@@ -9,7 +9,7 @@ from agent_pbx.tui import (
     env_flag,
     env_theme,
 )
-from textual.events import Key
+from textual.events import Click, Key
 from textual.widgets import Button, Checkbox, DataTable, Input, TextArea
 
 
@@ -439,6 +439,57 @@ async def test_tui_unseen_latest_blinks_attention_bar() -> None:
     assert steady_text == "NEW unseen latest report: agent-1"
     assert blink_text == "!!! unseen latest report: agent-1"
     assert attention.has_class("unseen-active")
+
+
+async def test_tui_clicking_unseen_alert_opens_first_latest() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    loaded: list[str] = []
+    threads: list[str] = []
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "running",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        tabs = app.query_one("#agent-tabs")
+        tabs.active = "thread-tab"
+        app.active_agent_tab = "thread-tab"
+        app.unseen_latest_agent_ids.add("agent-1")
+        app.render_unseen_attention()
+        click = Click(
+            app.query_one("#attention"),
+            0,
+            0,
+            0,
+            0,
+            1,
+            False,
+            False,
+            False,
+        )
+
+        await app.on_click(click)
+
+    assert app.selected_agent_id == "agent-1"
+    assert app.active_agent_tab == "latest-tab"
+    assert tabs.active == "latest-tab"
+    assert app.unseen_latest_agent_ids == set()
+    assert loaded == ["agent-1"]
+    assert threads == ["agent-1"]
+    assert click._stop_propagation is True
 
 
 async def test_tui_agent_status_refresh_marks_unseen_latest() -> None:

@@ -118,6 +118,8 @@ The same options are available as `Visual flash` and `Terminal bell` checkboxes
 inside the TUI. Alerts fire for new agent registrations, new reports, and
 command acknowledgements. The Agents table also highlights unseen latest reports
 with `NEW`, and the top alert bar blinks for unseen latest reports by default.
+Click the blinking alert to jump directly to the first unseen agent's `Latest`
+tab.
 Disable that with `AGENT_PBX_TUI_AGENT_BLINK=0` or the `Unseen blink` checkbox.
 
 TUI checkbox and theme selections persist between sessions in

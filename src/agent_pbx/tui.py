@@ -12,7 +12,7 @@ import httpx
 from rich.color import Color, ColorParseError
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal, Vertical
-from textual.events import Key
+from textual.events import Click, Key
 from textual.theme import Theme
 from textual.widgets import (
     Button,
@@ -668,6 +668,13 @@ class AgentPBXTUI(App[None]):
         attention.add_class("unseen-active")
         self.screen.set_class(self.attention_blink_phase, "attention-flash")
 
+    async def open_first_unseen_latest(self) -> bool:
+        for agent_id in sorted(self.unseen_latest_agent_ids):
+            if agent_id in self.agents:
+                await self.select_agent(agent_id)
+                return True
+        return False
+
     async def refresh_events(self) -> None:
         try:
             async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
@@ -699,6 +706,12 @@ class AgentPBXTUI(App[None]):
         if event.key == "space" and self.focused is self.query_one("#thread", DataTable):
             event.stop()
             self.toggle_current_thread_mark()
+
+    async def on_click(self, event: Click) -> None:
+        if getattr(event.widget, "id", None) == "attention":
+            opened = await self.open_first_unseen_latest()
+            if opened:
+                event.stop()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id == "message":
