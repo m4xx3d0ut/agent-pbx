@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from collections.abc import Callable
 
 from fastapi import (
@@ -17,6 +18,7 @@ from fastapi.responses import StreamingResponse
 
 from .auth import get_store, require_token
 from .config import ServerConfig
+from .mcp_tools import create_mcp_asgi_app
 from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .schemas import (
     AgentRegisterRequest,
@@ -33,10 +35,20 @@ from .store import Store
 
 
 def create_app(config: ServerConfig | None = None) -> FastAPI:
-    app = FastAPI(title="Agent PBX", version="0.1.0")
-    app.state.config = config or ServerConfig()
-    app.state.store = Store(app.state.config.db_path)
-    app.state.store.init()
+    resolved_config = config or ServerConfig()
+    store = Store(resolved_config.db_path)
+    store.init()
+    mcp_asgi_app, mcp_server = create_mcp_asgi_app(store, resolved_config)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        async with mcp_server.session_manager.run():
+            yield
+
+    app = FastAPI(title="Agent PBX", version="0.1.0", lifespan=lifespan)
+    app.state.config = resolved_config
+    app.state.store = store
+    app.mount("/mcp", mcp_asgi_app)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
