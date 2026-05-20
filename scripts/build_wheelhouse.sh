@@ -55,7 +55,8 @@ Install Agent PBX from this wheelhouse:
 
 Run locally:
 
-  agent-pbx serve --host 127.0.0.1 --port 8765
+  agent-pbx mcp start
+  agent-pbx mcp status
 EOF
 
 echo "wheelhouse: ${OUT_DIR}"

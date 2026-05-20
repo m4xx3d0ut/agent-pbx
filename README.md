@@ -71,10 +71,40 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
 python -m pytest
-agent-pbx serve --host 127.0.0.1 --port 8765
+agent-pbx mcp serve --host 127.0.0.1 --port 8765
 ```
 
 The server defaults to localhost. LAN binding requires bearer-token authentication and explicit operator intent.
+
+## Background MCP Daemon
+
+Start the shared local MCP daemon in the background:
+
+```bash
+agent-pbx mcp start
+```
+
+The daemon stores its SQLite DB, metadata, and logs under
+`${AGENT_PBX_HOME:-${XDG_DATA_HOME:-~/.local/share}/agent-pbx}` by default. Use
+`agent-pbx mcp status`, `agent-pbx mcp restart`, and `agent-pbx mcp stop` for
+lifecycle management. Use `agent-pbx mcp serve` or the compatibility command
+`agent-pbx serve` only when you want a foreground/debug process.
+
+`agent-pbx mcp status` prints the MCP URL, health URL, DB path, log path,
+metadata path, and a Codex connection command:
+
+```bash
+codex mcp add agent-pbx --url http://127.0.0.1:8765/mcp
+```
+
+If the requested port is already in use, `agent-pbx mcp start` fails fast. Stop
+the owning process or choose another port with `--port`. After an editable
+reinstall, restart the daemon so it serves the new code:
+
+```bash
+agent-pbx mcp restart
+agent-pbx mcp status
+```
 
 ## Planned Local Validation
 
@@ -89,11 +119,12 @@ agent-pbx sim-client --token dev-token --agent-id sim-agent-1 --message "Proceed
 
 ## Debug Runs
 
-Use `--debug` on the server for verbose PBX request and MCP tool logs. Use
-`--transcript` on simulator commands to write JSONL CLI transcripts:
+Use `--debug` on the foreground server or daemon for verbose PBX request and
+MCP tool logs. Use `--transcript` on simulator commands to write JSONL CLI
+transcripts:
 
 ```bash
-agent-pbx serve --debug --token dev-token
+agent-pbx mcp serve --debug --token dev-token
 agent-pbx sim-agent --token dev-token --transcript runs/sim-agent.jsonl
 agent-pbx sim-client --token dev-token --agent-id sim-agent-1 \
   --message "Proceed" --transcript runs/sim-client.jsonl
@@ -105,7 +136,7 @@ For a bounded TUI smoke feed, add `--debug-smoke` or set
 then every random 30-60 seconds, and stops after five minutes.
 
 ```bash
-agent-pbx serve --debug --debug-smoke --token dev-token
+agent-pbx mcp start --debug --debug-smoke --token dev-token
 ```
 
 ## TUI Notifications

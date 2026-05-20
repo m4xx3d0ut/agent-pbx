@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -11,6 +12,15 @@ import uvicorn
 from . import __version__
 from .api import create_app, create_token_helper_app
 from .config import ServerConfig
+from .mcp_daemon import (
+    MCPDaemonConfig,
+    config_from_args,
+    lan_auth_guard,
+    mcp_daemon_status,
+    restart_mcp_daemon,
+    start_mcp_daemon,
+    stop_mcp_daemon,
+)
 from .sim_agent import run_sim_agent
 from .sim_client import run_sim_client
 from .store import Store
@@ -31,26 +41,66 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
-    serve = subcommands.add_parser("serve", help="Run the Agent PBX HTTP/MCP service.")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8765)
-    serve.add_argument("--db", type=Path, default=Path("state/agent-pbx.sqlite"))
-    serve.add_argument("--token", default=None)
-    serve.add_argument("--allow-insecure-lan", action="store_true")
-    serve.add_argument("--debug", action="store_true", help="Enable verbose PBX debug logs.")
-    serve.add_argument(
-        "--debug-smoke",
-        action="store_true",
-        help=(
-            "Run a five-minute TUI smoke feed from three simulated Sun Tzu agents."
-        ),
+    def add_server_flags(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--host", default="127.0.0.1")
+        command.add_argument("--port", type=int, default=8765)
+        command.add_argument("--state-root", type=Path, default=None)
+        command.add_argument("--db", type=Path, default=None)
+        command.add_argument("--token", default=None)
+        command.add_argument("--allow-insecure-lan", action="store_true")
+        command.add_argument(
+            "--debug", action="store_true", help="Enable verbose PBX debug logs."
+        )
+        command.add_argument(
+            "--debug-smoke",
+            action="store_true",
+            help=(
+                "Run a five-minute TUI smoke feed from three simulated Sun Tzu agents."
+            ),
+        )
+        command.add_argument(
+            "--log-level",
+            default=None,
+            choices=["critical", "error", "warning", "info", "debug", "trace"],
+            help="Override Uvicorn log level. Defaults to debug when --debug is set.",
+        )
+
+    serve = subcommands.add_parser(
+        "serve", help="Run the Agent PBX HTTP/MCP service in the foreground."
     )
-    serve.add_argument(
-        "--log-level",
-        default=None,
-        choices=["critical", "error", "warning", "info", "debug", "trace"],
-        help="Override Uvicorn log level. Defaults to debug when --debug is set.",
+    add_server_flags(serve)
+
+    mcp = subcommands.add_parser("mcp", help="Manage the Agent PBX MCP daemon.")
+    mcp_subcommands = mcp.add_subparsers(dest="mcp_command", required=True)
+    start_mcp = mcp_subcommands.add_parser(
+        "start", help="Start Agent PBX MCP in the background."
     )
+    add_server_flags(start_mcp)
+    start_mcp.add_argument("--timeout", type=float, default=30.0)
+    stop_mcp = mcp_subcommands.add_parser(
+        "stop", help="Stop the background Agent PBX MCP daemon."
+    )
+    stop_mcp.add_argument("--host", default="127.0.0.1")
+    stop_mcp.add_argument("--port", type=int, default=8765)
+    stop_mcp.add_argument("--state-root", type=Path, default=None)
+    stop_mcp.add_argument("--db", type=Path, default=None)
+    stop_mcp.add_argument("--timeout", type=float, default=10.0)
+    restart_mcp = mcp_subcommands.add_parser(
+        "restart", help="Restart Agent PBX MCP in the background."
+    )
+    add_server_flags(restart_mcp)
+    restart_mcp.add_argument("--timeout", type=float, default=30.0)
+    status_mcp = mcp_subcommands.add_parser(
+        "status", help="Show background Agent PBX MCP status."
+    )
+    status_mcp.add_argument("--host", default="127.0.0.1")
+    status_mcp.add_argument("--port", type=int, default=8765)
+    status_mcp.add_argument("--state-root", type=Path, default=None)
+    status_mcp.add_argument("--db", type=Path, default=None)
+    serve_mcp = mcp_subcommands.add_parser(
+        "serve", help="Serve Agent PBX MCP in the foreground."
+    )
+    add_server_flags(serve_mcp)
 
     tui = subcommands.add_parser("tui", help="Run the Agent PBX TUI.")
     tui.add_argument("--server", default="http://127.0.0.1:8765")
@@ -78,7 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     token_helper.add_argument("--host", default="127.0.0.1")
     token_helper.add_argument("--port", type=int, default=8766)
-    token_helper.add_argument("--db", type=Path, default=Path("state/agent-pbx.sqlite"))
+    token_helper.add_argument("--state-root", type=Path, default=None)
+    token_helper.add_argument("--db", type=Path, default=None)
     token_helper.add_argument("--ttl", type=int, default=120)
     return parser
 
@@ -86,24 +137,32 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "serve":
-        config = ServerConfig(
-            host=args.host,
-            port=args.port,
-            db_path=args.db,
-            token=args.token or os.getenv("AGENT_PBX_TOKEN"),
-            allow_insecure_lan=args.allow_insecure_lan,
-            debug=args.debug,
-            debug_smoke=args.debug_smoke or env_flag("AGENT_PBX_DEBUG_SMOKE"),
-        )
-        log_level = args.log_level or ("debug" if args.debug else "info")
-        if args.debug:
-            logging.getLogger("agent_pbx").setLevel(logging.DEBUG)
-        app = create_app(config)
-        uvicorn.run(app, host=args.host, port=args.port, log_level=log_level)
+        return _serve_foreground(args)
+
+    if args.command == "mcp":
+        config = _daemon_config(args)
+        if args.mcp_command == "serve":
+            return _serve_foreground(args)
+        if args.mcp_command == "start":
+            result = start_mcp_daemon(config, timeout=args.timeout)
+            _print_mcp_status(result)
+            return 0 if result.get("ok", True) is not False else 1
+        if args.mcp_command == "stop":
+            result = stop_mcp_daemon(config, timeout=args.timeout)
+            _print_mcp_status(result)
+            return 0 if not result.get("error") else 1
+        if args.mcp_command == "restart":
+            result = restart_mcp_daemon(config, timeout=args.timeout)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result.get("ok", True) is not False else 1
+        if args.mcp_command == "status":
+            _print_mcp_status(mcp_daemon_status(config))
+            return 0
         return 0
 
     if args.command == "token-helper":
-        store = Store(args.db)
+        config = config_from_args(state_root=args.state_root, db_path=args.db)
+        store = Store(config.resolved_db_path)
         server_holder: dict[str, uvicorn.Server] = {}
 
         def stop_server() -> None:
@@ -153,3 +212,85 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     raise SystemExit(f"`agent-pbx {args.command}` is not implemented yet")
+
+
+def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
+    return config_from_args(
+        state_root=getattr(args, "state_root", None),
+        host=getattr(args, "host", "127.0.0.1"),
+        port=getattr(args, "port", 8765),
+        db_path=getattr(args, "db", None),
+        token=getattr(args, "token", None) or os.getenv("AGENT_PBX_TOKEN"),
+        allow_insecure_lan=bool(getattr(args, "allow_insecure_lan", False)),
+        debug=bool(getattr(args, "debug", False)),
+        debug_smoke=bool(getattr(args, "debug_smoke", False))
+        or env_flag("AGENT_PBX_DEBUG_SMOKE"),
+        log_level=getattr(args, "log_level", None),
+    )
+
+
+def _serve_foreground(args: argparse.Namespace) -> int:
+    daemon_config = _daemon_config(args)
+    auth_guard = lan_auth_guard(daemon_config)
+    if auth_guard is not None:
+        _print_mcp_status(
+            {
+                "ok": False,
+                "running": False,
+                "error": auth_guard,
+                "mcp_url": daemon_config.mcp_url,
+                "health_url": daemon_config.health_url,
+                "db_path": str(daemon_config.resolved_db_path),
+                "log_file": str(daemon_config.log_file),
+                "metadata_file": str(daemon_config.metadata_file),
+                "codex_command": daemon_config.codex_command,
+            }
+        )
+        return 1
+    config = ServerConfig(
+        host=daemon_config.host,
+        port=daemon_config.port,
+        db_path=daemon_config.resolved_db_path,
+        token=daemon_config.token,
+        allow_insecure_lan=daemon_config.allow_insecure_lan,
+        debug=daemon_config.debug,
+        debug_smoke=daemon_config.debug_smoke,
+    )
+    log_level = daemon_config.log_level or ("debug" if daemon_config.debug else "info")
+    if daemon_config.debug:
+        logging.getLogger("agent_pbx").setLevel(logging.DEBUG)
+    app = create_app(config)
+    uvicorn.run(
+        app,
+        host=daemon_config.host,
+        port=daemon_config.port,
+        log_level=log_level,
+    )
+    return 0
+
+
+def _print_mcp_status(result: dict[str, object]) -> None:
+    error = result.get("error")
+    if isinstance(error, dict):
+        print(f"error: {error.get('code', 'ERROR')}")
+        print(f"message: {error.get('message', '')}")
+        remediation = error.get("remediation")
+        if remediation:
+            print(f"remediation: {remediation}")
+    elif error:
+        print(f"error: {error}")
+    for key in (
+        "mcp_url",
+        "health_url",
+        "db_path",
+        "log_file",
+        "metadata_file",
+        "codex_command",
+        "pid",
+        "running",
+        "stale",
+        "started",
+        "stopped",
+    ):
+        if key in result and result[key] is not None:
+            print(f"{key}: {result[key]}")
