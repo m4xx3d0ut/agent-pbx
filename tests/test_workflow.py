@@ -30,6 +30,7 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
         },
     )
     fetched_report = client.get(f"/v1/reports/{report.json()['report_id']}")
+    latest_reports = client.get("/v1/agents/agent-1/reports?limit=1")
     command = client.post(
         "/v1/commands",
         json={
@@ -48,6 +49,7 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
     assert registered.status_code == 200
     assert report.status_code == 200
     assert fetched_report.json()["detail"] == "Full details are persisted at report time."
+    assert latest_reports.json()[0]["report_id"] == report.json()["report_id"]
     assert command.status_code == 200
     assert polled.json()[0]["status"] == "delivered"
     assert acked.json()["status"] == "acked"

@@ -1,0 +1,51 @@
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: agent-pbx
+  namespace: agent-pbx
+  labels:
+    workerbee.k1s.dev/project: agent-pbx
+spec:
+  # Build locally for WorkerBee with:
+  # workerbee_v1_image_build tag=agent-pbx:workerbee
+  image: agent-pbx:workerbee
+  imagePullPolicy: Never
+  replicas: 1
+  command:
+    - agent-pbx
+    - serve
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8080"
+    - --db
+    - /data/agent-pbx.sqlite
+  env:
+    - name: AGENT_PBX_TOKEN
+      value: workerbee-dev-token-change-me
+  ports:
+    - name: http
+      containerPort: 8080
+  service:
+    port: 8080
+    targetPort: 8080
+  health:
+    readiness:
+      httpGet: { path: /healthz, port: 8080 }
+      initialDelaySeconds: 1
+      periodSeconds: 2
+  ingress:
+    host: app.agent-pbx.workerbee.localhost
+    path: /
+  storage:
+    - name: data
+      mountPath: /data
+      retention: Retain
+      size: 1Gi
+  resources:
+    requests:
+      cpu: 0.25
+      memory: 256Mi
+    limits:
+      cpu: 1
+      memory: 512Mi

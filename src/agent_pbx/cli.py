@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from pathlib import Path
 
 import uvicorn
@@ -11,6 +12,7 @@ from .config import ServerConfig
 from .sim_agent import run_sim_agent
 from .sim_client import run_sim_client
 from .store import Store
+from .tui import run_tui
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             db_path=args.db,
-            token=args.token,
+            token=args.token or os.getenv("AGENT_PBX_TOKEN"),
             allow_insecure_lan=args.allow_insecure_lan,
         )
         app = create_app(config)
@@ -109,6 +111,10 @@ def main(argv: list[str] | None = None) -> int:
                 message=args.message,
             )
         )
+        return 0
+
+    if args.command == "tui":
+        run_tui(server=args.server, token=args.token)
         return 0
 
     raise SystemExit(f"`agent-pbx {args.command}` is not implemented yet")

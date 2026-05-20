@@ -121,6 +121,20 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="report not found")
         return report
 
+    @app.get(
+        "/v1/agents/{agent_id}/reports",
+        response_model=list[ReportResponse],
+        dependencies=[Depends(require_token)],
+    )
+    async def list_agent_reports(
+        agent_id: str,
+        limit: int = 20,
+        store: Store = Depends(get_store),
+    ) -> list[dict[str, object]]:
+        if store.get_agent(agent_id) is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        return store.list_reports(agent_id, limit=limit)
+
     @app.post(
         "/v1/commands",
         response_model=CommandResponse,

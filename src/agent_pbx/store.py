@@ -338,6 +338,31 @@ class Store:
             ).fetchone()
         return self._report_from_row(row) if row else None
 
+    def list_reports(self, agent_id: str | None = None, *, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 100)
+        if agent_id is None:
+            query = """
+                SELECT report_id, agent_id, project, status, summary, detail,
+                       needs_input, plan_options_json, created_at
+                FROM reports
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+            params: tuple[Any, ...] = (safe_limit,)
+        else:
+            query = """
+                SELECT report_id, agent_id, project, status, summary, detail,
+                       needs_input, plan_options_json, created_at
+                FROM reports
+                WHERE agent_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+            params = (agent_id, safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._report_from_row(row) for row in rows]
+
     def create_command(self, request: CommandCreateRequest) -> dict[str, Any]:
         command_id = str(uuid.uuid4())
         current = now_ts()

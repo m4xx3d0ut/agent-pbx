@@ -16,4 +16,11 @@ The server defaults to localhost. LAN binding requires bearer-token authenticati
 
 ## Planned Local Validation
 
-WorkerBee is used to rebuild and run the containerized MCP/API service with simulated agents and clients. Repository-owned WorkerBee manifests live under `ops/workerbee/` once deployment manifests are introduced.
+WorkerBee is used to rebuild and run the containerized MCP/API service with simulated agents and clients. Repository-owned WorkerBee manifests live under `ops/workerbee/`.
+
+```bash
+docker build -t agent-pbx:workerbee .
+docker run --rm -p 8765:8765 -e AGENT_PBX_TOKEN=dev-token agent-pbx:workerbee
+agent-pbx sim-agent --token dev-token --once
+agent-pbx sim-client --token dev-token --agent-id sim-agent-1 --message "Proceed"
+```
