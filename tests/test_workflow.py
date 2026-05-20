@@ -60,3 +60,51 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
         "command_delivered",
         "command_acked",
     ]
+
+
+def test_agent_thread_merges_reports_and_commands(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    report = client.post(
+        "/v1/agents/agent-1/reports",
+        json={
+            "project": "demo",
+            "status": "waiting",
+            "summary": "Need review",
+            "detail": "Full report detail",
+            "needs_input": True,
+            "plan_options": ["Approve"],
+        },
+    ).json()
+    command = client.post(
+        "/v1/commands",
+        json={
+            "agent_id": "agent-1",
+            "type": "request_detail",
+            "payload": {"request": "Please expand"},
+        },
+    ).json()
+    client.get("/v1/agents/agent-1/commands?wait_seconds=0")
+    client.post(
+        f"/v1/commands/{command['command_id']}/ack",
+        json={"result": {"ok": True}},
+    )
+
+    response = client.get("/v1/agents/agent-1/thread")
+    missing = client.get("/v1/agents/missing/thread")
+
+    assert response.status_code == 200
+    assert missing.status_code == 404
+    thread = response.json()
+    assert [item["kind"] for item in thread] == ["report", "command"]
+    assert thread[0]["item_id"] == f"report:{report['report_id']}"
+    assert thread[0]["body"] == "Full report detail"
+    assert thread[0]["metadata"]["plan_options"] == ["Approve"]
+    assert thread[1]["item_id"] == f"command:{command['command_id']}"
+    assert thread[1]["title"] == "Detail request"
+    assert thread[1]["body"] == "Please expand"
+    assert thread[1]["metadata"]["result"] == {"ok": True}

@@ -76,3 +76,14 @@ class EventResponse(BaseModel):
     subject_id: str | None
     payload: dict[str, Any]
     created_at: float
+
+
+class ThreadItemResponse(BaseModel):
+    item_id: str
+    kind: Literal["report", "command"]
+    agent_id: str
+    created_at: float
+    status: str
+    title: str
+    body: str
+    metadata: dict[str, Any]

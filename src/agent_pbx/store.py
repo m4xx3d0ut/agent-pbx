@@ -363,6 +363,38 @@ class Store:
             rows = conn.execute(query, params).fetchall()
         return [self._report_from_row(row) for row in rows]
 
+    def list_thread(self, agent_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 200)
+        reports = self.list_reports(agent_id, limit=safe_limit)
+        with self.connect() as conn:
+            command_rows = conn.execute(
+                """
+                SELECT command_id, agent_id, type, payload_json, status, created_at,
+                       claimed_at, acked_at, result_json
+                FROM commands
+                WHERE agent_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (agent_id, safe_limit),
+            ).fetchall()
+        commands = [self._command_from_row(row) for row in command_rows]
+        items = [self._thread_report(report) for report in reports]
+        items.extend(
+            self._thread_command(command)
+            for command in commands
+            if command is not None and command["agent_id"] is not None
+        )
+        latest = sorted(
+            items,
+            key=lambda item: (float(item["created_at"]), str(item["item_id"])),
+            reverse=True,
+        )[:safe_limit]
+        return sorted(
+            latest,
+            key=lambda item: (float(item["created_at"]), str(item["item_id"])),
+        )
+
     def create_command(self, request: CommandCreateRequest) -> dict[str, Any]:
         command_id = str(uuid.uuid4())
         current = now_ts()
@@ -469,3 +501,51 @@ class Store:
         data = dict(row)
         data["payload"] = json.loads(data.pop("payload_json"))
         return data
+
+    @staticmethod
+    def _thread_report(report: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "item_id": f"report:{report['report_id']}",
+            "kind": "report",
+            "agent_id": report["agent_id"],
+            "created_at": report["created_at"],
+            "status": report["status"],
+            "title": report["summary"],
+            "body": report["detail"],
+            "metadata": {
+                "report_id": report["report_id"],
+                "project": report["project"],
+                "needs_input": report["needs_input"],
+                "plan_options": report["plan_options"],
+            },
+        }
+
+    @staticmethod
+    def _thread_command(command: dict[str, Any]) -> dict[str, Any]:
+        payload = command["payload"]
+        if command["type"] == "send_input":
+            title = "Follow-up input"
+            body = str(payload.get("message") or payload)
+        elif command["type"] == "request_detail":
+            title = "Detail request"
+            body = str(payload.get("request") or payload)
+        else:
+            title = command["type"].replace("_", " ").title()
+            body = json.dumps(payload, indent=2, sort_keys=True)
+        return {
+            "item_id": f"command:{command['command_id']}",
+            "kind": "command",
+            "agent_id": command["agent_id"],
+            "created_at": command["created_at"],
+            "status": command["status"],
+            "title": title,
+            "body": body,
+            "metadata": {
+                "command_id": command["command_id"],
+                "type": command["type"],
+                "payload": payload,
+                "claimed_at": command["claimed_at"],
+                "acked_at": command["acked_at"],
+                "result": command["result"],
+            },
+        }

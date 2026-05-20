@@ -34,6 +34,7 @@ from .schemas import (
     EventResponse,
     ReportCreateRequest,
     ReportResponse,
+    ThreadItemResponse,
 )
 from .security import generate_pairing_code
 from .store import Store
@@ -150,6 +151,20 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="agent not registered")
         return store.list_reports(agent_id, limit=limit)
 
+    @app.get(
+        "/v1/agents/{agent_id}/thread",
+        response_model=list[ThreadItemResponse],
+        dependencies=[Depends(require_token)],
+    )
+    async def list_agent_thread(
+        agent_id: str,
+        limit: int = 100,
+        store: Store = Depends(get_store),
+    ) -> list[dict[str, object]]:
+        if store.get_agent(agent_id) is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        return store.list_thread(agent_id, limit=limit)
+
     @app.post(
         "/v1/commands",
         response_model=CommandResponse,
@@ -214,7 +229,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="command not found")
         store.append_event(
             "command_acked",
-            {"command_id": command_id, "result": request.result},
+            {
+                "command_id": command_id,
+                "agent_id": command["agent_id"],
+                "result": request.result,
+            },
             command_id,
         )
         return command

@@ -36,3 +36,11 @@ Pull requests should include a concise summary, test results, configuration chan
 ## Security & Configuration Tips
 
 The planned server may run on localhost or a LAN. Default to localhost-only binding, keep secrets out of Git, and do not expose the MCP server to the internet without a documented authentication and network security plan.
+
+## Agent PBX Session Behavior
+
+When an operator asks an agent to start using Agent PBX, treat PBX as active for
+the rest of that session. Continue reporting turn status, polling queued
+commands, and acknowledging handled commands until the operator explicitly asks
+you to stop using PBX or starts a new session. A `request_detail` command is not
+self-resolving; after polling it, respond with a new detailed `pbx_report_turn`.
