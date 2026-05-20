@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .schemas import AgentRegisterRequest, CommandCreateRequest, ReportCreateRequest
 from .security import hash_secret, now_ts
 
 
@@ -221,3 +223,224 @@ class Store:
             "payload": payload,
             "created_at": created_at,
         }
+
+    def list_events(self, *, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT event_id, type, subject_id, payload_json, created_at
+                FROM events
+                WHERE event_id > ?
+                ORDER BY event_id ASC
+                LIMIT ?
+                """,
+                (after_id, limit),
+            ).fetchall()
+        return [self._event_from_row(row) for row in rows]
+
+    def register_agent(self, request: AgentRegisterRequest) -> dict[str, Any]:
+        current = now_ts()
+        metadata_json = json.dumps(request.metadata)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO agents
+                    (agent_id, project, name, status, metadata_json, created_at, last_seen_at)
+                VALUES (?, ?, ?, 'online', ?, ?, ?)
+                ON CONFLICT(agent_id) DO UPDATE SET
+                    project = excluded.project,
+                    name = excluded.name,
+                    status = 'online',
+                    metadata_json = excluded.metadata_json,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (
+                    request.agent_id,
+                    request.project,
+                    request.name,
+                    metadata_json,
+                    current,
+                    current,
+                ),
+            )
+        return self.get_agent(request.agent_id) or {}
+
+    def get_agent(self, agent_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT agent_id, project, name, status, metadata_json, created_at, last_seen_at
+                FROM agents
+                WHERE agent_id = ?
+                """,
+                (agent_id,),
+            ).fetchone()
+        return self._agent_from_row(row) if row else None
+
+    def list_agents(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT agent_id, project, name, status, metadata_json, created_at, last_seen_at
+                FROM agents
+                ORDER BY last_seen_at DESC, agent_id ASC
+                """
+            ).fetchall()
+        return [self._agent_from_row(row) for row in rows]
+
+    def create_report(
+        self, agent_id: str, request: ReportCreateRequest
+    ) -> dict[str, Any]:
+        report_id = str(uuid.uuid4())
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE agents SET status = ?, last_seen_at = ?
+                WHERE agent_id = ?
+                """,
+                (request.status, current, agent_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO reports
+                    (report_id, agent_id, project, status, summary, detail,
+                     needs_input, plan_options_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    report_id,
+                    agent_id,
+                    request.project,
+                    request.status,
+                    request.summary,
+                    request.detail,
+                    int(request.needs_input),
+                    json.dumps(request.plan_options),
+                    current,
+                ),
+            )
+        report = self.get_report(report_id)
+        if report is None:
+            raise RuntimeError("report insert failed")
+        return report
+
+    def get_report(self, report_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT report_id, agent_id, project, status, summary, detail,
+                       needs_input, plan_options_json, created_at
+                FROM reports
+                WHERE report_id = ?
+                """,
+                (report_id,),
+            ).fetchone()
+        return self._report_from_row(row) if row else None
+
+    def create_command(self, request: CommandCreateRequest) -> dict[str, Any]:
+        command_id = str(uuid.uuid4())
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO commands
+                    (command_id, agent_id, type, payload_json, status, created_at)
+                VALUES (?, ?, ?, ?, 'queued', ?)
+                """,
+                (
+                    command_id,
+                    request.agent_id,
+                    request.type,
+                    json.dumps(request.payload),
+                    current,
+                ),
+            )
+        command = self.get_command(command_id)
+        if command is None:
+            raise RuntimeError("command insert failed")
+        return command
+
+    def get_command(self, command_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT command_id, agent_id, type, payload_json, status, created_at,
+                       claimed_at, acked_at, result_json
+                FROM commands
+                WHERE command_id = ?
+                """,
+                (command_id,),
+            ).fetchone()
+        return self._command_from_row(row) if row else None
+
+    def claim_commands(self, agent_id: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        current = now_ts()
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT command_id, agent_id, type, payload_json, status, created_at,
+                       claimed_at, acked_at, result_json
+                FROM commands
+                WHERE status = 'queued' AND (agent_id IS NULL OR agent_id = ?)
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (agent_id, limit),
+            ).fetchall()
+            command_ids = [row["command_id"] for row in rows]
+            if command_ids:
+                placeholders = ",".join("?" for _ in command_ids)
+                conn.execute(
+                    f"""
+                    UPDATE commands
+                    SET status = 'delivered', claimed_at = ?
+                    WHERE command_id IN ({placeholders})
+                    """,
+                    (current, *command_ids),
+                )
+        return [self.get_command(command_id) for command_id in command_ids if command_id]
+
+    def ack_command(
+        self, command_id: str, result: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE commands
+                SET status = 'acked', acked_at = ?, result_json = ?
+                WHERE command_id = ?
+                """,
+                (current, json.dumps(result or {}), command_id),
+            )
+        return self.get_command(command_id)
+
+    @staticmethod
+    def _agent_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["metadata"] = json.loads(data.pop("metadata_json"))
+        return data
+
+    @staticmethod
+    def _report_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["needs_input"] = bool(data["needs_input"])
+        data["plan_options"] = json.loads(data.pop("plan_options_json"))
+        return data
+
+    @staticmethod
+    def _command_from_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        data = dict(row)
+        data["payload"] = json.loads(data.pop("payload_json"))
+        result_json = data.pop("result_json")
+        data["result"] = json.loads(result_json) if result_json else None
+        return data
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["payload"] = json.loads(data.pop("payload_json"))
+        return data

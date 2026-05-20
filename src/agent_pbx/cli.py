@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from pathlib import Path
 
 import uvicorn
 
 from .api import create_app, create_token_helper_app
 from .config import ServerConfig
+from .sim_agent import run_sim_agent
+from .sim_client import run_sim_client
 from .store import Store
 
 
@@ -21,9 +24,25 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--token", default=None)
     serve.add_argument("--allow-insecure-lan", action="store_true")
 
-    subcommands.add_parser("tui", help="Run the Agent PBX TUI.")
-    subcommands.add_parser("sim-agent", help="Run a simulated reporting agent.")
-    subcommands.add_parser("sim-client", help="Run a simulated TUI client workflow.")
+    tui = subcommands.add_parser("tui", help="Run the Agent PBX TUI.")
+    tui.add_argument("--server", default="http://127.0.0.1:8765")
+    tui.add_argument("--token", default=None)
+
+    sim_agent = subcommands.add_parser("sim-agent", help="Run a simulated reporting agent.")
+    sim_agent.add_argument("--server", default="http://127.0.0.1:8765")
+    sim_agent.add_argument("--token", default=None)
+    sim_agent.add_argument("--agent-id", default="sim-agent-1")
+    sim_agent.add_argument("--project", default="agent-pbx")
+    sim_agent.add_argument("--once", action="store_true")
+    sim_agent.add_argument("--poll-wait", type=float, default=2.0)
+
+    sim_client = subcommands.add_parser(
+        "sim-client", help="Run a simulated TUI client workflow."
+    )
+    sim_client.add_argument("--server", default="http://127.0.0.1:8765")
+    sim_client.add_argument("--token", default=None)
+    sim_client.add_argument("--agent-id", default=None)
+    sim_client.add_argument("--message", default=None)
     token_helper = subcommands.add_parser(
         "token-helper", help="Run a short-lived token pairing helper."
     )
@@ -66,6 +85,30 @@ def main(argv: list[str] | None = None) -> int:
         server = uvicorn.Server(config)
         server_holder["server"] = server
         server.run()
+        return 0
+
+    if args.command == "sim-agent":
+        asyncio.run(
+            run_sim_agent(
+                server=args.server,
+                agent_id=args.agent_id,
+                project=args.project,
+                token=args.token,
+                once=args.once,
+                poll_wait=args.poll_wait,
+            )
+        )
+        return 0
+
+    if args.command == "sim-client":
+        asyncio.run(
+            run_sim_client(
+                server=args.server,
+                token=args.token,
+                agent_id=args.agent_id,
+                message=args.message,
+            )
+        )
         return 0
 
     raise SystemExit(f"`agent-pbx {args.command}` is not implemented yet")
