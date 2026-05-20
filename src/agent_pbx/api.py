@@ -4,8 +4,8 @@ import asyncio
 import json
 import logging
 import time
-from contextlib import asynccontextmanager
 from collections.abc import Callable
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import (
     BackgroundTasks,
@@ -23,6 +23,7 @@ from starlette.responses import Response
 from . import __version__
 from .auth import get_store, require_token
 from .config import ServerConfig
+from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .mcp_tools import create_mcp_asgi_app
 from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .schemas import (
@@ -52,7 +53,28 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async with mcp_server.session_manager.run():
-            yield
+            smoke_task: asyncio.Task[None] | None = None
+            if resolved_config.debug_smoke:
+                smoke_config = DebugSmokeConfig(
+                    duration_seconds=resolved_config.debug_smoke_duration_seconds,
+                    min_interval_seconds=(
+                        resolved_config.debug_smoke_min_interval_seconds
+                    ),
+                    max_interval_seconds=(
+                        resolved_config.debug_smoke_max_interval_seconds
+                    ),
+                )
+                smoke_task = asyncio.create_task(
+                    run_debug_smoke_reports(store, smoke_config),
+                    name="agent-pbx-debug-smoke",
+                )
+            try:
+                yield
+            finally:
+                if smoke_task is not None:
+                    smoke_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await smoke_task
 
     app = FastAPI(
         title="Agent PBX",

@@ -92,6 +92,15 @@ agent-pbx sim-client --token dev-token --agent-id sim-agent-1 \
   --message "Proceed" --transcript runs/sim-client.jsonl
 ```
 
+For a bounded TUI smoke feed, add `--debug-smoke` or set
+`AGENT_PBX_DEBUG_SMOKE=1`. This registers `sun-tzu-smoke-1` through
+`sun-tzu-smoke-3`, emits one or two short Sun Tzu quote reports immediately and
+then every random 30-60 seconds, and stops after five minutes.
+
+```bash
+agent-pbx serve --debug --debug-smoke --token dev-token
+```
+
 ## TUI Notifications
 
 The TUI keeps visual flash and terminal bell notifications off by default for

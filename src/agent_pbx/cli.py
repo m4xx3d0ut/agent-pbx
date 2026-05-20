@@ -17,6 +17,13 @@ from .store import Store
 from .tui import run_tui
 
 
+TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
+
+
+def env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in TRUE_ENV_VALUES
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-pbx")
     parser.add_argument(
@@ -31,6 +38,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--token", default=None)
     serve.add_argument("--allow-insecure-lan", action="store_true")
     serve.add_argument("--debug", action="store_true", help="Enable verbose PBX debug logs.")
+    serve.add_argument(
+        "--debug-smoke",
+        action="store_true",
+        help=(
+            "Run a five-minute TUI smoke feed from three simulated Sun Tzu agents."
+        ),
+    )
     serve.add_argument(
         "--log-level",
         default=None,
@@ -79,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
             token=args.token or os.getenv("AGENT_PBX_TOKEN"),
             allow_insecure_lan=args.allow_insecure_lan,
             debug=args.debug,
+            debug_smoke=args.debug_smoke or env_flag("AGENT_PBX_DEBUG_SMOKE"),
         )
         log_level = args.log_level or ("debug" if args.debug else "info")
         if args.debug:
