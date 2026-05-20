@@ -44,7 +44,7 @@ def test_tui_constructs() -> None:
     assert app.visual_flash_enabled is False
     assert app.terminal_bell_enabled is False
     assert app.agent_blink_enabled is True
-    assert app.ui_theme == "github-dark"
+    assert app.ui_theme == "cyberpunk"
 
 
 def test_tui_reads_notification_env(monkeypatch) -> None:
@@ -92,7 +92,7 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     )
     monkeypatch.setenv("AGENT_PBX_TUI_FLASH", "0")
     monkeypatch.setenv("AGENT_PBX_TUI_AGENT_BLINK", "1")
-    monkeypatch.setenv("AGENT_PBX_TUI_THEME", "github-dark")
+    monkeypatch.setenv("AGENT_PBX_TUI_THEME", "cyberpunk")
 
     app = AgentPBXTUI(
         server="http://127.0.0.1:8765",
@@ -101,7 +101,7 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
 
     assert app.visual_flash_enabled is False
     assert app.agent_blink_enabled is True
-    assert app.ui_theme == "github-dark"
+    assert app.ui_theme == "cyberpunk"
 
 
 def test_tui_saves_settings(tmp_path: Path) -> None:
@@ -130,6 +130,15 @@ def test_tui_reads_theme_env(monkeypatch) -> None:
 
     assert app.ui_theme == "1337"
     assert app.theme == "1337"
+
+
+def test_tui_maps_legacy_github_theme_to_default(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_THEME", "github-dark")
+
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert app.ui_theme == "cyberpunk"
+    assert app.theme == "cyberpunk"
 
 
 def test_tui_reads_custom_theme_name_env(monkeypatch) -> None:
@@ -175,7 +184,7 @@ def test_tui_constructor_overrides_notification_env(monkeypatch) -> None:
         server="http://127.0.0.1:8765",
         visual_flash=False,
         terminal_bell=False,
-        theme_name="github-dark",
+        theme_name="cyberpunk",
     )
 
     assert app.visual_flash_enabled is False
@@ -277,9 +286,9 @@ def test_tui_theme_toggle_updates_app_theme() -> None:
     assert app.ui_theme == "1337"
     assert app.theme == "1337"
 
-    app.set_ui_theme("github-dark")
-    assert app.ui_theme == "github-dark"
-    assert app.theme == "github-dark"
+    app.set_ui_theme("cyberpunk")
+    assert app.ui_theme == "cyberpunk"
+    assert app.theme == "cyberpunk"
 
 
 def test_tui_custom_theme_css_has_readable_text_area_highlights() -> None:

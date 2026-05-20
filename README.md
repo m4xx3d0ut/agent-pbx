@@ -137,9 +137,9 @@ TUI checkbox and theme selections persist between sessions in
 settings file. Explicit environment variables still override saved settings for
 that launch.
 
-The default TUI theme uses GitHub Dark-style colors. Use
-`AGENT_PBX_TUI_THEME=1337` or the `1337 theme` checkbox for a black and
-bright-green terminal look.
+The default TUI theme uses a cyberpunk palette with neon cyan, magenta, yellow,
+and green over a dark terminal base. Use `AGENT_PBX_TUI_THEME=1337` or the
+`1337 theme` checkbox for a black and bright-green terminal look.
 
 ## Custom TUI Theme
 

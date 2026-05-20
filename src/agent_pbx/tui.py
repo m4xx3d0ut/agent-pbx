@@ -33,7 +33,7 @@ from .client import auth_headers
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
 ATTENTION_EVENT_TYPES = {"agent_registered", "report_created", "command_acked"}
-DEFAULT_TUI_THEME = "github-dark"
+DEFAULT_TUI_THEME = "cyberpunk"
 DEFAULT_CUSTOM_THEME_NAME = "1337"
 THEME_1337_NAME = DEFAULT_CUSTOM_THEME_NAME
 DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
@@ -54,18 +54,18 @@ THEME_KEYS = (
     "panel",
     "boost",
 )
-GITHUB_DARK_PALETTE = {
-    "primary": "#58a6ff",
-    "secondary": "#8b949e",
-    "warning": "#d29922",
-    "error": "#f85149",
-    "success": "#3fb950",
-    "accent": "#58a6ff",
-    "foreground": "#c9d1d9",
-    "background": "#0d1117",
-    "surface": "#161b22",
-    "panel": "#21262d",
-    "boost": "#30363d",
+CYBERPUNK_PALETTE = {
+    "primary": "#00e5ff",
+    "secondary": "#9b5cff",
+    "warning": "#fcee09",
+    "error": "#ff2e88",
+    "success": "#38ff9c",
+    "accent": "#ff3df2",
+    "foreground": "#f2f7ff",
+    "background": "#070b16",
+    "surface": "#101826",
+    "panel": "#1a102a",
+    "boost": "#2b174b",
 }
 DEFAULT_CUSTOM_PALETTE = {
     "primary": "#00ff00",
@@ -100,7 +100,7 @@ def build_theme(name: str, palette: dict[str, str]) -> Theme:
     )
 
 
-THEME_GITHUB_DARK = build_theme(DEFAULT_TUI_THEME, GITHUB_DARK_PALETTE)
+THEME_CYBERPUNK = build_theme(DEFAULT_TUI_THEME, CYBERPUNK_PALETTE)
 
 
 def env_flag(*names: str, default: bool = False) -> bool:
@@ -180,7 +180,15 @@ def env_theme_value(custom_name: str | None = None) -> str | None:
     theme = os.getenv("AGENT_PBX_TUI_THEME", "").strip().lower()
     if is_custom_theme_selector(theme, resolved_custom_name):
         return resolved_custom_name
-    if theme in {"", "default", DEFAULT_TUI_THEME, "github", "github dark"}:
+    if theme in {
+        "",
+        "default",
+        DEFAULT_TUI_THEME,
+        "github",
+        "github dark",
+        "github-dark",
+        "github_dark",
+    }:
         return DEFAULT_TUI_THEME
     return None
 
@@ -414,7 +422,7 @@ class AgentPBXTUI(App[None]):
         self.custom_theme_name = env_custom_theme_name()
         self.custom_palette = env_custom_palette()
         self.custom_theme = build_theme(self.custom_theme_name, self.custom_palette)
-        self.register_theme(THEME_GITHUB_DARK)
+        self.register_theme(THEME_CYBERPUNK)
         self.register_theme(self.custom_theme)
         self.server = server.rstrip("/")
         self.token = token
