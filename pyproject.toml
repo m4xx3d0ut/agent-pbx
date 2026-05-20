@@ -1,13 +1,20 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-pbx"
-version = "0.1.0"
 description = "Local/LAN PBX for agent status reporting and follow-up queues."
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "Agent PBX contributors"}]
+dynamic = ["version"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+]
 dependencies = [
     "fastapi>=0.110,<1",
     "httpx>=0.27,<1",
@@ -19,12 +26,19 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build>=1,<2",
     "pytest>=8,<9",
     "pytest-asyncio>=0.23,<1",
 ]
 
 [project.scripts]
 agent-pbx = "agent_pbx.cli:main"
+
+[tool.setuptools]
+license-files = ["LICENSE"]
+
+[tool.setuptools.dynamic]
+version = {attr = "agent_pbx.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

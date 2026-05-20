@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
+from . import __version__
 from .auth import get_store, require_token
 from .config import ServerConfig
 from .mcp_tools import create_mcp_asgi_app
@@ -54,7 +55,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Agent PBX",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
         debug=resolved_config.debug,
     )
@@ -66,7 +67,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
-        return {"ok": True, "service": "agent-pbx", "version": "0.1.0"}
+        return {"ok": True, "service": "agent-pbx", "version": __version__}
 
     @app.get("/v1/auth/check", dependencies=[Depends(require_token)])
     async def auth_check() -> dict[str, object]:
@@ -290,7 +291,7 @@ def create_token_helper_app(
     store.init()
     code = pairing_code or generate_pairing_code()
     store.create_pairing_code(code, ttl_seconds=ttl_seconds)
-    app = FastAPI(title="Agent PBX Token Helper", version="0.1.0")
+    app = FastAPI(title="Agent PBX Token Helper", version=__version__)
     app.state.store = store
 
     @app.get("/healthz")

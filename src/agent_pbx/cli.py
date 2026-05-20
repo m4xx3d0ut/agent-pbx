@@ -8,6 +8,7 @@ from pathlib import Path
 
 import uvicorn
 
+from . import __version__
 from .api import create_app, create_token_helper_app
 from .config import ServerConfig
 from .sim_agent import run_sim_agent
@@ -18,6 +19,9 @@ from .tui import run_tui
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-pbx")
+    parser.add_argument(
+        "--version", action="version", version=f"agent-pbx {__version__}"
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     serve = subcommands.add_parser("serve", help="Run the Agent PBX HTTP/MCP service.")
