@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-pbx"
+version = "0.1.0"
+description = "Local/LAN PBX for agent status reporting and follow-up queues."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110,<1",
+    "httpx>=0.27,<1",
+    "mcp[cli]>=1.8,<2",
+    "pydantic>=2.7,<3",
+    "textual>=0.58,<1",
+    "uvicorn[standard]>=0.29,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.23,<1",
+]
+
+[project.scripts]
+agent-pbx = "agent_pbx.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

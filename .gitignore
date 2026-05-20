@@ -1,0 +1,55 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+.direnv/
+.eggs/
+build/
+dist/
+*.egg-info/
+state/
+.workerbee/
+.venv-demo/
+.local/
+.codex/
+tmp/
+# Benchmark/test artifacts
+snapshots/
+combined/
+charts/
+charts-user/
+# One-off root screenshots accidentally committed
+/# Anchor to repo root to avoid blocking docs assets
+/docs.home.arpa_*.png
+# Ignore future dev Caddy site snippets broadly
+ops/dev/caddy/sites/*.caddy
+# Local dev tool binaries
+ops/dev/bin/
+# Generated dev Caddy site snippets (ports are ephemeral)
+ops/dev/caddy/sites/blue.caddy
+ops/dev/caddy/sites/green.caddy
+# Generated edge NATS configs (created by add_edge_site.sh)
+ops/dev/nats-edge-*.conf
+ops/dev/nats-hub.conf
+# Ephemeral CI SSH keys for local/QEMU multinode smoke
+ops/ci/keys/
+.pytest_cache/
+.mypy_cache/
+coverage.xml
+htmlcov/
+*.mp4
+.cache
+docs/export/*
+docs/wiki/*
+content-prep/
+cip-series/
+libpod
+# Rosenpass/WireGuard PSK artifacts (local-only)
+rosenpass/
+rosenpass*.key
+rosenpass*.pub
+rosenpass*.conf
+rosenpass-status.json
+artifacts/
+runs/
+scripts/dev/*.bak.*
