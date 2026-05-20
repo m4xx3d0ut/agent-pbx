@@ -24,3 +24,15 @@ docker run --rm -p 8765:8765 -e AGENT_PBX_TOKEN=dev-token agent-pbx:workerbee
 agent-pbx sim-agent --token dev-token --once
 agent-pbx sim-client --token dev-token --agent-id sim-agent-1 --message "Proceed"
 ```
+
+## Debug Runs
+
+Use `--debug` on the server for verbose PBX request and MCP tool logs. Use
+`--transcript` on simulator commands to write JSONL CLI transcripts:
+
+```bash
+agent-pbx serve --debug --token dev-token
+agent-pbx sim-agent --token dev-token --transcript runs/sim-agent.jsonl
+agent-pbx sim-client --token dev-token --agent-id sim-agent-1 \
+  --message "Proceed" --transcript runs/sim-client.jsonl
+```

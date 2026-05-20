@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -18,6 +19,9 @@ from .security import constant_time_equal
 from .store import Store
 
 
+logger = logging.getLogger("agent_pbx.mcp")
+
+
 def build_mcp_server(store: Store) -> FastMCP:
     mcp = FastMCP(
         "Agent PBX",
@@ -33,6 +37,7 @@ def build_mcp_server(store: Store) -> FastMCP:
         name: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        logger.debug("mcp.tool.start name=pbx_register_agent agent_id=%s", agent_id)
         agent = store.register_agent(
             AgentRegisterRequest(
                 agent_id=agent_id,
@@ -46,6 +51,7 @@ def build_mcp_server(store: Store) -> FastMCP:
             {"agent_id": agent_id, "project": project},
             agent_id,
         )
+        logger.debug("mcp.tool.finish name=pbx_register_agent agent_id=%s", agent_id)
         return agent
 
     @mcp.tool()
@@ -58,6 +64,7 @@ def build_mcp_server(store: Store) -> FastMCP:
         needs_input: bool = False,
         plan_options: list[str] | None = None,
     ) -> dict[str, Any]:
+        logger.debug("mcp.tool.start name=pbx_report_turn agent_id=%s status=%s", agent_id, status)
         if store.get_agent(agent_id) is None:
             raise ValueError("agent not registered")
         report = store.create_report(
@@ -82,6 +89,11 @@ def build_mcp_server(store: Store) -> FastMCP:
             },
             report["report_id"],
         )
+        logger.debug(
+            "mcp.tool.finish name=pbx_report_turn agent_id=%s report_id=%s",
+            agent_id,
+            report["report_id"],
+        )
         return report
 
     @mcp.tool()
@@ -90,6 +102,7 @@ def build_mcp_server(store: Store) -> FastMCP:
         wait_seconds: float = 25,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
+        logger.debug("mcp.tool.start name=pbx_poll_commands agent_id=%s", agent_id)
         deadline = asyncio.get_running_loop().time() + min(max(wait_seconds, 0), 30)
         safe_limit = min(max(limit, 1), 50)
         while True:
@@ -105,8 +118,17 @@ def build_mcp_server(store: Store) -> FastMCP:
                         },
                         command["command_id"],
                     )
+                logger.debug(
+                    "mcp.tool.finish name=pbx_poll_commands agent_id=%s delivered=%s",
+                    agent_id,
+                    len(commands),
+                )
                 return commands
             if wait_seconds <= 0 or asyncio.get_running_loop().time() >= deadline:
+                logger.debug(
+                    "mcp.tool.finish name=pbx_poll_commands agent_id=%s delivered=0",
+                    agent_id,
+                )
                 return []
             await asyncio.sleep(0.5)
 
@@ -114,6 +136,7 @@ def build_mcp_server(store: Store) -> FastMCP:
     def pbx_ack_command(
         command_id: str, result: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        logger.debug("mcp.tool.start name=pbx_ack_command command_id=%s", command_id)
         command = store.ack_command(
             command_id, CommandAckRequest(result=result or {}).result
         )
@@ -124,6 +147,7 @@ def build_mcp_server(store: Store) -> FastMCP:
             {"command_id": command_id, "result": result or {}},
             command_id,
         )
+        logger.debug("mcp.tool.finish name=pbx_ack_command command_id=%s", command_id)
         return command
 
     @mcp.tool()
@@ -132,6 +156,11 @@ def build_mcp_server(store: Store) -> FastMCP:
         payload: dict[str, Any] | None = None,
         agent_id: str | None = None,
     ) -> dict[str, Any]:
+        logger.debug(
+            "mcp.tool.start name=pbx_queue_command agent_id=%s type=%s",
+            agent_id,
+            command_type,
+        )
         command = store.create_command(
             CommandCreateRequest(
                 agent_id=agent_id,
@@ -146,6 +175,10 @@ def build_mcp_server(store: Store) -> FastMCP:
                 "agent_id": agent_id,
                 "type": command_type,
             },
+            command["command_id"],
+        )
+        logger.debug(
+            "mcp.tool.finish name=pbx_queue_command command_id=%s",
             command["command_id"],
         )
         return command

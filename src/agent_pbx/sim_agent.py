@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from pathlib import Path
 
 import httpx
 
 from .client import auth_headers, post_json
+from .transcript import TranscriptRecorder, emit
 
 
 async def run_sim_agent(
@@ -16,9 +18,14 @@ async def run_sim_agent(
     token: str | None,
     once: bool = False,
     poll_wait: float = 2,
+    transcript: Path | None = None,
 ) -> None:
+    recorder = TranscriptRecorder(transcript, actor=f"sim-agent:{agent_id}")
+    recorder.record(
+        "start", server=server, agent_id=agent_id, project=project, once=once
+    )
     async with httpx.AsyncClient(base_url=server, timeout=30) as client:
-        await post_json(
+        agent = await post_json(
             client,
             "/v1/agents/register",
             {
@@ -29,6 +36,7 @@ async def run_sim_agent(
             },
             token,
         )
+        recorder.record("registered", agent=agent)
         report = await post_json(
             client,
             f"/v1/agents/{agent_id}/reports",
@@ -42,19 +50,32 @@ async def run_sim_agent(
             },
             token,
         )
-        print(f"reported {report['report_id']}")
+        emit(
+            f"reported {report['report_id']}",
+            recorder,
+            "reported",
+            report=report,
+        )
 
         while True:
             commands = await _poll_commands(client, agent_id, token, poll_wait)
+            recorder.record("polled", command_count=len(commands), commands=commands)
             for command in commands:
-                await post_json(
+                ack = await post_json(
                     client,
                     f"/v1/commands/{command['command_id']}/ack",
                     {"result": {"handled_by": agent_id, "ok": True}},
                     token,
                 )
-                print(f"acked {command['command_id']} {command['type']}")
+                emit(
+                    f"acked {command['command_id']} {command['type']}",
+                    recorder,
+                    "acked",
+                    command=command,
+                    ack=ack,
+                )
             if once:
+                recorder.record("complete")
                 return
             await asyncio.sleep(0.5)
 

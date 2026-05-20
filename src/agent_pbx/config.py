@@ -11,6 +11,7 @@ class ServerConfig:
     db_path: Path = Path("state/agent-pbx.sqlite")
     token: str | None = None
     allow_insecure_lan: bool = False
+    debug: bool = False
 
     @property
     def lan_bound(self) -> bool:

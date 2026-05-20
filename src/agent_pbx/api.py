@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from contextlib import asynccontextmanager
 from collections.abc import Callable
 
@@ -15,6 +17,8 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from .auth import get_store, require_token
 from .config import ServerConfig
@@ -34,6 +38,9 @@ from .security import generate_pairing_code
 from .store import Store
 
 
+logger = logging.getLogger("agent_pbx.api")
+
+
 def create_app(config: ServerConfig | None = None) -> FastAPI:
     resolved_config = config or ServerConfig()
     store = Store(resolved_config.db_path)
@@ -45,9 +52,16 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         async with mcp_server.session_manager.run():
             yield
 
-    app = FastAPI(title="Agent PBX", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="Agent PBX",
+        version="0.1.0",
+        lifespan=lifespan,
+        debug=resolved_config.debug,
+    )
     app.state.config = resolved_config
     app.state.store = store
+    if resolved_config.debug:
+        app.add_middleware(DebugRequestLogMiddleware)
     app.mount("/mcp", mcp_asgi_app)
 
     @app.get("/healthz")
@@ -235,6 +249,35 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     return app
+
+
+class DebugRequestLogMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:
+        start = time.perf_counter()
+        logger.debug(
+            "pbx.request.start method=%s path=%s client=%s",
+            request.method,
+            request.url.path,
+            request.client.host if request.client else "-",
+        )
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception(
+                "pbx.request.error method=%s path=%s duration_ms=%.2f",
+                request.method,
+                request.url.path,
+                (time.perf_counter() - start) * 1000,
+            )
+            raise
+        logger.debug(
+            "pbx.request.finish method=%s path=%s status=%s duration_ms=%.2f",
+            request.method,
+            request.url.path,
+            response.status_code,
+            (time.perf_counter() - start) * 1000,
+        )
+        return response
 
 
 def create_token_helper_app(
