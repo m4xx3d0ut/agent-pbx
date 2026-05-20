@@ -256,6 +256,7 @@ class FollowUpTextArea(TextArea):
 
 
 class AgentPBXTUI(App[None]):
+    TITLE = "Agent PBX"
     CSS = """
     Screen {
         layout: vertical;

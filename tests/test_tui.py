@@ -39,6 +39,7 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
 def test_tui_constructs() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", token="test")
 
+    assert app.TITLE == "Agent PBX"
     assert app.server == "http://127.0.0.1:8765"
     assert app.token == "test"
     assert app.visual_flash_enabled is False

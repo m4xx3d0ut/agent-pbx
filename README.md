@@ -1,6 +1,13 @@
 # Agent PBX
 
-Agent PBX is a local/LAN development service for collecting agent turn reports, storing full response details, and queuing follow-up commands for agents to poll.
+Agent PBX is a local/LAN MCP service for collecting agent turn reports, storing
+full response details, and queuing follow-up commands for agents to poll.
+
+The name borrows from telephony. A PBX, traditionally a private branch exchange,
+is a switchboard that routes calls between extensions and outside lines. Agent
+PBX applies that pattern to agent sessions: agents report into one hub,
+operators review the shared history, and follow-up commands are routed back to
+the right agent.
 
 ## Install
 

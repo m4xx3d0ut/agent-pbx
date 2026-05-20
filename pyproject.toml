@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-pbx"
-description = "Local/LAN PBX for agent status reporting and follow-up queues."
+description = "Agent PBX MCP service for agent status reporting and follow-up queues."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
