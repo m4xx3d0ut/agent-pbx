@@ -328,7 +328,8 @@ In the follow-up composer, `Enter` sends the input. The message field defaults
 to 8 rows. Use `Shift+Enter` to add new lines for longer Markdown or code
 snippets when your terminal reports that key distinctly. Use `Ctrl+J` or
 `Alt+Enter` as terminal-safe newline fallbacks. Long lines soft-wrap, and the
-input expands up to 15 rows with vertical scrolling when needed.
+input expands up to 15 rows with vertical scrolling when needed. The composer
+hotkey strip lists editing controls such as `Ctrl+W` for delete previous word.
 
 The thread is also available through the API:
 

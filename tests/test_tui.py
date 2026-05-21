@@ -10,6 +10,7 @@ from agent_pbx.tui import (
     env_custom_palette,
     env_flag,
     env_theme,
+    follow_up_edit_control,
     is_follow_up_newline_key,
     resolve_layout,
 )
@@ -296,6 +297,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         composer = app.query_one("#composer")
         agent_id = app.query_one("#agent-id", Input)
         message = app.query_one("#message", TextArea)
+        actions = app.query_one("#composer-actions")
+        hotkeys = app.query_one("#composer-hotkeys")
         buttons = app.query_one("#composer-buttons")
 
         assert agents.cursor_type == "row"
@@ -316,12 +319,45 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "Notification Options" not in app.CSS
         assert message.soft_wrap is True
         assert "scrollbar-size: 0 1;" in app.CSS
+        assert "#composer-button-inset {\n        width: 1;" in app.CSS
+        assert "#composer-hotkeys {\n        height: 1;" in app.CSS
+        assert "#composer-buttons Button {\n        width: 1fr;" in app.CSS
+        assert "padding-top: 1;" in app.CSS
+        assert composer.parent is app.query_one("#latest-tab")
         assert agent_id.region.height >= 8
         assert message.region.height >= 8
-        assert composer.region.height >= 13
+        assert composer.region.height >= 15
         assert message.region.bottom <= composer.region.bottom
+        assert actions.region.y >= message.region.bottom
+        assert buttons.region.x == message.region.x + 1
+        assert buttons.region.y > message.region.bottom
+        assert buttons.region.right <= message.region.right
+        assert hotkeys.region.y >= buttons.region.bottom
+        assert hotkeys.region.right <= composer.region.right
+        hotkey_text = str(hotkeys.renderable)
+        assert "Ctrl+J newline" in hotkey_text
+        assert "Ctrl+W word" in hotkey_text
+        assert "Ctrl+A/E" not in hotkey_text
+        assert "Ctrl+U" not in hotkey_text
+        assert "start/end" not in hotkey_text
+        assert "before/after" not in hotkey_text
+        assert "Ctrl+D" not in hotkey_text
+        assert "Ctrl+U/K" not in hotkey_text
+        assert "Ctrl+B/F" not in hotkey_text
+        assert "Ctrl+P/N" not in hotkey_text
         assert buttons.region.bottom <= composer.region.bottom
-        assert ping.region.right <= composer.region.right
+        assert ping.region.right <= message.region.right
+
+        tabs = app.query_one("#agent-tabs")
+        tabs.active = "thread-tab"
+        await pilot.pause()
+        assert composer.region.height == 0
+        tabs.active = "workerbee-tab"
+        await pilot.pause()
+        assert composer.region.height == 0
+        tabs.active = "latest-tab"
+        await pilot.pause()
+        assert composer.region.height >= 15
 
         await pilot.press("s")
         await pilot.pause()
@@ -412,9 +448,11 @@ async def test_tui_compact_layout_opens_agent_view_and_back(monkeypatch) -> None
         assert app.active_agent_tab == "latest-tab"
         assert str(app.query_one("#agent-title").renderable) == "Agent: agent-1"
         assert app.query_one("#right").region.width >= 58
-        assert app.query_one("#ping-agent", Button).region.right <= app.query_one(
-            "#composer"
-        ).region.right
+        message = app.query_one("#message", TextArea)
+        buttons = app.query_one("#composer-buttons")
+        assert buttons.region.x == message.region.x + 1
+        assert buttons.region.y > message.region.bottom
+        assert app.query_one("#ping-agent", Button).region.right <= message.region.right
 
         app.action_back()
         await pilot.pause()
@@ -1441,12 +1479,16 @@ async def test_tui_follow_up_shift_enter_inserts_newline_and_resizes() -> None:
         message.move_cursor((0, len("line 1")))
         await message._on_key(Key("shift_enter", None))
         await message._on_key(Key("ctrl+j", None))
+        await message._on_key(Key("alt+enter", None))
+        await message._on_key(Key("ctrl+enter", None))
         newline_text = message.text
         message.text = "\n".join(f"line {index}" for index in range(20))
         app.resize_message_input()
+        composer_height = app.query_one("#composer").styles.height.value
 
-    assert "line 1\n\n" in newline_text
+    assert "line 1\n\n\n\n" in newline_text
     assert message.styles.height.value == 15
+    assert composer_height == 22
 
 
 def test_tui_follow_up_newline_key_detection_accepts_terminal_variants() -> None:
@@ -1454,5 +1496,38 @@ def test_tui_follow_up_newline_key_detection_accepts_terminal_variants() -> None
     assert is_follow_up_newline_key(Key("shift_enter", None)) is True
     assert is_follow_up_newline_key(Key("shift+return", None)) is True
     assert is_follow_up_newline_key(Key("alt+enter", None)) is True
+    assert is_follow_up_newline_key(Key("ctrl+enter", None)) is True
     assert is_follow_up_newline_key(Key("ctrl+j", None)) is True
     assert is_follow_up_newline_key(Key("enter", None)) is False
+
+
+def test_tui_follow_up_edit_key_detection_accepts_described_controls() -> None:
+    assert follow_up_edit_control(Key("ctrl+w", None)) == "delete_word_left"
+    assert follow_up_edit_control(Key("ctrl+a", None)) is None
+    assert follow_up_edit_control(Key("ctrl+e", None)) is None
+    assert follow_up_edit_control(Key("ctrl+u", None)) is None
+    assert follow_up_edit_control(Key("ctrl+j", None)) is None
+    assert follow_up_edit_control(Key("ctrl+d", None)) is None
+    assert follow_up_edit_control(Key("ctrl+k", None)) is None
+    assert follow_up_edit_control(Key("alt+u", None)) is None
+    assert follow_up_edit_control(Key("alt+k", None)) is None
+    assert follow_up_edit_control(Key("ctrl+b", None)) is None
+    assert follow_up_edit_control(Key("ctrl+f", None)) is None
+    assert follow_up_edit_control(Key("ctrl+p", None)) is None
+    assert follow_up_edit_control(Key("ctrl+n", None)) is None
+
+
+async def test_tui_follow_up_word_edit_control_works() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        message = app.query_one("#message", TextArea)
+        message.text = "abc def"
+        message.move_cursor((0, 7))
+
+        await message._on_key(Key("ctrl+w", None))
+        after_word_back_text = message.text
+        after_word_back_cursor = message.cursor_location
+
+    assert after_word_back_text == "abc "
+    assert after_word_back_cursor == (0, 4)

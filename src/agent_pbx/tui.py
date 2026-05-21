@@ -54,6 +54,9 @@ FOLLOW_UP_NEWLINE_KEYS = {
     "ctrl+j",
     "newline",
 }
+FOLLOW_UP_EDIT_KEYS = {
+    "ctrl+w": "delete_word_left",
+}
 STALE_POLL_SECONDS = 120
 QUEUED_COMMAND_WARN_SECONDS = 60
 ACTIVE_POLL_SECONDS = 60
@@ -324,6 +327,13 @@ class FollowUpTextArea(TextArea):
             start, end = self.selection
             self._replace_via_keyboard("\n", start, end)
             return
+        edit = follow_up_edit_control(event)
+        if edit is not None:
+            event.stop()
+            event.prevent_default()
+            if edit == "delete_word_left":
+                self.action_delete_word_left()
+            return
         if event.key == "enter":
             event.stop()
             event.prevent_default()
@@ -351,6 +361,13 @@ def is_follow_up_newline_key(event: Key) -> bool:
         and ("enter" in name.split("+") or "return" in name.split("+"))
         for name in names
     )
+
+
+def follow_up_edit_control(event: Key) -> str | None:
+    for name in normalized_key_names(event):
+        if edit := FOLLOW_UP_EDIT_KEYS.get(name):
+            return edit
+    return None
 
 
 class SettingsScreen(ModalScreen[None]):
@@ -592,8 +609,8 @@ class AgentPBXTUI(App[None]):
 
     #composer {
         height: auto;
-        min-height: 13;
-        max-height: 20;
+        min-height: 15;
+        max-height: 22;
         border: tall $accent;
         padding: 0 1;
     }
@@ -605,14 +622,14 @@ class AgentPBXTUI(App[None]):
     }
 
     #agent-id {
-        width: 35%;
+        width: 20%;
         height: 8;
         border: tall $accent;
         background: $surface;
     }
 
     #message {
-        width: 65%;
+        width: 80%;
         height: 8;
         min-height: 8;
         max-height: 15;
@@ -624,24 +641,37 @@ class AgentPBXTUI(App[None]):
         scrollbar-background: $surface;
     }
 
+    #composer-actions {
+        height: 4;
+        padding-top: 1;
+    }
+
+    #composer-button-spacer {
+        width: 20%;
+        height: 3;
+    }
+
+    #composer-button-inset {
+        width: 1;
+        height: 3;
+    }
+
     #composer-buttons {
+        width: 1fr;
         height: 3;
         align: center middle;
     }
 
-    #send {
-        width: 13;
+    #composer-buttons Button {
+        width: 1fr;
         min-width: 1;
     }
 
-    #request-detail {
-        width: 18;
-        min-width: 1;
-    }
-
-    #ping-agent {
-        width: 10;
-        min-width: 1;
+    #composer-hotkeys {
+        height: 1;
+        content-align: center middle;
+        color: $secondary;
+        background: $surface;
     }
     """
 
@@ -767,6 +797,31 @@ class AgentPBXTUI(App[None]):
                 with TabbedContent(initial="latest-tab", id="agent-tabs"):
                     with TabPane("Latest", id="latest-tab"):
                         yield TextArea(id="detail", read_only=True)
+                        with Vertical(id="composer"):
+                            with Horizontal(id="composer-inputs"):
+                                yield Input(placeholder="Agent id", id="agent-id")
+                                yield FollowUpTextArea(id="message", soft_wrap=True)
+                            with Horizontal(id="composer-actions"):
+                                yield Static("", id="composer-button-spacer")
+                                yield Static("", id="composer-button-inset")
+                                with Horizontal(id="composer-buttons"):
+                                    yield Button(
+                                        "Send Input",
+                                        id="send",
+                                        variant="primary",
+                                    )
+                                    yield Button(
+                                        "Request Detail",
+                                        id="request-detail",
+                                    )
+                                    yield Button("Ping", id="ping-agent")
+                            yield Static(
+                                (
+                                    "Enter send | Ctrl+J newline | "
+                                    "Ctrl+W word"
+                                ),
+                                id="composer-hotkeys",
+                            )
                     with TabPane("Thread", id="thread-tab"):
                         yield DataTable(
                             id="thread",
@@ -784,14 +839,6 @@ class AgentPBXTUI(App[None]):
                         yield TextArea(id="workerbee-detail", read_only=True)
                         with Horizontal(id="workerbee-actions"):
                             yield Button("Refresh WorkerBee", id="workerbee-refresh")
-                with Vertical(id="composer"):
-                    with Horizontal(id="composer-inputs"):
-                        yield Input(placeholder="Agent id", id="agent-id")
-                        yield FollowUpTextArea(id="message", soft_wrap=True)
-                    with Horizontal(id="composer-buttons"):
-                        yield Button("Send Input", id="send", variant="primary")
-                        yield Button("Request Detail", id="request-detail")
-                        yield Button("Ping", id="ping-agent")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -1343,7 +1390,7 @@ class AgentPBXTUI(App[None]):
         )
         message_input.styles.height = height
         self.query_one("#composer-inputs").styles.height = height
-        self.query_one("#composer").styles.height = height + 5
+        self.query_one("#composer").styles.height = height + 7
 
     async def request_detail(self) -> None:
         agent_id = self.query_one("#agent-id", Input).value.strip()
