@@ -73,16 +73,33 @@ async def test_mcp_reporting_and_command_tools(tmp_path: Path) -> None:
             {"command_id": command["command_id"], "result": {"ok": True}},
         )
     )
+    inactive = tool_json(
+        await mcp.call_tool(
+            "pbx_set_active",
+            {"agent_id": "agent-1", "active": False},
+        )
+    )
 
     assert agent["agent_id"] == "agent-1"
+    assert agent["pbx_active"] is True
     assert ping["type"] == "ping"
     assert report["detail"] == "Full detail"
     assert polled[0]["command_id"] == command["command_id"]
     assert acked["status"] == "acked"
+    assert inactive["pbx_active"] is False
     ack_events = [
         event for event in store.list_events() if event["type"] == "command_acked"
     ]
     assert ack_events[0]["payload"]["agent_id"] == "agent-1"
+    active_events = [
+        event
+        for event in store.list_events()
+        if event["type"] == "agent_pbx_active_changed"
+    ]
+    assert active_events[0]["payload"] == {
+        "agent_id": "agent-1",
+        "pbx_active": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -95,7 +112,9 @@ async def test_mcp_agent_runbook_tool(tmp_path: Path) -> None:
 
     assert runbook["title"] == "Agent PBX Runbook"
     assert any("pbx_poll_commands" in item for item in runbook["active_loop"])
+    assert any("alert pickup mechanism" in item for item in runbook["active_loop"])
     assert "request_detail" in runbook["commands"]
+    assert any("pbx_set_active" in item for item in runbook["session_stop"])
 
 
 @pytest.mark.asyncio

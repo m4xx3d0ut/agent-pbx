@@ -20,6 +20,7 @@ class AgentRegisterRequest(BaseModel):
     project: str = Field(min_length=1, max_length=240)
     name: str | None = Field(default=None, max_length=120)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    pbx_active: bool = True
 
 
 class AgentResponse(BaseModel):
@@ -27,6 +28,7 @@ class AgentResponse(BaseModel):
     project: str
     name: str | None
     status: str
+    pbx_active: bool = True
     metadata: dict[str, Any]
     created_at: float
     last_seen_at: float

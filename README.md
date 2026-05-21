@@ -126,7 +126,10 @@ agent-pbx agent runbook
 
 Connected agents can also call `pbx_agent_runbook` over MCP. The runbook is
 intended for project-specific agent docs and for agents that need a refresher on
-session-long PBX behavior. The guidance requires `status="done"` reports for
+session-long PBX behavior. Agent registration defaults `pbx_active=true`, which
+means "Use Agent PBX" is on. While active, agents must both report meaningful
+progress and keep polling for queued commands; polling is the alert pickup
+mechanism for TUI follow-ups. The guidance requires `status="done"` reports for
 repository work to include whether changes are clean, committed, staged, or
 unstaged. It also requires normally progressing long-running work to check in
 with `status="working"` at least once every five minutes.
@@ -143,11 +146,19 @@ pbx_poll_commands(
 ```
 
 That repeats long-poll cycles for up to five minutes, so commands queued after
-the first long poll expires can still be picked up by a live agent.
+the first long poll expires can still be picked up by a live agent. If the
+window returns empty and the agent is still live and waiting, it should start
+another bounded window. If the task is done, it should send a final report
+instead of continuing to poll.
 
 Use `Ping` in the TUI to intentionally keep a live agent polling longer. Agents
 handle `ping` as a keepalive: reply with a `status="working"` pong report, ack
 with `{"pong": true}`, then start another bounded poll window.
+
+When an operator asks an agent to stop using PBX, the agent should send a final
+report, call `pbx_set_active(active=false)`, and stop PBX polling/reporting
+until a new PBX session starts. The TUI `PBX` column shows whether an agent has
+Agent PBX active.
 
 The TUI `Use` column shows a rough PBX-visible usage gauge per agent for the
 last hour: estimated tokens plus poll, report, and ping counts. Estimates use

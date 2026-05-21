@@ -638,7 +638,17 @@ class AgentPBXTUI(App[None]):
     async def on_mount(self) -> None:
         self.screen.set_class(self.ui_theme == self.custom_theme_name, "custom-theme")
         agents = self.query_one("#agents", DataTable)
-        agents.add_columns("New", "Agent", "Status", "Project", "Last Seen", "Queue", "Poll", "Use")
+        agents.add_columns(
+            "New",
+            "Agent",
+            "PBX",
+            "Status",
+            "Project",
+            "Last Seen",
+            "Queue",
+            "Poll",
+            "Use",
+        )
         events = self.query_one("#events", DataTable)
         events.add_columns("ID", "Type", "Subject")
         thread = self.query_one("#thread", DataTable)
@@ -723,6 +733,7 @@ class AgentPBXTUI(App[None]):
             cells = [
                 marker,
                 agent_id,
+                self.format_pbx_active(agent),
                 str(agent["status"]),
                 str(agent["project"]),
                 f"{agent['last_seen_at']:.0f}",
@@ -755,6 +766,9 @@ class AgentPBXTUI(App[None]):
             scroll=True,
         )
         table.focus()
+
+    def format_pbx_active(self, agent: dict[str, Any]) -> str:
+        return "on" if bool(agent.get("pbx_active", True)) else "off"
 
     def format_queue_state(self, agent: dict[str, Any]) -> str:
         try:
@@ -1419,6 +1433,7 @@ class AgentPBXTUI(App[None]):
             "command_delivered",
             "command_acked",
             "command_deleted",
+            "agent_pbx_active_changed",
         }:
             self.run_worker(
                 self.refresh_agents(),

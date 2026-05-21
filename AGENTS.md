@@ -42,14 +42,15 @@ The planned server may run on localhost or a LAN. Default to localhost-only bind
 
 When the operator asks you to use Agent PBX, register this session with
 `pbx_register_agent` using a stable `agent_id`, the current project name, and
-metadata containing the absolute `cwd` and task goal. Treat Agent PBX as active
-until the operator explicitly asks you to stop using PBX or starts a new
-session.
+metadata containing the absolute `cwd` and task goal. Registration defaults
+`pbx_active=true`; treat that as "Use Agent PBX" being on for this session until
+the operator explicitly asks you to stop using PBX or starts a new session.
 
-While PBX is active, report meaningful progress with `pbx_report_turn`: at task
-start, before waiting for input, after important milestones, after test or
+While `pbx_active=true`, report meaningful progress with `pbx_report_turn`: at
+task start, before waiting for input, after important milestones, after test or
 deploy results, and at turn completion. Keep summaries brief but actionable;
-put detailed notes in `detail`.
+put detailed notes in `detail`. Do not claim to be using Agent PBX unless you
+are also polling for queued commands.
 
 During long-running work that is progressing normally, send a
 `status="working"` `pbx_report_turn` check-in at least once every five minutes
@@ -66,11 +67,14 @@ work, after each report, before finishing a turn, and periodically during
 long-running work. Handle every returned command in order, then call
 `pbx_ack_command` with the result. Do not poll as another agent ID.
 
-For idle wait periods, use bounded repeated polling such as
+Polling is the alert pickup mechanism. A single long-poll call only watches one
+window; if the session remains live, keep starting bounded poll windows. For
+idle wait periods, use bounded repeated polling such as
 `pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
 This repeats long-poll cycles for up to five minutes, allowing queued commands
-to be picked up after the first long poll expires while keeping the wait
-bounded.
+to be picked up after the first long poll expires while keeping each wait
+bounded. When the bounded window returns empty, either start another bounded
+window if you are still waiting live, or send a final report and stop.
 
 If a `ping` command is received, treat it as a polling keepalive. Respond with a
 `status="working"` `pbx_report_turn` whose summary starts with `Pong`, ack the
@@ -91,6 +95,9 @@ Command handling rules:
 - `acknowledge`: ack after recording the instruction or status.
 - `ping`: send a `status="working"` pong report, ack with `{"pong": true}`, and
   restart bounded polling.
+
+If the operator asks you to stop using PBX, send a final report, call
+`pbx_set_active(active=false)`, then stop polling and reporting through PBX.
 
 If PBX is temporarily unavailable, continue local work, mention the PBX failure
 in your next response, and retry registration or polling when practical.

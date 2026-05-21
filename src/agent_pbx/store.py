@@ -11,7 +11,7 @@ from .schemas import AgentRegisterRequest, CommandCreateRequest, ReportCreateReq
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -71,6 +71,7 @@ class Store:
                     project TEXT NOT NULL,
                     name TEXT,
                     status TEXT NOT NULL,
+                    pbx_active INTEGER NOT NULL DEFAULT 1,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
                     created_at REAL NOT NULL,
                     last_seen_at REAL NOT NULL,
@@ -125,6 +126,12 @@ class Store:
                 (str(SCHEMA_VERSION),),
             )
             self._ensure_column(conn, "agents", "last_poll_at", "REAL")
+            self._ensure_column(
+                conn,
+                "agents",
+                "pbx_active",
+                "INTEGER NOT NULL DEFAULT 1",
+            )
 
     @staticmethod
     def _ensure_column(
@@ -268,12 +275,14 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO agents
-                    (agent_id, project, name, status, metadata_json, created_at, last_seen_at)
-                VALUES (?, ?, ?, 'online', ?, ?, ?)
+                    (agent_id, project, name, status, pbx_active, metadata_json,
+                     created_at, last_seen_at)
+                VALUES (?, ?, ?, 'online', ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     project = excluded.project,
                     name = excluded.name,
                     status = 'online',
+                    pbx_active = excluded.pbx_active,
                     metadata_json = excluded.metadata_json,
                     last_seen_at = excluded.last_seen_at
                 """,
@@ -281,6 +290,7 @@ class Store:
                     request.agent_id,
                     request.project,
                     request.name,
+                    int(request.pbx_active),
                     metadata_json,
                     current,
                     current,
@@ -292,8 +302,8 @@ class Store:
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT agent_id, project, name, status, metadata_json, created_at,
-                       last_seen_at, last_poll_at
+                SELECT agent_id, project, name, status, pbx_active, metadata_json,
+                       created_at, last_seen_at, last_poll_at
                 FROM agents
                 WHERE agent_id = ?
                 """,
@@ -305,8 +315,8 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT agent_id, project, name, status, metadata_json, created_at,
-                       last_seen_at, last_poll_at
+                SELECT agent_id, project, name, status, pbx_active, metadata_json,
+                       created_at, last_seen_at, last_poll_at
                 FROM agents
                 ORDER BY last_seen_at DESC, agent_id ASC
                 """
@@ -316,6 +326,19 @@ class Store:
                 self._add_queue_summary(conn, agent)
                 self._add_usage_summary(conn, agent)
         return agents
+
+    def set_agent_pbx_active(self, agent_id: str, active: bool) -> dict[str, Any] | None:
+        current = now_ts()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE agents
+                SET pbx_active = ?, last_seen_at = ?
+                WHERE agent_id = ?
+                """,
+                (int(active), current, agent_id),
+            )
+        return self.get_agent(agent_id) if cursor.rowcount else None
 
     def create_report(
         self, agent_id: str, request: ReportCreateRequest
@@ -532,6 +555,7 @@ class Store:
     @staticmethod
     def _agent_from_row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
+        data["pbx_active"] = bool(data["pbx_active"])
         data["metadata"] = json.loads(data.pop("metadata_json"))
         data["queued_command_count"] = 0
         data["oldest_queued_command_age_seconds"] = None

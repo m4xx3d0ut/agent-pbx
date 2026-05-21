@@ -407,6 +407,9 @@ def test_tui_formats_queue_and_poll_state(monkeypatch) -> None:
     assert app.format_poll_state({"queued_command_count": 0, "last_poll_at": None}) == "-"
     assert app.format_poll_state({"queued_command_count": 1, "last_poll_at": None}) == "never"
     assert app.format_usage_state({}) == "-"
+    assert app.format_pbx_active({"pbx_active": True}) == "on"
+    assert app.format_pbx_active({"pbx_active": False}) == "off"
+    assert app.format_pbx_active({}) == "on"
 
 
 async def test_tui_thread_selection_renders_detail() -> None:

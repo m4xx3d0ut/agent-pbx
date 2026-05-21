@@ -45,6 +45,7 @@ def build_mcp_server(store: Store) -> FastMCP:
         project: str,
         name: str | None = None,
         metadata: dict[str, Any] | None = None,
+        pbx_active: bool = True,
     ) -> dict[str, Any]:
         logger.debug("mcp.tool.start name=pbx_register_agent agent_id=%s", agent_id)
         agent = store.register_agent(
@@ -53,14 +54,38 @@ def build_mcp_server(store: Store) -> FastMCP:
                 project=project,
                 name=name,
                 metadata=metadata or {},
+                pbx_active=pbx_active,
             )
         )
         store.append_event(
             "agent_registered",
-            {"agent_id": agent_id, "project": project},
+            {"agent_id": agent_id, "project": project, "pbx_active": pbx_active},
             agent_id,
         )
         logger.debug("mcp.tool.finish name=pbx_register_agent agent_id=%s", agent_id)
+        return agent
+
+    @mcp.tool()
+    def pbx_set_active(agent_id: str, active: bool) -> dict[str, Any]:
+        """Mark whether this agent session is actively using Agent PBX."""
+        logger.debug(
+            "mcp.tool.start name=pbx_set_active agent_id=%s active=%s",
+            agent_id,
+            active,
+        )
+        agent = store.set_agent_pbx_active(agent_id, active)
+        if agent is None:
+            raise ValueError("agent not registered")
+        store.append_event(
+            "agent_pbx_active_changed",
+            {"agent_id": agent_id, "pbx_active": active},
+            agent_id,
+        )
+        logger.debug(
+            "mcp.tool.finish name=pbx_set_active agent_id=%s active=%s",
+            agent_id,
+            active,
+        )
         return agent
 
     @mcp.tool()

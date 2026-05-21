@@ -15,14 +15,15 @@ def agent_instructions_markdown() -> str:
 
 When the operator asks you to use Agent PBX, register this session with
 `pbx_register_agent` using a stable `agent_id`, the current project name, and
-metadata containing the absolute `cwd` and task goal. Treat Agent PBX as active
-until the operator explicitly asks you to stop using PBX or starts a new
-session.
+metadata containing the absolute `cwd` and task goal. Registration defaults
+`pbx_active=true`; treat that as "Use Agent PBX" being on for this session until
+the operator explicitly asks you to stop using PBX or starts a new session.
 
-While PBX is active, report meaningful progress with `pbx_report_turn`: at task
-start, before waiting for input, after important milestones, after test or
+While `pbx_active=true`, report meaningful progress with `pbx_report_turn`: at
+task start, before waiting for input, after important milestones, after test or
 deploy results, and at turn completion. Keep summaries brief but actionable;
-put detailed notes in `detail`.
+put detailed notes in `detail`. Do not claim to be using Agent PBX unless you
+are also polling for queued commands.
 
 During long-running work that is progressing normally, send a
 `status="working"` `pbx_report_turn` check-in at least once every five minutes
@@ -39,11 +40,14 @@ work, after each report, before finishing a turn, and periodically during
 long-running work. Handle every returned command in order, then call
 `pbx_ack_command` with the result. Do not poll as another agent ID.
 
-For idle wait periods, use bounded repeated polling such as
+Polling is the alert pickup mechanism. A single long-poll call only watches one
+window; if the session remains live, keep starting bounded poll windows. For
+idle wait periods, use bounded repeated polling such as
 `pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
 This repeats long-poll cycles for up to five minutes, allowing queued commands
-to be picked up after the first long poll expires while keeping the wait
-bounded.
+to be picked up after the first long poll expires while keeping each wait
+bounded. When the bounded window returns empty, either start another bounded
+window if you are still waiting live, or send a final report and stop.
 
 If a `ping` command is received, treat it as a polling keepalive. Respond with a
 `status="working"` `pbx_report_turn` whose summary starts with `Pong`, ack the
@@ -65,6 +69,9 @@ Command handling rules:
 - `ping`: send a `status="working"` pong report, ack with `{{"pong": true}}`, and
   restart bounded polling.
 
+If the operator asks you to stop using PBX, send a final report, call
+`pbx_set_active(active=false)`, then stop polling and reporting through PBX.
+
 If PBX is temporarily unavailable, continue local work, mention the PBX failure
 in your next response, and retry registration or polling when practical.
 {AGENT_INSTRUCTIONS_END}
@@ -83,7 +90,8 @@ operator follow-up queues, detailed report history, and TUI visibility.
 
 1. Choose a stable `agent_id`, for example `codex-agent-pbx-main`.
 2. Call `pbx_register_agent` with the current project and metadata such as
-   `cwd`, `task`, and relevant environment notes.
+   `cwd`, `task`, and relevant environment notes. The default
+   `pbx_active=true` means "Use Agent PBX" is on.
 3. Immediately call `pbx_report_turn` with `status="working"` so the operator
    can see that the session is connected.
 
@@ -99,15 +107,23 @@ operator follow-up queues, detailed report history, and TUI visibility.
    the command has been handled.
 5. Never poll or acknowledge commands for a different `agent_id`.
 
-For idle wait periods, prefer
+Polling is what lets Agent PBX alerts and TUI follow-ups reach a live agent.
+While `pbx_active=true`, do not rely on one long-poll call and then go idle. For
+idle wait periods, prefer
 `pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
 The server repeats long-poll cycles until a command arrives or the five-minute
-window expires.
+window expires. If the window returns empty and the agent is still live and
+waiting for operator input, start another bounded window. If the task is done,
+send the final report instead of continuing to poll.
 
 If a `ping` command arrives, send a `status="working"` pong report, ack the
 command with `{"pong": true}`, and immediately begin another bounded poll window.
 This lets an operator intentionally extend the agent's polling period while the
 agent is still live.
+
+If the operator asks you to stop using PBX, send a final report, call
+`pbx_set_active(active=false)`, then stop polling. Do not call PBX tools again
+unless the operator starts a new PBX session.
 
 Keep recurring check-ins concise. PBX estimates visible usage from poll counts,
 report text, command payloads, and ack payloads, so repeated verbose reports can
@@ -155,21 +171,23 @@ def runbook_payload() -> dict[str, Any]:
         "title": "Agent PBX Runbook",
         "summary": (
             "Use Agent PBX as a session-long coordination bus: register once, "
-            "report meaningful progress, poll commands regularly, and ack only "
-            "after handling each command."
+            "keep pbx_active=true while using it, report meaningful progress, "
+            "poll commands regularly, and ack only after handling each command."
         ),
         "session_start": [
             "Choose a stable agent_id such as codex-agent-pbx-main.",
-            "Call pbx_register_agent with project, name, cwd, task, and metadata.",
+            "Call pbx_register_agent with project, name, cwd, task, and metadata; pbx_active defaults true.",
             "Send an initial pbx_report_turn with status='working'.",
         ],
         "active_loop": [
             "Call pbx_poll_commands before work, after each report, before turn end, and periodically during long work.",
+            "Polling is the alert pickup mechanism; while pbx_active=true, keep using bounded repeated poll windows if the live session is waiting.",
             "Use pbx_report_turn for milestones, blockers, test results, deployment results, and final outcomes.",
             "Keep summary concise and put complete notes in detail.",
             "Handle commands in order and call pbx_ack_command only after handling.",
             "Never poll or ack commands for another agent_id.",
             "For idle waits, use pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5).",
+            "If that bounded window returns empty and you are still live, start another bounded window; if done, send a final report.",
         ],
         "keepalive": [
             "A ping command is a polling keepalive, not task input.",
@@ -205,6 +223,11 @@ def runbook_payload() -> dict[str, Any]:
             "acknowledge": "Record the instruction or status and ack.",
             "ping": 'Send a status=\'working\' pong report, ack with {"pong": true}, then restart bounded polling.',
         },
+        "session_stop": [
+            "If the operator asks you to stop using PBX, send a final report.",
+            "Call pbx_set_active(active=false) so the TUI shows Use Agent PBX is off.",
+            "Stop polling and reporting through PBX until the operator starts a new PBX session.",
+        ],
         "failure_modes": [
             "If PBX is unavailable, continue local work when possible and retry later.",
             "If a claimed command fails, report the failure and ack with an error result.",

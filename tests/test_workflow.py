@@ -49,6 +49,7 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
     events = client.get("/v1/events")
 
     assert registered.status_code == 200
+    assert registered.json()["pbx_active"] is True
     assert report.status_code == 200
     assert fetched_report.json()["detail"] == "Full details are persisted at report time."
     assert latest_reports.json()[0]["report_id"] == report.json()["report_id"]
