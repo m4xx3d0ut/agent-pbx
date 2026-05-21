@@ -7,13 +7,15 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 from rich.color import Color, ColorParseError
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.events import Click, Key
+from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.widgets import (
     Button,
@@ -39,7 +41,7 @@ DEFAULT_CUSTOM_THEME_NAME = "1337"
 THEME_1337_NAME = DEFAULT_CUSTOM_THEME_NAME
 DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
 DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
-FOLLOW_UP_MIN_HEIGHT = 3
+FOLLOW_UP_MIN_HEIGHT = 8
 FOLLOW_UP_MAX_HEIGHT = 15
 SHIFT_ENTER_KEYS = {"shift+enter", "shift_enter", "shift+return"}
 STALE_POLL_SECONDS = 120
@@ -57,6 +59,7 @@ THEME_KEYS = (
     "panel",
     "boost",
 )
+WidgetType = TypeVar("WidgetType")
 CYBERPUNK_PALETTE = {
     "primary": "#00e5ff",
     "secondary": "#9b5cff",
@@ -310,6 +313,58 @@ class FollowUpTextArea(TextArea):
         await super()._on_key(event)
 
 
+class SettingsScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(
+        self,
+        *,
+        visual_flash_enabled: bool,
+        terminal_bell_enabled: bool,
+        agent_blink_enabled: bool,
+        custom_theme_name: str,
+        custom_theme_enabled: bool,
+    ) -> None:
+        super().__init__()
+        self.visual_flash_enabled = visual_flash_enabled
+        self.terminal_bell_enabled = terminal_bell_enabled
+        self.agent_blink_enabled = agent_blink_enabled
+        self.custom_theme_name = custom_theme_name
+        self.custom_theme_enabled = custom_theme_enabled
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings-panel"):
+            yield Static("Settings", id="settings-title")
+            with Vertical(id="settings-options"):
+                yield Checkbox(
+                    "Visual flash",
+                    value=self.visual_flash_enabled,
+                    id="visual-flash",
+                )
+                yield Checkbox(
+                    "Terminal bell",
+                    value=self.terminal_bell_enabled,
+                    id="terminal-bell",
+                )
+                yield Checkbox(
+                    "Unseen blink",
+                    value=self.agent_blink_enabled,
+                    id="agent-blink",
+                )
+                yield Checkbox(
+                    f"{self.custom_theme_name} theme",
+                    value=self.custom_theme_enabled,
+                    id="theme-1337",
+                )
+            with Horizontal(id="settings-actions"):
+                yield Button("Close", id="settings-close", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "settings-close":
+            event.stop()
+            self.dismiss()
+
+
 class AgentPBXTUI(App[None]):
     TITLE = "Agent PBX"
     CSS = """
@@ -362,6 +417,41 @@ class AgentPBXTUI(App[None]):
     Screen.custom-theme TextArea.-read-only .text-area--cursor {
         background: $warning;
         color: $background;
+    }
+
+    SettingsScreen {
+        align: center middle;
+    }
+
+    #settings-panel {
+        width: 72;
+        max-width: 90%;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #settings-title {
+        height: 1;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #settings-options {
+        height: auto;
+    }
+
+    #settings-options Checkbox {
+        height: 3;
+    }
+
+    #settings-actions {
+        height: 3;
+    }
+
+    #settings-actions Button {
+        width: 1fr;
     }
 
     #main {
@@ -422,39 +512,38 @@ class AgentPBXTUI(App[None]):
         width: 1fr;
     }
 
-    #notification-options {
-        height: 3;
-    }
-
-    #notification-options Checkbox {
-        width: 1fr;
-    }
-
     #events {
         height: 12;
     }
 
     #composer {
         height: auto;
-        min-height: 6;
-        max-height: 18;
+        min-height: 11;
+        max-height: 20;
+        border: tall $accent;
+        padding: 0 1;
     }
 
     #composer-inputs {
-        height: auto;
+        height: 8;
+        min-height: 8;
         max-height: 15;
     }
 
     #agent-id {
         width: 35%;
-        height: 3;
+        height: 8;
+        border: tall $accent;
+        background: $surface;
     }
 
     #message {
         width: 65%;
-        height: 3;
-        min-height: 3;
+        height: 8;
+        min-height: 8;
         max-height: 15;
+        border: tall $accent;
+        background: $surface;
         scrollbar-size: 1 1;
         scrollbar-color: $accent;
         scrollbar-color-hover: $warning;
@@ -472,6 +561,7 @@ class AgentPBXTUI(App[None]):
 
     BINDINGS = [
         ("r", "refresh", "Refresh"),
+        ("s", "settings", "Settings"),
         ("q", "quit", "Quit"),
     ]
 
@@ -603,32 +693,10 @@ class AgentPBXTUI(App[None]):
                         yield TextArea(id="workerbee-detail", read_only=True)
                         with Horizontal(id="workerbee-actions"):
                             yield Button("Refresh WorkerBee", id="workerbee-refresh")
-                yield Static("Notification Options")
-                with Horizontal(id="notification-options"):
-                    yield Checkbox(
-                        "Visual flash",
-                        value=self.visual_flash_enabled,
-                        id="visual-flash",
-                    )
-                    yield Checkbox(
-                        "Terminal bell",
-                        value=self.terminal_bell_enabled,
-                        id="terminal-bell",
-                    )
-                    yield Checkbox(
-                        "Unseen blink",
-                        value=self.agent_blink_enabled,
-                        id="agent-blink",
-                    )
-                    yield Checkbox(
-                        f"{self.custom_theme_name} theme",
-                        value=self.ui_theme == self.custom_theme_name,
-                        id="theme-1337",
-                    )
                 with Vertical(id="composer"):
                     with Horizontal(id="composer-inputs"):
                         yield Input(placeholder="Agent id", id="agent-id")
-                        yield FollowUpTextArea(id="message", soft_wrap=True)
+                        yield FollowUpTextArea(id="message", soft_wrap=False)
                     with Horizontal(id="composer-buttons"):
                         yield Button("Send Input", id="send", variant="primary")
                         yield Button("Request Detail", id="request-detail")
@@ -636,7 +704,7 @@ class AgentPBXTUI(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.screen.set_class(self.ui_theme == self.custom_theme_name, "custom-theme")
+        self.apply_theme_class()
         agents = self.query_one("#agents", DataTable)
         agents.add_columns(
             "New",
@@ -667,6 +735,25 @@ class AgentPBXTUI(App[None]):
             if self.active_agent_tab == "workerbee-tab":
                 await self.load_workerbee_status(self.selected_agent_id)
 
+    def action_settings(self) -> None:
+        self.push_screen(
+            SettingsScreen(
+                visual_flash_enabled=self.visual_flash_enabled,
+                terminal_bell_enabled=self.terminal_bell_enabled,
+                agent_blink_enabled=self.agent_blink_enabled,
+                custom_theme_name=self.custom_theme_name,
+                custom_theme_enabled=self.ui_theme == self.custom_theme_name,
+            )
+        )
+
+    def query_one_or_none(
+        self, selector: str, widget_type: type[WidgetType]
+    ) -> WidgetType | None:
+        try:
+            return self.query_one(selector, widget_type)
+        except NoMatches:
+            return None
+
     async def refresh_agents(self) -> None:
         try:
             async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
@@ -674,7 +761,9 @@ class AgentPBXTUI(App[None]):
                 response.raise_for_status()
                 agents = response.json()
         except Exception as exc:
-            self.query_one("#detail", TextArea).text = f"Unable to refresh agents: {exc}"
+            detail = self.query_one_or_none("#detail", TextArea)
+            if detail is not None:
+                detail.text = f"Unable to refresh agents: {exc}"
             return
 
         previous_last_seen = self.agent_last_seen_at.copy()
@@ -723,7 +812,13 @@ class AgentPBXTUI(App[None]):
         return agent_id == self.selected_agent_id and self.active_agent_tab == "latest-tab"
 
     def render_agents(self) -> None:
-        table = self.query_one("#agents", DataTable)
+        table = self.query_one_or_none("#agents", DataTable)
+        if table is None:
+            return
+        scroll_x = table.scroll_x
+        scroll_target_x = table.scroll_target_x
+        scroll_y = table.scroll_y
+        scroll_target_y = table.scroll_target_y
         cursor_agent_id = self.agent_id_at_cursor()
         table.clear()
         for agent in self.agents.values():
@@ -749,9 +844,15 @@ class AgentPBXTUI(App[None]):
                 animate=False,
                 scroll=False,
             )
+        table.scroll_x = scroll_x
+        table.scroll_target_x = scroll_target_x
+        table.scroll_y = scroll_y
+        table.scroll_target_y = scroll_target_y
 
     def agent_id_at_cursor(self) -> str | None:
-        table = self.query_one("#agents", DataTable)
+        table = self.query_one_or_none("#agents", DataTable)
+        if table is None:
+            return None
         if table.row_count == 0 or not table.is_valid_row_index(table.cursor_row):
             return None
         return str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
@@ -759,7 +860,9 @@ class AgentPBXTUI(App[None]):
     def focus_agent_row(self, agent_id: str) -> None:
         if agent_id not in self.agents:
             return
-        table = self.query_one("#agents", DataTable)
+        table = self.query_one_or_none("#agents", DataTable)
+        if table is None:
+            return
         table.move_cursor(
             row=table.get_row_index(agent_id),
             animate=False,
@@ -819,7 +922,9 @@ class AgentPBXTUI(App[None]):
         self.render_unseen_attention()
 
     def render_unseen_attention(self) -> None:
-        attention = self.query_one("#attention", Static)
+        attention = self.query_one_or_none("#attention", Static)
+        if attention is None:
+            return
         if not self.agent_blink_enabled or not self.unseen_latest_agent_ids:
             if attention.has_class("unseen-active"):
                 attention.update("")
@@ -1349,10 +1454,16 @@ class AgentPBXTUI(App[None]):
         self.ui_theme = self.resolve_theme(theme_name)
         self.theme = self.ui_theme
         self.save_settings()
+        self.apply_theme_class()
+
+    def apply_theme_class(self) -> None:
+        use_custom_theme = self.ui_theme == self.custom_theme_name
         try:
-            self.screen.set_class(self.ui_theme == self.custom_theme_name, "custom-theme")
+            screens = list(self.screen_stack)
         except ScreenStackError:
             return
+        for screen in screens:
+            screen.set_class(use_custom_theme, "custom-theme")
 
     def resolve_theme(self, theme_name: str) -> str:
         if is_custom_theme_selector(theme_name, self.custom_theme_name):

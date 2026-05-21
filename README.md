@@ -238,13 +238,12 @@ docker build --build-arg AGENT_PBX_TUI_FLASH=1 \
   -t agent-pbx:tui .
 ```
 
-The same options are available as `Visual flash` and `Terminal bell` checkboxes
-inside the TUI. Alerts fire for new agent registrations, new reports, and
-command acknowledgements. The Agents table also highlights unseen latest reports
-with `NEW`, and the top alert bar blinks for unseen latest reports by default.
-Click the blinking alert to jump directly to the first unseen agent's `Latest`
-tab.
-Disable that with `AGENT_PBX_TUI_AGENT_BLINK=0` or the `Unseen blink` checkbox.
+The same options are available from the TUI `Settings` screen with the `s`
+hotkey. Alerts fire for new agent registrations, new reports, and command
+acknowledgements. The Agents table also highlights unseen latest reports with
+`NEW`, and the top alert bar blinks for unseen latest reports by default. Click
+the blinking alert to jump directly to the first unseen agent's `Latest` tab.
+Disable that with `AGENT_PBX_TUI_AGENT_BLINK=0` or the `Unseen blink` setting.
 
 TUI checkbox and theme selections persist between sessions in
 `${XDG_CONFIG_HOME:-~/.config}/agent-pbx/tui-settings.json`. Set
@@ -254,7 +253,7 @@ that launch.
 
 The default TUI theme uses a cyberpunk palette with neon cyan, magenta, yellow,
 and green over a dark terminal base. Use `AGENT_PBX_TUI_THEME=1337` or the
-`1337 theme` checkbox for a black and bright-green terminal look.
+theme toggle in `Settings` for a black and bright-green terminal look.
 
 ## Custom TUI Theme
 
@@ -289,9 +288,9 @@ Use `Space` on a Thread row to mark it, then export `Item`, `Marked`, or `All`
 to Markdown under `artifacts/thread-exports/`. Set
 `AGENT_PBX_TUI_EXPORT_DIR=/path/to/exports` to change the destination.
 
-In the follow-up composer, `Enter` sends the input. Use `Shift+Enter` to add
-new lines for longer Markdown or code snippets; the input expands up to 15 rows
-and scrolls when needed.
+In the follow-up composer, `Enter` sends the input. The message field defaults
+to 8 rows. Use `Shift+Enter` to add new lines for longer Markdown or code
+snippets; the input expands up to 15 rows and scrolls when needed.
 
 The thread is also available through the API:
 

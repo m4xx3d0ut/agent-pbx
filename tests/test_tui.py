@@ -41,6 +41,7 @@ def test_tui_constructs() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", token="test")
 
     assert app.TITLE == "Agent PBX"
+    assert ("s", "settings", "Settings") in app.BINDINGS
     assert app.server == "http://127.0.0.1:8765"
     assert app.token == "test"
     assert app.visual_flash_enabled is False
@@ -217,14 +218,22 @@ def test_tui_alerts_only_for_attention_events() -> None:
     assert app.should_alert({"type": "command_delivered"}) is False
 
 
-async def test_tui_mounts_notification_controls() -> None:
+def test_tui_background_render_skips_before_widgets_mount() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {"agent-1": {"agent_id": "agent-1"}}
+    app.unseen_latest_agent_ids.add("agent-1")
+
+    app.render_agents()
+    app.focus_agent_row("agent-1")
+    app.render_unseen_attention()
+
+    assert app.agent_id_at_cursor() is None
+
+
+async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", visual_flash=True)
 
-    async with app.run_test():
-        visual = app.query_one("#visual-flash", Checkbox)
-        bell = app.query_one("#terminal-bell", Checkbox)
-        agent_blink = app.query_one("#agent-blink", Checkbox)
-        theme = app.query_one("#theme-1337", Checkbox)
+    async with app.run_test() as pilot:
         agents = app.query_one("#agents", DataTable)
         thread = app.query_one("#thread", DataTable)
         request_detail = app.query_one("#request-detail", Button)
@@ -236,13 +245,10 @@ async def test_tui_mounts_notification_controls() -> None:
         workerbee_detail = app.query_one("#workerbee-detail", TextArea)
         workerbee_refresh = app.query_one("#workerbee-refresh", Button)
         composer = app.query_one("#composer")
+        agent_id = app.query_one("#agent-id", Input)
         message = app.query_one("#message", TextArea)
         buttons = app.query_one("#composer-buttons")
 
-        assert visual.value is True
-        assert bell.value is False
-        assert agent_blink.value is True
-        assert theme.value is False
         assert agents.cursor_type == "row"
         assert agents.show_row_labels is False
         assert thread.cursor_type == "row"
@@ -258,8 +264,27 @@ async def test_tui_mounts_notification_controls() -> None:
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
+        assert "Notification Options" not in app.CSS
+        assert message.soft_wrap is False
+        assert agent_id.region.height >= 8
+        assert message.region.height >= 8
         assert message.region.bottom <= composer.region.bottom
         assert buttons.region.bottom <= composer.region.bottom
+
+        await pilot.press("s")
+        await pilot.pause()
+
+        visual = app.screen.query_one("#visual-flash", Checkbox)
+        bell = app.screen.query_one("#terminal-bell", Checkbox)
+        agent_blink = app.screen.query_one("#agent-blink", Checkbox)
+        theme = app.screen.query_one("#theme-1337", Checkbox)
+        close = app.screen.query_one("#settings-close", Button)
+
+        assert visual.value is True
+        assert bell.value is False
+        assert agent_blink.value is True
+        assert theme.value is False
+        assert close.label.plain == "Close"
 
 
 async def test_tui_select_agent_updates_composer_and_loads_report() -> None:
@@ -1072,6 +1097,35 @@ async def test_tui_agent_refresh_preserves_cursor_position() -> None:
 
     assert table.cursor_row == 1
     assert cursor_agent_id == "agent-2"
+
+
+async def test_tui_agent_refresh_preserves_table_scroll() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1-with-a-long-display-name",
+                "status": "running",
+                "project": "agent-pbx-project-with-a-long-display-name",
+                "last_seen_at": 123.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2-with-a-long-display-name",
+                "status": "running",
+                "project": "agent-pbx-project-with-a-long-display-name",
+                "last_seen_at": 124.0,
+            },
+        }
+        app.render_agents()
+        table = app.query_one("#agents", DataTable)
+        table.scroll_x = 10
+        table.scroll_target_x = 10
+        app.agents["agent-1"]["status"] = "completed"
+        app.render_agents()
+
+    assert table.scroll_x == 10
+    assert table.scroll_target_x == 10
 
 
 async def test_tui_request_detail_queues_command() -> None:
