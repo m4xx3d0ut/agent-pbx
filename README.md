@@ -294,10 +294,9 @@ direct mode without opening settings. `AGENT_PBX_TUI_TMUX_CAPTURE_LINES=0`
 captures only the visible pane by default; set a positive value to include
 scrollback when you intentionally need older output. Set
 `AGENT_PBX_TUI_TMUX_REFRESH_SECONDS=1.5` to tune the snapshot refresh cadence;
-larger values reduce redraw pop at the cost of freshness. The tmux view renders
-the last few pane lines as a small live tail so Codex status/spinner churn does
-not force a full main-buffer redraw; tune it with
-`AGENT_PBX_TUI_TMUX_TAIL_LINES=3`.
+larger values reduce redraw pop at the cost of freshness. The tmux view crops
+the Codex `Working` status/input area from captured output, so the main render
+focuses on transcript changes instead of the live prompt buffer.
 
 TUI checkbox, layout, and theme selections persist between sessions in
 `${XDG_CONFIG_HOME:-~/.config}/agent-pbx/tui-settings.json`. Set

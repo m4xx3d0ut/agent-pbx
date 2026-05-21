@@ -48,7 +48,6 @@ DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
 DEFAULT_TMUX_CAPTURE_LINES = 0
 DEFAULT_TMUX_REFRESH_SECONDS = 1.5
 MIN_TMUX_REFRESH_SECONDS = 0.25
-DEFAULT_TMUX_TAIL_LINES = 3
 FOLLOW_UP_MIN_HEIGHT = 8
 FOLLOW_UP_MAX_HEIGHT = 15
 FOLLOW_UP_NEWLINE_KEYS = {
@@ -77,6 +76,9 @@ THEME_KEYS = (
     "surface",
     "panel",
     "boost",
+)
+CODEX_STATUS_LINE_PATTERN = re.compile(
+    r"\b(Working|Thinking|Reading|Editing|Running|Waiting)\b"
 )
 WidgetType = TypeVar("WidgetType")
 CYBERPUNK_PALETTE = {
@@ -256,14 +258,6 @@ def env_tmux_refresh_seconds_value() -> float | None:
     if parsed is None or parsed <= 0:
         return None
     return max(MIN_TMUX_REFRESH_SECONDS, parsed)
-
-
-def env_tmux_tail_lines_value() -> int | None:
-    value = os.getenv("AGENT_PBX_TUI_TMUX_TAIL_LINES", "").strip()
-    if not value:
-        return None
-    parsed = int_value(value)
-    return parsed if parsed is not None and parsed >= 0 else None
 
 
 def env_settings_file() -> Path:
@@ -652,15 +646,6 @@ class AgentPBXTUI(App[None]):
         scrollbar-background: $surface;
     }
 
-    #tmux-tail {
-        height: 5;
-        min-height: 3;
-        border: tall $secondary;
-        background: $background;
-        color: $foreground;
-        padding: 0 1;
-    }
-
     #tmux-actions {
         height: 3;
     }
@@ -670,9 +655,9 @@ class AgentPBXTUI(App[None]):
     }
 
     #tmux-message {
-        height: 4;
-        min-height: 4;
-        max-height: 8;
+        height: 8;
+        min-height: 8;
+        max-height: 15;
         border: tall $accent;
         background: $surface;
         scrollbar-size: 0 1;
@@ -880,9 +865,6 @@ class AgentPBXTUI(App[None]):
         self.tmux_refresh_seconds = (
             env_tmux_refresh_seconds_value() or DEFAULT_TMUX_REFRESH_SECONDS
         )
-        self.tmux_tail_lines = env_tmux_tail_lines_value()
-        if self.tmux_tail_lines is None:
-            self.tmux_tail_lines = DEFAULT_TMUX_TAIL_LINES
         export_dir_setting = str_setting(
             self.settings,
             "export_dir",
@@ -920,7 +902,6 @@ class AgentPBXTUI(App[None]):
         self.tmux_manual_override_agent_ids: set[str] = set()
         self.tmux_detached_agent_ids: set[str] = set()
         self.tmux_last_capture_by_pane: dict[str, str] = {}
-        self.tmux_last_tail_by_pane: dict[str, str] = {}
         self.tmux_last_status_by_agent: dict[str, str] = {}
         self.tmux_panes: list[tmux_support.TmuxPane] = []
         self.tmux_refreshing = False
@@ -955,7 +936,6 @@ class AgentPBXTUI(App[None]):
                         with Vertical(id="tmux-panel"):
                             yield Static("Tmux: -", id="tmux-status")
                             yield TextArea(id="tmux-stream", read_only=True)
-                            yield Static("", id="tmux-tail")
                             with Horizontal(id="tmux-actions"):
                                 yield Button("Auto", id="tmux-auto")
                                 yield Button("Select Pane", id="tmux-select")
@@ -1017,7 +997,6 @@ class AgentPBXTUI(App[None]):
         self.apply_theme_class()
         self.apply_layout_class()
         self.apply_tmux_class()
-        self.apply_tmux_tail_layout()
         agents = self.query_one("#agents", DataTable)
         agents.add_columns(
             "New",
@@ -1513,8 +1492,7 @@ class AgentPBXTUI(App[None]):
     async def load_tmux_capture(self, agent_id: str) -> None:
         status = self.query_one_or_none("#tmux-status", Static)
         stream = self.query_one_or_none("#tmux-stream", TextArea)
-        tail = self.query_one_or_none("#tmux-tail", Static)
-        if status is None or stream is None or tail is None:
+        if status is None or stream is None:
             return
         try:
             panes = await asyncio.to_thread(tmux_support.list_panes)
@@ -1525,7 +1503,6 @@ class AgentPBXTUI(App[None]):
                 cache_key=agent_id,
             )
             stream.text = f"Unable to list tmux panes: {exc}"
-            self.update_tmux_tail(tail, "", cache_key=agent_id)
             return
         self.tmux_panes = panes
         pane, mode = self.resolve_tmux_pane(agent_id, panes)
@@ -1540,7 +1517,6 @@ class AgentPBXTUI(App[None]):
                     "The saved tmux pane target no longer matches this agent.\n\n"
                     "Use Auto to rediscover the pane or Select Pane to choose one."
                 )
-                self.update_tmux_tail(tail, "", cache_key=agent_id)
             else:
                 self.update_tmux_status(
                     status,
@@ -1551,7 +1527,6 @@ class AgentPBXTUI(App[None]):
                     "No tmux pane is attached for this agent.\n\n"
                     "Use Auto to retry discovery or Select Pane to choose a pane."
                 )
-                self.update_tmux_tail(tail, "", cache_key=agent_id)
             return
         try:
             captured = await asyncio.to_thread(
@@ -1566,17 +1541,10 @@ class AgentPBXTUI(App[None]):
                 cache_key=agent_id,
             )
             stream.text = f"Unable to capture tmux pane {pane.pane_id}: {exc}"
-            self.update_tmux_tail(tail, "", cache_key=agent_id)
             return
-        body_text, tail_text = self.split_tmux_capture(captured or "(empty tmux pane)")
         self.update_tmux_stream(
             stream,
-            body_text,
-            cache_key=f"{agent_id}:{pane.pane_id}",
-        )
-        self.update_tmux_tail(
-            tail,
-            tail_text,
+            self.crop_tmux_capture_for_display(captured or "(empty tmux pane)"),
             cache_key=f"{agent_id}:{pane.pane_id}",
         )
         self.update_tmux_status(
@@ -1585,7 +1553,7 @@ class AgentPBXTUI(App[None]):
                 "Tmux: "
                 f"{pane.pane_id} {pane.target_label} {mode} "
                 f"{self.tmux_capture_mode_label()} "
-                f"tail {self.tmux_tail_lines} "
+                "cropped "
                 f"{pane.current_command} {pane.width}x{pane.height}"
             ),
             cache_key=agent_id,
@@ -1609,15 +1577,16 @@ class AgentPBXTUI(App[None]):
             return "visible"
         return f"scrollback {self.tmux_capture_lines}"
 
-    def split_tmux_capture(self, captured: str) -> tuple[str, str]:
-        if self.tmux_tail_lines <= 0:
-            return captured, ""
+    def crop_tmux_capture_for_display(self, captured: str) -> str:
         lines = captured.splitlines()
-        if len(lines) <= self.tmux_tail_lines:
-            return captured, ""
-        body = "\n".join(lines[: -self.tmux_tail_lines]).rstrip("\n")
-        tail = "\n".join(lines[-self.tmux_tail_lines :]).rstrip("\n")
-        return body or "(empty tmux pane)", tail
+        if not lines:
+            return captured
+        search_start = max(0, len(lines) - 12)
+        for index in range(len(lines) - 1, search_start - 1, -1):
+            if CODEX_STATUS_LINE_PATTERN.search(lines[index]):
+                body = "\n".join(lines[:index]).rstrip("\n")
+                return body or "(empty tmux pane)"
+        return captured
 
     def update_tmux_stream(
         self,
@@ -1641,16 +1610,6 @@ class AgentPBXTUI(App[None]):
         else:
             stream.scroll_y = scroll_y
             stream.scroll_target_y = scroll_target_y
-        return True
-
-    def update_tmux_tail(self, tail: Static, captured: str, *, cache_key: str) -> bool:
-        previous = self.tmux_last_tail_by_pane.get(cache_key)
-        self.tmux_last_tail_by_pane[cache_key] = captured
-        if previous == captured and str(tail.renderable) == captured:
-            return False
-        if str(tail.renderable) == captured:
-            return False
-        tail.update(captured)
         return True
 
     def resolve_tmux_pane(
@@ -2202,18 +2161,6 @@ class AgentPBXTUI(App[None]):
             return
         for screen in screens:
             screen.set_class(self.tmux_direct_enabled, "tmux-direct")
-
-    def apply_tmux_tail_layout(self) -> None:
-        tail = self.query_one_or_none("#tmux-tail", Static)
-        if tail is None:
-            return
-        if self.tmux_tail_lines <= 0:
-            tail.styles.height = 0
-            tail.styles.min_height = 0
-            return
-        height = min(8, max(3, self.tmux_tail_lines + 2))
-        tail.styles.height = height
-        tail.styles.min_height = min(height, 3)
 
     def show_compact_home(self) -> None:
         if not self.is_compact_layout():
