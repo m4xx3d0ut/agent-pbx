@@ -625,7 +625,6 @@ class AgentPBXTUI(App[None]):
         await self.refresh_agents()
         await self.refresh_events()
         self.set_interval(2.0, self.refresh_agents)
-        self.set_interval(15.0, self.refresh_workerbee_if_active)
         self.set_interval(0.8, self.toggle_unseen_attention)
         self.run_worker(self.stream_events(), name="events", exclusive=True)
 
@@ -896,10 +895,6 @@ class AgentPBXTUI(App[None]):
     async def refresh_selected_agent(self, agent_id: str) -> None:
         await self.load_latest_report(agent_id)
         await self.load_thread(agent_id)
-
-    async def refresh_workerbee_if_active(self) -> None:
-        if self.active_agent_tab == "workerbee-tab" and self.selected_agent_id:
-            await self.load_workerbee_status(self.selected_agent_id)
 
     def mark_latest_seen(self, agent_id: str) -> None:
         last_seen = self.agent_last_seen(agent_id)

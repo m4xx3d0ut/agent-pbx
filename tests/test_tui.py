@@ -1,3 +1,4 @@
+import inspect
 import json
 from pathlib import Path
 
@@ -341,6 +342,13 @@ def test_tui_formats_workerbee_status() -> None:
     assert "Name: demo-dev-123" in rendered
     assert "No deployment recorded yet." in rendered
     assert "Global Dashboard" in rendered
+
+
+def test_tui_workerbee_does_not_poll_while_active() -> None:
+    source = inspect.getsource(AgentPBXTUI.on_mount)
+
+    assert "refresh_workerbee_if_active" not in source
+    assert "load_workerbee_status" not in source
 
 
 def test_tui_extracts_event_agent_id() -> None:
