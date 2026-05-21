@@ -289,9 +289,15 @@ report and queue buttons. Agent PBX still records normal reports in `Thread`,
 but follow-up input is pasted directly into the selected tmux pane, so slash
 commands such as `/status` are sent unchanged. The TUI auto-matches panes by
 agent cwd/project/title and provides `Auto`, `Select Pane`, and `Detach`
-controls for manual correction. `AGENT_PBX_TUI_TMUX_CAPTURE_LINES=0` captures
-only the visible pane by default; set a positive value to include scrollback
-when you intentionally need older output.
+controls for manual correction. Press `Ctrl+T` from `Latest` to toggle tmux
+direct mode without opening settings. `AGENT_PBX_TUI_TMUX_CAPTURE_LINES=0`
+captures only the visible pane by default; set a positive value to include
+scrollback when you intentionally need older output. Set
+`AGENT_PBX_TUI_TMUX_REFRESH_SECONDS=1.5` to tune the snapshot refresh cadence;
+larger values reduce redraw pop at the cost of freshness. The tmux view renders
+the last few pane lines as a small live tail so Codex status/spinner churn does
+not force a full main-buffer redraw; tune it with
+`AGENT_PBX_TUI_TMUX_TAIL_LINES=3`.
 
 TUI checkbox, layout, and theme selections persist between sessions in
 `${XDG_CONFIG_HOME:-~/.config}/agent-pbx/tui-settings.json`. Set

@@ -37,6 +37,8 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_LAYOUT",
         "AGENT_PBX_TUI_TMUX",
         "AGENT_PBX_TUI_TMUX_CAPTURE_LINES",
+        "AGENT_PBX_TUI_TMUX_REFRESH_SECONDS",
+        "AGENT_PBX_TUI_TMUX_TAIL_LINES",
     ]:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(
@@ -50,6 +52,7 @@ def test_tui_constructs() -> None:
 
     assert app.TITLE == "Agent PBX"
     assert ("s", "settings", "Settings") in app.BINDINGS
+    assert ("ctrl+t", "toggle_tmux_direct", "Tmux") in app.BINDINGS
     assert app.server == "http://127.0.0.1:8765"
     assert app.token == "test"
     assert app.visual_flash_enabled is False
@@ -57,6 +60,8 @@ def test_tui_constructs() -> None:
     assert app.agent_blink_enabled is True
     assert app.tmux_direct_enabled is False
     assert app.tmux_capture_lines == 0
+    assert app.tmux_refresh_seconds == 1.5
+    assert app.tmux_tail_lines == 3
     assert app.tmux_agent_targets == {}
     assert app.ui_theme == "cyberpunk"
     assert app.layout_mode == "split"
@@ -131,6 +136,8 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_PBX_TUI_AGENT_BLINK", "1")
     monkeypatch.setenv("AGENT_PBX_TUI_TMUX", "1")
     monkeypatch.setenv("AGENT_PBX_TUI_TMUX_CAPTURE_LINES", "750")
+    monkeypatch.setenv("AGENT_PBX_TUI_TMUX_REFRESH_SECONDS", "2.75")
+    monkeypatch.setenv("AGENT_PBX_TUI_TMUX_TAIL_LINES", "4")
     monkeypatch.setenv("AGENT_PBX_TUI_THEME", "cyberpunk")
     monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "compact")
 
@@ -143,6 +150,8 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     assert app.agent_blink_enabled is True
     assert app.tmux_direct_enabled is True
     assert app.tmux_capture_lines == 750
+    assert app.tmux_refresh_seconds == 2.75
+    assert app.tmux_tail_lines == 4
     assert app.ui_theme == "cyberpunk"
     assert app.layout_mode == "compact"
 
@@ -347,6 +356,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
+        assert "#tmux-tail {\n        height: 5;" in app.CSS
         assert "Notification Options" not in app.CSS
         assert message.soft_wrap is True
         assert "scrollbar-size: 0 1;" in app.CSS
@@ -368,6 +378,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         hotkey_text = str(hotkeys.renderable)
         assert "Ctrl+J newline" in hotkey_text
         assert "Ctrl+W word" in hotkey_text
+        assert "Ctrl+T tmux" in hotkey_text
         assert "Ctrl+A/E" not in hotkey_text
         assert "Ctrl+U" not in hotkey_text
         assert "start/end" not in hotkey_text
@@ -495,8 +506,10 @@ async def test_tui_tmux_direct_replaces_latest_and_sends_exact_input(
         assert app.query_one("#detail", TextArea).region.height == 0
         assert app.query_one("#composer").region.height == 0
         assert app.query_one("#tmux-panel").region.height > 0
+        assert app.query_one("#tmux-tail").region.height >= 3
         assert "%76" in str(app.query_one("#tmux-status").renderable)
         assert app.query_one("#tmux-stream", TextArea).text == "%76 captured 25"
+        assert str(app.query_one("#tmux-tail").renderable) == ""
         assert threads == ["agent-1"]
 
         app.query_one("#tmux-message", TextArea).text = "/status"
@@ -511,12 +524,64 @@ async def test_tui_tmux_update_skips_unchanged_capture() -> None:
 
     async with app.run_test():
         stream = app.query_one("#tmux-stream", TextArea)
+        tail = app.query_one("#tmux-tail")
 
         first = app.update_tmux_stream(stream, "same", cache_key="agent:%1")
         second = app.update_tmux_stream(stream, "same", cache_key="agent:%1")
+        first_tail = app.update_tmux_tail(tail, "tail", cache_key="agent:%1")
+        second_tail = app.update_tmux_tail(tail, "tail", cache_key="agent:%1")
 
     assert first is True
     assert second is False
+    assert first_tail is True
+    assert second_tail is False
+
+
+def test_tui_tmux_split_capture_uses_live_tail() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    body, tail = app.split_tmux_capture("one\ntwo\nthree\nfour\nfive")
+    assert body == "one\ntwo"
+    assert tail == "three\nfour\nfive"
+
+    app.tmux_tail_lines = 0
+    body, tail = app.split_tmux_capture("one\ntwo")
+    assert body == "one\ntwo"
+    assert tail == ""
+
+
+async def test_tui_tmux_toggle_hotkey_only_from_latest() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    captures: list[str] = []
+    reports: list[str] = []
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        reports.append(agent_id)
+
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-1"
+        app.active_agent_tab = "thread-tab"
+        await app.action_toggle_tmux_direct()
+        assert app.tmux_direct_enabled is False
+
+        app.active_agent_tab = "latest-tab"
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert app.tmux_direct_enabled is True
+        assert app.screen.has_class("tmux-direct")
+
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert app.tmux_direct_enabled is False
+
+    assert captures == ["agent-1"]
+    assert reports == ["agent-1"]
 
 
 def test_tui_tmux_resolve_uses_manual_override_and_detach() -> None:
