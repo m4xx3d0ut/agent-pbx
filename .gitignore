@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 .env
+local.env
+local.env.*
+!local.env.example
 .venv/
 .direnv/
 .eggs/

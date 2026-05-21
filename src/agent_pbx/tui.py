@@ -40,6 +40,8 @@ ATTENTION_EVENT_TYPES = {"agent_registered", "report_created", "command_acked"}
 DEFAULT_TUI_THEME = "cyberpunk"
 DEFAULT_CUSTOM_THEME_NAME = "1337"
 THEME_1337_NAME = DEFAULT_CUSTOM_THEME_NAME
+DEFAULT_TUI_LAYOUT = "split"
+COMPACT_TUI_LAYOUT = "compact"
 DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
 DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
 FOLLOW_UP_MIN_HEIGHT = 8
@@ -201,6 +203,19 @@ def env_theme_value(custom_name: str | None = None) -> str | None:
     return None
 
 
+def resolve_layout(layout_name: str) -> str:
+    normalized = layout_name.strip().lower().replace("_", "-")
+    if normalized in {"compact", "mobile", "small", "single", "single-pane"}:
+        return COMPACT_TUI_LAYOUT
+    return DEFAULT_TUI_LAYOUT
+
+
+def env_layout_value() -> str | None:
+    if "AGENT_PBX_TUI_LAYOUT" not in os.environ:
+        return None
+    return resolve_layout(os.getenv("AGENT_PBX_TUI_LAYOUT", ""))
+
+
 def env_export_dir(default: Path = DEFAULT_EXPORT_DIR) -> Path:
     return env_export_dir_value() or default
 
@@ -324,6 +339,7 @@ class SettingsScreen(ModalScreen[None]):
         visual_flash_enabled: bool,
         terminal_bell_enabled: bool,
         agent_blink_enabled: bool,
+        compact_layout_enabled: bool,
         custom_theme_name: str,
         custom_theme_enabled: bool,
     ) -> None:
@@ -331,6 +347,7 @@ class SettingsScreen(ModalScreen[None]):
         self.visual_flash_enabled = visual_flash_enabled
         self.terminal_bell_enabled = terminal_bell_enabled
         self.agent_blink_enabled = agent_blink_enabled
+        self.compact_layout_enabled = compact_layout_enabled
         self.custom_theme_name = custom_theme_name
         self.custom_theme_enabled = custom_theme_enabled
 
@@ -352,6 +369,11 @@ class SettingsScreen(ModalScreen[None]):
                     "Unseen blink",
                     value=self.agent_blink_enabled,
                     id="agent-blink",
+                )
+                yield Checkbox(
+                    "Compact layout",
+                    value=self.compact_layout_enabled,
+                    id="compact-layout",
                 )
                 yield Checkbox(
                     f"{self.custom_theme_name} theme",
@@ -394,6 +416,22 @@ class AgentPBXTUI(App[None]):
     Screen.attention-flash #left,
     Screen.attention-flash #right {
         border: solid $warning;
+    }
+
+    Screen.compact-home #left {
+        width: 100%;
+    }
+
+    Screen.compact-home #right {
+        display: none;
+    }
+
+    Screen.compact-agent #left {
+        display: none;
+    }
+
+    Screen.compact-agent #right {
+        width: 100%;
     }
 
     Screen.custom-theme TextArea {
@@ -476,6 +514,17 @@ class AgentPBXTUI(App[None]):
 
     #agent-tabs {
         height: 1fr;
+    }
+
+    #agent-title {
+        display: none;
+        height: 1;
+        content-align: left middle;
+        text-style: bold;
+    }
+
+    Screen.compact-agent #agent-title {
+        display: block;
     }
 
     #detail {
@@ -576,6 +625,7 @@ class AgentPBXTUI(App[None]):
     BINDINGS = [
         ("r", "refresh", "Refresh"),
         ("s", "settings", "Settings"),
+        ("b", "back", "Back"),
         ("q", "quit", "Quit"),
     ]
 
@@ -648,6 +698,9 @@ class AgentPBXTUI(App[None]):
             theme_name or env_theme_value(custom_name=self.custom_theme_name) or theme_setting
         )
         self.theme = self.ui_theme
+        layout_setting = str_setting(self.settings, "layout", DEFAULT_TUI_LAYOUT)
+        self.layout_mode = resolve_layout(env_layout_value() or layout_setting)
+        self.compact_view = "home"
         self.agents: dict[str, dict[str, Any]] = {}
         self.selected_agent_id: str | None = None
         self.events: list[dict[str, Any]] = []
@@ -687,6 +740,7 @@ class AgentPBXTUI(App[None]):
                     show_row_labels=False,
                 )
             with Vertical(id="right"):
+                yield Static("Agent: -", id="agent-title")
                 with TabbedContent(initial="latest-tab", id="agent-tabs"):
                     with TabPane("Latest", id="latest-tab"):
                         yield TextArea(id="detail", read_only=True)
@@ -719,6 +773,7 @@ class AgentPBXTUI(App[None]):
 
     async def on_mount(self) -> None:
         self.apply_theme_class()
+        self.apply_layout_class()
         agents = self.query_one("#agents", DataTable)
         agents.add_columns(
             "New",
@@ -755,10 +810,15 @@ class AgentPBXTUI(App[None]):
                 visual_flash_enabled=self.visual_flash_enabled,
                 terminal_bell_enabled=self.terminal_bell_enabled,
                 agent_blink_enabled=self.agent_blink_enabled,
+                compact_layout_enabled=self.layout_mode == COMPACT_TUI_LAYOUT,
                 custom_theme_name=self.custom_theme_name,
                 custom_theme_enabled=self.ui_theme == self.custom_theme_name,
             )
         )
+
+    def action_back(self) -> None:
+        if self.is_compact_layout() and self.compact_view == "agent":
+            self.show_compact_home()
 
     def query_one_or_none(
         self, selector: str, widget_type: type[WidgetType]
@@ -823,6 +883,8 @@ class AgentPBXTUI(App[None]):
             return None
 
     def is_latest_engaged(self, agent_id: str) -> bool:
+        if self.is_compact_layout() and self.compact_view != "agent":
+            return False
         return agent_id == self.selected_agent_id and self.active_agent_tab == "latest-tab"
 
     def render_agents(self) -> None:
@@ -875,6 +937,9 @@ class AgentPBXTUI(App[None]):
         return str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
 
     def focus_agent_row(self, agent_id: str) -> None:
+        self.move_agent_cursor(agent_id, focus=True)
+
+    def move_agent_cursor(self, agent_id: str, *, focus: bool) -> None:
         if agent_id not in self.agents:
             return
         table = self.query_one_or_none("#agents", DataTable)
@@ -885,7 +950,8 @@ class AgentPBXTUI(App[None]):
             animate=False,
             scroll=True,
         )
-        table.focus()
+        if focus:
+            table.focus()
 
     def format_pbx_active(self, agent: dict[str, Any]) -> str:
         return "on" if bool(agent.get("pbx_active", True)) else "off"
@@ -976,7 +1042,7 @@ class AgentPBXTUI(App[None]):
                 attention.remove_class("unseen-active")
                 if not attention.has_class("attention-active"):
                     self.attention_agent_id = None
-            self.screen.remove_class("attention-flash")
+            self.set_attention_flash_class(False)
             return
         unseen_agent_ids = sorted(self.unseen_latest_agent_ids)
         self.attention_agent_id = unseen_agent_ids[0]
@@ -987,7 +1053,13 @@ class AgentPBXTUI(App[None]):
         marker = "!!!" if self.attention_blink_phase else "NEW"
         attention.update(f"{marker} unseen latest report: {agents}")
         attention.add_class("unseen-active")
-        self.screen.set_class(self.attention_blink_phase, "attention-flash")
+        self.set_attention_flash_class(self.attention_blink_phase)
+
+    def set_attention_flash_class(self, enabled: bool) -> None:
+        try:
+            self.screen.set_class(enabled, "attention-flash")
+        except ScreenStackError:
+            return
 
     def attention_target_agent_id(self) -> str | None:
         if self.attention_agent_id in self.agents:
@@ -1008,8 +1080,17 @@ class AgentPBXTUI(App[None]):
     async def open_agent_latest(self, agent_id: str) -> bool:
         if agent_id not in self.agents:
             return False
+        self.activate_latest_tab()
+        if self.is_compact_layout():
+            self.move_agent_cursor(agent_id, focus=False)
         await self.select_agent(agent_id)
-        self.focus_agent_row(agent_id)
+        self.activate_latest_tab()
+        if self.is_compact_layout():
+            detail = self.query_one_or_none("#detail", TextArea)
+            if detail is not None:
+                detail.focus()
+        else:
+            self.focus_agent_row(agent_id)
         return True
 
     async def refresh_events(self) -> None:
@@ -1043,7 +1124,8 @@ class AgentPBXTUI(App[None]):
             self.select_thread_item(str(event.cell_key.row_key.value))
 
     def on_key(self, event: Key) -> None:
-        if event.key == "space" and self.focused is self.query_one("#thread", DataTable):
+        thread = self.query_one_or_none("#thread", DataTable)
+        if event.key == "space" and thread is not None and self.focused is thread:
             event.stop()
             self.toggle_current_thread_mark()
 
@@ -1075,9 +1157,15 @@ class AgentPBXTUI(App[None]):
     async def select_agent(self, agent_id: str) -> None:
         if agent_id != self.selected_agent_id:
             self.selected_thread_item_id = None
+        was_compact_home = self.is_compact_layout() and self.compact_view == "home"
         self.selected_agent_id = agent_id
         self.query_one("#agent-id", Input).value = self.selected_agent_id
-        if self.active_agent_tab in {"latest-tab", "thread-tab"}:
+        agent_title = self.query_one_or_none("#agent-title", Static)
+        if agent_title is not None:
+            agent_title.update(f"Agent: {agent_id}")
+        if self.is_compact_layout():
+            self.show_compact_agent()
+        if was_compact_home or self.active_agent_tab in {"latest-tab", "thread-tab"}:
             self.activate_latest_tab()
         await self.refresh_selected_agent(self.selected_agent_id)
         if self.active_agent_tab == "latest-tab":
@@ -1492,6 +1580,8 @@ class AgentPBXTUI(App[None]):
                 self.render_unseen_attention()
             self.render_agents()
             self.save_settings()
+        elif event.checkbox.id == "compact-layout":
+            self.set_layout_mode(COMPACT_TUI_LAYOUT if event.value else DEFAULT_TUI_LAYOUT)
         elif event.checkbox.id == "theme-1337":
             self.set_ui_theme(self.custom_theme_name if event.value else DEFAULT_TUI_THEME)
 
@@ -1510,6 +1600,41 @@ class AgentPBXTUI(App[None]):
         for screen in screens:
             screen.set_class(use_custom_theme, "custom-theme")
 
+    def is_compact_layout(self) -> bool:
+        return self.layout_mode == COMPACT_TUI_LAYOUT
+
+    def set_layout_mode(self, layout_name: str) -> None:
+        self.layout_mode = resolve_layout(layout_name)
+        self.compact_view = "home"
+        self.apply_layout_class()
+        self.save_settings()
+
+    def apply_layout_class(self) -> None:
+        is_compact = self.is_compact_layout()
+        compact_home = is_compact and self.compact_view == "home"
+        compact_agent = is_compact and self.compact_view == "agent"
+        try:
+            screens = list(self.screen_stack)
+        except ScreenStackError:
+            return
+        for screen in screens:
+            screen.set_class(compact_home, "compact-home")
+            screen.set_class(compact_agent, "compact-agent")
+
+    def show_compact_home(self) -> None:
+        if not self.is_compact_layout():
+            return
+        self.compact_view = "home"
+        self.apply_layout_class()
+        if self.selected_agent_id:
+            self.move_agent_cursor(self.selected_agent_id, focus=True)
+
+    def show_compact_agent(self) -> None:
+        if not self.is_compact_layout():
+            return
+        self.compact_view = "agent"
+        self.apply_layout_class()
+
     def resolve_theme(self, theme_name: str) -> str:
         if is_custom_theme_selector(theme_name, self.custom_theme_name):
             return self.custom_theme_name
@@ -1521,6 +1646,7 @@ class AgentPBXTUI(App[None]):
             "terminal_bell": self.terminal_bell_enabled,
             "agent_blink": self.agent_blink_enabled,
             "theme": self.ui_theme,
+            "layout": self.layout_mode,
             "export_dir": str(self.export_dir),
             "latest_viewed_at_by_agent": self.latest_viewed_at_by_agent,
             "last_seen_event_id": self.last_seen_event_id,
@@ -1859,16 +1985,21 @@ class AgentPBXTUI(App[None]):
         message = f"New {event_type}"
         if subject:
             message = f"{message}: {subject}"
-        attention = self.query_one("#attention", Static)
+        attention = self.query_one_or_none("#attention", Static)
+        if attention is None:
+            return
         attention.update(message)
         attention.add_class("attention-active")
-        self.screen.add_class("attention-flash")
+        self.set_attention_flash_class(True)
         self.set_timer(3.0, lambda: self.clear_flash(generation))
 
     def clear_flash(self, generation: int) -> None:
         if generation != self.flash_generation:
             return
-        attention = self.query_one("#attention", Static)
+        attention = self.query_one_or_none("#attention", Static)
+        if attention is None:
+            self.set_attention_flash_class(False)
+            return
         if not self.unseen_latest_agent_ids:
             attention.update("")
             attention.remove_class("attention-active")
@@ -1876,7 +2007,7 @@ class AgentPBXTUI(App[None]):
         else:
             attention.remove_class("attention-active")
             self.render_unseen_attention()
-        self.screen.remove_class("attention-flash")
+        self.set_attention_flash_class(False)
 
 
 def run_tui(*, server: str, token: str | None = None) -> None:

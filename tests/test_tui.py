@@ -10,6 +10,7 @@ from agent_pbx.tui import (
     env_custom_palette,
     env_flag,
     env_theme,
+    resolve_layout,
 )
 from textual.events import Click, Key
 from textual.widgets import Button, Checkbox, DataTable, Input, TextArea
@@ -30,6 +31,7 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_CUSTOM_FOREGROUND",
         "AGENT_PBX_TUI_CUSTOM_BACKGROUND",
         "AGENT_PBX_TUI_EXPORT_DIR",
+        "AGENT_PBX_TUI_LAYOUT",
     ]:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(
@@ -49,6 +51,9 @@ def test_tui_constructs() -> None:
     assert app.terminal_bell_enabled is False
     assert app.agent_blink_enabled is True
     assert app.ui_theme == "cyberpunk"
+    assert app.layout_mode == "split"
+    assert app.compact_view == "home"
+    assert ("b", "back", "Back") in app.BINDINGS
 
 
 def test_tui_reads_notification_env(monkeypatch) -> None:
@@ -70,6 +75,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "terminal_bell": True,
                 "agent_blink": False,
                 "theme": "1337",
+                "layout": "compact",
                 "export_dir": str(tmp_path / "exports"),
                 "latest_viewed_at_by_agent": {"agent-1": 123.0},
                 "last_seen_event_id": 42,
@@ -87,6 +93,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.terminal_bell_enabled is True
     assert app.agent_blink_enabled is False
     assert app.ui_theme == "1337"
+    assert app.layout_mode == "compact"
     assert app.export_dir == tmp_path / "exports"
     assert app.latest_viewed_at_by_agent == {"agent-1": 123.0}
     assert app.last_seen_event_id == 42
@@ -95,12 +102,20 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
 def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     settings_file = tmp_path / "settings.json"
     settings_file.write_text(
-        json.dumps({"visual_flash": True, "agent_blink": False, "theme": "1337"}),
+        json.dumps(
+            {
+                "visual_flash": True,
+                "agent_blink": False,
+                "theme": "1337",
+                "layout": "split",
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("AGENT_PBX_TUI_FLASH", "0")
     monkeypatch.setenv("AGENT_PBX_TUI_AGENT_BLINK", "1")
     monkeypatch.setenv("AGENT_PBX_TUI_THEME", "cyberpunk")
+    monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "compact")
 
     app = AgentPBXTUI(
         server="http://127.0.0.1:8765",
@@ -110,6 +125,7 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     assert app.visual_flash_enabled is False
     assert app.agent_blink_enabled is True
     assert app.ui_theme == "cyberpunk"
+    assert app.layout_mode == "compact"
 
 
 def test_tui_saves_settings(tmp_path: Path) -> None:
@@ -122,6 +138,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     app.visual_flash_enabled = True
     app.terminal_bell_enabled = True
     app.agent_blink_enabled = False
+    app.layout_mode = "compact"
     app.latest_viewed_at_by_agent = {"agent-1": 123.0}
     app.last_seen_event_id = 42
     app.set_ui_theme("1337")
@@ -131,6 +148,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["terminal_bell"] is True
     assert saved["agent_blink"] is False
     assert saved["theme"] == "1337"
+    assert saved["layout"] == "compact"
     assert saved["latest_viewed_at_by_agent"] == {"agent-1": 123.0}
     assert saved["last_seen_event_id"] == 42
 
@@ -142,6 +160,16 @@ def test_tui_reads_theme_env(monkeypatch) -> None:
 
     assert app.ui_theme == "1337"
     assert app.theme == "1337"
+
+
+def test_tui_reads_layout_env_aliases(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "mobile")
+
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert app.layout_mode == "compact"
+    assert resolve_layout("single-pane") == "compact"
+    assert resolve_layout("split") == "split"
 
 
 def test_tui_maps_legacy_github_theme_to_default(monkeypatch) -> None:
@@ -219,6 +247,23 @@ def test_tui_alerts_only_for_attention_events() -> None:
     assert app.should_alert({"type": "command_delivered"}) is False
 
 
+def test_tui_flash_timer_tolerates_unmounted_attention() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.flash_generation = 1
+
+    app.flash_for_event({"type": "report_created", "subject_id": "report-1"})
+    app.clear_flash(1)
+
+
+def test_tui_space_key_tolerates_unmounted_thread() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    event = Key("space", " ")
+
+    app.on_key(event)
+
+    assert event._stop_propagation is False
+
+
 def test_tui_background_render_skips_before_widgets_mount() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     app.agents = {"agent-1": {"agent_id": "agent-1"}}
@@ -282,12 +327,14 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         visual = app.screen.query_one("#visual-flash", Checkbox)
         bell = app.screen.query_one("#terminal-bell", Checkbox)
         agent_blink = app.screen.query_one("#agent-blink", Checkbox)
+        compact_layout = app.screen.query_one("#compact-layout", Checkbox)
         theme = app.screen.query_one("#theme-1337", Checkbox)
         close = app.screen.query_one("#settings-close", Button)
 
         assert visual.value is True
         assert bell.value is False
         assert agent_blink.value is True
+        assert compact_layout.value is False
         assert theme.value is False
         assert close.label.plain == "Close"
 
@@ -318,6 +365,119 @@ async def test_tui_select_agent_updates_composer_and_loads_report() -> None:
         assert app.active_agent_tab == "latest-tab"
         assert loaded == ["agent-1"]
         assert threads == ["agent-1"]
+
+
+async def test_tui_compact_layout_opens_agent_view_and_back(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "compact")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    loaded: list[str] = []
+    threads: list[str] = []
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(60, 24)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "running",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.render_agents()
+
+        assert app.screen.has_class("compact-home")
+        assert app.query_one("#left").region.width >= 58
+
+        tabs = app.query_one("#agent-tabs")
+        tabs.active = "workerbee-tab"
+        app.active_agent_tab = "workerbee-tab"
+        await app.select_agent("agent-1")
+        await pilot.pause()
+
+        assert app.compact_view == "agent"
+        assert app.screen.has_class("compact-agent")
+        assert tabs.active == "latest-tab"
+        assert app.active_agent_tab == "latest-tab"
+        assert str(app.query_one("#agent-title").renderable) == "Agent: agent-1"
+        assert app.query_one("#right").region.width >= 58
+        assert app.query_one("#ping-agent", Button).region.right <= app.query_one(
+            "#composer"
+        ).region.right
+
+        app.action_back()
+        await pilot.pause()
+
+        assert app.compact_view == "home"
+        assert app.screen.has_class("compact-home")
+
+    assert loaded == ["agent-1"]
+    assert threads == ["agent-1"]
+
+
+async def test_tui_compact_alert_opens_agent_latest(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "compact")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    loaded: list[str] = []
+    threads: list[str] = []
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "running",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 124.0,
+            },
+        }
+        app.render_agents()
+        app.unseen_latest_agent_ids.add("agent-2")
+        app.render_unseen_attention()
+        click = Click(
+            app.query_one("#attention"),
+            0,
+            0,
+            0,
+            0,
+            1,
+            False,
+            False,
+            False,
+        )
+
+        await app.on_click(click)
+
+    assert app.selected_agent_id == "agent-2"
+    assert app.compact_view == "agent"
+    assert app.active_agent_tab == "latest-tab"
+    assert app.unseen_latest_agent_ids == set()
+    assert loaded == ["agent-2"]
+    assert threads == ["agent-2"]
+    assert click._stop_propagation is True
 
 
 async def test_tui_workerbee_tab_keeps_agent_selection_and_loads_status() -> None:
@@ -409,6 +569,20 @@ def test_tui_theme_toggle_updates_app_theme() -> None:
     app.set_ui_theme("cyberpunk")
     assert app.ui_theme == "cyberpunk"
     assert app.theme == "cyberpunk"
+
+
+def test_tui_layout_toggle_persists(tmp_path: Path) -> None:
+    settings_file = tmp_path / "settings.json"
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        settings_file=settings_file,
+    )
+
+    app.set_layout_mode("compact")
+
+    saved = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert app.layout_mode == "compact"
+    assert saved["layout"] == "compact"
 
 
 def test_tui_custom_theme_css_has_readable_text_area_highlights() -> None:

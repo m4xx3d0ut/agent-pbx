@@ -76,6 +76,34 @@ agent-pbx mcp serve --host 127.0.0.1 --port 8765
 
 The server defaults to localhost. LAN binding requires bearer-token authentication and explicit operator intent.
 
+## Local Environment
+
+Use `local.env.example` as the template for machine-specific MCP and client
+defaults:
+
+```bash
+cp local.env.example local.env
+$EDITOR local.env
+source ./local.env
+```
+
+`local.env` is gitignored because it may contain local tokens and absolute
+paths. After sourcing it, the CLI reads `AGENT_PBX_HOST`, `AGENT_PBX_PORT`,
+`AGENT_PBX_TOKEN`, `AGENT_PBX_SERVER_URL`, `AGENT_PBX_DEBUG`, and
+`AGENT_PBX_WORKERBEE_BIN` as defaults. Explicit host, port, server, and token
+flags still take precedence.
+
+For the common local workflow:
+
+```bash
+source .venv/bin/activate
+source ./local.env
+agent-pbx mcp restart
+agent-pbx mcp status
+codex mcp add agent-pbx --url "$AGENT_PBX_MCP_URL"
+agent-pbx tui
+```
+
 ## Background MCP Daemon
 
 Start the shared local MCP daemon in the background:
@@ -247,7 +275,13 @@ acknowledgements. The Agents table also highlights unseen latest reports with
 the blinking alert to jump directly to the first unseen agent's `Latest` tab.
 Disable that with `AGENT_PBX_TUI_AGENT_BLINK=0` or the `Unseen blink` setting.
 
-TUI checkbox and theme selections persist between sessions in
+For narrow terminals, enable the compact layout with
+`AGENT_PBX_TUI_LAYOUT=compact` or the `Compact layout` setting. Compact mode
+uses the Agents and Events pane as the home screen; selecting an agent opens a
+full-width agent view with `Latest`, `Thread`, and `WorkerBee` tabs. Press `b`
+to return to the agent list.
+
+TUI checkbox, layout, and theme selections persist between sessions in
 `${XDG_CONFIG_HOME:-~/.config}/agent-pbx/tui-settings.json`. Set
 `AGENT_PBX_TUI_SETTINGS_FILE=/path/to/tui-settings.json` to use a different
 settings file. Explicit environment variables still override saved settings for

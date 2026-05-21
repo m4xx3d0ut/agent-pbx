@@ -41,6 +41,33 @@ def env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in TRUE_ENV_VALUES
 
 
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "").strip())
+    except ValueError:
+        return default
+
+
+def env_text(name: str, default: str) -> str:
+    value = os.getenv(name, "").strip()
+    return value or default
+
+
+def default_host() -> str:
+    return env_text("AGENT_PBX_HOST", "127.0.0.1")
+
+
+def default_port() -> int:
+    return env_int("AGENT_PBX_PORT", 8765)
+
+
+def default_client_server() -> str:
+    explicit = os.getenv("AGENT_PBX_SERVER_URL") or os.getenv("AGENT_PBX_SERVER")
+    if explicit and explicit.strip():
+        return explicit.strip().rstrip("/")
+    return f"http://{default_host()}:{default_port()}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-pbx")
     parser.add_argument(
@@ -49,8 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     def add_server_flags(command: argparse.ArgumentParser) -> None:
-        command.add_argument("--host", default="127.0.0.1")
-        command.add_argument("--port", type=int, default=8765)
+        command.add_argument("--host", default=default_host())
+        command.add_argument("--port", type=int, default=default_port())
         command.add_argument("--state-root", type=Path, default=None)
         command.add_argument("--db", type=Path, default=None)
         command.add_argument("--token", default=None)
@@ -105,8 +132,8 @@ def build_parser() -> argparse.ArgumentParser:
     stop_mcp = mcp_subcommands.add_parser(
         "stop", help="Stop the background Agent PBX MCP daemon."
     )
-    stop_mcp.add_argument("--host", default="127.0.0.1")
-    stop_mcp.add_argument("--port", type=int, default=8765)
+    stop_mcp.add_argument("--host", default=default_host())
+    stop_mcp.add_argument("--port", type=int, default=default_port())
     stop_mcp.add_argument("--state-root", type=Path, default=None)
     stop_mcp.add_argument("--db", type=Path, default=None)
     stop_mcp.add_argument("--timeout", type=float, default=10.0)
@@ -118,8 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
     status_mcp = mcp_subcommands.add_parser(
         "status", help="Show background Agent PBX MCP status."
     )
-    status_mcp.add_argument("--host", default="127.0.0.1")
-    status_mcp.add_argument("--port", type=int, default=8765)
+    status_mcp.add_argument("--host", default=default_host())
+    status_mcp.add_argument("--port", type=int, default=default_port())
     status_mcp.add_argument("--state-root", type=Path, default=None)
     status_mcp.add_argument("--db", type=Path, default=None)
     serve_mcp = mcp_subcommands.add_parser(
@@ -128,12 +155,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_server_flags(serve_mcp)
 
     tui = subcommands.add_parser("tui", help="Run the Agent PBX TUI.")
-    tui.add_argument("--server", default="http://127.0.0.1:8765")
-    tui.add_argument("--token", default=None)
+    tui.add_argument("--server", default=default_client_server())
+    tui.add_argument("--token", default=os.getenv("AGENT_PBX_TOKEN"))
 
     sim_agent = subcommands.add_parser("sim-agent", help="Run a simulated reporting agent.")
-    sim_agent.add_argument("--server", default="http://127.0.0.1:8765")
-    sim_agent.add_argument("--token", default=None)
+    sim_agent.add_argument("--server", default=default_client_server())
+    sim_agent.add_argument("--token", default=os.getenv("AGENT_PBX_TOKEN"))
     sim_agent.add_argument("--agent-id", default="sim-agent-1")
     sim_agent.add_argument("--project", default="agent-pbx")
     sim_agent.add_argument("--once", action="store_true")
@@ -143,8 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
     sim_client = subcommands.add_parser(
         "sim-client", help="Run a simulated TUI client workflow."
     )
-    sim_client.add_argument("--server", default="http://127.0.0.1:8765")
-    sim_client.add_argument("--token", default=None)
+    sim_client.add_argument("--server", default=default_client_server())
+    sim_client.add_argument("--token", default=os.getenv("AGENT_PBX_TOKEN"))
     sim_client.add_argument("--agent-id", default=None)
     sim_client.add_argument("--message", default=None)
     sim_client.add_argument("--transcript", type=Path, default=None)
@@ -269,7 +296,7 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         db_path=getattr(args, "db", None),
         token=getattr(args, "token", None) or os.getenv("AGENT_PBX_TOKEN"),
         allow_insecure_lan=bool(getattr(args, "allow_insecure_lan", False)),
-        debug=bool(getattr(args, "debug", False)),
+        debug=bool(getattr(args, "debug", False)) or env_flag("AGENT_PBX_DEBUG"),
         debug_smoke=bool(getattr(args, "debug_smoke", False))
         or env_flag("AGENT_PBX_DEBUG_SMOKE"),
         log_level=getattr(args, "log_level", None),

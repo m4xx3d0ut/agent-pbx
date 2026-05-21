@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agent_pbx.cli import build_parser, main
+from agent_pbx.cli import _daemon_config, build_parser, main
 from agent_pbx.mcp_daemon import (
     MCPDaemonConfig,
     config_from_args,
@@ -217,6 +217,29 @@ def test_mcp_cli_parser_accepts_lifecycle_commands() -> None:
     assert status.mcp_command == "status"
     assert serve.mcp_command == "serve"
     assert serve.debug_smoke is True
+
+
+def test_mcp_cli_parser_uses_local_env_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_HOST", "127.0.0.2")
+    monkeypatch.setenv("AGENT_PBX_PORT", "9876")
+    monkeypatch.setenv("AGENT_PBX_TOKEN", "secret")
+    monkeypatch.setenv("AGENT_PBX_SERVER_URL", "http://127.0.0.2:9876")
+    monkeypatch.setenv("AGENT_PBX_DEBUG", "1")
+
+    parser = build_parser()
+    restart = parser.parse_args(["mcp", "restart"])
+    tui = parser.parse_args(["tui"])
+    sim_agent = parser.parse_args(["sim-agent"])
+    override = parser.parse_args(["tui", "--server", "http://localhost:9999"])
+
+    assert restart.host == "127.0.0.2"
+    assert restart.port == 9876
+    assert _daemon_config(restart).debug is True
+    assert tui.server == "http://127.0.0.2:9876"
+    assert tui.token == "secret"
+    assert sim_agent.server == "http://127.0.0.2:9876"
+    assert sim_agent.token == "secret"
+    assert override.server == "http://localhost:9999"
 
 
 def test_foreground_mcp_serve_refuses_lan_without_token(
