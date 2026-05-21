@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 from typing import Any, Mapping, Sequence
 
 
@@ -23,6 +24,7 @@ TMUX_PANE_FORMAT = "\t".join(
         "#{history_size}",
     ]
 )
+DEFAULT_SUBMIT_DELAY_SECONDS = 0.08
 
 
 @dataclass(frozen=True)
@@ -108,7 +110,13 @@ def capture_pane(target: str, *, lines: int = 0, tmux_bin: str = "tmux") -> str:
     return result.stdout.rstrip("\n")
 
 
-def send_text(target: str, text: str, *, tmux_bin: str = "tmux") -> None:
+def send_text(
+    target: str,
+    text: str,
+    *,
+    tmux_bin: str = "tmux",
+    submit_delay_seconds: float = DEFAULT_SUBMIT_DELAY_SECONDS,
+) -> None:
     buffer_name = f"agent-pbx-{os.getpid()}"
     path: str | None = None
     try:
@@ -130,8 +138,10 @@ def send_text(target: str, text: str, *, tmux_bin: str = "tmux") -> None:
             check=True,
             text=True,
         )
+        if submit_delay_seconds > 0:
+            time.sleep(submit_delay_seconds)
         subprocess.run(
-            [tmux_bin, "send-keys", "-t", target, "Enter"],
+            [tmux_bin, "send-keys", "-t", target, "C-m"],
             check=True,
             text=True,
         )

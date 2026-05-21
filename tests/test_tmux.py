@@ -117,6 +117,7 @@ def test_tmux_capture_zero_lines_uses_visible_pane(monkeypatch) -> None:
 def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:
     calls: list[list[str]] = []
     loaded_text: list[str] = []
+    sleeps: list[float] = []
 
     def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -125,6 +126,7 @@ def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+    monkeypatch.setattr(tmux.time, "sleep", lambda seconds: sleeps.append(seconds))
 
     tmux.send_text("%1", "/status")
 
@@ -132,4 +134,5 @@ def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:
     assert calls[0][0:3] == ["tmux", "load-buffer", "-b"]
     assert calls[1][0:4] == ["tmux", "paste-buffer", "-d", "-b"]
     assert calls[1][-2:] == ["-t", "%1"]
-    assert calls[2] == ["tmux", "send-keys", "-t", "%1", "Enter"]
+    assert calls[2] == ["tmux", "send-keys", "-t", "%1", "C-m"]
+    assert sleeps == [tmux.DEFAULT_SUBMIT_DELAY_SECONDS]
