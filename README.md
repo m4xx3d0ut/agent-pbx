@@ -16,7 +16,7 @@ the right agent.
 When release artifacts are published, install the latest wheelhouse with:
 
 ```bash
-curl -fsSL https://github.com/the-cm-collective/agent-pbx/releases/latest/download/install-agent-pbx.sh | sh
+curl -fsSL https://github.com/m4xx3d0ut/agent-pbx/releases/latest/download/install-agent-pbx.sh | sh
 agent-pbx --version
 ```
 

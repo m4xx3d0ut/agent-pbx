@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-DEFAULT_BASE_URL="https://github.com/the-cm-collective/agent-pbx/releases/latest/download"
+DEFAULT_BASE_URL="https://github.com/m4xx3d0ut/agent-pbx/releases/latest/download"
 BASE_URL="${AGENT_PBX_INSTALL_BASE_URL:-$DEFAULT_BASE_URL}"
 ARCHIVE_NAME="${AGENT_PBX_WHEELHOUSE_ARCHIVE:-agent-pbx-wheelhouse.tar.gz}"
 FORCE_STANDALONE="${AGENT_PBX_FORCE_STANDALONE:-0}"
