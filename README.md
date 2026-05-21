@@ -326,7 +326,9 @@ to Markdown under `artifacts/thread-exports/`. Set
 
 In the follow-up composer, `Enter` sends the input. The message field defaults
 to 8 rows. Use `Shift+Enter` to add new lines for longer Markdown or code
-snippets; the input expands up to 15 rows and scrolls when needed.
+snippets when your terminal reports that key distinctly. Use `Ctrl+J` or
+`Alt+Enter` as terminal-safe newline fallbacks. Long lines soft-wrap, and the
+input expands up to 15 rows with vertical scrolling when needed.
 
 The thread is also available through the API:
 

@@ -46,7 +46,14 @@ DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
 DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
 FOLLOW_UP_MIN_HEIGHT = 8
 FOLLOW_UP_MAX_HEIGHT = 15
-SHIFT_ENTER_KEYS = {"shift+enter", "shift_enter", "shift+return"}
+FOLLOW_UP_NEWLINE_KEYS = {
+    "shift+enter",
+    "shift+return",
+    "alt+enter",
+    "ctrl+enter",
+    "ctrl+j",
+    "newline",
+}
 STALE_POLL_SECONDS = 120
 QUEUED_COMMAND_WARN_SECONDS = 60
 ACTIVE_POLL_SECONDS = 60
@@ -311,10 +318,11 @@ def format_count(value: int) -> str:
 
 class FollowUpTextArea(TextArea):
     async def _on_key(self, event: Key) -> None:
-        if event.key in SHIFT_ENTER_KEYS:
+        if is_follow_up_newline_key(event):
             event.stop()
             event.prevent_default()
-            self.insert("\n")
+            start, end = self.selection
+            self._replace_via_keyboard("\n", start, end)
             return
         if event.key == "enter":
             event.stop()
@@ -328,6 +336,21 @@ class FollowUpTextArea(TextArea):
                 )
             return
         await super()._on_key(event)
+
+
+def normalized_key_names(event: Key) -> set[str]:
+    values = {event.key, getattr(event, "name", "")}
+    values.update(getattr(event, "aliases", []) or [])
+    return {value.strip().lower().replace("_", "+") for value in values if value}
+
+
+def is_follow_up_newline_key(event: Key) -> bool:
+    names = normalized_key_names(event)
+    return bool(names & FOLLOW_UP_NEWLINE_KEYS) or any(
+        ("shift" in name.split("+") or "alt" in name.split("+"))
+        and ("enter" in name.split("+") or "return" in name.split("+"))
+        for name in names
+    )
 
 
 class SettingsScreen(ModalScreen[None]):
@@ -595,7 +618,7 @@ class AgentPBXTUI(App[None]):
         max-height: 15;
         border: tall $accent;
         background: $surface;
-        scrollbar-size: 1 1;
+        scrollbar-size: 0 1;
         scrollbar-color: $accent;
         scrollbar-color-hover: $warning;
         scrollbar-background: $surface;
@@ -764,7 +787,7 @@ class AgentPBXTUI(App[None]):
                 with Vertical(id="composer"):
                     with Horizontal(id="composer-inputs"):
                         yield Input(placeholder="Agent id", id="agent-id")
-                        yield FollowUpTextArea(id="message", soft_wrap=False)
+                        yield FollowUpTextArea(id="message", soft_wrap=True)
                     with Horizontal(id="composer-buttons"):
                         yield Button("Send Input", id="send", variant="primary")
                         yield Button("Request Detail", id="request-detail")

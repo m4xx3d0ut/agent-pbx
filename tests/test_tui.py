@@ -10,6 +10,7 @@ from agent_pbx.tui import (
     env_custom_palette,
     env_flag,
     env_theme,
+    is_follow_up_newline_key,
     resolve_layout,
 )
 from textual.events import Click, Key
@@ -313,7 +314,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
         assert "Notification Options" not in app.CSS
-        assert message.soft_wrap is False
+        assert message.soft_wrap is True
+        assert "scrollbar-size: 0 1;" in app.CSS
         assert agent_id.region.height >= 8
         assert message.region.height >= 8
         assert composer.region.height >= 13
@@ -1437,9 +1439,20 @@ async def test_tui_follow_up_shift_enter_inserts_newline_and_resizes() -> None:
         message = app.query_one("#message", TextArea)
         message.text = "line 1"
         message.move_cursor((0, len("line 1")))
-        await message._on_key(Key("shift+enter", None))
+        await message._on_key(Key("shift_enter", None))
+        await message._on_key(Key("ctrl+j", None))
+        newline_text = message.text
         message.text = "\n".join(f"line {index}" for index in range(20))
         app.resize_message_input()
 
-    assert "line 1\n" in message.text
+    assert "line 1\n\n" in newline_text
     assert message.styles.height.value == 15
+
+
+def test_tui_follow_up_newline_key_detection_accepts_terminal_variants() -> None:
+    assert is_follow_up_newline_key(Key("shift+enter", None)) is True
+    assert is_follow_up_newline_key(Key("shift_enter", None)) is True
+    assert is_follow_up_newline_key(Key("shift+return", None)) is True
+    assert is_follow_up_newline_key(Key("alt+enter", None)) is True
+    assert is_follow_up_newline_key(Key("ctrl+j", None)) is True
+    assert is_follow_up_newline_key(Key("enter", None)) is False
