@@ -281,6 +281,17 @@ uses the Agents and Events pane as the home screen; selecting an agent opens a
 full-width agent view with `Latest`, `Thread`, and `WorkerBee` tabs. Press `b`
 to return to the agent list.
 
+Experimental local-only tmux direct mode is available for workflows where the
+TUI, MCP server, tmux, and Codex pane all run on the same host. Enable it with
+`AGENT_PBX_TUI_TMUX=1` or the `Tmux direct` setting. When enabled, the selected
+agent's `Latest` tab shows a captured tmux pane instead of the PBX latest
+report and queue buttons. Agent PBX still records normal reports in `Thread`,
+but follow-up input is pasted directly into the selected tmux pane, so slash
+commands such as `/status` are sent unchanged. The TUI auto-matches panes by
+agent cwd/project/title and provides `Auto`, `Select Pane`, and `Detach`
+controls for manual correction. Set `AGENT_PBX_TUI_TMUX_CAPTURE_LINES=500` to
+adjust captured scrollback.
+
 TUI checkbox, layout, and theme selections persist between sessions in
 `${XDG_CONFIG_HOME:-~/.config}/agent-pbx/tui-settings.json`. Set
 `AGENT_PBX_TUI_SETTINGS_FILE=/path/to/tui-settings.json` to use a different

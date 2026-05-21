@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from rich.text import Text
 
+from agent_pbx import tmux as tmux_support
 from agent_pbx.tui import (
     AgentPBXTUI,
     env_custom_palette,
@@ -34,6 +35,8 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_CUSTOM_BACKGROUND",
         "AGENT_PBX_TUI_EXPORT_DIR",
         "AGENT_PBX_TUI_LAYOUT",
+        "AGENT_PBX_TUI_TMUX",
+        "AGENT_PBX_TUI_TMUX_CAPTURE_LINES",
     ]:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(
@@ -52,6 +55,9 @@ def test_tui_constructs() -> None:
     assert app.visual_flash_enabled is False
     assert app.terminal_bell_enabled is False
     assert app.agent_blink_enabled is True
+    assert app.tmux_direct_enabled is False
+    assert app.tmux_capture_lines == 500
+    assert app.tmux_agent_targets == {}
     assert app.ui_theme == "cyberpunk"
     assert app.layout_mode == "split"
     assert app.compact_view == "home"
@@ -78,6 +84,9 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "agent_blink": False,
                 "theme": "1337",
                 "layout": "compact",
+                "tmux_direct": True,
+                "tmux_capture_lines": 250,
+                "tmux_agent_targets": {"agent-1": "%1"},
                 "export_dir": str(tmp_path / "exports"),
                 "latest_viewed_at_by_agent": {"agent-1": 123.0},
                 "last_seen_event_id": 42,
@@ -96,6 +105,9 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.agent_blink_enabled is False
     assert app.ui_theme == "1337"
     assert app.layout_mode == "compact"
+    assert app.tmux_direct_enabled is True
+    assert app.tmux_capture_lines == 250
+    assert app.tmux_agent_targets == {"agent-1": "%1"}
     assert app.export_dir == tmp_path / "exports"
     assert app.latest_viewed_at_by_agent == {"agent-1": 123.0}
     assert app.last_seen_event_id == 42
@@ -108,6 +120,7 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
             {
                 "visual_flash": True,
                 "agent_blink": False,
+                "tmux_direct": False,
                 "theme": "1337",
                 "layout": "split",
             }
@@ -116,6 +129,8 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     )
     monkeypatch.setenv("AGENT_PBX_TUI_FLASH", "0")
     monkeypatch.setenv("AGENT_PBX_TUI_AGENT_BLINK", "1")
+    monkeypatch.setenv("AGENT_PBX_TUI_TMUX", "1")
+    monkeypatch.setenv("AGENT_PBX_TUI_TMUX_CAPTURE_LINES", "750")
     monkeypatch.setenv("AGENT_PBX_TUI_THEME", "cyberpunk")
     monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "compact")
 
@@ -126,6 +141,8 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
 
     assert app.visual_flash_enabled is False
     assert app.agent_blink_enabled is True
+    assert app.tmux_direct_enabled is True
+    assert app.tmux_capture_lines == 750
     assert app.ui_theme == "cyberpunk"
     assert app.layout_mode == "compact"
 
@@ -140,6 +157,9 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     app.visual_flash_enabled = True
     app.terminal_bell_enabled = True
     app.agent_blink_enabled = False
+    app.tmux_direct_enabled = True
+    app.tmux_capture_lines = 333
+    app.tmux_agent_targets = {"agent-1": "%2"}
     app.layout_mode = "compact"
     app.latest_viewed_at_by_agent = {"agent-1": 123.0}
     app.last_seen_event_id = 42
@@ -149,6 +169,9 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["visual_flash"] is True
     assert saved["terminal_bell"] is True
     assert saved["agent_blink"] is False
+    assert saved["tmux_direct"] is True
+    assert saved["tmux_capture_lines"] == 333
+    assert saved["tmux_agent_targets"] == {"agent-1": "%2"}
     assert saved["theme"] == "1337"
     assert saved["layout"] == "compact"
     assert saved["latest_viewed_at_by_agent"] == {"agent-1": 123.0}
@@ -366,6 +389,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         bell = app.screen.query_one("#terminal-bell", Checkbox)
         agent_blink = app.screen.query_one("#agent-blink", Checkbox)
         compact_layout = app.screen.query_one("#compact-layout", Checkbox)
+        tmux_direct = app.screen.query_one("#tmux-direct", Checkbox)
         theme = app.screen.query_one("#theme-1337", Checkbox)
         close = app.screen.query_one("#settings-close", Button)
 
@@ -373,6 +397,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert bell.value is False
         assert agent_blink.value is True
         assert compact_layout.value is False
+        assert tmux_direct.value is False
         assert theme.value is False
         assert close.label.plain == "Close"
 
@@ -403,6 +428,121 @@ async def test_tui_select_agent_updates_composer_and_loads_report() -> None:
         assert app.active_agent_tab == "latest-tab"
         assert loaded == ["agent-1"]
         assert threads == ["agent-1"]
+
+
+async def test_tui_tmux_direct_replaces_latest_and_sends_exact_input(
+    monkeypatch,
+) -> None:
+    pane = tmux_support.TmuxPane(
+        "agent-pbx",
+        "0",
+        "2",
+        "%76",
+        True,
+        "node",
+        "agent-pbx",
+        "/home/me/agent-pbx",
+        142,
+        45,
+        500,
+    )
+    sent: list[tuple[str, str]] = []
+    threads: list[str] = []
+
+    monkeypatch.setattr("agent_pbx.tui.tmux_support.list_panes", lambda: [pane])
+    monkeypatch.setattr(
+        "agent_pbx.tui.tmux_support.capture_pane",
+        lambda target, *, lines=500: f"{target} captured {lines}",
+    )
+    monkeypatch.setattr(
+        "agent_pbx.tui.tmux_support.send_text",
+        lambda target, text: sent.append((target, text)),
+    )
+
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        tmux_direct=True,
+        tmux_capture_lines=25,
+    )
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "project": "agent-pbx",
+                "status": "working",
+                "last_seen_at": 123.0,
+                "metadata": {"cwd": "/home/me/agent-pbx"},
+            }
+        }
+        await app.select_agent("agent-1")
+        await pilot.pause()
+
+        assert app.screen.has_class("tmux-direct")
+        assert app.query_one("#detail", TextArea).region.height == 0
+        assert app.query_one("#composer").region.height == 0
+        assert app.query_one("#tmux-panel").region.height > 0
+        assert "%76" in str(app.query_one("#tmux-status").renderable)
+        assert app.query_one("#tmux-stream", TextArea).text == "%76 captured 25"
+        assert threads == ["agent-1"]
+
+        app.query_one("#tmux-message", TextArea).text = "/status"
+        await app.send_input()
+        await pilot.pause()
+
+    assert sent == [("%76", "/status")]
+
+
+def test_tui_tmux_resolve_uses_manual_override_and_detach() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "project": "agent-pbx",
+            "metadata": {"cwd": "/home/me/agent-pbx"},
+        }
+    }
+    auto_pane = tmux_support.TmuxPane(
+        "s",
+        "0",
+        "1",
+        "%1",
+        True,
+        "node",
+        "agent-pbx",
+        "/home/me/agent-pbx",
+        80,
+        24,
+        100,
+    )
+    manual_pane = tmux_support.TmuxPane(
+        "s",
+        "0",
+        "2",
+        "%2",
+        False,
+        "zsh",
+        "shell",
+        "/home/me",
+        80,
+        24,
+        100,
+    )
+
+    app.tmux_agent_targets = {"agent-1": "%2"}
+    pane, mode = app.resolve_tmux_pane("agent-1", [auto_pane, manual_pane])
+    assert pane == manual_pane
+    assert mode == "manual"
+
+    app.tmux_detached_agent_ids.add("agent-1")
+    pane, mode = app.resolve_tmux_pane("agent-1", [auto_pane, manual_pane])
+    assert pane is None
+    assert mode == "detached"
 
 
 async def test_tui_compact_layout_opens_agent_view_and_back(monkeypatch) -> None:
