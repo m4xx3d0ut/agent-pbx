@@ -51,6 +51,27 @@ def test_tmux_choose_pane_for_agent_returns_none_for_ties() -> None:
     assert tmux.choose_pane_for_agent(panes, agent) is None
 
 
+def test_tmux_pane_matches_agent_validates_cwd_or_project() -> None:
+    agent = {
+        "agent_id": "codex-main",
+        "project": "agent-pbx",
+        "metadata": {"cwd": "/home/me/agent-pbx"},
+    }
+    cwd_match = tmux.TmuxPane(
+        "s", "0", "1", "%1", True, "node", "codex", "/home/me/agent-pbx", 80, 20, 100
+    )
+    project_match = tmux.TmuxPane(
+        "s", "0", "2", "%2", True, "zsh", "agent-pbx", "/tmp", 80, 20, 100
+    )
+    stale = tmux.TmuxPane(
+        "s", "0", "3", "%3", True, "zsh", "shell", "/home/me/other", 80, 20, 100
+    )
+
+    assert tmux.pane_matches_agent(cwd_match, agent) is True
+    assert tmux.pane_matches_agent(project_match, agent) is True
+    assert tmux.pane_matches_agent(stale, agent) is False
+
+
 def test_tmux_list_and_capture_use_expected_commands(monkeypatch) -> None:
     calls: list[list[str]] = []
 
@@ -76,6 +97,21 @@ def test_tmux_list_and_capture_use_expected_commands(monkeypatch) -> None:
     assert captured == "line 1\nline 2"
     assert calls[0][:3] == ["tmux", "list-panes", "-a"]
     assert calls[1] == ["tmux", "capture-pane", "-p", "-J", "-S", "-25", "-t", "%1"]
+
+
+def test_tmux_capture_zero_lines_uses_visible_pane(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "visible\n", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    captured = tmux.capture_pane("%1", lines=0)
+
+    assert captured == "visible"
+    assert calls == [["tmux", "capture-pane", "-p", "-J", "-S", "0", "-t", "%1"]]
 
 
 def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:

@@ -56,7 +56,7 @@ def test_tui_constructs() -> None:
     assert app.terminal_bell_enabled is False
     assert app.agent_blink_enabled is True
     assert app.tmux_direct_enabled is False
-    assert app.tmux_capture_lines == 500
+    assert app.tmux_capture_lines == 0
     assert app.tmux_agent_targets == {}
     assert app.ui_theme == "cyberpunk"
     assert app.layout_mode == "split"
@@ -145,6 +145,14 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     assert app.tmux_capture_lines == 750
     assert app.ui_theme == "cyberpunk"
     assert app.layout_mode == "compact"
+
+
+def test_tui_env_allows_visible_tmux_capture(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_TMUX_CAPTURE_LINES", "0")
+
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert app.tmux_capture_lines == 0
 
 
 def test_tui_saves_settings(tmp_path: Path) -> None:
@@ -452,7 +460,7 @@ async def test_tui_tmux_direct_replaces_latest_and_sends_exact_input(
     monkeypatch.setattr("agent_pbx.tui.tmux_support.list_panes", lambda: [pane])
     monkeypatch.setattr(
         "agent_pbx.tui.tmux_support.capture_pane",
-        lambda target, *, lines=500: f"{target} captured {lines}",
+        lambda target, *, lines=0: f"{target} captured {lines}",
     )
     monkeypatch.setattr(
         "agent_pbx.tui.tmux_support.send_text",
@@ -498,6 +506,19 @@ async def test_tui_tmux_direct_replaces_latest_and_sends_exact_input(
     assert sent == [("%76", "/status")]
 
 
+async def test_tui_tmux_update_skips_unchanged_capture() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test():
+        stream = app.query_one("#tmux-stream", TextArea)
+
+        first = app.update_tmux_stream(stream, "same", cache_key="agent:%1")
+        second = app.update_tmux_stream(stream, "same", cache_key="agent:%1")
+
+    assert first is True
+    assert second is False
+
+
 def test_tui_tmux_resolve_uses_manual_override_and_detach() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     app.agents = {
@@ -535,6 +556,11 @@ def test_tui_tmux_resolve_uses_manual_override_and_detach() -> None:
     )
 
     app.tmux_agent_targets = {"agent-1": "%2"}
+    pane, mode = app.resolve_tmux_pane("agent-1", [auto_pane, manual_pane])
+    assert pane is None
+    assert mode == "stale"
+
+    app.tmux_manual_override_agent_ids.add("agent-1")
     pane, mode = app.resolve_tmux_pane("agent-1", [auto_pane, manual_pane])
     assert pane == manual_pane
     assert mode == "manual"

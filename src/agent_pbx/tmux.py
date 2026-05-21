@@ -85,8 +85,11 @@ def list_panes(tmux_bin: str = "tmux") -> list[TmuxPane]:
     return panes
 
 
-def capture_pane(target: str, *, lines: int = 500, tmux_bin: str = "tmux") -> str:
-    safe_lines = max(1, int(lines))
+def capture_start_arg(lines: int) -> str:
+    return "0" if lines <= 0 else f"-{lines}"
+
+
+def capture_pane(target: str, *, lines: int = 0, tmux_bin: str = "tmux") -> str:
     result = subprocess.run(
         [
             tmux_bin,
@@ -94,7 +97,7 @@ def capture_pane(target: str, *, lines: int = 500, tmux_bin: str = "tmux") -> st
             "-p",
             "-J",
             "-S",
-            f"-{safe_lines}",
+            capture_start_arg(int(lines)),
             "-t",
             target,
         ],
@@ -169,6 +172,20 @@ def score_pane_for_agent(pane: TmuxPane, agent: Mapping[str, Any]) -> int:
             score += points
 
     return score
+
+
+def pane_matches_agent(pane: TmuxPane, agent: Mapping[str, Any]) -> bool:
+    metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+    agent_cwd = str(metadata.get("cwd") or "")
+    project = str(agent.get("project") or "").strip().lower()
+    pane_text = f"{pane.title} {pane.cwd}".lower()
+    if not agent_cwd and not project:
+        return True
+    if agent_cwd and pane.cwd == agent_cwd:
+        return True
+    if project and project in pane_text:
+        return True
+    return False
 
 
 def choose_pane_for_agent(

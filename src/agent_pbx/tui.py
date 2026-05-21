@@ -45,7 +45,7 @@ DEFAULT_TUI_LAYOUT = "split"
 COMPACT_TUI_LAYOUT = "compact"
 DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
 DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
-DEFAULT_TMUX_CAPTURE_LINES = 500
+DEFAULT_TMUX_CAPTURE_LINES = 0
 FOLLOW_UP_MIN_HEIGHT = 8
 FOLLOW_UP_MAX_HEIGHT = 15
 FOLLOW_UP_NEWLINE_KEYS = {
@@ -242,7 +242,7 @@ def env_tmux_capture_lines_value() -> int | None:
     if not value:
         return None
     parsed = int_value(value)
-    return parsed if parsed is not None and parsed > 0 else None
+    return parsed if parsed is not None and parsed >= 0 else None
 
 
 def env_settings_file() -> Path:
@@ -837,14 +837,15 @@ class AgentPBXTUI(App[None]):
             "tmux_capture_lines",
             DEFAULT_TMUX_CAPTURE_LINES,
         )
-        if capture_lines_setting <= 0:
+        if capture_lines_setting < 0:
             capture_lines_setting = DEFAULT_TMUX_CAPTURE_LINES
         env_capture_lines = env_tmux_capture_lines_value()
-        self.tmux_capture_lines = (
-            tmux_capture_lines
-            if tmux_capture_lines is not None and tmux_capture_lines > 0
-            else env_capture_lines or capture_lines_setting
-        )
+        if tmux_capture_lines is not None and tmux_capture_lines >= 0:
+            self.tmux_capture_lines = tmux_capture_lines
+        elif env_capture_lines is not None:
+            self.tmux_capture_lines = env_capture_lines
+        else:
+            self.tmux_capture_lines = capture_lines_setting
         export_dir_setting = str_setting(
             self.settings,
             "export_dir",
@@ -879,7 +880,9 @@ class AgentPBXTUI(App[None]):
         )
         self.workerbee_status_by_agent: dict[str, dict[str, Any]] = {}
         self.tmux_agent_targets = str_map_setting(self.settings, "tmux_agent_targets")
+        self.tmux_manual_override_agent_ids: set[str] = set()
         self.tmux_detached_agent_ids: set[str] = set()
+        self.tmux_last_capture_by_pane: dict[str, str] = {}
         self.tmux_panes: list[tmux_support.TmuxPane] = []
         self.tmux_refreshing = False
         self.attention_blink_phase = False
@@ -1458,11 +1461,18 @@ class AgentPBXTUI(App[None]):
         self.tmux_panes = panes
         pane, mode = self.resolve_tmux_pane(agent_id, panes)
         if pane is None:
-            status.update(f"Tmux: no pane for {agent_id}")
-            stream.text = (
-                "No tmux pane is attached for this agent.\n\n"
-                "Use Auto to retry discovery or Select Pane to choose a pane."
-            )
+            if mode == "stale":
+                status.update(f"Tmux: stale target for {agent_id}")
+                stream.text = (
+                    "The saved tmux pane target no longer matches this agent.\n\n"
+                    "Use Auto to rediscover the pane or Select Pane to choose one."
+                )
+            else:
+                status.update(f"Tmux: no pane for {agent_id}")
+                stream.text = (
+                    "No tmux pane is attached for this agent.\n\n"
+                    "Use Auto to retry discovery or Select Pane to choose a pane."
+                )
             return
         try:
             captured = await asyncio.to_thread(
@@ -1474,14 +1484,36 @@ class AgentPBXTUI(App[None]):
             status.update(f"Tmux: {pane.pane_id} capture failed")
             stream.text = f"Unable to capture tmux pane {pane.pane_id}: {exc}"
             return
-        self.update_tmux_stream(stream, captured or "(empty tmux pane)")
+        self.update_tmux_stream(
+            stream,
+            captured or "(empty tmux pane)",
+            cache_key=f"{agent_id}:{pane.pane_id}",
+        )
         status.update(
             "Tmux: "
             f"{pane.pane_id} {pane.target_label} {mode} "
+            f"{self.tmux_capture_mode_label()} "
             f"{pane.current_command} {pane.width}x{pane.height}"
         )
 
-    def update_tmux_stream(self, stream: TextArea, captured: str) -> None:
+    def tmux_capture_mode_label(self) -> str:
+        if self.tmux_capture_lines <= 0:
+            return "visible"
+        return f"scrollback {self.tmux_capture_lines}"
+
+    def update_tmux_stream(
+        self,
+        stream: TextArea,
+        captured: str,
+        *,
+        cache_key: str,
+    ) -> bool:
+        previous = self.tmux_last_capture_by_pane.get(cache_key)
+        self.tmux_last_capture_by_pane[cache_key] = captured
+        if previous == captured and stream.text == captured:
+            return False
+        if stream.text == captured:
+            return False
         at_bottom = bool(getattr(stream, "is_vertical_scroll_end", True))
         scroll_y = stream.scroll_y
         scroll_target_y = stream.scroll_target_y
@@ -1491,6 +1523,7 @@ class AgentPBXTUI(App[None]):
         else:
             stream.scroll_y = scroll_y
             stream.scroll_target_y = scroll_target_y
+        return True
 
     def resolve_tmux_pane(
         self,
@@ -1499,12 +1532,18 @@ class AgentPBXTUI(App[None]):
     ) -> tuple[tmux_support.TmuxPane | None, str]:
         if agent_id in self.tmux_detached_agent_ids:
             return None, "detached"
+        agent = self.agents.get(agent_id, {"agent_id": agent_id})
         manual_target = self.tmux_agent_targets.get(agent_id)
         if manual_target:
             for pane in panes:
                 if pane.pane_id == manual_target or pane.target_label == manual_target:
+                    if (
+                        agent_id not in self.tmux_manual_override_agent_ids
+                        and not tmux_support.pane_matches_agent(pane, agent)
+                    ):
+                        return None, "stale"
                     return pane, "manual"
-        agent = self.agents.get(agent_id, {"agent_id": agent_id})
+            return None, "stale"
         pane = tmux_support.choose_pane_for_agent(panes, agent)
         if pane is None:
             return None, "auto"
@@ -1540,6 +1579,7 @@ class AgentPBXTUI(App[None]):
         )
         pane = ranked[(current_index + 1) % len(ranked)]
         self.tmux_agent_targets[agent_id] = pane.pane_id
+        self.tmux_manual_override_agent_ids.add(agent_id)
         self.tmux_detached_agent_ids.discard(agent_id)
         self.save_settings()
         await self.load_tmux_capture(agent_id)
@@ -1549,6 +1589,7 @@ class AgentPBXTUI(App[None]):
         if not agent_id:
             return
         self.tmux_agent_targets.pop(agent_id, None)
+        self.tmux_manual_override_agent_ids.discard(agent_id)
         self.tmux_detached_agent_ids.discard(agent_id)
         self.save_settings()
         await self.load_tmux_capture(agent_id)
@@ -1558,6 +1599,7 @@ class AgentPBXTUI(App[None]):
         if not agent_id:
             return
         self.tmux_agent_targets.pop(agent_id, None)
+        self.tmux_manual_override_agent_ids.discard(agent_id)
         self.tmux_detached_agent_ids.add(agent_id)
         self.save_settings()
         status = self.query_one_or_none("#tmux-status", Static)
@@ -1696,10 +1738,13 @@ class AgentPBXTUI(App[None]):
                 status.update(f"Tmux: unavailable ({exc})")
             return
         self.tmux_panes = panes
-        pane, _ = self.resolve_tmux_pane(agent_id, panes)
+        pane, mode = self.resolve_tmux_pane(agent_id, panes)
         if pane is None:
             if status is not None:
-                status.update(f"Tmux: no pane for {agent_id}")
+                if mode == "stale":
+                    status.update(f"Tmux: stale target for {agent_id}")
+                else:
+                    status.update(f"Tmux: no pane for {agent_id}")
             return
         try:
             await asyncio.to_thread(tmux_support.send_text, pane.pane_id, message)
