@@ -106,6 +106,30 @@ agent-pbx mcp restart
 agent-pbx mcp status
 ```
 
+## Agent Instructions
+
+Agent PBX can print or install the AGENTS.md wording that tells Codex-style
+agents how to register, report, poll, and handle queued operator commands.
+
+```bash
+agent-pbx agent instructions
+agent-pbx agent install --check --target AGENTS.md
+agent-pbx agent install --append --target AGENTS.md
+agent-pbx agent install --append --allow-create --target AGENTS.md
+```
+
+For deeper behavior guidance, print the runbook:
+
+```bash
+agent-pbx agent runbook
+```
+
+Connected agents can also call `pbx_agent_runbook` over MCP. The runbook is
+intended for project-specific agent docs and for agents that need a refresher on
+session-long PBX behavior. The guidance requires `status="done"` reports for
+repository work to include whether changes are clean, committed, staged, or
+unstaged.
+
 ## Planned Local Validation
 
 WorkerBee is used to rebuild and run the containerized MCP/API service with simulated agents and clients. Repository-owned WorkerBee manifests live under `ops/workerbee/`.

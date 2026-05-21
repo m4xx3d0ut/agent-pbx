@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from agent_pbx.agent import (
+    AGENT_INSTRUCTIONS_END,
+    AGENT_INSTRUCTIONS_START,
+    agent_instructions_markdown,
+    install_agent_instructions,
+    runbook_payload,
+)
+from agent_pbx.cli import main
+
+
+def test_agent_instructions_include_pbx_loop() -> None:
+    instructions = agent_instructions_markdown()
+
+    assert AGENT_INSTRUCTIONS_START in instructions
+    assert AGENT_INSTRUCTIONS_END in instructions
+    assert "pbx_register_agent" in instructions
+    assert "pbx_poll_commands" in instructions
+    assert "request_detail" in instructions
+    assert "pbx_ack_command" in instructions
+    assert "status=\"done\"" in instructions
+    assert "git status --short" in instructions
+
+
+def test_runbook_payload_includes_command_guidance() -> None:
+    payload = runbook_payload()
+
+    assert payload["title"] == "Agent PBX Runbook"
+    assert any("pbx_poll_commands" in item for item in payload["active_loop"])
+    assert any("git state" in item for item in payload["done_reports"])
+    assert "request_detail" in payload["commands"]
+
+
+def test_install_agent_instructions_check_missing_target(tmp_path: Path) -> None:
+    target = tmp_path / "AGENTS.md"
+
+    result = install_agent_instructions(target, check=True)
+
+    assert result["ok"] is True
+    assert result["exists"] is False
+    assert result["installed"] is False
+    assert result["would_create"] is True
+
+
+def test_install_agent_instructions_creates_and_is_idempotent(tmp_path: Path) -> None:
+    target = tmp_path / "docs" / "AGENTS.md"
+
+    created = install_agent_instructions(target, append=True, allow_create=True)
+    checked = install_agent_instructions(target, check=True)
+    unchanged = install_agent_instructions(target, append=True, allow_create=True)
+
+    text = target.read_text(encoding="utf-8")
+    assert created["changed"] is True
+    assert checked["installed"] is True
+    assert unchanged["changed"] is False
+    assert text.count(AGENT_INSTRUCTIONS_START) == 1
+
+
+def test_install_agent_instructions_appends_to_existing_file(tmp_path: Path) -> None:
+    target = tmp_path / "AGENTS.md"
+    target.write_text("# Existing\n\nKeep this.\n", encoding="utf-8")
+
+    result = install_agent_instructions(target, append=True)
+
+    text = target.read_text(encoding="utf-8")
+    assert result["changed"] is True
+    assert text.startswith("# Existing\n\nKeep this.\n")
+    assert AGENT_INSTRUCTIONS_START in text
+
+
+def test_agent_cli_prints_instructions(capsys) -> None:
+    result = main(["agent", "instructions"])
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert AGENT_INSTRUCTIONS_START in out
+    assert "pbx_poll_commands" in out
+
+
+def test_agent_cli_prints_runbook(capsys) -> None:
+    result = main(["agent", "runbook"])
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "Agent PBX Runbook" in out
+    assert "pbx_report_turn" in out
+
+
+def test_agent_cli_installs_instructions(tmp_path: Path, capsys) -> None:
+    target = tmp_path / "AGENTS.md"
+
+    result = main(
+        [
+            "agent",
+            "install",
+            "--target",
+            str(target),
+            "--append",
+            "--allow-create",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert '"changed": true' in out
+    assert AGENT_INSTRUCTIONS_START in target.read_text(encoding="utf-8")

@@ -5,11 +5,17 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 import uvicorn
 
 from . import __version__
+from .agent import (
+    agent_instructions_markdown,
+    install_agent_instructions,
+    runbook_markdown,
+)
 from .api import create_app, create_token_helper_app
 from .config import ServerConfig
 from .mcp_daemon import (
@@ -69,6 +75,24 @@ def build_parser() -> argparse.ArgumentParser:
         "serve", help="Run the Agent PBX HTTP/MCP service in the foreground."
     )
     add_server_flags(serve)
+
+    agent = subcommands.add_parser(
+        "agent", help="Print or install Agent PBX agent instructions."
+    )
+    agent_subcommands = agent.add_subparsers(dest="agent_command", required=True)
+    agent_subcommands.add_parser(
+        "instructions", help="Print the Agent PBX AGENTS.md block."
+    )
+    agent_subcommands.add_parser(
+        "runbook", help="Print the Agent PBX agent usage runbook."
+    )
+    agent_install = agent_subcommands.add_parser(
+        "install", help="Install the Agent PBX AGENTS.md block."
+    )
+    agent_install.add_argument("--target", type=Path, default=Path("AGENTS.md"))
+    agent_install.add_argument("--check", action="store_true")
+    agent_install.add_argument("--append", action="store_true")
+    agent_install.add_argument("--allow-create", action="store_true")
 
     mcp = subcommands.add_parser("mcp", help="Manage the Agent PBX MCP daemon.")
     mcp_subcommands = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -138,6 +162,28 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "serve":
         return _serve_foreground(args)
+
+    if args.command == "agent":
+        if args.agent_command == "instructions":
+            print(agent_instructions_markdown().rstrip())
+            return 0
+        if args.agent_command == "runbook":
+            print(runbook_markdown().rstrip())
+            return 0
+        if args.agent_command == "install":
+            try:
+                result = install_agent_instructions(
+                    args.target,
+                    check=args.check,
+                    append=args.append,
+                    allow_create=args.allow_create,
+                )
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+        return 0
 
     if args.command == "mcp":
         config = _daemon_config(args)

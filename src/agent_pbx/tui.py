@@ -488,6 +488,7 @@ class AgentPBXTUI(App[None]):
         self.agent_last_seen_at: dict[str, float] = {}
         self.latest_viewed_at_by_agent: dict[str, float] = {}
         self.attention_blink_phase = False
+        self.attention_agent_id: str | None = None
         self.event_stream_disconnected = False
         self.last_seen_event_id = 0
         self.flash_generation = 0
@@ -651,6 +652,17 @@ class AgentPBXTUI(App[None]):
             return None
         return str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
 
+    def focus_agent_row(self, agent_id: str) -> None:
+        if agent_id not in self.agents:
+            return
+        table = self.query_one("#agents", DataTable)
+        table.move_cursor(
+            row=table.get_row_index(agent_id),
+            animate=False,
+            scroll=True,
+        )
+        table.focus()
+
     def toggle_unseen_attention(self) -> None:
         if not self.agent_blink_enabled or not self.unseen_latest_agent_ids:
             if self.attention_blink_phase:
@@ -666,9 +678,13 @@ class AgentPBXTUI(App[None]):
             if attention.has_class("unseen-active"):
                 attention.update("")
                 attention.remove_class("unseen-active")
+                if not attention.has_class("attention-active"):
+                    self.attention_agent_id = None
             self.screen.remove_class("attention-flash")
             return
-        agents = ", ".join(sorted(self.unseen_latest_agent_ids)[:3])
+        unseen_agent_ids = sorted(self.unseen_latest_agent_ids)
+        self.attention_agent_id = unseen_agent_ids[0]
+        agents = ", ".join(unseen_agent_ids[:3])
         extra = len(self.unseen_latest_agent_ids) - 3
         if extra > 0:
             agents = f"{agents}, +{extra}"
@@ -677,12 +693,28 @@ class AgentPBXTUI(App[None]):
         attention.add_class("unseen-active")
         self.screen.set_class(self.attention_blink_phase, "attention-flash")
 
-    async def open_first_unseen_latest(self) -> bool:
+    def attention_target_agent_id(self) -> str | None:
+        if self.attention_agent_id in self.agents:
+            return self.attention_agent_id
         for agent_id in sorted(self.unseen_latest_agent_ids):
             if agent_id in self.agents:
-                await self.select_agent(agent_id)
-                return True
-        return False
+                return agent_id
+        if self.selected_agent_id in self.agents:
+            return self.selected_agent_id
+        return None
+
+    async def open_attention_latest(self) -> bool:
+        agent_id = self.attention_target_agent_id()
+        if agent_id is None:
+            return False
+        return await self.open_agent_latest(agent_id)
+
+    async def open_agent_latest(self, agent_id: str) -> bool:
+        if agent_id not in self.agents:
+            return False
+        await self.select_agent(agent_id)
+        self.focus_agent_row(agent_id)
+        return True
 
     async def refresh_events(self) -> None:
         try:
@@ -718,7 +750,7 @@ class AgentPBXTUI(App[None]):
 
     async def on_click(self, event: Click) -> None:
         if getattr(event.widget, "id", None) == "attention":
-            opened = await self.open_first_unseen_latest()
+            opened = await self.open_attention_latest()
             if opened:
                 event.stop()
 
@@ -806,6 +838,7 @@ class AgentPBXTUI(App[None]):
             self.render_thread([])
             thread_detail.text = f"Unable to load thread for {agent_id}: {exc}"
             return
+        thread = self.order_thread_for_display(thread)
         self.thread_items = {item["item_id"]: item for item in thread}
         self.thread_order = [item["item_id"] for item in thread]
         self.marked_thread_item_ids.intersection_update(self.thread_items)
@@ -814,13 +847,22 @@ class AgentPBXTUI(App[None]):
             item_id = (
                 self.selected_thread_item_id
                 if self.selected_thread_item_id in self.thread_items
-                else thread[-1]["item_id"]
+                else thread[0]["item_id"]
             )
             self.select_thread_item(item_id)
         else:
             self.selected_thread_item_id = None
             self.thread_order = []
             thread_detail.text = f"No thread history for {agent_id}."
+
+    def order_thread_for_display(
+        self, thread: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return sorted(
+            thread,
+            key=lambda item: (float(item["created_at"]), str(item["item_id"])),
+            reverse=True,
+        )
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "send":
@@ -993,6 +1035,9 @@ class AgentPBXTUI(App[None]):
         self.render_events()
         event_type = str(event.get("type"))
         agent_id = self.event_agent_id(event)
+        selected_agent_id = self.selected_agent_id
+        if event_type == "report_created" and agent_id == selected_agent_id:
+            self.activate_latest_tab()
         if event_type in {"agent_registered", "report_created"}:
             self.run_worker(
                 self.refresh_agents(),
@@ -1001,7 +1046,6 @@ class AgentPBXTUI(App[None]):
             )
         if event_type == "report_created" and agent_id:
             self.mark_latest_unseen(agent_id)
-        selected_agent_id = self.selected_agent_id
         if selected_agent_id and agent_id == selected_agent_id:
             if event_type == "report_created":
                 self.run_worker(
@@ -1205,6 +1249,7 @@ class AgentPBXTUI(App[None]):
     def flash_for_event(self, event: dict[str, Any]) -> None:
         self.flash_generation += 1
         generation = self.flash_generation
+        self.attention_agent_id = self.event_agent_id(event)
         event_type = str(event.get("type", "event")).replace("_", " ")
         subject = event.get("subject_id") or ""
         message = f"New {event_type}"
@@ -1223,6 +1268,7 @@ class AgentPBXTUI(App[None]):
         if not self.unseen_latest_agent_ids:
             attention.update("")
             attention.remove_class("attention-active")
+            self.attention_agent_id = None
         else:
             attention.remove_class("attention-active")
             self.render_unseen_attention()

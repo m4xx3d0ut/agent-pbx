@@ -37,10 +37,40 @@ Pull requests should include a concise summary, test results, configuration chan
 
 The planned server may run on localhost or a LAN. Default to localhost-only binding, keep secrets out of Git, and do not expose the MCP server to the internet without a documented authentication and network security plan.
 
-## Agent PBX Session Behavior
+<!-- agent-pbx-agent-instructions:v1 start -->
+## Agent PBX
 
-When an operator asks an agent to start using Agent PBX, treat PBX as active for
-the rest of that session. Continue reporting turn status, polling queued
-commands, and acknowledging handled commands until the operator explicitly asks
-you to stop using PBX or starts a new session. A `request_detail` command is not
-self-resolving; after polling it, respond with a new detailed `pbx_report_turn`.
+When the operator asks you to use Agent PBX, register this session with
+`pbx_register_agent` using a stable `agent_id`, the current project name, and
+metadata containing the absolute `cwd` and task goal. Treat Agent PBX as active
+until the operator explicitly asks you to stop using PBX or starts a new
+session.
+
+While PBX is active, report meaningful progress with `pbx_report_turn`: at task
+start, before waiting for input, after important milestones, after test or
+deploy results, and at turn completion. Keep summaries brief but actionable;
+put detailed notes in `detail`.
+
+Every `status="done"` report for repository work must state the git state:
+clean, committed, staged, or unstaged. Include the relevant `git status --short`
+summary and the commit hash when changes were committed. If the workspace is not
+a git repository, say so explicitly.
+
+Poll for queued operator commands with `pbx_poll_commands` before starting
+work, after each report, before finishing a turn, and periodically during
+long-running work. Handle every returned command in order, then call
+`pbx_ack_command` with the result. Do not poll as another agent ID.
+
+Command handling rules:
+
+- `request_detail`: send a new detailed `pbx_report_turn`; do not only ack it.
+- `send_input`: treat the message as operator follow-up and respond through a
+  new `pbx_report_turn`.
+- `start_task`: begin the requested task and report that it started.
+- `cancel_task`: stop the current PBX-scoped task when safe and report what was
+  stopped.
+- `acknowledge`: ack after recording the instruction or status.
+
+If PBX is temporarily unavailable, continue local work, mention the PBX failure
+in your next response, and retry registration or polling when practical.
+<!-- agent-pbx-agent-instructions:v1 end -->

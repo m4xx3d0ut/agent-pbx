@@ -8,6 +8,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .agent import runbook_payload
 from .config import ServerConfig
 from .schemas import (
     AgentRegisterRequest,
@@ -25,10 +26,18 @@ logger = logging.getLogger("agent_pbx.mcp")
 def build_mcp_server(store: Store) -> FastMCP:
     mcp = FastMCP(
         "Agent PBX",
-        instructions="Report agent turn status and poll queued follow-up commands.",
+        instructions=(
+            "Report agent turn status, poll queued follow-up commands, and use "
+            "pbx_agent_runbook for Agent PBX session guidance."
+        ),
         streamable_http_path="/",
         stateless_http=True,
     )
+
+    @mcp.tool()
+    def pbx_agent_runbook() -> dict[str, Any]:
+        """Return Agent PBX usage guidance for agents."""
+        return runbook_payload()
 
     @mcp.tool()
     def pbx_register_agent(
@@ -144,7 +153,11 @@ def build_mcp_server(store: Store) -> FastMCP:
             raise ValueError("command not found")
         store.append_event(
             "command_acked",
-            {"command_id": command_id, "result": result or {}},
+            {
+                "command_id": command_id,
+                "agent_id": command["agent_id"],
+                "result": result or {},
+            },
             command_id,
         )
         logger.debug("mcp.tool.finish name=pbx_ack_command command_id=%s", command_id)

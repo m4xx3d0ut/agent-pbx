@@ -339,6 +339,54 @@ async def test_tui_thread_selection_renders_detail() -> None:
     assert '"ok": true' in detail
 
 
+async def test_tui_thread_table_renders_newest_first() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        thread = [
+            {
+                "item_id": "report:old",
+                "kind": "report",
+                "agent_id": "agent-1",
+                "created_at": 100.0,
+                "status": "done",
+                "title": "Old report",
+                "body": "old",
+                "metadata": {},
+            },
+            {
+                "item_id": "command:middle",
+                "kind": "command",
+                "agent_id": "agent-1",
+                "created_at": 101.0,
+                "status": "acked",
+                "title": "Middle command",
+                "body": "middle",
+                "metadata": {},
+            },
+            {
+                "item_id": "report:new",
+                "kind": "report",
+                "agent_id": "agent-1",
+                "created_at": 102.0,
+                "status": "working",
+                "title": "New report",
+                "body": "new",
+                "metadata": {},
+            },
+        ]
+        ordered = app.order_thread_for_display(thread)
+        app.thread_items = {item["item_id"]: item for item in ordered}
+        app.thread_order = [item["item_id"] for item in ordered]
+        app.render_thread(ordered)
+        table = app.query_one("#thread", DataTable)
+
+    assert app.thread_order == ["report:new", "command:middle", "report:old"]
+    assert table.get_row_at(0)[4] == "New report"
+    assert table.get_row_at(1)[4] == "Middle command"
+    assert table.get_row_at(2)[4] == "Old report"
+
+
 async def test_tui_thread_marking_tracks_rows() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -472,12 +520,21 @@ async def test_tui_clicking_unseen_alert_opens_first_latest() -> None:
                 "status": "running",
                 "project": "agent-pbx",
                 "last_seen_at": 123.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "status": "running",
+                "project": "agent-pbx",
+                "last_seen_at": 124.0,
             }
         }
+        app.render_agents()
+        agents = app.query_one("#agents", DataTable)
+        agents.move_cursor(row=0, animate=False)
         tabs = app.query_one("#agent-tabs")
         tabs.active = "thread-tab"
         app.active_agent_tab = "thread-tab"
-        app.unseen_latest_agent_ids.add("agent-1")
+        app.unseen_latest_agent_ids.add("agent-2")
         app.render_unseen_attention()
         click = Click(
             app.query_one("#attention"),
@@ -492,14 +549,153 @@ async def test_tui_clicking_unseen_alert_opens_first_latest() -> None:
         )
 
         await app.on_click(click)
+        cursor_row = agents.cursor_row
+        cursor_agent_id = app.agent_id_at_cursor()
+        focused = app.focused
 
-    assert app.selected_agent_id == "agent-1"
+    assert app.selected_agent_id == "agent-2"
     assert app.active_agent_tab == "latest-tab"
     assert tabs.active == "latest-tab"
     assert app.unseen_latest_agent_ids == set()
-    assert loaded == ["agent-1"]
-    assert threads == ["agent-1"]
+    assert cursor_row == 1
+    assert cursor_agent_id == "agent-2"
+    assert focused is agents
+    assert loaded == ["agent-2"]
+    assert threads == ["agent-2"]
     assert click._stop_propagation is True
+
+
+async def test_tui_clicking_flash_alert_opens_event_agent_latest_from_thread() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", visual_flash=True)
+    loaded: list[str] = []
+    threads: list[str] = []
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "running",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "status": "running",
+                "project": "agent-pbx",
+                "last_seen_at": 124.0,
+            },
+        }
+        app.render_agents()
+        agents = app.query_one("#agents", DataTable)
+        agents.move_cursor(row=0, animate=False)
+        tabs = app.query_one("#agent-tabs")
+        tabs.active = "thread-tab"
+        app.active_agent_tab = "thread-tab"
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.flash_for_event(
+            {
+                "type": "command_acked",
+                "subject_id": "cmd-1",
+                "payload": {"agent_id": "agent-2"},
+            }
+        )
+        click = Click(
+            app.query_one("#attention"),
+            0,
+            0,
+            0,
+            0,
+            1,
+            False,
+            False,
+            False,
+        )
+
+        await app.on_click(click)
+        cursor_row = agents.cursor_row
+        cursor_agent_id = app.agent_id_at_cursor()
+        focused = app.focused
+
+    assert app.selected_agent_id == "agent-2"
+    assert app.active_agent_tab == "latest-tab"
+    assert tabs.active == "latest-tab"
+    assert app.unseen_latest_agent_ids == set()
+    assert cursor_row == 1
+    assert cursor_agent_id == "agent-2"
+    assert focused is agents
+    assert loaded == ["agent-2"]
+    assert threads == ["agent-2"]
+    assert click._stop_propagation is True
+
+
+async def test_tui_selected_report_event_opens_latest_from_thread() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    refreshed_agents = 0
+    refreshed_selected: list[str] = []
+    worker_coros = []
+
+    async def fake_refresh_agents() -> None:
+        nonlocal refreshed_agents
+        refreshed_agents += 1
+
+    async def fake_refresh_selected_agent(agent_id: str) -> None:
+        refreshed_selected.append(agent_id)
+
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_selected_agent = fake_refresh_selected_agent  # type: ignore[method-assign]
+
+    async with app.run_test():
+        def fake_run_worker(coro, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            worker_coros.append(coro)
+            return None
+
+        app.run_worker = fake_run_worker  # type: ignore[method-assign]
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "running",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.render_agents()
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        tabs = app.query_one("#agent-tabs")
+        tabs.active = "thread-tab"
+        app.active_agent_tab = "thread-tab"
+        refreshed_agents = 0
+
+        app.handle_event(
+            {
+                "event_id": 1,
+                "type": "report_created",
+                "subject_id": "report-1",
+                "payload": {
+                    "agent_id": "agent-1",
+                    "status": "working",
+                    "summary": "Working",
+                },
+            }
+        )
+        for coro in worker_coros:
+            await coro
+
+    assert app.active_agent_tab == "latest-tab"
+    assert tabs.active == "latest-tab"
+    assert app.unseen_latest_agent_ids == set()
+    assert refreshed_agents == 1
+    assert refreshed_selected == ["agent-1"]
 
 
 async def test_tui_agent_status_refresh_marks_unseen_latest() -> None:
