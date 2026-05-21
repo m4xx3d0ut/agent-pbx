@@ -328,6 +328,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         export_marked = app.query_one("#export-marked", Button)
         export_all = app.query_one("#export-all", Button)
         delete_queued = app.query_one("#delete-queued", Button)
+        send_plan = app.query_one("#send-plan-choice", Button)
+        send_plan_tmux = app.query_one("#send-plan-tmux", Button)
         workerbee_detail = app.query_one("#workerbee-detail", TextArea)
         workerbee_refresh = app.query_one("#workerbee-refresh", Button)
         composer = app.query_one("#composer")
@@ -347,10 +349,16 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert export_marked.label.plain == "Export Marked"
         assert export_all.label.plain == "Export All"
         assert delete_queued.label.plain == "Delete Queued"
+        assert send_plan.label.plain == "Send Plan Choice"
+        assert send_plan_tmux.label.plain == "Send to Codex Pane"
+        assert send_plan.disabled is True
+        assert send_plan_tmux.disabled is True
         assert workerbee_detail.read_only is True
         assert workerbee_refresh.label.plain == "Refresh WorkerBee"
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
+        assert "#plan-choice-panel {\n        display: none;" in app.CSS
+        assert "#plan-notes {\n        height: 4;" in app.CSS
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
         assert "#tmux-message {\n        height: 8;" in app.CSS
         assert "Notification Options" not in app.CSS
@@ -925,10 +933,24 @@ async def test_tui_thread_selection_renders_detail() -> None:
         ]
         app.thread_items = {item["item_id"]: item for item in thread}
         app.render_thread(thread)
+        app.select_thread_item("report:r1")
+        report_detail = app.query_one("#thread-detail", TextArea).text
+        plan_options = app.query_one("#plan-options", DataTable)
+        send_plan = app.query_one("#send-plan-choice", Button)
+        send_plan_tmux = app.query_one("#send-plan-tmux", Button)
+        plan_row_count = plan_options.row_count
+        plan_option_text = plan_options.get_row_at(0)[1]
+        send_plan_enabled = not send_plan.disabled
+        send_plan_tmux_disabled = send_plan_tmux.disabled
         app.select_thread_item("command:c1")
         detail = app.query_one("#thread-detail", TextArea).text
 
     assert app.selected_thread_item_id == "command:c1"
+    assert "Plan Options:" in report_detail
+    assert plan_row_count == 1
+    assert plan_option_text == "Next"
+    assert send_plan_enabled is True
+    assert send_plan_tmux_disabled is True
     assert "Command: c1" in detail
     assert "Proceed" in detail
     assert '"ok": true' in detail
@@ -1652,6 +1674,103 @@ async def test_tui_ping_queues_keepalive_command() -> None:
     assert threads == ["agent-1"]
     assert "Ping queued for agent-1." in detail
     assert "Command: cmd-1" in detail
+
+
+async def test_tui_send_plan_choice_queues_follow_up_with_notes() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+    threads: list[str] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        item = {
+            "item_id": "report:r1",
+            "kind": "report",
+            "agent_id": "agent-1",
+            "created_at": 123.0,
+            "status": "blocked",
+            "title": "Choose",
+            "body": "Pick a path",
+            "metadata": {"plan_options": ["A", "B"]},
+        }
+        app.selected_agent_id = "agent-1"
+        app.thread_items = {"report:r1": item}
+        app.select_thread_item("report:r1")
+        app.select_plan_option("1")
+        app.query_one("#plan-notes", TextArea).text = "Prefer the safer path."
+        await app.send_plan_choice()
+        notes = app.query_one("#plan-notes", TextArea).text
+
+    assert queued == [
+        (
+            "agent-1",
+            "send_input",
+            {
+                "message": (
+                    "Selected plan option: B\n\n"
+                    "Operator notes:\nPrefer the safer path."
+                )
+            },
+        )
+    ]
+    assert threads == ["agent-1"]
+    assert notes == ""
+
+
+async def test_tui_send_plan_choice_to_tmux_uses_direct_pane() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        item = {
+            "item_id": "report:r1",
+            "kind": "report",
+            "agent_id": "agent-1",
+            "created_at": 123.0,
+            "status": "blocked",
+            "title": "Choose",
+            "body": "Pick a path",
+            "metadata": {"plan_options": ["Proceed"]},
+        }
+        app.selected_agent_id = "agent-1"
+        app.thread_items = {"report:r1": item}
+        app.select_thread_item("report:r1")
+        app.query_one("#plan-notes", TextArea).text = "Go now."
+        await app.send_plan_choice_to_tmux()
+
+    assert sent == [
+        (
+            "agent-1",
+            "Selected plan option: Proceed\n\nOperator notes:\nGo now.",
+        )
+    ]
+    assert captures == ["agent-1"]
 
 
 async def test_tui_follow_up_enter_sends_input() -> None:

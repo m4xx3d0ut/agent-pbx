@@ -337,6 +337,12 @@ reports, follow-up inputs, detail requests, and command results. The thread is
 compact by default; selecting a row shows the full report detail or command
 payload/result in the thread detail pane.
 
+When a report includes `plan_options`, the Thread tab shows a plan-choice panel.
+Select an option, add optional notes, then use `Send Plan Choice` to queue a
+normal `send_input` follow-up. If tmux direct mode is enabled, `Send to Codex
+Pane` pastes the same choice message directly into the local Codex pane as a
+convenience bridge.
+
 Use `Space` on a Thread row to mark it, then export `Item`, `Marked`, or `All`
 to Markdown under `artifacts/thread-exports/`. Set
 `AGENT_PBX_TUI_EXPORT_DIR=/path/to/exports` to change the destination.

@@ -52,6 +52,12 @@ deploy results, and at turn completion. Keep summaries brief but actionable;
 put detailed notes in `detail`. Do not claim to be using Agent PBX unless you
 are also polling for queued commands.
 
+When operator choice is needed, send `pbx_report_turn(needs_input=true,
+plan_options=[...])` with concise, mutually exclusive options. The TUI can queue
+the selected option back as `send_input`; treat a message beginning with
+`Selected plan option:` as the operator's chosen path, then report what you will
+do next and ack after handling.
+
 During long-running work that is progressing normally, send a
 `status="working"` `pbx_report_turn` check-in at least once every five minutes
 until the work completes. Include what is still running and the last meaningful

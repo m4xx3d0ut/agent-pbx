@@ -35,6 +35,8 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "pbx_active=true" in instructions
     assert "alert pickup mechanism" in instructions
     assert "pbx_set_active(active=false)" in instructions
+    assert "plan_options" in instructions
+    assert "Selected plan option:" in instructions
 
 
 def test_runbook_payload_includes_command_guidance() -> None:
@@ -54,6 +56,8 @@ def test_runbook_payload_includes_command_guidance() -> None:
     assert any("git state" in item for item in payload["done_reports"])
     assert any("pbx_set_active" in item for item in payload["session_stop"])
     assert "request_detail" in payload["commands"]
+    assert any("plan_options" in item for item in payload["plan_options"])
+    assert any("Selected plan option:" in item for item in payload["plan_options"])
 
 
 def test_install_agent_instructions_check_missing_target(tmp_path: Path) -> None:

@@ -25,6 +25,12 @@ deploy results, and at turn completion. Keep summaries brief but actionable;
 put detailed notes in `detail`. Do not claim to be using Agent PBX unless you
 are also polling for queued commands.
 
+When operator choice is needed, send `pbx_report_turn(needs_input=true,
+plan_options=[...])` with concise, mutually exclusive options. The TUI can queue
+the selected option back as `send_input`; treat a message beginning with
+`Selected plan option:` as the operator's chosen path, then report what you will
+do next and ack after handling.
+
 During long-running work that is progressing normally, send a
 `status="working"` `pbx_report_turn` check-in at least once every five minutes
 until the work completes. Include what is still running and the last meaningful
@@ -140,6 +146,14 @@ every five minutes until it completes. Include what is running, the latest
 progress signal, and whether operator input is needed. Poll for queued commands
 after each check-in.
 
+## Plan Options
+
+When you need the operator to choose between implementation paths, include
+`needs_input=true` and `plan_options=[...]` in `pbx_report_turn`. Keep each
+option short, actionable, and mutually exclusive. If the TUI sends back a
+`send_input` message beginning with `Selected plan option:`, follow that choice
+and use any `Operator notes:` text as additional constraints.
+
 ## Done Reports
 
 Before sending `status="done"` for repository work, inspect the workspace and
@@ -212,6 +226,12 @@ def runbook_payload() -> dict[str, Any]:
             "Keep recurring working and pong reports concise.",
             "Avoid repeating long logs, diffs, or unchanged plans in recurring reports.",
             "Watch TUI usage estimates for high polling, report, ping, or token patterns.",
+        ],
+        "plan_options": [
+            "Use pbx_report_turn(needs_input=true, plan_options=[...]) when operator choice is required.",
+            "Keep plan options concise, actionable, and mutually exclusive.",
+            "Treat send_input messages beginning with 'Selected plan option:' as the operator's chosen path.",
+            "Use Operator notes in that message as additional constraints.",
         ],
         "long_running_work": [
             "For normally progressing long-running work, send status='working' at least once every five minutes.",

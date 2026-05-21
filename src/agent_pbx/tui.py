@@ -683,6 +683,41 @@ class AgentPBXTUI(App[None]):
         min-height: 12;
     }
 
+    #plan-choice-panel {
+        display: none;
+        height: 13;
+        min-height: 0;
+        border: tall $secondary;
+        padding: 0 1;
+    }
+
+    #plan-choice-title {
+        height: 1;
+        color: $secondary;
+        content-align: left middle;
+    }
+
+    #plan-options {
+        height: 4;
+    }
+
+    #plan-notes {
+        height: 4;
+        min-height: 3;
+        max-height: 8;
+        border: tall $accent;
+        background: $surface;
+        scrollbar-size: 0 1;
+    }
+
+    #plan-actions {
+        height: 3;
+    }
+
+    #plan-actions Button {
+        width: 1fr;
+    }
+
     #thread-actions {
         height: 3;
     }
@@ -889,6 +924,7 @@ class AgentPBXTUI(App[None]):
         self.thread_items: dict[str, dict[str, Any]] = {}
         self.thread_order: list[str] = []
         self.selected_thread_item_id: str | None = None
+        self.selected_plan_option_index: int | None = None
         self.marked_thread_item_ids: set[str] = set()
         self.active_agent_tab = "latest-tab"
         self.unseen_latest_agent_ids: set[str] = set()
@@ -981,6 +1017,27 @@ class AgentPBXTUI(App[None]):
                             show_row_labels=False,
                         )
                         yield TextArea(id="thread-detail", read_only=True)
+                        with Vertical(id="plan-choice-panel"):
+                            yield Static("Plan Options", id="plan-choice-title")
+                            yield DataTable(
+                                id="plan-options",
+                                cursor_type="row",
+                                show_row_labels=False,
+                            )
+                            yield TextArea(
+                                id="plan-notes",
+                                soft_wrap=True,
+                            )
+                            with Horizontal(id="plan-actions"):
+                                yield Button(
+                                    "Send Plan Choice",
+                                    id="send-plan-choice",
+                                    variant="primary",
+                                )
+                                yield Button(
+                                    "Send to Codex Pane",
+                                    id="send-plan-tmux",
+                                )
                         with Horizontal(id="thread-actions"):
                             yield Button("Export Item", id="export-item")
                             yield Button("Export Marked", id="export-marked")
@@ -1013,6 +1070,9 @@ class AgentPBXTUI(App[None]):
         events.add_columns("ID", "Type", "Subject")
         thread = self.query_one("#thread", DataTable)
         thread.add_columns("M", "Time", "Kind", "Status", "Summary")
+        plan_options = self.query_one("#plan-options", DataTable)
+        plan_options.add_columns("#", "Option")
+        self.render_plan_choice_panel(None)
         await self.refresh_agents()
         await self.refresh_events()
         self.set_interval(2.0, self.refresh_agents)
@@ -1061,8 +1121,17 @@ class AgentPBXTUI(App[None]):
         if enabled:
             self.tmux_detached_agent_ids.clear()
         self.apply_tmux_class()
+        self.update_plan_tmux_button_state()
         self.save_settings()
         return enabled
+
+    def update_plan_tmux_button_state(self) -> None:
+        send_tmux = self.query_one_or_none("#send-plan-tmux", Button)
+        if send_tmux is None:
+            return
+        send_tmux.disabled = (
+            not self.tmux_direct_enabled or self.selected_plan_option() is None
+        )
 
     def query_one_or_none(
         self, selector: str, widget_type: type[WidgetType]
@@ -1359,6 +1428,10 @@ class AgentPBXTUI(App[None]):
             return
         if event.data_table.id == "thread":
             self.select_thread_item(str(event.row_key.value))
+            return
+        if event.data_table.id == "plan-options":
+            self.select_plan_option(str(event.row_key.value))
+            return
 
     async def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         if event.data_table.id == "agents":
@@ -1366,6 +1439,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.data_table.id == "thread":
             self.select_thread_item(str(event.cell_key.row_key.value))
+            return
+        if event.data_table.id == "plan-options":
+            self.select_plan_option(str(event.cell_key.row_key.value))
 
     def on_key(self, event: Key) -> None:
         thread = self.query_one_or_none("#thread", DataTable)
@@ -1712,6 +1788,7 @@ class AgentPBXTUI(App[None]):
             self.thread_order = []
             self.marked_thread_item_ids.clear()
             self.render_thread([])
+            self.render_plan_choice_panel(None)
             thread_detail.text = f"Unable to load thread for {agent_id}: {exc}"
             return
         thread = self.order_thread_for_display(thread)
@@ -1729,6 +1806,7 @@ class AgentPBXTUI(App[None]):
         else:
             self.selected_thread_item_id = None
             self.thread_order = []
+            self.render_plan_choice_panel(None)
             thread_detail.text = f"No thread history for {agent_id}."
 
     def order_thread_for_display(
@@ -1777,6 +1855,12 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "delete-queued":
             await self.delete_queued_thread_commands()
             return
+        if event.button.id == "send-plan-choice":
+            await self.send_plan_choice()
+            return
+        if event.button.id == "send-plan-tmux":
+            await self.send_plan_choice_to_tmux()
+            return
         if event.button.id == "workerbee-refresh":
             if self.selected_agent_id:
                 await self.load_workerbee_status(self.selected_agent_id)
@@ -1817,13 +1901,20 @@ class AgentPBXTUI(App[None]):
         message = message_input.text
         if not agent_id or not message.strip():
             return
+        sent = await self.send_text_to_tmux(agent_id, message)
+        if not sent:
+            return
+        message_input.text = ""
+        await self.load_tmux_capture(agent_id)
+
+    async def send_text_to_tmux(self, agent_id: str, message: str) -> bool:
         status = self.query_one_or_none("#tmux-status", Static)
         try:
             panes = await asyncio.to_thread(tmux_support.list_panes)
         except Exception as exc:
             if status is not None:
                 status.update(f"Tmux: unavailable ({exc})")
-            return
+            return False
         self.tmux_panes = panes
         pane, mode = self.resolve_tmux_pane(agent_id, panes)
         if pane is None:
@@ -1832,14 +1923,89 @@ class AgentPBXTUI(App[None]):
                     status.update(f"Tmux: stale target for {agent_id}")
                 else:
                     status.update(f"Tmux: no pane for {agent_id}")
-            return
+            return False
         try:
             await asyncio.to_thread(tmux_support.send_text, pane.pane_id, message)
         except Exception as exc:
             if status is not None:
                 status.update(f"Tmux: send failed ({exc})")
+            return False
+        return True
+
+    def selected_plan_option(self) -> str | None:
+        item = (
+            self.thread_items.get(self.selected_thread_item_id)
+            if self.selected_thread_item_id
+            else None
+        )
+        options = self.plan_options_for_item(item)
+        if self.selected_plan_option_index is None:
+            return None
+        if (
+            self.selected_plan_option_index < 0
+            or self.selected_plan_option_index >= len(options)
+        ):
+            return None
+        return options[self.selected_plan_option_index]
+
+    def plan_options_for_item(self, item: dict[str, Any] | None) -> list[str]:
+        if not item or item.get("kind") != "report":
+            return []
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        return [
+            str(option)
+            for option in list_value(metadata.get("plan_options"))
+            if str(option).strip()
+        ]
+
+    def plan_choice_message(self, option: str, notes: str = "") -> str:
+        message = f"Selected plan option: {option.strip()}"
+        clean_notes = notes.strip()
+        if clean_notes:
+            message = f"{message}\n\nOperator notes:\n{clean_notes}"
+        return message
+
+    async def send_plan_choice(self) -> None:
+        agent_id = (
+            self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
+        )
+        option = self.selected_plan_option()
+        if not agent_id or option is None:
+            self.notify("Select a plan option first.", severity="warning")
             return
-        message_input.text = ""
+        notes_input = self.query_one("#plan-notes", TextArea)
+        message = self.plan_choice_message(option, notes_input.text)
+        command = await self.queue_command(
+            agent_id,
+            "send_input",
+            {"message": message},
+        )
+        notes_input.text = ""
+        self.notify(f"Plan choice queued for {agent_id}: {command['command_id']}")
+        await self.refresh_events()
+        await self.load_thread(agent_id)
+
+    async def send_plan_choice_to_tmux(self) -> None:
+        agent_id = (
+            self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
+        )
+        option = self.selected_plan_option()
+        if not self.tmux_direct_enabled:
+            self.notify(
+                "Enable tmux direct mode before sending to Codex pane.",
+                severity="warning",
+            )
+            return
+        if not agent_id or option is None:
+            self.notify("Select a plan option first.", severity="warning")
+            return
+        notes_input = self.query_one("#plan-notes", TextArea)
+        message = self.plan_choice_message(option, notes_input.text)
+        sent = await self.send_text_to_tmux(agent_id, message)
+        if not sent:
+            return
+        notes_input.text = ""
+        self.notify(f"Sent plan choice to Codex pane for {agent_id}.")
         await self.load_tmux_capture(agent_id)
 
     async def request_detail(self) -> None:
@@ -2333,6 +2499,49 @@ class AgentPBXTUI(App[None]):
             return
         self.selected_thread_item_id = item_id
         self.query_one("#thread-detail", TextArea).text = self.format_thread_item(item)
+        self.render_plan_choice_panel(item)
+
+    def render_plan_choice_panel(self, item: dict[str, Any] | None) -> None:
+        panel = self.query_one_or_none("#plan-choice-panel", Vertical)
+        table = self.query_one_or_none("#plan-options", DataTable)
+        notes = self.query_one_or_none("#plan-notes", TextArea)
+        send = self.query_one_or_none("#send-plan-choice", Button)
+        send_tmux = self.query_one_or_none("#send-plan-tmux", Button)
+        if panel is None or table is None or notes is None:
+            return
+        options = self.plan_options_for_item(item)
+        table.clear()
+        self.selected_plan_option_index = None
+        if not options:
+            panel.styles.display = "none"
+            notes.text = ""
+            if send is not None:
+                send.disabled = True
+            if send_tmux is not None:
+                send_tmux.disabled = True
+            return
+        panel.styles.display = "block"
+        for index, option in enumerate(options):
+            table.add_row(str(index + 1), option, key=str(index))
+        self.selected_plan_option_index = 0
+        table.move_cursor(row=0, animate=False, scroll=False)
+        if send is not None:
+            send.disabled = False
+        if send_tmux is not None:
+            send_tmux.disabled = not self.tmux_direct_enabled
+
+    def select_plan_option(self, row_key: str) -> None:
+        parsed = int_value(row_key)
+        if parsed is None:
+            return
+        item = (
+            self.thread_items.get(self.selected_thread_item_id)
+            if self.selected_thread_item_id
+            else None
+        )
+        if parsed < 0 or parsed >= len(self.plan_options_for_item(item)):
+            return
+        self.selected_plan_option_index = parsed
 
     def current_thread_item_id(self) -> str | None:
         table = self.query_one("#thread", DataTable)
