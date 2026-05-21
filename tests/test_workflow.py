@@ -120,6 +120,62 @@ def test_agent_thread_merges_reports_and_commands(tmp_path: Path) -> None:
     assert thread[1]["metadata"]["result"] == {"ok": True}
 
 
+def test_delete_queued_command_removes_it_from_thread_and_poll(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    command = client.post(
+        "/v1/commands",
+        json={
+            "agent_id": "agent-1",
+            "type": "send_input",
+            "payload": {"message": "Never mind"},
+        },
+    ).json()
+
+    deleted = client.delete(f"/v1/commands/{command['command_id']}")
+    polled = client.get("/v1/agents/agent-1/commands?wait_seconds=0")
+    thread = client.get("/v1/agents/agent-1/thread")
+    agents = client.get("/v1/agents")
+    events = client.get("/v1/events")
+
+    assert deleted.status_code == 200
+    assert deleted.json()["command_id"] == command["command_id"]
+    assert deleted.json()["status"] == "queued"
+    assert polled.json() == []
+    assert thread.json() == []
+    assert agents.json()[0]["queued_command_count"] == 0
+    assert [event["type"] for event in events.json()] == [
+        "agent_registered",
+        "command_queued",
+        "command_deleted",
+    ]
+
+
+def test_delete_delivered_command_is_rejected(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    command = client.post(
+        "/v1/commands",
+        json={
+            "agent_id": "agent-1",
+            "type": "send_input",
+            "payload": {"message": "Proceed"},
+        },
+    ).json()
+    client.get("/v1/agents/agent-1/commands?wait_seconds=0")
+
+    deleted = client.delete(f"/v1/commands/{command['command_id']}")
+
+    assert deleted.status_code == 409
+    assert deleted.json()["detail"] == "command is not queued"
+
+
 def test_agent_workerbee_status_endpoint(tmp_path: Path, monkeypatch) -> None:
     def fake_status_for_agent(self, agent):  # noqa: ANN001, ARG001
         return {

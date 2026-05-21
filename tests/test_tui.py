@@ -232,6 +232,7 @@ async def test_tui_mounts_notification_controls() -> None:
         export_item = app.query_one("#export-item", Button)
         export_marked = app.query_one("#export-marked", Button)
         export_all = app.query_one("#export-all", Button)
+        delete_queued = app.query_one("#delete-queued", Button)
         workerbee_detail = app.query_one("#workerbee-detail", TextArea)
         workerbee_refresh = app.query_one("#workerbee-refresh", Button)
         composer = app.query_one("#composer")
@@ -251,6 +252,7 @@ async def test_tui_mounts_notification_controls() -> None:
         assert export_item.label.plain == "Export Item"
         assert export_marked.label.plain == "Export Marked"
         assert export_all.label.plain == "Export All"
+        assert delete_queued.label.plain == "Delete Queued"
         assert workerbee_detail.read_only is True
         assert workerbee_refresh.label.plain == "Refresh WorkerBee"
         assert "#thread {\n        height: 7;" in app.CSS
@@ -559,6 +561,88 @@ def test_tui_thread_export_writes_markdown(tmp_path: Path) -> None:
     assert "# Agent PBX Thread Export: agent-1" in content
     assert "Full report detail" in content
     assert '"report_id": "r1"' in content
+
+
+def test_tui_queued_command_ids_for_delete_prefers_marked_items() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.selected_thread_item_id = "command:selected"
+    app.thread_order = ["command:selected", "command:queued", "command:acked", "report:r1"]
+    app.thread_items = {
+        "command:selected": {
+            "item_id": "command:selected",
+            "kind": "command",
+            "status": "queued",
+            "metadata": {"command_id": "selected"},
+        },
+        "command:queued": {
+            "item_id": "command:queued",
+            "kind": "command",
+            "status": "queued",
+            "metadata": {"command_id": "queued"},
+        },
+        "command:acked": {
+            "item_id": "command:acked",
+            "kind": "command",
+            "status": "acked",
+            "metadata": {"command_id": "acked"},
+        },
+        "report:r1": {
+            "item_id": "report:r1",
+            "kind": "report",
+            "status": "done",
+            "metadata": {"report_id": "r1"},
+        },
+    }
+    app.marked_thread_item_ids = {"command:queued", "command:acked", "report:r1"}
+
+    assert app.queued_command_ids_for_delete() == ["queued"]
+
+
+async def test_tui_delete_queued_thread_commands_refreshes_thread() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    deleted: list[str] = []
+    events_refreshed = 0
+    agents_refreshed = 0
+    threads: list[str] = []
+
+    async def fake_delete_queued_command(command_id: str) -> dict[str, str]:
+        deleted.append(command_id)
+        return {"command_id": command_id}
+
+    async def fake_refresh_events() -> None:
+        nonlocal events_refreshed
+        events_refreshed += 1
+
+    async def fake_refresh_agents() -> None:
+        nonlocal agents_refreshed
+        agents_refreshed += 1
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.delete_queued_command = fake_delete_queued_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+    app.selected_agent_id = "agent-1"
+    app.selected_thread_item_id = "command:c1"
+    app.thread_order = ["command:c1"]
+    app.thread_items = {
+        "command:c1": {
+            "item_id": "command:c1",
+            "kind": "command",
+            "status": "queued",
+            "metadata": {"command_id": "c1"},
+        }
+    }
+
+    deleted_count = await app.delete_queued_thread_commands()
+
+    assert deleted_count == 1
+    assert deleted == ["c1"]
+    assert events_refreshed == 1
+    assert agents_refreshed == 1
+    assert threads == ["agent-1"]
 
 
 async def test_tui_unseen_latest_tracking_clears_when_seen() -> None:

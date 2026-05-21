@@ -231,6 +231,40 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         )
         return command
 
+    @app.delete(
+        "/v1/commands/{command_id}",
+        response_model=CommandResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def delete_queued_command(
+        command_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        command = store.get_command(command_id)
+        if command is None:
+            raise HTTPException(status_code=404, detail="command not found")
+        if command["status"] != "queued":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="command is not queued",
+            )
+        deleted = store.delete_queued_command(command_id)
+        if deleted is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="command is no longer queued",
+            )
+        store.append_event(
+            "command_deleted",
+            {
+                "command_id": command_id,
+                "agent_id": deleted["agent_id"],
+                "type": deleted["type"],
+            },
+            command_id,
+        )
+        return deleted
+
     @app.get(
         "/v1/agents/{agent_id}/commands",
         response_model=list[CommandResponse],

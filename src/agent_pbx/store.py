@@ -460,6 +460,17 @@ class Store:
             ).fetchone()
         return self._command_from_row(row) if row else None
 
+    def delete_queued_command(self, command_id: str) -> dict[str, Any] | None:
+        command = self.get_command(command_id)
+        if command is None or command["status"] != "queued":
+            return None
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM commands WHERE command_id = ? AND status = 'queued'",
+                (command_id,),
+            )
+        return command if cursor.rowcount else None
+
     def claim_commands(self, agent_id: str, *, limit: int = 10) -> list[dict[str, Any]]:
         current = now_ts()
         with self.connect() as conn:

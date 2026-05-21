@@ -598,6 +598,7 @@ class AgentPBXTUI(App[None]):
                             yield Button("Export Marked", id="export-marked")
                             yield Button("Export All", id="export-all")
                             yield Button("Clear Marks", id="clear-marks")
+                            yield Button("Delete Queued", id="delete-queued")
                     with TabPane("WorkerBee", id="workerbee-tab"):
                         yield TextArea(id="workerbee-detail", read_only=True)
                         with Horizontal(id="workerbee-actions"):
@@ -1035,6 +1036,9 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "clear-marks":
             self.clear_thread_marks()
             return
+        if event.button.id == "delete-queued":
+            await self.delete_queued_thread_commands()
+            return
         if event.button.id == "workerbee-refresh":
             if self.selected_agent_id:
                 await self.load_workerbee_status(self.selected_agent_id)
@@ -1122,6 +1126,15 @@ class AgentPBXTUI(App[None]):
                     "type": command_type,
                     "payload": payload,
                 },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def delete_queued_command(self, command_id: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
+            response = await client.delete(
+                f"/v1/commands/{command_id}",
                 headers=auth_headers(self.token),
             )
             response.raise_for_status()
@@ -1405,6 +1418,7 @@ class AgentPBXTUI(App[None]):
             "command_queued",
             "command_delivered",
             "command_acked",
+            "command_deleted",
         }:
             self.run_worker(
                 self.refresh_agents(),
@@ -1420,7 +1434,12 @@ class AgentPBXTUI(App[None]):
                     name="selected-agent-report",
                     exclusive=True,
                 )
-            elif event_type in {"command_queued", "command_delivered", "command_acked"}:
+            elif event_type in {
+                "command_queued",
+                "command_delivered",
+                "command_acked",
+                "command_deleted",
+            }:
                 self.run_worker(
                     self.load_thread(selected_agent_id),
                     name="selected-agent-thread",
@@ -1495,6 +1514,53 @@ class AgentPBXTUI(App[None]):
             return
         self.marked_thread_item_ids.clear()
         self.render_thread([self.thread_items[item_id] for item_id in self.thread_order])
+
+    async def delete_queued_thread_commands(self) -> int:
+        agent_id = self.selected_agent_id
+        command_ids = self.queued_command_ids_for_delete()
+        if not command_ids:
+            self.notify("No queued commands selected for deletion.", severity="warning")
+            return 0
+        deleted = 0
+        failures: list[str] = []
+        for command_id in command_ids:
+            try:
+                await self.delete_queued_command(command_id)
+            except Exception as exc:
+                failures.append(f"{command_id}: {exc}")
+            else:
+                deleted += 1
+        if deleted:
+            self.notify(f"Deleted {deleted} queued command(s).")
+        if failures:
+            self.notify(
+                f"Failed to delete {len(failures)} command(s).",
+                severity="error",
+            )
+        await self.refresh_events()
+        await self.refresh_agents()
+        if agent_id:
+            await self.load_thread(agent_id)
+        return deleted
+
+    def queued_command_ids_for_delete(self) -> list[str]:
+        item_ids = self.thread_item_ids_for_scope(
+            "marked" if self.marked_thread_item_ids else "item"
+        )
+        command_ids: list[str] = []
+        for item_id in item_ids:
+            item = self.thread_items.get(item_id)
+            if (
+                item is None
+                or item.get("kind") != "command"
+                or item.get("status") != "queued"
+            ):
+                continue
+            metadata = item.get("metadata")
+            command_id = metadata.get("command_id") if isinstance(metadata, dict) else None
+            if command_id:
+                command_ids.append(str(command_id))
+        return command_ids
 
     def export_thread_scope(self, scope: str) -> Path | None:
         item_ids = self.thread_item_ids_for_scope(scope)
