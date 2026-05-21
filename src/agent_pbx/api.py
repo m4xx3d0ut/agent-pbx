@@ -26,6 +26,7 @@ from .config import ServerConfig
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .mcp_tools import create_mcp_asgi_app
 from .pairing import PairRequest, PairResponse, issue_pairing_token
+from .polling import poll_commands as poll_commands_until
 from .schemas import (
     AgentRegisterRequest,
     AgentResponse,
@@ -36,9 +37,11 @@ from .schemas import (
     ReportCreateRequest,
     ReportResponse,
     ThreadItemResponse,
+    WorkerBeeStatusResponse,
 )
 from .security import generate_pairing_code
 from .store import Store
+from .workerbee import WorkerBeeStatusService
 
 
 logger = logging.getLogger("agent_pbx.api")
@@ -84,6 +87,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     )
     app.state.config = resolved_config
     app.state.store = store
+    app.state.workerbee = WorkerBeeStatusService(
+        workerbee_bin=resolved_config.workerbee_bin,
+        timeout_seconds=resolved_config.workerbee_timeout_seconds,
+        cache_seconds=resolved_config.workerbee_cache_seconds,
+    )
     if resolved_config.debug:
         app.add_middleware(DebugRequestLogMiddleware)
     app.mount("/mcp", mcp_asgi_app)
@@ -187,6 +195,22 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="agent not registered")
         return store.list_thread(agent_id, limit=limit)
 
+    @app.get(
+        "/v1/agents/{agent_id}/workerbee",
+        response_model=WorkerBeeStatusResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_agent_workerbee_status(
+        agent_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        workerbee = request.app.state.workerbee
+        return await asyncio.to_thread(workerbee.status_for_agent, agent)
+
     @app.post(
         "/v1/commands",
         response_model=CommandResponse,
@@ -215,26 +239,31 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     async def poll_commands(
         agent_id: str,
         wait_seconds: float = 25,
+        max_wait_seconds: float | None = None,
+        interval_seconds: float = 5,
+        limit: int = 10,
         store: Store = Depends(get_store),
     ) -> list[dict[str, object]]:
-        deadline = asyncio.get_running_loop().time() + min(max(wait_seconds, 0), 30)
-        while True:
-            commands = store.claim_commands(agent_id)
-            if commands:
-                for command in commands:
-                    store.append_event(
-                        "command_delivered",
-                        {
-                            "command_id": command["command_id"],
-                            "agent_id": agent_id,
-                            "type": command["type"],
-                        },
-                        command["command_id"],
-                    )
-                return commands
-            if wait_seconds <= 0 or asyncio.get_running_loop().time() >= deadline:
-                return []
-            await asyncio.sleep(0.5)
+        commands = await poll_commands_until(
+            store,
+            agent_id,
+            wait_seconds=wait_seconds,
+            max_wait_seconds=max_wait_seconds,
+            interval_seconds=interval_seconds,
+            limit=limit,
+        )
+        store.record_poll(agent_id, delivered_count=len(commands))
+        for command in commands:
+            store.append_event(
+                "command_delivered",
+                {
+                    "command_id": command["command_id"],
+                    "agent_id": agent_id,
+                    "type": command["type"],
+                },
+                command["command_id"],
+            )
+        return commands
 
     @app.post(
         "/v1/commands/{command_id}/ack",

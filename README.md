@@ -128,7 +128,31 @@ Connected agents can also call `pbx_agent_runbook` over MCP. The runbook is
 intended for project-specific agent docs and for agents that need a refresher on
 session-long PBX behavior. The guidance requires `status="done"` reports for
 repository work to include whether changes are clean, committed, staged, or
-unstaged.
+unstaged. It also requires normally progressing long-running work to check in
+with `status="working"` at least once every five minutes.
+
+For idle waits, agents should use bounded repeated polling:
+
+```python
+pbx_poll_commands(
+    agent_id="codex-main",
+    wait_seconds=25,
+    max_wait_seconds=300,
+    interval_seconds=5,
+)
+```
+
+That repeats long-poll cycles for up to five minutes, so commands queued after
+the first long poll expires can still be picked up by a live agent.
+
+Use `Ping` in the TUI to intentionally keep a live agent polling longer. Agents
+handle `ping` as a keepalive: reply with a `status="working"` pong report, ack
+with `{"pong": true}`, then start another bounded poll window.
+
+The TUI `Use` column shows a rough PBX-visible usage gauge per agent for the
+last hour: estimated tokens plus poll, report, and ping counts. Estimates use
+payload text size and fixed weights for polling overhead; they are not exact
+Codex billing, but they identify noisy agents and verbose check-ins.
 
 ## Planned Local Validation
 
@@ -140,6 +164,24 @@ docker run --rm -p 8765:8765 -e AGENT_PBX_TOKEN=dev-token agent-pbx:workerbee
 agent-pbx sim-agent --token dev-token --once
 agent-pbx sim-client --token dev-token --agent-id sim-agent-1 --message "Proceed"
 ```
+
+## WorkerBee TUI Status
+
+Set `AGENT_PBX_WORKERBEE_BIN` before starting the Agent PBX daemon to enable
+the read-only WorkerBee tab in the TUI. The daemon runs WorkerBee status
+commands; the TUI only renders the API result.
+
+```bash
+export AGENT_PBX_WORKERBEE_BIN=/home/m4xx3d0ut/git/k1s-wt/k1s-workerbee/.venv/bin/workerbee
+agent-pbx mcp restart --token dev-token
+agent-pbx tui --token dev-token
+```
+
+Agents must register with `metadata.cwd` set to their project directory. When
+the selected agent is in a WorkerBee project, the tab shows the WorkerBee
+project name, mode, running state, dashboard URLs, app readiness, latest
+deployment metadata, ingress URLs, workloads, and validation findings. The v1
+tab does not start, stop, deploy, or mutate WorkerBee projects.
 
 ## Debug Runs
 

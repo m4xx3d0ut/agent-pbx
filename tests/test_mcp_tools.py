@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -40,6 +41,16 @@ async def test_mcp_reporting_and_command_tools(tmp_path: Path) -> None:
             },
         )
     )
+    ping = tool_json(
+        await mcp.call_tool(
+            "pbx_queue_command",
+            {
+                "agent_id": "agent-1",
+                "command_type": "ping",
+                "payload": {"request": "pong"},
+            },
+        )
+    )
     report = tool_json(
         await mcp.call_tool(
             "pbx_report_turn",
@@ -64,6 +75,7 @@ async def test_mcp_reporting_and_command_tools(tmp_path: Path) -> None:
     )
 
     assert agent["agent_id"] == "agent-1"
+    assert ping["type"] == "ping"
     assert report["detail"] == "Full detail"
     assert polled[0]["command_id"] == command["command_id"]
     assert acked["status"] == "acked"
@@ -84,3 +96,45 @@ async def test_mcp_agent_runbook_tool(tmp_path: Path) -> None:
     assert runbook["title"] == "Agent PBX Runbook"
     assert any("pbx_poll_commands" in item for item in runbook["active_loop"])
     assert "request_detail" in runbook["commands"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_repeated_poll_picks_up_late_command(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {"agent_id": "agent-1", "project": "demo"},
+    )
+    poll_task = asyncio.create_task(
+        mcp.call_tool(
+            "pbx_poll_commands",
+            {
+                "agent_id": "agent-1",
+                "wait_seconds": 0,
+                "max_wait_seconds": 1,
+                "interval_seconds": 0.05,
+            },
+        )
+    )
+    await asyncio.sleep(0.1)
+    command = tool_json(
+        await mcp.call_tool(
+            "pbx_queue_command",
+            {
+                "agent_id": "agent-1",
+                "command_type": "send_input",
+                "payload": {"message": "late"},
+            },
+        )
+    )
+
+    polled = tool_json(await poll_task)
+    agent = store.get_agent("agent-1")
+
+    assert polled[0]["command_id"] == command["command_id"]
+    assert polled[0]["status"] == "delivered"
+    assert agent is not None
+    assert agent["last_poll_at"] is not None

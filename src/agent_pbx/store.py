@@ -11,7 +11,12 @@ from .schemas import AgentRegisterRequest, CommandCreateRequest, ReportCreateReq
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
+TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
+POLL_BASE_TOKEN_ESTIMATE = 80
+DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
+USAGE_WARN_TOKENS_PER_HOUR = 10_000
+POLL_WARN_PER_HOUR = 24
 
 
 @dataclass(frozen=True)
@@ -68,7 +73,8 @@ class Store:
                     status TEXT NOT NULL,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
                     created_at REAL NOT NULL,
-                    last_seen_at REAL NOT NULL
+                    last_seen_at REAL NOT NULL,
+                    last_poll_at REAL
                 );
 
                 CREATE TABLE IF NOT EXISTS reports (
@@ -97,6 +103,14 @@ class Store:
                     FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS poll_events (
+                    poll_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id TEXT NOT NULL,
+                    delivered_count INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     type TEXT NOT NULL,
@@ -110,6 +124,15 @@ class Store:
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+            self._ensure_column(conn, "agents", "last_poll_at", "REAL")
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection, table: str, column: str, definition: str
+    ) -> None:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def has_tokens(self) -> bool:
         with self.connect() as conn:
@@ -269,7 +292,8 @@ class Store:
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT agent_id, project, name, status, metadata_json, created_at, last_seen_at
+                SELECT agent_id, project, name, status, metadata_json, created_at,
+                       last_seen_at, last_poll_at
                 FROM agents
                 WHERE agent_id = ?
                 """,
@@ -281,12 +305,17 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT agent_id, project, name, status, metadata_json, created_at, last_seen_at
+                SELECT agent_id, project, name, status, metadata_json, created_at,
+                       last_seen_at, last_poll_at
                 FROM agents
                 ORDER BY last_seen_at DESC, agent_id ASC
                 """
             ).fetchall()
-        return [self._agent_from_row(row) for row in rows]
+            agents = [self._agent_from_row(row) for row in rows]
+            for agent in agents:
+                self._add_queue_summary(conn, agent)
+                self._add_usage_summary(conn, agent)
+        return agents
 
     def create_report(
         self, agent_id: str, request: ReportCreateRequest
@@ -434,6 +463,10 @@ class Store:
     def claim_commands(self, agent_id: str, *, limit: int = 10) -> list[dict[str, Any]]:
         current = now_ts()
         with self.connect() as conn:
+            conn.execute(
+                "UPDATE agents SET last_poll_at = ? WHERE agent_id = ?",
+                (current, agent_id),
+            )
             rows = conn.execute(
                 """
                 SELECT command_id, agent_id, type, payload_json, status, created_at,
@@ -458,6 +491,18 @@ class Store:
                 )
         return [self.get_command(command_id) for command_id in command_ids if command_id]
 
+    def record_poll(self, agent_id: str, *, delivered_count: int) -> None:
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO poll_events(agent_id, delivered_count, created_at)
+                SELECT ?, ?, ?
+                WHERE EXISTS (SELECT 1 FROM agents WHERE agent_id = ?)
+                """,
+                (agent_id, max(0, delivered_count), current, agent_id),
+            )
+
     def ack_command(
         self, command_id: str, result: dict[str, Any] | None = None
     ) -> dict[str, Any] | None:
@@ -477,7 +522,94 @@ class Store:
     def _agent_from_row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["metadata"] = json.loads(data.pop("metadata_json"))
+        data["queued_command_count"] = 0
+        data["oldest_queued_command_age_seconds"] = None
+        data["polls_per_hour"] = 0
+        data["empty_polls_per_hour"] = 0
+        data["reports_per_hour"] = 0
+        data["pings_per_hour"] = 0
+        data["estimated_visible_tokens_per_hour"] = 0
+        data["usage_warning"] = None
         return data
+
+    @staticmethod
+    def _add_queue_summary(
+        conn: sqlite3.Connection, agent: dict[str, Any]
+    ) -> None:
+        current = now_ts()
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS queued_count, MIN(created_at) AS oldest_created_at
+            FROM commands
+            WHERE status = 'queued' AND (agent_id IS NULL OR agent_id = ?)
+            """,
+            (agent["agent_id"],),
+        ).fetchone()
+        queued_count = int(row["queued_count"] or 0) if row else 0
+        oldest = row["oldest_created_at"] if row else None
+        agent["queued_command_count"] = queued_count
+        agent["oldest_queued_command_age_seconds"] = (
+            max(0.0, current - float(oldest)) if oldest is not None else None
+        )
+
+    @staticmethod
+    def _add_usage_summary(
+        conn: sqlite3.Connection, agent: dict[str, Any]
+    ) -> None:
+        since = now_ts() - 3600
+        agent_id = agent["agent_id"]
+        poll_row = conn.execute(
+            """
+            SELECT COUNT(*) AS poll_count,
+                   SUM(CASE WHEN delivered_count = 0 THEN 1 ELSE 0 END) AS empty_count,
+                   SUM(delivered_count) AS delivered_count
+            FROM poll_events
+            WHERE agent_id = ? AND created_at >= ?
+            """,
+            (agent_id, since),
+        ).fetchone()
+        report_row = conn.execute(
+            """
+            SELECT COUNT(*) AS report_count,
+                   COALESCE(SUM(LENGTH(summary) + LENGTH(detail)), 0) AS report_chars
+            FROM reports
+            WHERE agent_id = ? AND created_at >= ?
+            """,
+            (agent_id, since),
+        ).fetchone()
+        command_row = conn.execute(
+            """
+            SELECT COUNT(*) AS command_count,
+                   SUM(CASE WHEN type = 'ping' THEN 1 ELSE 0 END) AS ping_count,
+                   COALESCE(SUM(LENGTH(payload_json) + COALESCE(LENGTH(result_json), 0)), 0) AS command_chars
+            FROM commands
+            WHERE (agent_id = ? OR agent_id IS NULL) AND created_at >= ?
+            """,
+            (agent_id, since),
+        ).fetchone()
+        poll_count = int(poll_row["poll_count"] or 0) if poll_row else 0
+        empty_count = int(poll_row["empty_count"] or 0) if poll_row else 0
+        delivered_count = int(poll_row["delivered_count"] or 0) if poll_row else 0
+        report_count = int(report_row["report_count"] or 0) if report_row else 0
+        report_chars = int(report_row["report_chars"] or 0) if report_row else 0
+        ping_count = int(command_row["ping_count"] or 0) if command_row else 0
+        command_chars = int(command_row["command_chars"] or 0) if command_row else 0
+        estimated_tokens = (
+            poll_count * POLL_BASE_TOKEN_ESTIMATE
+            + delivered_count * DELIVERED_COMMAND_TOKEN_ESTIMATE
+            + (report_chars + command_chars) // TOKEN_ESTIMATE_CHARS_PER_TOKEN
+        )
+        warning = None
+        if estimated_tokens >= USAGE_WARN_TOKENS_PER_HOUR:
+            warning = "high estimated token use"
+        elif poll_count >= POLL_WARN_PER_HOUR and empty_count == poll_count:
+            warning = "idle polling"
+        agent["polls_per_hour"] = poll_count
+        agent["empty_polls_per_hour"] = empty_count
+        agent["reports_per_hour"] = report_count
+        agent["pings_per_hour"] = ping_count
+        agent["estimated_visible_tokens_per_hour"] = estimated_tokens
+        agent["usage_warning"] = warning
 
     @staticmethod
     def _report_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -529,6 +661,9 @@ class Store:
         elif command["type"] == "request_detail":
             title = "Detail request"
             body = str(payload.get("request") or payload)
+        elif command["type"] == "ping":
+            title = "Ping"
+            body = str(payload.get("request") or "Ping agent and extend polling.")
         else:
             title = command["type"].replace("_", " ").title()
             body = json.dumps(payload, indent=2, sort_keys=True)

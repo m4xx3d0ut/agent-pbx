@@ -6,7 +6,12 @@ from pydantic import BaseModel, Field
 
 
 CommandType = Literal[
-    "request_detail", "send_input", "start_task", "cancel_task", "acknowledge"
+    "request_detail",
+    "send_input",
+    "start_task",
+    "cancel_task",
+    "acknowledge",
+    "ping",
 ]
 
 
@@ -25,6 +30,15 @@ class AgentResponse(BaseModel):
     metadata: dict[str, Any]
     created_at: float
     last_seen_at: float
+    last_poll_at: float | None = None
+    queued_command_count: int = 0
+    oldest_queued_command_age_seconds: float | None = None
+    polls_per_hour: int = 0
+    empty_polls_per_hour: int = 0
+    reports_per_hour: int = 0
+    pings_per_hour: int = 0
+    estimated_visible_tokens_per_hour: int = 0
+    usage_warning: str | None = None
 
 
 class ReportCreateRequest(BaseModel):
@@ -87,3 +101,25 @@ class ThreadItemResponse(BaseModel):
     title: str
     body: str
     metadata: dict[str, Any]
+
+
+class WorkerBeeStatusResponse(BaseModel):
+    configured: bool
+    available: bool
+    agent_id: str
+    cwd: str | None = None
+    workerbee_bin: str | None = None
+    checked_at: float
+    project: str | None = None
+    mode: str | None = None
+    running: bool | None = None
+    status_kind: str | None = None
+    dashboard_url: str | None = None
+    state_dir: str | None = None
+    description: str | None = None
+    error: dict[str, Any] | None = None
+    project_status: dict[str, Any] | None = None
+    project_card: dict[str, Any] | None = None
+    global_dashboard: dict[str, Any] | None = None
+    app_status: dict[str, Any] | None = None
+    latest_deployment: dict[str, Any] | None = None

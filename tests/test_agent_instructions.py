@@ -23,6 +23,12 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "pbx_ack_command" in instructions
     assert "status=\"done\"" in instructions
     assert "git status --short" in instructions
+    assert "status=\"working\"" in instructions
+    assert "five minutes" in instructions
+    assert "max_wait_seconds=300" in instructions
+    assert "`ping`" in instructions
+    assert '{"pong": true}' in instructions
+    assert "Keep routine check-ins and pong reports concise" in instructions
 
 
 def test_runbook_payload_includes_command_guidance() -> None:
@@ -30,6 +36,11 @@ def test_runbook_payload_includes_command_guidance() -> None:
 
     assert payload["title"] == "Agent PBX Runbook"
     assert any("pbx_poll_commands" in item for item in payload["active_loop"])
+    assert any("max_wait_seconds=300" in item for item in payload["active_loop"])
+    assert any("pong" in item for item in payload["keepalive"])
+    assert any("usage estimates" in item for item in payload["usage_guardrails"])
+    assert any("five minutes" in item for item in payload["long_running_work"])
+    assert "ping" in payload["commands"]
     assert any("git state" in item for item in payload["done_reports"])
     assert "request_detail" in payload["commands"]
 

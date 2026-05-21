@@ -31,6 +31,7 @@ from .sim_agent import run_sim_agent
 from .sim_client import run_sim_client
 from .store import Store
 from .tui import run_tui
+from .workerbee import env_workerbee_bin
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
@@ -272,6 +273,7 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         debug_smoke=bool(getattr(args, "debug_smoke", False))
         or env_flag("AGENT_PBX_DEBUG_SMOKE"),
         log_level=getattr(args, "log_level", None),
+        workerbee_bin=env_workerbee_bin(),
     )
 
 
@@ -301,6 +303,7 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         allow_insecure_lan=daemon_config.allow_insecure_lan,
         debug=daemon_config.debug,
         debug_smoke=daemon_config.debug_smoke,
+        workerbee_bin=daemon_config.workerbee_bin,
     )
     log_level = daemon_config.log_level or ("debug" if daemon_config.debug else "info")
     if daemon_config.debug:
@@ -332,6 +335,7 @@ def _print_mcp_status(result: dict[str, object]) -> None:
         "log_file",
         "metadata_file",
         "codex_command",
+        "workerbee_bin",
         "pid",
         "running",
         "stale",

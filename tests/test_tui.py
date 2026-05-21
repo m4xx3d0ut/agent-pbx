@@ -219,9 +219,12 @@ async def test_tui_mounts_notification_controls() -> None:
         agents = app.query_one("#agents", DataTable)
         thread = app.query_one("#thread", DataTable)
         request_detail = app.query_one("#request-detail", Button)
+        ping = app.query_one("#ping-agent", Button)
         export_item = app.query_one("#export-item", Button)
         export_marked = app.query_one("#export-marked", Button)
         export_all = app.query_one("#export-all", Button)
+        workerbee_detail = app.query_one("#workerbee-detail", TextArea)
+        workerbee_refresh = app.query_one("#workerbee-refresh", Button)
         composer = app.query_one("#composer")
         message = app.query_one("#message", TextArea)
         buttons = app.query_one("#composer-buttons")
@@ -235,11 +238,15 @@ async def test_tui_mounts_notification_controls() -> None:
         assert thread.cursor_type == "row"
         assert thread.show_row_labels is False
         assert request_detail.label.plain == "Request Detail"
+        assert ping.label.plain == "Ping"
         assert export_item.label.plain == "Export Item"
         assert export_marked.label.plain == "Export Marked"
         assert export_all.label.plain == "Export All"
+        assert workerbee_detail.read_only is True
+        assert workerbee_refresh.label.plain == "Refresh WorkerBee"
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
+        assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
         assert message.region.bottom <= composer.region.bottom
         assert buttons.region.bottom <= composer.region.bottom
 
@@ -272,6 +279,70 @@ async def test_tui_select_agent_updates_composer_and_loads_report() -> None:
         assert threads == ["agent-1"]
 
 
+async def test_tui_workerbee_tab_keeps_agent_selection_and_loads_status() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    loaded: list[str] = []
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    async def fake_load_workerbee_status(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+    app.load_workerbee_status = fake_load_workerbee_status  # type: ignore[method-assign]
+
+    async with app.run_test():
+        tabs = app.query_one("#agent-tabs")
+        tabs.active = "workerbee-tab"
+        app.active_agent_tab = "workerbee-tab"
+        await app.select_agent("agent-1")
+
+        assert tabs.active == "workerbee-tab"
+        assert app.active_agent_tab == "workerbee-tab"
+        assert loaded == ["agent-1"]
+
+
+def test_tui_formats_workerbee_status() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    status = {
+        "available": True,
+        "agent_id": "agent-1",
+        "cwd": "/tmp/repo",
+        "workerbee_bin": "/tmp/workerbee",
+        "project": "demo-dev-123",
+        "mode": "lazy",
+        "running": False,
+        "status_kind": "stopped",
+        "dashboard_url": "https://dashboard.local/",
+        "state_dir": "/tmp/state",
+        "description": "no app workload deployed yet",
+        "app_status": {
+            "state": "no_workload_deployed",
+            "ready": False,
+            "message": "no app workload deployed yet",
+            "declared_workload_count": 0,
+            "ready_workload_count": 0,
+            "degraded_workload_count": 0,
+            "orphaned_workload_count": 0,
+        },
+        "latest_deployment": None,
+        "project_card": {"status_kind": "stopped", "exposed_route_summary": "none"},
+        "global_dashboard": {"dashboard_url": "https://dashboard.local/", "running": True},
+    }
+
+    rendered = app.format_workerbee_status(status)
+
+    assert "Project" in rendered
+    assert "Name: demo-dev-123" in rendered
+    assert "No deployment recorded yet." in rendered
+    assert "Global Dashboard" in rendered
+
+
 def test_tui_extracts_event_agent_id() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -295,6 +366,29 @@ def test_tui_theme_toggle_updates_app_theme() -> None:
 def test_tui_custom_theme_css_has_readable_text_area_highlights() -> None:
     assert "Screen.custom-theme TextArea .text-area--selection" in AgentPBXTUI.CSS
     assert "color: $background;" in AgentPBXTUI.CSS
+
+
+def test_tui_formats_queue_and_poll_state(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
+    agent = {
+        "queued_command_count": 2,
+        "oldest_queued_command_age_seconds": 125.0,
+        "last_poll_at": 700.0,
+        "estimated_visible_tokens_per_hour": 12500,
+        "polls_per_hour": 30,
+        "reports_per_hour": 12,
+        "pings_per_hour": 3,
+        "usage_warning": "high estimated token use",
+    }
+
+    assert app.format_queue_state(agent) == "!2 2m"
+    assert app.format_poll_state(agent) == "stale 5m ago"
+    assert app.format_usage_state(agent) == "!12kt p30 r12 g3"
+    assert app.format_poll_state({"queued_command_count": 0, "last_poll_at": 980.0}) == "active"
+    assert app.format_poll_state({"queued_command_count": 0, "last_poll_at": None}) == "-"
+    assert app.format_poll_state({"queued_command_count": 1, "last_poll_at": None}) == "never"
+    assert app.format_usage_state({}) == "-"
 
 
 async def test_tui_thread_selection_renders_detail() -> None:
@@ -698,6 +792,38 @@ async def test_tui_selected_report_event_opens_latest_from_thread() -> None:
     assert refreshed_selected == ["agent-1"]
 
 
+async def test_tui_command_events_refresh_agent_queue_state() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    refreshed_agents = 0
+    worker_coros = []
+
+    async def fake_refresh_agents() -> None:
+        nonlocal refreshed_agents
+        refreshed_agents += 1
+
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+
+    async with app.run_test():
+        def fake_run_worker(coro, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            worker_coros.append(coro)
+            return None
+
+        app.run_worker = fake_run_worker  # type: ignore[method-assign]
+        refreshed_agents = 0
+        app.handle_event(
+            {
+                "event_id": 1,
+                "type": "command_queued",
+                "subject_id": "cmd-1",
+                "payload": {"agent_id": "agent-1"},
+            }
+        )
+        for coro in worker_coros:
+            await coro
+
+    assert refreshed_agents == 1
+
+
 async def test_tui_agent_status_refresh_marks_unseen_latest() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -819,6 +945,45 @@ async def test_tui_request_detail_queues_command() -> None:
         )
     ]
     assert "Detail request queued for agent-1." in detail
+    assert "Command: cmd-1" in detail
+
+
+async def test_tui_ping_queues_keepalive_command() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, object]]] = []
+    threads: list[str] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, object]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.query_one("#agent-id", Input).value = "agent-1"
+        await app.ping_agent()
+        detail = app.query_one("#detail", TextArea).text
+
+    assert queued[0][0] == "agent-1"
+    assert queued[0][1] == "ping"
+    assert queued[0][2]["restart_poll"] is True
+    assert queued[0][2]["recommended_poll"] == {
+        "wait_seconds": 25,
+        "max_wait_seconds": 300,
+        "interval_seconds": 5,
+    }
+    assert threads == ["agent-1"]
+    assert "Ping queued for agent-1." in detail
     assert "Command: cmd-1" in detail
 
 

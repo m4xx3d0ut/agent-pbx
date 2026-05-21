@@ -24,6 +24,11 @@ start, before waiting for input, after important milestones, after test or
 deploy results, and at turn completion. Keep summaries brief but actionable;
 put detailed notes in `detail`.
 
+During long-running work that is progressing normally, send a
+`status="working"` `pbx_report_turn` check-in at least once every five minutes
+until the work completes. Include what is still running and the last meaningful
+progress signal, then poll for queued commands.
+
 Every `status="done"` report for repository work must state the git state:
 clean, committed, staged, or unstaged. Include the relevant `git status --short`
 summary and the commit hash when changes were committed. If the workspace is not
@@ -34,6 +39,20 @@ work, after each report, before finishing a turn, and periodically during
 long-running work. Handle every returned command in order, then call
 `pbx_ack_command` with the result. Do not poll as another agent ID.
 
+For idle wait periods, use bounded repeated polling such as
+`pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
+This repeats long-poll cycles for up to five minutes, allowing queued commands
+to be picked up after the first long poll expires while keeping the wait
+bounded.
+
+If a `ping` command is received, treat it as a polling keepalive. Respond with a
+`status="working"` `pbx_report_turn` whose summary starts with `Pong`, ack the
+ping with `{{"pong": true}}`, then immediately start another bounded poll window.
+
+Keep routine check-ins and pong reports concise. Avoid repeating long logs,
+diffs, or unchanged plan text in recurring `status="working"` reports; summarize
+the latest signal and reference where details can be reviewed.
+
 Command handling rules:
 
 - `request_detail`: send a new detailed `pbx_report_turn`; do not only ack it.
@@ -43,6 +62,8 @@ Command handling rules:
 - `cancel_task`: stop the current PBX-scoped task when safe and report what was
   stopped.
 - `acknowledge`: ack after recording the instruction or status.
+- `ping`: send a `status="working"` pong report, ack with `{{"pong": true}}`, and
+  restart bounded polling.
 
 If PBX is temporarily unavailable, continue local work, mention the PBX failure
 in your next response, and retry registration or polling when practical.
@@ -78,6 +99,28 @@ operator follow-up queues, detailed report history, and TUI visibility.
    the command has been handled.
 5. Never poll or acknowledge commands for a different `agent_id`.
 
+For idle wait periods, prefer
+`pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
+The server repeats long-poll cycles until a command arrives or the five-minute
+window expires.
+
+If a `ping` command arrives, send a `status="working"` pong report, ack the
+command with `{"pong": true}`, and immediately begin another bounded poll window.
+This lets an operator intentionally extend the agent's polling period while the
+agent is still live.
+
+Keep recurring check-ins concise. PBX estimates visible usage from poll counts,
+report text, command payloads, and ack payloads, so repeated verbose reports can
+create avoidable account impact.
+
+## Long-Running Work
+
+If a command, test, build, deploy, or other process is still progressing
+normally, send a `status="working"` `pbx_report_turn` check-in at least once
+every five minutes until it completes. Include what is running, the latest
+progress signal, and whether operator input is needed. Poll for queued commands
+after each check-in.
+
 ## Done Reports
 
 Before sending `status="done"` for repository work, inspect the workspace and
@@ -95,6 +138,8 @@ not a git repository, state that explicitly.
 - `cancel_task`: stop the PBX-scoped task when safe, report what stopped, then
   ack.
 - `acknowledge`: record the instruction or status and ack.
+- `ping`: send a `status="working"` pong report, ack with `{"pong": true}`, and
+  restart bounded polling.
 
 ## Failure Modes
 
@@ -124,6 +169,26 @@ def runbook_payload() -> dict[str, Any]:
             "Keep summary concise and put complete notes in detail.",
             "Handle commands in order and call pbx_ack_command only after handling.",
             "Never poll or ack commands for another agent_id.",
+            "For idle waits, use pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5).",
+        ],
+        "keepalive": [
+            "A ping command is a polling keepalive, not task input.",
+            "On ping, send a status='working' pong report.",
+            'Ack the ping with {"pong": true}.',
+            "Immediately start another bounded poll window.",
+            "Keep pong reports concise.",
+        ],
+        "usage_guardrails": [
+            "Use five-minute working check-ins for normal long-running progress.",
+            "Keep recurring working and pong reports concise.",
+            "Avoid repeating long logs, diffs, or unchanged plans in recurring reports.",
+            "Watch TUI usage estimates for high polling, report, ping, or token patterns.",
+        ],
+        "long_running_work": [
+            "For normally progressing long-running work, send status='working' at least once every five minutes.",
+            "Include what is still running and the latest meaningful progress signal.",
+            "State whether operator input is needed.",
+            "Call pbx_poll_commands after each long-running check-in.",
         ],
         "done_reports": [
             "Before status='done' for repository work, inspect git state.",
@@ -138,6 +203,7 @@ def runbook_payload() -> dict[str, Any]:
             "start_task": "Start the requested task and report that it began.",
             "cancel_task": "Stop the PBX-scoped task when safe, report what stopped, then ack.",
             "acknowledge": "Record the instruction or status and ack.",
+            "ping": 'Send a status=\'working\' pong report, ack with {"pong": true}, then restart bounded polling.',
         },
         "failure_modes": [
             "If PBX is unavailable, continue local work when possible and retry later.",

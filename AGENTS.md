@@ -51,6 +51,11 @@ start, before waiting for input, after important milestones, after test or
 deploy results, and at turn completion. Keep summaries brief but actionable;
 put detailed notes in `detail`.
 
+During long-running work that is progressing normally, send a
+`status="working"` `pbx_report_turn` check-in at least once every five minutes
+until the work completes. Include what is still running and the last meaningful
+progress signal, then poll for queued commands.
+
 Every `status="done"` report for repository work must state the git state:
 clean, committed, staged, or unstaged. Include the relevant `git status --short`
 summary and the commit hash when changes were committed. If the workspace is not
@@ -61,6 +66,20 @@ work, after each report, before finishing a turn, and periodically during
 long-running work. Handle every returned command in order, then call
 `pbx_ack_command` with the result. Do not poll as another agent ID.
 
+For idle wait periods, use bounded repeated polling such as
+`pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
+This repeats long-poll cycles for up to five minutes, allowing queued commands
+to be picked up after the first long poll expires while keeping the wait
+bounded.
+
+If a `ping` command is received, treat it as a polling keepalive. Respond with a
+`status="working"` `pbx_report_turn` whose summary starts with `Pong`, ack the
+ping with `{"pong": true}`, then immediately start another bounded poll window.
+
+Keep routine check-ins and pong reports concise. Avoid repeating long logs,
+diffs, or unchanged plan text in recurring `status="working"` reports; summarize
+the latest signal and reference where details can be reviewed.
+
 Command handling rules:
 
 - `request_detail`: send a new detailed `pbx_report_turn`; do not only ack it.
@@ -70,6 +89,8 @@ Command handling rules:
 - `cancel_task`: stop the current PBX-scoped task when safe and report what was
   stopped.
 - `acknowledge`: ack after recording the instruction or status.
+- `ping`: send a `status="working"` pong report, ack with `{"pong": true}`, and
+  restart bounded polling.
 
 If PBX is temporarily unavailable, continue local work, mention the PBX failure
 in your next response, and retry registration or polling when practical.

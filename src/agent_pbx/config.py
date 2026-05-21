@@ -16,6 +16,9 @@ class ServerConfig:
     debug_smoke_duration_seconds: float = 300.0
     debug_smoke_min_interval_seconds: float = 30.0
     debug_smoke_max_interval_seconds: float = 60.0
+    workerbee_bin: Path | None = None
+    workerbee_timeout_seconds: float = 10.0
+    workerbee_cache_seconds: float = 10.0
 
     @property
     def lan_bound(self) -> bool:

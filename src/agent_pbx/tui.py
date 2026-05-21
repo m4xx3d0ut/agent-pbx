@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 import httpx
@@ -41,6 +42,8 @@ DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
 FOLLOW_UP_MIN_HEIGHT = 3
 FOLLOW_UP_MAX_HEIGHT = 15
 SHIFT_ENTER_KEYS = {"shift+enter", "shift_enter", "shift+return"}
+STALE_POLL_SECONDS = 120
+QUEUED_COMMAND_WARN_SECONDS = 60
 THEME_KEYS = (
     "primary",
     "secondary",
@@ -234,6 +237,41 @@ def slugify(value: str) -> str:
     return slug or "agent"
 
 
+def float_value(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def int_value(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def list_value(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    return f"{hours}h"
+
+
+def format_count(value: int) -> str:
+    if value < 1000:
+        return str(value)
+    return f"{value // 1000}k"
+
+
 class FollowUpTextArea(TextArea):
     async def _on_key(self, event: Key) -> None:
         if event.key in SHIFT_ENTER_KEYS:
@@ -351,6 +389,19 @@ class AgentPBXTUI(App[None]):
     }
 
     #thread-actions Button {
+        width: 1fr;
+    }
+
+    #workerbee-detail {
+        height: 1fr;
+        min-height: 12;
+    }
+
+    #workerbee-actions {
+        height: 3;
+    }
+
+    #workerbee-actions Button {
         width: 1fr;
     }
 
@@ -487,6 +538,7 @@ class AgentPBXTUI(App[None]):
         self.unseen_latest_agent_ids: set[str] = set()
         self.agent_last_seen_at: dict[str, float] = {}
         self.latest_viewed_at_by_agent: dict[str, float] = {}
+        self.workerbee_status_by_agent: dict[str, dict[str, Any]] = {}
         self.attention_blink_phase = False
         self.attention_agent_id: str | None = None
         self.event_stream_disconnected = False
@@ -526,6 +578,10 @@ class AgentPBXTUI(App[None]):
                             yield Button("Export Marked", id="export-marked")
                             yield Button("Export All", id="export-all")
                             yield Button("Clear Marks", id="clear-marks")
+                    with TabPane("WorkerBee", id="workerbee-tab"):
+                        yield TextArea(id="workerbee-detail", read_only=True)
+                        with Horizontal(id="workerbee-actions"):
+                            yield Button("Refresh WorkerBee", id="workerbee-refresh")
                 yield Static("Notification Options")
                 with Horizontal(id="notification-options"):
                     yield Checkbox(
@@ -555,12 +611,13 @@ class AgentPBXTUI(App[None]):
                     with Horizontal(id="composer-buttons"):
                         yield Button("Send Input", id="send", variant="primary")
                         yield Button("Request Detail", id="request-detail")
+                        yield Button("Ping", id="ping-agent")
         yield Footer()
 
     async def on_mount(self) -> None:
         self.screen.set_class(self.ui_theme == self.custom_theme_name, "custom-theme")
         agents = self.query_one("#agents", DataTable)
-        agents.add_columns("New", "Agent", "Status", "Project", "Last Seen")
+        agents.add_columns("New", "Agent", "Status", "Project", "Last Seen", "Queue", "Poll", "Use")
         events = self.query_one("#events", DataTable)
         events.add_columns("ID", "Type", "Subject")
         thread = self.query_one("#thread", DataTable)
@@ -568,6 +625,7 @@ class AgentPBXTUI(App[None]):
         await self.refresh_agents()
         await self.refresh_events()
         self.set_interval(2.0, self.refresh_agents)
+        self.set_interval(15.0, self.refresh_workerbee_if_active)
         self.set_interval(0.8, self.toggle_unseen_attention)
         self.run_worker(self.stream_events(), name="events", exclusive=True)
 
@@ -576,6 +634,8 @@ class AgentPBXTUI(App[None]):
         await self.refresh_events()
         if self.selected_agent_id:
             await self.refresh_selected_agent(self.selected_agent_id)
+            if self.active_agent_tab == "workerbee-tab":
+                await self.load_workerbee_status(self.selected_agent_id)
 
     async def refresh_agents(self) -> None:
         try:
@@ -636,6 +696,9 @@ class AgentPBXTUI(App[None]):
                 str(agent["status"]),
                 str(agent["project"]),
                 f"{agent['last_seen_at']:.0f}",
+                self.format_queue_state(agent),
+                self.format_poll_state(agent),
+                self.format_usage_state(agent),
             ]
             table.add_row(*cells, key=agent_id)
         restore_agent_id = cursor_agent_id if cursor_agent_id in self.agents else None
@@ -662,6 +725,45 @@ class AgentPBXTUI(App[None]):
             scroll=True,
         )
         table.focus()
+
+    def format_queue_state(self, agent: dict[str, Any]) -> str:
+        try:
+            queued_count = int(agent.get("queued_command_count") or 0)
+        except (TypeError, ValueError):
+            queued_count = 0
+        if queued_count <= 0:
+            return ""
+        age = float_value(agent.get("oldest_queued_command_age_seconds"))
+        if age is None:
+            return str(queued_count)
+        prefix = "!" if age >= QUEUED_COMMAND_WARN_SECONDS else ""
+        return f"{prefix}{queued_count} {format_duration(age)}"
+
+    def format_poll_state(self, agent: dict[str, Any]) -> str:
+        last_poll_at = float_value(agent.get("last_poll_at"))
+        try:
+            queued_count = int(agent.get("queued_command_count") or 0)
+        except (TypeError, ValueError):
+            queued_count = 0
+        if last_poll_at is None:
+            return "never" if queued_count else "-"
+        age = max(0.0, time.time() - last_poll_at)
+        if age <= 60:
+            return "active"
+        label = f"{format_duration(age)} ago"
+        if queued_count and age >= STALE_POLL_SECONDS:
+            return f"stale {label}"
+        return label
+
+    def format_usage_state(self, agent: dict[str, Any]) -> str:
+        tokens = int_value(agent.get("estimated_visible_tokens_per_hour")) or 0
+        polls = int_value(agent.get("polls_per_hour")) or 0
+        reports = int_value(agent.get("reports_per_hour")) or 0
+        pings = int_value(agent.get("pings_per_hour")) or 0
+        if not any([tokens, polls, reports, pings]):
+            return "-"
+        prefix = "!" if agent.get("usage_warning") else ""
+        return f"{prefix}{format_count(tokens)}t p{polls} r{reports} g{pings}"
 
     def toggle_unseen_attention(self) -> None:
         if not self.agent_blink_enabled or not self.unseen_latest_agent_ids:
@@ -766,15 +868,25 @@ class AgentPBXTUI(App[None]):
         self.active_agent_tab = str(event.pane.id)
         if self.active_agent_tab == "latest-tab" and self.selected_agent_id:
             self.mark_latest_seen(self.selected_agent_id)
+        if self.active_agent_tab == "workerbee-tab" and self.selected_agent_id:
+            self.run_worker(
+                self.load_workerbee_status(self.selected_agent_id),
+                name="workerbee-status",
+                exclusive=True,
+            )
 
     async def select_agent(self, agent_id: str) -> None:
         if agent_id != self.selected_agent_id:
             self.selected_thread_item_id = None
         self.selected_agent_id = agent_id
         self.query_one("#agent-id", Input).value = self.selected_agent_id
-        self.activate_latest_tab()
+        if self.active_agent_tab in {"latest-tab", "thread-tab"}:
+            self.activate_latest_tab()
         await self.refresh_selected_agent(self.selected_agent_id)
-        self.mark_latest_seen(agent_id)
+        if self.active_agent_tab == "latest-tab":
+            self.mark_latest_seen(agent_id)
+        elif self.active_agent_tab == "workerbee-tab":
+            await self.load_workerbee_status(agent_id)
 
     def activate_latest_tab(self) -> None:
         tabs = self.query_one("#agent-tabs", TabbedContent)
@@ -784,6 +896,10 @@ class AgentPBXTUI(App[None]):
     async def refresh_selected_agent(self, agent_id: str) -> None:
         await self.load_latest_report(agent_id)
         await self.load_thread(agent_id)
+
+    async def refresh_workerbee_if_active(self) -> None:
+        if self.active_agent_tab == "workerbee-tab" and self.selected_agent_id:
+            await self.load_workerbee_status(self.selected_agent_id)
 
     def mark_latest_seen(self, agent_id: str) -> None:
         last_seen = self.agent_last_seen(agent_id)
@@ -871,6 +987,9 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "request-detail":
             await self.request_detail()
             return
+        if event.button.id == "ping-agent":
+            await self.ping_agent()
+            return
         if event.button.id == "export-item":
             self.export_thread_scope("item")
             return
@@ -882,6 +1001,10 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "clear-marks":
             self.clear_thread_marks()
+            return
+        if event.button.id == "workerbee-refresh":
+            if self.selected_agent_id:
+                await self.load_workerbee_status(self.selected_agent_id)
 
     async def send_input(self) -> None:
         agent_id = self.query_one("#agent-id", Input).value.strip()
@@ -927,6 +1050,34 @@ class AgentPBXTUI(App[None]):
         await self.refresh_events()
         await self.load_thread(agent_id)
 
+    async def ping_agent(self) -> None:
+        agent_id = self.query_one("#agent-id", Input).value.strip()
+        if not agent_id:
+            return
+        command = await self.queue_command(
+            agent_id,
+            "ping",
+            {
+                "request": (
+                    "Reply with a status='working' pong report, acknowledge this "
+                    "ping, then start another bounded poll window."
+                ),
+                "restart_poll": True,
+                "recommended_poll": {
+                    "wait_seconds": 25,
+                    "max_wait_seconds": 300,
+                    "interval_seconds": 5,
+                },
+            },
+        )
+        self.query_one("#detail", TextArea).text = (
+            f"Ping queued for {agent_id}.\n"
+            f"Command: {command['command_id']}\n\n"
+            "Waiting for the agent to reply with a pong report and restart polling."
+        )
+        await self.refresh_events()
+        await self.load_thread(agent_id)
+
     async def queue_command(
         self, agent_id: str, command_type: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
@@ -942,6 +1093,180 @@ class AgentPBXTUI(App[None]):
             )
             response.raise_for_status()
             return response.json()
+
+    async def load_workerbee_status(self, agent_id: str) -> None:
+        detail = self.query_one("#workerbee-detail", TextArea)
+        detail.text = f"Loading WorkerBee status for {agent_id}..."
+        try:
+            async with httpx.AsyncClient(base_url=self.server, timeout=15) as client:
+                response = await client.get(
+                    f"/v1/agents/{agent_id}/workerbee",
+                    headers=auth_headers(self.token),
+                )
+                response.raise_for_status()
+                status = response.json()
+        except Exception as exc:
+            detail.text = f"Unable to load WorkerBee status for {agent_id}: {exc}"
+            return
+        self.workerbee_status_by_agent[agent_id] = status
+        detail.text = self.format_workerbee_status(status)
+
+    def format_workerbee_status(self, status: dict[str, Any]) -> str:
+        agent_id = str(status.get("agent_id") or "-")
+        cwd = str(status.get("cwd") or "-")
+        workerbee_bin = str(status.get("workerbee_bin") or "-")
+        lines = [
+            f"Agent: {agent_id}",
+            f"Cwd: {cwd}",
+            f"WorkerBee: {workerbee_bin}",
+        ]
+        error = status.get("error") if isinstance(status.get("error"), dict) else None
+        if error:
+            lines.extend(
+                [
+                    "",
+                    "Status: unavailable",
+                    f"Code: {error.get('code', 'WORKERBEE_ERROR')}",
+                    f"Message: {error.get('message', '')}",
+                ]
+            )
+            remediation = error.get("remediation")
+            if remediation:
+                lines.append(f"Remediation: {remediation}")
+            return "\n".join(lines)
+
+        if not status.get("available"):
+            lines.extend(["", "Status: unavailable"])
+            return "\n".join(lines)
+
+        project = str(status.get("project") or "-")
+        mode = str(status.get("mode") or "-")
+        status_kind = str(status.get("status_kind") or "-")
+        running = status.get("running")
+        dashboard_url = str(status.get("dashboard_url") or "-")
+        state_dir = str(status.get("state_dir") or "-")
+        description = str(status.get("description") or "-")
+        app_status = status.get("app_status")
+        latest_deployment = status.get("latest_deployment")
+        project_card = status.get("project_card")
+        global_dashboard = status.get("global_dashboard")
+        lines.extend(
+            [
+                "",
+                "Project",
+                f"Name: {project}",
+                f"Mode: {mode}",
+                f"Running: {running if running is not None else '-'}",
+                f"Status: {status_kind}",
+                f"Dashboard: {dashboard_url}",
+                f"State Dir: {state_dir}",
+                f"Description: {description}",
+            ]
+        )
+        lines.extend(self.format_workerbee_app_status(app_status))
+        lines.extend(self.format_workerbee_deployment(latest_deployment))
+        lines.extend(self.format_workerbee_project_card(project_card))
+        lines.extend(self.format_workerbee_global_dashboard(global_dashboard))
+        return "\n".join(lines)
+
+    def format_workerbee_app_status(self, app_status: object) -> list[str]:
+        if not isinstance(app_status, dict):
+            return ["", "App", "No app status reported."]
+        lines = [
+            "",
+            "App",
+            f"State: {app_status.get('state') or '-'}",
+            f"Ready: {app_status.get('ready')}",
+            f"Message: {app_status.get('message') or '-'}",
+            (
+                "Workloads: "
+                f"{app_status.get('declared_workload_count', 0)} declared, "
+                f"{app_status.get('ready_workload_count', 0)} ready, "
+                f"{app_status.get('degraded_workload_count', 0)} degraded, "
+                f"{app_status.get('orphaned_workload_count', 0)} orphaned"
+            ),
+        ]
+        urls = list_value(app_status.get("ingress_urls"))
+        if urls:
+            lines.append("Ingress URLs:")
+            lines.extend(f"- {url}" for url in urls)
+        workloads = list_value(app_status.get("declared_workloads"))
+        if workloads:
+            lines.append("Declared Workloads:")
+            lines.extend(f"- {self.format_workerbee_workload(workload)}" for workload in workloads)
+        return lines
+
+    def format_workerbee_deployment(self, deployment: object) -> list[str]:
+        lines = ["", "Latest Deployment"]
+        if not isinstance(deployment, dict):
+            lines.append("No deployment recorded yet.")
+            return lines
+        lines.extend(
+            [
+                f"ID: {deployment.get('id') or deployment.get('deployment_id') or '-'}",
+                f"Target: {deployment.get('target') or '-'}",
+                f"Namespace: {deployment.get('namespace') or '-'}",
+                f"Stage: {deployment.get('stage') or deployment.get('stage_dir') or '-'}",
+                f"Created: {deployment.get('created_at') or '-'}",
+                f"Updated: {deployment.get('updated_at') or '-'}",
+            ]
+        )
+        urls = list_value(deployment.get("ingress_urls"))
+        if urls:
+            lines.append("Ingress URLs:")
+            lines.extend(f"- {url}" for url in urls)
+        validation = deployment.get("validation")
+        if isinstance(validation, dict):
+            findings = list_value(validation.get("findings"))
+            if findings:
+                lines.append("Validation Findings:")
+                lines.extend(
+                    f"- {finding.get('level', 'info')} {finding.get('code', '')}: "
+                    f"{finding.get('message', '')}"
+                    for finding in findings
+                    if isinstance(finding, dict)
+                )
+        return lines
+
+    def format_workerbee_project_card(self, project_card: object) -> list[str]:
+        if not isinstance(project_card, dict):
+            return []
+        lines = ["", "Dashboard Project"]
+        for label, key in (
+            ("Kind", "status_kind"),
+            ("Stack", "stack_running"),
+            ("Profile", "profile_running"),
+            ("Ingress", "ingress_status"),
+            ("Exposed Routes", "exposed_route_summary"),
+        ):
+            value = project_card.get(key)
+            if value is not None:
+                lines.append(f"{label}: {value}")
+        return lines
+
+    def format_workerbee_global_dashboard(self, dashboard: object) -> list[str]:
+        if not isinstance(dashboard, dict):
+            return []
+        lines = ["", "Global Dashboard"]
+        for label, key in (
+            ("URL", "dashboard_url"),
+            ("Running", "running"),
+            ("Exposure", "exposure"),
+            ("Runtime", "runtime"),
+            ("CA Ready", "ca_ready"),
+        ):
+            value = dashboard.get(key)
+            if value is not None:
+                lines.append(f"{label}: {value}")
+        return lines
+
+    def format_workerbee_workload(self, workload: object) -> str:
+        if not isinstance(workload, dict):
+            return str(workload)
+        kind = workload.get("kind") or workload.get("input_kind") or "workload"
+        name = workload.get("name") or "-"
+        namespace = workload.get("namespace") or "-"
+        return f"{kind} {namespace}/{name}"
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if event.checkbox.id == "visual-flash":
@@ -1038,7 +1363,13 @@ class AgentPBXTUI(App[None]):
         selected_agent_id = self.selected_agent_id
         if event_type == "report_created" and agent_id == selected_agent_id:
             self.activate_latest_tab()
-        if event_type in {"agent_registered", "report_created"}:
+        if event_type in {
+            "agent_registered",
+            "report_created",
+            "command_queued",
+            "command_delivered",
+            "command_acked",
+        }:
             self.run_worker(
                 self.refresh_agents(),
                 name="agents-refresh",

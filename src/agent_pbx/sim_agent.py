@@ -61,10 +61,34 @@ async def run_sim_agent(
             commands = await _poll_commands(client, agent_id, token, poll_wait)
             recorder.record("polled", command_count=len(commands), commands=commands)
             for command in commands:
+                if command["type"] == "ping":
+                    pong = await post_json(
+                        client,
+                        f"/v1/agents/{agent_id}/reports",
+                        {
+                            "project": project,
+                            "status": "working",
+                            "summary": f"Pong from {agent_id}",
+                            "detail": (
+                                f"{agent_id} received ping {command['command_id']} "
+                                "and is continuing to poll."
+                            ),
+                            "needs_input": False,
+                            "plan_options": [],
+                        },
+                        token,
+                    )
+                    recorder.record("pong", command=command, report=pong)
                 ack = await post_json(
                     client,
                     f"/v1/commands/{command['command_id']}/ack",
-                    {"result": {"handled_by": agent_id, "ok": True}},
+                    {
+                        "result": (
+                            {"handled_by": agent_id, "ok": True, "pong": True}
+                            if command["type"] == "ping"
+                            else {"handled_by": agent_id, "ok": True}
+                        )
+                    },
                     token,
                 )
                 emit(

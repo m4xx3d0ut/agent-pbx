@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -10,6 +9,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .agent import runbook_payload
 from .config import ServerConfig
+from .polling import poll_commands as poll_commands_until
 from .schemas import (
     AgentRegisterRequest,
     CommandAckRequest,
@@ -110,36 +110,35 @@ def build_mcp_server(store: Store) -> FastMCP:
         agent_id: str,
         wait_seconds: float = 25,
         limit: int = 10,
+        max_wait_seconds: float | None = None,
+        interval_seconds: float = 5,
     ) -> list[dict[str, Any]]:
         logger.debug("mcp.tool.start name=pbx_poll_commands agent_id=%s", agent_id)
-        deadline = asyncio.get_running_loop().time() + min(max(wait_seconds, 0), 30)
-        safe_limit = min(max(limit, 1), 50)
-        while True:
-            commands = store.claim_commands(agent_id, limit=safe_limit)
-            if commands:
-                for command in commands:
-                    store.append_event(
-                        "command_delivered",
-                        {
-                            "command_id": command["command_id"],
-                            "agent_id": agent_id,
-                            "type": command["type"],
-                        },
-                        command["command_id"],
-                    )
-                logger.debug(
-                    "mcp.tool.finish name=pbx_poll_commands agent_id=%s delivered=%s",
-                    agent_id,
-                    len(commands),
-                )
-                return commands
-            if wait_seconds <= 0 or asyncio.get_running_loop().time() >= deadline:
-                logger.debug(
-                    "mcp.tool.finish name=pbx_poll_commands agent_id=%s delivered=0",
-                    agent_id,
-                )
-                return []
-            await asyncio.sleep(0.5)
+        commands = await poll_commands_until(
+            store,
+            agent_id,
+            wait_seconds=wait_seconds,
+            max_wait_seconds=max_wait_seconds,
+            interval_seconds=interval_seconds,
+            limit=limit,
+        )
+        store.record_poll(agent_id, delivered_count=len(commands))
+        for command in commands:
+            store.append_event(
+                "command_delivered",
+                {
+                    "command_id": command["command_id"],
+                    "agent_id": agent_id,
+                    "type": command["type"],
+                },
+                command["command_id"],
+            )
+        logger.debug(
+            "mcp.tool.finish name=pbx_poll_commands agent_id=%s delivered=%s",
+            agent_id,
+            len(commands),
+        )
+        return commands
 
     @mcp.tool()
     def pbx_ack_command(
