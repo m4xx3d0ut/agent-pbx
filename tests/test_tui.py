@@ -69,6 +69,8 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "agent_blink": False,
                 "theme": "1337",
                 "export_dir": str(tmp_path / "exports"),
+                "latest_viewed_at_by_agent": {"agent-1": 123.0},
+                "last_seen_event_id": 42,
             }
         ),
         encoding="utf-8",
@@ -84,6 +86,8 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.agent_blink_enabled is False
     assert app.ui_theme == "1337"
     assert app.export_dir == tmp_path / "exports"
+    assert app.latest_viewed_at_by_agent == {"agent-1": 123.0}
+    assert app.last_seen_event_id == 42
 
 
 def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
@@ -116,6 +120,8 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     app.visual_flash_enabled = True
     app.terminal_bell_enabled = True
     app.agent_blink_enabled = False
+    app.latest_viewed_at_by_agent = {"agent-1": 123.0}
+    app.last_seen_event_id = 42
     app.set_ui_theme("1337")
 
     saved = json.loads(settings_file.read_text(encoding="utf-8"))
@@ -123,6 +129,8 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["terminal_bell"] is True
     assert saved["agent_blink"] is False
     assert saved["theme"] == "1337"
+    assert saved["latest_viewed_at_by_agent"] == {"agent-1": 123.0}
+    assert saved["last_seen_event_id"] == 42
 
 
 def test_tui_reads_theme_env(monkeypatch) -> None:
@@ -572,6 +580,61 @@ async def test_tui_unseen_latest_tracking_clears_when_seen() -> None:
         app.mark_latest_seen("agent-1")
 
     assert app.unseen_latest_agent_ids == set()
+
+
+def test_tui_persisted_latest_seen_prevents_startup_alert() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.latest_viewed_at_by_agent = {"agent-1": 101.0}
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "done",
+            "project": "agent-pbx",
+            "last_seen_at": 101.0,
+        }
+    }
+
+    app.update_unseen_from_agent_refresh({})
+
+    assert app.unseen_latest_agent_ids == set()
+
+
+def test_tui_persisted_latest_seen_marks_new_offline_report() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.latest_viewed_at_by_agent = {"agent-1": 101.0}
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "done",
+            "project": "agent-pbx",
+            "last_seen_at": 102.0,
+        }
+    }
+
+    app.update_unseen_from_agent_refresh({})
+
+    assert app.unseen_latest_agent_ids == {"agent-1"}
+
+
+def test_tui_mark_latest_seen_persists_watermark(tmp_path: Path) -> None:
+    settings_file = tmp_path / "settings.json"
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        settings_file=settings_file,
+    )
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "done",
+            "project": "agent-pbx",
+            "last_seen_at": 123.0,
+        }
+    }
+
+    app.mark_latest_seen("agent-1")
+
+    saved = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert saved["latest_viewed_at_by_agent"] == {"agent-1": 123.0}
 
 
 async def test_tui_unseen_latest_blinks_attention_bar() -> None:

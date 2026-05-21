@@ -251,6 +251,23 @@ def int_value(value: object) -> int | None:
         return None
 
 
+def int_setting(settings: dict[str, Any], key: str, default: int) -> int:
+    value = int_value(settings.get(key))
+    return value if value is not None else default
+
+
+def float_map_setting(settings: dict[str, Any], key: str) -> dict[str, float]:
+    value = settings.get(key)
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, float] = {}
+    for item_key, item_value in value.items():
+        parsed = float_value(item_value)
+        if isinstance(item_key, str) and parsed is not None:
+            result[item_key] = parsed
+    return result
+
+
 def list_value(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
@@ -537,12 +554,15 @@ class AgentPBXTUI(App[None]):
         self.active_agent_tab = "latest-tab"
         self.unseen_latest_agent_ids: set[str] = set()
         self.agent_last_seen_at: dict[str, float] = {}
-        self.latest_viewed_at_by_agent: dict[str, float] = {}
+        self.latest_viewed_at_by_agent = float_map_setting(
+            self.settings,
+            "latest_viewed_at_by_agent",
+        )
         self.workerbee_status_by_agent: dict[str, dict[str, Any]] = {}
         self.attention_blink_phase = False
         self.attention_agent_id: str | None = None
         self.event_stream_disconnected = False
-        self.last_seen_event_id = 0
+        self.last_seen_event_id = int_setting(self.settings, "last_seen_event_id", 0)
         self.flash_generation = 0
 
     def compose(self) -> ComposeResult:
@@ -661,7 +681,17 @@ class AgentPBXTUI(App[None]):
             if current_last_seen is None:
                 continue
             previous = previous_last_seen.get(agent_id)
-            if previous is not None and current_last_seen > previous:
+            latest_viewed_at = self.latest_viewed_at_by_agent.get(agent_id)
+            if latest_viewed_at is not None and current_last_seen <= latest_viewed_at:
+                self.unseen_latest_agent_ids.discard(agent_id)
+            elif previous is None:
+                if latest_viewed_at is not None and current_last_seen > latest_viewed_at:
+                    if self.is_latest_engaged(agent_id):
+                        self.latest_viewed_at_by_agent[agent_id] = current_last_seen
+                        self.unseen_latest_agent_ids.discard(agent_id)
+                    else:
+                        self.unseen_latest_agent_ids.add(agent_id)
+            elif current_last_seen > previous:
                 if self.is_latest_engaged(agent_id):
                     self.latest_viewed_at_by_agent[agent_id] = current_last_seen
                     self.unseen_latest_agent_ids.discard(agent_id)
@@ -825,9 +855,12 @@ class AgentPBXTUI(App[None]):
                 self.events = response.json()[-50:]
         except Exception:
             return
+        previous_last_seen_event_id = self.last_seen_event_id
         self.last_seen_event_id = max(
             [self.last_seen_event_id, *[int(event["event_id"]) for event in self.events]]
         )
+        if self.last_seen_event_id != previous_last_seen_event_id:
+            self.save_settings()
         self.render_events()
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -898,13 +931,18 @@ class AgentPBXTUI(App[None]):
 
     def mark_latest_seen(self, agent_id: str) -> None:
         last_seen = self.agent_last_seen(agent_id)
+        changed = False
         if last_seen is not None:
+            changed = self.latest_viewed_at_by_agent.get(agent_id) != last_seen
             self.latest_viewed_at_by_agent[agent_id] = last_seen
         if agent_id not in self.unseen_latest_agent_ids:
+            if changed:
+                self.save_settings()
             return
         self.unseen_latest_agent_ids.remove(agent_id)
         self.render_agents()
         self.render_unseen_attention()
+        self.save_settings()
 
     async def load_latest_report(self, agent_id: str) -> None:
         detail = self.query_one("#detail", TextArea)
@@ -1301,6 +1339,8 @@ class AgentPBXTUI(App[None]):
             "agent_blink": self.agent_blink_enabled,
             "theme": self.ui_theme,
             "export_dir": str(self.export_dir),
+            "latest_viewed_at_by_agent": self.latest_viewed_at_by_agent,
+            "last_seen_event_id": self.last_seen_event_id,
         }
         try:
             self.settings_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1334,6 +1374,7 @@ class AgentPBXTUI(App[None]):
                                 if event_id <= self.last_seen_event_id:
                                     continue
                                 self.last_seen_event_id = event_id
+                                self.save_settings()
                                 self.events.append(event)
                                 self.events = self.events[-50:]
                                 self.call_later(self.handle_event, event)
