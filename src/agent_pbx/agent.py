@@ -41,17 +41,19 @@ long-running work. Handle every returned command in order, then call
 `pbx_ack_command` with the result. Do not poll as another agent ID.
 
 Polling is the alert pickup mechanism. A single long-poll call only watches one
-window; if the session remains live, keep starting bounded poll windows. For
-idle wait periods, use bounded repeated polling such as
-`pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
-This repeats long-poll cycles for up to five minutes, allowing queued commands
-to be picked up after the first long poll expires while keeping each wait
-bounded. When the bounded window returns empty, either start another bounded
-window if you are still waiting live, or send a final report and stop.
+window; if the session remains live, keep starting bounded poll windows. After
+sending a terminal reply (`status` of `done`, `complete`, `completed`, `failed`,
+`canceled`, or `blocked`) while `pbx_active=true`, open one post-reply follow-up
+window with
+`pbx_poll_commands(wait_seconds=25, max_wait_seconds=600, interval_seconds=5)`.
+This repeats long-poll cycles for up to ten minutes, allowing queued follow-ups
+to be picked up after the reply. If the 600s window returns empty, stop polling
+until the next explicit PBX action or new work.
 
 If a `ping` command is received, treat it as a polling keepalive. Respond with a
 `status="working"` `pbx_report_turn` whose summary starts with `Pong`, ack the
-ping with `{{"pong": true}}`, then immediately start another bounded poll window.
+ping with `{{"pong": true}}`, then immediately start another bounded poll window
+with `pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
 
 Keep routine check-ins and pong reports concise. Avoid repeating long logs,
 diffs, or unchanged plan text in recurring `status="working"` reports; summarize
@@ -108,18 +110,19 @@ operator follow-up queues, detailed report history, and TUI visibility.
 5. Never poll or acknowledge commands for a different `agent_id`.
 
 Polling is what lets Agent PBX alerts and TUI follow-ups reach a live agent.
-While `pbx_active=true`, do not rely on one long-poll call and then go idle. For
-idle wait periods, prefer
-`pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
-The server repeats long-poll cycles until a command arrives or the five-minute
-window expires. If the window returns empty and the agent is still live and
-waiting for operator input, start another bounded window. If the task is done,
-send the final report instead of continuing to poll.
+While `pbx_active=true`, do not rely on one long-poll call and then go idle.
+After sending a terminal reply (`done`, `complete`, `completed`, `failed`,
+`canceled`, or `blocked`), open one post-reply follow-up window with
+`pbx_poll_commands(wait_seconds=25, max_wait_seconds=600, interval_seconds=5)`.
+The server repeats long-poll cycles until a command arrives or the ten-minute
+window expires. If the 600s window returns empty, stop polling until the next
+explicit PBX action or new work.
 
 If a `ping` command arrives, send a `status="working"` pong report, ack the
 command with `{"pong": true}`, and immediately begin another bounded poll window.
-This lets an operator intentionally extend the agent's polling period while the
-agent is still live.
+Use `pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`
+for that ping window. This lets an operator intentionally extend the agent's
+polling period in five-minute increments while the agent is still live.
 
 If the operator asks you to stop using PBX, send a final report, call
 `pbx_set_active(active=false)`, then stop polling. Do not call PBX tools again
@@ -181,19 +184,27 @@ def runbook_payload() -> dict[str, Any]:
         ],
         "active_loop": [
             "Call pbx_poll_commands before work, after each report, before turn end, and periodically during long work.",
-            "Polling is the alert pickup mechanism; while pbx_active=true, keep using bounded repeated poll windows if the live session is waiting.",
+            "Polling is the alert pickup mechanism; while pbx_active=true, use bounded repeated poll windows for terminal follow-up and ping keepalive periods.",
             "Use pbx_report_turn for milestones, blockers, test results, deployment results, and final outcomes.",
             "Keep summary concise and put complete notes in detail.",
             "Handle commands in order and call pbx_ack_command only after handling.",
             "Never poll or ack commands for another agent_id.",
-            "For idle waits, use pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5).",
-            "If that bounded window returns empty and you are still live, start another bounded window; if done, send a final report.",
+            "After terminal replies, use pbx_poll_commands(wait_seconds=25, max_wait_seconds=600, interval_seconds=5).",
+            "If that 600s post-reply window returns empty, stop polling until the next explicit PBX action or new work.",
+        ],
+        "post_reply_follow_up": [
+            "Terminal statuses are done, complete, completed, failed, canceled, and blocked.",
+            "After sending a terminal report while pbx_active=true, open one 600s follow-up poll window.",
+            "Use pbx_poll_commands(wait_seconds=25, max_wait_seconds=600, interval_seconds=5).",
+            "If a command arrives, handle it, ack it, report, then apply this terminal follow-up rule again if the new response is terminal.",
+            "If the 600s window returns empty, stop polling until the next explicit PBX action or new work.",
         ],
         "keepalive": [
             "A ping command is a polling keepalive, not task input.",
             "On ping, send a status='working' pong report.",
             'Ack the ping with {"pong": true}.',
-            "Immediately start another bounded poll window.",
+            "Immediately start another bounded poll window with pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5).",
+            "Ping extends polling in five-minute increments.",
             "Keep pong reports concise.",
         ],
         "usage_guardrails": [

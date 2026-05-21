@@ -134,26 +134,28 @@ repository work to include whether changes are clean, committed, staged, or
 unstaged. It also requires normally progressing long-running work to check in
 with `status="working"` at least once every five minutes.
 
-For idle waits, agents should use bounded repeated polling:
+After a terminal reply, agents should open one bounded post-reply follow-up
+window:
 
 ```python
 pbx_poll_commands(
     agent_id="codex-main",
     wait_seconds=25,
-    max_wait_seconds=300,
+    max_wait_seconds=600,
     interval_seconds=5,
 )
 ```
 
-That repeats long-poll cycles for up to five minutes, so commands queued after
-the first long poll expires can still be picked up by a live agent. If the
-window returns empty and the agent is still live and waiting, it should start
-another bounded window. If the task is done, it should send a final report
-instead of continuing to poll.
+That repeats long-poll cycles for up to ten minutes after `done`, `complete`,
+`completed`, `failed`, `canceled`, or `blocked` reports, so follow-ups queued
+after the reply can still be picked up by a live agent. If the 600s window
+returns empty, the agent should stop polling until the next explicit PBX action
+or new work.
 
 Use `Ping` in the TUI to intentionally keep a live agent polling longer. Agents
 handle `ping` as a keepalive: reply with a `status="working"` pong report, ack
-with `{"pong": true}`, then start another bounded poll window.
+with `{"pong": true}`, then start another 300s bounded poll window. Each ping
+extends polling in five-minute increments.
 
 When an operator asks an agent to stop using PBX, the agent should send a final
 report, call `pbx_set_active(active=false)`, and stop PBX polling/reporting

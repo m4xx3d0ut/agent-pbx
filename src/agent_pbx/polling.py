@@ -7,8 +7,16 @@ from .store import Store
 
 
 MAX_LONG_POLL_SECONDS = 30.0
-MAX_REPEAT_POLL_SECONDS = 300.0
+MAX_REPEAT_POLL_SECONDS = 600.0
 MAX_POLL_INTERVAL_SECONDS = 60.0
+
+
+def bounded_repeat_poll_seconds(
+    max_wait_seconds: float | None, *, default_seconds: float
+) -> float:
+    if max_wait_seconds is None:
+        return default_seconds
+    return min(max(max_wait_seconds, 0.0), MAX_REPEAT_POLL_SECONDS)
 
 
 async def poll_commands(
@@ -21,10 +29,9 @@ async def poll_commands(
     interval_seconds: float = 5.0,
 ) -> list[dict[str, Any]]:
     per_wait = min(max(wait_seconds, 0.0), MAX_LONG_POLL_SECONDS)
-    total_wait = (
-        per_wait
-        if max_wait_seconds is None
-        else min(max(max_wait_seconds, 0.0), MAX_REPEAT_POLL_SECONDS)
+    total_wait = bounded_repeat_poll_seconds(
+        max_wait_seconds,
+        default_seconds=per_wait,
     )
     interval = min(max(interval_seconds, 0.0), MAX_POLL_INTERVAL_SECONDS)
     safe_limit = min(max(limit, 1), 50)

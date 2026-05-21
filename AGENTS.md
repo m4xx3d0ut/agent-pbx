@@ -68,17 +68,19 @@ long-running work. Handle every returned command in order, then call
 `pbx_ack_command` with the result. Do not poll as another agent ID.
 
 Polling is the alert pickup mechanism. A single long-poll call only watches one
-window; if the session remains live, keep starting bounded poll windows. For
-idle wait periods, use bounded repeated polling such as
-`pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
-This repeats long-poll cycles for up to five minutes, allowing queued commands
-to be picked up after the first long poll expires while keeping each wait
-bounded. When the bounded window returns empty, either start another bounded
-window if you are still waiting live, or send a final report and stop.
+window; if the session remains live, keep starting bounded poll windows. After
+sending a terminal reply (`status` of `done`, `complete`, `completed`, `failed`,
+`canceled`, or `blocked`) while `pbx_active=true`, open one post-reply follow-up
+window with
+`pbx_poll_commands(wait_seconds=25, max_wait_seconds=600, interval_seconds=5)`.
+This repeats long-poll cycles for up to ten minutes, allowing queued follow-ups
+to be picked up after the reply. If the 600s window returns empty, stop polling
+until the next explicit PBX action or new work.
 
 If a `ping` command is received, treat it as a polling keepalive. Respond with a
 `status="working"` `pbx_report_turn` whose summary starts with `Pong`, ack the
-ping with `{"pong": true}`, then immediately start another bounded poll window.
+ping with `{"pong": true}`, then immediately start another bounded poll window
+with `pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
 
 Keep routine check-ins and pong reports concise. Avoid repeating long logs,
 diffs, or unchanged plan text in recurring `status="working"` reports; summarize
