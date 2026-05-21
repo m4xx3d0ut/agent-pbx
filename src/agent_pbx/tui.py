@@ -11,6 +11,7 @@ from typing import Any, TypeVar
 
 import httpx
 from rich.color import Color, ColorParseError
+from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
@@ -46,6 +47,7 @@ FOLLOW_UP_MAX_HEIGHT = 15
 SHIFT_ENTER_KEYS = {"shift+enter", "shift_enter", "shift+return"}
 STALE_POLL_SECONDS = 120
 QUEUED_COMMAND_WARN_SECONDS = 60
+ACTIVE_POLL_SECONDS = 60
 THEME_KEYS = (
     "primary",
     "secondary",
@@ -518,7 +520,7 @@ class AgentPBXTUI(App[None]):
 
     #composer {
         height: auto;
-        min-height: 11;
+        min-height: 13;
         max-height: 20;
         border: tall $accent;
         padding: 0 1;
@@ -552,10 +554,22 @@ class AgentPBXTUI(App[None]):
 
     #composer-buttons {
         height: 3;
+        align: center middle;
     }
 
-    #composer-buttons Button {
-        width: 1fr;
+    #send {
+        width: 13;
+        min-width: 1;
+    }
+
+    #request-detail {
+        width: 18;
+        min-width: 1;
+    }
+
+    #ping-agent {
+        width: 10;
+        min-width: 1;
     }
     """
 
@@ -825,17 +839,20 @@ class AgentPBXTUI(App[None]):
             agent_id = str(agent["agent_id"])
             unseen = agent_id in self.unseen_latest_agent_ids
             marker = "NEW" if unseen else ""
-            cells = [
-                marker,
-                agent_id,
-                self.format_pbx_active(agent),
-                str(agent["status"]),
-                str(agent["project"]),
-                f"{agent['last_seen_at']:.0f}",
-                self.format_queue_state(agent),
-                self.format_poll_state(agent),
-                self.format_usage_state(agent),
-            ]
+            cells = self.style_agent_row(
+                [
+                    marker,
+                    agent_id,
+                    self.format_pbx_active(agent),
+                    str(agent["status"]),
+                    str(agent["project"]),
+                    f"{agent['last_seen_at']:.0f}",
+                    self.format_queue_state(agent),
+                    self.format_poll_state(agent),
+                    self.format_usage_state(agent),
+                ],
+                agent,
+            )
             table.add_row(*cells, key=agent_id)
         restore_agent_id = cursor_agent_id if cursor_agent_id in self.agents else None
         if restore_agent_id is not None:
@@ -895,12 +912,40 @@ class AgentPBXTUI(App[None]):
         if last_poll_at is None:
             return "never" if queued_count else "-"
         age = max(0.0, time.time() - last_poll_at)
-        if age <= 60:
+        if age <= ACTIVE_POLL_SECONDS:
             return "active"
         label = f"{format_duration(age)} ago"
         if queued_count and age >= STALE_POLL_SECONDS:
             return f"stale {label}"
         return label
+
+    def agent_poll_level(self, agent: dict[str, Any]) -> str:
+        last_poll_at = float_value(agent.get("last_poll_at"))
+        try:
+            queued_count = int(agent.get("queued_command_count") or 0)
+        except (TypeError, ValueError):
+            queued_count = 0
+        if last_poll_at is None:
+            return "never" if queued_count else "idle"
+        age = max(0.0, time.time() - last_poll_at)
+        if age <= ACTIVE_POLL_SECONDS:
+            return "active"
+        if queued_count and age >= STALE_POLL_SECONDS:
+            return "stale"
+        return "idle"
+
+    def style_agent_row(
+        self, cells: list[str], agent: dict[str, Any]
+    ) -> list[str | Text]:
+        level = self.agent_poll_level(agent)
+        style = {
+            "active": "bold green",
+            "stale": "bold yellow",
+            "never": "bold red",
+        }.get(level)
+        if style is None:
+            return cells
+        return [Text(cell, style=style) for cell in cells]
 
     def format_usage_state(self, agent: dict[str, Any]) -> str:
         tokens = int_value(agent.get("estimated_visible_tokens_per_hour")) or 0
@@ -1187,7 +1232,7 @@ class AgentPBXTUI(App[None]):
         )
         message_input.styles.height = height
         self.query_one("#composer-inputs").styles.height = height
-        self.query_one("#composer").styles.height = height + 3
+        self.query_one("#composer").styles.height = height + 5
 
     async def request_detail(self) -> None:
         agent_id = self.query_one("#agent-id", Input).value.strip()

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 
 from agent_pbx.tui import (
     AgentPBXTUI,
@@ -234,6 +235,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", visual_flash=True)
 
     async with app.run_test() as pilot:
+        await pilot.resize_terminal(80, 24)
+        await pilot.pause()
         agents = app.query_one("#agents", DataTable)
         thread = app.query_one("#thread", DataTable)
         request_detail = app.query_one("#request-detail", Button)
@@ -268,8 +271,10 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert message.soft_wrap is False
         assert agent_id.region.height >= 8
         assert message.region.height >= 8
+        assert composer.region.height >= 13
         assert message.region.bottom <= composer.region.bottom
         assert buttons.region.bottom <= composer.region.bottom
+        assert ping.region.right <= composer.region.right
 
         await pilot.press("s")
         await pilot.pause()
@@ -431,10 +436,27 @@ def test_tui_formats_queue_and_poll_state(monkeypatch) -> None:
     assert app.format_poll_state({"queued_command_count": 0, "last_poll_at": 980.0}) == "active"
     assert app.format_poll_state({"queued_command_count": 0, "last_poll_at": None}) == "-"
     assert app.format_poll_state({"queued_command_count": 1, "last_poll_at": None}) == "never"
+    assert app.agent_poll_level({"queued_command_count": 0, "last_poll_at": 980.0}) == "active"
+    assert app.agent_poll_level(agent) == "stale"
+    assert app.agent_poll_level({"queued_command_count": 1, "last_poll_at": None}) == "never"
+    assert app.agent_poll_level({"queued_command_count": 0, "last_poll_at": None}) == "idle"
     assert app.format_usage_state({}) == "-"
     assert app.format_pbx_active({"pbx_active": True}) == "on"
     assert app.format_pbx_active({"pbx_active": False}) == "off"
     assert app.format_pbx_active({}) == "on"
+
+
+def test_tui_styles_active_polling_agent_rows(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
+
+    cells = app.style_agent_row(
+        ["", "agent-1", "on", "working", "demo", "1000", "", "active", "-"],
+        {"queued_command_count": 0, "last_poll_at": 990.0},
+    )
+
+    assert all(isinstance(cell, Text) for cell in cells)
+    assert {cell.style for cell in cells if isinstance(cell, Text)} == {"bold green"}
 
 
 async def test_tui_thread_selection_renders_detail() -> None:
