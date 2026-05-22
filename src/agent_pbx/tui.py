@@ -621,6 +621,7 @@ class AgentPBXTUI(App[None]):
     }
 
     Screen.tmux-direct #detail,
+    Screen.tmux-direct #latest-plan-choice-panel,
     Screen.tmux-direct #composer {
         display: none;
     }
@@ -683,6 +684,7 @@ class AgentPBXTUI(App[None]):
         min-height: 12;
     }
 
+    #latest-plan-choice-panel,
     #plan-choice-panel {
         display: none;
         height: 13;
@@ -691,16 +693,19 @@ class AgentPBXTUI(App[None]):
         padding: 0 1;
     }
 
+    #latest-plan-choice-title,
     #plan-choice-title {
         height: 1;
         color: $secondary;
         content-align: left middle;
     }
 
+    #latest-plan-options,
     #plan-options {
         height: 4;
     }
 
+    #latest-plan-notes,
     #plan-notes {
         height: 4;
         min-height: 3;
@@ -710,10 +715,12 @@ class AgentPBXTUI(App[None]):
         scrollbar-size: 0 1;
     }
 
+    #latest-plan-actions,
     #plan-actions {
         height: 3;
     }
 
+    #latest-plan-actions Button,
     #plan-actions Button {
         width: 1fr;
     }
@@ -921,10 +928,12 @@ class AgentPBXTUI(App[None]):
         self.agents: dict[str, dict[str, Any]] = {}
         self.selected_agent_id: str | None = None
         self.events: list[dict[str, Any]] = []
+        self.latest_report_by_agent: dict[str, dict[str, Any]] = {}
         self.thread_items: dict[str, dict[str, Any]] = {}
         self.thread_order: list[str] = []
         self.selected_thread_item_id: str | None = None
         self.selected_plan_option_index: int | None = None
+        self.selected_latest_plan_option_index: int | None = None
         self.marked_thread_item_ids: set[str] = set()
         self.active_agent_tab = "latest-tab"
         self.unseen_latest_agent_ids: set[str] = set()
@@ -969,6 +978,30 @@ class AgentPBXTUI(App[None]):
                 with TabbedContent(initial="latest-tab", id="agent-tabs"):
                     with TabPane("Latest", id="latest-tab"):
                         yield TextArea(id="detail", read_only=True)
+                        with Vertical(id="latest-plan-choice-panel"):
+                            yield Static(
+                                "Plan Options",
+                                id="latest-plan-choice-title",
+                            )
+                            yield DataTable(
+                                id="latest-plan-options",
+                                cursor_type="row",
+                                show_row_labels=False,
+                            )
+                            yield TextArea(
+                                id="latest-plan-notes",
+                                soft_wrap=True,
+                            )
+                            with Horizontal(id="latest-plan-actions"):
+                                yield Button(
+                                    "Send Plan Choice",
+                                    id="latest-send-plan-choice",
+                                    variant="primary",
+                                )
+                                yield Button(
+                                    "Send to Codex Pane",
+                                    id="latest-send-plan-tmux",
+                                )
                         with Vertical(id="tmux-panel"):
                             yield Static("Tmux: -", id="tmux-status")
                             yield TextArea(id="tmux-stream", read_only=True)
@@ -1059,6 +1092,7 @@ class AgentPBXTUI(App[None]):
             "New",
             "Agent",
             "PBX",
+            "Plan",
             "Status",
             "Project",
             "Last Seen",
@@ -1069,9 +1103,12 @@ class AgentPBXTUI(App[None]):
         events = self.query_one("#events", DataTable)
         events.add_columns("ID", "Type", "Subject")
         thread = self.query_one("#thread", DataTable)
-        thread.add_columns("M", "Time", "Kind", "Status", "Summary")
+        thread.add_columns("M", "Time", "Kind", "Plan", "Status", "Summary")
+        latest_plan_options = self.query_one("#latest-plan-options", DataTable)
+        latest_plan_options.add_columns("#", "Option")
         plan_options = self.query_one("#plan-options", DataTable)
         plan_options.add_columns("#", "Option")
+        self.render_latest_plan_choice_panel(None)
         self.render_plan_choice_panel(None)
         await self.refresh_agents()
         await self.refresh_events()
@@ -1127,11 +1164,16 @@ class AgentPBXTUI(App[None]):
 
     def update_plan_tmux_button_state(self) -> None:
         send_tmux = self.query_one_or_none("#send-plan-tmux", Button)
-        if send_tmux is None:
-            return
-        send_tmux.disabled = (
-            not self.tmux_direct_enabled or self.selected_plan_option() is None
-        )
+        if send_tmux is not None:
+            send_tmux.disabled = (
+                not self.tmux_direct_enabled or self.selected_plan_option() is None
+            )
+        latest_send_tmux = self.query_one_or_none("#latest-send-plan-tmux", Button)
+        if latest_send_tmux is not None:
+            latest_send_tmux.disabled = (
+                not self.tmux_direct_enabled
+                or self.selected_latest_plan_option() is None
+            )
 
     def query_one_or_none(
         self, selector: str, widget_type: type[WidgetType]
@@ -1219,6 +1261,7 @@ class AgentPBXTUI(App[None]):
                     marker,
                     agent_id,
                     self.format_pbx_active(agent),
+                    self.format_plan_state(agent),
                     str(agent["status"]),
                     str(agent["project"]),
                     f"{agent['last_seen_at']:.0f}",
@@ -1268,6 +1311,17 @@ class AgentPBXTUI(App[None]):
 
     def format_pbx_active(self, agent: dict[str, Any]) -> str:
         return "on" if bool(agent.get("pbx_active", True)) else "off"
+
+    def format_plan_state(self, agent: dict[str, Any]) -> str:
+        option_count = int_value(agent.get("latest_report_plan_option_count")) or 0
+        if option_count > 0:
+            return f"PLAN:{option_count}"
+        if bool(agent.get("latest_report_needs_input")):
+            return "INPUT"
+        latest_status = str(agent.get("latest_report_status") or "").strip().lower()
+        if latest_status in {"plan", "planning", "needs_input", "waiting"}:
+            return latest_status.upper()
+        return ""
 
     def format_queue_state(self, agent: dict[str, Any]) -> str:
         try:
@@ -1432,6 +1486,9 @@ class AgentPBXTUI(App[None]):
         if event.data_table.id == "plan-options":
             self.select_plan_option(str(event.row_key.value))
             return
+        if event.data_table.id == "latest-plan-options":
+            self.select_latest_plan_option(str(event.row_key.value))
+            return
 
     async def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         if event.data_table.id == "agents":
@@ -1442,6 +1499,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.data_table.id == "plan-options":
             self.select_plan_option(str(event.cell_key.row_key.value))
+            return
+        if event.data_table.id == "latest-plan-options":
+            self.select_latest_plan_option(str(event.cell_key.row_key.value))
 
     def on_key(self, event: Key) -> None:
         thread = self.query_one_or_none("#thread", DataTable)
@@ -1539,17 +1599,32 @@ class AgentPBXTUI(App[None]):
                 reports = response.json()
         except Exception as exc:
             detail.text = f"Unable to load report for {agent_id}: {exc}"
+            self.render_latest_plan_choice_panel(None)
             return
         if not reports:
             detail.text = f"No reports for {agent_id}."
+            self.latest_report_by_agent.pop(agent_id, None)
+            self.render_latest_plan_choice_panel(None)
             return
         report = reports[0]
-        detail.text = (
-            f"Agent: {report['agent_id']}\n"
-            f"Status: {report['status']}\n"
-            f"Summary: {report['summary']}\n\n"
-            f"{report['detail']}"
-        )
+        self.latest_report_by_agent[agent_id] = report
+        plan_options = [
+            str(option)
+            for option in list_value(report.get("plan_options"))
+            if str(option).strip()
+        ]
+        lines = [
+            f"Agent: {report['agent_id']}",
+            f"Status: {report['status']}",
+            f"Needs Input: {'yes' if report.get('needs_input') else 'no'}",
+            f"Summary: {report['summary']}",
+            "",
+            str(report["detail"]),
+        ]
+        if plan_options:
+            lines.extend(["", "Plan Options:", *[f"- {option}" for option in plan_options]])
+        detail.text = "\n".join(lines)
+        self.render_latest_plan_choice_panel(report)
 
     async def refresh_tmux_capture_if_active(self) -> None:
         if (
@@ -1861,6 +1936,12 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "send-plan-tmux":
             await self.send_plan_choice_to_tmux()
             return
+        if event.button.id == "latest-send-plan-choice":
+            await self.send_latest_plan_choice()
+            return
+        if event.button.id == "latest-send-plan-tmux":
+            await self.send_latest_plan_choice_to_tmux()
+            return
         if event.button.id == "workerbee-refresh":
             if self.selected_agent_id:
                 await self.load_workerbee_status(self.selected_agent_id)
@@ -1948,6 +2029,22 @@ class AgentPBXTUI(App[None]):
             return None
         return options[self.selected_plan_option_index]
 
+    def selected_latest_plan_option(self) -> str | None:
+        report = (
+            self.latest_report_by_agent.get(self.selected_agent_id)
+            if self.selected_agent_id
+            else None
+        )
+        options = self.plan_options_for_report(report)
+        if self.selected_latest_plan_option_index is None:
+            return None
+        if (
+            self.selected_latest_plan_option_index < 0
+            or self.selected_latest_plan_option_index >= len(options)
+        ):
+            return None
+        return options[self.selected_latest_plan_option_index]
+
     def plan_options_for_item(self, item: dict[str, Any] | None) -> list[str]:
         if not item or item.get("kind") != "report":
             return []
@@ -1955,6 +2052,15 @@ class AgentPBXTUI(App[None]):
         return [
             str(option)
             for option in list_value(metadata.get("plan_options"))
+            if str(option).strip()
+        ]
+
+    def plan_options_for_report(self, report: dict[str, Any] | None) -> list[str]:
+        if not report:
+            return []
+        return [
+            str(option)
+            for option in list_value(report.get("plan_options"))
             if str(option).strip()
         ]
 
@@ -2000,6 +2106,49 @@ class AgentPBXTUI(App[None]):
             self.notify("Select a plan option first.", severity="warning")
             return
         notes_input = self.query_one("#plan-notes", TextArea)
+        message = self.plan_choice_message(option, notes_input.text)
+        sent = await self.send_text_to_tmux(agent_id, message)
+        if not sent:
+            return
+        notes_input.text = ""
+        self.notify(f"Sent plan choice to Codex pane for {agent_id}.")
+        await self.load_tmux_capture(agent_id)
+
+    async def send_latest_plan_choice(self) -> None:
+        agent_id = (
+            self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
+        )
+        option = self.selected_latest_plan_option()
+        if not agent_id or option is None:
+            self.notify("Select a plan option first.", severity="warning")
+            return
+        notes_input = self.query_one("#latest-plan-notes", TextArea)
+        message = self.plan_choice_message(option, notes_input.text)
+        command = await self.queue_command(
+            agent_id,
+            "send_input",
+            {"message": message},
+        )
+        notes_input.text = ""
+        self.notify(f"Plan choice queued for {agent_id}: {command['command_id']}")
+        await self.refresh_events()
+        await self.load_thread(agent_id)
+
+    async def send_latest_plan_choice_to_tmux(self) -> None:
+        agent_id = (
+            self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
+        )
+        option = self.selected_latest_plan_option()
+        if not self.tmux_direct_enabled:
+            self.notify(
+                "Enable tmux direct mode before sending to Codex pane.",
+                severity="warning",
+            )
+            return
+        if not agent_id or option is None:
+            self.notify("Select a plan option first.", severity="warning")
+            return
+        notes_input = self.query_one("#latest-plan-notes", TextArea)
         message = self.plan_choice_message(option, notes_input.text)
         sent = await self.send_text_to_tmux(agent_id, message)
         if not sent:
@@ -2482,6 +2631,7 @@ class AgentPBXTUI(App[None]):
                 "*" if item["item_id"] in self.marked_thread_item_ids else "",
                 f"{item['created_at']:.0f}",
                 item["kind"],
+                self.format_thread_plan_state(item),
                 item["status"],
                 item["title"],
                 key=item["item_id"],
@@ -2500,6 +2650,49 @@ class AgentPBXTUI(App[None]):
         self.selected_thread_item_id = item_id
         self.query_one("#thread-detail", TextArea).text = self.format_thread_item(item)
         self.render_plan_choice_panel(item)
+
+    def format_thread_plan_state(self, item: dict[str, Any]) -> str:
+        if item.get("kind") != "report":
+            return ""
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        option_count = len(self.plan_options_for_item(item))
+        if option_count > 0:
+            return f"PLAN:{option_count}"
+        if bool(metadata.get("needs_input")):
+            return "INPUT"
+        status = str(item.get("status") or "").strip().lower()
+        if status in {"plan", "planning", "needs_input", "waiting"}:
+            return status.upper()
+        return ""
+
+    def render_latest_plan_choice_panel(self, report: dict[str, Any] | None) -> None:
+        panel = self.query_one_or_none("#latest-plan-choice-panel", Vertical)
+        table = self.query_one_or_none("#latest-plan-options", DataTable)
+        notes = self.query_one_or_none("#latest-plan-notes", TextArea)
+        send = self.query_one_or_none("#latest-send-plan-choice", Button)
+        send_tmux = self.query_one_or_none("#latest-send-plan-tmux", Button)
+        if panel is None or table is None or notes is None:
+            return
+        options = self.plan_options_for_report(report)
+        table.clear()
+        self.selected_latest_plan_option_index = None
+        if not options:
+            panel.styles.display = "none"
+            notes.text = ""
+            if send is not None:
+                send.disabled = True
+            if send_tmux is not None:
+                send_tmux.disabled = True
+            return
+        panel.styles.display = "block"
+        for index, option in enumerate(options):
+            table.add_row(str(index + 1), option, key=str(index))
+        self.selected_latest_plan_option_index = 0
+        table.move_cursor(row=0, animate=False, scroll=False)
+        if send is not None:
+            send.disabled = False
+        if send_tmux is not None:
+            send_tmux.disabled = not self.tmux_direct_enabled
 
     def render_plan_choice_panel(self, item: dict[str, Any] | None) -> None:
         panel = self.query_one_or_none("#plan-choice-panel", Vertical)
@@ -2542,6 +2735,21 @@ class AgentPBXTUI(App[None]):
         if parsed < 0 or parsed >= len(self.plan_options_for_item(item)):
             return
         self.selected_plan_option_index = parsed
+        self.update_plan_tmux_button_state()
+
+    def select_latest_plan_option(self, row_key: str) -> None:
+        parsed = int_value(row_key)
+        if parsed is None:
+            return
+        report = (
+            self.latest_report_by_agent.get(self.selected_agent_id)
+            if self.selected_agent_id
+            else None
+        )
+        if parsed < 0 or parsed >= len(self.plan_options_for_report(report)):
+            return
+        self.selected_latest_plan_option_index = parsed
+        self.update_plan_tmux_button_state()
 
     def current_thread_item_id(self) -> str | None:
         table = self.query_one("#thread", DataTable)

@@ -323,6 +323,7 @@ class Store:
             ).fetchall()
             agents = [self._agent_from_row(row) for row in rows]
             for agent in agents:
+                self._add_latest_report_summary(conn, agent)
                 self._add_queue_summary(conn, agent)
                 self._add_usage_summary(conn, agent)
         return agents
@@ -565,7 +566,40 @@ class Store:
         data["pings_per_hour"] = 0
         data["estimated_visible_tokens_per_hour"] = 0
         data["usage_warning"] = None
+        data["latest_report_id"] = None
+        data["latest_report_status"] = None
+        data["latest_report_needs_input"] = False
+        data["latest_report_plan_option_count"] = 0
+        data["latest_report_action_required"] = False
         return data
+
+    @staticmethod
+    def _add_latest_report_summary(
+        conn: sqlite3.Connection, agent: dict[str, Any]
+    ) -> None:
+        row = conn.execute(
+            """
+            SELECT report_id, status, needs_input, plan_options_json
+            FROM reports
+            WHERE agent_id = ?
+            ORDER BY created_at DESC, report_id DESC
+            LIMIT 1
+            """,
+            (agent["agent_id"],),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            plan_options = json.loads(row["plan_options_json"])
+        except json.JSONDecodeError:
+            plan_options = []
+        option_count = len(plan_options) if isinstance(plan_options, list) else 0
+        needs_input = bool(row["needs_input"])
+        agent["latest_report_id"] = row["report_id"]
+        agent["latest_report_status"] = row["status"]
+        agent["latest_report_needs_input"] = needs_input
+        agent["latest_report_plan_option_count"] = option_count
+        agent["latest_report_action_required"] = needs_input or option_count > 0
 
     @staticmethod
     def _add_queue_summary(

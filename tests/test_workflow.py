@@ -56,6 +56,11 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
     assert command.status_code == 200
     assert agents_before_poll.json()[0]["queued_command_count"] == 1
     assert agents_before_poll.json()[0]["last_poll_at"] is None
+    assert agents_before_poll.json()[0]["latest_report_id"] == report.json()["report_id"]
+    assert agents_before_poll.json()[0]["latest_report_status"] == "needs_input"
+    assert agents_before_poll.json()[0]["latest_report_needs_input"] is True
+    assert agents_before_poll.json()[0]["latest_report_plan_option_count"] == 2
+    assert agents_before_poll.json()[0]["latest_report_action_required"] is True
     assert agents_before_poll.json()[0]["polls_per_hour"] == 0
     assert polled.json()[0]["status"] == "delivered"
     assert agents_after_poll.json()[0]["queued_command_count"] == 0

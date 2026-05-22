@@ -37,6 +37,7 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "pbx_set_active(active=false)" in instructions
     assert "plan_options" in instructions
     assert "Selected plan option:" in instructions
+    assert "Do not only write choices" in instructions
 
 
 def test_runbook_payload_includes_command_guidance() -> None:
@@ -58,6 +59,7 @@ def test_runbook_payload_includes_command_guidance() -> None:
     assert "request_detail" in payload["commands"]
     assert any("plan_options" in item for item in payload["plan_options"])
     assert any("Selected plan option:" in item for item in payload["plan_options"])
+    assert any("Do not only write choices" in item for item in payload["plan_options"])
 
 
 def test_install_agent_instructions_check_missing_target(tmp_path: Path) -> None:

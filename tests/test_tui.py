@@ -328,6 +328,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         export_marked = app.query_one("#export-marked", Button)
         export_all = app.query_one("#export-all", Button)
         delete_queued = app.query_one("#delete-queued", Button)
+        latest_send_plan = app.query_one("#latest-send-plan-choice", Button)
+        latest_send_plan_tmux = app.query_one("#latest-send-plan-tmux", Button)
         send_plan = app.query_one("#send-plan-choice", Button)
         send_plan_tmux = app.query_one("#send-plan-tmux", Button)
         workerbee_detail = app.query_one("#workerbee-detail", TextArea)
@@ -349,6 +351,10 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert export_marked.label.plain == "Export Marked"
         assert export_all.label.plain == "Export All"
         assert delete_queued.label.plain == "Delete Queued"
+        assert latest_send_plan.label.plain == "Send Plan Choice"
+        assert latest_send_plan_tmux.label.plain == "Send to Codex Pane"
+        assert latest_send_plan.disabled is True
+        assert latest_send_plan_tmux.disabled is True
         assert send_plan.label.plain == "Send Plan Choice"
         assert send_plan_tmux.label.plain == "Send to Codex Pane"
         assert send_plan.disabled is True
@@ -357,8 +363,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert workerbee_refresh.label.plain == "Refresh WorkerBee"
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
-        assert "#plan-choice-panel {\n        display: none;" in app.CSS
-        assert "#plan-notes {\n        height: 4;" in app.CSS
+        assert "#latest-plan-choice-panel,\n    #plan-choice-panel {" in app.CSS
+        assert "#latest-plan-notes,\n    #plan-notes {" in app.CSS
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
         assert "#tmux-message {\n        height: 8;" in app.CSS
         assert "Notification Options" not in app.CSS
@@ -938,8 +944,10 @@ async def test_tui_thread_selection_renders_detail() -> None:
         plan_options = app.query_one("#plan-options", DataTable)
         send_plan = app.query_one("#send-plan-choice", Button)
         send_plan_tmux = app.query_one("#send-plan-tmux", Button)
+        table = app.query_one("#thread", DataTable)
         plan_row_count = plan_options.row_count
         plan_option_text = plan_options.get_row_at(0)[1]
+        plan_marker = table.get_row_at(0)[3]
         send_plan_enabled = not send_plan.disabled
         send_plan_tmux_disabled = send_plan_tmux.disabled
         app.select_thread_item("command:c1")
@@ -949,6 +957,7 @@ async def test_tui_thread_selection_renders_detail() -> None:
     assert "Plan Options:" in report_detail
     assert plan_row_count == 1
     assert plan_option_text == "Next"
+    assert plan_marker == "PLAN:1"
     assert send_plan_enabled is True
     assert send_plan_tmux_disabled is True
     assert "Command: c1" in detail
@@ -999,9 +1008,9 @@ async def test_tui_thread_table_renders_newest_first() -> None:
         table = app.query_one("#thread", DataTable)
 
     assert app.thread_order == ["report:new", "command:middle", "report:old"]
-    assert table.get_row_at(0)[4] == "New report"
-    assert table.get_row_at(1)[4] == "Middle command"
-    assert table.get_row_at(2)[4] == "Old report"
+    assert table.get_row_at(0)[5] == "New report"
+    assert table.get_row_at(1)[5] == "Middle command"
+    assert table.get_row_at(2)[5] == "Old report"
 
 
 async def test_tui_thread_marking_tracks_rows() -> None:
@@ -1726,6 +1735,60 @@ async def test_tui_send_plan_choice_queues_follow_up_with_notes() -> None:
                     "Operator notes:\nPrefer the safer path."
                 )
             },
+        )
+    ]
+    assert threads == ["agent-1"]
+    assert notes == ""
+
+
+async def test_tui_latest_plan_choice_queues_follow_up_with_notes() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+    threads: list[str] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        report = {
+            "report_id": "r1",
+            "agent_id": "agent-1",
+            "project": "demo",
+            "status": "needs_input",
+            "summary": "Choose",
+            "detail": "Pick a path",
+            "needs_input": True,
+            "plan_options": ["A", "B"],
+            "created_at": 123.0,
+        }
+        app.selected_agent_id = "agent-1"
+        app.latest_report_by_agent = {"agent-1": report}
+        app.render_latest_plan_choice_panel(report)
+        app.select_latest_plan_option("1")
+        app.query_one("#latest-plan-notes", TextArea).text = "Prefer B."
+        table = app.query_one("#latest-plan-options", DataTable)
+        await app.send_latest_plan_choice()
+        notes = app.query_one("#latest-plan-notes", TextArea).text
+
+    assert table.row_count == 2
+    assert queued == [
+        (
+            "agent-1",
+            "send_input",
+            {"message": "Selected plan option: B\n\nOperator notes:\nPrefer B."},
         )
     ]
     assert threads == ["agent-1"]

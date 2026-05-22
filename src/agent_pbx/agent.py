@@ -29,7 +29,9 @@ When operator choice is needed, send `pbx_report_turn(needs_input=true,
 plan_options=[...])` with concise, mutually exclusive options. The TUI can queue
 the selected option back as `send_input`; treat a message beginning with
 `Selected plan option:` as the operator's chosen path, then report what you will
-do next and ack after handling.
+do next and ack after handling. Do not only write choices in `summary` or
+`detail`; without `needs_input=true` and `plan_options`, the TUI can show the
+text but cannot provide plan-selection controls.
 
 During long-running work that is progressing normally, send a
 `status="working"` `pbx_report_turn` check-in at least once every five minutes
@@ -150,9 +152,11 @@ after each check-in.
 
 When you need the operator to choose between implementation paths, include
 `needs_input=true` and `plan_options=[...]` in `pbx_report_turn`. Keep each
-option short, actionable, and mutually exclusive. If the TUI sends back a
-`send_input` message beginning with `Selected plan option:`, follow that choice
-and use any `Operator notes:` text as additional constraints.
+option short, actionable, and mutually exclusive. Do not only write plan choices
+in `summary` or `detail`; the TUI needs these structured fields to render
+selection controls. If the TUI sends back a `send_input` message beginning with
+`Selected plan option:`, follow that choice and use any `Operator notes:` text
+as additional constraints.
 
 ## Done Reports
 
@@ -230,6 +234,7 @@ def runbook_payload() -> dict[str, Any]:
         "plan_options": [
             "Use pbx_report_turn(needs_input=true, plan_options=[...]) when operator choice is required.",
             "Keep plan options concise, actionable, and mutually exclusive.",
+            "Do not only write choices in summary or detail; structured plan_options are what the TUI turns into selection controls.",
             "Treat send_input messages beginning with 'Selected plan option:' as the operator's chosen path.",
             "Use Operator notes in that message as additional constraints.",
         ],

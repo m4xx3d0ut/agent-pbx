@@ -41,6 +41,11 @@ class AgentResponse(BaseModel):
     pings_per_hour: int = 0
     estimated_visible_tokens_per_hour: int = 0
     usage_warning: str | None = None
+    latest_report_id: str | None = None
+    latest_report_status: str | None = None
+    latest_report_needs_input: bool = False
+    latest_report_plan_option_count: int = 0
+    latest_report_action_required: bool = False
 
 
 class ReportCreateRequest(BaseModel):

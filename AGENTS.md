@@ -56,7 +56,9 @@ When operator choice is needed, send `pbx_report_turn(needs_input=true,
 plan_options=[...])` with concise, mutually exclusive options. The TUI can queue
 the selected option back as `send_input`; treat a message beginning with
 `Selected plan option:` as the operator's chosen path, then report what you will
-do next and ack after handling.
+do next and ack after handling. Do not only write choices in `summary` or
+`detail`; without `needs_input=true` and `plan_options`, the TUI can show the
+text but cannot provide plan-selection controls.
 
 During long-running work that is progressing normally, send a
 `status="working"` `pbx_report_turn` check-in at least once every five minutes
