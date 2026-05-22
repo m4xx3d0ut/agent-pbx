@@ -327,6 +327,9 @@ scrollback when you intentionally need older output. Set
 larger values reduce redraw pop at the cost of freshness. The tmux view crops
 the Codex `Working` status/input area from captured output, so the main render
 focuses on transcript changes instead of the live prompt buffer.
+On tiny terminals, tmux direct mode hides the pane action button row, shortens
+the editor hotkey text, and focuses the tmux input box so the transcript and
+input both stay visible.
 
 When tmux is available, the Agents table may show a local `Live` hint. `active`
 means the captured pane text changed recently, `idle 1m` means the pane has not

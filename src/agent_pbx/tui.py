@@ -761,6 +761,10 @@ class AgentPBXTUI(App[None]):
         display: block;
     }
 
+    Screen.tiny-agent.tmux-direct #agent-title {
+        display: none;
+    }
+
     #detail {
         height: 1fr;
         min-height: 8;
@@ -1012,6 +1016,21 @@ class AgentPBXTUI(App[None]):
         height: 3;
         padding-top: 0;
     }
+
+    Screen.tiny-agent.tmux-direct #tmux-actions {
+        display: none;
+    }
+
+    Screen.tiny-agent.tmux-direct #tmux-stream {
+        min-height: 5;
+        border: none;
+    }
+
+    Screen.tiny-agent.tmux-direct #tmux-message {
+        height: 5;
+        min-height: 4;
+        max-height: 5;
+    }
     """
 
     BINDINGS = [
@@ -1183,6 +1202,8 @@ class AgentPBXTUI(App[None]):
         return text
 
     def tmux_hotkeys_text(self) -> str:
+        if self.is_tiny_layout():
+            return "Enter send | C-J nl | C-W word | C-T PBX"
         return "Enter send | Ctrl+J newline | Ctrl+W word | Ctrl+T PBX"
 
     def compose(self) -> ComposeResult:
@@ -3031,6 +3052,7 @@ class AgentPBXTUI(App[None]):
         self.apply_layout_dimensions()
         self.render_agent_columns()
         self.update_tiny_button_labels()
+        self.update_hotkey_labels()
         self.restore_layout_focus()
 
     def apply_layout_dimensions(self) -> None:
@@ -3089,6 +3111,11 @@ class AgentPBXTUI(App[None]):
             if button is not None:
                 button.label = Text(label)
 
+    def update_hotkey_labels(self) -> None:
+        tmux_hotkeys = self.query_one_or_none("#tmux-hotkeys", Static)
+        if tmux_hotkeys is not None:
+            tmux_hotkeys.update(self.tmux_hotkeys_text())
+
     def restore_layout_focus(self) -> None:
         if not self.is_collapsed_layout():
             return
@@ -3097,8 +3124,15 @@ class AgentPBXTUI(App[None]):
             if agents is not None:
                 agents.focus()
         else:
+            if isinstance(self.focused, (Input, TextArea)):
+                return
+            if self.tmux_direct_enabled and self.active_agent_tab == "latest-tab":
+                tmux_message = self.query_one_or_none("#tmux-message", TextArea)
+                if tmux_message is not None:
+                    tmux_message.focus()
+                    return
             detail = self.query_one_or_none("#detail", TextArea)
-            if detail is not None and not isinstance(self.focused, (Input, TextArea)):
+            if detail is not None:
                 detail.focus()
 
     def apply_tmux_class(self) -> None:

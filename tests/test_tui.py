@@ -596,6 +596,62 @@ async def test_tui_tmux_direct_replaces_latest_and_sends_exact_input(
     assert sent == [("%76", "/status")]
 
 
+async def test_tui_tiny_tmux_direct_keeps_stream_and_input_visible(
+    monkeypatch,
+) -> None:
+    pane = tmux_support.TmuxPane(
+        "agent-pbx",
+        "0",
+        "2",
+        "%76",
+        True,
+        "node",
+        "agent-pbx",
+        "/home/me/agent-pbx",
+        53,
+        20,
+        500,
+    )
+
+    monkeypatch.setattr("agent_pbx.tui.tmux_support.list_panes", lambda: [pane])
+    monkeypatch.setattr(
+        "agent_pbx.tui.tmux_support.capture_pane",
+        lambda target, *, lines=0: "\n".join(f"line {index}" for index in range(20)),
+    )
+
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(53, 20)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "project": "agent-pbx",
+                "status": "working",
+                "last_seen_at": 123.0,
+                "metadata": {"cwd": "/home/me/agent-pbx"},
+            }
+        }
+        await app.select_agent("agent-1")
+        await pilot.pause()
+
+        stream = app.query_one("#tmux-stream", TextArea)
+        message = app.query_one("#tmux-message", TextArea)
+        hotkeys = app.query_one("#tmux-hotkeys", Static)
+
+        assert app.screen.has_class("tiny-agent")
+        assert app.screen.has_class("tmux-direct")
+        assert app.query_one("#agent-title").region.height == 0
+        assert app.query_one("#tmux-actions").region.height == 0
+        assert stream.region.height >= 5
+        assert 4 <= message.region.height <= 5
+        assert message.region.bottom <= app.size.height
+        assert hotkeys.region.bottom <= app.size.height
+        assert "C-J nl" in str(hotkeys.renderable)
+        assert app.focused is message
+
+
 async def test_tui_tmux_update_skips_unchanged_capture() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
 
