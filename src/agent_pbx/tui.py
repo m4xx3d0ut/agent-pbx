@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -16,7 +17,7 @@ from urllib.parse import urlparse
 import httpx
 from rich.color import Color, ColorParseError
 from rich.text import Text
-from textual.app import App, ComposeResult, ScreenStackError
+from textual.app import App, ComposeResult, ScreenStackError, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
@@ -1446,6 +1447,97 @@ class AgentPBXTUI(App[None]):
         self.set_interval(self.tmux_refresh_seconds, self.refresh_tmux_capture_if_active)
         self.set_interval(0.8, self.toggle_unseen_attention)
         self.run_worker(self.stream_events(), name="events", exclusive=True)
+
+    def get_system_commands(self, screen: Any) -> Iterable[SystemCommand]:
+        yield from super().get_system_commands(screen)
+        yield SystemCommand("/refresh", "Refresh agents, events, and selected agent", self.palette_refresh)
+        yield SystemCommand("/detail", "Request detail for the selected agent", self.palette_request_detail)
+        yield SystemCommand("/ping", "Ping the selected nohup-mode agent", self.palette_ping)
+        yield SystemCommand("/cancel", "Mark the selected agent canceled", self.palette_mark_canceled)
+        yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
+        yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
+        yield SystemCommand("/hide agent", "Hide the selected agent from the Agents view", self.palette_hide_agent)
+        yield SystemCommand("/purge agent", "Hide selected agent and delete its thread data", self.palette_purge_agent)
+        yield SystemCommand("/theme cyberpunk", "Use the Cyberpunk theme", lambda: self.palette_set_theme(DEFAULT_TUI_THEME))
+        yield SystemCommand("/theme minimal", "Use the high-compatibility Minimal theme", lambda: self.palette_set_theme(MINIMAL_TUI_THEME))
+        yield SystemCommand(f"/theme {self.custom_theme_name}", "Use the custom TUI theme", lambda: self.palette_set_theme(self.custom_theme_name))
+        yield SystemCommand("/layout adaptive", "Use adaptive layout mode", lambda: self.palette_set_layout(ADAPTIVE_TUI_LAYOUT))
+        yield SystemCommand("/layout split", "Use split layout mode", lambda: self.palette_set_layout(SPLIT_TUI_LAYOUT))
+        yield SystemCommand("/layout compact", "Use compact layout mode", lambda: self.palette_set_layout(COMPACT_TUI_LAYOUT))
+        yield SystemCommand("/layout tiny", "Use tiny layout mode", lambda: self.palette_set_layout(TINY_TUI_LAYOUT))
+
+    def palette_refresh(self) -> None:
+        self.run_worker(self.action_refresh(), name="palette-refresh", exclusive=True)
+
+    def palette_agent_id(self) -> str | None:
+        agent_id = self.selected_or_cursor_agent_id()
+        if not agent_id:
+            self.notify("Select an agent first.", severity="warning")
+            return None
+        agent_input = self.query_one_or_none("#agent-id", Input)
+        if agent_input is not None:
+            agent_input.value = agent_id
+        return agent_id
+
+    def palette_request_detail(self) -> None:
+        if self.palette_agent_id() is None:
+            return
+        self.run_worker(self.request_detail(), name="palette-request-detail", exclusive=True)
+
+    def palette_ping(self) -> None:
+        if self.palette_agent_id() is None:
+            return
+        self.run_worker(self.ping_agent(), name="palette-ping", exclusive=True)
+
+    def palette_mark_canceled(self) -> None:
+        if self.palette_agent_id() is None:
+            return
+        self.run_worker(self.mark_agent_canceled(), name="palette-cancel", exclusive=True)
+
+    def palette_toggle_tmux(self) -> None:
+        self.run_worker(self.action_toggle_tmux_direct(), name="palette-tmux", exclusive=True)
+
+    def palette_workerbee(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_workerbee_for_agent(agent_id),
+            name="palette-workerbee",
+            exclusive=True,
+        )
+
+    def palette_hide_agent(self) -> None:
+        self.run_worker(
+            self.dismiss_selected_agent(delete_thread=False),
+            name="palette-hide-agent",
+            exclusive=True,
+        )
+
+    def palette_purge_agent(self) -> None:
+        self.run_worker(
+            self.dismiss_selected_agent(delete_thread=True),
+            name="palette-purge-agent",
+            exclusive=True,
+        )
+
+    def palette_set_theme(self, theme_name: str) -> None:
+        self.set_ui_theme(theme_name)
+        self.notify(f"Theme set to {self.ui_theme}.")
+
+    def palette_set_layout(self, layout_name: str) -> None:
+        self.set_layout_mode(layout_name)
+        self.notify(f"Layout set to {self.layout_mode}.")
+
+    async def open_workerbee_for_agent(self, agent_id: str) -> None:
+        tabs = self.query_one_or_none("#agent-tabs", TabbedContent)
+        if tabs is not None:
+            tabs.active = "workerbee-tab"
+        self.active_agent_tab = "workerbee-tab"
+        if agent_id in self.agents:
+            await self.select_agent(agent_id)
+        else:
+            await self.load_workerbee_status(agent_id)
 
     async def action_refresh(self) -> None:
         await self.refresh_agents()

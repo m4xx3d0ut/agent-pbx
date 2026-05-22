@@ -1264,6 +1264,58 @@ def test_tui_theme_toggle_updates_app_theme() -> None:
     assert app.theme == "cyberpunk"
 
 
+async def test_tui_palette_includes_operator_commands() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        titles = {command.title for command in app.get_system_commands(app.screen)}
+
+    assert "/detail" in titles
+    assert "/ping" in titles
+    assert "/tmux" in titles
+    assert "/workerbee" in titles
+    assert "/theme minimal" in titles
+    assert "/layout compact" in titles
+
+
+async def test_tui_palette_agent_commands_use_selected_agent() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[str] = []
+
+    async def fake_request_detail() -> None:
+        calls.append(app.query_one("#agent-id", Input).value)
+
+    app.request_detail = fake_request_detail  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.palette_request_detail()
+        await pilot.pause()
+
+    assert calls == ["agent-1"]
+
+
+def test_tui_palette_theme_and_layout_commands() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    app.palette_set_theme("minimal")
+    app.palette_set_layout("tiny")
+
+    assert app.ui_theme == "minimal"
+    assert app.layout_mode == "tiny"
+
+
 def test_tui_layout_toggle_persists(tmp_path: Path) -> None:
     settings_file = tmp_path / "settings.json"
     app = AgentPBXTUI(
