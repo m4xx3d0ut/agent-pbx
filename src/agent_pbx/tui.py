@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import time
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
 import httpx
 from rich.color import Color, ColorParseError
@@ -66,6 +70,7 @@ FOLLOW_UP_EDIT_KEYS = {
 STALE_POLL_SECONDS = 120
 QUEUED_COMMAND_WARN_SECONDS = 60
 ACTIVE_POLL_SECONDS = 60
+TMUX_LIVENESS_IDLE_SECONDS = 60
 THEME_KEYS = (
     "primary",
     "secondary",
@@ -83,6 +88,17 @@ CODEX_STATUS_LINE_PATTERN = re.compile(
     r"\b(Working|Thinking|Reading|Editing|Running|Waiting)\b"
 )
 WidgetType = TypeVar("WidgetType")
+
+
+@dataclass
+class TmuxLiveness:
+    pane_id: str | None = None
+    capture_hash: str | None = None
+    last_capture_at: float | None = None
+    last_changed_at: float | None = None
+    state: str = "unknown"
+
+
 CYBERPUNK_PALETTE = {
     "primary": "#00e5ff",
     "secondary": "#9b5cff",
@@ -262,6 +278,24 @@ def env_tmux_refresh_seconds_value() -> float | None:
     return max(MIN_TMUX_REFRESH_SECONDS, parsed)
 
 
+def is_local_server_url(server: str) -> bool:
+    parsed = urlparse(server)
+    host = (parsed.hostname or "").strip().lower()
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
+def tmux_features_available(
+    *,
+    tmux_direct_enabled: bool = False,
+    tmux_bin: str = "tmux",
+) -> bool:
+    if shutil.which(tmux_bin) is None:
+        return False
+    return bool(os.getenv("TMUX")) or tmux_direct_enabled or env_flag(
+        "AGENT_PBX_TUI_TMUX_SHOW"
+    )
+
+
 def env_settings_file() -> Path:
     value = os.getenv("AGENT_PBX_TUI_SETTINGS_FILE", "").strip()
     if value:
@@ -419,6 +453,7 @@ class SettingsScreen(ModalScreen[None]):
         agent_blink_enabled: bool,
         compact_layout_enabled: bool,
         tmux_direct_enabled: bool,
+        tmux_features_available: bool,
         custom_theme_name: str,
         custom_theme_enabled: bool,
     ) -> None:
@@ -428,6 +463,7 @@ class SettingsScreen(ModalScreen[None]):
         self.agent_blink_enabled = agent_blink_enabled
         self.compact_layout_enabled = compact_layout_enabled
         self.tmux_direct_enabled = tmux_direct_enabled
+        self.tmux_features_available = tmux_features_available
         self.custom_theme_name = custom_theme_name
         self.custom_theme_enabled = custom_theme_enabled
 
@@ -455,11 +491,13 @@ class SettingsScreen(ModalScreen[None]):
                     value=self.compact_layout_enabled,
                     id="compact-layout",
                 )
-                yield Checkbox(
+                tmux_direct = Checkbox(
                     "Tmux direct",
                     value=self.tmux_direct_enabled,
                     id="tmux-direct",
                 )
+                tmux_direct.disabled = not self.tmux_features_available
+                yield tmux_direct
                 yield Checkbox(
                     f"{self.custom_theme_name} theme",
                     value=self.custom_theme_enabled,
@@ -892,6 +930,14 @@ class AgentPBXTUI(App[None]):
         )
         if tmux_direct is None and tmux_direct_setting is not None:
             self.tmux_direct_enabled = tmux_direct_setting
+        self.tmux_features_available = tmux_features_available(
+            tmux_direct_enabled=self.tmux_direct_enabled
+        )
+        self.tmux_local_direct_context = (
+            self.tmux_features_available and is_local_server_url(self.server)
+        )
+        if self.tmux_direct_enabled and not self.tmux_features_available:
+            self.tmux_direct_enabled = False
         capture_lines_setting = int_setting(
             self.settings,
             "tmux_capture_lines",
@@ -950,6 +996,8 @@ class AgentPBXTUI(App[None]):
         self.tmux_detached_agent_ids: set[str] = set()
         self.tmux_last_capture_by_pane: dict[str, str] = {}
         self.tmux_last_status_by_agent: dict[str, str] = {}
+        self.tmux_visible_capture_key: str | None = None
+        self.tmux_liveness_by_agent: dict[str, TmuxLiveness] = {}
         self.tmux_panes: list[tmux_support.TmuxPane] = []
         self.tmux_refreshing = False
         self.attention_blink_phase = False
@@ -957,6 +1005,15 @@ class AgentPBXTUI(App[None]):
         self.event_stream_disconnected = False
         self.last_seen_event_id = int_setting(self.settings, "last_seen_event_id", 0)
         self.flash_generation = 0
+
+    def composer_hotkeys_text(self) -> str:
+        text = "Enter send | Ctrl+J newline | Ctrl+W word"
+        if self.tmux_features_available:
+            text += " | Ctrl+T tmux"
+        return text
+
+    def tmux_hotkeys_text(self) -> str:
+        return "Enter send | Ctrl+J newline | Ctrl+W word | Ctrl+T PBX"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -1014,10 +1071,7 @@ class AgentPBXTUI(App[None]):
                                 yield Button("Send", id="tmux-send", variant="primary")
                             yield FollowUpTextArea(id="tmux-message", soft_wrap=True)
                             yield Static(
-                                (
-                                    "Enter send | Ctrl+J newline | "
-                                    "Ctrl+W word | Ctrl+T PBX"
-                                ),
+                                self.tmux_hotkeys_text(),
                                 id="tmux-hotkeys",
                             )
                         with Vertical(id="composer"):
@@ -1040,10 +1094,7 @@ class AgentPBXTUI(App[None]):
                                     yield Button("Ping", id="ping-agent")
                                     yield Button("Mark Canceled", id="mark-canceled")
                             yield Static(
-                                (
-                                    "Enter send | Ctrl+J newline | "
-                                    "Ctrl+W word | Ctrl+T tmux"
-                                ),
+                                self.composer_hotkeys_text(),
                                 id="composer-hotkeys",
                             )
                     with TabPane("Thread", id="thread-tab"):
@@ -1091,7 +1142,7 @@ class AgentPBXTUI(App[None]):
         self.apply_layout_class()
         self.apply_tmux_class()
         agents = self.query_one("#agents", DataTable)
-        agents.add_columns(
+        agent_columns = [
             "New",
             "Agent",
             "PBX",
@@ -1100,9 +1151,11 @@ class AgentPBXTUI(App[None]):
             "Project",
             "Last Seen",
             "Queue",
-            "Poll",
-            "Use",
-        )
+        ]
+        if self.tmux_features_available:
+            agent_columns.append("Live")
+        agent_columns.extend(["Poll", "Use"])
+        agents.add_columns(*agent_columns)
         events = self.query_one("#events", DataTable)
         events.add_columns("ID", "Type", "Subject")
         thread = self.query_one("#thread", DataTable)
@@ -1136,6 +1189,7 @@ class AgentPBXTUI(App[None]):
                 agent_blink_enabled=self.agent_blink_enabled,
                 compact_layout_enabled=self.layout_mode == COMPACT_TUI_LAYOUT,
                 tmux_direct_enabled=self.tmux_direct_enabled,
+                tmux_features_available=self.tmux_features_available,
                 custom_theme_name=self.custom_theme_name,
                 custom_theme_enabled=self.ui_theme == self.custom_theme_name,
             )
@@ -1157,6 +1211,13 @@ class AgentPBXTUI(App[None]):
             await self.load_latest_report(self.selected_agent_id)
 
     def set_tmux_direct_enabled(self, enabled: bool) -> bool:
+        if enabled and not self.tmux_features_available:
+            self.notify(
+                "Tmux direct is unavailable in this terminal. Start inside tmux "
+                "or set AGENT_PBX_TUI_TMUX_SHOW=1 on a host with tmux.",
+                severity="warning",
+            )
+            enabled = False
         self.tmux_direct_enabled = enabled
         if enabled:
             self.tmux_detached_agent_ids.clear()
@@ -1259,19 +1320,26 @@ class AgentPBXTUI(App[None]):
             agent_id = str(agent["agent_id"])
             unseen = agent_id in self.unseen_latest_agent_ids
             marker = "NEW" if unseen else ""
-            cells = self.style_agent_row(
+            row = [
+                marker,
+                agent_id,
+                self.format_pbx_active(agent),
+                self.format_plan_state(agent),
+                self.format_agent_status(agent),
+                str(agent["project"]),
+                f"{agent['last_seen_at']:.0f}",
+                self.format_queue_state(agent),
+            ]
+            if self.tmux_features_available:
+                row.append(self.format_tmux_liveness(agent_id))
+            row.extend(
                 [
-                    marker,
-                    agent_id,
-                    self.format_pbx_active(agent),
-                    self.format_plan_state(agent),
-                    self.format_agent_status(agent),
-                    str(agent["project"]),
-                    f"{agent['last_seen_at']:.0f}",
-                    self.format_queue_state(agent),
                     self.format_poll_state(agent),
                     self.format_usage_state(agent),
-                ],
+                ]
+            )
+            cells = self.style_agent_row(
+                row,
                 agent,
             )
             table.add_row(*cells, key=agent_id)
@@ -1335,14 +1403,75 @@ class AgentPBXTUI(App[None]):
         if agent is not None and not self.agent_requires_polling(agent):
             return (
                 "This PBX queue action requires Agent PBX nohup mode. "
-                "Report-mode agents will not pick it up unless they poll; "
-                "use tmux direct mode to interact locally without polling."
+                "Report-mode agents will not pick it up; use tmux direct mode "
+                "to interact locally without polling, or explicitly restart "
+                "the agent with Agent PBX nohup."
             )
         return "Waiting for the agent to poll this command and publish a new report."
 
     def command_delivery_requires_nohup(self, agent_id: str) -> bool:
         agent = self.agents.get(agent_id)
         return agent is not None and not self.agent_requires_polling(agent)
+
+    def record_tmux_liveness_state(
+        self,
+        agent_id: str,
+        state: str,
+        *,
+        pane_id: str | None = None,
+    ) -> None:
+        entry = self.tmux_liveness_by_agent.setdefault(agent_id, TmuxLiveness())
+        entry.state = state
+        entry.pane_id = pane_id
+        entry.last_capture_at = time.time()
+
+    def record_tmux_capture_liveness(
+        self,
+        agent_id: str,
+        pane_id: str,
+        captured: str,
+    ) -> None:
+        now = time.time()
+        capture_hash = hashlib.sha256(
+            captured.encode("utf-8", errors="replace")
+        ).hexdigest()
+        entry = self.tmux_liveness_by_agent.setdefault(agent_id, TmuxLiveness())
+        if entry.pane_id != pane_id or entry.capture_hash != capture_hash:
+            entry.last_changed_at = now
+        entry.pane_id = pane_id
+        entry.capture_hash = capture_hash
+        entry.last_capture_at = now
+        entry.state = "captured"
+
+    def tmux_liveness_level(self, agent_id: str) -> str:
+        entry = self.tmux_liveness_by_agent.get(agent_id)
+        if entry is None:
+            return "unknown"
+        if entry.state == "stale":
+            return "stale"
+        if entry.state != "captured":
+            return "unknown"
+        if entry.last_changed_at is None:
+            return "unknown"
+        age = max(0.0, time.time() - entry.last_changed_at)
+        if age < TMUX_LIVENESS_IDLE_SECONDS:
+            return "active"
+        return "idle"
+
+    def format_tmux_liveness(self, agent_id: str) -> str:
+        entry = self.tmux_liveness_by_agent.get(agent_id)
+        if entry is None:
+            return "-"
+        if entry.state == "stale":
+            return "stale"
+        if entry.state != "captured":
+            return "-"
+        if entry.last_changed_at is None:
+            return "-"
+        age = max(0.0, time.time() - entry.last_changed_at)
+        if age < TMUX_LIVENESS_IDLE_SECONDS:
+            return "active"
+        return f"idle {format_duration(age)}"
 
     def notify_queued_command(
         self, agent_id: str, label: str, command: dict[str, Any]
@@ -1429,6 +1558,12 @@ class AgentPBXTUI(App[None]):
                 "stale": "bold yellow",
                 "never": "bold red",
             }.get(level)
+            if style is None and self.tmux_features_available:
+                tmux_level = self.tmux_liveness_level(str(agent.get("agent_id") or ""))
+                style = {
+                    "active": "bold cyan",
+                    "stale": "bold yellow",
+                }.get(tmux_level)
         if style is None:
             return cells
         return [Text(cell, style=style) for cell in cells]
@@ -1703,16 +1838,24 @@ class AgentPBXTUI(App[None]):
         try:
             panes = await asyncio.to_thread(tmux_support.list_panes)
         except Exception as exc:
+            self.tmux_visible_capture_key = None
+            self.record_tmux_liveness_state(agent_id, "unavailable")
             self.update_tmux_status(
                 status,
                 "Tmux: unavailable",
                 cache_key=agent_id,
             )
             stream.text = f"Unable to list tmux panes: {exc}"
+            self.render_agents()
             return
         self.tmux_panes = panes
         pane, mode = self.resolve_tmux_pane(agent_id, panes)
         if pane is None:
+            self.tmux_visible_capture_key = None
+            self.record_tmux_liveness_state(
+                agent_id,
+                "stale" if mode == "stale" else mode,
+            )
             if mode == "stale":
                 self.update_tmux_status(
                     status,
@@ -1733,7 +1876,10 @@ class AgentPBXTUI(App[None]):
                     "No tmux pane is attached for this agent.\n\n"
                     "Use Auto to retry discovery or Select Pane to choose a pane."
                 )
+            self.render_agents()
             return
+        cache_key = f"{agent_id}:{pane.pane_id}"
+        self.prepare_tmux_stream_for_capture(stream, cache_key=cache_key, pane=pane)
         try:
             captured = await asyncio.to_thread(
                 tmux_support.capture_pane,
@@ -1746,12 +1892,16 @@ class AgentPBXTUI(App[None]):
                 f"Tmux: {pane.pane_id} capture failed",
                 cache_key=agent_id,
             )
+            self.record_tmux_liveness_state(agent_id, "unavailable", pane_id=pane.pane_id)
             stream.text = f"Unable to capture tmux pane {pane.pane_id}: {exc}"
+            self.render_agents()
             return
+        displayed = self.crop_tmux_capture_for_display(captured or "(empty tmux pane)")
+        self.record_tmux_capture_liveness(agent_id, pane.pane_id, displayed)
         self.update_tmux_stream(
             stream,
-            self.crop_tmux_capture_for_display(captured or "(empty tmux pane)"),
-            cache_key=f"{agent_id}:{pane.pane_id}",
+            displayed,
+            cache_key=cache_key,
         )
         self.update_tmux_status(
             status,
@@ -1764,6 +1914,21 @@ class AgentPBXTUI(App[None]):
             ),
             cache_key=agent_id,
         )
+        self.render_agents()
+
+    def prepare_tmux_stream_for_capture(
+        self,
+        stream: TextArea,
+        *,
+        cache_key: str,
+        pane: tmux_support.TmuxPane,
+    ) -> bool:
+        if self.tmux_visible_capture_key == cache_key:
+            return False
+        self.tmux_visible_capture_key = cache_key
+        stream.text = f"Loading tmux pane {pane.pane_id} ({pane.target_label})..."
+        stream.scroll_home(animate=False)
+        return True
 
     def update_tmux_status(
         self,
@@ -1894,6 +2059,7 @@ class AgentPBXTUI(App[None]):
         self.tmux_agent_targets.pop(agent_id, None)
         self.tmux_manual_override_agent_ids.discard(agent_id)
         self.tmux_detached_agent_ids.add(agent_id)
+        self.tmux_visible_capture_key = None
         self.save_settings()
         status = self.query_one_or_none("#tmux-status", Static)
         stream = self.query_one_or_none("#tmux-stream", TextArea)
@@ -2528,11 +2694,11 @@ class AgentPBXTUI(App[None]):
         elif event.checkbox.id == "compact-layout":
             self.set_layout_mode(COMPACT_TUI_LAYOUT if event.value else DEFAULT_TUI_LAYOUT)
         elif event.checkbox.id == "tmux-direct":
-            self.set_tmux_direct_enabled(event.value)
+            enabled = self.set_tmux_direct_enabled(event.value)
             if self.selected_agent_id:
                 worker = (
                     self.load_tmux_capture(self.selected_agent_id)
-                    if event.value
+                    if enabled
                     else self.load_latest_report(self.selected_agent_id)
                 )
                 self.run_worker(

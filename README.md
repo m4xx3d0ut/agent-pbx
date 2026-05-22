@@ -160,10 +160,11 @@ Agent PBX has two operator-facing modes:
 
 - `use Agent PBX`: report mode. Agents register with
   `metadata.pbx_mode="report"` and send meaningful `pbx_report_turn` updates.
-  They do not need to poll queued commands.
+  They must not call `pbx_poll_commands` or claim queued command pickup.
 - `use Agent PBX nohup`: nohup mode. Agents register or update metadata with
-  `pbx_mode="nohup"`, report status, poll queued commands, ack handled commands,
-  honor pings, and open post-reply follow-up windows.
+  `pbx_mode="nohup"` and `pbx_nohup_explicit=true`, report status, poll queued
+  commands, ack handled commands, honor pings, and open post-reply follow-up
+  windows.
 
 Registration still defaults `pbx_active=true`, which means Agent PBX visibility
 is on. `pbx_active=false` means PBX is off for either mode. The guidance
@@ -189,6 +190,10 @@ That repeats long-poll cycles for up to ten minutes after `done`, `complete`,
 after the reply can still be picked up by a live nohup-mode agent. If the 600s
 window returns empty, the agent should stop polling until the next explicit PBX
 action or new work.
+
+Agents should open that post-reply window only after the operator explicitly
+asked for `use Agent PBX nohup`. In report mode, including local tmux-direct
+workflows, agents should send the terminal report and stop without long polling.
 
 Use `Ping` in the TUI to intentionally keep a live nohup-mode agent polling
 longer. Agents handle `ping` as a keepalive: reply with a `status="working"`
@@ -301,7 +306,9 @@ report and queue buttons. Agent PBX still records normal reports in `Thread`,
 but follow-up input is pasted directly into the selected tmux pane, so slash
 commands such as `/status` are sent unchanged. The TUI auto-matches panes by
 agent cwd/project/title and provides `Auto`, `Select Pane`, and `Detach`
-controls for manual correction. Press `Ctrl+T` from `Latest` to toggle tmux
+controls for manual correction. Tmux controls are disabled when `tmux` is not
+available; set `AGENT_PBX_TUI_TMUX_SHOW=1` to show them on a tmux-capable host
+outside an attached tmux client. Press `Ctrl+T` from `Latest` to toggle tmux
 direct mode without opening settings. `AGENT_PBX_TUI_TMUX_CAPTURE_LINES=0`
 captures only the visible pane by default; set a positive value to include
 scrollback when you intentionally need older output. Set
@@ -309,6 +316,21 @@ scrollback when you intentionally need older output. Set
 larger values reduce redraw pop at the cost of freshness. The tmux view crops
 the Codex `Working` status/input area from captured output, so the main render
 focuses on transcript changes instead of the live prompt buffer.
+
+When tmux is available, the Agents table may show a local `Live` hint. `active`
+means the captured pane text changed recently, `idle 1m` means the pane has not
+visibly changed for the idle threshold, and `stale` means the selected pane
+target is gone or invalid. This is an inferred local hint; PBX-reported status
+remains authoritative.
+
+The tmux read path is snapshot-based: Agent PBX uses `capture-pane` to show the
+rendered pane state a human would see. Tmux paste buffers are used for sending
+text, not as a live read source. Follow-up text is loaded into a named tmux
+buffer, pasted with bracketed paste, then submitted; set
+`AGENT_PBX_TUI_TMUX_BRACKETED_PASTE=0` only if a target pane mishandles
+bracketed paste. `pipe-pane` and tmux control mode are better fits for future
+debug transcripts or event-driven refresh, but the default UI remains
+`capture-pane` plus periodic resync for now.
 
 For local tmux-direct testing, use report mode unless you specifically need PBX
 queued follow-ups: tell the agent `use Agent PBX`, not `use Agent PBX nohup`.
@@ -385,9 +407,10 @@ curl -H "Authorization: Bearer $AGENT_PBX_TOKEN" \
 When an agent is asked to use Agent PBX for a session, it should keep using PBX
 until the operator explicitly asks it to stop or starts a new session. Default
 `use Agent PBX` is report mode: the agent reports meaningful turn status with
-`pbx_report_turn` and does not need to poll. `use Agent PBX nohup` is queue
-pickup mode: the agent reports, polls queued commands with `pbx_poll_commands`,
-and acks handled commands with `pbx_ack_command`.
+`pbx_report_turn` and must not poll. `use Agent PBX nohup` is explicit queue
+pickup mode: the agent reports, registers `pbx_nohup_explicit=true`, polls
+queued commands with `pbx_poll_commands`, and acks handled commands with
+`pbx_ack_command`.
 
 `Request Detail` queues a `request_detail` command. A new detailed report appears
 only after the target agent polls that command and responds with a new

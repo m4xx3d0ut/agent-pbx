@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
 
 from agent_pbx import tmux
@@ -114,6 +113,30 @@ def test_tmux_capture_zero_lines_uses_visible_pane(monkeypatch) -> None:
     assert calls == [["tmux", "capture-pane", "-p", "-J", "-S", "0", "-t", "%1"]]
 
 
+def test_tmux_capture_options_use_expected_flags(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "alternate\n", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    captured = tmux.capture_pane(
+        "%1",
+        lines=0,
+        join_wrapped=False,
+        alternate_screen=True,
+        copy_mode=True,
+        preserve_trailing_spaces=True,
+    )
+
+    assert captured == "alternate"
+    assert calls == [
+        ["tmux", "capture-pane", "-p", "-a", "-M", "-N", "-S", "0", "-t", "%1"]
+    ]
+
+
 def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:
     calls: list[list[str]] = []
     loaded_text: list[str] = []
@@ -122,7 +145,7 @@ def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:
     def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
         if args[1] == "load-buffer":
-            loaded_text.append(Path(args[-1]).read_text(encoding="utf-8"))
+            loaded_text.append(str(kwargs.get("input")))
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(tmux.subprocess, "run", fake_run)
@@ -132,7 +155,24 @@ def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:
 
     assert loaded_text == ["/status"]
     assert calls[0][0:3] == ["tmux", "load-buffer", "-b"]
-    assert calls[1][0:4] == ["tmux", "paste-buffer", "-d", "-b"]
+    assert calls[0][-1] == "-"
+    assert calls[1][0:5] == ["tmux", "paste-buffer", "-p", "-d", "-b"]
     assert calls[1][-2:] == ["-t", "%1"]
     assert calls[2] == ["tmux", "send-keys", "-t", "%1", "C-m"]
     assert sleeps == [tmux.DEFAULT_SUBMIT_DELAY_SECONDS]
+
+
+def test_tmux_send_text_can_disable_bracketed_paste(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+    monkeypatch.setattr(tmux.time, "sleep", lambda seconds: None)
+    monkeypatch.setenv("AGENT_PBX_TUI_TMUX_BRACKETED_PASTE", "0")
+
+    tmux.send_text("%1", "hello")
+
+    assert calls[1][0:4] == ["tmux", "paste-buffer", "-d", "-b"]

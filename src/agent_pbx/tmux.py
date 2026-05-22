@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import subprocess
-import tempfile
 import time
 from typing import Any, Mapping, Sequence
 
@@ -25,6 +24,7 @@ TMUX_PANE_FORMAT = "\t".join(
     ]
 )
 DEFAULT_SUBMIT_DELAY_SECONDS = 0.08
+FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
 
 
 @dataclass(frozen=True)
@@ -91,23 +91,40 @@ def capture_start_arg(lines: int) -> str:
     return "0" if lines <= 0 else f"-{lines}"
 
 
-def capture_pane(target: str, *, lines: int = 0, tmux_bin: str = "tmux") -> str:
+def capture_pane(
+    target: str,
+    *,
+    lines: int = 0,
+    tmux_bin: str = "tmux",
+    join_wrapped: bool = True,
+    alternate_screen: bool = False,
+    copy_mode: bool = False,
+    preserve_trailing_spaces: bool = False,
+) -> str:
+    args = [tmux_bin, "capture-pane", "-p"]
+    if join_wrapped:
+        args.append("-J")
+    if alternate_screen:
+        args.append("-a")
+    if copy_mode:
+        args.append("-M")
+    if preserve_trailing_spaces:
+        args.append("-N")
+    args.extend(["-S", capture_start_arg(int(lines)), "-t", target])
     result = subprocess.run(
-        [
-            tmux_bin,
-            "capture-pane",
-            "-p",
-            "-J",
-            "-S",
-            capture_start_arg(int(lines)),
-            "-t",
-            target,
-        ],
+        args,
         capture_output=True,
         check=True,
         text=True,
     )
     return result.stdout.rstrip("\n")
+
+
+def bracketed_paste_enabled() -> bool:
+    value = os.getenv("AGENT_PBX_TUI_TMUX_BRACKETED_PASTE")
+    if value is None:
+        return True
+    return value.strip().lower() not in FALSE_ENV_VALUES
 
 
 def send_text(
@@ -116,28 +133,29 @@ def send_text(
     *,
     tmux_bin: str = "tmux",
     submit_delay_seconds: float = DEFAULT_SUBMIT_DELAY_SECONDS,
+    bracketed_paste: bool | None = None,
+    submit: bool = True,
 ) -> None:
     buffer_name = f"agent-pbx-{os.getpid()}"
-    path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            delete=False,
-            prefix="agent-pbx-tmux-",
-        ) as handle:
-            handle.write(text)
-            path = handle.name
-        subprocess.run(
-            [tmux_bin, "load-buffer", "-b", buffer_name, path],
-            check=True,
-            text=True,
-        )
-        subprocess.run(
-            [tmux_bin, "paste-buffer", "-d", "-b", buffer_name, "-t", target],
-            check=True,
-            text=True,
-        )
+    subprocess.run(
+        [tmux_bin, "load-buffer", "-b", buffer_name, "-"],
+        input=text,
+        check=True,
+        text=True,
+    )
+    paste_cmd = [tmux_bin, "paste-buffer"]
+    use_bracketed_paste = (
+        bracketed_paste if bracketed_paste is not None else bracketed_paste_enabled()
+    )
+    if use_bracketed_paste:
+        paste_cmd.append("-p")
+    paste_cmd.extend(["-d", "-b", buffer_name, "-t", target])
+    subprocess.run(
+        paste_cmd,
+        check=True,
+        text=True,
+    )
+    if submit:
         if submit_delay_seconds > 0:
             time.sleep(submit_delay_seconds)
         subprocess.run(
@@ -145,9 +163,6 @@ def send_text(
             check=True,
             text=True,
         )
-    finally:
-        if path is not None:
-            Path(path).unlink(missing_ok=True)
 
 
 def score_pane_for_agent(pane: TmuxPane, agent: Mapping[str, Any]) -> int:

@@ -24,13 +24,16 @@ Default "use Agent PBX" is report mode: send meaningful `pbx_report_turn`
 updates at task start, before waiting for input, after important milestones,
 after test or deploy results, and at turn completion. Keep summaries brief but
 actionable and put detailed notes in `detail`. Report mode does not require
-polling queued commands.
+polling queued commands. In report mode, never call `pbx_poll_commands` or
+claim PBX queue pickup.
 
 If the operator asks you to "use Agent PBX nohup", switch to nohup mode by
-registering or updating metadata with `pbx_mode="nohup"`. Nohup mode means
-reporting plus queued command pickup: poll with `pbx_poll_commands`, handle
-commands, ack them with `pbx_ack_command`, honor ping keepalives, and use the
-post-reply follow-up window.
+registering or updating metadata with `pbx_mode="nohup"` and
+`pbx_nohup_explicit=true`. Nohup mode means reporting plus queued command
+pickup: poll with `pbx_poll_commands`, handle commands, ack them with
+`pbx_ack_command`, honor ping keepalives, and use the post-reply follow-up
+window. Do not infer nohup mode from queued commands, pings, plan requests, or
+the phrase "use Agent PBX"; it must be explicitly requested.
 
 When operator choice is needed, send `pbx_report_turn(needs_input=true,
 plan_options=[...])` with concise, mutually exclusive options. The TUI can queue
@@ -69,6 +72,11 @@ mode, open one post-reply follow-up window with
 This repeats long-poll cycles for up to ten minutes, allowing queued follow-ups
 to be picked up after the reply. If the 600s window returns empty, stop polling
 until the next explicit PBX action or new work.
+
+Before opening any post-reply long-poll window, confirm this session is in
+explicit nohup mode. If this is report mode, or if local tmux direct interaction
+is being used for follow-up, close out normally after the final report and do
+not poll.
 
 If a `ping` command is received in nohup mode, treat it as a polling keepalive.
 Respond with a `status="working"` `pbx_report_turn` whose summary starts with
@@ -124,13 +132,15 @@ operator follow-up queues, detailed report history, and TUI visibility.
 Default "use Agent PBX" means report mode. Register with
 `metadata.pbx_mode="report"` and send meaningful `pbx_report_turn` updates for
 progress, blockers, plan options, test results, and final outcomes. Report mode
-does not require polling queued commands; it is the right fit when the operator
-will interact through tmux direct mode or the normal Codex session.
+never calls `pbx_poll_commands`; it is the right fit when the operator will
+interact through tmux direct mode or the normal Codex session.
 
 "Use Agent PBX nohup" means nohup mode. Register or update metadata with
-`pbx_mode="nohup"`. Nohup mode includes report mode plus queued command pickup:
-poll commands, handle them in order, ack them after handling, honor pings, and
-open post-reply follow-up poll windows.
+`pbx_mode="nohup"` and `pbx_nohup_explicit=true`. Nohup mode includes report
+mode plus queued command pickup: poll commands, handle them in order, ack them
+after handling, honor pings, and open post-reply follow-up poll windows. Do not
+infer nohup mode from queued commands, pings, plan requests, or ordinary "use
+Agent PBX" wording.
 
 If the operator asks you to stop using PBX, send a final report, call
 `pbx_set_active(active=false)`, then stop reporting and any nohup polling. Do
@@ -146,6 +156,15 @@ not call PBX tools again unless the operator starts a new PBX session.
    least once every five minutes.
 4. Do not claim queue pickup in report mode; PBX queue buttons require nohup
    mode, while tmux direct mode bypasses the PBX queue.
+
+## Local Tmux Direct Mode
+
+When the Codex session is running in tmux and the Agent PBX MCP server plus TUI
+are on the same physical host, prefer report mode plus tmux direct interaction.
+The TUI can paste follow-ups directly into the local Codex pane, so long-polling
+is unnecessary and can create confusing perceived activity. Only use nohup
+polling in this local tmux workflow when the operator explicitly asks for
+`use Agent PBX nohup`.
 
 ## Nohup Mode Loop
 
@@ -163,6 +182,10 @@ After sending a terminal reply (`done`, `complete`, `completed`, `failed`,
 The server repeats long-poll cycles until a command arrives or the ten-minute
 window expires. If the 600s window returns empty, stop polling until the next
 explicit PBX action or new work.
+
+Before opening this post-reply window, confirm the session is explicitly in
+nohup mode. In report mode or local tmux direct workflows, send the final report
+and stop; do not long poll.
 
 If a `ping` command arrives, send a `status="working"` pong report, ack the
 command with `{"pong": true}`, and immediately begin another bounded poll window.
@@ -235,8 +258,9 @@ def runbook_payload() -> dict[str, Any]:
         "title": "Agent PBX Runbook",
         "summary": (
             "Use Agent PBX as a session-long coordination bus: report mode "
-            "records status and history, while nohup mode adds polling, queued "
-            "follow-ups, ping keepalives, and command acking."
+            "records status and history without polling, while explicitly "
+            "requested nohup mode adds queued follow-ups, ping keepalives, "
+            "long polling, and command acking."
         ),
         "session_start": [
             "Choose a stable agent_id such as codex-agent-pbx-main.",
@@ -245,15 +269,22 @@ def runbook_payload() -> dict[str, Any]:
         ],
         "pbx_modes": [
             "Default 'use Agent PBX' means report mode: register with metadata.pbx_mode='report' and send pbx_report_turn updates.",
-            "Report mode does not require pbx_poll_commands; use tmux direct or normal Codex interaction for follow-up.",
-            "'Use Agent PBX nohup' means register or update metadata.pbx_mode='nohup'.",
+            "Report mode never calls pbx_poll_commands and never claims queued command pickup.",
+            "Use tmux direct or normal Codex interaction for follow-up in report mode.",
+            "'Use Agent PBX nohup' means register or update metadata.pbx_mode='nohup' and metadata.pbx_nohup_explicit=true.",
             "Nohup mode adds pbx_poll_commands, queued command handling, pbx_ack_command, ping keepalive, and post-reply follow-up windows.",
+            "Do not infer nohup mode from queued commands, pings, plan requests, or ordinary 'use Agent PBX' wording.",
             "pbx_active=false means Agent PBX is off in either mode.",
+        ],
+        "tmux_direct_mode": [
+            "When Codex, Agent PBX MCP, the TUI, and tmux are on the same physical host, prefer report mode plus tmux direct interaction.",
+            "Tmux direct follow-up goes directly to the local Codex pane and does not require PBX queue polling.",
+            "Only use nohup long polling in local tmux workflows when the operator explicitly asks for 'use Agent PBX nohup'.",
         ],
         "active_loop": [
             "Use pbx_report_turn for milestones, blockers, test results, deployment results, and final outcomes.",
             "Keep summary concise and put complete notes in detail.",
-            "In report mode, do not claim queued command pickup and do not need to poll.",
+            "In report mode, do not call pbx_poll_commands and do not claim queued command pickup.",
             "In nohup mode, call pbx_poll_commands before work, after each report, before turn end, and periodically during long work.",
             "Polling is the alert pickup mechanism for PBX-queued follow-up in nohup mode.",
             "In nohup mode, handle commands in order and call pbx_ack_command only after handling.",
@@ -264,6 +295,8 @@ def runbook_payload() -> dict[str, Any]:
         "post_reply_follow_up": [
             "Terminal statuses are done, complete, completed, failed, canceled, and blocked.",
             "After sending a terminal report in nohup mode, open one 600s follow-up poll window.",
+            "Before opening a post-reply window, confirm metadata.pbx_mode='nohup' and metadata.pbx_nohup_explicit=true.",
+            "In report mode or local tmux direct workflows, send the terminal report and do not long poll.",
             "Use pbx_poll_commands(wait_seconds=25, max_wait_seconds=600, interval_seconds=5).",
             "If a command arrives, handle it, ack it, report, then apply this terminal follow-up rule again if the new response is terminal.",
             "If the 600s window returns empty, stop polling until the next explicit PBX action or new work.",

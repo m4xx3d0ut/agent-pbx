@@ -8,12 +8,15 @@ from rich.text import Text
 from agent_pbx import tmux as tmux_support
 from agent_pbx.tui import (
     AgentPBXTUI,
+    TMUX_LIVENESS_IDLE_SECONDS,
     env_custom_palette,
     env_flag,
     env_theme,
     follow_up_edit_control,
+    is_local_server_url,
     is_follow_up_newline_key,
     resolve_layout,
+    tmux_features_available,
 )
 from textual.events import Click, Key
 from textual.widgets import Button, Checkbox, DataTable, Input, TextArea
@@ -36,10 +39,13 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_EXPORT_DIR",
         "AGENT_PBX_TUI_LAYOUT",
         "AGENT_PBX_TUI_TMUX",
+        "AGENT_PBX_TUI_TMUX_SHOW",
         "AGENT_PBX_TUI_TMUX_CAPTURE_LINES",
         "AGENT_PBX_TUI_TMUX_REFRESH_SECONDS",
     ]:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1,0")
+    monkeypatch.setattr("agent_pbx.tui.shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setenv(
         "AGENT_PBX_TUI_SETTINGS_FILE",
         str(tmp_path / "agent-pbx" / "tui-settings.json"),
@@ -75,6 +81,21 @@ def test_tui_reads_notification_env(monkeypatch) -> None:
 
     assert app.visual_flash_enabled is True
     assert app.terminal_bell_enabled is True
+
+
+def test_tui_detects_tmux_features(monkeypatch) -> None:
+    monkeypatch.setattr("agent_pbx.tui.shutil.which", lambda name: "/usr/bin/tmux")
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("AGENT_PBX_TUI_TMUX_SHOW", raising=False)
+
+    assert tmux_features_available(tmux_direct_enabled=False) is False
+    assert tmux_features_available(tmux_direct_enabled=True) is True
+    monkeypatch.setenv("AGENT_PBX_TUI_TMUX_SHOW", "1")
+    assert tmux_features_available(tmux_direct_enabled=False) is True
+    monkeypatch.setattr("agent_pbx.tui.shutil.which", lambda name: None)
+    assert tmux_features_available(tmux_direct_enabled=True) is False
+    assert is_local_server_url("http://127.0.0.1:8767") is True
+    assert is_local_server_url("http://192.168.1.20:8767") is False
 
 
 def test_tui_reads_saved_settings(tmp_path: Path) -> None:
@@ -439,6 +460,22 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert close.label.plain == "Close"
 
 
+async def test_tui_disables_tmux_controls_when_unavailable(monkeypatch) -> None:
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr("agent_pbx.tui.shutil.which", lambda name: None)
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        hotkeys = app.query_one("#composer-hotkeys")
+        app.action_settings()
+        await pilot.pause()
+        tmux_direct = app.screen.query_one("#tmux-direct", Checkbox)
+
+        assert app.tmux_features_available is False
+        assert tmux_direct.disabled is True
+        assert "Ctrl+T tmux" not in str(hotkeys.renderable)
+
+
 async def test_tui_select_agent_updates_composer_and_loads_report() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     loaded: list[str] = []
@@ -547,6 +584,86 @@ async def test_tui_tmux_update_skips_unchanged_capture() -> None:
 
     assert first is True
     assert second is False
+
+
+async def test_tui_tmux_prepare_clears_stale_visible_stream() -> None:
+    pane = tmux_support.TmuxPane(
+        "agent-pbx",
+        "0",
+        "2",
+        "%76",
+        True,
+        "node",
+        "agent-pbx",
+        "/home/me/agent-pbx",
+        142,
+        45,
+        500,
+    )
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test():
+        stream = app.query_one("#tmux-stream", TextArea)
+        stream.text = "old agent capture"
+
+        changed = app.prepare_tmux_stream_for_capture(
+            stream,
+            cache_key="agent-1:%76",
+            pane=pane,
+        )
+        unchanged = app.prepare_tmux_stream_for_capture(
+            stream,
+            cache_key="agent-1:%76",
+            pane=pane,
+        )
+
+    assert changed is True
+    assert unchanged is False
+    assert stream.text == "Loading tmux pane %76 (agent-pbx:0.2)..."
+
+
+def test_tui_tmux_liveness_formats_activity(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
+
+    app.record_tmux_capture_liveness("agent-1", "%1", "first capture")
+    assert app.format_tmux_liveness("agent-1") == "active"
+    assert app.tmux_liveness_level("agent-1") == "active"
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.time.time",
+        lambda: 1000.0 + TMUX_LIVENESS_IDLE_SECONDS + 1,
+    )
+    assert app.format_tmux_liveness("agent-1") == "idle 1m"
+    assert app.tmux_liveness_level("agent-1") == "idle"
+
+    app.record_tmux_liveness_state("agent-1", "stale", pane_id="%1")
+    assert app.format_tmux_liveness("agent-1") == "stale"
+    assert app.tmux_liveness_level("agent-1") == "stale"
+
+    app.record_tmux_liveness_state("agent-1", "auto")
+    assert app.format_tmux_liveness("agent-1") == "-"
+    assert app.tmux_liveness_level("agent-1") == "unknown"
+
+
+def test_tui_styles_tmux_active_rows_without_changing_status(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
+    app.record_tmux_capture_liveness("agent-1", "%1", "changed")
+
+    cells = app.style_agent_row(
+        ["", "agent-1", "report", "", "done", "demo", "1000", "", "active", "-", "-"],
+        {
+            "agent_id": "agent-1",
+            "status": "done",
+            "queued_command_count": 0,
+            "last_poll_at": None,
+        },
+    )
+
+    assert all(isinstance(cell, Text) for cell in cells)
+    assert {cell.style for cell in cells if isinstance(cell, Text)} == {"bold cyan"}
+    assert app.format_agent_status({"status": "done"}) == "done"
 
 
 def test_tui_tmux_crop_hides_codex_status_and_input_region() -> None:

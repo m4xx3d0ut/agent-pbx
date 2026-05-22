@@ -48,13 +48,16 @@ Default "use Agent PBX" is report mode: send meaningful `pbx_report_turn`
 updates at task start, before waiting for input, after important milestones,
 after test or deploy results, and at turn completion. Keep summaries brief but
 actionable and put detailed notes in `detail`. Report mode does not require
-polling queued commands.
+polling queued commands. In report mode, never call `pbx_poll_commands` or
+claim PBX queue pickup.
 
 If the operator asks you to "use Agent PBX nohup", switch to nohup mode by
-registering or updating metadata with `pbx_mode="nohup"`. Nohup mode means
-reporting plus queued command pickup: poll with `pbx_poll_commands`, handle
-commands, ack them with `pbx_ack_command`, honor ping keepalives, and use the
-post-reply follow-up window.
+registering or updating metadata with `pbx_mode="nohup"` and
+`pbx_nohup_explicit=true`. Nohup mode means reporting plus queued command
+pickup: poll with `pbx_poll_commands`, handle commands, ack them with
+`pbx_ack_command`, honor ping keepalives, and use the post-reply follow-up
+window. Do not infer nohup mode from queued commands, pings, plan requests, or
+the phrase "use Agent PBX"; it must be explicitly requested.
 
 When operator choice is needed, send `pbx_report_turn(needs_input=true,
 plan_options=[...])` with concise, mutually exclusive options. The TUI can queue
@@ -93,6 +96,11 @@ mode, open one post-reply follow-up window with
 This repeats long-poll cycles for up to ten minutes, allowing queued follow-ups
 to be picked up after the reply. If the 600s window returns empty, stop polling
 until the next explicit PBX action or new work.
+
+Before opening any post-reply long-poll window, confirm this session is in
+explicit nohup mode. If this is report mode, or if local tmux direct interaction
+is being used for follow-up, close out normally after the final report and do
+not poll.
 
 If a `ping` command is received in nohup mode, treat it as a polling keepalive.
 Respond with a `status="working"` `pbx_report_turn` whose summary starts with
