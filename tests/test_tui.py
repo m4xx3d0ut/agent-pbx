@@ -1442,6 +1442,54 @@ async def test_tui_palette_plan_thread_modal_can_send_to_tmux() -> None:
     assert captured == ["agent-1"]
 
 
+async def test_tui_palette_dynamic_plan_option_commands_open_preselected_modal() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "plan",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.latest_report_by_agent = {
+            "agent-1": {
+                "report_id": "report-1",
+                "plan_options": ["A", "B"],
+            }
+        }
+        app.thread_items = {
+            "report:r1": {
+                "item_id": "report:r1",
+                "kind": "report",
+                "metadata": {"plan_options": ["Thread option"]},
+            }
+        }
+        app.selected_thread_item_id = "report:r1"
+        commands = {command.title: command for command in app.get_system_commands(app.screen)}
+
+        assert "/plan latest 2: B" in commands
+        assert "/plan thread 1: Thread option" in commands
+
+        commands["/plan latest 2: B"].callback()
+        await pilot.pause()
+
+        assert app.screen.query_one("#palette-plan-source", Static).renderable == "Latest report"
+        assert app.screen.query_one("#palette-plan-option", Select).value == "1"
+
+
+def test_tui_palette_option_labels_are_compact() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert app.palette_option_label("  A\n\nB  ") == "A B"
+    assert app.palette_option_label("x" * 100) == f"{'x' * 69}..."
+
+
 def test_tui_layout_toggle_persists(tmp_path: Path) -> None:
     settings_file = tmp_path / "settings.json"
     app = AgentPBXTUI(

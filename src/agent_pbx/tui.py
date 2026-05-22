@@ -1580,6 +1580,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         yield SystemCommand("/plan latest", "Choose from latest report plan options", self.palette_plan_latest)
         yield SystemCommand("/plan thread", "Choose from selected thread plan options", self.palette_plan_thread)
+        yield from self.palette_dynamic_plan_commands()
         yield SystemCommand("/hide agent", "Hide the selected agent from the Agents view", self.palette_hide_agent)
         yield SystemCommand("/purge agent", "Hide selected agent and delete its thread data", self.palette_purge_agent)
         yield SystemCommand("/theme cyberpunk", "Use the Cyberpunk theme", lambda: self.palette_set_theme(DEFAULT_TUI_THEME))
@@ -1632,14 +1633,11 @@ class AgentPBXTUI(App[None]):
         )
 
     def palette_plan_latest(self) -> None:
-        agent_id = self.palette_agent_id()
-        if agent_id is None:
-            return
-        report = self.latest_report_by_agent.get(agent_id)
-        options = self.plan_options_for_report(report)
-        if not options:
+        context = self.palette_latest_plan_context()
+        if context is None:
             self.notify("No latest plan options for the selected agent.", severity="warning")
             return
+        agent_id, options = context
         selected_index = self.selected_latest_plan_option_index or 0
         self.open_palette_plan_choice(
             agent_id,
@@ -1649,20 +1647,104 @@ class AgentPBXTUI(App[None]):
         )
 
     def palette_plan_thread(self) -> None:
-        agent_id = self.palette_agent_id()
-        if agent_id is None:
+        context = self.palette_thread_plan_context()
+        if context is None:
+            self.notify("No selected thread plan options.", severity="warning")
             return
+        agent_id, options = context
+        selected_index = self.selected_plan_option_index or 0
+        self.open_palette_plan_choice(
+            agent_id,
+            "Selected thread item",
+            options,
+            selected_index=selected_index,
+        )
+
+    def palette_latest_plan_context(self) -> tuple[str, list[str]] | None:
+        agent_id = self.palette_context_agent_id()
+        if agent_id is None:
+            return None
+        options = self.plan_options_for_report(self.latest_report_by_agent.get(agent_id))
+        if not options:
+            return None
+        return agent_id, options
+
+    def palette_thread_plan_context(self) -> tuple[str, list[str]] | None:
+        agent_id = self.palette_context_agent_id()
+        if agent_id is None:
+            return None
         item_id = self.selected_thread_item_id
         if item_id is None:
             thread = self.query_one_or_none("#thread", DataTable)
-            if thread is not None and thread.row_count > 0 and thread.is_valid_row_index(thread.cursor_row):
-                item_id = str(thread.coordinate_to_cell_key(thread.cursor_coordinate).row_key.value)
-        item = self.thread_items.get(item_id or "")
-        options = self.plan_options_for_item(item)
+            if (
+                thread is not None
+                and thread.row_count > 0
+                and thread.is_valid_row_index(thread.cursor_row)
+            ):
+                item_id = str(
+                    thread.coordinate_to_cell_key(thread.cursor_coordinate).row_key.value
+                )
+        options = self.plan_options_for_item(self.thread_items.get(item_id or ""))
         if not options:
+            return None
+        return agent_id, options
+
+    def palette_context_agent_id(self) -> str | None:
+        if self.selected_agent_id:
+            return self.selected_agent_id
+        cursor_agent_id = self.agent_id_at_cursor()
+        if cursor_agent_id:
+            return cursor_agent_id
+        agent_input = self.query_one_or_none("#agent-id", Input)
+        if agent_input is not None and agent_input.value.strip():
+            return agent_input.value.strip()
+        return None
+
+    def palette_dynamic_plan_commands(self) -> Iterable[SystemCommand]:
+        latest = self.palette_latest_plan_context()
+        if latest is not None:
+            agent_id, options = latest
+            for index, option in enumerate(options):
+                yield SystemCommand(
+                    f"/plan latest {index + 1}: {self.palette_option_label(option)}",
+                    f"Open latest plan option {index + 1} for {agent_id}",
+                    lambda index=index: self.palette_open_latest_plan_option(index),
+                )
+        thread = self.palette_thread_plan_context()
+        if thread is not None:
+            agent_id, options = thread
+            for index, option in enumerate(options):
+                yield SystemCommand(
+                    f"/plan thread {index + 1}: {self.palette_option_label(option)}",
+                    f"Open thread plan option {index + 1} for {agent_id}",
+                    lambda index=index: self.palette_open_thread_plan_option(index),
+                )
+
+    def palette_option_label(self, option: str) -> str:
+        label = " ".join(option.strip().split())
+        if len(label) > 72:
+            return f"{label[:69]}..."
+        return label
+
+    def palette_open_latest_plan_option(self, selected_index: int) -> None:
+        context = self.palette_latest_plan_context()
+        if context is None:
+            self.notify("No latest plan options for the selected agent.", severity="warning")
+            return
+        agent_id, options = context
+        self.open_palette_plan_choice(
+            agent_id,
+            "Latest report",
+            options,
+            selected_index=selected_index,
+        )
+
+    def palette_open_thread_plan_option(self, selected_index: int) -> None:
+        context = self.palette_thread_plan_context()
+        if context is None:
             self.notify("No selected thread plan options.", severity="warning")
             return
-        selected_index = self.selected_plan_option_index or 0
+        agent_id, options = context
         self.open_palette_plan_choice(
             agent_id,
             "Selected thread item",
