@@ -44,6 +44,10 @@ Registration defaults `pbx_active=true`; treat that as "Use Agent PBX" being on
 for this session until the operator explicitly asks you to stop using PBX or
 starts a new session.
 
+If you need a refresher on the Agent PBX contract, call `pbx_agent_runbook`.
+It is the MCP-exposed source for current mode, polling, command, plan, and done
+report guidance.
+
 Default "use Agent PBX" is report mode: send meaningful `pbx_report_turn`
 updates at task start, before waiting for input, after important milestones,
 after test or deploy results, and at turn completion. Keep summaries brief but
@@ -113,6 +117,11 @@ Codex pane; they are not MCP tools, PBX queued commands, or a reason to enter
 nohup mode. Treat them like normal operator prompts only after they reach your
 session.
 
+`pbx_queue_command` is exposed for the operator, TUI, tests, and control-plane
+helpers to queue work for agents. Do not use it as normal agent-side behavior
+or to self-queue work; in nohup mode, receive queued work through
+`pbx_poll_commands` instead.
+
 If a `ping` command is received in nohup mode, treat it as a polling keepalive.
 Respond with a `status="working"` `pbx_report_turn` whose summary starts with
 `Pong`, ack the ping with `{"pong": true}`, then immediately start another
@@ -124,6 +133,9 @@ diffs, or unchanged plan text in recurring `status="working"` reports; summarize
 the latest signal and reference where details can be reviewed.
 
 Command handling rules:
+
+These rules apply after `pbx_poll_commands` delivers a queued command in
+explicit nohup mode:
 
 - `request_detail`: send a new detailed `pbx_report_turn`; do not only ack it.
 - `send_input`: treat the message as operator follow-up and respond through a

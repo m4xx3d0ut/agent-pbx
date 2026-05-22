@@ -20,6 +20,10 @@ Registration defaults `pbx_active=true`; treat that as "Use Agent PBX" being on
 for this session until the operator explicitly asks you to stop using PBX or
 starts a new session.
 
+If you need a refresher on the Agent PBX contract, call `pbx_agent_runbook`.
+It is the MCP-exposed source for current mode, polling, command, plan, and done
+report guidance.
+
 Default "use Agent PBX" is report mode: send meaningful `pbx_report_turn`
 updates at task start, before waiting for input, after important milestones,
 after test or deploy results, and at turn completion. Keep summaries brief but
@@ -89,6 +93,11 @@ Codex pane; they are not MCP tools, PBX queued commands, or a reason to enter
 nohup mode. Treat them like normal operator prompts only after they reach your
 session.
 
+`pbx_queue_command` is exposed for the operator, TUI, tests, and control-plane
+helpers to queue work for agents. Do not use it as normal agent-side behavior
+or to self-queue work; in nohup mode, receive queued work through
+`pbx_poll_commands` instead.
+
 If a `ping` command is received in nohup mode, treat it as a polling keepalive.
 Respond with a `status="working"` `pbx_report_turn` whose summary starts with
 `Pong`, ack the ping with `{{"pong": true}}`, then immediately start another
@@ -100,6 +109,9 @@ diffs, or unchanged plan text in recurring `status="working"` reports; summarize
 the latest signal and reference where details can be reviewed.
 
 Command handling rules:
+
+These rules apply after `pbx_poll_commands` delivers a queued command in
+explicit nohup mode:
 
 - `request_detail`: send a new detailed `pbx_report_turn`; do not only ack it.
 - `send_input`: treat the message as operator follow-up and respond through a
@@ -137,6 +149,24 @@ operator follow-up queues, detailed report history, and TUI visibility.
    `pbx_active=true` means Agent PBX visibility is on.
 3. Immediately call `pbx_report_turn` with `status="working"` so the operator
    can see that the session is connected.
+4. If the local AGENTS.md guidance is unclear or stale, call
+   `pbx_agent_runbook` for the current MCP-exposed Agent PBX contract.
+
+## MCP Tool Roles
+
+- `pbx_agent_runbook`: fetch current Agent PBX agent guidance.
+- `pbx_register_agent`: register or refresh this session's identity,
+  metadata, and PBX active state.
+- `pbx_set_active`: turn PBX visibility off or back on for this session.
+- `pbx_report_turn`: report status, details, needs-input state, and structured
+  plan options.
+- `pbx_poll_commands`: in explicit nohup mode only, receive queued operator
+  commands for this agent.
+- `pbx_ack_command`: in explicit nohup mode only, acknowledge a delivered
+  command after handling it.
+- `pbx_queue_command`: operator, TUI, test, and control-plane helper for
+  queuing commands. Do not use it as normal agent-side behavior or to self-queue
+  work.
 
 ## PBX Modes
 
@@ -189,6 +219,10 @@ These commands paste configured text into the selected Codex pane. They are
 operator shortcuts only: they are not MCP tools, not PBX queued commands, and
 not a signal to start nohup polling. Respond to the resulting prompt normally
 when it appears in your session.
+
+`pbx_queue_command` is the MCP equivalent of those operator/control-plane
+queue actions. Agents should receive queued work through `pbx_poll_commands` in
+explicit nohup mode rather than queueing work for themselves.
 
 ## Nohup Mode Loop
 
@@ -258,6 +292,9 @@ not a git repository, state that explicitly.
 
 ## Command Handling
 
+These rules apply to commands delivered by `pbx_poll_commands` in explicit
+nohup mode.
+
 - `request_detail`: send a new detailed `pbx_report_turn`, then ack the command.
 - `send_input`: treat `payload.message` as operator follow-up, act on it, report
   the result, then ack.
@@ -290,6 +327,16 @@ def runbook_payload() -> dict[str, Any]:
             "Choose a stable agent_id such as codex-agent-pbx-main.",
             "Call pbx_register_agent with project, name, cwd, task, and metadata.pbx_mode; pbx_active defaults true.",
             "Send an initial pbx_report_turn with status='working'.",
+            "Call pbx_agent_runbook if local AGENTS.md guidance is unclear or stale.",
+        ],
+        "tool_roles": [
+            "pbx_agent_runbook returns current Agent PBX agent guidance.",
+            "pbx_register_agent registers or refreshes this session identity, metadata, and PBX active state.",
+            "pbx_set_active turns PBX visibility off or back on for this session.",
+            "pbx_report_turn reports status, detail, needs-input state, and structured plan_options.",
+            "pbx_poll_commands receives queued operator commands in explicit nohup mode only.",
+            "pbx_ack_command acknowledges a delivered command after handling it in explicit nohup mode.",
+            "pbx_queue_command is for operators, the TUI, tests, and control-plane helpers; agents should not self-queue work.",
         ],
         "pbx_modes": [
             "Default 'use Agent PBX' means report mode: register with metadata.pbx_mode='report' and send pbx_report_turn updates.",
@@ -311,6 +358,7 @@ def runbook_payload() -> dict[str, Any]:
             "They paste configured prompts into the selected Codex pane; they are not MCP tools or PBX queued commands.",
             "Do not enter nohup mode because a custom slash command was used.",
             "Treat the resulting text like a normal operator prompt after it reaches the Codex session.",
+            "pbx_queue_command is the MCP queueing equivalent for operator/control-plane actions, not normal agent-side behavior.",
         ],
         "active_loop": [
             "Use pbx_report_turn for milestones, blockers, test results, deployment results, and final outcomes.",
