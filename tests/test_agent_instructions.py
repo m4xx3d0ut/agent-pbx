@@ -33,6 +33,9 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert '{"pong": true}' in instructions
     assert "Keep routine check-ins and pong reports concise" in instructions
     assert "pbx_active=true" in instructions
+    assert "pbx_mode=\"report\"" in instructions
+    assert "use Agent PBX nohup" in instructions
+    assert "Report mode does not require" in instructions
     assert "alert pickup mechanism" in instructions
     assert "pbx_set_active(active=false)" in instructions
     assert "plan_options" in instructions
@@ -44,6 +47,9 @@ def test_runbook_payload_includes_command_guidance() -> None:
     payload = runbook_payload()
 
     assert payload["title"] == "Agent PBX Runbook"
+    assert any("report mode" in item for item in payload["pbx_modes"])
+    assert any("nohup" in item for item in payload["pbx_modes"])
+    assert any("does not require pbx_poll_commands" in item for item in payload["pbx_modes"])
     assert any("pbx_poll_commands" in item for item in payload["active_loop"])
     assert any("max_wait_seconds=600" in item for item in payload["active_loop"])
     assert any("max_wait_seconds=600" in item for item in payload["post_reply_follow_up"])

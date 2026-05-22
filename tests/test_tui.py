@@ -870,6 +870,7 @@ def test_tui_formats_queue_and_poll_state(monkeypatch) -> None:
         "queued_command_count": 2,
         "oldest_queued_command_age_seconds": 125.0,
         "last_poll_at": 700.0,
+        "metadata": {"pbx_mode": "nohup"},
         "estimated_visible_tokens_per_hour": 12500,
         "polls_per_hour": 30,
         "reports_per_hour": 12,
@@ -882,15 +883,43 @@ def test_tui_formats_queue_and_poll_state(monkeypatch) -> None:
     assert app.format_usage_state(agent) == "!12kt p30 r12 g3"
     assert app.format_poll_state({"queued_command_count": 0, "last_poll_at": 980.0}) == "active"
     assert app.format_poll_state({"queued_command_count": 0, "last_poll_at": None}) == "-"
-    assert app.format_poll_state({"queued_command_count": 1, "last_poll_at": None}) == "never"
+    assert app.format_poll_state({"queued_command_count": 1, "last_poll_at": None}) == "-"
+    assert (
+        app.format_poll_state(
+            {
+                "queued_command_count": 1,
+                "last_poll_at": None,
+                "metadata": {"pbx_mode": "nohup"},
+            }
+        )
+        == "never"
+    )
     assert app.agent_poll_level({"queued_command_count": 0, "last_poll_at": 980.0}) == "active"
     assert app.agent_poll_level(agent) == "stale"
-    assert app.agent_poll_level({"queued_command_count": 1, "last_poll_at": None}) == "never"
+    assert app.agent_poll_level({"queued_command_count": 1, "last_poll_at": None}) == "idle"
+    assert (
+        app.agent_poll_level(
+            {
+                "queued_command_count": 1,
+                "last_poll_at": None,
+                "metadata": {"pbx_mode": "nohup"},
+            }
+        )
+        == "never"
+    )
     assert app.agent_poll_level({"queued_command_count": 0, "last_poll_at": None}) == "idle"
     assert app.format_usage_state({}) == "-"
-    assert app.format_pbx_active({"pbx_active": True}) == "on"
+    assert app.format_pbx_active({"pbx_active": True}) == "report"
+    assert app.format_pbx_active({"pbx_active": True, "metadata": {"pbx_mode": "nohup"}}) == "nohup"
+    assert app.format_pbx_active({"pbx_active": True, "metadata": {"pbx_mode": "unknown"}}) == "report"
     assert app.format_pbx_active({"pbx_active": False}) == "off"
-    assert app.format_pbx_active({}) == "on"
+    assert app.format_pbx_active({}) == "report"
+    app.agents = {
+        "agent-1": {"agent_id": "agent-1", "metadata": {"pbx_mode": "report"}},
+        "agent-2": {"agent_id": "agent-2", "metadata": {"pbx_mode": "nohup"}},
+    }
+    assert "requires Agent PBX nohup mode" in app.command_delivery_note("agent-1")
+    assert "Waiting for the agent to poll" in app.command_delivery_note("agent-2")
 
 
 def test_tui_styles_active_polling_agent_rows(monkeypatch) -> None:

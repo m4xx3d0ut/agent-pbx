@@ -111,6 +111,8 @@ async def test_mcp_agent_runbook_tool(tmp_path: Path) -> None:
     runbook = tool_json(await mcp.call_tool("pbx_agent_runbook", {}))
 
     assert runbook["title"] == "Agent PBX Runbook"
+    assert any("report mode" in item for item in runbook["pbx_modes"])
+    assert any("nohup" in item for item in runbook["pbx_modes"])
     assert any("pbx_poll_commands" in item for item in runbook["active_loop"])
     assert any("alert pickup mechanism" in item for item in runbook["active_loop"])
     assert "request_detail" in runbook["commands"]

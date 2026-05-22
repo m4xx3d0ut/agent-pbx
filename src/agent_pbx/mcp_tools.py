@@ -27,8 +27,8 @@ def build_mcp_server(store: Store) -> FastMCP:
     mcp = FastMCP(
         "Agent PBX",
         instructions=(
-            "Report agent turn status, poll queued follow-up commands, and use "
-            "pbx_agent_runbook for Agent PBX session guidance."
+            "Report agent turn status, poll queued follow-up commands in nohup "
+            "mode, and use pbx_agent_runbook for Agent PBX session guidance."
         ),
         streamable_http_path="/",
         stateless_http=True,

@@ -43,6 +43,8 @@ DEFAULT_CUSTOM_THEME_NAME = "1337"
 THEME_1337_NAME = DEFAULT_CUSTOM_THEME_NAME
 DEFAULT_TUI_LAYOUT = "split"
 COMPACT_TUI_LAYOUT = "compact"
+PBX_REPORT_MODE = "report"
+PBX_NOHUP_MODE = "nohup"
 DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
 DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
 DEFAULT_TMUX_CAPTURE_LINES = 0
@@ -1309,8 +1311,48 @@ class AgentPBXTUI(App[None]):
         if focus:
             table.focus()
 
+    def agent_pbx_mode(self, agent: dict[str, Any]) -> str:
+        if not bool(agent.get("pbx_active", True)):
+            return "off"
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        mode = str(metadata.get("pbx_mode") or PBX_REPORT_MODE).strip().lower()
+        if mode == PBX_NOHUP_MODE:
+            return PBX_NOHUP_MODE
+        return PBX_REPORT_MODE
+
+    def agent_requires_polling(self, agent: dict[str, Any]) -> bool:
+        return self.agent_pbx_mode(agent) == PBX_NOHUP_MODE
+
     def format_pbx_active(self, agent: dict[str, Any]) -> str:
-        return "on" if bool(agent.get("pbx_active", True)) else "off"
+        return self.agent_pbx_mode(agent)
+
+    def command_delivery_note(self, agent_id: str) -> str:
+        agent = self.agents.get(agent_id)
+        if agent is not None and not self.agent_requires_polling(agent):
+            return (
+                "This PBX queue action requires Agent PBX nohup mode. "
+                "Report-mode agents will not pick it up unless they poll; "
+                "use tmux direct mode to interact locally without polling."
+            )
+        return "Waiting for the agent to poll this command and publish a new report."
+
+    def command_delivery_requires_nohup(self, agent_id: str) -> bool:
+        agent = self.agents.get(agent_id)
+        return agent is not None and not self.agent_requires_polling(agent)
+
+    def notify_queued_command(
+        self, agent_id: str, label: str, command: dict[str, Any]
+    ) -> None:
+        suffix = (
+            " Requires nohup polling."
+            if self.command_delivery_requires_nohup(agent_id)
+            else ""
+        )
+        severity = "warning" if suffix else "information"
+        self.notify(
+            f"{label} queued for {agent_id}: {command['command_id']}.{suffix}",
+            severity=severity,
+        )
 
     def format_plan_state(self, agent: dict[str, Any]) -> str:
         option_count = int_value(agent.get("latest_report_plan_option_count")) or 0
@@ -1343,12 +1385,14 @@ class AgentPBXTUI(App[None]):
         except (TypeError, ValueError):
             queued_count = 0
         if last_poll_at is None:
-            return "never" if queued_count else "-"
+            if self.agent_requires_polling(agent):
+                return "never" if queued_count else "-"
+            return "-"
         age = max(0.0, time.time() - last_poll_at)
         if age <= ACTIVE_POLL_SECONDS:
             return "active"
         label = f"{format_duration(age)} ago"
-        if queued_count and age >= STALE_POLL_SECONDS:
+        if self.agent_requires_polling(agent) and queued_count and age >= STALE_POLL_SECONDS:
             return f"stale {label}"
         return label
 
@@ -1359,11 +1403,13 @@ class AgentPBXTUI(App[None]):
         except (TypeError, ValueError):
             queued_count = 0
         if last_poll_at is None:
-            return "never" if queued_count else "idle"
+            if self.agent_requires_polling(agent):
+                return "never" if queued_count else "idle"
+            return "idle"
         age = max(0.0, time.time() - last_poll_at)
         if age <= ACTIVE_POLL_SECONDS:
             return "active"
-        if queued_count and age >= STALE_POLL_SECONDS:
+        if self.agent_requires_polling(agent) and queued_count and age >= STALE_POLL_SECONDS:
             return "stale"
         return "idle"
 
@@ -1955,13 +2001,14 @@ class AgentPBXTUI(App[None]):
         message = message_input.text.strip()
         if not agent_id or not message:
             return
-        await self.queue_command(
+        command = await self.queue_command(
             agent_id,
             "send_input",
             {"message": message},
         )
         message_input.text = ""
         self.resize_message_input()
+        self.notify_queued_command(agent_id, "Input", command)
         await self.refresh_events()
         await self.load_thread(agent_id)
 
@@ -2087,7 +2134,7 @@ class AgentPBXTUI(App[None]):
             {"message": message},
         )
         notes_input.text = ""
-        self.notify(f"Plan choice queued for {agent_id}: {command['command_id']}")
+        self.notify_queued_command(agent_id, "Plan choice", command)
         await self.refresh_events()
         await self.load_thread(agent_id)
 
@@ -2130,7 +2177,7 @@ class AgentPBXTUI(App[None]):
             {"message": message},
         )
         notes_input.text = ""
-        self.notify(f"Plan choice queued for {agent_id}: {command['command_id']}")
+        self.notify_queued_command(agent_id, "Plan choice", command)
         await self.refresh_events()
         await self.load_thread(agent_id)
 
@@ -2169,7 +2216,7 @@ class AgentPBXTUI(App[None]):
         self.query_one("#detail", TextArea).text = (
             f"Detail request queued for {agent_id}.\n"
             f"Command: {command['command_id']}\n\n"
-            "Waiting for the agent to poll this command and publish a new report."
+            f"{self.command_delivery_note(agent_id)}"
         )
         await self.refresh_events()
         await self.load_thread(agent_id)
@@ -2197,7 +2244,8 @@ class AgentPBXTUI(App[None]):
         self.query_one("#detail", TextArea).text = (
             f"Ping queued for {agent_id}.\n"
             f"Command: {command['command_id']}\n\n"
-            "Waiting for the agent to reply with a pong report and restart polling."
+            "Ping only extends polling for agents using Agent PBX nohup mode.\n"
+            f"{self.command_delivery_note(agent_id)}"
         )
         await self.refresh_events()
         await self.load_thread(agent_id)

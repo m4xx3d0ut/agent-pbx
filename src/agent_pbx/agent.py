@@ -15,15 +15,22 @@ def agent_instructions_markdown() -> str:
 
 When the operator asks you to use Agent PBX, register this session with
 `pbx_register_agent` using a stable `agent_id`, the current project name, and
-metadata containing the absolute `cwd` and task goal. Registration defaults
-`pbx_active=true`; treat that as "Use Agent PBX" being on for this session until
-the operator explicitly asks you to stop using PBX or starts a new session.
+metadata containing the absolute `cwd`, task goal, and `pbx_mode="report"`.
+Registration defaults `pbx_active=true`; treat that as "Use Agent PBX" being on
+for this session until the operator explicitly asks you to stop using PBX or
+starts a new session.
 
-While `pbx_active=true`, report meaningful progress with `pbx_report_turn`: at
-task start, before waiting for input, after important milestones, after test or
-deploy results, and at turn completion. Keep summaries brief but actionable;
-put detailed notes in `detail`. Do not claim to be using Agent PBX unless you
-are also polling for queued commands.
+Default "use Agent PBX" is report mode: send meaningful `pbx_report_turn`
+updates at task start, before waiting for input, after important milestones,
+after test or deploy results, and at turn completion. Keep summaries brief but
+actionable and put detailed notes in `detail`. Report mode does not require
+polling queued commands.
+
+If the operator asks you to "use Agent PBX nohup", switch to nohup mode by
+registering or updating metadata with `pbx_mode="nohup"`. Nohup mode means
+reporting plus queued command pickup: poll with `pbx_poll_commands`, handle
+commands, ack them with `pbx_ack_command`, honor ping keepalives, and use the
+post-reply follow-up window.
 
 When operator choice is needed, send `pbx_report_turn(needs_input=true,
 plan_options=[...])` with concise, mutually exclusive options. The TUI can queue
@@ -36,32 +43,33 @@ text but cannot provide plan-selection controls.
 During long-running work that is progressing normally, send a
 `status="working"` `pbx_report_turn` check-in at least once every five minutes
 until the work completes. Include what is still running and the last meaningful
-progress signal, then poll for queued commands.
+progress signal. In nohup mode, poll for queued commands after each check-in.
 
 Every `status="done"` report for repository work must state the git state:
 clean, committed, staged, or unstaged. Include the relevant `git status --short`
 summary and the commit hash when changes were committed. If the workspace is not
 a git repository, say so explicitly.
 
-Poll for queued operator commands with `pbx_poll_commands` before starting
-work, after each report, before finishing a turn, and periodically during
-long-running work. Handle every returned command in order, then call
-`pbx_ack_command` with the result. Do not poll as another agent ID.
+In nohup mode, poll for queued operator commands with `pbx_poll_commands`
+before starting work, after each report, before finishing a turn, and
+periodically during long-running work. Handle every returned command in order,
+then call `pbx_ack_command` with the result. Do not poll as another agent ID.
 
-Polling is the alert pickup mechanism. A single long-poll call only watches one
-window; if the session remains live, keep starting bounded poll windows. After
-sending a terminal reply (`status` of `done`, `complete`, `completed`, `failed`,
-`canceled`, or `blocked`) while `pbx_active=true`, open one post-reply follow-up
-window with
+Polling is the alert pickup mechanism for PBX-queued follow-ups in nohup mode. A
+single long-poll call only watches one window; if the session remains live, keep
+starting bounded poll windows. After sending a terminal reply (`status` of
+`done`, `complete`, `completed`, `failed`, `canceled`, or `blocked`) in nohup
+mode, open one post-reply follow-up window with
 `pbx_poll_commands(wait_seconds=25, max_wait_seconds=600, interval_seconds=5)`.
 This repeats long-poll cycles for up to ten minutes, allowing queued follow-ups
 to be picked up after the reply. If the 600s window returns empty, stop polling
 until the next explicit PBX action or new work.
 
-If a `ping` command is received, treat it as a polling keepalive. Respond with a
-`status="working"` `pbx_report_turn` whose summary starts with `Pong`, ack the
-ping with `{{"pong": true}}`, then immediately start another bounded poll window
-with `pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
+If a `ping` command is received in nohup mode, treat it as a polling keepalive.
+Respond with a `status="working"` `pbx_report_turn` whose summary starts with
+`Pong`, ack the ping with `{{"pong": true}}`, then immediately start another
+bounded poll window with
+`pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5)`.
 
 Keep routine check-ins and pong reports concise. Avoid repeating long logs,
 diffs, or unchanged plan text in recurring `status="working"` reports; summarize
@@ -100,25 +108,49 @@ operator follow-up queues, detailed report history, and TUI visibility.
 
 1. Choose a stable `agent_id`, for example `codex-agent-pbx-main`.
 2. Call `pbx_register_agent` with the current project and metadata such as
-   `cwd`, `task`, and relevant environment notes. The default
-   `pbx_active=true` means "Use Agent PBX" is on.
+   `cwd`, `task`, `pbx_mode`, and relevant environment notes. The default
+   `pbx_active=true` means Agent PBX visibility is on.
 3. Immediately call `pbx_report_turn` with `status="working"` so the operator
    can see that the session is connected.
 
-## Active Loop
+## PBX Modes
+
+Default "use Agent PBX" means report mode. Register with
+`metadata.pbx_mode="report"` and send meaningful `pbx_report_turn` updates for
+progress, blockers, plan options, test results, and final outcomes. Report mode
+does not require polling queued commands; it is the right fit when the operator
+will interact through tmux direct mode or the normal Codex session.
+
+"Use Agent PBX nohup" means nohup mode. Register or update metadata with
+`pbx_mode="nohup"`. Nohup mode includes report mode plus queued command pickup:
+poll commands, handle them in order, ack them after handling, honor pings, and
+open post-reply follow-up poll windows.
+
+If the operator asks you to stop using PBX, send a final report, call
+`pbx_set_active(active=false)`, then stop polling and reporting. Do not call PBX
+tools again unless the operator starts a new PBX session.
+
+## Report Mode Loop
+
+1. Report milestones, blockers, test results, deployment results, plan options,
+   and final outcomes with `pbx_report_turn`.
+2. Keep `summary` short enough for the TUI. Put complete notes, logs, and
+   reasoning in `detail`.
+3. For normal long-running progress, send a `status="working"` check-in at
+   least once every five minutes.
+4. Do not claim queue pickup in report mode; PBX queue buttons require nohup
+   mode, while tmux direct mode bypasses the PBX queue.
+
+## Nohup Mode Loop
 
 1. Poll with `pbx_poll_commands` before starting work, after each report,
    before ending the turn, and periodically during long-running work.
-2. Report milestones, blockers, test results, deployment results, and final
-   outcomes with `pbx_report_turn`.
-3. Keep `summary` short enough for the TUI. Put complete notes, logs, and
-   reasoning in `detail`.
-4. Handle commands in the order received and only call `pbx_ack_command` after
+2. Handle commands in the order received and only call `pbx_ack_command` after
    the command has been handled.
-5. Never poll or acknowledge commands for a different `agent_id`.
+3. Never poll or acknowledge commands for a different `agent_id`.
 
 Polling is what lets Agent PBX alerts and TUI follow-ups reach a live agent.
-While `pbx_active=true`, do not rely on one long-poll call and then go idle.
+In nohup mode, do not rely on one long-poll call and then go idle.
 After sending a terminal reply (`done`, `complete`, `completed`, `failed`,
 `canceled`, or `blocked`), open one post-reply follow-up window with
 `pbx_poll_commands(wait_seconds=25, max_wait_seconds=600, interval_seconds=5)`.
@@ -132,10 +164,6 @@ Use `pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5
 for that ping window. This lets an operator intentionally extend the agent's
 polling period in five-minute increments while the agent is still live.
 
-If the operator asks you to stop using PBX, send a final report, call
-`pbx_set_active(active=false)`, then stop polling. Do not call PBX tools again
-unless the operator starts a new PBX session.
-
 Keep recurring check-ins concise. PBX estimates visible usage from poll counts,
 report text, command payloads, and ack payloads, so repeated verbose reports can
 create avoidable account impact.
@@ -145,8 +173,8 @@ create avoidable account impact.
 If a command, test, build, deploy, or other process is still progressing
 normally, send a `status="working"` `pbx_report_turn` check-in at least once
 every five minutes until it completes. Include what is running, the latest
-progress signal, and whether operator input is needed. Poll for queued commands
-after each check-in.
+progress signal, and whether operator input is needed. In nohup mode, poll for
+queued commands after each check-in.
 
 ## Plan Options
 
@@ -191,34 +219,42 @@ def runbook_payload() -> dict[str, Any]:
     return {
         "title": "Agent PBX Runbook",
         "summary": (
-            "Use Agent PBX as a session-long coordination bus: register once, "
-            "keep pbx_active=true while using it, report meaningful progress, "
-            "poll commands regularly, and ack only after handling each command."
+            "Use Agent PBX as a session-long coordination bus: report mode "
+            "records status and history, while nohup mode adds polling, queued "
+            "follow-ups, ping keepalives, and command acking."
         ),
         "session_start": [
             "Choose a stable agent_id such as codex-agent-pbx-main.",
-            "Call pbx_register_agent with project, name, cwd, task, and metadata; pbx_active defaults true.",
+            "Call pbx_register_agent with project, name, cwd, task, and metadata.pbx_mode; pbx_active defaults true.",
             "Send an initial pbx_report_turn with status='working'.",
         ],
+        "pbx_modes": [
+            "Default 'use Agent PBX' means report mode: register with metadata.pbx_mode='report' and send pbx_report_turn updates.",
+            "Report mode does not require pbx_poll_commands; use tmux direct or normal Codex interaction for follow-up.",
+            "'Use Agent PBX nohup' means register or update metadata.pbx_mode='nohup'.",
+            "Nohup mode adds pbx_poll_commands, queued command handling, pbx_ack_command, ping keepalive, and post-reply follow-up windows.",
+            "pbx_active=false means Agent PBX is off in either mode.",
+        ],
         "active_loop": [
-            "Call pbx_poll_commands before work, after each report, before turn end, and periodically during long work.",
-            "Polling is the alert pickup mechanism; while pbx_active=true, use bounded repeated poll windows for terminal follow-up and ping keepalive periods.",
             "Use pbx_report_turn for milestones, blockers, test results, deployment results, and final outcomes.",
             "Keep summary concise and put complete notes in detail.",
-            "Handle commands in order and call pbx_ack_command only after handling.",
+            "In report mode, do not claim queued command pickup and do not need to poll.",
+            "In nohup mode, call pbx_poll_commands before work, after each report, before turn end, and periodically during long work.",
+            "Polling is the alert pickup mechanism for PBX-queued follow-up in nohup mode.",
+            "In nohup mode, handle commands in order and call pbx_ack_command only after handling.",
             "Never poll or ack commands for another agent_id.",
             "After terminal replies, use pbx_poll_commands(wait_seconds=25, max_wait_seconds=600, interval_seconds=5).",
             "If that 600s post-reply window returns empty, stop polling until the next explicit PBX action or new work.",
         ],
         "post_reply_follow_up": [
             "Terminal statuses are done, complete, completed, failed, canceled, and blocked.",
-            "After sending a terminal report while pbx_active=true, open one 600s follow-up poll window.",
+            "After sending a terminal report in nohup mode, open one 600s follow-up poll window.",
             "Use pbx_poll_commands(wait_seconds=25, max_wait_seconds=600, interval_seconds=5).",
             "If a command arrives, handle it, ack it, report, then apply this terminal follow-up rule again if the new response is terminal.",
             "If the 600s window returns empty, stop polling until the next explicit PBX action or new work.",
         ],
         "keepalive": [
-            "A ping command is a polling keepalive, not task input.",
+            "A ping command is a nohup-mode polling keepalive, not task input.",
             "On ping, send a status='working' pong report.",
             'Ack the ping with {"pong": true}.',
             "Immediately start another bounded poll window with pbx_poll_commands(wait_seconds=25, max_wait_seconds=300, interval_seconds=5).",
@@ -242,7 +278,7 @@ def runbook_payload() -> dict[str, Any]:
             "For normally progressing long-running work, send status='working' at least once every five minutes.",
             "Include what is still running and the latest meaningful progress signal.",
             "State whether operator input is needed.",
-            "Call pbx_poll_commands after each long-running check-in.",
+            "In nohup mode, call pbx_poll_commands after each long-running check-in.",
         ],
         "done_reports": [
             "Before status='done' for repository work, inspect git state.",
