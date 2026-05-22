@@ -45,6 +45,11 @@ During long-running work that is progressing normally, send a
 until the work completes. Include what is still running and the last meaningful
 progress signal. In nohup mode, poll for queued commands after each check-in.
 
+If you observe cancellation before the session exits, send a final
+`status="canceled"` `pbx_report_turn` that states the operator cancelled the CLI
+session. If the process exits before you can report, the operator can use
+`Mark Canceled` in the TUI to record that state.
+
 Every `status="done"` report for repository work must state the git state:
 clean, committed, staged, or unstaged. Include the relevant `git status --short`
 summary and the commit hash when changes were committed. If the workspace is not
@@ -88,7 +93,8 @@ Command handling rules:
   restart bounded polling.
 
 If the operator asks you to stop using PBX, send a final report, call
-`pbx_set_active(active=false)`, then stop polling and reporting through PBX.
+`pbx_set_active(active=false)`, then stop reporting and any nohup polling
+through PBX.
 
 If PBX is temporarily unavailable, continue local work, mention the PBX failure
 in your next response, and retry registration or polling when practical.
@@ -127,8 +133,8 @@ poll commands, handle them in order, ack them after handling, honor pings, and
 open post-reply follow-up poll windows.
 
 If the operator asks you to stop using PBX, send a final report, call
-`pbx_set_active(active=false)`, then stop polling and reporting. Do not call PBX
-tools again unless the operator starts a new PBX session.
+`pbx_set_active(active=false)`, then stop reporting and any nohup polling. Do
+not call PBX tools again unless the operator starts a new PBX session.
 
 ## Report Mode Loop
 
@@ -175,6 +181,15 @@ normally, send a `status="working"` `pbx_report_turn` check-in at least once
 every five minutes until it completes. Include what is running, the latest
 progress signal, and whether operator input is needed. In nohup mode, poll for
 queued commands after each check-in.
+
+## Cancellation And Stale Status
+
+If cancellation is observed before the session exits, send a final
+`status="canceled"` report explaining that the operator cancelled the CLI
+session. If a session exits before it can report, Agent PBX keeps the raw last
+reported status but exposes an effective stale status after ten minutes for
+`working` and `running` agents. Operators can use `Mark Canceled` in the TUI to
+write a historical canceled report and clear the working state.
 
 ## Plan Options
 
@@ -280,6 +295,11 @@ def runbook_payload() -> dict[str, Any]:
             "State whether operator input is needed.",
             "In nohup mode, call pbx_poll_commands after each long-running check-in.",
         ],
+        "cancellation": [
+            "If cancellation is observed before exit, send a final status='canceled' pbx_report_turn.",
+            "If a session exits before it can report, Agent PBX preserves the raw last status and derives stale-working or stale-running after ten minutes.",
+            "Operators can use Mark Canceled in the TUI to write a canceled report and clear working state.",
+        ],
         "done_reports": [
             "Before status='done' for repository work, inspect git state.",
             "State whether changes are clean, committed, staged, or unstaged.",
@@ -288,17 +308,17 @@ def runbook_payload() -> dict[str, Any]:
             "If the workspace is not a git repository, say so explicitly.",
         ],
         "commands": {
-            "request_detail": "Send a new detailed pbx_report_turn, then ack.",
-            "send_input": "Treat payload.message as operator follow-up, act, report, then ack.",
-            "start_task": "Start the requested task and report that it began.",
-            "cancel_task": "Stop the PBX-scoped task when safe, report what stopped, then ack.",
-            "acknowledge": "Record the instruction or status and ack.",
-            "ping": 'Send a status=\'working\' pong report, ack with {"pong": true}, then restart bounded polling.',
+            "request_detail": "In nohup mode, send a new detailed pbx_report_turn, then ack.",
+            "send_input": "In nohup mode, treat payload.message as operator follow-up, act, report, then ack.",
+            "start_task": "In nohup mode, start the requested task and report that it began.",
+            "cancel_task": "In nohup mode, stop the PBX-scoped task when safe, report what stopped, then ack.",
+            "acknowledge": "In nohup mode, record the instruction or status and ack.",
+            "ping": 'In nohup mode, send a status=\'working\' pong report, ack with {"pong": true}, then restart bounded polling.',
         },
         "session_stop": [
             "If the operator asks you to stop using PBX, send a final report.",
             "Call pbx_set_active(active=false) so the TUI shows Use Agent PBX is off.",
-            "Stop polling and reporting through PBX until the operator starts a new PBX session.",
+            "Stop reporting and any nohup polling through PBX until the operator starts a new PBX session.",
         ],
         "failure_modes": [
             "If PBX is unavailable, continue local work when possible and retry later.",

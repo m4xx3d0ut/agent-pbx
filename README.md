@@ -393,3 +393,10 @@ and acks handled commands with `pbx_ack_command`.
 only after the target agent polls that command and responds with a new
 `pbx_report_turn`, so it is intended for nohup-mode agents. For local
 tmux-direct workflows, send the request directly to the Codex pane instead.
+
+Agent status is last-reported state plus a derived effective state. If an agent
+last reported `working` or `running` and has not checked in for ten minutes, the
+API/TUI shows `stale-working` or `stale-running` while preserving the raw last
+reported status. Use `Mark Canceled` in the Latest controls when an agent was
+cancelled from its CLI session and can no longer report cleanup itself; this
+writes a `status="canceled"` report to the thread and clears the working state.

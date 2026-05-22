@@ -38,6 +38,8 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "Report mode does not require" in instructions
     assert "alert pickup mechanism" in instructions
     assert "pbx_set_active(active=false)" in instructions
+    assert "status=\"canceled\"" in instructions
+    assert "Mark Canceled" in instructions
     assert "plan_options" in instructions
     assert "Selected plan option:" in instructions
     assert "Do not only write choices" in instructions
@@ -59,10 +61,14 @@ def test_runbook_payload_includes_command_guidance() -> None:
     assert any("pong" in item for item in payload["keepalive"])
     assert any("usage estimates" in item for item in payload["usage_guardrails"])
     assert any("five minutes" in item for item in payload["long_running_work"])
+    assert any("status='canceled'" in item for item in payload["cancellation"])
+    assert any("stale-working" in item for item in payload["cancellation"])
     assert "ping" in payload["commands"]
     assert any("git state" in item for item in payload["done_reports"])
     assert any("pbx_set_active" in item for item in payload["session_stop"])
+    assert any("nohup polling" in item for item in payload["session_stop"])
     assert "request_detail" in payload["commands"]
+    assert "nohup mode" in payload["commands"]["request_detail"]
     assert any("plan_options" in item for item in payload["plan_options"])
     assert any("Selected plan option:" in item for item in payload["plan_options"])
     assert any("Do not only write choices" in item for item in payload["plan_options"])

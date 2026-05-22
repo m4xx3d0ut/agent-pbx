@@ -17,6 +17,8 @@ POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
 USAGE_WARN_TOKENS_PER_HOUR = 10_000
 POLL_WARN_PER_HOUR = 24
+STALE_WORKING_SECONDS = 600
+STALE_WORKING_STATUSES = {"running", "working"}
 
 
 @dataclass(frozen=True)
@@ -558,6 +560,7 @@ class Store:
         data = dict(row)
         data["pbx_active"] = bool(data["pbx_active"])
         data["metadata"] = json.loads(data.pop("metadata_json"))
+        Store._add_effective_status(data)
         data["queued_command_count"] = 0
         data["oldest_queued_command_age_seconds"] = None
         data["polls_per_hour"] = 0
@@ -572,6 +575,25 @@ class Store:
         data["latest_report_plan_option_count"] = 0
         data["latest_report_action_required"] = False
         return data
+
+    @staticmethod
+    def _add_effective_status(agent: dict[str, Any]) -> None:
+        status = str(agent.get("status") or "")
+        last_seen_at = agent.get("last_seen_at")
+        age: float | None = None
+        if last_seen_at is not None:
+            try:
+                age = max(0.0, now_ts() - float(last_seen_at))
+            except (TypeError, ValueError):
+                age = None
+        stale = (
+            age is not None
+            and age >= STALE_WORKING_SECONDS
+            and status.lower() in STALE_WORKING_STATUSES
+        )
+        agent["status_age_seconds"] = age
+        agent["status_stale"] = stale
+        agent["effective_status"] = f"stale-{status}" if stale else status
 
     @staticmethod
     def _add_latest_report_summary(

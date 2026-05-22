@@ -1,9 +1,12 @@
+import sqlite3
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
+from agent_pbx.store import STALE_WORKING_SECONDS
 
 
 def test_report_command_event_workflow(tmp_path: Path) -> None:
@@ -124,6 +127,37 @@ def test_agent_thread_merges_reports_and_commands(tmp_path: Path) -> None:
     assert thread[1]["title"] == "Ping"
     assert thread[1]["body"] == "Please pong"
     assert thread[1]["metadata"]["result"] == {"ok": True}
+
+
+def test_working_agent_reports_effective_stale_status(tmp_path: Path) -> None:
+    db_path = tmp_path / "pbx.sqlite"
+    client = TestClient(create_app(ServerConfig(db_path=db_path)))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    client.post(
+        "/v1/agents/agent-1/reports",
+        json={
+            "project": "demo",
+            "status": "working",
+            "summary": "Still working",
+            "detail": "The last known report said work was in progress.",
+        },
+    )
+    stale_seen_at = time.time() - STALE_WORKING_SECONDS - 5
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE agents SET last_seen_at = ? WHERE agent_id = ?",
+            (stale_seen_at, "agent-1"),
+        )
+
+    agent = client.get("/v1/agents").json()[0]
+
+    assert agent["status"] == "working"
+    assert agent["effective_status"] == "stale-working"
+    assert agent["status_stale"] is True
+    assert agent["status_age_seconds"] >= STALE_WORKING_SECONDS
 
 
 def test_delete_queued_command_removes_it_from_thread_and_poll(tmp_path: Path) -> None:

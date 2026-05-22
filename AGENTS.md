@@ -2,20 +2,17 @@
 
 ## Project Structure & Module Organization
 
-This repository is currently in the planning stage. `R&D_PLAN.md` defines the intended Agent PBX scope: a local/LAN MCP server plus a lightweight Python TUI for monitoring and interacting with multiple Codex agents. `.gitignore` already reserves common Python, test, local state, and generated artifact paths.
+This repository implements Agent PBX: a local/LAN MCP server plus a Python Textual TUI for monitoring and interacting with multiple Codex agents. Core source lives in `src/agent_pbx/`; tests live in `tests/`; local runtime state and generated artifacts stay out of Git.
 
-As implementation begins, keep source code under `src/agent_pbx/`, tests under `tests/`, and operational notes under `docs/` or `ops/` as appropriate. Treat `.codex/`, `.env`, `.venv/`, `state/`, `artifacts/`, and `runs/` as local-only or generated data.
+Operational assets live under `ops/` where needed. Treat `.codex/`, `.env`, `.venv/`, `state/`, `artifacts/`, and `runs/` as local-only or generated data.
 
 ## Build, Test, and Development Commands
 
-No build system or package metadata is committed yet. Until tooling is added, use standard Python commands:
-
-- `python -m venv .venv` creates a local virtual environment.
-- `source .venv/bin/activate` activates it for development.
-- `python -m pytest` should run the test suite once `tests/` exists.
-- `python -m agent_pbx` is the preferred future local entry point if the package exposes one.
-
-When adding project tooling, document commands in `README.md` and keep this file aligned.
+- `python -m venv .venv && source .venv/bin/activate` creates and enters a local development environment.
+- `pip install -e '.[dev]'` installs Agent PBX and test tooling from `pyproject.toml`.
+- `pytest` runs the full test suite.
+- `agent-pbx mcp restart --port "$AGENT_PBX_PORT" --token "$AGENT_PBX_TOKEN" --debug` restarts the local daemon for manual testing.
+- `agent-pbx tui --server "http://127.0.0.1:${AGENT_PBX_PORT}" --token "$AGENT_PBX_TOKEN"` opens the TUI.
 
 ## Coding Style & Naming Conventions
 
@@ -29,7 +26,7 @@ Use `pytest` for unit and integration tests. Name test files `test_*.py` and mir
 
 ## Commit & Pull Request Guidelines
 
-This repository has no commit history yet, so no existing convention can be inferred. Use short, imperative commit subjects such as `Add sqlite spool schema` or `Implement agent status callback`. Keep commits focused.
+Use short, imperative commit subjects such as `Add latest plan action controls` or `Split Agent PBX report and nohup modes`. Keep commits focused and include tests/docs with behavior changes.
 
 Pull requests should include a concise summary, test results, configuration changes, and any security implications. Include screenshots or terminal captures for TUI changes.
 
@@ -71,6 +68,11 @@ During long-running work that is progressing normally, send a
 `status="working"` `pbx_report_turn` check-in at least once every five minutes
 until the work completes. Include what is still running and the last meaningful
 progress signal. In nohup mode, poll for queued commands after each check-in.
+
+If you observe cancellation before the session exits, send a final
+`status="canceled"` `pbx_report_turn` that states the operator cancelled the CLI
+session. If the process exits before you can report, the operator can use
+`Mark Canceled` in the TUI to record that state.
 
 Every `status="done"` report for repository work must state the git state:
 clean, committed, staged, or unstaged. Include the relevant `git status --short`
@@ -115,7 +117,8 @@ Command handling rules:
   restart bounded polling.
 
 If the operator asks you to stop using PBX, send a final report, call
-`pbx_set_active(active=false)`, then stop polling and reporting through PBX.
+`pbx_set_active(active=false)`, then stop reporting and any nohup polling
+through PBX.
 
 If PBX is temporarily unavailable, continue local work, mention the PBX failure
 in your next response, and retry registration or polling when practical.

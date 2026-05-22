@@ -28,6 +28,9 @@ class AgentResponse(BaseModel):
     project: str
     name: str | None
     status: str
+    effective_status: str | None = None
+    status_age_seconds: float | None = None
+    status_stale: bool = False
     pbx_active: bool = True
     metadata: dict[str, Any]
     created_at: float

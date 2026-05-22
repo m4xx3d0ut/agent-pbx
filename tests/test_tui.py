@@ -324,6 +324,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         thread = app.query_one("#thread", DataTable)
         request_detail = app.query_one("#request-detail", Button)
         ping = app.query_one("#ping-agent", Button)
+        mark_canceled = app.query_one("#mark-canceled", Button)
         export_item = app.query_one("#export-item", Button)
         export_marked = app.query_one("#export-marked", Button)
         export_all = app.query_one("#export-all", Button)
@@ -347,6 +348,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert thread.show_row_labels is False
         assert request_detail.label.plain == "Request Detail"
         assert ping.label.plain == "Ping"
+        assert mark_canceled.label.plain == "Mark Canceled"
         assert export_item.label.plain == "Export Item"
         assert export_marked.label.plain == "Export Marked"
         assert export_all.label.plain == "Export All"
@@ -685,7 +687,7 @@ async def test_tui_compact_layout_opens_agent_view_and_back(monkeypatch) -> None
         buttons = app.query_one("#composer-buttons")
         assert buttons.region.x == message.region.x + 1
         assert buttons.region.y > message.region.bottom
-        assert app.query_one("#ping-agent", Button).region.right <= message.region.right
+        assert app.query_one("#mark-canceled", Button).region.right <= message.region.right
 
         app.action_back()
         await pilot.pause()
@@ -1712,6 +1714,75 @@ async def test_tui_ping_queues_keepalive_command() -> None:
     assert threads == ["agent-1"]
     assert "Ping queued for agent-1." in detail
     assert "Command: cmd-1" in detail
+
+
+async def test_tui_mark_agent_canceled_creates_report() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    reports: list[tuple[str, dict[str, object]]] = []
+    refreshed_agents = 0
+    refreshed_events = 0
+    threads: list[str] = []
+
+    async def fake_create_agent_report(
+        agent_id: str, payload: dict[str, object]
+    ) -> dict[str, object]:
+        reports.append((agent_id, payload))
+        return {"report_id": "report-1"}
+
+    async def fake_refresh_agents() -> None:
+        nonlocal refreshed_agents
+        refreshed_agents += 1
+
+    async def fake_refresh_events() -> None:
+        nonlocal refreshed_events
+        refreshed_events += 1
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.create_agent_report = fake_create_agent_report  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "project": "demo",
+                "status": "working",
+                "effective_status": "stale-working",
+            }
+        }
+        app.query_one("#agent-id", Input).value = "agent-1"
+        refreshed_agents = 0
+        refreshed_events = 0
+        await app.mark_agent_canceled()
+        detail = app.query_one("#detail", TextArea).text
+
+    assert reports == [
+        (
+            "agent-1",
+            {
+                "project": "demo",
+                "status": "canceled",
+                "summary": "Session marked canceled by operator",
+                "detail": (
+                    "The operator marked this agent canceled from the TUI because "
+                    "the CLI session was cancelled or is no longer active.\n\n"
+                    "Previous status: working\n"
+                    "Previous effective status: stale-working"
+                ),
+                "needs_input": False,
+                "plan_options": [],
+            },
+        )
+    ]
+    assert refreshed_agents == 1
+    assert refreshed_events == 1
+    assert threads == ["agent-1"]
+    assert "Marked agent-1 canceled." in detail
+    assert "Report: report-1" in detail
 
 
 async def test_tui_send_plan_choice_queues_follow_up_with_notes() -> None:

@@ -1038,6 +1038,7 @@ class AgentPBXTUI(App[None]):
                                         id="request-detail",
                                     )
                                     yield Button("Ping", id="ping-agent")
+                                    yield Button("Mark Canceled", id="mark-canceled")
                             yield Static(
                                 (
                                     "Enter send | Ctrl+J newline | "
@@ -1264,7 +1265,7 @@ class AgentPBXTUI(App[None]):
                     agent_id,
                     self.format_pbx_active(agent),
                     self.format_plan_state(agent),
-                    str(agent["status"]),
+                    self.format_agent_status(agent),
                     str(agent["project"]),
                     f"{agent['last_seen_at']:.0f}",
                     self.format_queue_state(agent),
@@ -1325,6 +1326,9 @@ class AgentPBXTUI(App[None]):
 
     def format_pbx_active(self, agent: dict[str, Any]) -> str:
         return self.agent_pbx_mode(agent)
+
+    def format_agent_status(self, agent: dict[str, Any]) -> str:
+        return str(agent.get("effective_status") or agent.get("status") or "")
 
     def command_delivery_note(self, agent_id: str) -> str:
         agent = self.agents.get(agent_id)
@@ -1416,12 +1420,15 @@ class AgentPBXTUI(App[None]):
     def style_agent_row(
         self, cells: list[str], agent: dict[str, Any]
     ) -> list[str | Text]:
-        level = self.agent_poll_level(agent)
-        style = {
-            "active": "bold green",
-            "stale": "bold yellow",
-            "never": "bold red",
-        }.get(level)
+        if bool(agent.get("status_stale")):
+            style = "bold yellow"
+        else:
+            level = self.agent_poll_level(agent)
+            style = {
+                "active": "bold green",
+                "stale": "bold yellow",
+                "never": "bold red",
+            }.get(level)
         if style is None:
             return cells
         return [Text(cell, style=style) for cell in cells]
@@ -1961,6 +1968,9 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "ping-agent":
             await self.ping_agent()
             return
+        if event.button.id == "mark-canceled":
+            await self.mark_agent_canceled()
+            return
         if event.button.id == "export-item":
             self.export_thread_scope("item")
             return
@@ -2250,6 +2260,44 @@ class AgentPBXTUI(App[None]):
         await self.refresh_events()
         await self.load_thread(agent_id)
 
+    async def mark_agent_canceled(self) -> None:
+        agent_id = self.query_one("#agent-id", Input).value.strip()
+        if not agent_id:
+            return
+        agent = self.agents.get(agent_id)
+        project = str((agent or {}).get("project") or "").strip()
+        if not project:
+            self.notify("Select a known agent before marking canceled.", severity="warning")
+            return
+        previous_status = str((agent or {}).get("status") or "-")
+        previous_effective = str((agent or {}).get("effective_status") or previous_status)
+        detail = (
+            "The operator marked this agent canceled from the TUI because the "
+            "CLI session was cancelled or is no longer active.\n\n"
+            f"Previous status: {previous_status}\n"
+            f"Previous effective status: {previous_effective}"
+        )
+        report = await self.create_agent_report(
+            agent_id,
+            {
+                "project": project,
+                "status": "canceled",
+                "summary": "Session marked canceled by operator",
+                "detail": detail,
+                "needs_input": False,
+                "plan_options": [],
+            },
+        )
+        self.query_one("#detail", TextArea).text = (
+            f"Marked {agent_id} canceled.\n"
+            f"Report: {report['report_id']}\n\n"
+            f"{detail}"
+        )
+        self.notify(f"Marked {agent_id} canceled.")
+        await self.refresh_agents()
+        await self.refresh_events()
+        await self.load_thread(agent_id)
+
     async def queue_command(
         self, agent_id: str, command_type: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
@@ -2261,6 +2309,18 @@ class AgentPBXTUI(App[None]):
                     "type": command_type,
                     "payload": payload,
                 },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def create_agent_report(
+        self, agent_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
+            response = await client.post(
+                f"/v1/agents/{agent_id}/reports",
+                json=payload,
                 headers=auth_headers(self.token),
             )
             response.raise_for_status()
