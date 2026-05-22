@@ -9,6 +9,7 @@ from agent_pbx import tmux as tmux_support
 from agent_pbx.tui import (
     AgentPBXTUI,
     CustomSlashCommand,
+    PLAN_PBX_CONTEXT_PROMPT,
     TMUX_LIVENESS_IDLE_SECONDS,
     DEFAULT_SPLIT_PERCENT,
     env_custom_palette,
@@ -1777,6 +1778,11 @@ async def test_tui_palette_plan_primes_next_follow_up_prompt() -> None:
         (
             "agent-1",
             "send_input",
+            {"message": PLAN_PBX_CONTEXT_PROMPT},
+        ),
+        (
+            "agent-1",
+            "send_input",
             {"message": "/plan"},
         ),
         (
@@ -1841,6 +1847,7 @@ async def test_tui_palette_plan_primes_next_tmux_prompt() -> None:
         await app.send_input()
 
     assert sent == [
+        ("agent-1", PLAN_PBX_CONTEXT_PROMPT),
         ("agent-1", "/plan"),
         ("agent-1", "Investigate options."),
     ]

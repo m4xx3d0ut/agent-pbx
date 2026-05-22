@@ -317,9 +317,10 @@ sequence is ignored while typing in follow-up inputs, avoiding terminal
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/tmux`, `/workerbee`, `/theme minimal`,
 and `/layout compact`. Use `/plan` when no plan is active to submit Codex's
-`/plan` slash command before the selected agent's next prompt. In tmux direct
-mode this is sent as two terminal submissions: `/plan`, then your prompt. When
-the selected agent has structured plan options, the palette also shows
+`/plan` slash command before the selected agent's next prompt. Agent PBX first
+sends `use agent pbx for planning`, then `/plan`, then your prompt so agents
+know to publish structured `plan_options` for the TUI modal. When the selected
+agent has structured plan options, the palette also shows
 `/plan latest`, `/plan thread`, and direct entries such as
 `/plan latest 2: ...`; selecting one opens a plan-choice modal with optional
 notes before sending through PBX or, in tmux direct mode, to the Codex pane.

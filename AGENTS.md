@@ -51,6 +51,11 @@ actionable and put detailed notes in `detail`. Report mode does not require
 polling queued commands. In report mode, never call `pbx_poll_commands` or
 claim PBX queue pickup.
 
+If the operator says "use agent pbx for planning", treat it as report mode with
+extra emphasis on structured plan reporting. Before presenting plan choices,
+send `pbx_report_turn(needs_input=true, plan_options=[...])` so the TUI can
+open its plan-selection modal.
+
 If the operator asks you to "use Agent PBX nohup", switch to nohup mode by
 registering or updating metadata with `pbx_mode="nohup"` and
 `pbx_nohup_explicit=true`. Nohup mode means reporting plus queued command

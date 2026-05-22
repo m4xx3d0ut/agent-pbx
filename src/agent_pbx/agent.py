@@ -27,6 +27,11 @@ actionable and put detailed notes in `detail`. Report mode does not require
 polling queued commands. In report mode, never call `pbx_poll_commands` or
 claim PBX queue pickup.
 
+If the operator says "use agent pbx for planning", treat it as report mode with
+extra emphasis on structured plan reporting. Before presenting plan choices,
+send `pbx_report_turn(needs_input=true, plan_options=[...])` so the TUI can
+open its plan-selection modal.
+
 If the operator asks you to "use Agent PBX nohup", switch to nohup mode by
 registering or updating metadata with `pbx_mode="nohup"` and
 `pbx_nohup_explicit=true`. Nohup mode means reporting plus queued command
@@ -140,6 +145,11 @@ Default "use Agent PBX" means report mode. Register with
 progress, blockers, plan options, test results, and final outcomes. Report mode
 never calls `pbx_poll_commands`; it is the right fit when the operator will
 interact through tmux direct mode or the normal Codex session.
+
+"Use agent pbx for planning" is also report mode. It means plan choices should
+be sent through structured `pbx_report_turn(needs_input=true,
+plan_options=[...])` before or while Codex plan mode is active, so the Agent PBX
+TUI can render a modal for choosing among options.
 
 "Use Agent PBX nohup" means nohup mode. Register or update metadata with
 `pbx_mode="nohup"` and `pbx_nohup_explicit=true`. Nohup mode includes report
@@ -283,6 +293,7 @@ def runbook_payload() -> dict[str, Any]:
         ],
         "pbx_modes": [
             "Default 'use Agent PBX' means report mode: register with metadata.pbx_mode='report' and send pbx_report_turn updates.",
+            "'Use agent pbx for planning' also means report mode, with structured plan_options sent through pbx_report_turn(needs_input=true, plan_options=[...]).",
             "Report mode never calls pbx_poll_commands and never claims queued command pickup.",
             "Use tmux direct or normal Codex interaction for follow-up in report mode.",
             "'Use Agent PBX nohup' means register or update metadata.pbx_mode='nohup' and metadata.pbx_nohup_explicit=true.",

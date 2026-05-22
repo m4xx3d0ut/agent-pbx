@@ -95,6 +95,8 @@ QUEUED_COMMAND_WARN_SECONDS = 60
 ACTIVE_POLL_SECONDS = 60
 TMUX_LIVENESS_IDLE_SECONDS = 60
 SLASH_COMMAND_FOLLOWUP_DELAY_SECONDS = 0.2
+PLAN_PBX_CONTEXT_PROMPT = "use agent pbx for planning"
+PLAN_SLASH_COMMAND = "/plan"
 AGENT_JUMP_KEYS = {
     "1": 0,
     "2": 1,
@@ -2104,8 +2106,10 @@ class AgentPBXTUI(App[None]):
         agent_id = self.palette_agent_id()
         if agent_id is None:
             return
-        self.pending_slash_command_by_agent[agent_id] = "/plan"
-        self.notify(f"Next prompt for {agent_id} will start with /plan.")
+        self.pending_slash_command_by_agent[agent_id] = PLAN_SLASH_COMMAND
+        self.notify(
+            f"Next prompt for {agent_id} will start Agent PBX planning, then /plan."
+        )
 
     def palette_plan_latest(self) -> None:
         context = self.palette_latest_plan_context()
@@ -3534,8 +3538,10 @@ class AgentPBXTUI(App[None]):
         message = message_input.text.strip()
         if not agent_id or not message:
             return
-        pending_slash = self.pending_slash_command_for_message(agent_id, message)
-        if pending_slash:
+        pending_slash_commands = self.pending_slash_command_sequence_for_message(
+            agent_id, message
+        )
+        for pending_slash in pending_slash_commands:
             await self.queue_command(
                 agent_id,
                 "send_input",
@@ -3570,8 +3576,10 @@ class AgentPBXTUI(App[None]):
         message = message_input.text
         if not agent_id or not message.strip():
             return
-        pending_slash = self.pending_slash_command_for_message(agent_id, message)
-        if pending_slash:
+        pending_slash_commands = self.pending_slash_command_sequence_for_message(
+            agent_id, message
+        )
+        for pending_slash in pending_slash_commands:
             sent_slash = await self.send_text_to_tmux(agent_id, pending_slash)
             if not sent_slash:
                 return
@@ -3583,16 +3591,18 @@ class AgentPBXTUI(App[None]):
         message_input.text = ""
         await self.load_tmux_capture(agent_id)
 
-    def pending_slash_command_for_message(
+    def pending_slash_command_sequence_for_message(
         self, agent_id: str, message: str
-    ) -> str | None:
+    ) -> list[str]:
         command = self.pending_slash_command_by_agent.get(agent_id)
         body = message.strip()
         if not command or not body:
-            return None
+            return []
         if body.startswith("/"):
-            return None
-        return command
+            return []
+        if command == PLAN_SLASH_COMMAND:
+            return [PLAN_PBX_CONTEXT_PROMPT, PLAN_SLASH_COMMAND]
+        return [command]
 
     def clear_pending_slash_command(self, agent_id: str) -> None:
         self.pending_slash_command_by_agent.pop(agent_id, None)
