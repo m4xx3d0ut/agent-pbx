@@ -314,6 +314,12 @@ def test_tui_background_render_skips_before_widgets_mount() -> None:
     assert app.agent_id_at_cursor() is None
 
 
+async def test_tui_load_latest_report_skips_before_detail_mount() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    await app.load_latest_report("agent-1")
+
+
 async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", visual_flash=True)
 

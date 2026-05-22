@@ -1640,7 +1640,9 @@ class AgentPBXTUI(App[None]):
         self.save_settings()
 
     async def load_latest_report(self, agent_id: str) -> None:
-        detail = self.query_one("#detail", TextArea)
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is None:
+            return
         try:
             async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
                 response = await client.get(
