@@ -60,6 +60,27 @@ def test_tui_constructs() -> None:
     assert app.TITLE == "Agent PBX"
     assert ("s", "settings", "Settings") in app.BINDINGS
     assert ("ctrl+t", "toggle_tmux_direct", "Tmux") in app.BINDINGS
+    assert any(
+        getattr(binding, "key", None) == "d"
+        and getattr(binding, "action", None) == "hide_agent"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "shift+d"
+        and getattr(binding, "action", None) == "purge_agent"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "alt+1"
+        and getattr(binding, "action", None) == "jump_agent_1"
+        and getattr(binding, "key_display", None) == "Alt+1-0"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "alt+0"
+        and getattr(binding, "action", None) == "jump_agent_0"
+        for binding in app.BINDINGS
+    )
     assert app.server == "http://127.0.0.1:8765"
     assert app.token == "test"
     assert app.visual_flash_enabled is False
@@ -362,6 +383,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         await pilot.pause()
         agents = app.query_one("#agents", DataTable)
         thread = app.query_one("#thread", DataTable)
+        hide_agent = app.query_one("#hide-agent", Button)
+        purge_agent = app.query_one("#purge-agent", Button)
         request_detail = app.query_one("#request-detail", Button)
         ping = app.query_one("#ping-agent", Button)
         mark_canceled = app.query_one("#mark-canceled", Button)
@@ -386,6 +409,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert agents.show_row_labels is False
         assert thread.cursor_type == "row"
         assert thread.show_row_labels is False
+        assert hide_agent.label.plain == "Hide Agent (d)"
+        assert purge_agent.label.plain == "Purge Agent (D)"
         assert request_detail.label.plain == "Request Detail"
         assert ping.label.plain == "Ping"
         assert mark_canceled.label.plain == "Mark Canceled"
@@ -743,6 +768,41 @@ def test_tui_styles_tmux_active_rows_without_changing_status(monkeypatch) -> Non
     assert all(isinstance(cell, Text) for cell in cells)
     assert {cell.style for cell in cells if isinstance(cell, Text)} == {"bold cyan"}
     assert app.format_agent_status({"status": "done"}) == "done"
+
+
+def test_tui_infers_tmux_working_status_for_active_terminal_report(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
+    app.record_tmux_capture_liveness("agent-1", "%1", "changed")
+
+    assert (
+        app.format_agent_status({"agent_id": "agent-1", "status": "completed"})
+        == "tmux-working"
+    )
+    assert (
+        app.format_agent_status(
+            {"agent_id": "agent-1", "effective_status": "done", "status": "completed"}
+        )
+        == "tmux-working"
+    )
+
+
+def test_tui_keeps_reported_status_for_idle_or_nonterminal_tmux(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
+    app.record_tmux_capture_liveness("agent-1", "%1", "changed")
+
+    assert app.format_agent_status({"agent_id": "agent-1", "status": "working"}) == "working"
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.time.time",
+        lambda: 1000.0 + TMUX_LIVENESS_IDLE_SECONDS + 1,
+    )
+
+    assert (
+        app.format_agent_status({"agent_id": "agent-1", "status": "completed"})
+        == "completed"
+    )
 
 
 def test_tui_styles_tmux_idle_rows(monkeypatch) -> None:
@@ -1557,6 +1617,264 @@ async def test_tui_delete_queued_thread_commands_refreshes_thread() -> None:
     assert events_refreshed == 1
     assert agents_refreshed == 1
     assert threads == ["agent-1"]
+
+
+async def test_tui_dismiss_selected_agent_hides_and_retains_thread() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    deleted: list[tuple[str, bool]] = []
+    agents_refreshed = 0
+    events_refreshed = 0
+
+    async def fake_delete_agent(agent_id: str, *, delete_thread: bool = False) -> dict[str, str]:
+        deleted.append((agent_id, delete_thread))
+        return {"agent_id": agent_id}
+
+    async def fake_refresh_agents() -> None:
+        nonlocal agents_refreshed
+        agents_refreshed += 1
+
+    async def fake_refresh_events() -> None:
+        nonlocal events_refreshed
+        events_refreshed += 1
+
+    app.delete_agent = fake_delete_agent  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.latest_report_by_agent = {"agent-1": {"summary": "done"}}
+        app.unseen_latest_agent_ids = {"agent-1"}
+        app.thread_items = {"report:r1": {"item_id": "report:r1"}}
+        app.thread_order = ["report:r1"]
+        app.render_agents()
+        agents_refreshed = 0
+        events_refreshed = 0
+        await app.dismiss_selected_agent(delete_thread=False)
+        detail = app.query_one("#detail", TextArea).text
+
+    assert deleted == [("agent-1", False)]
+    assert agents_refreshed == 1
+    assert events_refreshed == 1
+    assert app.selected_agent_id is None
+    assert app.latest_report_by_agent == {}
+    assert app.unseen_latest_agent_ids == set()
+    assert app.thread_items == {}
+    assert "Hidden agent-1." in detail
+    assert "Thread data was retained" in detail
+
+
+async def test_tui_purge_selected_agent_uses_cursor_and_deletes_thread() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    deleted: list[tuple[str, bool]] = []
+
+    async def fake_delete_agent(agent_id: str, *, delete_thread: bool = False) -> dict[str, str]:
+        deleted.append((agent_id, delete_thread))
+        return {"agent_id": agent_id}
+
+    async def fake_refresh() -> None:
+        return None
+
+    app.delete_agent = fake_delete_agent  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 124.0,
+            },
+        }
+        app.selected_agent_id = "agent-1"
+        app.render_agents()
+        table = app.query_one("#agents", DataTable)
+        table.move_cursor(row=1, animate=False)
+        await app.dismiss_selected_agent(delete_thread=True)
+        detail = app.query_one("#detail", TextArea).text
+
+    assert deleted == [("agent-2", True)]
+    assert app.selected_agent_id == "agent-1"
+    assert "Purged agent-2." in detail
+    assert "Thread data was deleted" in detail
+
+
+async def test_tui_agent_hide_and_purge_hotkeys_trigger_from_agents_table() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    deleted: list[tuple[str, bool]] = []
+
+    async def fake_delete_agent(agent_id: str, *, delete_thread: bool = False) -> dict[str, str]:
+        deleted.append((agent_id, delete_thread))
+        return {"agent_id": agent_id}
+
+    async def fake_refresh() -> None:
+        return None
+
+    app.delete_agent = fake_delete_agent  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 124.0,
+            },
+        }
+        app.render_agents()
+        table = app.query_one("#agents", DataTable)
+        table.focus()
+        table.move_cursor(row=0, animate=False)
+        await pilot.press("d")
+        await pilot.pause()
+
+        table.move_cursor(row=1, animate=False)
+        await pilot.press("shift+d")
+        await pilot.pause()
+
+    assert deleted == [("agent-1", False), ("agent-2", True)]
+
+
+async def test_tui_agent_hide_hotkey_ignored_in_text_inputs() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    deleted: list[tuple[str, bool]] = []
+
+    async def fake_delete_agent(agent_id: str, *, delete_thread: bool = False) -> dict[str, str]:
+        deleted.append((agent_id, delete_thread))
+        return {"agent_id": agent_id}
+
+    app.delete_agent = fake_delete_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.render_agents()
+        message = app.query_one("#message", TextArea)
+        message.focus()
+        await pilot.press("d")
+        await pilot.press("shift+d")
+        await pilot.pause()
+
+    assert deleted == []
+
+
+async def test_tui_agent_jump_hotkeys_open_latest_by_visible_row() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    loaded: list[str] = []
+    threads: list[str] = []
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            f"agent-{index}": {
+                "agent_id": f"agent-{index}",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 100.0 + index,
+            }
+            for index in range(1, 11)
+        }
+        app.render_agents()
+        tabs = app.query_one("#agent-tabs")
+        tabs.active = "thread-tab"
+        app.active_agent_tab = "thread-tab"
+        await pilot.press("alt+3")
+        await pilot.pause()
+
+        assert app.selected_agent_id == "agent-3"
+        assert app.active_agent_tab == "latest-tab"
+        assert tabs.active == "latest-tab"
+        assert app.agent_id_at_cursor() == "agent-3"
+
+        await pilot.press("alt+0")
+        await pilot.pause()
+
+        assert app.selected_agent_id == "agent-10"
+        assert app.agent_id_at_cursor() == "agent-10"
+
+    assert loaded == ["agent-3", "agent-10"]
+    assert threads == ["agent-3", "agent-10"]
+
+
+async def test_tui_agent_jump_hotkeys_open_compact_agent_view() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(80, 24)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.render_agents()
+        await pilot.press("alt+1")
+        await pilot.pause()
+
+        assert app.effective_layout_mode == "compact"
+        assert app.compact_view == "agent"
+        assert app.selected_agent_id == "agent-1"
+        assert app.screen.has_class("compact-agent")
 
 
 async def test_tui_unseen_latest_tracking_clears_when_seen() -> None:

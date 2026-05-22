@@ -17,6 +17,7 @@ import httpx
 from rich.color import Color, ColorParseError
 from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.events import Click, Key, Resize
@@ -89,6 +90,15 @@ STALE_POLL_SECONDS = 120
 QUEUED_COMMAND_WARN_SECONDS = 60
 ACTIVE_POLL_SECONDS = 60
 TMUX_LIVENESS_IDLE_SECONDS = 60
+TMUX_WORKING_INFERABLE_STATUSES = {
+    "blocked",
+    "canceled",
+    "cancelled",
+    "complete",
+    "completed",
+    "done",
+    "failed",
+}
 THEME_KEYS = (
     "primary",
     "secondary",
@@ -629,7 +639,8 @@ class AgentPBXTUI(App[None]):
     }
 
     Screen.tiny-home #events-title,
-    Screen.tiny-home #events {
+    Screen.tiny-home #events,
+    Screen.tiny-home #agent-actions {
         display: none;
     }
 
@@ -743,6 +754,14 @@ class AgentPBXTUI(App[None]):
 
     #agents {
         height: 1fr;
+    }
+
+    #agent-actions {
+        height: 3;
+    }
+
+    #agent-actions Button {
+        width: 1fr;
     }
 
     #agent-tabs {
@@ -1037,6 +1056,30 @@ class AgentPBXTUI(App[None]):
         ("r", "refresh", "Refresh"),
         ("s", "settings", "Settings"),
         ("ctrl+t", "toggle_tmux_direct", "Tmux"),
+        Binding("d", "hide_agent", "Hide Agent", priority=True),
+        Binding(
+            "alt+1",
+            "jump_agent_1",
+            "Agent 1-10",
+            key_display="Alt+1-0",
+            priority=True,
+        ),
+        Binding("alt+2", "jump_agent_2", "Agent 2", show=False, priority=True),
+        Binding("alt+3", "jump_agent_3", "Agent 3", show=False, priority=True),
+        Binding("alt+4", "jump_agent_4", "Agent 4", show=False, priority=True),
+        Binding("alt+5", "jump_agent_5", "Agent 5", show=False, priority=True),
+        Binding("alt+6", "jump_agent_6", "Agent 6", show=False, priority=True),
+        Binding("alt+7", "jump_agent_7", "Agent 7", show=False, priority=True),
+        Binding("alt+8", "jump_agent_8", "Agent 8", show=False, priority=True),
+        Binding("alt+9", "jump_agent_9", "Agent 9", show=False, priority=True),
+        Binding("alt+0", "jump_agent_0", "Agent 10", show=False, priority=True),
+        Binding(
+            "shift+d",
+            "purge_agent",
+            "Purge Agent",
+            key_display="D",
+            priority=True,
+        ),
         ("b", "back", "Back"),
         ("q", "quit", "Quit"),
     ]
@@ -1217,6 +1260,9 @@ class AgentPBXTUI(App[None]):
                     cursor_type="row",
                     show_row_labels=False,
                 )
+                with Horizontal(id="agent-actions"):
+                    yield Button("Hide Agent (d)", id="hide-agent")
+                    yield Button("Purge Agent (D)", id="purge-agent")
                 yield Static("Events", id="events-title")
                 yield DataTable(
                     id="events",
@@ -1378,6 +1424,54 @@ class AgentPBXTUI(App[None]):
     def action_back(self) -> None:
         if self.is_compact_layout() and self.compact_view == "agent":
             self.show_compact_home()
+
+    def action_hide_agent(self) -> None:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        self.run_worker(
+            self.dismiss_selected_agent(delete_thread=False),
+            name="dismiss-agent",
+            exclusive=True,
+        )
+
+    def action_purge_agent(self) -> None:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        self.run_worker(
+            self.dismiss_selected_agent(delete_thread=True),
+            name="purge-agent",
+            exclusive=True,
+        )
+
+    async def action_jump_agent_1(self) -> None:
+        await self.jump_to_agent_row(0)
+
+    async def action_jump_agent_2(self) -> None:
+        await self.jump_to_agent_row(1)
+
+    async def action_jump_agent_3(self) -> None:
+        await self.jump_to_agent_row(2)
+
+    async def action_jump_agent_4(self) -> None:
+        await self.jump_to_agent_row(3)
+
+    async def action_jump_agent_5(self) -> None:
+        await self.jump_to_agent_row(4)
+
+    async def action_jump_agent_6(self) -> None:
+        await self.jump_to_agent_row(5)
+
+    async def action_jump_agent_7(self) -> None:
+        await self.jump_to_agent_row(6)
+
+    async def action_jump_agent_8(self) -> None:
+        await self.jump_to_agent_row(7)
+
+    async def action_jump_agent_9(self) -> None:
+        await self.jump_to_agent_row(8)
+
+    async def action_jump_agent_0(self) -> None:
+        await self.jump_to_agent_row(9)
 
     async def action_toggle_tmux_direct(self) -> None:
         if self.active_agent_tab != "latest-tab":
@@ -1661,6 +1755,22 @@ class AgentPBXTUI(App[None]):
         if focus:
             table.focus()
 
+    def agent_id_at_row_index(self, row_index: int) -> str | None:
+        table = self.query_one_or_none("#agents", DataTable)
+        if table is None or not table.is_valid_row_index(row_index):
+            return None
+        return str(table.ordered_rows[row_index].key.value)
+
+    async def jump_to_agent_row(self, row_index: int) -> bool:
+        agent_id = self.agent_id_at_row_index(row_index)
+        if agent_id is None:
+            self.notify(
+                f"No agent at shortcut slot {row_index + 1}.",
+                severity="warning",
+            )
+            return False
+        return await self.open_agent_latest(agent_id)
+
     def agent_pbx_mode(self, agent: dict[str, Any]) -> str:
         if not bool(agent.get("pbx_active", True)):
             return "off"
@@ -1677,7 +1787,18 @@ class AgentPBXTUI(App[None]):
         return self.agent_pbx_mode(agent)
 
     def format_agent_status(self, agent: dict[str, Any]) -> str:
-        return str(agent.get("effective_status") or agent.get("status") or "")
+        status = str(agent.get("effective_status") or agent.get("status") or "")
+        if self.infer_tmux_working_status(agent, status):
+            return "tmux-working"
+        return status
+
+    def infer_tmux_working_status(self, agent: dict[str, Any], status: str) -> bool:
+        agent_id = str(agent.get("agent_id") or "")
+        if not agent_id or not self.tmux_features_available:
+            return False
+        if status.strip().lower() not in TMUX_WORKING_INFERABLE_STATUSES:
+            return False
+        return self.tmux_liveness_level(agent_id) == "active"
 
     def command_delivery_note(self, agent_id: str) -> str:
         agent = self.agents.get(agent_id)
@@ -2001,6 +2122,7 @@ class AgentPBXTUI(App[None]):
         if event.key == "e" or event.character == "e":
             event.stop()
             self.toggle_tiny_events()
+            return
 
     async def on_click(self, event: Click) -> None:
         if getattr(event.widget, "id", None) == "attention":
@@ -2474,6 +2596,13 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "workerbee-refresh":
             if self.selected_agent_id:
                 await self.load_workerbee_status(self.selected_agent_id)
+            return
+        if event.button.id == "hide-agent":
+            await self.dismiss_selected_agent(delete_thread=False)
+            return
+        if event.button.id == "purge-agent":
+            await self.dismiss_selected_agent(delete_thread=True)
+            return
 
     async def send_input(self) -> None:
         if self.tmux_direct_enabled:
@@ -2771,6 +2900,73 @@ class AgentPBXTUI(App[None]):
         await self.refresh_events()
         await self.load_thread(agent_id)
 
+    def selected_or_cursor_agent_id(self) -> str | None:
+        cursor_agent_id = self.agent_id_at_cursor()
+        if cursor_agent_id:
+            return cursor_agent_id
+        if self.selected_agent_id:
+            return self.selected_agent_id
+        agent_input = self.query_one_or_none("#agent-id", Input)
+        if agent_input is not None:
+            value = agent_input.value.strip()
+            if value:
+                return value
+        return None
+
+    async def dismiss_selected_agent(self, *, delete_thread: bool) -> None:
+        agent_id = self.selected_or_cursor_agent_id()
+        if not agent_id:
+            self.notify("Select an agent before hiding it.", severity="warning")
+            return
+        try:
+            await self.delete_agent(agent_id, delete_thread=delete_thread)
+        except Exception as exc:
+            self.notify(f"Unable to hide {agent_id}: {exc}", severity="error")
+            return
+
+        self.unseen_latest_agent_ids.discard(agent_id)
+        self.latest_report_by_agent.pop(agent_id, None)
+        self.workerbee_status_by_agent.pop(agent_id, None)
+        self.tmux_liveness_by_agent.pop(agent_id, None)
+        self.tmux_agent_targets.pop(agent_id, None)
+        self.tmux_manual_override_agent_ids.discard(agent_id)
+        self.tmux_detached_agent_ids.discard(agent_id)
+        if self.selected_agent_id == agent_id:
+            self.selected_agent_id = None
+            agent_input = self.query_one_or_none("#agent-id", Input)
+            if agent_input is not None:
+                agent_input.value = ""
+            self.selected_thread_item_id = None
+            self.thread_items = {}
+            self.thread_order = []
+            self.marked_thread_item_ids.clear()
+            thread = self.query_one_or_none("#thread", DataTable)
+            if thread is not None:
+                thread.clear()
+            thread_detail = self.query_one_or_none("#thread-detail", TextArea)
+            if thread_detail is not None:
+                thread_detail.text = ""
+            if self.is_collapsed_layout():
+                self.show_compact_home()
+
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = (
+                f"{'Purged' if delete_thread else 'Hidden'} {agent_id}.\n\n"
+                + (
+                    "Thread data was deleted. The agent will reappear if it "
+                    "registers again."
+                    if delete_thread
+                    else "Thread data was retained. The agent will reappear "
+                    "with its history if it registers again."
+                )
+            )
+        self.notify(
+            f"{'Purged' if delete_thread else 'Hidden'} {agent_id} from Agents."
+        )
+        await self.refresh_agents()
+        await self.refresh_events()
+
     async def queue_command(
         self, agent_id: str, command_type: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
@@ -2782,6 +2978,18 @@ class AgentPBXTUI(App[None]):
                     "type": command_type,
                     "payload": payload,
                 },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def delete_agent(
+        self, agent_id: str, *, delete_thread: bool = False
+    ) -> dict[str, Any]:
+        async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
+            response = await client.delete(
+                f"/v1/agents/{agent_id}",
+                params={"delete_thread": delete_thread},
                 headers=auth_headers(self.token),
             )
             response.raise_for_status()
@@ -3082,18 +3290,21 @@ class AgentPBXTUI(App[None]):
         agents = self.query_one_or_none("#agents", DataTable)
         events_title = self.query_one_or_none("#events-title", Static)
         events = self.query_one_or_none("#events", DataTable)
-        widgets = [agents_title, agents, events_title, events]
+        agent_actions = self.query_one_or_none("#agent-actions", Horizontal)
+        widgets = [agents_title, agents, events_title, events, agent_actions]
         if any(widget is None for widget in widgets):
             return
         assert agents_title is not None
         assert agents is not None
         assert events_title is not None
         assert events is not None
+        assert agent_actions is not None
         tiny_home = self.is_tiny_layout() and self.compact_view == "home"
         show_events = tiny_home and self.tiny_show_events
         show_agents = not tiny_home or not show_events
         agents_title.styles.display = "block" if show_agents else "none"
         agents.styles.display = "block" if show_agents else "none"
+        agent_actions.styles.display = "none" if tiny_home else "block"
         events_title.styles.display = "block" if show_events or not tiny_home else "none"
         events.styles.display = "block" if show_events or not tiny_home else "none"
         events.styles.height = "1fr" if show_events else 12
@@ -3243,6 +3454,7 @@ class AgentPBXTUI(App[None]):
             "command_acked",
             "command_deleted",
             "agent_pbx_active_changed",
+            "agent_dismissed",
         }:
             self.run_worker(
                 self.refresh_agents(),

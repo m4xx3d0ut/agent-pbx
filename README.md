@@ -309,6 +309,10 @@ default. Mouse-drag splitters are intentionally deferred because the current
 Textual version does not provide a native splitter and keyboard controls work
 better over SSH and mobile terminals.
 
+Use `Alt+1` through `Alt+9` to jump directly to the first nine visible agents'
+`Latest` tabs; `Alt+0` jumps to the tenth visible agent. Some terminals label
+Alt as Meta or send it as an Escape-prefixed key sequence.
+
 Experimental local-only tmux direct mode is available for workflows where the
 TUI, MCP server, tmux, and Codex pane all run on the same host. Enable it with
 `AGENT_PBX_TUI_TMUX=1` or the `Tmux direct` setting. When enabled, the selected
@@ -334,8 +338,10 @@ input both stay visible.
 When tmux is available, the Agents table may show a local `Live` hint. `active`
 means the captured pane text changed recently, `idle 1m` means the pane has not
 visibly changed for the idle threshold, and `stale` means the selected pane
-target is gone or invalid. This is an inferred local hint; PBX-reported status
-remains authoritative.
+target is gone or invalid. When `Live` is `active` and the last PBX report is a
+terminal status such as `done` or `completed`, the TUI displays
+`tmux-working` in `Status` to make the local pane activity visible. This does
+not rewrite the stored PBX report.
 
 The tmux read path is snapshot-based: Agent PBX uses `capture-pane` to show the
 rendered pane state a human would see. Tmux paste buffers are used for sending
@@ -390,6 +396,11 @@ reports, follow-up inputs, detail requests, and command results. The thread is
 compact by default; selecting a row shows the full report detail or command
 payload/result in the thread detail pane.
 
+Use `Hide Agent` or press `d` from the Agents list to remove a stale agent from
+the view while keeping its thread history. Use `Purge Agent` or press `D` to
+hide the agent and delete its reports, queued commands, command history, and
+poll stats. Hidden agents reappear when they register again.
+
 When a report includes `plan_options`, the Latest and Thread tabs show a
 plan-choice panel. Agents must set `needs_input=true` and
 `plan_options=[...]`; writing choices only in report text creates history, but
@@ -415,6 +426,15 @@ The thread is also available through the API:
 curl -H "Authorization: Bearer $AGENT_PBX_TOKEN" \
   "http://127.0.0.1:${AGENT_PBX_PORT:-8765}/v1/agents/<agent-id>/thread"
 ```
+
+Hide an agent from `/v1/agents` while retaining its thread:
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $AGENT_PBX_TOKEN" \
+  "http://127.0.0.1:${AGENT_PBX_PORT:-8765}/v1/agents/<agent-id>"
+```
+
+Add `?delete_thread=true` to purge that agent's thread data while hiding it.
 
 ## Agent PBX Session Semantics
 

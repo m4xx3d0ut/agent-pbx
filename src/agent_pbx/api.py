@@ -128,6 +128,33 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     async def list_agents(store: Store = Depends(get_store)) -> list[dict[str, object]]:
         return store.list_agents()
 
+    @app.delete(
+        "/v1/agents/{agent_id}",
+        response_model=AgentResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def dismiss_agent(
+        agent_id: str,
+        delete_thread: bool = False,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        dismissed = store.dismiss_agent(agent_id, delete_thread=delete_thread)
+        if dismissed is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        store.append_event(
+            "agent_dismissed",
+            {
+                "agent_id": agent_id,
+                "project": agent["project"],
+                "delete_thread": delete_thread,
+            },
+            agent_id,
+        )
+        return dismissed
+
     @app.post(
         "/v1/agents/{agent_id}/reports",
         response_model=ReportResponse,

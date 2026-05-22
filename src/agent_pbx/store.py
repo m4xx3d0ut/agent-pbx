@@ -11,7 +11,7 @@ from .schemas import AgentRegisterRequest, CommandCreateRequest, ReportCreateReq
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -77,7 +77,8 @@ class Store:
                     metadata_json TEXT NOT NULL DEFAULT '{}',
                     created_at REAL NOT NULL,
                     last_seen_at REAL NOT NULL,
-                    last_poll_at REAL
+                    last_poll_at REAL,
+                    dismissed_at REAL
                 );
 
                 CREATE TABLE IF NOT EXISTS reports (
@@ -128,6 +129,7 @@ class Store:
                 (str(SCHEMA_VERSION),),
             )
             self._ensure_column(conn, "agents", "last_poll_at", "REAL")
+            self._ensure_column(conn, "agents", "dismissed_at", "REAL")
             self._ensure_column(
                 conn,
                 "agents",
@@ -278,15 +280,16 @@ class Store:
                 """
                 INSERT INTO agents
                     (agent_id, project, name, status, pbx_active, metadata_json,
-                     created_at, last_seen_at)
-                VALUES (?, ?, ?, 'online', ?, ?, ?, ?)
+                     created_at, last_seen_at, dismissed_at)
+                VALUES (?, ?, ?, 'online', ?, ?, ?, ?, NULL)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     project = excluded.project,
                     name = excluded.name,
                     status = 'online',
                     pbx_active = excluded.pbx_active,
                     metadata_json = excluded.metadata_json,
-                    last_seen_at = excluded.last_seen_at
+                    last_seen_at = excluded.last_seen_at,
+                    dismissed_at = NULL
                 """,
                 (
                     request.agent_id,
@@ -305,7 +308,7 @@ class Store:
             row = conn.execute(
                 """
                 SELECT agent_id, project, name, status, pbx_active, metadata_json,
-                       created_at, last_seen_at, last_poll_at
+                       created_at, last_seen_at, last_poll_at, dismissed_at
                 FROM agents
                 WHERE agent_id = ?
                 """,
@@ -318,8 +321,9 @@ class Store:
             rows = conn.execute(
                 """
                 SELECT agent_id, project, name, status, pbx_active, metadata_json,
-                       created_at, last_seen_at, last_poll_at
+                       created_at, last_seen_at, last_poll_at, dismissed_at
                 FROM agents
+                WHERE dismissed_at IS NULL
                 ORDER BY last_seen_at DESC, agent_id ASC
                 """
             ).fetchall()
@@ -329,6 +333,28 @@ class Store:
                 self._add_queue_summary(conn, agent)
                 self._add_usage_summary(conn, agent)
         return agents
+
+    def dismiss_agent(
+        self, agent_id: str, *, delete_thread: bool = False
+    ) -> dict[str, Any] | None:
+        agent = self.get_agent(agent_id)
+        if agent is None:
+            return None
+        current = now_ts()
+        with self.connect() as conn:
+            if delete_thread:
+                conn.execute("DELETE FROM reports WHERE agent_id = ?", (agent_id,))
+                conn.execute("DELETE FROM commands WHERE agent_id = ?", (agent_id,))
+                conn.execute("DELETE FROM poll_events WHERE agent_id = ?", (agent_id,))
+            cursor = conn.execute(
+                """
+                UPDATE agents
+                SET dismissed_at = ?, last_seen_at = ?
+                WHERE agent_id = ?
+                """,
+                (current, current, agent_id),
+            )
+        return self.get_agent(agent_id) if cursor.rowcount else None
 
     def set_agent_pbx_active(self, agent_id: str, active: bool) -> dict[str, Any] | None:
         current = now_ts()

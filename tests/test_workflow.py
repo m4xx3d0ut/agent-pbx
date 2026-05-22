@@ -216,6 +216,101 @@ def test_delete_delivered_command_is_rejected(tmp_path: Path) -> None:
     assert deleted.json()["detail"] == "command is not queued"
 
 
+def test_dismiss_agent_hides_from_list_but_keeps_thread_until_reconnect(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    report = client.post(
+        "/v1/agents/agent-1/reports",
+        json={
+            "project": "demo",
+            "status": "done",
+            "summary": "Finished",
+            "detail": "Work complete.",
+        },
+    ).json()
+    command = client.post(
+        "/v1/commands",
+        json={
+            "agent_id": "agent-1",
+            "type": "send_input",
+            "payload": {"message": "Follow up later"},
+        },
+    ).json()
+
+    dismissed = client.delete("/v1/agents/agent-1")
+    agents_after_dismiss = client.get("/v1/agents").json()
+    thread_after_dismiss = client.get("/v1/agents/agent-1/thread").json()
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    agents_after_reconnect = client.get("/v1/agents").json()
+    events = client.get("/v1/events").json()
+
+    assert dismissed.status_code == 200
+    assert dismissed.json()["agent_id"] == "agent-1"
+    assert agents_after_dismiss == []
+    assert {item["item_id"] for item in thread_after_dismiss} == {
+        f"report:{report['report_id']}",
+        f"command:{command['command_id']}",
+    }
+    assert agents_after_reconnect[0]["agent_id"] == "agent-1"
+    assert agents_after_reconnect[0]["latest_report_id"] == report["report_id"]
+    assert [event["type"] for event in events] == [
+        "agent_registered",
+        "report_created",
+        "command_queued",
+        "agent_dismissed",
+        "agent_registered",
+    ]
+
+
+def test_dismiss_agent_with_delete_thread_purges_agent_history(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    client.post(
+        "/v1/agents/agent-1/reports",
+        json={
+            "project": "demo",
+            "status": "done",
+            "summary": "Finished",
+            "detail": "Work complete.",
+        },
+    )
+    client.post(
+        "/v1/commands",
+        json={
+            "agent_id": "agent-1",
+            "type": "send_input",
+            "payload": {"message": "Discard this"},
+        },
+    )
+    client.get("/v1/agents/agent-1/commands?wait_seconds=0")
+
+    dismissed = client.delete("/v1/agents/agent-1?delete_thread=true")
+    thread_after_dismiss = client.get("/v1/agents/agent-1/thread").json()
+    polled_after_dismiss = client.get("/v1/agents/agent-1/commands?wait_seconds=0")
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    agents_after_reconnect = client.get("/v1/agents").json()
+
+    assert dismissed.status_code == 200
+    assert thread_after_dismiss == []
+    assert polled_after_dismiss.json() == []
+    assert agents_after_reconnect[0]["latest_report_id"] is None
+    assert agents_after_reconnect[0]["queued_command_count"] == 0
+
+
 def test_agent_workerbee_status_endpoint(tmp_path: Path, monkeypatch) -> None:
     def fake_status_for_agent(self, agent):  # noqa: ANN001, ARG001
         return {
