@@ -309,9 +309,10 @@ default. Mouse-drag splitters are intentionally deferred because the current
 Textual version does not provide a native splitter and keyboard controls work
 better over SSH and mobile terminals.
 
-Use `Alt+1` through `Alt+9` to jump directly to the first nine visible agents'
-`Latest` tabs; `Alt+0` jumps to the tenth visible agent. Some terminals label
-Alt as Meta or send it as an Escape-prefixed key sequence.
+Use `g` followed by `1` through `9` to jump directly to the first nine visible
+agents' `Latest` tabs; `g` then `0` jumps to the tenth visible agent. The
+sequence is ignored while typing in follow-up inputs, avoiding terminal
+`Alt+number` tab-switching conflicts.
 
 Experimental local-only tmux direct mode is available for workflows where the
 TUI, MCP server, tmux, and Codex pane all run on the same host. Enable it with

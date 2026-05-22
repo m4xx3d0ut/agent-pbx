@@ -70,15 +70,9 @@ def test_tui_constructs() -> None:
         and getattr(binding, "action", None) == "purge_agent"
         for binding in app.BINDINGS
     )
-    assert any(
-        getattr(binding, "key", None) == "alt+1"
-        and getattr(binding, "action", None) == "jump_agent_1"
-        and getattr(binding, "key_display", None) == "Alt+1-0"
-        for binding in app.BINDINGS
-    )
-    assert any(
-        getattr(binding, "key", None) == "alt+0"
-        and getattr(binding, "action", None) == "jump_agent_0"
+    assert not any(
+        str(getattr(binding, "key", "")).startswith("alt+")
+        and "jump_agent" in str(getattr(binding, "action", ""))
         for binding in app.BINDINGS
     )
     assert app.server == "http://127.0.0.1:8765"
@@ -1809,7 +1803,7 @@ async def test_tui_agent_hide_hotkey_ignored_in_text_inputs() -> None:
     assert deleted == []
 
 
-async def test_tui_agent_jump_hotkeys_open_latest_by_visible_row() -> None:
+async def test_tui_agent_jump_sequence_opens_latest_by_visible_row() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     loaded: list[str] = []
     threads: list[str] = []
@@ -1839,7 +1833,8 @@ async def test_tui_agent_jump_hotkeys_open_latest_by_visible_row() -> None:
         tabs = app.query_one("#agent-tabs")
         tabs.active = "thread-tab"
         app.active_agent_tab = "thread-tab"
-        await pilot.press("alt+3")
+        await pilot.press("g")
+        await pilot.press("3")
         await pilot.pause()
 
         assert app.selected_agent_id == "agent-3"
@@ -1847,7 +1842,8 @@ async def test_tui_agent_jump_hotkeys_open_latest_by_visible_row() -> None:
         assert tabs.active == "latest-tab"
         assert app.agent_id_at_cursor() == "agent-3"
 
-        await pilot.press("alt+0")
+        await pilot.press("g")
+        await pilot.press("0")
         await pilot.pause()
 
         assert app.selected_agent_id == "agent-10"
@@ -1857,7 +1853,7 @@ async def test_tui_agent_jump_hotkeys_open_latest_by_visible_row() -> None:
     assert threads == ["agent-3", "agent-10"]
 
 
-async def test_tui_agent_jump_hotkeys_open_compact_agent_view() -> None:
+async def test_tui_agent_jump_sequence_opens_compact_agent_view() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
     async def fake_load_latest_report(agent_id: str) -> None:
@@ -1881,13 +1877,49 @@ async def test_tui_agent_jump_hotkeys_open_compact_agent_view() -> None:
             }
         }
         app.render_agents()
-        await pilot.press("alt+1")
+        await pilot.press("g")
+        await pilot.press("1")
         await pilot.pause()
 
         assert app.effective_layout_mode == "compact"
         assert app.compact_view == "agent"
         assert app.selected_agent_id == "agent-1"
         assert app.screen.has_class("compact-agent")
+
+
+async def test_tui_agent_jump_sequence_ignored_in_text_inputs() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    loaded: list[str] = []
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.render_agents()
+        message = app.query_one("#message", TextArea)
+        message.focus()
+        await pilot.press("g")
+        await pilot.press("1")
+        await pilot.pause()
+
+    assert loaded == []
+    assert app.selected_agent_id is None
 
 
 async def test_tui_unseen_latest_tracking_clears_when_seen() -> None:

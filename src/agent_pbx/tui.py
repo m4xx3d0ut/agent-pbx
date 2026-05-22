@@ -91,6 +91,18 @@ STALE_POLL_SECONDS = 120
 QUEUED_COMMAND_WARN_SECONDS = 60
 ACTIVE_POLL_SECONDS = 60
 TMUX_LIVENESS_IDLE_SECONDS = 60
+AGENT_JUMP_KEYS = {
+    "1": 0,
+    "2": 1,
+    "3": 2,
+    "4": 3,
+    "5": 4,
+    "6": 5,
+    "7": 6,
+    "8": 7,
+    "9": 8,
+    "0": 9,
+}
 TMUX_WORKING_INFERABLE_STATUSES = {
     "blocked",
     "canceled",
@@ -1108,22 +1120,6 @@ class AgentPBXTUI(App[None]):
         ("ctrl+t", "toggle_tmux_direct", "Tmux"),
         Binding("d", "hide_agent", "Hide Agent", priority=True),
         Binding(
-            "alt+1",
-            "jump_agent_1",
-            "Agent 1-10",
-            key_display="Alt+1-0",
-            priority=True,
-        ),
-        Binding("alt+2", "jump_agent_2", "Agent 2", show=False, priority=True),
-        Binding("alt+3", "jump_agent_3", "Agent 3", show=False, priority=True),
-        Binding("alt+4", "jump_agent_4", "Agent 4", show=False, priority=True),
-        Binding("alt+5", "jump_agent_5", "Agent 5", show=False, priority=True),
-        Binding("alt+6", "jump_agent_6", "Agent 6", show=False, priority=True),
-        Binding("alt+7", "jump_agent_7", "Agent 7", show=False, priority=True),
-        Binding("alt+8", "jump_agent_8", "Agent 8", show=False, priority=True),
-        Binding("alt+9", "jump_agent_9", "Agent 9", show=False, priority=True),
-        Binding("alt+0", "jump_agent_0", "Agent 10", show=False, priority=True),
-        Binding(
             "shift+d",
             "purge_agent",
             "Purge Agent",
@@ -1288,6 +1284,8 @@ class AgentPBXTUI(App[None]):
         self.event_stream_disconnected = False
         self.last_seen_event_id = int_setting(self.settings, "last_seen_event_id", 0)
         self.flash_generation = 0
+        self.agent_jump_prefix_pending = False
+        self.agent_jump_prefix_generation = 0
 
     def composer_hotkeys_text(self) -> str:
         text = "Enter send | Ctrl+J newline | Ctrl+W word"
@@ -1305,7 +1303,7 @@ class AgentPBXTUI(App[None]):
         yield Static("", id="attention")
         with Horizontal(id="main"):
             with Vertical(id="left"):
-                yield Static("Agents", id="agents-title")
+                yield Static("Agents (g 1-0)", id="agents-title")
                 yield DataTable(
                     id="agents",
                     cursor_type="row",
@@ -1493,36 +1491,6 @@ class AgentPBXTUI(App[None]):
             name="purge-agent",
             exclusive=True,
         )
-
-    async def action_jump_agent_1(self) -> None:
-        await self.jump_to_agent_row(0)
-
-    async def action_jump_agent_2(self) -> None:
-        await self.jump_to_agent_row(1)
-
-    async def action_jump_agent_3(self) -> None:
-        await self.jump_to_agent_row(2)
-
-    async def action_jump_agent_4(self) -> None:
-        await self.jump_to_agent_row(3)
-
-    async def action_jump_agent_5(self) -> None:
-        await self.jump_to_agent_row(4)
-
-    async def action_jump_agent_6(self) -> None:
-        await self.jump_to_agent_row(5)
-
-    async def action_jump_agent_7(self) -> None:
-        await self.jump_to_agent_row(6)
-
-    async def action_jump_agent_8(self) -> None:
-        await self.jump_to_agent_row(7)
-
-    async def action_jump_agent_9(self) -> None:
-        await self.jump_to_agent_row(8)
-
-    async def action_jump_agent_0(self) -> None:
-        await self.jump_to_agent_row(9)
 
     async def action_toggle_tmux_direct(self) -> None:
         if self.active_agent_tab != "latest-tab":
@@ -1821,6 +1789,44 @@ class AgentPBXTUI(App[None]):
             )
             return False
         return await self.open_agent_latest(agent_id)
+
+    def begin_agent_jump_prefix(self) -> None:
+        self.agent_jump_prefix_generation += 1
+        generation = self.agent_jump_prefix_generation
+        self.agent_jump_prefix_pending = True
+        self.notify("Agent jump: press 1-0.")
+        self.set_timer(3.0, lambda: self.clear_agent_jump_prefix(generation))
+
+    def clear_agent_jump_prefix(self, generation: int | None = None) -> None:
+        if generation is not None and generation != self.agent_jump_prefix_generation:
+            return
+        self.agent_jump_prefix_pending = False
+
+    def agent_jump_index_from_key(self, event: Key) -> int | None:
+        key = str(event.character or event.key or "").lower()
+        return AGENT_JUMP_KEYS.get(key)
+
+    def handle_agent_jump_key(self, event: Key) -> bool:
+        if self.agent_jump_prefix_pending:
+            row_index = self.agent_jump_index_from_key(event)
+            self.clear_agent_jump_prefix()
+            if row_index is None:
+                if event.key == "escape":
+                    event.stop()
+                    return True
+                return False
+            event.stop()
+            self.run_worker(
+                self.jump_to_agent_row(row_index),
+                name="jump-agent",
+                exclusive=True,
+            )
+            return True
+        if event.character == "g" or event.key == "g":
+            event.stop()
+            self.begin_agent_jump_prefix()
+            return True
+        return False
 
     def agent_pbx_mode(self, agent: dict[str, Any]) -> str:
         if not bool(agent.get("pbx_active", True)):
@@ -2157,6 +2163,9 @@ class AgentPBXTUI(App[None]):
             self.toggle_current_thread_mark()
             return
         if isinstance(focused, (Input, TextArea)):
+            self.clear_agent_jump_prefix()
+            return
+        if self.handle_agent_jump_key(event):
             return
         if event.character == "[":
             event.stop()
