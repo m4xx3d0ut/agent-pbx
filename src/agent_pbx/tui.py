@@ -1554,7 +1554,6 @@ class AgentPBXTUI(App[None]):
         else:
             level = self.agent_poll_level(agent)
             style = {
-                "active": "bold green",
                 "stale": "bold yellow",
                 "never": "bold red",
             }.get(level)
@@ -1562,8 +1561,11 @@ class AgentPBXTUI(App[None]):
                 tmux_level = self.tmux_liveness_level(str(agent.get("agent_id") or ""))
                 style = {
                     "active": "bold cyan",
+                    "idle": "dim",
                     "stale": "bold yellow",
                 }.get(tmux_level)
+            if style is None and level == "active":
+                style = "bold green"
         if style is None:
             return cells
         return [Text(cell, style=style) for cell in cells]

@@ -666,6 +666,68 @@ def test_tui_styles_tmux_active_rows_without_changing_status(monkeypatch) -> Non
     assert app.format_agent_status({"status": "done"}) == "done"
 
 
+def test_tui_styles_tmux_idle_rows(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
+    app.record_tmux_capture_liveness("agent-1", "%1", "unchanged")
+    monkeypatch.setattr(
+        "agent_pbx.tui.time.time",
+        lambda: 1000.0 + TMUX_LIVENESS_IDLE_SECONDS + 1,
+    )
+
+    cells = app.style_agent_row(
+        ["", "agent-1", "report", "", "done", "demo", "1000", "", "idle 1m", "-", "-"],
+        {
+            "agent_id": "agent-1",
+            "status": "done",
+            "queued_command_count": 0,
+            "last_poll_at": None,
+        },
+    )
+
+    assert all(isinstance(cell, Text) for cell in cells)
+    assert {cell.style for cell in cells if isinstance(cell, Text)} == {"dim"}
+
+
+def test_tui_styles_tmux_stale_rows(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
+    app.record_tmux_liveness_state("agent-1", "stale", pane_id="%1")
+
+    cells = app.style_agent_row(
+        ["", "agent-1", "report", "", "done", "demo", "1000", "", "stale", "-", "-"],
+        {
+            "agent_id": "agent-1",
+            "status": "done",
+            "queued_command_count": 0,
+            "last_poll_at": None,
+        },
+    )
+
+    assert all(isinstance(cell, Text) for cell in cells)
+    assert {cell.style for cell in cells if isinstance(cell, Text)} == {"bold yellow"}
+
+
+def test_tui_pbx_never_overrides_tmux_active_rows(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
+    app.record_tmux_capture_liveness("agent-1", "%1", "changed")
+
+    cells = app.style_agent_row(
+        ["", "agent-1", "nohup", "", "working", "demo", "1000", "1", "active", "never", "-"],
+        {
+            "agent_id": "agent-1",
+            "status": "working",
+            "queued_command_count": 1,
+            "last_poll_at": None,
+            "metadata": {"pbx_mode": "nohup"},
+        },
+    )
+
+    assert all(isinstance(cell, Text) for cell in cells)
+    assert {cell.style for cell in cells if isinstance(cell, Text)} == {"bold red"}
+
+
 def test_tui_tmux_crop_hides_codex_status_and_input_region() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
 
