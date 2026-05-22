@@ -1483,6 +1483,19 @@ async def test_tui_palette_dynamic_plan_option_commands_open_preselected_modal()
         assert app.screen.query_one("#palette-plan-option", Select).value == "1"
 
 
+async def test_tui_palette_dynamic_plan_option_commands_require_options() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        titles = {command.title for command in app.get_system_commands(app.screen)}
+
+    assert "/plan latest" in titles
+    assert not any(title.startswith("/plan latest 1:") for title in titles)
+    assert not any(title.startswith("/plan thread 1:") for title in titles)
+
+
 def test_tui_palette_option_labels_are_compact() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 

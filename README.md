@@ -314,6 +314,13 @@ agents' `Latest` tabs; `g` then `0` jumps to the tenth visible agent. The
 sequence is ignored while typing in follow-up inputs, avoiding terminal
 `Alt+number` tab-switching conflicts.
 
+Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
+commands such as `/detail`, `/ping`, `/tmux`, `/workerbee`, `/theme minimal`,
+and `/layout compact`. When the selected agent has structured plan options,
+the palette also shows `/plan latest`, `/plan thread`, and direct entries such
+as `/plan latest 2: ...`; selecting one opens a plan-choice modal with optional
+notes before sending through PBX or, in tmux direct mode, to the Codex pane.
+
 Experimental local-only tmux direct mode is available for workflows where the
 TUI, MCP server, tmux, and Codex pane all run on the same host. Enable it with
 `AGENT_PBX_TUI_TMUX=1` or the `Tmux direct` setting. When enabled, the selected
