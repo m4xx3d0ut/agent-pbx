@@ -19,7 +19,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.events import Click, Key
+from textual.events import Click, Key, Resize
 from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.widgets import (
@@ -29,6 +29,7 @@ from textual.widgets import (
     Footer,
     Header,
     Input,
+    Select,
     Static,
     TabbedContent,
     TabPane,
@@ -45,8 +46,25 @@ ATTENTION_EVENT_TYPES = {"agent_registered", "report_created", "command_acked"}
 DEFAULT_TUI_THEME = "cyberpunk"
 DEFAULT_CUSTOM_THEME_NAME = "1337"
 THEME_1337_NAME = DEFAULT_CUSTOM_THEME_NAME
-DEFAULT_TUI_LAYOUT = "split"
+ADAPTIVE_TUI_LAYOUT = "adaptive"
+DEFAULT_TUI_LAYOUT = ADAPTIVE_TUI_LAYOUT
+SPLIT_TUI_LAYOUT = "split"
 COMPACT_TUI_LAYOUT = "compact"
+TINY_TUI_LAYOUT = "tiny"
+LAYOUT_CHOICES = (
+    (ADAPTIVE_TUI_LAYOUT.title(), ADAPTIVE_TUI_LAYOUT),
+    (SPLIT_TUI_LAYOUT.title(), SPLIT_TUI_LAYOUT),
+    (COMPACT_TUI_LAYOUT.title(), COMPACT_TUI_LAYOUT),
+    (TINY_TUI_LAYOUT.title(), TINY_TUI_LAYOUT),
+)
+SPLIT_MIN_WIDTH = 100
+SPLIT_MIN_HEIGHT = 24
+COMPACT_MIN_WIDTH = 70
+COMPACT_MIN_HEIGHT = 22
+DEFAULT_SPLIT_PERCENT = 42
+MIN_SPLIT_PERCENT = 25
+MAX_SPLIT_PERCENT = 75
+SPLIT_PERCENT_STEP = 5
 PBX_REPORT_MODE = "report"
 PBX_NOHUP_MODE = "nohup"
 DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
@@ -240,8 +258,14 @@ def env_theme_value(custom_name: str | None = None) -> str | None:
 
 def resolve_layout(layout_name: str) -> str:
     normalized = layout_name.strip().lower().replace("_", "-")
+    if normalized in {"", "default", "auto", "adaptive", "responsive"}:
+        return ADAPTIVE_TUI_LAYOUT
+    if normalized in {"split", "wide", "desktop"}:
+        return SPLIT_TUI_LAYOUT
     if normalized in {"compact", "mobile", "small", "single", "single-pane"}:
         return COMPACT_TUI_LAYOUT
+    if normalized in {"tiny", "pocket", "pocketchip", "mini"}:
+        return TINY_TUI_LAYOUT
     return DEFAULT_TUI_LAYOUT
 
 
@@ -249,6 +273,18 @@ def env_layout_value() -> str | None:
     if "AGENT_PBX_TUI_LAYOUT" not in os.environ:
         return None
     return resolve_layout(os.getenv("AGENT_PBX_TUI_LAYOUT", ""))
+
+
+def clamp_split_percent(value: int) -> int:
+    return max(MIN_SPLIT_PERCENT, min(MAX_SPLIT_PERCENT, value))
+
+
+def env_split_percent_value() -> int | None:
+    value = os.getenv("AGENT_PBX_TUI_SPLIT_PERCENT", "").strip()
+    if not value:
+        return None
+    parsed = int_value(value)
+    return clamp_split_percent(parsed) if parsed is not None else None
 
 
 def env_export_dir(default: Path = DEFAULT_EXPORT_DIR) -> Path:
@@ -451,7 +487,8 @@ class SettingsScreen(ModalScreen[None]):
         visual_flash_enabled: bool,
         terminal_bell_enabled: bool,
         agent_blink_enabled: bool,
-        compact_layout_enabled: bool,
+        layout_mode: str,
+        split_percent: int,
         tmux_direct_enabled: bool,
         tmux_features_available: bool,
         custom_theme_name: str,
@@ -461,7 +498,8 @@ class SettingsScreen(ModalScreen[None]):
         self.visual_flash_enabled = visual_flash_enabled
         self.terminal_bell_enabled = terminal_bell_enabled
         self.agent_blink_enabled = agent_blink_enabled
-        self.compact_layout_enabled = compact_layout_enabled
+        self.layout_mode = layout_mode
+        self.split_percent = split_percent
         self.tmux_direct_enabled = tmux_direct_enabled
         self.tmux_features_available = tmux_features_available
         self.custom_theme_name = custom_theme_name
@@ -486,11 +524,21 @@ class SettingsScreen(ModalScreen[None]):
                     value=self.agent_blink_enabled,
                     id="agent-blink",
                 )
-                yield Checkbox(
-                    "Compact layout",
-                    value=self.compact_layout_enabled,
-                    id="compact-layout",
+                yield Static("Layout", id="layout-mode-label")
+                yield Select(
+                    LAYOUT_CHOICES,
+                    value=self.layout_mode,
+                    allow_blank=False,
+                    id="layout-mode",
                 )
+                yield Static(
+                    f"Agents width: {self.split_percent}%",
+                    id="split-percent-label",
+                )
+                with Horizontal(id="split-percent-actions"):
+                    yield Button("Narrow", id="split-narrow")
+                    yield Button("Reset", id="split-reset")
+                    yield Button("Widen", id="split-widen")
                 tmux_direct = Checkbox(
                     "Tmux direct",
                     value=self.tmux_direct_enabled,
@@ -510,6 +558,25 @@ class SettingsScreen(ModalScreen[None]):
         if event.button.id == "settings-close":
             event.stop()
             self.dismiss()
+            return
+        if event.button.id in {"split-narrow", "split-reset", "split-widen"}:
+            event.stop()
+            app = self.app
+            if event.button.id == "split-narrow":
+                app.adjust_split_percent(-SPLIT_PERCENT_STEP)  # type: ignore[attr-defined]
+            elif event.button.id == "split-widen":
+                app.adjust_split_percent(SPLIT_PERCENT_STEP)  # type: ignore[attr-defined]
+            else:
+                app.reset_split_percent()  # type: ignore[attr-defined]
+            self.split_percent = app.split_percent  # type: ignore[attr-defined]
+            self.query_one("#split-percent-label", Static).update(
+                f"Agents width: {self.split_percent}%"
+            )
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "layout-mode":
+            event.stop()
+            self.app.set_layout_mode(str(event.value))  # type: ignore[attr-defined]
 
 
 class AgentPBXTUI(App[None]):
@@ -541,20 +608,39 @@ class AgentPBXTUI(App[None]):
         border: solid $warning;
     }
 
-    Screen.compact-home #left {
+    Screen.compact-home #left,
+    Screen.tiny-home #left {
         width: 100%;
     }
 
-    Screen.compact-home #right {
+    Screen.compact-home #right,
+    Screen.tiny-home #right {
         display: none;
     }
 
-    Screen.compact-agent #left {
+    Screen.compact-agent #left,
+    Screen.tiny-agent #left {
         display: none;
     }
 
-    Screen.compact-agent #right {
+    Screen.compact-agent #right,
+    Screen.tiny-agent #right {
         width: 100%;
+    }
+
+    Screen.tiny-home #events-title,
+    Screen.tiny-home #events {
+        display: none;
+    }
+
+    Screen.tiny-home.tiny-events #agents-title,
+    Screen.tiny-home.tiny-events #agents {
+        display: none;
+    }
+
+    Screen.tiny-home.tiny-events #events-title,
+    Screen.tiny-home.tiny-events #events {
+        display: block;
     }
 
     Screen.custom-theme TextArea {
@@ -609,6 +695,30 @@ class AgentPBXTUI(App[None]):
         height: 3;
     }
 
+    #layout-mode {
+        height: 3;
+    }
+
+    #layout-mode-label {
+        height: 1;
+        color: $secondary;
+        content-align: center middle;
+    }
+
+    #split-percent-label {
+        height: 1;
+        color: $secondary;
+        content-align: center middle;
+    }
+
+    #split-percent-actions {
+        height: 3;
+    }
+
+    #split-percent-actions Button {
+        width: 1fr;
+    }
+
     #settings-actions {
         height: 3;
     }
@@ -646,7 +756,8 @@ class AgentPBXTUI(App[None]):
         text-style: bold;
     }
 
-    Screen.compact-agent #agent-title {
+    Screen.compact-agent #agent-title,
+    Screen.tiny-agent #agent-title {
         display: block;
     }
 
@@ -790,6 +901,10 @@ class AgentPBXTUI(App[None]):
         height: 12;
     }
 
+    Screen.tiny-home #events {
+        height: 1fr;
+    }
+
     #composer {
         height: auto;
         min-height: 15;
@@ -855,6 +970,47 @@ class AgentPBXTUI(App[None]):
         content-align: center middle;
         color: $secondary;
         background: $surface;
+    }
+
+    Screen.tiny-agent #detail,
+    Screen.tiny-agent #tmux-stream,
+    Screen.tiny-agent #workerbee-detail {
+        min-height: 4;
+    }
+
+    Screen.tiny-agent #thread {
+        height: 5;
+        min-height: 4;
+    }
+
+    Screen.tiny-agent #thread-detail {
+        min-height: 5;
+    }
+
+    Screen.tiny-agent #composer {
+        min-height: 11;
+        max-height: 14;
+        padding: 0;
+    }
+
+    Screen.tiny-agent #composer-inputs {
+        height: 8;
+        min-height: 8;
+    }
+
+    Screen.tiny-agent #agent-id,
+    Screen.tiny-agent #composer-button-spacer,
+    Screen.tiny-agent #composer-button-inset {
+        display: none;
+    }
+
+    Screen.tiny-agent #message {
+        width: 100%;
+    }
+
+    Screen.tiny-agent #composer-actions {
+        height: 3;
+        padding-top: 0;
     }
     """
 
@@ -972,7 +1128,21 @@ class AgentPBXTUI(App[None]):
         self.theme = self.ui_theme
         layout_setting = str_setting(self.settings, "layout", DEFAULT_TUI_LAYOUT)
         self.layout_mode = resolve_layout(env_layout_value() or layout_setting)
+        self.effective_layout_mode = self.compute_effective_layout()
         self.compact_view = "home"
+        self.tiny_show_events = False
+        split_percent_setting = int_setting(
+            self.settings,
+            "split_percent",
+            DEFAULT_SPLIT_PERCENT,
+        )
+        split_percent_env = env_split_percent_value()
+        self.split_percent = (
+            split_percent_env
+            if split_percent_env is not None
+            else clamp_split_percent(split_percent_setting)
+        )
+        self.rendered_agent_columns: tuple[str, ...] = ()
         self.agents: dict[str, dict[str, Any]] = {}
         self.selected_agent_id: str | None = None
         self.events: list[dict[str, Any]] = []
@@ -1020,13 +1190,13 @@ class AgentPBXTUI(App[None]):
         yield Static("", id="attention")
         with Horizontal(id="main"):
             with Vertical(id="left"):
-                yield Static("Agents")
+                yield Static("Agents", id="agents-title")
                 yield DataTable(
                     id="agents",
                     cursor_type="row",
                     show_row_labels=False,
                 )
-                yield Static("Events")
+                yield Static("Events", id="events-title")
                 yield DataTable(
                     id="events",
                     cursor_type="row",
@@ -1139,23 +1309,11 @@ class AgentPBXTUI(App[None]):
 
     async def on_mount(self) -> None:
         self.apply_theme_class()
+        self.update_effective_layout()
         self.apply_layout_class()
         self.apply_tmux_class()
         agents = self.query_one("#agents", DataTable)
-        agent_columns = [
-            "New",
-            "Agent",
-            "PBX",
-            "Plan",
-            "Status",
-            "Project",
-            "Last Seen",
-            "Queue",
-        ]
-        if self.tmux_features_available:
-            agent_columns.append("Live")
-        agent_columns.extend(["Poll", "Use"])
-        agents.add_columns(*agent_columns)
+        self.render_agent_columns(agents)
         events = self.query_one("#events", DataTable)
         events.add_columns("ID", "Type", "Subject")
         thread = self.query_one("#thread", DataTable)
@@ -1187,7 +1345,8 @@ class AgentPBXTUI(App[None]):
                 visual_flash_enabled=self.visual_flash_enabled,
                 terminal_bell_enabled=self.terminal_bell_enabled,
                 agent_blink_enabled=self.agent_blink_enabled,
-                compact_layout_enabled=self.layout_mode == COMPACT_TUI_LAYOUT,
+                layout_mode=self.layout_mode,
+                split_percent=self.split_percent,
                 tmux_direct_enabled=self.tmux_direct_enabled,
                 tmux_features_available=self.tmux_features_available,
                 custom_theme_name=self.custom_theme_name,
@@ -1246,6 +1405,125 @@ class AgentPBXTUI(App[None]):
             return self.query_one(selector, widget_type)
         except NoMatches:
             return None
+
+    def compute_effective_layout(
+        self, width: int | None = None, height: int | None = None
+    ) -> str:
+        if width is None or height is None:
+            try:
+                width = self.size.width
+                height = self.size.height
+            except Exception:
+                width = SPLIT_MIN_WIDTH
+                height = SPLIT_MIN_HEIGHT
+        if self.layout_mode == SPLIT_TUI_LAYOUT:
+            return SPLIT_TUI_LAYOUT
+        if self.layout_mode == TINY_TUI_LAYOUT:
+            return TINY_TUI_LAYOUT
+        if width < COMPACT_MIN_WIDTH or height < COMPACT_MIN_HEIGHT:
+            return TINY_TUI_LAYOUT
+        if self.layout_mode == COMPACT_TUI_LAYOUT:
+            return COMPACT_TUI_LAYOUT
+        if width >= SPLIT_MIN_WIDTH and height >= SPLIT_MIN_HEIGHT:
+            return SPLIT_TUI_LAYOUT
+        return COMPACT_TUI_LAYOUT
+
+    def update_effective_layout(
+        self, width: int | None = None, height: int | None = None
+    ) -> bool:
+        previous = self.effective_layout_mode
+        self.effective_layout_mode = self.compute_effective_layout(width, height)
+        if self.effective_layout_mode == SPLIT_TUI_LAYOUT:
+            self.compact_view = "home"
+            self.tiny_show_events = False
+        changed = previous != self.effective_layout_mode
+        return changed
+
+    def is_collapsed_layout(self) -> bool:
+        return self.effective_layout_mode in {COMPACT_TUI_LAYOUT, TINY_TUI_LAYOUT}
+
+    def is_tiny_layout(self) -> bool:
+        return self.effective_layout_mode == TINY_TUI_LAYOUT
+
+    def desired_agent_columns(self) -> tuple[str, ...]:
+        live = ("Live",) if self.tmux_features_available else ()
+        if self.effective_layout_mode == TINY_TUI_LAYOUT:
+            return ("New", "Agent", "Status", "Queue", *live)
+        if self.effective_layout_mode == COMPACT_TUI_LAYOUT:
+            return ("New", "Agent", "Plan", "Status", "Queue", *live, "Poll")
+        return (
+            "New",
+            "Agent",
+            "PBX",
+            "Plan",
+            "Status",
+            "Project",
+            "Last Seen",
+            "Queue",
+            *live,
+            "Poll",
+            "Use",
+        )
+
+    def render_agent_columns(self, table: DataTable | None = None) -> None:
+        table = table or self.query_one_or_none("#agents", DataTable)
+        if table is None:
+            return
+        columns = self.desired_agent_columns()
+        if columns == self.rendered_agent_columns:
+            return
+        table.clear(columns=True)
+        table.add_columns(*columns)
+        self.rendered_agent_columns = columns
+
+    def agent_row_values(self, agent: dict[str, Any]) -> list[str]:
+        agent_id = str(agent["agent_id"])
+        values = {
+            "New": "NEW" if agent_id in self.unseen_latest_agent_ids else "",
+            "Agent": agent_id,
+            "PBX": self.format_pbx_active(agent),
+            "Plan": self.format_plan_state(agent),
+            "Status": self.format_agent_status(agent),
+            "Project": str(agent["project"]),
+            "Last Seen": f"{agent['last_seen_at']:.0f}",
+            "Queue": self.format_queue_state(agent),
+            "Live": self.format_tmux_liveness(agent_id),
+            "Poll": self.format_poll_state(agent),
+            "Use": self.format_usage_state(agent),
+        }
+        return [values[column] for column in self.rendered_agent_columns]
+
+    def on_resize(self, event: Resize) -> None:
+        if self.update_effective_layout(event.size.width, event.size.height):
+            self.apply_layout_class()
+            self.render_agents()
+        else:
+            self.apply_layout_dimensions()
+
+    def set_layout_mode(self, layout_name: str) -> None:
+        self.layout_mode = resolve_layout(layout_name)
+        self.compact_view = "home"
+        self.tiny_show_events = False
+        self.update_effective_layout()
+        self.apply_layout_class()
+        self.render_agents()
+        self.save_settings()
+
+    def adjust_split_percent(self, delta: int) -> None:
+        self.split_percent = clamp_split_percent(self.split_percent + delta)
+        self.apply_layout_dimensions()
+        self.save_settings()
+
+    def reset_split_percent(self) -> None:
+        self.split_percent = DEFAULT_SPLIT_PERCENT
+        self.apply_layout_dimensions()
+        self.save_settings()
+
+    def toggle_tiny_events(self) -> None:
+        if not (self.is_tiny_layout() and self.compact_view == "home"):
+            return
+        self.tiny_show_events = not self.tiny_show_events
+        self.apply_layout_class()
 
     async def refresh_agents(self) -> None:
         try:
@@ -1315,29 +1593,11 @@ class AgentPBXTUI(App[None]):
         scroll_y = table.scroll_y
         scroll_target_y = table.scroll_target_y
         cursor_agent_id = self.agent_id_at_cursor()
+        self.render_agent_columns(table)
         table.clear()
         for agent in self.agents.values():
             agent_id = str(agent["agent_id"])
-            unseen = agent_id in self.unseen_latest_agent_ids
-            marker = "NEW" if unseen else ""
-            row = [
-                marker,
-                agent_id,
-                self.format_pbx_active(agent),
-                self.format_plan_state(agent),
-                self.format_agent_status(agent),
-                str(agent["project"]),
-                f"{agent['last_seen_at']:.0f}",
-                self.format_queue_state(agent),
-            ]
-            if self.tmux_features_available:
-                row.append(self.format_tmux_liveness(agent_id))
-            row.extend(
-                [
-                    self.format_poll_state(agent),
-                    self.format_usage_state(agent),
-                ]
-            )
+            row = self.agent_row_values(agent)
             cells = self.style_agent_row(
                 row,
                 agent,
@@ -1695,9 +1955,31 @@ class AgentPBXTUI(App[None]):
 
     def on_key(self, event: Key) -> None:
         thread = self.query_one_or_none("#thread", DataTable)
-        if event.key == "space" and thread is not None and self.focused is thread:
+        try:
+            focused = self.focused
+        except ScreenStackError:
+            focused = None
+        if event.key == "space" and thread is not None and focused is thread:
             event.stop()
             self.toggle_current_thread_mark()
+            return
+        if isinstance(focused, (Input, TextArea)):
+            return
+        if event.character == "[":
+            event.stop()
+            self.adjust_split_percent(-SPLIT_PERCENT_STEP)
+            return
+        if event.character == "]":
+            event.stop()
+            self.adjust_split_percent(SPLIT_PERCENT_STEP)
+            return
+        if event.character == "0":
+            event.stop()
+            self.reset_split_percent()
+            return
+        if event.key == "e" or event.character == "e":
+            event.stop()
+            self.toggle_tiny_events()
 
     async def on_click(self, event: Click) -> None:
         if getattr(event.widget, "id", None) == "attention":
@@ -2693,8 +2975,6 @@ class AgentPBXTUI(App[None]):
                 self.render_unseen_attention()
             self.render_agents()
             self.save_settings()
-        elif event.checkbox.id == "compact-layout":
-            self.set_layout_mode(COMPACT_TUI_LAYOUT if event.value else DEFAULT_TUI_LAYOUT)
         elif event.checkbox.id == "tmux-direct":
             enabled = self.set_tmux_direct_enabled(event.value)
             if self.selected_agent_id:
@@ -2727,25 +3007,99 @@ class AgentPBXTUI(App[None]):
             screen.set_class(use_custom_theme, "custom-theme")
 
     def is_compact_layout(self) -> bool:
-        return self.layout_mode == COMPACT_TUI_LAYOUT
-
-    def set_layout_mode(self, layout_name: str) -> None:
-        self.layout_mode = resolve_layout(layout_name)
-        self.compact_view = "home"
-        self.apply_layout_class()
-        self.save_settings()
+        return self.is_collapsed_layout()
 
     def apply_layout_class(self) -> None:
-        is_compact = self.is_compact_layout()
-        compact_home = is_compact and self.compact_view == "home"
-        compact_agent = is_compact and self.compact_view == "agent"
+        split_layout = self.effective_layout_mode == SPLIT_TUI_LAYOUT
+        compact_layout = self.effective_layout_mode == COMPACT_TUI_LAYOUT
+        tiny_layout = self.effective_layout_mode == TINY_TUI_LAYOUT
+        compact_home = compact_layout and self.compact_view == "home"
+        compact_agent = compact_layout and self.compact_view == "agent"
+        tiny_home = tiny_layout and self.compact_view == "home"
+        tiny_agent = tiny_layout and self.compact_view == "agent"
         try:
             screens = list(self.screen_stack)
         except ScreenStackError:
             return
         for screen in screens:
+            screen.set_class(split_layout, "split-layout")
             screen.set_class(compact_home, "compact-home")
             screen.set_class(compact_agent, "compact-agent")
+            screen.set_class(tiny_home, "tiny-home")
+            screen.set_class(tiny_agent, "tiny-agent")
+            screen.set_class(tiny_home and self.tiny_show_events, "tiny-events")
+        self.apply_layout_dimensions()
+        self.render_agent_columns()
+        self.update_tiny_button_labels()
+        self.restore_layout_focus()
+
+    def apply_layout_dimensions(self) -> None:
+        left = self.query_one_or_none("#left", Vertical)
+        right = self.query_one_or_none("#right", Vertical)
+        if left is None or right is None:
+            return
+        if self.effective_layout_mode == SPLIT_TUI_LAYOUT:
+            left.styles.display = "block"
+            right.styles.display = "block"
+            left.styles.width = f"{self.split_percent}%"
+            right.styles.width = f"{100 - self.split_percent}%"
+        elif self.compact_view == "home":
+            left.styles.display = "block"
+            right.styles.display = "none"
+            left.styles.width = "100%"
+            right.styles.width = "100%"
+        else:
+            left.styles.display = "none"
+            right.styles.display = "block"
+            left.styles.width = "100%"
+            right.styles.width = "100%"
+        self.apply_tiny_events_visibility()
+
+    def apply_tiny_events_visibility(self) -> None:
+        agents_title = self.query_one_or_none("#agents-title", Static)
+        agents = self.query_one_or_none("#agents", DataTable)
+        events_title = self.query_one_or_none("#events-title", Static)
+        events = self.query_one_or_none("#events", DataTable)
+        widgets = [agents_title, agents, events_title, events]
+        if any(widget is None for widget in widgets):
+            return
+        assert agents_title is not None
+        assert agents is not None
+        assert events_title is not None
+        assert events is not None
+        tiny_home = self.is_tiny_layout() and self.compact_view == "home"
+        show_events = tiny_home and self.tiny_show_events
+        show_agents = not tiny_home or not show_events
+        agents_title.styles.display = "block" if show_agents else "none"
+        agents.styles.display = "block" if show_agents else "none"
+        events_title.styles.display = "block" if show_events or not tiny_home else "none"
+        events.styles.display = "block" if show_events or not tiny_home else "none"
+        events.styles.height = "1fr" if show_events else 12
+
+    def update_tiny_button_labels(self) -> None:
+        tiny = self.is_tiny_layout()
+        labels = {
+            "send": "Send" if tiny else "Send Input",
+            "request-detail": "Detail" if tiny else "Request Detail",
+            "ping-agent": "Ping",
+            "mark-canceled": "Cancel" if tiny else "Mark Canceled",
+        }
+        for button_id, label in labels.items():
+            button = self.query_one_or_none(f"#{button_id}", Button)
+            if button is not None:
+                button.label = Text(label)
+
+    def restore_layout_focus(self) -> None:
+        if not self.is_collapsed_layout():
+            return
+        if self.compact_view == "home":
+            agents = self.query_one_or_none("#agents", DataTable)
+            if agents is not None:
+                agents.focus()
+        else:
+            detail = self.query_one_or_none("#detail", TextArea)
+            if detail is not None and not isinstance(self.focused, (Input, TextArea)):
+                detail.focus()
 
     def apply_tmux_class(self) -> None:
         try:
@@ -2756,15 +3110,16 @@ class AgentPBXTUI(App[None]):
             screen.set_class(self.tmux_direct_enabled, "tmux-direct")
 
     def show_compact_home(self) -> None:
-        if not self.is_compact_layout():
+        if not self.is_collapsed_layout():
             return
         self.compact_view = "home"
+        self.tiny_show_events = False
         self.apply_layout_class()
         if self.selected_agent_id:
             self.move_agent_cursor(self.selected_agent_id, focus=True)
 
     def show_compact_agent(self) -> None:
-        if not self.is_compact_layout():
+        if not self.is_collapsed_layout():
             return
         self.compact_view = "agent"
         self.apply_layout_class()
@@ -2781,6 +3136,7 @@ class AgentPBXTUI(App[None]):
             "agent_blink": self.agent_blink_enabled,
             "theme": self.ui_theme,
             "layout": self.layout_mode,
+            "split_percent": self.split_percent,
             "export_dir": str(self.export_dir),
             "tmux_direct": self.tmux_direct_enabled,
             "tmux_capture_lines": self.tmux_capture_lines,

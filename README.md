@@ -292,11 +292,22 @@ acknowledgements. The Agents table also highlights unseen latest reports with
 the blinking alert to jump directly to the first unseen agent's `Latest` tab.
 Disable that with `AGENT_PBX_TUI_AGENT_BLINK=0` or the `Unseen blink` setting.
 
-For narrow terminals, enable the compact layout with
-`AGENT_PBX_TUI_LAYOUT=compact` or the `Compact layout` setting. Compact mode
-uses the Agents and Events pane as the home screen; selecting an agent opens a
-full-width agent view with `Latest`, `Thread`, and `WorkerBee` tabs. Press `b`
-to return to the agent list.
+The TUI layout defaults to `adaptive`: wide terminals use a side-by-side
+Agents/right-pane split, narrow terminals use compact full-width agent views,
+and very small terminals use a tiny mode that shows only Agents or Events on
+the home screen. Override with
+`AGENT_PBX_TUI_LAYOUT=adaptive|split|compact|tiny` or the `Layout` setting.
+Selecting an agent in compact or tiny mode opens a full-width view with
+`Latest`, `Thread`, and `WorkerBee` tabs; press `b` to return to the agent
+list. In tiny mode, press `e` on the home screen to toggle between Agents and
+Events.
+
+In split layout, adjust the Agents/right-pane width with `[` and `]`; press
+`0` to reset to the default 42% Agents width. The same controls are available
+from Settings, and `AGENT_PBX_TUI_SPLIT_PERCENT=25..75` can set the launch
+default. Mouse-drag splitters are intentionally deferred because the current
+Textual version does not provide a native splitter and keyboard controls work
+better over SSH and mobile terminals.
 
 Experimental local-only tmux direct mode is available for workflows where the
 TUI, MCP server, tmux, and Codex pane all run on the same host. Enable it with

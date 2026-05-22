@@ -9,6 +9,7 @@ from agent_pbx import tmux as tmux_support
 from agent_pbx.tui import (
     AgentPBXTUI,
     TMUX_LIVENESS_IDLE_SECONDS,
+    DEFAULT_SPLIT_PERCENT,
     env_custom_palette,
     env_flag,
     env_theme,
@@ -19,7 +20,7 @@ from agent_pbx.tui import (
     tmux_features_available,
 )
 from textual.events import Click, Key
-from textual.widgets import Button, Checkbox, DataTable, Input, TextArea
+from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static, TextArea
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +39,7 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_CUSTOM_BACKGROUND",
         "AGENT_PBX_TUI_EXPORT_DIR",
         "AGENT_PBX_TUI_LAYOUT",
+        "AGENT_PBX_TUI_SPLIT_PERCENT",
         "AGENT_PBX_TUI_TMUX",
         "AGENT_PBX_TUI_TMUX_SHOW",
         "AGENT_PBX_TUI_TMUX_CAPTURE_LINES",
@@ -68,7 +70,9 @@ def test_tui_constructs() -> None:
     assert app.tmux_refresh_seconds == 1.5
     assert app.tmux_agent_targets == {}
     assert app.ui_theme == "cyberpunk"
-    assert app.layout_mode == "split"
+    assert app.layout_mode == "adaptive"
+    assert app.effective_layout_mode == "compact"
+    assert app.split_percent == DEFAULT_SPLIT_PERCENT
     assert app.compact_view == "home"
     assert ("b", "back", "Back") in app.BINDINGS
 
@@ -108,6 +112,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "agent_blink": False,
                 "theme": "1337",
                 "layout": "compact",
+                "split_percent": 61,
                 "tmux_direct": True,
                 "tmux_capture_lines": 250,
                 "tmux_agent_targets": {"agent-1": "%1"},
@@ -129,6 +134,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.agent_blink_enabled is False
     assert app.ui_theme == "1337"
     assert app.layout_mode == "compact"
+    assert app.split_percent == 61
     assert app.tmux_direct_enabled is True
     assert app.tmux_capture_lines == 250
     assert app.tmux_agent_targets == {"agent-1": "%1"}
@@ -147,6 +153,7 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
                 "tmux_direct": False,
                 "theme": "1337",
                 "layout": "split",
+                "split_percent": 35,
             }
         ),
         encoding="utf-8",
@@ -158,6 +165,7 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_PBX_TUI_TMUX_REFRESH_SECONDS", "2.75")
     monkeypatch.setenv("AGENT_PBX_TUI_THEME", "cyberpunk")
     monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "compact")
+    monkeypatch.setenv("AGENT_PBX_TUI_SPLIT_PERCENT", "72")
 
     app = AgentPBXTUI(
         server="http://127.0.0.1:8765",
@@ -171,6 +179,7 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     assert app.tmux_refresh_seconds == 2.75
     assert app.ui_theme == "cyberpunk"
     assert app.layout_mode == "compact"
+    assert app.split_percent == 72
 
 
 def test_tui_env_allows_visible_tmux_capture(monkeypatch) -> None:
@@ -195,6 +204,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     app.tmux_capture_lines = 333
     app.tmux_agent_targets = {"agent-1": "%2"}
     app.layout_mode = "compact"
+    app.split_percent = 57
     app.latest_viewed_at_by_agent = {"agent-1": 123.0}
     app.last_seen_event_id = 42
     app.set_ui_theme("1337")
@@ -208,6 +218,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["tmux_agent_targets"] == {"agent-1": "%2"}
     assert saved["theme"] == "1337"
     assert saved["layout"] == "compact"
+    assert saved["split_percent"] == 57
     assert saved["latest_viewed_at_by_agent"] == {"agent-1": 123.0}
     assert saved["last_seen_event_id"] == 42
 
@@ -229,6 +240,8 @@ def test_tui_reads_layout_env_aliases(monkeypatch) -> None:
     assert app.layout_mode == "compact"
     assert resolve_layout("single-pane") == "compact"
     assert resolve_layout("split") == "split"
+    assert resolve_layout("auto") == "adaptive"
+    assert resolve_layout("pocketchip") == "tiny"
 
 
 def test_tui_maps_legacy_github_theme_to_default(monkeypatch) -> None:
@@ -345,7 +358,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", visual_flash=True)
 
     async with app.run_test() as pilot:
-        await pilot.resize_terminal(80, 24)
+        await pilot.resize_terminal(120, 32)
         await pilot.pause()
         agents = app.query_one("#agents", DataTable)
         thread = app.query_one("#thread", DataTable)
@@ -446,7 +459,11 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         visual = app.screen.query_one("#visual-flash", Checkbox)
         bell = app.screen.query_one("#terminal-bell", Checkbox)
         agent_blink = app.screen.query_one("#agent-blink", Checkbox)
-        compact_layout = app.screen.query_one("#compact-layout", Checkbox)
+        layout_mode = app.screen.query_one("#layout-mode", Select)
+        split_label = app.screen.query_one("#split-percent-label", Static)
+        split_narrow = app.screen.query_one("#split-narrow", Button)
+        split_reset = app.screen.query_one("#split-reset", Button)
+        split_widen = app.screen.query_one("#split-widen", Button)
         tmux_direct = app.screen.query_one("#tmux-direct", Checkbox)
         theme = app.screen.query_one("#theme-1337", Checkbox)
         close = app.screen.query_one("#settings-close", Button)
@@ -454,7 +471,11 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert visual.value is True
         assert bell.value is False
         assert agent_blink.value is True
-        assert compact_layout.value is False
+        assert layout_mode.value == "adaptive"
+        assert str(split_label.renderable) == "Agents width: 42%"
+        assert split_narrow.label.plain == "Narrow"
+        assert split_reset.label.plain == "Reset"
+        assert split_widen.label.plain == "Widen"
         assert tmux_direct.value is False
         assert theme.value is False
         assert close.label.plain == "Close"
@@ -490,7 +511,9 @@ async def test_tui_select_agent_updates_composer_and_loads_report() -> None:
     app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
     app.load_thread = fake_load_thread  # type: ignore[method-assign]
 
-    async with app.run_test():
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
         tabs = app.query_one("#agent-tabs")
         tabs.active = "thread-tab"
         app.active_agent_tab = "thread-tab"
@@ -841,7 +864,7 @@ async def test_tui_compact_layout_opens_agent_view_and_back(monkeypatch) -> None
     app.load_thread = fake_load_thread  # type: ignore[method-assign]
 
     async with app.run_test() as pilot:
-        await pilot.resize_terminal(60, 24)
+        await pilot.resize_terminal(80, 24)
         await pilot.pause()
         app.agents = {
             "agent-1": {
@@ -879,6 +902,91 @@ async def test_tui_compact_layout_opens_agent_view_and_back(monkeypatch) -> None
 
         assert app.compact_view == "home"
         assert app.screen.has_class("compact-home")
+
+    assert loaded == ["agent-1"]
+    assert threads == ["agent-1"]
+
+
+async def test_tui_adaptive_layout_breakpoints_split_keys_and_tiny_events() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        assert app.layout_mode == "adaptive"
+        assert app.effective_layout_mode == "split"
+        assert app.screen.has_class("split-layout")
+
+        await pilot.press("]")
+        await pilot.pause()
+        assert app.split_percent == DEFAULT_SPLIT_PERCENT + 5
+        await pilot.press("[")
+        await pilot.press("0")
+        await pilot.pause()
+        assert app.split_percent == DEFAULT_SPLIT_PERCENT
+
+        app.query_one("#message", TextArea).focus()
+        await pilot.press("]")
+        await pilot.pause()
+        assert app.split_percent == DEFAULT_SPLIT_PERCENT
+
+        await pilot.resize_terminal(80, 24)
+        await pilot.pause()
+        assert app.effective_layout_mode == "compact"
+        assert app.screen.has_class("compact-home")
+
+        await pilot.resize_terminal(53, 20)
+        await pilot.pause()
+        assert app.effective_layout_mode == "tiny"
+        assert app.screen.has_class("tiny-home")
+        assert app.query_one("#events", DataTable).styles.display == "none"
+
+        await pilot.press("e")
+        await pilot.pause()
+        assert app.tiny_show_events is True
+        assert app.screen.has_class("tiny-events")
+        assert app.query_one("#agents", DataTable).styles.display == "none"
+        assert app.query_one("#events", DataTable).styles.display == "block"
+
+
+async def test_tui_tiny_layout_opens_agent_view(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "tiny")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    loaded: list[str] = []
+    threads: list[str] = []
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(53, 20)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "running",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.render_agents()
+
+        assert app.screen.has_class("tiny-home")
+        await app.select_agent("agent-1")
+        await pilot.pause()
+
+        assert app.compact_view == "agent"
+        assert app.screen.has_class("tiny-agent")
+        assert app.query_one("#agent-id", Input).region.height == 0
+        assert app.query_one("#send", Button).label.plain == "Send"
+        assert app.query_one("#request-detail", Button).label.plain == "Detail"
+        assert app.query_one("#mark-canceled", Button).label.plain == "Cancel"
 
     assert loaded == ["agent-1"]
     assert threads == ["agent-1"]
@@ -957,7 +1065,9 @@ async def test_tui_workerbee_tab_keeps_agent_selection_and_loads_status() -> Non
     app.load_thread = fake_load_thread  # type: ignore[method-assign]
     app.load_workerbee_status = fake_load_workerbee_status  # type: ignore[method-assign]
 
-    async with app.run_test():
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
         tabs = app.query_one("#agent-tabs")
         tabs.active = "workerbee-tab"
         app.active_agent_tab = "workerbee-tab"
@@ -1043,6 +1153,24 @@ def test_tui_layout_toggle_persists(tmp_path: Path) -> None:
     saved = json.loads(settings_file.read_text(encoding="utf-8"))
     assert app.layout_mode == "compact"
     assert saved["layout"] == "compact"
+
+
+def test_tui_split_percent_persists_and_clamps(tmp_path: Path) -> None:
+    settings_file = tmp_path / "settings.json"
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        settings_file=settings_file,
+    )
+
+    app.adjust_split_percent(100)
+    assert app.split_percent == 75
+    app.adjust_split_percent(-100)
+    assert app.split_percent == 25
+    app.reset_split_percent()
+
+    saved = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert app.split_percent == DEFAULT_SPLIT_PERCENT
+    assert saved["split_percent"] == DEFAULT_SPLIT_PERCENT
 
 
 def test_tui_custom_theme_css_has_readable_text_area_highlights() -> None:
@@ -1633,7 +1761,9 @@ async def test_tui_selected_report_event_opens_latest_from_thread() -> None:
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.refresh_selected_agent = fake_refresh_selected_agent  # type: ignore[method-assign]
 
-    async with app.run_test():
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
         def fake_run_worker(coro, *_args, **_kwargs):  # type: ignore[no-untyped-def]
             worker_coros.append(coro)
             return None
@@ -1742,7 +1872,9 @@ async def test_tui_agent_status_refresh_marks_unseen_latest() -> None:
 async def test_tui_agent_status_refresh_does_not_mark_engaged_latest() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
-    async with app.run_test():
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
         app.selected_agent_id = "agent-1"
         app.active_agent_tab = "latest-tab"
         app.agents = {
@@ -1804,7 +1936,9 @@ async def test_tui_agent_refresh_preserves_cursor_position() -> None:
 async def test_tui_agent_refresh_preserves_table_scroll() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
-    async with app.run_test():
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
         app.agents = {
             "agent-1": {
                 "agent_id": "agent-1-with-a-long-display-name",
