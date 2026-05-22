@@ -1275,6 +1275,8 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/ping" in titles
     assert "/tmux" in titles
     assert "/workerbee" in titles
+    assert "/plan latest" in titles
+    assert "/plan thread" in titles
     assert "/theme minimal" in titles
     assert "/layout compact" in titles
 
@@ -1314,6 +1316,130 @@ def test_tui_palette_theme_and_layout_commands() -> None:
 
     assert app.ui_theme == "minimal"
     assert app.layout_mode == "tiny"
+
+
+async def test_tui_palette_plan_latest_modal_sends_choice_with_notes() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+    refreshed_events = 0
+    loaded_threads: list[str] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        nonlocal refreshed_events
+        refreshed_events += 1
+
+    async def fake_load_thread(agent_id: str) -> None:
+        loaded_threads.append(agent_id)
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        refreshed_events = 0
+        loaded_threads = []
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "plan",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.latest_report_by_agent = {
+            "agent-1": {
+                "report_id": "report-1",
+                "plan_options": ["A", "B"],
+            }
+        }
+        app.selected_latest_plan_option_index = 1
+
+        app.palette_plan_latest()
+        await pilot.pause()
+
+        assert app.screen.query_one("#palette-plan-title", Static).renderable == "Plan Choice: agent-1"
+        option = app.screen.query_one("#palette-plan-option", Select)
+        notes = app.screen.query_one("#palette-plan-notes", TextArea)
+        send_tmux = app.screen.query_one("#palette-plan-send-tmux", Button)
+        assert option.value == "1"
+        assert send_tmux.disabled is True
+
+        notes.text = "Prefer B."
+        app.screen.submit(via_tmux=False)  # type: ignore[attr-defined]
+        await pilot.pause()
+
+    assert queued == [
+        (
+            "agent-1",
+            "send_input",
+            {"message": "Selected plan option: B\n\nOperator notes:\nPrefer B."},
+        )
+    ]
+    assert refreshed_events == 1
+    assert loaded_threads == ["agent-1"]
+
+
+async def test_tui_palette_plan_thread_modal_can_send_to_tmux() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    captured: list[str] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captured.append(agent_id)
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "plan",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.thread_items = {
+            "report:r1": {
+                "item_id": "report:r1",
+                "kind": "report",
+                "metadata": {"plan_options": ["Proceed"]},
+            }
+        }
+        app.selected_thread_item_id = "report:r1"
+
+        app.palette_plan_thread()
+        await pilot.pause()
+
+        assert app.screen.query_one("#palette-plan-source", Static).renderable == "Selected thread item"
+        assert app.screen.query_one("#palette-plan-send-tmux", Button).disabled is False
+        app.screen.query_one("#palette-plan-notes", TextArea).text = "Go now."
+        app.screen.submit(via_tmux=True)  # type: ignore[attr-defined]
+        await pilot.pause()
+
+    assert sent == [
+        (
+            "agent-1",
+            "Selected plan option: Proceed\n\nOperator notes:\nGo now.",
+        )
+    ]
+    assert captured == ["agent-1"]
 
 
 def test_tui_layout_toggle_persists(tmp_path: Path) -> None:

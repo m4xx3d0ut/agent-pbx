@@ -515,6 +515,87 @@ class FollowUpTextArea(TextArea):
         await super()._on_key(event)
 
 
+class PlanChoiceScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        source: str,
+        options: list[str],
+        selected_index: int = 0,
+        tmux_enabled: bool = False,
+    ) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.source = source
+        self.options = options
+        self.selected_index = selected_index if 0 <= selected_index < len(options) else 0
+        self.tmux_enabled = tmux_enabled
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="palette-plan-panel"):
+            yield Static(f"Plan Choice: {self.agent_id}", id="palette-plan-title")
+            yield Static(self.source, id="palette-plan-source")
+            yield Select(
+                [(option, str(index)) for index, option in enumerate(self.options)],
+                value=str(self.selected_index),
+                allow_blank=False,
+                id="palette-plan-option",
+            )
+            yield TextArea(id="palette-plan-notes", soft_wrap=True)
+            with Horizontal(id="palette-plan-actions"):
+                yield Button(
+                    "Send via PBX",
+                    id="palette-plan-send-pbx",
+                    variant="primary",
+                )
+                send_tmux = Button("Send to tmux", id="palette-plan-send-tmux")
+                send_tmux.disabled = not self.tmux_enabled
+                yield send_tmux
+                yield Button("Cancel", id="palette-plan-cancel")
+
+    def selected_option(self) -> str | None:
+        select = self.query_one("#palette-plan-option", Select)
+        index = int_value(select.value)
+        if index is None or index < 0 or index >= len(self.options):
+            return None
+        return self.options[index]
+
+    def submit(self, *, via_tmux: bool) -> None:
+        option = self.selected_option()
+        if option is None:
+            self.notify("Select a plan option first.", severity="warning")
+            return
+        notes = self.query_one("#palette-plan-notes", TextArea).text
+        app = self.app
+        app.run_worker(  # type: ignore[attr-defined]
+            app.submit_palette_plan_choice(  # type: ignore[attr-defined]
+                self.agent_id,
+                option,
+                notes,
+                via_tmux=via_tmux,
+            ),
+            name="palette-plan-choice",
+            exclusive=True,
+        )
+        self.dismiss()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "palette-plan-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "palette-plan-send-pbx":
+            event.stop()
+            self.submit(via_tmux=False)
+            return
+        if event.button.id == "palette-plan-send-tmux":
+            event.stop()
+            self.submit(via_tmux=True)
+
+
 def normalized_key_names(event: Key) -> set[str]:
     values = {event.key, getattr(event, "name", "")}
     values.update(getattr(event, "aliases", []) or [])
@@ -735,6 +816,47 @@ class AgentPBXTUI(App[None]):
     Screen.custom-theme TextArea.-read-only .text-area--cursor {
         background: $warning;
         color: $background;
+    }
+
+    PlanChoiceScreen {
+        align: center middle;
+    }
+
+    #palette-plan-panel {
+        width: 78;
+        max-width: 92%;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #palette-plan-title {
+        height: 1;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #palette-plan-source {
+        height: 1;
+        color: $secondary;
+        content-align: center middle;
+    }
+
+    #palette-plan-option {
+        height: 3;
+    }
+
+    #palette-plan-notes {
+        height: 8;
+    }
+
+    #palette-plan-actions {
+        height: 3;
+    }
+
+    #palette-plan-actions Button {
+        width: 1fr;
     }
 
     SettingsScreen {
@@ -1456,6 +1578,8 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/cancel", "Mark the selected agent canceled", self.palette_mark_canceled)
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
+        yield SystemCommand("/plan latest", "Choose from latest report plan options", self.palette_plan_latest)
+        yield SystemCommand("/plan thread", "Choose from selected thread plan options", self.palette_plan_thread)
         yield SystemCommand("/hide agent", "Hide the selected agent from the Agents view", self.palette_hide_agent)
         yield SystemCommand("/purge agent", "Hide selected agent and delete its thread data", self.palette_purge_agent)
         yield SystemCommand("/theme cyberpunk", "Use the Cyberpunk theme", lambda: self.palette_set_theme(DEFAULT_TUI_THEME))
@@ -1506,6 +1630,94 @@ class AgentPBXTUI(App[None]):
             name="palette-workerbee",
             exclusive=True,
         )
+
+    def palette_plan_latest(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        report = self.latest_report_by_agent.get(agent_id)
+        options = self.plan_options_for_report(report)
+        if not options:
+            self.notify("No latest plan options for the selected agent.", severity="warning")
+            return
+        selected_index = self.selected_latest_plan_option_index or 0
+        self.open_palette_plan_choice(
+            agent_id,
+            "Latest report",
+            options,
+            selected_index=selected_index,
+        )
+
+    def palette_plan_thread(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        item_id = self.selected_thread_item_id
+        if item_id is None:
+            thread = self.query_one_or_none("#thread", DataTable)
+            if thread is not None and thread.row_count > 0 and thread.is_valid_row_index(thread.cursor_row):
+                item_id = str(thread.coordinate_to_cell_key(thread.cursor_coordinate).row_key.value)
+        item = self.thread_items.get(item_id or "")
+        options = self.plan_options_for_item(item)
+        if not options:
+            self.notify("No selected thread plan options.", severity="warning")
+            return
+        selected_index = self.selected_plan_option_index or 0
+        self.open_palette_plan_choice(
+            agent_id,
+            "Selected thread item",
+            options,
+            selected_index=selected_index,
+        )
+
+    def open_palette_plan_choice(
+        self,
+        agent_id: str,
+        source: str,
+        options: list[str],
+        *,
+        selected_index: int = 0,
+    ) -> None:
+        self.push_screen(
+            PlanChoiceScreen(
+                agent_id=agent_id,
+                source=source,
+                options=options,
+                selected_index=selected_index,
+                tmux_enabled=self.tmux_direct_enabled,
+            )
+        )
+
+    async def submit_palette_plan_choice(
+        self,
+        agent_id: str,
+        option: str,
+        notes: str = "",
+        *,
+        via_tmux: bool = False,
+    ) -> None:
+        message = self.plan_choice_message(option, notes)
+        if via_tmux:
+            if not self.tmux_direct_enabled:
+                self.notify(
+                    "Enable tmux direct mode before sending to Codex pane.",
+                    severity="warning",
+                )
+                return
+            sent = await self.send_text_to_tmux(agent_id, message)
+            if not sent:
+                return
+            self.notify(f"Sent plan choice to Codex pane for {agent_id}.")
+            await self.load_tmux_capture(agent_id)
+            return
+        command = await self.queue_command(
+            agent_id,
+            "send_input",
+            {"message": message},
+        )
+        self.notify_queued_command(agent_id, "Plan choice", command)
+        await self.refresh_events()
+        await self.load_thread(agent_id)
 
     def palette_hide_agent(self) -> None:
         self.run_worker(
