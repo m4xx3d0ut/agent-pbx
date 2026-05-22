@@ -176,3 +176,23 @@ def test_tmux_send_text_can_disable_bracketed_paste(monkeypatch) -> None:
     tmux.send_text("%1", "hello")
 
     assert calls[1][0:4] == ["tmux", "paste-buffer", "-d", "-b"]
+
+
+def test_tmux_send_literal_keys_types_and_submits(monkeypatch) -> None:
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+    monkeypatch.setattr(tmux.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    tmux.send_literal_keys("%1", "/plan")
+
+    assert calls == [
+        ["tmux", "send-keys", "-t", "%1", "-l", "/plan"],
+        ["tmux", "send-keys", "-t", "%1", "C-m"],
+    ]
+    assert sleeps == [tmux.DEFAULT_SUBMIT_DELAY_SECONDS]

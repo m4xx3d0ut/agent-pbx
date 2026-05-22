@@ -95,7 +95,13 @@ QUEUED_COMMAND_WARN_SECONDS = 60
 ACTIVE_POLL_SECONDS = 60
 TMUX_LIVENESS_IDLE_SECONDS = 60
 SLASH_COMMAND_FOLLOWUP_DELAY_SECONDS = 0.2
-PLAN_PBX_CONTEXT_PROMPT = "use agent pbx for planning"
+PLAN_MODE_FOLLOWUP_DELAY_SECONDS = 1.0
+PLAN_PBX_CONTEXT_PROMPT = (
+    "Use Agent PBX for planning. Register or update this session in Agent PBX "
+    "report mode with pbx_mode=\"report\". Do not start nohup polling. When "
+    "operator choice is needed, send pbx_report_turn with needs_input=true and "
+    "structured plan_options so the TUI can present selectable choices."
+)
 PLAN_SLASH_COMMAND = "/plan"
 AGENT_JUMP_KEYS = {
     "1": 0,
@@ -556,6 +562,10 @@ def load_custom_slash_commands(
 
 def render_custom_slash_prompt(command: CustomSlashCommand, arg: str = "") -> str:
     return command.prompt.replace("{arg}", arg.strip())
+
+
+def render_plan_prompt(message: str) -> str:
+    return f"{PLAN_PBX_CONTEXT_PROMPT}\n\n{message.strip()}"
 
 
 def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME_NAME) -> set[str]:
@@ -1923,7 +1933,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/cancel", "Mark the selected agent canceled", self.palette_mark_canceled)
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
-        yield SystemCommand("/plan", "Prefix the selected agent's next prompt with /plan", self.palette_prime_plan_prompt)
+        yield SystemCommand("/plan", "Send /plan before the selected agent's next prompt", self.palette_prime_plan_prompt)
         yield SystemCommand("/plan latest", "Choose from latest report plan options", self.palette_plan_latest)
         yield SystemCommand("/plan thread", "Choose from selected thread plan options", self.palette_plan_thread)
         yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
@@ -2108,7 +2118,7 @@ class AgentPBXTUI(App[None]):
             return
         self.pending_slash_command_by_agent[agent_id] = PLAN_SLASH_COMMAND
         self.notify(
-            f"Next prompt for {agent_id} will start Agent PBX planning, then /plan."
+            f"Next prompt for {agent_id} will start plan mode with Agent PBX instructions."
         )
 
     def palette_plan_latest(self) -> None:
@@ -3538,6 +3548,17 @@ class AgentPBXTUI(App[None]):
         message = message_input.text.strip()
         if not agent_id or not message:
             return
+        if self.should_send_plan_prompt(agent_id, message):
+            sent_plan = await self.send_plan_prompt(
+                agent_id,
+                message,
+                via_tmux=False,
+            )
+            if sent_plan:
+                self.clear_pending_slash_command(agent_id)
+                message_input.text = ""
+                self.resize_message_input()
+            return
         pending_slash_commands = self.pending_slash_command_sequence_for_message(
             agent_id, message
         )
@@ -3576,6 +3597,17 @@ class AgentPBXTUI(App[None]):
         message = message_input.text
         if not agent_id or not message.strip():
             return
+        if self.should_send_plan_prompt(agent_id, message):
+            sent_plan = await self.send_plan_prompt(
+                agent_id,
+                message,
+                via_tmux=True,
+            )
+            if sent_plan:
+                self.clear_pending_slash_command(agent_id)
+                message_input.text = ""
+                await self.load_tmux_capture(agent_id)
+            return
         pending_slash_commands = self.pending_slash_command_sequence_for_message(
             agent_id, message
         )
@@ -3601,28 +3633,57 @@ class AgentPBXTUI(App[None]):
         if body.startswith("/"):
             return []
         if command == PLAN_SLASH_COMMAND:
-            return [PLAN_PBX_CONTEXT_PROMPT, PLAN_SLASH_COMMAND]
+            return [PLAN_SLASH_COMMAND]
         return [command]
 
     def clear_pending_slash_command(self, agent_id: str) -> None:
         self.pending_slash_command_by_agent.pop(agent_id, None)
 
+    def should_send_plan_prompt(self, agent_id: str, message: str) -> bool:
+        command = self.pending_slash_command_by_agent.get(agent_id)
+        return (
+            command == PLAN_SLASH_COMMAND
+            and bool(message.strip())
+            and not message.strip().startswith("/")
+        )
+
+    async def send_plan_prompt(
+        self,
+        agent_id: str,
+        message: str,
+        *,
+        via_tmux: bool,
+    ) -> bool:
+        plan_prompt = render_plan_prompt(message)
+        if via_tmux:
+            sent_slash = await self.send_keys_to_tmux(agent_id, PLAN_SLASH_COMMAND)
+            if not sent_slash:
+                return False
+            await asyncio.sleep(PLAN_MODE_FOLLOWUP_DELAY_SECONDS)
+            sent_prompt = await self.send_text_to_tmux(agent_id, plan_prompt)
+            if not sent_prompt:
+                return False
+            self.notify(f"Plan prompt sent to tmux for {agent_id}.")
+            return True
+        await self.queue_command(
+            agent_id,
+            "send_input",
+            {"message": PLAN_SLASH_COMMAND},
+        )
+        command = await self.queue_command(
+            agent_id,
+            "send_input",
+            {"message": plan_prompt},
+        )
+        self.notify_queued_command(agent_id, "Plan prompt", command)
+        await self.refresh_events()
+        await self.load_thread(agent_id)
+        return True
+
     async def send_text_to_tmux(self, agent_id: str, message: str) -> bool:
         status = self.query_one_or_none("#tmux-status", Static)
-        try:
-            panes = await asyncio.to_thread(tmux_support.list_panes)
-        except Exception as exc:
-            if status is not None:
-                status.update(f"Tmux: unavailable ({exc})")
-            return False
-        self.tmux_panes = panes
-        pane, mode = self.resolve_tmux_pane(agent_id, panes)
+        pane = await self.resolve_tmux_send_pane(agent_id, status=status)
         if pane is None:
-            if status is not None:
-                if mode == "stale":
-                    status.update(f"Tmux: stale target for {agent_id}")
-                else:
-                    status.update(f"Tmux: no pane for {agent_id}")
             return False
         try:
             await asyncio.to_thread(tmux_support.send_text, pane.pane_id, message)
@@ -3631,6 +3692,46 @@ class AgentPBXTUI(App[None]):
                 status.update(f"Tmux: send failed ({exc})")
             return False
         return True
+
+    async def send_keys_to_tmux(self, agent_id: str, message: str) -> bool:
+        status = self.query_one_or_none("#tmux-status", Static)
+        pane = await self.resolve_tmux_send_pane(agent_id, status=status)
+        if pane is None:
+            return False
+        try:
+            await asyncio.to_thread(
+                tmux_support.send_literal_keys,
+                pane.pane_id,
+                message,
+            )
+        except Exception as exc:
+            if status is not None:
+                status.update(f"Tmux: send failed ({exc})")
+            return False
+        return True
+
+    async def resolve_tmux_send_pane(
+        self,
+        agent_id: str,
+        *,
+        status: Static | None,
+    ) -> tmux_support.TmuxPane | None:
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes)
+        except Exception as exc:
+            if status is not None:
+                status.update(f"Tmux: unavailable ({exc})")
+            return None
+        self.tmux_panes = panes
+        pane, mode = self.resolve_tmux_pane(agent_id, panes)
+        if pane is None:
+            if status is not None:
+                if mode == "stale":
+                    status.update(f"Tmux: stale target for {agent_id}")
+                else:
+                    status.update(f"Tmux: no pane for {agent_id}")
+            return None
+        return pane
 
     def selected_plan_option(self) -> str | None:
         item = (

@@ -317,10 +317,12 @@ sequence is ignored while typing in follow-up inputs, avoiding terminal
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/tmux`, `/workerbee`, `/theme minimal`,
 and `/layout compact`. Use `/plan` when no plan is active to submit Codex's
-`/plan` slash command before the selected agent's next prompt. Agent PBX first
-sends `use agent pbx for planning`, then `/plan`, then your prompt so agents
-know to publish structured `plan_options` for the TUI modal. When the selected
-agent has structured plan options, the palette also shows
+`/plan` slash command before the selected agent's next prompt. In tmux direct
+mode, Agent PBX types `/plan` with tmux key events, waits briefly for Codex to
+enter plan mode, then sends one combined prompt: Agent PBX planning instructions
+followed by your plan request. Slash commands are typed rather than bracketed
+pasted so Codex handles them as interactive commands. When the selected agent
+has structured plan options, the palette also shows
 `/plan latest`, `/plan thread`, and direct entries such as
 `/plan latest 2: ...`; selecting one opens a plan-choice modal with optional
 notes before sending through PBX or, in tmux direct mode, to the Codex pane.
@@ -367,6 +369,38 @@ Each command needs a slash-prefixed `name` and a non-empty `prompt`. Built-in
 palette names win over custom names, and duplicate custom names are skipped.
 `{arg}` is the only supported placeholder; commands that use it open a small
 input prompt before sending.
+
+### Custom Theme Creation Guide
+
+Agent PBX ships with `cyberpunk`, `minimal`, and the bundled custom `1337`
+theme. To create your own theme, rename the custom theme, select it, then
+override the color slots with environment variables. Keep personal palettes in
+your gitignored `local.env` or shell profile.
+
+```bash
+AGENT_PBX_TUI_CUSTOM_THEME_NAME=aurora \
+AGENT_PBX_TUI_THEME=aurora \
+AGENT_PBX_TUI_CUSTOM_PRIMARY="#7dd3fc" \
+AGENT_PBX_TUI_CUSTOM_SECONDARY="#c084fc" \
+AGENT_PBX_TUI_CUSTOM_WARNING="#facc15" \
+AGENT_PBX_TUI_CUSTOM_ERROR="#fb7185" \
+AGENT_PBX_TUI_CUSTOM_SUCCESS="#4ade80" \
+AGENT_PBX_TUI_CUSTOM_ACCENT="#f0abfc" \
+AGENT_PBX_TUI_CUSTOM_FOREGROUND="#e5eefc" \
+AGENT_PBX_TUI_CUSTOM_BACKGROUND="#050814" \
+AGENT_PBX_TUI_CUSTOM_SURFACE="#0f172a" \
+AGENT_PBX_TUI_CUSTOM_PANEL="#111827" \
+AGENT_PBX_TUI_CUSTOM_BOOST="#1e293b" \
+agent-pbx tui --token dev-token
+```
+
+Use `FOREGROUND` and `BACKGROUND` for normal text and the terminal base.
+`SURFACE` and `PANEL` shape input boxes, modals, and panes. `PRIMARY`,
+`SECONDARY`, and `ACCENT` drive active UI elements and borders. `SUCCESS`,
+`WARNING`, and `ERROR` preserve operational meaning, so keep them distinct.
+`BOOST` is a stronger contrast color used for highlights. After launching, use
+`Settings -> Theme` or `/theme <name>` from the palette to switch back to your
+custom theme if another theme is selected.
 
 Experimental local-only tmux direct mode is available for workflows where the
 TUI, MCP server, tmux, and Codex pane all run on the same host. Enable it with
@@ -423,29 +457,7 @@ and green over a dark terminal base. Use the `Theme` selector in `Settings` or
 set `AGENT_PBX_TUI_THEME` to choose another built-in theme. `minimal` uses a
 plain black/white terminal base while preserving semantic highlight colors for
 alerts, status, and activity. `1337` keeps the black and bright-green terminal
-look.
-
-## Custom TUI Theme
-
-The bundled custom theme defaults to the `1337` palette. Rename it with
-`AGENT_PBX_TUI_CUSTOM_THEME_NAME`, then select it with `AGENT_PBX_TUI_THEME`:
-
-```bash
-AGENT_PBX_TUI_CUSTOM_THEME_NAME=matrix \
-AGENT_PBX_TUI_THEME=matrix \
-agent-pbx tui --token dev-token
-```
-
-Override individual colors with `AGENT_PBX_TUI_CUSTOM_<COLOR>` variables. Valid
-keys are `PRIMARY`, `SECONDARY`, `WARNING`, `ERROR`, `SUCCESS`, `ACCENT`,
-`FOREGROUND`, `BACKGROUND`, `SURFACE`, `PANEL`, and `BOOST`.
-
-```bash
-AGENT_PBX_TUI_THEME=1337 \
-AGENT_PBX_TUI_CUSTOM_FOREGROUND="#00ff00" \
-AGENT_PBX_TUI_CUSTOM_BACKGROUND="#000000" \
-agent-pbx tui --token dev-token
-```
+look. See the custom theme guide above for user-defined palettes.
 
 ## TUI History Thread
 

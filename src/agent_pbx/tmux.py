@@ -165,6 +165,29 @@ def send_text(
         )
 
 
+def send_literal_keys(
+    target: str,
+    text: str,
+    *,
+    tmux_bin: str = "tmux",
+    submit_delay_seconds: float = DEFAULT_SUBMIT_DELAY_SECONDS,
+    submit: bool = True,
+) -> None:
+    subprocess.run(
+        [tmux_bin, "send-keys", "-t", target, "-l", text],
+        check=True,
+        text=True,
+    )
+    if submit:
+        if submit_delay_seconds > 0:
+            time.sleep(submit_delay_seconds)
+        subprocess.run(
+            [tmux_bin, "send-keys", "-t", target, "C-m"],
+            check=True,
+            text=True,
+        )
+
+
 def score_pane_for_agent(pane: TmuxPane, agent: Mapping[str, Any]) -> int:
     metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
     agent_cwd = str(metadata.get("cwd") or "")

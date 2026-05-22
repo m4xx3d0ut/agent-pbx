@@ -22,6 +22,7 @@ from agent_pbx.tui import (
     is_follow_up_newline_key,
     load_custom_slash_commands,
     parse_custom_slash_commands,
+    render_plan_prompt,
     render_custom_slash_prompt,
     resolve_layout,
     tmux_features_available,
@@ -1381,6 +1382,15 @@ def test_tui_render_custom_slash_prompt() -> None:
     )
 
 
+def test_tui_plan_prompt_prefix_requests_structured_pbx_planning() -> None:
+    prompt = PLAN_PBX_CONTEXT_PROMPT
+
+    assert "pbx_report_turn" in prompt
+    assert "structured plan_options" in prompt
+    assert "Do not start nohup polling" in prompt
+    assert render_plan_prompt("Draft a path forward.").endswith("Draft a path forward.")
+
+
 async def test_tui_palette_custom_commands_require_tmux_mode(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -1775,21 +1785,12 @@ async def test_tui_palette_plan_primes_next_follow_up_prompt() -> None:
         await app.send_input()
 
     assert queued == [
+        ("agent-1", "send_input", {"message": "/plan"}),
         (
             "agent-1",
             "send_input",
-            {"message": PLAN_PBX_CONTEXT_PROMPT},
+            {"message": render_plan_prompt("Draft a path forward.")},
         ),
-        (
-            "agent-1",
-            "send_input",
-            {"message": "/plan"},
-        ),
-        (
-            "agent-1",
-            "send_input",
-            {"message": "Draft a path forward."},
-        )
     ]
     assert app.pending_slash_command_by_agent == {}
 
@@ -1828,16 +1829,31 @@ async def test_tui_pending_plan_does_not_duplicate_manual_slash_prompt() -> None
 async def test_tui_palette_plan_primes_next_tmux_prompt() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     sent: list[tuple[str, str]] = []
+    typed: list[tuple[str, str]] = []
 
     async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
         sent.append((agent_id, message))
+        return True
+
+    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
+        typed.append((agent_id, message))
         return True
 
     async def fake_load_tmux_capture(agent_id: str) -> None:
         return None
 
     app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_refresh_selected_agent(agent_id: str) -> None:
+        return None
+
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_selected_agent = fake_refresh_selected_agent  # type: ignore[method-assign]
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1845,13 +1861,11 @@ async def test_tui_palette_plan_primes_next_tmux_prompt() -> None:
         app.pending_slash_command_by_agent["agent-1"] = "/plan"
         app.query_one("#tmux-message", TextArea).text = "Investigate options."
         await app.send_input()
+        assert app.pending_slash_command_by_agent == {}
+        await pilot.pause()
 
-    assert sent == [
-        ("agent-1", PLAN_PBX_CONTEXT_PROMPT),
-        ("agent-1", "/plan"),
-        ("agent-1", "Investigate options."),
-    ]
-    assert app.pending_slash_command_by_agent == {}
+    assert typed == [("agent-1", "/plan")]
+    assert sent == [("agent-1", render_plan_prompt("Investigate options."))]
 
 
 async def test_tui_palette_plan_thread_modal_can_send_to_tmux() -> None:
