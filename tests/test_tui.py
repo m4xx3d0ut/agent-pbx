@@ -1275,6 +1275,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/ping" in titles
     assert "/tmux" in titles
     assert "/workerbee" in titles
+    assert "/plan" in titles
     assert "/plan latest" in titles
     assert "/plan thread" in titles
     assert "/theme minimal" in titles
@@ -1386,6 +1387,117 @@ async def test_tui_palette_plan_latest_modal_sends_choice_with_notes() -> None:
     ]
     assert refreshed_events == 1
     assert loaded_threads == ["agent-1"]
+
+
+async def test_tui_palette_plan_primes_next_follow_up_prompt() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.palette_prime_plan_prompt()
+        assert app.pending_slash_command_by_agent == {"agent-1": "/plan"}
+
+        app.query_one("#message", TextArea).text = "Draft a path forward."
+        await app.send_input()
+
+    assert queued == [
+        (
+            "agent-1",
+            "send_input",
+            {"message": "/plan"},
+        ),
+        (
+            "agent-1",
+            "send_input",
+            {"message": "Draft a path forward."},
+        )
+    ]
+    assert app.pending_slash_command_by_agent == {}
+
+
+async def test_tui_pending_plan_does_not_duplicate_manual_slash_prompt() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.pending_slash_command_by_agent["agent-1"] = "/plan"
+        app.query_one("#message", TextArea).text = "/status"
+        await app.send_input()
+
+    assert queued == [("agent-1", "send_input", {"message": "/status"})]
+    assert app.pending_slash_command_by_agent == {}
+
+
+async def test_tui_palette_plan_primes_next_tmux_prompt() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        return None
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.pending_slash_command_by_agent["agent-1"] = "/plan"
+        app.query_one("#tmux-message", TextArea).text = "Investigate options."
+        await app.send_input()
+
+    assert sent == [
+        ("agent-1", "/plan"),
+        ("agent-1", "Investigate options."),
+    ]
+    assert app.pending_slash_command_by_agent == {}
 
 
 async def test_tui_palette_plan_thread_modal_can_send_to_tmux() -> None:

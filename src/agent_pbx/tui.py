@@ -92,6 +92,7 @@ STALE_POLL_SECONDS = 120
 QUEUED_COMMAND_WARN_SECONDS = 60
 ACTIVE_POLL_SECONDS = 60
 TMUX_LIVENESS_IDLE_SECONDS = 60
+SLASH_COMMAND_FOLLOWUP_DELAY_SECONDS = 0.2
 AGENT_JUMP_KEYS = {
     "1": 0,
     "2": 1,
@@ -1404,6 +1405,7 @@ class AgentPBXTUI(App[None]):
         self.tmux_refreshing = False
         self.attention_blink_phase = False
         self.attention_agent_id: str | None = None
+        self.pending_slash_command_by_agent: dict[str, str] = {}
         self.event_stream_disconnected = False
         self.last_seen_event_id = int_setting(self.settings, "last_seen_event_id", 0)
         self.flash_generation = 0
@@ -1578,6 +1580,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/cancel", "Mark the selected agent canceled", self.palette_mark_canceled)
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
+        yield SystemCommand("/plan", "Prefix the selected agent's next prompt with /plan", self.palette_prime_plan_prompt)
         yield SystemCommand("/plan latest", "Choose from latest report plan options", self.palette_plan_latest)
         yield SystemCommand("/plan thread", "Choose from selected thread plan options", self.palette_plan_thread)
         yield from self.palette_dynamic_plan_commands()
@@ -1631,6 +1634,13 @@ class AgentPBXTUI(App[None]):
             name="palette-workerbee",
             exclusive=True,
         )
+
+    def palette_prime_plan_prompt(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.pending_slash_command_by_agent[agent_id] = "/plan"
+        self.notify(f"Next prompt for {agent_id} will start with /plan.")
 
     def palette_plan_latest(self) -> None:
         context = self.palette_latest_plan_context()
@@ -3059,11 +3069,19 @@ class AgentPBXTUI(App[None]):
         message = message_input.text.strip()
         if not agent_id or not message:
             return
+        pending_slash = self.pending_slash_command_for_message(agent_id, message)
+        if pending_slash:
+            await self.queue_command(
+                agent_id,
+                "send_input",
+                {"message": pending_slash},
+            )
         command = await self.queue_command(
             agent_id,
             "send_input",
             {"message": message},
         )
+        self.clear_pending_slash_command(agent_id)
         message_input.text = ""
         self.resize_message_input()
         self.notify_queued_command(agent_id, "Input", command)
@@ -3087,11 +3105,32 @@ class AgentPBXTUI(App[None]):
         message = message_input.text
         if not agent_id or not message.strip():
             return
+        pending_slash = self.pending_slash_command_for_message(agent_id, message)
+        if pending_slash:
+            sent_slash = await self.send_text_to_tmux(agent_id, pending_slash)
+            if not sent_slash:
+                return
+            await asyncio.sleep(SLASH_COMMAND_FOLLOWUP_DELAY_SECONDS)
         sent = await self.send_text_to_tmux(agent_id, message)
         if not sent:
             return
+        self.clear_pending_slash_command(agent_id)
         message_input.text = ""
         await self.load_tmux_capture(agent_id)
+
+    def pending_slash_command_for_message(
+        self, agent_id: str, message: str
+    ) -> str | None:
+        command = self.pending_slash_command_by_agent.get(agent_id)
+        body = message.strip()
+        if not command or not body:
+            return None
+        if body.startswith("/"):
+            return None
+        return command
+
+    def clear_pending_slash_command(self, agent_id: str) -> None:
+        self.pending_slash_command_by_agent.pop(agent_id, None)
 
     async def send_text_to_tmux(self, agent_id: str, message: str) -> bool:
         status = self.query_one_or_none("#tmux-status", Static)
