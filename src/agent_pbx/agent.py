@@ -78,6 +78,12 @@ explicit nohup mode. If this is report mode, or if local tmux direct interaction
 is being used for follow-up, close out normally after the final report and do
 not poll.
 
+Custom slash commands configured in the Agent PBX TUI are local operator
+shortcuts for tmux direct mode. They paste configured prompts into the selected
+Codex pane; they are not MCP tools, PBX queued commands, or a reason to enter
+nohup mode. Treat them like normal operator prompts only after they reach your
+session.
+
 If a `ping` command is received in nohup mode, treat it as a polling keepalive.
 Respond with a `status="working"` `pbx_report_turn` whose summary starts with
 `Pong`, ack the ping with `{{"pong": true}}`, then immediately start another
@@ -165,6 +171,14 @@ The TUI can paste follow-ups directly into the local Codex pane, so long-polling
 is unnecessary and can create confusing perceived activity. Only use nohup
 polling in this local tmux workflow when the operator explicitly asks for
 `use Agent PBX nohup`.
+
+## Custom TUI Slash Commands
+
+The Agent PBX TUI can define local custom slash commands for tmux direct mode.
+These commands paste configured text into the selected Codex pane. They are
+operator shortcuts only: they are not MCP tools, not PBX queued commands, and
+not a signal to start nohup polling. Respond to the resulting prompt normally
+when it appears in your session.
 
 ## Nohup Mode Loop
 
@@ -280,6 +294,12 @@ def runbook_payload() -> dict[str, Any]:
             "When Codex, Agent PBX MCP, the TUI, and tmux are on the same physical host, prefer report mode plus tmux direct interaction.",
             "Tmux direct follow-up goes directly to the local Codex pane and does not require PBX queue polling.",
             "Only use nohup long polling in local tmux workflows when the operator explicitly asks for 'use Agent PBX nohup'.",
+        ],
+        "custom_slash_commands": [
+            "Custom TUI slash commands are local operator shortcuts for tmux direct mode.",
+            "They paste configured prompts into the selected Codex pane; they are not MCP tools or PBX queued commands.",
+            "Do not enter nohup mode because a custom slash command was used.",
+            "Treat the resulting text like a normal operator prompt after it reaches the Codex session.",
         ],
         "active_loop": [
             "Use pbx_report_turn for milestones, blockers, test results, deployment results, and final outcomes.",

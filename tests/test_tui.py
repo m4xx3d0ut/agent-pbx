@@ -8,14 +8,20 @@ from rich.text import Text
 from agent_pbx import tmux as tmux_support
 from agent_pbx.tui import (
     AgentPBXTUI,
+    CustomSlashCommand,
     TMUX_LIVENESS_IDLE_SECONDS,
     DEFAULT_SPLIT_PERCENT,
     env_custom_palette,
     env_flag,
+    env_slash_commands_file,
     env_theme,
     follow_up_edit_control,
+    git_diff_passthrough_command,
     is_local_server_url,
     is_follow_up_newline_key,
+    load_custom_slash_commands,
+    parse_custom_slash_commands,
+    render_custom_slash_prompt,
     resolve_layout,
     tmux_features_available,
 )
@@ -44,6 +50,7 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_TMUX_SHOW",
         "AGENT_PBX_TUI_TMUX_CAPTURE_LINES",
         "AGENT_PBX_TUI_TMUX_REFRESH_SECONDS",
+        "AGENT_PBX_TUI_COMMANDS_FILE",
     ]:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1,0")
@@ -1280,6 +1287,259 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/plan thread" in titles
     assert "/theme minimal" in titles
     assert "/layout compact" in titles
+    assert "/gitstatus" not in titles
+    assert "/gitdiff" not in titles
+    assert "/gitstageandcommit" not in titles
+
+
+def test_tui_custom_slash_commands_env_path(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("AGENT_PBX_TUI_COMMANDS_FILE", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    assert (
+        env_slash_commands_file()
+        == tmp_path / "config" / "agent-pbx" / "slash-commands.json"
+    )
+
+    monkeypatch.setenv("AGENT_PBX_TUI_COMMANDS_FILE", "~/commands.json")
+    assert env_slash_commands_file() == Path("~/commands.json").expanduser()
+
+
+def test_tui_custom_slash_commands_parse_and_validate() -> None:
+    data = {
+        "commands": [
+            {
+                "name": "/review",
+                "description": "Review changes",
+                "prompt": "review the current changes",
+            },
+            {
+                "name": "/testfile",
+                "prompt": "run focused tests for {arg}",
+                "arg_label": "Target",
+                "arg_placeholder": "tests/test_tui.py",
+                "arg_required": True,
+            },
+            {"name": "bad", "prompt": "ignored"},
+            {"name": "/detail", "prompt": "ignored duplicate"},
+            {"name": "/badplaceholder", "prompt": "run {file}"},
+        ]
+    }
+
+    commands, errors = parse_custom_slash_commands(
+        data,
+        built_in_names={"/detail"},
+    )
+
+    assert [command.name for command in commands] == ["/review", "/testfile"]
+    assert commands[1].uses_arg is True
+    assert commands[1].arg_required is True
+    assert any("must start with '/'" in error for error in errors)
+    assert any("duplicates" in error for error in errors)
+    assert any("{file}" in error for error in errors)
+
+
+def test_tui_load_custom_slash_commands_from_file(tmp_path: Path) -> None:
+    path = tmp_path / "slash-commands.json"
+    path.write_text(
+        json.dumps(
+            {
+                "commands": [
+                    {
+                        "name": "/review",
+                        "description": "Review changes",
+                        "prompt": "review the current changes",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    commands, errors = load_custom_slash_commands(path)
+
+    assert errors == []
+    assert commands == [
+        CustomSlashCommand(
+            name="/review",
+            description="Review changes",
+            prompt="review the current changes",
+        )
+    ]
+
+
+def test_tui_render_custom_slash_prompt() -> None:
+    command = CustomSlashCommand(
+        name="/testfile",
+        description="Run tests",
+        prompt="run focused tests for {arg}",
+    )
+
+    assert render_custom_slash_prompt(command, " tests/test_tui.py ") == (
+        "run focused tests for tests/test_tui.py"
+    )
+
+
+async def test_tui_palette_custom_commands_require_tmux_mode(
+    monkeypatch, tmp_path: Path
+) -> None:
+    commands_file = tmp_path / "slash-commands.json"
+    commands_file.write_text(
+        json.dumps(
+            {
+                "commands": [
+                    {
+                        "name": "/review",
+                        "description": "Review changes",
+                        "prompt": "review the current changes",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENT_PBX_TUI_COMMANDS_FILE", str(commands_file))
+
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    tmux_app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        titles = {command.title for command in app.get_system_commands(app.screen)}
+    async with tmux_app.run_test() as pilot:
+        await pilot.pause()
+        tmux_titles = {
+            command.title for command in tmux_app.get_system_commands(tmux_app.screen)
+        }
+
+    assert "/commands reload" in titles
+    assert "/review" not in titles
+    assert "/review" in tmux_titles
+
+
+async def test_tui_palette_includes_git_commands_only_in_tmux_mode() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        titles = {command.title for command in app.get_system_commands(app.screen)}
+
+    assert "/gitstatus" in titles
+    assert "/gitdiff" in titles
+    assert "/gitstageandcommit" in titles
+
+
+async def test_tui_palette_custom_static_command_sends_to_tmux(
+    monkeypatch, tmp_path: Path
+) -> None:
+    commands_file = tmp_path / "slash-commands.json"
+    commands_file.write_text(
+        json.dumps(
+            {
+                "commands": [
+                    {
+                        "name": "/review",
+                        "description": "Review changes",
+                        "prompt": "review the current changes",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENT_PBX_TUI_COMMANDS_FILE", str(commands_file))
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        return None
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.palette_custom_slash_command(app.custom_slash_commands[0])
+        await pilot.pause()
+
+    assert sent == [("agent-1", "review the current changes")]
+
+
+async def test_tui_palette_custom_arg_command_opens_modal_and_sends(
+    monkeypatch, tmp_path: Path
+) -> None:
+    commands_file = tmp_path / "slash-commands.json"
+    commands_file.write_text(
+        json.dumps(
+            {
+                "commands": [
+                    {
+                        "name": "/testfile",
+                        "description": "Run focused tests",
+                        "prompt": "run focused tests for {arg}",
+                        "arg_label": "Target",
+                        "arg_placeholder": "tests/test_tui.py",
+                        "arg_required": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENT_PBX_TUI_COMMANDS_FILE", str(commands_file))
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        return None
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.palette_custom_slash_command(app.custom_slash_commands[0])
+        await pilot.pause()
+        target = app.screen.query_one("#palette-custom-command-arg", Input)
+        target.value = "tests/test_tui.py"
+        app.screen.submit()  # type: ignore[attr-defined]
+        await pilot.pause()
+
+    assert sent == [("agent-1", "run focused tests for tests/test_tui.py")]
+
+
+async def test_tui_palette_reload_custom_commands(
+    monkeypatch, tmp_path: Path
+) -> None:
+    commands_file = tmp_path / "slash-commands.json"
+    commands_file.write_text(
+        json.dumps({"commands": [{"name": "/one", "prompt": "one"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENT_PBX_TUI_COMMANDS_FILE", str(commands_file))
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert [command.name for command in app.custom_slash_commands] == ["/one"]
+        commands_file.write_text(
+            json.dumps({"commands": [{"name": "/two", "prompt": "two"}]}),
+            encoding="utf-8",
+        )
+        app.palette_reload_custom_slash_commands()
+        await pilot.pause()
+
+    assert [command.name for command in app.custom_slash_commands] == ["/two"]
 
 
 async def test_tui_palette_agent_commands_use_selected_agent() -> None:
@@ -1317,6 +1577,93 @@ def test_tui_palette_theme_and_layout_commands() -> None:
 
     assert app.ui_theme == "minimal"
     assert app.layout_mode == "tiny"
+
+
+async def test_tui_palette_gitstatus_sends_passthrough_to_tmux() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.palette_git_status()
+        await pilot.pause()
+
+    assert sent == [("agent-1", "!git status")]
+    assert captures == ["agent-1"]
+
+
+async def test_tui_palette_git_stage_and_commit_sends_prompt_to_tmux() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        return None
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.palette_git_stage_and_commit()
+        await pilot.pause()
+
+    assert sent == [("agent-1", "stage and commit the changes")]
+
+
+async def test_tui_palette_gitdiff_modal_sends_optional_target() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.palette_git_diff()
+        await pilot.pause()
+        target = app.screen.query_one("#palette-gitdiff-target", Input)
+        target.value = "main:README.md"
+        app.screen.submit()  # type: ignore[attr-defined]
+        await pilot.pause()
+
+    assert sent == [("agent-1", "!git diff main:README.md")]
+    assert captures == ["agent-1"]
+
+
+def test_tui_gitdiff_passthrough_command_formats_targets() -> None:
+    assert git_diff_passthrough_command("") == "!git diff"
+    assert git_diff_passthrough_command("README.md") == "!git diff -- README.md"
+    assert git_diff_passthrough_command("main:README.md") == "!git diff main:README.md"
+    assert (
+        git_diff_passthrough_command("docs/My File.md")
+        == "!git diff -- 'docs/My File.md'"
+    )
 
 
 async def test_tui_palette_plan_latest_modal_sends_choice_with_notes() -> None:

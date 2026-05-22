@@ -102,6 +102,12 @@ explicit nohup mode. If this is report mode, or if local tmux direct interaction
 is being used for follow-up, close out normally after the final report and do
 not poll.
 
+Custom slash commands configured in the Agent PBX TUI are local operator
+shortcuts for tmux direct mode. They paste configured prompts into the selected
+Codex pane; they are not MCP tools, PBX queued commands, or a reason to enter
+nohup mode. Treat them like normal operator prompts only after they reach your
+session.
+
 If a `ping` command is received in nohup mode, treat it as a polling keepalive.
 Respond with a `status="working"` `pbx_report_turn` whose summary starts with
 `Pong`, ack the ping with `{"pong": true}`, then immediately start another

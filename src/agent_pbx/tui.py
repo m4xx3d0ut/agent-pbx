@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import time
 from typing import Any, TypeVar
@@ -72,6 +73,7 @@ PBX_REPORT_MODE = "report"
 PBX_NOHUP_MODE = "nohup"
 DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
 DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
+DEFAULT_SLASH_COMMANDS_FILE = Path("agent-pbx/slash-commands.json")
 DEFAULT_TMUX_CAPTURE_LINES = 0
 DEFAULT_TMUX_REFRESH_SECONDS = 1.5
 MIN_TMUX_REFRESH_SECONDS = 0.25
@@ -130,6 +132,29 @@ THEME_KEYS = (
 CODEX_STATUS_LINE_PATTERN = re.compile(
     r"\b(Working|Thinking|Reading|Editing|Running|Waiting)\b"
 )
+BUILT_IN_PALETTE_COMMAND_NAMES = {
+    "/refresh",
+    "/detail",
+    "/ping",
+    "/cancel",
+    "/tmux",
+    "/workerbee",
+    "/plan",
+    "/plan latest",
+    "/plan thread",
+    "/gitstatus",
+    "/gitdiff",
+    "/gitstageandcommit",
+    "/commands reload",
+    "/hide agent",
+    "/purge agent",
+    "/theme cyberpunk",
+    "/theme minimal",
+    "/layout adaptive",
+    "/layout split",
+    "/layout compact",
+    "/layout tiny",
+}
 WidgetType = TypeVar("WidgetType")
 
 
@@ -140,6 +165,20 @@ class TmuxLiveness:
     last_capture_at: float | None = None
     last_changed_at: float | None = None
     state: str = "unknown"
+
+
+@dataclass(frozen=True)
+class CustomSlashCommand:
+    name: str
+    description: str
+    prompt: str
+    arg_label: str = "Argument"
+    arg_placeholder: str = ""
+    arg_required: bool = False
+
+    @property
+    def uses_arg(self) -> bool:
+        return "{arg}" in self.prompt
 
 
 CYBERPUNK_PALETTE = {
@@ -409,6 +448,120 @@ def load_tui_settings(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def env_slash_commands_file() -> Path:
+    value = os.getenv("AGENT_PBX_TUI_COMMANDS_FILE", "").strip()
+    if value:
+        return Path(value).expanduser()
+    config_home = os.getenv("XDG_CONFIG_HOME", "").strip()
+    base = Path(config_home).expanduser() if config_home else Path.home() / ".config"
+    return base / DEFAULT_SLASH_COMMANDS_FILE
+
+
+def parse_custom_slash_commands(
+    data: object,
+    *,
+    built_in_names: set[str] | None = None,
+) -> tuple[list[CustomSlashCommand], list[str]]:
+    if not isinstance(data, dict):
+        return [], ["custom slash command file must contain a JSON object"]
+    raw_commands = data.get("commands")
+    if raw_commands is None:
+        return [], []
+    if not isinstance(raw_commands, list):
+        return [], ["custom slash command field 'commands' must be a list"]
+
+    reserved_names = {name.strip() for name in built_in_names or set()}
+    seen_names = set(reserved_names)
+    commands: list[CustomSlashCommand] = []
+    errors: list[str] = []
+    for index, item in enumerate(raw_commands, start=1):
+        prefix = f"commands[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        name = item.get("name")
+        prompt = item.get("prompt")
+        if not isinstance(name, str) or not name.strip():
+            errors.append(f"{prefix}.name is required")
+            continue
+        normalized_name = name.strip()
+        if not normalized_name.startswith("/"):
+            errors.append(f"{prefix}.name must start with '/'")
+            continue
+        if normalized_name in seen_names:
+            errors.append(f"{prefix}.name duplicates a built-in or earlier command")
+            continue
+        if not isinstance(prompt, str) or not prompt.strip():
+            errors.append(f"{prefix}.prompt is required")
+            continue
+        clean_prompt = prompt.strip()
+        placeholders = set(re.findall(r"{([^{}]+)}", clean_prompt))
+        unsupported = sorted(placeholders - {"arg"})
+        if unsupported:
+            errors.append(
+                f"{prefix}.prompt uses unsupported placeholder(s): "
+                + ", ".join(f"{{{value}}}" for value in unsupported)
+            )
+            continue
+        description = item.get("description")
+        arg_label = item.get("arg_label")
+        arg_placeholder = item.get("arg_placeholder")
+        arg_required = item.get("arg_required")
+        commands.append(
+            CustomSlashCommand(
+                name=normalized_name,
+                description=(
+                    description.strip()
+                    if isinstance(description, str) and description.strip()
+                    else "Custom slash command"
+                ),
+                prompt=clean_prompt,
+                arg_label=(
+                    arg_label.strip()
+                    if isinstance(arg_label, str) and arg_label.strip()
+                    else "Argument"
+                ),
+                arg_placeholder=(
+                    arg_placeholder.strip()
+                    if isinstance(arg_placeholder, str)
+                    and arg_placeholder.strip()
+                    else ""
+                ),
+                arg_required=arg_required if isinstance(arg_required, bool) else False,
+            )
+        )
+        seen_names.add(normalized_name)
+    return commands, errors
+
+
+def load_custom_slash_commands(
+    path: Path,
+    *,
+    built_in_names: set[str] | None = None,
+) -> tuple[list[CustomSlashCommand], list[str]]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return [], []
+    except OSError as exc:
+        return [], [f"unable to read {path}: {exc}"]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return [], [f"{path}: invalid JSON at line {exc.lineno}, column {exc.colno}"]
+    return parse_custom_slash_commands(data, built_in_names=built_in_names)
+
+
+def render_custom_slash_prompt(command: CustomSlashCommand, arg: str = "") -> str:
+    return command.prompt.replace("{arg}", arg.strip())
+
+
+def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME_NAME) -> set[str]:
+    names = set(BUILT_IN_PALETTE_COMMAND_NAMES)
+    names.add(f"/theme {custom_theme_name}")
+    return names
+
+
 def bool_setting(settings: dict[str, Any], key: str, default: bool) -> bool:
     value = settings.get(key)
     return value if isinstance(value, bool) else default
@@ -597,6 +750,101 @@ class PlanChoiceScreen(ModalScreen[None]):
             self.submit(via_tmux=True)
 
 
+class GitDiffScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, *, agent_id: str) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="palette-gitdiff-panel"):
+            yield Static(f"Git Diff: {self.agent_id}", id="palette-gitdiff-title")
+            yield Static(
+                "Optional file or branch:file target",
+                id="palette-gitdiff-help",
+            )
+            yield Input(
+                placeholder="README.md or main:README.md",
+                id="palette-gitdiff-target",
+            )
+            with Horizontal(id="palette-gitdiff-actions"):
+                yield Button("Run Diff", id="palette-gitdiff-run", variant="primary")
+                yield Button("Cancel", id="palette-gitdiff-cancel")
+
+    def submit(self) -> None:
+        target = self.query_one("#palette-gitdiff-target", Input).value
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.palette_git_diff_target(self.agent_id, target),  # type: ignore[attr-defined]
+            name="palette-gitdiff",
+            exclusive=True,
+        )
+        self.dismiss()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "palette-gitdiff-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "palette-gitdiff-run":
+            event.stop()
+            self.submit()
+
+
+class CustomSlashCommandArgScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, *, agent_id: str, command: CustomSlashCommand) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.command = command
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="palette-custom-command-panel"):
+            yield Static(
+                f"{self.command.name}: {self.agent_id}",
+                id="palette-custom-command-title",
+            )
+            yield Static(self.command.description, id="palette-custom-command-help")
+            yield Input(
+                placeholder=self.command.arg_placeholder,
+                id="palette-custom-command-arg",
+            )
+            with Horizontal(id="palette-custom-command-actions"):
+                yield Button("Send", id="palette-custom-command-send", variant="primary")
+                yield Button("Cancel", id="palette-custom-command-cancel")
+
+    def submit(self) -> None:
+        arg = self.query_one("#palette-custom-command-arg", Input).value
+        if self.command.arg_required and not arg.strip():
+            self.notify(f"{self.command.arg_label} is required.", severity="warning")
+            return
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.palette_custom_slash_command_arg(  # type: ignore[attr-defined]
+                self.agent_id,
+                self.command,
+                arg,
+            ),
+            name=f"palette-custom-{slugify(self.command.name)}",
+            exclusive=True,
+        )
+        self.dismiss()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "palette-custom-command-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "palette-custom-command-send":
+            event.stop()
+            self.submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "palette-custom-command-arg":
+            event.stop()
+            self.submit()
+
+
 def normalized_key_names(event: Key) -> set[str]:
     values = {event.key, getattr(event, "name", "")}
     values.update(getattr(event, "aliases", []) or [])
@@ -617,6 +865,16 @@ def follow_up_edit_control(event: Key) -> str | None:
         if edit := FOLLOW_UP_EDIT_KEYS.get(name):
             return edit
     return None
+
+
+def git_diff_passthrough_command(target: str = "") -> str:
+    clean_target = target.strip()
+    if not clean_target:
+        return "!git diff"
+    quoted = shlex.quote(clean_target)
+    if ":" in clean_target and not clean_target.startswith((".", "/")):
+        return f"!git diff {quoted}"
+    return f"!git diff -- {quoted}"
 
 
 class SettingsScreen(ModalScreen[None]):
@@ -857,6 +1115,80 @@ class AgentPBXTUI(App[None]):
     }
 
     #palette-plan-actions Button {
+        width: 1fr;
+    }
+
+    GitDiffScreen {
+        align: center middle;
+    }
+
+    #palette-gitdiff-panel {
+        width: 72;
+        max-width: 92%;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #palette-gitdiff-title {
+        height: 1;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #palette-gitdiff-help {
+        height: 1;
+        color: $secondary;
+        content-align: center middle;
+    }
+
+    #palette-gitdiff-target {
+        height: 3;
+    }
+
+    #palette-gitdiff-actions {
+        height: 3;
+    }
+
+    #palette-gitdiff-actions Button {
+        width: 1fr;
+    }
+
+    CustomSlashCommandArgScreen {
+        align: center middle;
+    }
+
+    #palette-custom-command-panel {
+        width: 72;
+        max-width: 92%;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #palette-custom-command-title {
+        height: 1;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #palette-custom-command-help {
+        height: 1;
+        color: $secondary;
+        content-align: center middle;
+    }
+
+    #palette-custom-command-arg {
+        height: 3;
+    }
+
+    #palette-custom-command-actions {
+        height: 3;
+    }
+
+    #palette-custom-command-actions Button {
         width: 1fr;
     }
 
@@ -1283,6 +1615,14 @@ class AgentPBXTUI(App[None]):
             else env_settings_file()
         )
         self.settings = load_tui_settings(self.settings_file)
+        self.slash_commands_file = env_slash_commands_file()
+        (
+            self.custom_slash_commands,
+            self.custom_slash_command_errors,
+        ) = load_custom_slash_commands(
+            self.slash_commands_file,
+            built_in_names=built_in_palette_command_names(self.custom_theme_name),
+        )
         visual_flash_setting = env_flag_value(
             "AGENT_PBX_TUI_VISUAL_FLASH", "AGENT_PBX_TUI_FLASH"
         )
@@ -1567,6 +1907,7 @@ class AgentPBXTUI(App[None]):
         self.render_plan_choice_panel(None)
         await self.refresh_agents()
         await self.refresh_events()
+        self.notify_custom_slash_command_errors()
         self.set_interval(2.0, self.refresh_agents)
         self.set_interval(self.tmux_refresh_seconds, self.refresh_tmux_capture_if_active)
         self.set_interval(0.8, self.toggle_unseen_attention)
@@ -1583,7 +1924,13 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/plan", "Prefix the selected agent's next prompt with /plan", self.palette_prime_plan_prompt)
         yield SystemCommand("/plan latest", "Choose from latest report plan options", self.palette_plan_latest)
         yield SystemCommand("/plan thread", "Choose from selected thread plan options", self.palette_plan_thread)
+        yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
         yield from self.palette_dynamic_plan_commands()
+        if self.tmux_direct_enabled:
+            yield SystemCommand("/gitstatus", "Run !git status in the selected tmux pane", self.palette_git_status)
+            yield SystemCommand("/gitdiff", "Run !git diff with an optional target in tmux", self.palette_git_diff)
+            yield SystemCommand("/gitstageandcommit", "Ask Codex to stage and commit changes", self.palette_git_stage_and_commit)
+            yield from self.palette_custom_slash_commands()
         yield SystemCommand("/hide agent", "Hide the selected agent from the Agents view", self.palette_hide_agent)
         yield SystemCommand("/purge agent", "Hide selected agent and delete its thread data", self.palette_purge_agent)
         yield SystemCommand("/theme cyberpunk", "Use the Cyberpunk theme", lambda: self.palette_set_theme(DEFAULT_TUI_THEME))
@@ -1634,6 +1981,124 @@ class AgentPBXTUI(App[None]):
             name="palette-workerbee",
             exclusive=True,
         )
+
+    def palette_reload_custom_slash_commands(self) -> None:
+        self.reload_custom_slash_commands(notify=True)
+
+    def palette_custom_slash_commands(self) -> Iterable[SystemCommand]:
+        for command in self.custom_slash_commands:
+            yield SystemCommand(
+                command.name,
+                command.description,
+                lambda command=command: self.palette_custom_slash_command(command),
+            )
+
+    def palette_custom_slash_command(self, command: CustomSlashCommand) -> None:
+        agent_id = self.palette_tmux_agent_id()
+        if agent_id is None:
+            return
+        if command.uses_arg:
+            self.push_screen(
+                CustomSlashCommandArgScreen(agent_id=agent_id, command=command)
+            )
+            return
+        self.run_worker(
+            self.palette_send_tmux_prompt(agent_id, command.prompt, command.name),
+            name=f"palette-custom-{slugify(command.name)}",
+            exclusive=True,
+        )
+
+    async def palette_custom_slash_command_arg(
+        self,
+        agent_id: str,
+        command: CustomSlashCommand,
+        arg: str,
+    ) -> None:
+        await self.palette_send_tmux_prompt(
+            agent_id,
+            render_custom_slash_prompt(command, arg),
+            command.name,
+        )
+
+    def reload_custom_slash_commands(self, *, notify: bool = False) -> None:
+        (
+            self.custom_slash_commands,
+            self.custom_slash_command_errors,
+        ) = load_custom_slash_commands(
+            self.slash_commands_file,
+            built_in_names=built_in_palette_command_names(self.custom_theme_name),
+        )
+        if notify:
+            if self.custom_slash_command_errors:
+                self.notify_custom_slash_command_errors()
+                return
+            count = len(self.custom_slash_commands)
+            self.notify(
+                f"Loaded {count} custom slash command{'s' if count != 1 else ''}."
+            )
+
+    def notify_custom_slash_command_errors(self) -> None:
+        if not self.custom_slash_command_errors:
+            return
+        first = self.custom_slash_command_errors[0]
+        extra = len(self.custom_slash_command_errors) - 1
+        suffix = f" (+{extra} more)" if extra else ""
+        self.notify(f"Custom slash commands: {first}{suffix}", severity="warning")
+
+    def palette_tmux_agent_id(self) -> str | None:
+        if not self.tmux_direct_enabled:
+            self.notify("Enable tmux direct mode before using this command.", severity="warning")
+            return None
+        return self.palette_agent_id()
+
+    def palette_git_status(self) -> None:
+        agent_id = self.palette_tmux_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.palette_send_tmux_prompt(agent_id, "!git status", "Git status"),
+            name="palette-gitstatus",
+            exclusive=True,
+        )
+
+    def palette_git_stage_and_commit(self) -> None:
+        agent_id = self.palette_tmux_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.palette_send_tmux_prompt(
+                agent_id,
+                "stage and commit the changes",
+                "Stage and commit",
+            ),
+            name="palette-gitstageandcommit",
+            exclusive=True,
+        )
+
+    def palette_git_diff(self) -> None:
+        agent_id = self.palette_tmux_agent_id()
+        if agent_id is None:
+            return
+        self.push_screen(GitDiffScreen(agent_id=agent_id))
+
+    async def palette_git_diff_target(self, agent_id: str, target: str = "") -> None:
+        await self.palette_send_tmux_prompt(
+            agent_id,
+            git_diff_passthrough_command(target),
+            "Git diff",
+        )
+
+    async def palette_send_tmux_prompt(
+        self, agent_id: str, prompt: str, label: str
+    ) -> None:
+        if not self.tmux_direct_enabled:
+            self.notify("Enable tmux direct mode before using this command.", severity="warning")
+            return
+        sent = await self.send_text_to_tmux(agent_id, prompt)
+        if not sent:
+            return
+        self.notify(f"{label} sent to tmux for {agent_id}.")
+        await self.load_tmux_capture(agent_id)
 
     def palette_prime_plan_prompt(self) -> None:
         agent_id = self.palette_agent_id()

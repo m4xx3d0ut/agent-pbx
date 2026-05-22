@@ -47,6 +47,9 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "plan_options" in instructions
     assert "Selected plan option:" in instructions
     assert "Do not only write choices" in instructions
+    assert "Custom slash commands" in instructions
+    assert "not MCP tools" in instructions
+    assert "or a reason to enter" in instructions
 
 
 def test_runbook_payload_includes_command_guidance() -> None:
@@ -59,6 +62,8 @@ def test_runbook_payload_includes_command_guidance() -> None:
     assert any("pbx_nohup_explicit=true" in item for item in payload["pbx_modes"])
     assert any("Do not infer nohup mode" in item for item in payload["pbx_modes"])
     assert any("tmux direct" in item for item in payload["tmux_direct_mode"])
+    assert any("Custom TUI slash commands" in item for item in payload["custom_slash_commands"])
+    assert any("not MCP tools" in item for item in payload["custom_slash_commands"])
     assert any("pbx_poll_commands" in item for item in payload["active_loop"])
     assert any("do not call pbx_poll_commands" in item for item in payload["active_loop"])
     assert any("max_wait_seconds=600" in item for item in payload["active_loop"])

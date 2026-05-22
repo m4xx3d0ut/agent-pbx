@@ -323,6 +323,49 @@ the selected agent has structured plan options, the palette also shows
 `/plan latest`, `/plan thread`, and direct entries such as
 `/plan latest 2: ...`; selecting one opens a plan-choice modal with optional
 notes before sending through PBX or, in tmux direct mode, to the Codex pane.
+When tmux direct mode is enabled, the palette also exposes git helpers:
+`/gitstatus` sends `!git status`, `/gitdiff` opens an optional target prompt
+and sends `!git diff`, and `/gitstageandcommit` asks Codex to stage and commit
+the current changes.
+
+Custom palette slash commands can be defined in
+`${XDG_CONFIG_HOME:-~/.config}/agent-pbx/slash-commands.json`, or another file
+set with `AGENT_PBX_TUI_COMMANDS_FILE=/path/to/slash-commands.json`. They are
+local TUI shortcuts for tmux direct mode: Agent PBX sends the configured prompt
+into the selected Codex pane, but does not create MCP tools or PBX queued
+commands. Reload them without restarting the TUI with `/commands reload`.
+
+```json
+{
+  "commands": [
+    {
+      "name": "/review",
+      "description": "Ask Codex to review current changes",
+      "prompt": "review the current changes"
+    },
+    {
+      "name": "/testfile",
+      "description": "Run focused tests for a target",
+      "prompt": "run focused tests for {arg}",
+      "arg_label": "Target",
+      "arg_placeholder": "tests/test_tui.py",
+      "arg_required": true
+    },
+    {
+      "name": "/shell",
+      "description": "Run a Codex passthrough command",
+      "prompt": "!{arg}",
+      "arg_label": "Command",
+      "arg_required": true
+    }
+  ]
+}
+```
+
+Each command needs a slash-prefixed `name` and a non-empty `prompt`. Built-in
+palette names win over custom names, and duplicate custom names are skipped.
+`{arg}` is the only supported placeholder; commands that use it open a small
+input prompt before sending.
 
 Experimental local-only tmux direct mode is available for workflows where the
 TUI, MCP server, tmux, and Codex pane all run on the same host. Enable it with
