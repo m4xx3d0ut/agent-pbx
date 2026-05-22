@@ -253,6 +253,15 @@ def test_tui_reads_theme_env(monkeypatch) -> None:
     assert app.theme == "1337"
 
 
+def test_tui_reads_minimal_theme_env(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_THEME", "black-white")
+
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert app.ui_theme == "minimal"
+    assert app.theme == "minimal"
+
+
 def test_tui_reads_layout_env_aliases(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "mobile")
 
@@ -490,7 +499,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         split_reset = app.screen.query_one("#split-reset", Button)
         split_widen = app.screen.query_one("#split-widen", Button)
         tmux_direct = app.screen.query_one("#tmux-direct", Checkbox)
-        theme = app.screen.query_one("#theme-1337", Checkbox)
+        theme = app.screen.query_one("#theme-mode", Select)
         close = app.screen.query_one("#settings-close", Button)
 
         assert visual.value is True
@@ -502,7 +511,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert split_reset.label.plain == "Reset"
         assert split_widen.label.plain == "Widen"
         assert tmux_direct.value is False
-        assert theme.value is False
+        assert theme.value == "cyberpunk"
         assert close.label.plain == "Close"
 
 
@@ -1251,6 +1260,10 @@ def test_tui_theme_toggle_updates_app_theme() -> None:
     app.set_ui_theme("1337")
     assert app.ui_theme == "1337"
     assert app.theme == "1337"
+
+    app.set_ui_theme("minimal")
+    assert app.ui_theme == "minimal"
+    assert app.theme == "minimal"
 
     app.set_ui_theme("cyberpunk")
     assert app.ui_theme == "cyberpunk"

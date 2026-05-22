@@ -45,6 +45,7 @@ TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
 ATTENTION_EVENT_TYPES = {"agent_registered", "report_created", "command_acked"}
 DEFAULT_TUI_THEME = "cyberpunk"
+MINIMAL_TUI_THEME = "minimal"
 DEFAULT_CUSTOM_THEME_NAME = "1337"
 THEME_1337_NAME = DEFAULT_CUSTOM_THEME_NAME
 ADAPTIVE_TUI_LAYOUT = "adaptive"
@@ -140,6 +141,19 @@ CYBERPUNK_PALETTE = {
     "panel": "#1a102a",
     "boost": "#2b174b",
 }
+MINIMAL_PALETTE = {
+    "primary": "#ffffff",
+    "secondary": "#c0c0c0",
+    "warning": "#ffff00",
+    "error": "#ff0000",
+    "success": "#00ff00",
+    "accent": "#ffffff",
+    "foreground": "#ffffff",
+    "background": "#000000",
+    "surface": "#000000",
+    "panel": "#000000",
+    "boost": "#ffffff",
+}
 DEFAULT_CUSTOM_PALETTE = {
     "primary": "#00ff00",
     "secondary": "#00ff00",
@@ -174,6 +188,7 @@ def build_theme(name: str, palette: dict[str, str]) -> Theme:
 
 
 THEME_CYBERPUNK = build_theme(DEFAULT_TUI_THEME, CYBERPUNK_PALETTE)
+THEME_MINIMAL = build_theme(MINIMAL_TUI_THEME, MINIMAL_PALETTE)
 
 
 def env_flag(*names: str, default: bool = False) -> bool:
@@ -237,6 +252,33 @@ def is_custom_theme_selector(theme: str, custom_name: str) -> bool:
     }
 
 
+def is_minimal_theme_selector(theme: str) -> bool:
+    normalized = theme.strip().lower().replace("_", "-")
+    return normalized in {
+        MINIMAL_TUI_THEME,
+        "basic",
+        "black-white",
+        "blackwhite",
+        "bw",
+        "compat",
+        "compatible",
+        "mono",
+        "monochrome",
+    }
+
+
+def is_default_theme_selector(theme: str) -> bool:
+    normalized = theme.strip().lower().replace("_", "-")
+    return normalized in {
+        "",
+        "default",
+        DEFAULT_TUI_THEME,
+        "github",
+        "github dark",
+        "github-dark",
+    }
+
+
 def env_theme(
     default: str = DEFAULT_TUI_THEME, custom_name: str | None = None
 ) -> str:
@@ -253,15 +295,9 @@ def env_theme_value(custom_name: str | None = None) -> str | None:
     theme = os.getenv("AGENT_PBX_TUI_THEME", "").strip().lower()
     if is_custom_theme_selector(theme, resolved_custom_name):
         return resolved_custom_name
-    if theme in {
-        "",
-        "default",
-        DEFAULT_TUI_THEME,
-        "github",
-        "github dark",
-        "github-dark",
-        "github_dark",
-    }:
+    if is_minimal_theme_selector(theme):
+        return MINIMAL_TUI_THEME
+    if is_default_theme_selector(theme):
         return DEFAULT_TUI_THEME
     return None
 
@@ -502,7 +538,7 @@ class SettingsScreen(ModalScreen[None]):
         tmux_direct_enabled: bool,
         tmux_features_available: bool,
         custom_theme_name: str,
-        custom_theme_enabled: bool,
+        theme_name: str,
     ) -> None:
         super().__init__()
         self.visual_flash_enabled = visual_flash_enabled
@@ -513,7 +549,7 @@ class SettingsScreen(ModalScreen[None]):
         self.tmux_direct_enabled = tmux_direct_enabled
         self.tmux_features_available = tmux_features_available
         self.custom_theme_name = custom_theme_name
-        self.custom_theme_enabled = custom_theme_enabled
+        self.theme_name = theme_name
 
     def compose(self) -> ComposeResult:
         with Vertical(id="settings-panel"):
@@ -556,10 +592,16 @@ class SettingsScreen(ModalScreen[None]):
                 )
                 tmux_direct.disabled = not self.tmux_features_available
                 yield tmux_direct
-                yield Checkbox(
-                    f"{self.custom_theme_name} theme",
-                    value=self.custom_theme_enabled,
-                    id="theme-1337",
+                yield Static("Theme", id="theme-label")
+                yield Select(
+                    [
+                        ("Cyberpunk", DEFAULT_TUI_THEME),
+                        ("Minimal", MINIMAL_TUI_THEME),
+                        (self.custom_theme_name, self.custom_theme_name),
+                    ],
+                    value=self.theme_name,
+                    allow_blank=False,
+                    id="theme-mode",
                 )
             with Horizontal(id="settings-actions"):
                 yield Button("Close", id="settings-close", variant="primary")
@@ -587,6 +629,9 @@ class SettingsScreen(ModalScreen[None]):
         if event.select.id == "layout-mode":
             event.stop()
             self.app.set_layout_mode(str(event.value))  # type: ignore[attr-defined]
+        elif event.select.id == "theme-mode":
+            event.stop()
+            self.app.set_ui_theme(str(event.value))  # type: ignore[attr-defined]
 
 
 class AgentPBXTUI(App[None]):
@@ -710,7 +755,12 @@ class AgentPBXTUI(App[None]):
         height: 3;
     }
 
-    #layout-mode-label {
+    #theme-mode {
+        height: 3;
+    }
+
+    #layout-mode-label,
+    #theme-label {
         height: 1;
         color: $secondary;
         content-align: center middle;
@@ -1103,6 +1153,7 @@ class AgentPBXTUI(App[None]):
         self.custom_palette = env_custom_palette()
         self.custom_theme = build_theme(self.custom_theme_name, self.custom_palette)
         self.register_theme(THEME_CYBERPUNK)
+        self.register_theme(THEME_MINIMAL)
         self.register_theme(self.custom_theme)
         self.server = server.rstrip("/")
         self.token = token
@@ -1417,7 +1468,7 @@ class AgentPBXTUI(App[None]):
                 tmux_direct_enabled=self.tmux_direct_enabled,
                 tmux_features_available=self.tmux_features_available,
                 custom_theme_name=self.custom_theme_name,
-                custom_theme_enabled=self.ui_theme == self.custom_theme_name,
+                theme_name=self.ui_theme,
             )
         )
 
@@ -3217,8 +3268,6 @@ class AgentPBXTUI(App[None]):
                     name="tmux-toggle",
                     exclusive=True,
                 )
-        elif event.checkbox.id == "theme-1337":
-            self.set_ui_theme(self.custom_theme_name if event.value else DEFAULT_TUI_THEME)
 
     def set_ui_theme(self, theme_name: str) -> None:
         self.ui_theme = self.resolve_theme(theme_name)
@@ -3372,6 +3421,10 @@ class AgentPBXTUI(App[None]):
     def resolve_theme(self, theme_name: str) -> str:
         if is_custom_theme_selector(theme_name, self.custom_theme_name):
             return self.custom_theme_name
+        if is_minimal_theme_selector(theme_name):
+            return MINIMAL_TUI_THEME
+        if is_default_theme_selector(theme_name):
+            return DEFAULT_TUI_THEME
         return DEFAULT_TUI_THEME
 
     def save_settings(self) -> None:

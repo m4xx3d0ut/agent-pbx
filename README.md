@@ -364,8 +364,11 @@ settings file. Explicit environment variables still override saved settings for
 that launch.
 
 The default TUI theme uses a cyberpunk palette with neon cyan, magenta, yellow,
-and green over a dark terminal base. Use `AGENT_PBX_TUI_THEME=1337` or the
-theme toggle in `Settings` for a black and bright-green terminal look.
+and green over a dark terminal base. Use the `Theme` selector in `Settings` or
+set `AGENT_PBX_TUI_THEME` to choose another built-in theme. `minimal` uses a
+plain black/white terminal base while preserving semantic highlight colors for
+alerts, status, and activity. `1337` keeps the black and bright-green terminal
+look.
 
 ## Custom TUI Theme
 
