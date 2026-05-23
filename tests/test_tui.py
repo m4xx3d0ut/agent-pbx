@@ -18,9 +18,11 @@ from agent_pbx.tui import (
     env_theme,
     follow_up_edit_control,
     git_diff_passthrough_command,
+    git_push_passthrough_command,
     is_local_server_url,
     is_follow_up_newline_key,
     load_custom_slash_commands,
+    parse_git_push_slash_command,
     parse_custom_slash_commands,
     render_plan_prompt,
     render_custom_slash_prompt,
@@ -1295,6 +1297,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/layout compact" in titles
     assert "/gitstatus" not in titles
     assert "/gitdiff" not in titles
+    assert "/gitpush" not in titles
     assert "/gitstageandcommit" not in titles
 
 
@@ -1441,6 +1444,7 @@ async def test_tui_palette_includes_git_commands_only_in_tmux_mode() -> None:
 
     assert "/gitstatus" in titles
     assert "/gitdiff" in titles
+    assert "/gitpush" in titles
     assert "/gitstageandcommit" in titles
 
 
@@ -1773,6 +1777,64 @@ async def test_tui_palette_gitdiff_modal_sends_optional_target() -> None:
     assert captures == ["agent-1"]
 
 
+async def test_tui_palette_gitpush_modal_sends_optional_branch() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.palette_git_push()
+        await pilot.pause()
+        branch = app.screen.query_one("#palette-gitpush-branch", Input)
+        branch.value = "dev"
+        app.screen.submit()  # type: ignore[attr-defined]
+        await pilot.pause()
+
+    assert sent == [("agent-1", "!git push origin dev")]
+    assert captures == ["agent-1"]
+
+
+async def test_tui_gitpush_slash_input_defaults_to_current_branch() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        return None
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        message = app.query_one("#tmux-message", TextArea)
+        message.text = "/gitpush"
+        await app.send_tmux_input()
+        message.text = "/gitpush release/v1"
+        await app.send_tmux_input()
+
+    assert sent == [
+        ("agent-1", "!git push origin HEAD"),
+        ("agent-1", "!git push origin release/v1"),
+    ]
+
+
 def test_tui_gitdiff_passthrough_command_formats_targets() -> None:
     assert git_diff_passthrough_command("") == "!git diff"
     assert git_diff_passthrough_command("README.md") == "!git diff -- README.md"
@@ -1781,6 +1843,20 @@ def test_tui_gitdiff_passthrough_command_formats_targets() -> None:
         git_diff_passthrough_command("docs/My File.md")
         == "!git diff -- 'docs/My File.md'"
     )
+
+
+def test_tui_gitpush_passthrough_command_formats_branch() -> None:
+    assert git_push_passthrough_command("") == "!git push origin HEAD"
+    assert git_push_passthrough_command("dev") == "!git push origin dev"
+    assert git_push_passthrough_command("feature/mobile-ui") == (
+        "!git push origin feature/mobile-ui"
+    )
+    assert git_push_passthrough_command("release candidate") == (
+        "!git push origin 'release candidate'"
+    )
+    assert parse_git_push_slash_command("/gitpush") == ""
+    assert parse_git_push_slash_command("/gitpush dev") == "dev"
+    assert parse_git_push_slash_command("/gitpush-dev") is None
 
 
 async def test_tui_plan_selection_command_sends_latest_choice_with_notes() -> None:

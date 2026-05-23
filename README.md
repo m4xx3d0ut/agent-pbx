@@ -1,5 +1,9 @@
 # Agent PBX
 
+<p align="center">
+  <img src="docs/assets/agent-pbx-tui.gif" alt="Agent PBX TUI showing agent status, latest reports, and thread history" width="960">
+</p>
+
 Agent PBX is a local/LAN MCP service for collecting agent turn reports, storing
 full response details, and queuing follow-up commands for agents to poll.
 
@@ -367,8 +371,10 @@ choice metadata when the latest report or selected thread item includes
 `/plan thread 1: ...` prefill the reply syntax for quick editing.
 When tmux direct mode is enabled, the palette also exposes git helpers:
 `/gitstatus` sends `!git status`, `/gitdiff` opens an optional target prompt
-and sends `!git diff`, and `/gitstageandcommit` asks Codex to stage and commit
-the current changes.
+and sends `!git diff`, `/gitpush` sends `!git push origin HEAD` by default or
+`!git push origin <branch>` when given a branch/ref, and `/gitstageandcommit`
+asks Codex to stage and commit the current changes. From the Latest input, use
+`/gitpush` for the current branch or `/gitpush dev` for an explicit branch/ref.
 
 Custom palette slash commands can be defined in
 `${XDG_CONFIG_HOME:-~/.config}/agent-pbx/slash-commands.json`, or another file

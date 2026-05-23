@@ -162,6 +162,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/plan thread",
     "/gitstatus",
     "/gitdiff",
+    "/gitpush",
     "/gitstageandcommit",
     "/commands reload",
     "/hide agent",
@@ -853,6 +854,52 @@ class GitDiffScreen(ModalScreen[None]):
             self.submit()
 
 
+class GitPushScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, *, agent_id: str) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="palette-gitdiff-panel"):
+            yield Static(f"Git Push: {self.agent_id}", id="palette-gitdiff-title")
+            yield Static(
+                "Optional branch/ref. Leave blank to push the current branch with HEAD.",
+                id="palette-gitdiff-help",
+            )
+            yield Input(
+                placeholder="current branch",
+                id="palette-gitpush-branch",
+            )
+            with Horizontal(id="palette-gitdiff-actions"):
+                yield Button("Push", id="palette-gitpush-run", variant="primary")
+                yield Button("Cancel", id="palette-gitpush-cancel")
+
+    def submit(self) -> None:
+        branch = self.query_one("#palette-gitpush-branch", Input).value
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.palette_git_push_target(self.agent_id, branch),  # type: ignore[attr-defined]
+            name="palette-gitpush",
+            exclusive=True,
+        )
+        self.dismiss()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "palette-gitpush-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "palette-gitpush-run":
+            event.stop()
+            self.submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "palette-gitpush-branch":
+            event.stop()
+            self.submit()
+
+
 class CustomSlashCommandArgScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Close")]
 
@@ -946,6 +993,25 @@ def git_diff_passthrough_command(target: str = "") -> str:
     if ":" in clean_target and not clean_target.startswith((".", "/")):
         return f"!git diff {quoted}"
     return f"!git diff -- {quoted}"
+
+
+def git_push_passthrough_command(branch: str = "") -> str:
+    clean_branch = branch.strip()
+    if not clean_branch:
+        return "!git push origin HEAD"
+    return f"!git push origin {shlex.quote(clean_branch)}"
+
+
+def parse_git_push_slash_command(message: str) -> str | None:
+    stripped = message.strip()
+    if "\n" in stripped:
+        return None
+    if stripped.lower() == "/gitpush":
+        return ""
+    command, separator, branch = stripped.partition(" ")
+    if not separator or command.lower() != "/gitpush":
+        return None
+    return branch.strip()
 
 
 class SettingsScreen(ModalScreen[None]):
@@ -1944,6 +2010,7 @@ class AgentPBXTUI(App[None]):
         if self.tmux_direct_enabled:
             yield SystemCommand("/gitstatus", "Run !git status in the selected tmux pane", self.palette_git_status)
             yield SystemCommand("/gitdiff", "Run !git diff with an optional target in tmux", self.palette_git_diff)
+            yield SystemCommand("/gitpush", "Run !git push origin with an optional branch in tmux", self.palette_git_push)
             yield SystemCommand("/gitstageandcommit", "Ask Codex to stage and commit changes", self.palette_git_stage_and_commit)
             yield from self.palette_custom_slash_commands()
         yield SystemCommand("/hide agent", "Hide the selected agent from the Agents view", self.palette_hide_agent)
@@ -2106,6 +2173,19 @@ class AgentPBXTUI(App[None]):
             agent_id,
             git_diff_passthrough_command(target),
             "Git diff",
+        )
+
+    def palette_git_push(self) -> None:
+        agent_id = self.palette_tmux_agent_id()
+        if agent_id is None:
+            return
+        self.push_screen(GitPushScreen(agent_id=agent_id))
+
+    async def palette_git_push_target(self, agent_id: str, branch: str = "") -> None:
+        await self.palette_send_tmux_prompt(
+            agent_id,
+            git_push_passthrough_command(branch),
+            "Git push",
         )
 
     async def palette_send_tmux_prompt(
@@ -3250,6 +3330,29 @@ class AgentPBXTUI(App[None]):
         text_area: TextArea,
         message: str,
     ) -> bool:
+        git_push_branch = parse_git_push_slash_command(message)
+        if git_push_branch is not None:
+            agent_id = self.sent_history_agent_id(text_area)
+            if agent_id:
+                self.selected_agent_id = agent_id
+                agent_input = self.query_one_or_none("#agent-id", Input)
+                if agent_input is not None:
+                    agent_input.value = agent_id
+            if not self.tmux_direct_enabled:
+                self.notify(
+                    "Enable tmux direct mode before using this command.",
+                    severity="warning",
+                )
+                return True
+            if not agent_id:
+                self.notify("Select an agent first.", severity="warning")
+                return True
+            await self.palette_git_push_target(agent_id, git_push_branch)
+            self.record_sent_message(agent_id, message)
+            text_area.text = ""
+            if text_area.id == "message":
+                self.resize_message_input()
+            return True
         command = self.slash_command_for_text(message)
         if command is None:
             return False

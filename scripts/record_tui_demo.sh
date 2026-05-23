@@ -235,21 +235,21 @@ def request(method: str, path: str, payload: dict[str, object]) -> dict[str, obj
 
 agents = [
     {
-        "agent_id": "demo-workerbee",
+        "agent_id": "sun-tzu-smoke-1",
         "project": "agent-pbx",
-        "name": "WorkerBee Demo",
+        "name": "Sun Tzu Smoke 1",
         "metadata": {"cwd": cwd, "pbx_mode": "report", "demo": True},
     },
     {
-        "agent_id": "demo-planner",
+        "agent_id": "sun-tzu-smoke-3",
         "project": "agent-pbx",
-        "name": "Planning Demo",
+        "name": "Sun Tzu Smoke 3",
         "metadata": {"cwd": cwd, "pbx_mode": "report", "demo": True},
     },
     {
-        "agent_id": "demo-nohup",
+        "agent_id": "sun-tzu-smoke-2",
         "project": "agent-pbx",
-        "name": "Nohup Demo",
+        "name": "Sun Tzu Smoke 2",
         "metadata": {"cwd": cwd, "pbx_mode": "nohup", "demo": True},
     },
 ]
@@ -259,15 +259,15 @@ for agent in agents:
 
 request(
     "POST",
-    "/v1/agents/demo-workerbee/reports",
+    "/v1/agents/sun-tzu-smoke-1/reports",
     {
         "project": "agent-pbx",
         "status": "working",
-        "summary": "WorkerBee project status is ready for review",
+        "summary": "Attack where he is unprepared.",
         "detail": (
-            "Demo agent registered with metadata.cwd pointing at this repository. "
-            "Open the WorkerBee tab to show project status, workload readiness, "
-            "and dashboard links when AGENT_PBX_WORKERBEE_BIN is configured."
+            "Attack where he is unprepared.\n\n"
+            "Debug smoke report from sun-tzu-smoke-1. Use this to verify TUI "
+            "refresh, unseen markers, and alerts."
         ),
         "needs_input": False,
         "plan_options": [],
@@ -275,37 +275,41 @@ request(
 )
 request(
     "POST",
-    "/v1/agents/demo-planner/reports",
+    "/v1/agents/sun-tzu-smoke-3/reports",
     {
         "project": "agent-pbx",
         "status": "plan",
-        "summary": "Choose a TUI demo path",
-        "detail": "This report demonstrates structured plan options and Thread history.",
+        "summary": "Know yourself and you will win all battles.",
+        "detail": (
+            "Know yourself and you will win all battles.\n\n"
+            "This report demonstrates structured plan options and Thread history."
+        ),
         "needs_input": True,
         "plan_options": [
             {
-                "id": "tour",
-                "label": "Tour the TUI",
-                "description": "Show Latest, Thread, WorkerBee, and palette commands.",
+                "id": "observe",
+                "label": "Observe",
+                "description": "Review the field before committing the next move.",
             },
             {
-                "id": "release",
-                "label": "Prepare release notes",
-                "description": "Summarize tests and artifact status.",
+                "id": "advance",
+                "label": "Advance",
+                "description": "Act while the opening is visible.",
             },
         ],
     },
 )
 request(
     "POST",
-    "/v1/agents/demo-nohup/reports",
+    "/v1/agents/sun-tzu-smoke-2/reports",
     {
         "project": "agent-pbx",
         "status": "done",
-        "summary": "Nohup follow-up window is available",
+        "summary": "Opportunities multiply as they are seized.",
         "detail": (
-            "This agent demonstrates queued commands, pings, and post-reply "
-            "follow-up handling for local LAN workflows."
+            "Opportunities multiply as they are seized.\n\n"
+            "Debug smoke report from sun-tzu-smoke-2. This agent demonstrates "
+            "queued commands, pings, and post-reply follow-up handling."
         ),
         "needs_input": False,
         "plan_options": [],
@@ -315,9 +319,9 @@ request(
     "POST",
     "/v1/commands",
     {
-        "agent_id": "demo-nohup",
+        "agent_id": "sun-tzu-smoke-2",
         "type": "request_detail",
-        "payload": {"request": "Show the detailed demo response."},
+        "payload": {"request": "Show the detailed smoke quote response."},
     },
 )
 PY
