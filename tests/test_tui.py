@@ -25,6 +25,7 @@ from agent_pbx.tui import (
     render_plan_prompt,
     render_custom_slash_prompt,
     resolve_layout,
+    slash_completion_direction,
     tmux_features_available,
 )
 from textual.events import Click, Key
@@ -404,10 +405,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         export_marked = app.query_one("#export-marked", Button)
         export_all = app.query_one("#export-all", Button)
         delete_queued = app.query_one("#delete-queued", Button)
-        latest_send_plan = app.query_one("#latest-send-plan-choice", Button)
-        latest_send_plan_tmux = app.query_one("#latest-send-plan-tmux", Button)
-        send_plan = app.query_one("#send-plan-choice", Button)
-        send_plan_tmux = app.query_one("#send-plan-tmux", Button)
+        latest_plan_hint = app.query_one("#latest-plan-hint", Static)
+        plan_hint = app.query_one("#plan-hint", Static)
         workerbee_detail = app.query_one("#workerbee-detail", TextArea)
         workerbee_refresh = app.query_one("#workerbee-refresh", Button)
         composer = app.query_one("#composer")
@@ -430,20 +429,14 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert export_marked.label.plain == "Export Marked"
         assert export_all.label.plain == "Export All"
         assert delete_queued.label.plain == "Delete Queued"
-        assert latest_send_plan.label.plain == "Send Plan Choice"
-        assert latest_send_plan_tmux.label.plain == "Send to Codex Pane"
-        assert latest_send_plan.disabled is True
-        assert latest_send_plan_tmux.disabled is True
-        assert send_plan.label.plain == "Send Plan Choice"
-        assert send_plan_tmux.label.plain == "Send to Codex Pane"
-        assert send_plan.disabled is True
-        assert send_plan_tmux.disabled is True
+        assert latest_plan_hint.renderable == "Reply with /plan:1 optional notes."
+        assert plan_hint.renderable == "Reply with /plan:1 optional notes."
         assert workerbee_detail.read_only is True
         assert workerbee_refresh.label.plain == "Refresh WorkerBee"
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
         assert "#latest-plan-choice-panel,\n    #plan-choice-panel {" in app.CSS
-        assert "#latest-plan-notes,\n    #plan-notes {" in app.CSS
+        assert "#latest-plan-hint,\n    #plan-hint {" in app.CSS
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
         assert "#tmux-message {\n        height: 8;" in app.CSS
         assert "Notification Options" not in app.CSS
@@ -1017,7 +1010,7 @@ async def test_tui_compact_layout_opens_agent_view_and_back(monkeypatch) -> None
         assert app.screen.has_class("compact-agent")
         assert tabs.active == "latest-tab"
         assert app.active_agent_tab == "latest-tab"
-        assert str(app.query_one("#agent-title").renderable) == "Agent: agent-1"
+        assert str(app.query_one("#agent-title").renderable) == "Agent: agent-1 | Plan: off"
         assert app.query_one("#right").region.width >= 58
         message = app.query_one("#message", TextArea)
         buttons = app.query_one("#composer-buttons")
@@ -1282,6 +1275,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
 
     assert "/detail" in titles
     assert "/ping" in titles
+    assert "/esc" in titles
     assert "/tmux" in titles
     assert "/workerbee" in titles
     assert "/plan" in titles
@@ -1580,6 +1574,108 @@ async def test_tui_palette_agent_commands_use_selected_agent() -> None:
     assert calls == ["agent-1"]
 
 
+async def test_tui_palette_escape_uses_selected_agent() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[str] = []
+
+    async def fake_send_escape_key() -> None:
+        calls.append(app.query_one("#agent-id", Input).value)
+
+    app.send_escape_key = fake_send_escape_key  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.palette_escape()
+        await pilot.pause()
+
+    assert calls == ["agent-1"]
+
+
+async def test_tui_follow_up_tab_completes_slash_command() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        message = app.query_one("#message", TextArea)
+        message.text = "/e"
+        message.move_cursor((0, 2))
+        await message._on_key(Key("tab", "\t"))
+
+    assert message.text == "/esc"
+    assert message.cursor_location == (0, len("/esc"))
+
+
+async def test_tui_follow_up_tab_cycles_slash_command_matches() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        message = app.query_one("#message", TextArea)
+        message.text = "/plan"
+        message.move_cursor((0, len("/plan")))
+        await message._on_key(Key("tab", "\t"))
+        first_completion = message.text
+        await message._on_key(Key("tab", "\t"))
+        second_completion = message.text
+
+    assert first_completion == "/plan latest"
+    assert second_completion == "/plan thread"
+
+
+async def test_tui_tmux_follow_up_tab_completes_tmux_only_command() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test():
+        message = app.query_one("#tmux-message", TextArea)
+        message.text = "/gitst"
+        message.move_cursor((0, len("/gitst")))
+        await message._on_key(Key("tab", "\t"))
+
+    assert message.text == "/gitstatus"
+
+
+async def test_tui_follow_up_exact_slash_command_executes_locally() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[str] = []
+
+    async def fake_send_escape_key() -> None:
+        calls.append(app.query_one("#agent-id", Input).value)
+
+    app.send_escape_key = fake_send_escape_key  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        message = app.query_one("#message", TextArea)
+        message.text = "/esc"
+        await app.send_input()
+        await pilot.pause()
+
+    assert calls == ["agent-1"]
+    assert message.text == ""
+
+
+async def test_tui_follow_up_exact_theme_command_executes_without_agent() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        message = app.query_one("#message", TextArea)
+        message.text = "/theme minimal"
+        await app.send_input()
+
+    assert app.ui_theme == "minimal"
+    assert message.text == ""
+
+
 def test_tui_palette_theme_and_layout_commands() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -1677,7 +1773,7 @@ def test_tui_gitdiff_passthrough_command_formats_targets() -> None:
     )
 
 
-async def test_tui_palette_plan_latest_modal_sends_choice_with_notes() -> None:
+async def test_tui_plan_selection_command_sends_latest_choice_with_notes() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     queued: list[tuple[str, str, dict[str, str]]] = []
     refreshed_events = 0
@@ -1720,34 +1816,26 @@ async def test_tui_palette_plan_latest_modal_sends_choice_with_notes() -> None:
                 "plan_options": ["A", "B"],
             }
         }
-        app.selected_latest_plan_option_index = 1
-
-        app.palette_plan_latest()
-        await pilot.pause()
-
-        assert app.screen.query_one("#palette-plan-title", Static).renderable == "Plan Choice: agent-1"
-        option = app.screen.query_one("#palette-plan-option", Select)
-        notes = app.screen.query_one("#palette-plan-notes", TextArea)
-        send_tmux = app.screen.query_one("#palette-plan-send-tmux", Button)
-        assert option.value == "1"
-        assert send_tmux.disabled is True
-
-        notes.text = "Prefer B."
-        app.screen.submit(via_tmux=False)  # type: ignore[attr-defined]
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.query_one("#message", TextArea).text = "/plan:2 Prefer B."
+        await app.send_input()
         await pilot.pause()
 
     assert queued == [
         (
             "agent-1",
             "send_input",
-            {"message": "Selected plan option: B\n\nOperator notes:\nPrefer B."},
+            {
+                "message": "Selected plan option: B\n\nOperator notes:\nPrefer B.",
+                "plan_choice": {"label": "B", "option": "B"},
+            },
         )
     ]
     assert refreshed_events == 1
     assert loaded_threads == ["agent-1"]
 
 
-async def test_tui_palette_plan_primes_next_follow_up_prompt() -> None:
+async def test_tui_palette_plan_toggles_mode_immediately() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     queued: list[tuple[str, str, dict[str, str]]] = []
 
@@ -1779,19 +1867,10 @@ async def test_tui_palette_plan_primes_next_follow_up_prompt() -> None:
         }
         app.selected_agent_id = "agent-1"
         app.palette_prime_plan_prompt()
-        assert app.pending_slash_command_by_agent == {"agent-1": "/plan"}
+        await pilot.pause()
 
-        app.query_one("#message", TextArea).text = "Draft a path forward."
-        await app.send_input()
-
-    assert queued == [
-        ("agent-1", "send_input", {"message": "/plan"}),
-        (
-            "agent-1",
-            "send_input",
-            {"message": render_plan_prompt("Draft a path forward.")},
-        ),
-    ]
+    assert queued == [("agent-1", "send_input", {"message": "/plan"})]
+    assert app.plan_mode_active_agent_ids == {"agent-1"}
     assert app.pending_slash_command_by_agent == {}
 
 
@@ -1868,7 +1947,7 @@ async def test_tui_palette_plan_primes_next_tmux_prompt() -> None:
     assert sent == [("agent-1", render_plan_prompt("Investigate options."))]
 
 
-async def test_tui_palette_plan_thread_modal_can_send_to_tmux() -> None:
+async def test_tui_plan_selection_command_can_send_thread_choice_to_tmux() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     sent: list[tuple[str, str]] = []
     captured: list[str] = []
@@ -1904,13 +1983,9 @@ async def test_tui_palette_plan_thread_modal_can_send_to_tmux() -> None:
         }
         app.selected_thread_item_id = "report:r1"
 
-        app.palette_plan_thread()
-        await pilot.pause()
-
-        assert app.screen.query_one("#palette-plan-source", Static).renderable == "Selected thread item"
-        assert app.screen.query_one("#palette-plan-send-tmux", Button).disabled is False
-        app.screen.query_one("#palette-plan-notes", TextArea).text = "Go now."
-        app.screen.submit(via_tmux=True)  # type: ignore[attr-defined]
+        app.active_agent_tab = "thread-tab"
+        app.query_one("#tmux-message", TextArea).text = "/plan sel:1 Go now."
+        await app.send_tmux_input()
         await pilot.pause()
 
     assert sent == [
@@ -1922,7 +1997,7 @@ async def test_tui_palette_plan_thread_modal_can_send_to_tmux() -> None:
     assert captured == ["agent-1"]
 
 
-async def test_tui_palette_dynamic_plan_option_commands_open_preselected_modal() -> None:
+async def test_tui_palette_dynamic_plan_option_commands_prepare_reply() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
     async with app.run_test() as pilot:
@@ -1959,8 +2034,7 @@ async def test_tui_palette_dynamic_plan_option_commands_open_preselected_modal()
         commands["/plan latest 2: B"].callback()
         await pilot.pause()
 
-        assert app.screen.query_one("#palette-plan-source", Static).renderable == "Latest report"
-        assert app.screen.query_one("#palette-plan-option", Select).value == "1"
+        assert app.query_one("#message", TextArea).text == "/plan:2 "
 
 
 async def test_tui_palette_dynamic_plan_option_commands_require_options() -> None:
@@ -2128,14 +2202,11 @@ async def test_tui_thread_selection_renders_detail() -> None:
         app.select_thread_item("report:r1")
         report_detail = app.query_one("#thread-detail", TextArea).text
         plan_options = app.query_one("#plan-options", DataTable)
-        send_plan = app.query_one("#send-plan-choice", Button)
-        send_plan_tmux = app.query_one("#send-plan-tmux", Button)
+        plan_hint = app.query_one("#plan-hint", Static)
         table = app.query_one("#thread", DataTable)
         plan_row_count = plan_options.row_count
         plan_option_text = plan_options.get_row_at(0)[1]
         plan_marker = table.get_row_at(0)[3]
-        send_plan_enabled = not send_plan.disabled
-        send_plan_tmux_disabled = send_plan_tmux.disabled
         app.select_thread_item("command:c1")
         detail = app.query_one("#thread-detail", TextArea).text
 
@@ -2144,11 +2215,82 @@ async def test_tui_thread_selection_renders_detail() -> None:
     assert plan_row_count == 1
     assert plan_option_text == "Next"
     assert plan_marker == "PLAN:1"
-    assert send_plan_enabled is True
-    assert send_plan_tmux_disabled is True
+    assert plan_hint.renderable == "Reply with /plan:1 optional notes."
     assert "Command: c1" in detail
     assert "Proceed" in detail
     assert '"ok": true' in detail
+
+
+async def test_tui_structured_plan_options_render_and_queue_metadata() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, object]]] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, object]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        item = {
+            "item_id": "report:r1",
+            "kind": "report",
+            "agent_id": "agent-1",
+            "created_at": 123.0,
+            "status": "needs_input",
+            "title": "Choose",
+            "body": "Pick a path",
+            "metadata": {
+                "plan_options": [
+                    {
+                        "id": "incremental",
+                        "label": "Incremental hardening",
+                        "description": "Fix lifecycle first.",
+                    }
+                ]
+            },
+        }
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.thread_items = {"report:r1": item}
+        app.select_thread_item("report:r1")
+        table = app.query_one("#plan-options", DataTable)
+        app.query_one("#message", TextArea).text = "/plan:1 Ship this."
+        await app.send_input()
+
+    assert table.get_row_at(0)[1] == "Incremental hardening: Fix lifecycle first."
+    assert queued == [
+        (
+            "agent-1",
+            "send_input",
+            {
+                "message": (
+                    "Selected plan option: Incremental hardening\n\n"
+                    "Operator notes:\nShip this."
+                ),
+                "plan_choice": {
+                    "id": "incremental",
+                    "label": "Incremental hardening",
+                    "description": "Fix lifecycle first.",
+                    "option": {
+                        "id": "incremental",
+                        "label": "Incremental hardening",
+                        "description": "Fix lifecycle first.",
+                    },
+                },
+            },
+        )
+    ]
 
 
 async def test_tui_thread_table_renders_newest_first() -> None:
@@ -3134,6 +3276,73 @@ async def test_tui_request_detail_queues_command() -> None:
     assert "Command: cmd-1" in detail
 
 
+async def test_tui_escape_queues_send_key_command() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+    threads: list[str] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.query_one("#agent-id", Input).value = "agent-1"
+        await app.send_escape_key()
+        detail = app.query_one("#detail", TextArea).text
+
+    assert queued == [
+        (
+            "agent-1",
+            "send_key",
+            {
+                "key": "escape",
+                "request": (
+                    "Send an Escape key event to the agent session if supported; "
+                    "otherwise report that key injection is unavailable."
+                ),
+            },
+        )
+    ]
+    assert threads == ["agent-1"]
+    assert "Escape key request queued for agent-1." in detail
+    assert "Command: cmd-1" in detail
+
+
+async def test_tui_escape_sends_tmux_escape_key() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    async def fake_send_key_to_tmux(agent_id: str, key: str) -> bool:
+        sent.append((agent_id, key))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.send_key_to_tmux = fake_send_key_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.query_one("#agent-id", Input).value = "agent-1"
+        await app.send_escape_key()
+
+    assert sent == [("agent-1", "Escape")]
+    assert captures == ["agent-1"]
+
+
 async def test_tui_ping_queues_keepalive_command() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     queued: list[tuple[str, str, dict[str, object]]] = []
@@ -3242,7 +3451,7 @@ async def test_tui_mark_agent_canceled_creates_report() -> None:
     assert "Report: report-1" in detail
 
 
-async def test_tui_send_plan_choice_queues_follow_up_with_notes() -> None:
+async def test_tui_plan_selection_command_queues_thread_choice_with_notes() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     queued: list[tuple[str, str, dict[str, str]]] = []
     threads: list[str] = []
@@ -3275,12 +3484,13 @@ async def test_tui_send_plan_choice_queues_follow_up_with_notes() -> None:
             "metadata": {"plan_options": ["A", "B"]},
         }
         app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
         app.thread_items = {"report:r1": item}
         app.select_thread_item("report:r1")
-        app.select_plan_option("1")
-        app.query_one("#plan-notes", TextArea).text = "Prefer the safer path."
-        await app.send_plan_choice()
-        notes = app.query_one("#plan-notes", TextArea).text
+        app.active_agent_tab = "thread-tab"
+        app.query_one("#message", TextArea).text = "/plan:2 Prefer the safer path."
+        await app.send_input()
+        message_text = app.query_one("#message", TextArea).text
 
     assert queued == [
         (
@@ -3290,12 +3500,13 @@ async def test_tui_send_plan_choice_queues_follow_up_with_notes() -> None:
                 "message": (
                     "Selected plan option: B\n\n"
                     "Operator notes:\nPrefer the safer path."
-                )
+                ),
+                "plan_choice": {"label": "B", "option": "B"},
             },
         )
     ]
     assert threads == ["agent-1"]
-    assert notes == ""
+    assert message_text == ""
 
 
 async def test_tui_latest_plan_choice_queues_follow_up_with_notes() -> None:
@@ -3333,26 +3544,29 @@ async def test_tui_latest_plan_choice_queues_follow_up_with_notes() -> None:
         }
         app.selected_agent_id = "agent-1"
         app.latest_report_by_agent = {"agent-1": report}
+        app.query_one("#agent-id", Input).value = "agent-1"
         app.render_latest_plan_choice_panel(report)
-        app.select_latest_plan_option("1")
-        app.query_one("#latest-plan-notes", TextArea).text = "Prefer B."
+        app.query_one("#message", TextArea).text = "/plan:2 Prefer B."
         table = app.query_one("#latest-plan-options", DataTable)
-        await app.send_latest_plan_choice()
-        notes = app.query_one("#latest-plan-notes", TextArea).text
+        await app.send_input()
+        message_text = app.query_one("#message", TextArea).text
 
     assert table.row_count == 2
     assert queued == [
         (
             "agent-1",
             "send_input",
-            {"message": "Selected plan option: B\n\nOperator notes:\nPrefer B."},
+            {
+                "message": "Selected plan option: B\n\nOperator notes:\nPrefer B.",
+                "plan_choice": {"label": "B", "option": "B"},
+            },
         )
     ]
     assert threads == ["agent-1"]
-    assert notes == ""
+    assert message_text == ""
 
 
-async def test_tui_send_plan_choice_to_tmux_uses_direct_pane() -> None:
+async def test_tui_plan_selection_command_to_tmux_uses_direct_pane() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     sent: list[tuple[str, str]] = []
     captures: list[str] = []
@@ -3381,8 +3595,9 @@ async def test_tui_send_plan_choice_to_tmux_uses_direct_pane() -> None:
         app.selected_agent_id = "agent-1"
         app.thread_items = {"report:r1": item}
         app.select_thread_item("report:r1")
-        app.query_one("#plan-notes", TextArea).text = "Go now."
-        await app.send_plan_choice_to_tmux()
+        app.active_agent_tab = "thread-tab"
+        app.query_one("#tmux-message", TextArea).text = "/plan:1 Go now."
+        await app.send_tmux_input()
 
     assert sent == [
         (
@@ -3428,6 +3643,93 @@ async def test_tui_follow_up_enter_sends_input() -> None:
     assert message.text == ""
 
 
+async def test_tui_follow_up_up_recalls_prior_sent_agent_messages() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": f"cmd-{len(queued)}"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.query_one("#agent-id", Input).value = "agent-1"
+        message = app.query_one("#message", TextArea)
+        message.text = "first prompt"
+        await app.send_input()
+        message.text = "second prompt"
+        await app.send_input()
+
+        await message._on_key(Key("up", None))
+        recalled_latest = message.text
+        await message._on_key(Key("up", None))
+        recalled_previous = message.text
+        await message._on_key(Key("down", None))
+        recalled_next = message.text
+
+    assert [item[2]["message"] for item in queued] == ["first prompt", "second prompt"]
+    assert recalled_latest == "second prompt"
+    assert recalled_previous == "first prompt"
+    assert recalled_next == "second prompt"
+
+
+async def test_tui_follow_up_up_does_not_replace_existing_draft() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.record_sent_message("agent-1", "sent prompt")
+        message = app.query_one("#message", TextArea)
+        message.text = "draft"
+        await message._on_key(Key("up", None))
+
+    assert message.text == "draft"
+
+
+async def test_tui_tmux_follow_up_up_recalls_prior_sent_messages() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        return None
+
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        message = app.query_one("#tmux-message", TextArea)
+        message.text = "tmux first"
+        await app.send_tmux_input()
+        message.text = "tmux second"
+        await app.send_tmux_input()
+
+        await message._on_key(Key("up", None))
+        recalled_latest = message.text
+        await message._on_key(Key("up", None))
+        recalled_previous = message.text
+
+    assert sent == [("agent-1", "tmux first"), ("agent-1", "tmux second")]
+    assert recalled_latest == "tmux second"
+    assert recalled_previous == "tmux first"
+
+
 async def test_tui_follow_up_shift_enter_inserts_newline_and_resizes() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -3457,6 +3759,14 @@ def test_tui_follow_up_newline_key_detection_accepts_terminal_variants() -> None
     assert is_follow_up_newline_key(Key("ctrl+enter", None)) is True
     assert is_follow_up_newline_key(Key("ctrl+j", None)) is True
     assert is_follow_up_newline_key(Key("enter", None)) is False
+
+
+def test_tui_slash_completion_key_detection_accepts_terminal_variants() -> None:
+    assert slash_completion_direction(Key("tab", "\t")) == 1
+    assert slash_completion_direction(Key("shift+tab", None)) == -1
+    assert slash_completion_direction(Key("shift_tab", None)) == -1
+    assert slash_completion_direction(Key("backtab", None)) == -1
+    assert slash_completion_direction(Key("enter", None)) is None
 
 
 def test_tui_follow_up_edit_key_detection_accepts_described_controls() -> None:

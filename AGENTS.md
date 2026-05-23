@@ -58,23 +58,27 @@ claim PBX queue pickup.
 If the operator says "use agent pbx for planning", treat it as report mode with
 extra emphasis on structured plan reporting. Before presenting plan choices,
 send `pbx_report_turn(needs_input=true, plan_options=[...])` so the TUI can
-open its plan-selection modal.
+show the choices in Latest and Thread.
 
 If the operator asks you to "use Agent PBX nohup", switch to nohup mode by
 registering or updating metadata with `pbx_mode="nohup"` and
 `pbx_nohup_explicit=true`. Nohup mode means reporting plus queued command
 pickup: poll with `pbx_poll_commands`, handle commands, ack them with
-`pbx_ack_command`, honor ping keepalives, and use the post-reply follow-up
-window. Do not infer nohup mode from queued commands, pings, plan requests, or
-the phrase "use Agent PBX"; it must be explicitly requested.
+`pbx_ack_command(agent_id=...)`, honor ping keepalives, and use the post-reply
+follow-up window. Do not infer nohup mode from queued commands, pings, plan
+requests, or the phrase "use Agent PBX"; it must be explicitly requested.
 
 When operator choice is needed, send `pbx_report_turn(needs_input=true,
 plan_options=[...])` with concise, mutually exclusive options. The TUI can queue
-the selected option back as `send_input`; treat a message beginning with
+the selected option back as `send_input`; in tmux direct mode it can send the
+same selection directly into the Codex pane. Treat a message beginning with
 `Selected plan option:` as the operator's chosen path, then report what you will
 do next and ack after handling. Do not only write choices in `summary` or
 `detail`; without `needs_input=true` and `plan_options`, the TUI can show the
-text but cannot provide plan-selection controls.
+text but cannot attach stable choice metadata. Operators reply with `/plan:1
+optional notes` or `/plan sel:1 optional notes`; the TUI converts that to the
+`Selected plan option:` message. Plan options may be strings or objects with
+`id`, `label`, and optional `description`.
 
 During long-running work that is progressing normally, send a
 `status="working"` `pbx_report_turn` check-in at least once every five minutes
@@ -94,7 +98,8 @@ a git repository, say so explicitly.
 In nohup mode, poll for queued operator commands with `pbx_poll_commands`
 before starting work, after each report, before finishing a turn, and
 periodically during long-running work. Handle every returned command in order,
-then call `pbx_ack_command` with the result. Do not poll as another agent ID.
+then call `pbx_ack_command` with this session's `agent_id` and the result. Do
+not poll as another agent ID.
 
 Polling is the alert pickup mechanism for PBX-queued follow-ups in nohup mode. A
 single long-poll call only watches one window; if the session remains live, keep
@@ -140,6 +145,9 @@ explicit nohup mode:
 - `request_detail`: send a new detailed `pbx_report_turn`; do not only ack it.
 - `send_input`: treat the message as operator follow-up and respond through a
   new `pbx_report_turn`.
+- `send_key`: if `payload.key` is `escape`, treat it as an operator Escape key
+  request. Send Escape to the local CLI when supported; otherwise report that
+  key injection is unavailable in this session, then ack.
 - `start_task`: begin the requested task and report that it started.
 - `cancel_task`: stop the current PBX-scoped task when safe and report what was
   stopped.

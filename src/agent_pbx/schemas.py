@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 CommandType = Literal[
     "request_detail",
     "send_input",
+    "send_key",
     "start_task",
     "cancel_task",
     "acknowledge",
@@ -51,13 +52,32 @@ class AgentResponse(BaseModel):
     latest_report_action_required: bool = False
 
 
+class StructuredPlanOption(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    label: str = Field(min_length=1, max_length=400)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+PlanOption = str | StructuredPlanOption
+
+
+def plan_option_to_jsonable(option: PlanOption) -> str | dict[str, str]:
+    if isinstance(option, StructuredPlanOption):
+        return option.model_dump(exclude_none=True)
+    return option
+
+
+def plan_options_to_jsonable(options: list[PlanOption]) -> list[str | dict[str, str]]:
+    return [plan_option_to_jsonable(option) for option in options]
+
+
 class ReportCreateRequest(BaseModel):
     project: str = Field(min_length=1, max_length=240)
     status: str = Field(default="done", max_length=40)
     summary: str = Field(min_length=1, max_length=4000)
     detail: str = Field(min_length=1)
     needs_input: bool = False
-    plan_options: list[str] = Field(default_factory=list)
+    plan_options: list[PlanOption] = Field(default_factory=list)
 
 
 class ReportResponse(BaseModel):
@@ -68,7 +88,7 @@ class ReportResponse(BaseModel):
     summary: str
     detail: str
     needs_input: bool
-    plan_options: list[str]
+    plan_options: list[PlanOption]
     created_at: float
 
 
@@ -79,6 +99,7 @@ class CommandCreateRequest(BaseModel):
 
 
 class CommandAckRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=120)
     result: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .schemas import AgentRegisterRequest, CommandCreateRequest, ReportCreateRequest
+from .schemas import (
+    AgentRegisterRequest,
+    CommandCreateRequest,
+    ReportCreateRequest,
+    plan_options_to_jsonable,
+)
 from .security import hash_secret, now_ts
 
 
@@ -397,7 +402,7 @@ class Store:
                     request.summary,
                     request.detail,
                     int(request.needs_input),
-                    json.dumps(request.plan_options),
+                    json.dumps(plan_options_to_jsonable(request.plan_options)),
                     current,
                 ),
             )
@@ -547,10 +552,12 @@ class Store:
                 conn.execute(
                     f"""
                     UPDATE commands
-                    SET status = 'delivered', claimed_at = ?
-                    WHERE command_id IN ({placeholders})
+                    SET status = 'delivered',
+                        claimed_at = ?,
+                        agent_id = COALESCE(agent_id, ?)
+                    WHERE command_id IN ({placeholders}) AND status = 'queued'
                     """,
-                    (current, *command_ids),
+                    (current, agent_id, *command_ids),
                 )
         return [self.get_command(command_id) for command_id in command_ids if command_id]
 
@@ -567,18 +574,20 @@ class Store:
             )
 
     def ack_command(
-        self, command_id: str, result: dict[str, Any] | None = None
+        self, command_id: str, agent_id: str, result: dict[str, Any] | None = None
     ) -> dict[str, Any] | None:
         current = now_ts()
         with self.connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE commands
                 SET status = 'acked', acked_at = ?, result_json = ?
-                WHERE command_id = ?
+                WHERE command_id = ? AND agent_id = ? AND status = 'delivered'
                 """,
-                (current, json.dumps(result or {}), command_id),
+                (current, json.dumps(result or {}), command_id, agent_id),
             )
+        if not cursor.rowcount:
+            return None
         return self.get_command(command_id)
 
     @staticmethod
@@ -775,6 +784,10 @@ class Store:
         if command["type"] == "send_input":
             title = "Follow-up input"
             body = str(payload.get("message") or payload)
+        elif command["type"] == "send_key":
+            key = str(payload.get("key") or "").strip() or "key"
+            title = f"Send key: {key}"
+            body = str(payload.get("request") or payload)
         elif command["type"] == "request_detail":
             title = "Detail request"
             body = str(payload.get("request") or payload)

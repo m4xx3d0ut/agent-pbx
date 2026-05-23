@@ -70,7 +70,11 @@ async def test_mcp_reporting_and_command_tools(tmp_path: Path) -> None:
     acked = tool_json(
         await mcp.call_tool(
             "pbx_ack_command",
-            {"command_id": command["command_id"], "result": {"ok": True}},
+            {
+                "command_id": command["command_id"],
+                "agent_id": "agent-1",
+                "result": {"ok": True},
+            },
         )
     )
     inactive = tool_json(
@@ -117,6 +121,67 @@ async def test_mcp_agent_runbook_tool(tmp_path: Path) -> None:
     assert any("alert pickup mechanism" in item for item in runbook["active_loop"])
     assert "request_detail" in runbook["commands"]
     assert any("pbx_set_active" in item for item in runbook["session_stop"])
+
+
+@pytest.mark.asyncio
+async def test_mcp_rejects_unknown_agents_and_invalid_acks(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {"agent_id": "agent-1", "project": "demo"},
+    )
+    command = tool_json(
+        await mcp.call_tool(
+            "pbx_queue_command",
+            {
+                "agent_id": "agent-1",
+                "command_type": "send_input",
+                "payload": {"message": "Proceed"},
+            },
+        )
+    )
+
+    with pytest.raises(Exception):
+        await mcp.call_tool(
+            "pbx_queue_command",
+            {
+                "agent_id": "missing",
+                "command_type": "send_input",
+                "payload": {"message": "Nope"},
+            },
+        )
+    with pytest.raises(Exception):
+        await mcp.call_tool(
+            "pbx_poll_commands", {"agent_id": "missing", "wait_seconds": 0}
+        )
+    with pytest.raises(Exception):
+        await mcp.call_tool(
+            "pbx_ack_command",
+            {
+                "command_id": command["command_id"],
+                "agent_id": "agent-1",
+                "result": {"ok": True},
+            },
+        )
+
+    await mcp.call_tool(
+        "pbx_poll_commands", {"agent_id": "agent-1", "wait_seconds": 0}
+    )
+    acked = tool_json(
+        await mcp.call_tool(
+            "pbx_ack_command",
+            {
+                "command_id": command["command_id"],
+                "agent_id": "agent-1",
+                "result": {"ok": True},
+            },
+        )
+    )
+
+    assert acked["status"] == "acked"
 
 
 @pytest.mark.asyncio

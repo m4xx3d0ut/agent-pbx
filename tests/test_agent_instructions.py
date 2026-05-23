@@ -37,7 +37,8 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "pbx_active=true" in instructions
     assert "pbx_mode=\"report\"" in instructions
     assert "use agent pbx for planning" in instructions
-    assert "plan-selection modal" in instructions
+    assert "/plan:1" in instructions
+    assert "show the choices in Latest and Thread" in instructions
     assert "use Agent PBX nohup" in instructions
     assert "pbx_nohup_explicit=true" in instructions
     assert "never call `pbx_poll_commands`" in instructions

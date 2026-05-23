@@ -47,7 +47,7 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
     agents_after_poll = client.get("/v1/agents")
     acked = client.post(
         f"/v1/commands/{command.json()['command_id']}/ack",
-        json={"result": {"ok": True}},
+        json={"agent_id": "agent-1", "result": {"ok": True}},
     )
     events = client.get("/v1/events")
 
@@ -110,7 +110,7 @@ def test_agent_thread_merges_reports_and_commands(tmp_path: Path) -> None:
     client.get("/v1/agents/agent-1/commands?wait_seconds=0")
     client.post(
         f"/v1/commands/{command['command_id']}/ack",
-        json={"result": {"ok": True}},
+        json={"agent_id": "agent-1", "result": {"ok": True}},
     )
 
     response = client.get("/v1/agents/agent-1/thread")
@@ -127,6 +127,163 @@ def test_agent_thread_merges_reports_and_commands(tmp_path: Path) -> None:
     assert thread[1]["title"] == "Ping"
     assert thread[1]["body"] == "Please pong"
     assert thread[1]["metadata"]["result"] == {"ok": True}
+
+
+def test_command_lifecycle_rejects_unknown_agents_and_invalid_acks(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-2", "project": "demo"},
+    )
+    command = client.post(
+        "/v1/commands",
+        json={
+            "agent_id": "agent-1",
+            "type": "send_input",
+            "payload": {"message": "Proceed"},
+        },
+    ).json()
+
+    unknown_target = client.post(
+        "/v1/commands",
+        json={
+            "agent_id": "missing",
+            "type": "send_input",
+            "payload": {"message": "Nope"},
+        },
+    )
+    unknown_poll = client.get("/v1/agents/missing/commands?wait_seconds=0")
+    early_ack = client.post(
+        f"/v1/commands/{command['command_id']}/ack",
+        json={"agent_id": "agent-1", "result": {"ok": True}},
+    )
+    client.get("/v1/agents/agent-1/commands?wait_seconds=0")
+    wrong_agent_ack = client.post(
+        f"/v1/commands/{command['command_id']}/ack",
+        json={"agent_id": "agent-2", "result": {"ok": True}},
+    )
+    valid_ack = client.post(
+        f"/v1/commands/{command['command_id']}/ack",
+        json={"agent_id": "agent-1", "result": {"ok": True}},
+    )
+    repeat_ack = client.post(
+        f"/v1/commands/{command['command_id']}/ack",
+        json={"agent_id": "agent-1", "result": {"ok": True}},
+    )
+
+    assert unknown_target.status_code == 404
+    assert unknown_poll.status_code == 404
+    assert early_ack.status_code == 409
+    assert early_ack.json()["detail"] == "command is queued, not delivered"
+    assert wrong_agent_ack.status_code == 409
+    assert wrong_agent_ack.json()["detail"] == "command is not owned by agent"
+    assert valid_ack.status_code == 200
+    assert valid_ack.json()["status"] == "acked"
+    assert repeat_ack.status_code == 409
+    assert repeat_ack.json()["detail"] == "command is acked, not delivered"
+
+
+def test_broadcast_command_is_claimed_by_first_polling_agent(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    for agent_id in ("agent-1", "agent-2"):
+        client.post(
+            "/v1/agents/register",
+            json={"agent_id": agent_id, "project": "demo"},
+        )
+    command = client.post(
+        "/v1/commands",
+        json={
+            "agent_id": None,
+            "type": "send_input",
+            "payload": {"message": "Broadcast"},
+        },
+    ).json()
+
+    first_poll = client.get("/v1/agents/agent-1/commands?wait_seconds=0")
+    second_poll = client.get("/v1/agents/agent-2/commands?wait_seconds=0")
+    thread_1 = client.get("/v1/agents/agent-1/thread").json()
+    thread_2 = client.get("/v1/agents/agent-2/thread").json()
+    ack = client.post(
+        f"/v1/commands/{command['command_id']}/ack",
+        json={"agent_id": "agent-1", "result": {"ok": True}},
+    )
+
+    assert first_poll.status_code == 200
+    assert first_poll.json()[0]["agent_id"] == "agent-1"
+    assert second_poll.json() == []
+    assert [item["item_id"] for item in thread_1] == [
+        f"command:{command['command_id']}"
+    ]
+    assert thread_2 == []
+    assert ack.status_code == 200
+
+
+def test_structured_plan_options_round_trip(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+
+    report = client.post(
+        "/v1/agents/agent-1/reports",
+        json={
+            "project": "demo",
+            "status": "needs_input",
+            "summary": "Choose",
+            "detail": "Pick one.",
+            "needs_input": True,
+            "plan_options": [
+                "Legacy",
+                {
+                    "id": "incremental",
+                    "label": "Incremental hardening",
+                    "description": "Fix lifecycle first.",
+                },
+            ],
+        },
+    )
+    latest = client.get("/v1/agents/agent-1/reports?limit=1")
+    thread = client.get("/v1/agents/agent-1/thread")
+
+    assert report.status_code == 200
+    assert latest.json()[0]["plan_options"][1] == {
+        "id": "incremental",
+        "label": "Incremental hardening",
+        "description": "Fix lifecycle first.",
+    }
+    assert thread.json()[0]["metadata"]["plan_options"][0] == "Legacy"
+    assert thread.json()[0]["metadata"]["plan_options"][1]["id"] == "incremental"
+
+
+def test_send_key_command_round_trip(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+
+    command = client.post(
+        "/v1/commands",
+        json={
+            "agent_id": "agent-1",
+            "type": "send_key",
+            "payload": {"key": "escape", "request": "Send Escape"},
+        },
+    )
+    polled = client.get("/v1/agents/agent-1/commands?wait_seconds=0")
+    thread = client.get("/v1/agents/agent-1/thread")
+
+    assert command.status_code == 200
+    assert command.json()["type"] == "send_key"
+    assert polled.json()[0]["payload"]["key"] == "escape"
+    assert thread.json()[0]["title"] == "Send key: escape"
 
 
 def test_working_agent_reports_effective_stale_status(tmp_path: Path) -> None:

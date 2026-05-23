@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -79,6 +80,7 @@ DEFAULT_TMUX_REFRESH_SECONDS = 1.5
 MIN_TMUX_REFRESH_SECONDS = 0.25
 FOLLOW_UP_MIN_HEIGHT = 8
 FOLLOW_UP_MAX_HEIGHT = 15
+SENT_MESSAGE_HISTORY_LIMIT = 100
 FOLLOW_UP_NEWLINE_KEYS = {
     "shift+enter",
     "shift+return",
@@ -90,6 +92,8 @@ FOLLOW_UP_NEWLINE_KEYS = {
 FOLLOW_UP_EDIT_KEYS = {
     "ctrl+w": "delete_word_left",
 }
+SLASH_COMPLETION_FORWARD_KEYS = {"tab"}
+SLASH_COMPLETION_BACKWARD_KEYS = {"shift+tab", "shift_tab", "backtab"}
 STALE_POLL_SECONDS = 120
 QUEUED_COMMAND_WARN_SECONDS = 60
 ACTIVE_POLL_SECONDS = 60
@@ -103,6 +107,11 @@ PLAN_PBX_CONTEXT_PROMPT = (
     "structured plan_options so the TUI can present selectable choices."
 )
 PLAN_SLASH_COMMAND = "/plan"
+PLAN_SELECTION_PATTERN = re.compile(
+    r"^/plan(?:\s+sel(?:ect)?)?\s*:?\s*(?P<index>[1-9][0-9]*)"
+    r"(?:\s+(?P<notes>.*))?$",
+    re.IGNORECASE | re.DOTALL,
+)
 AGENT_JUMP_KEYS = {
     "1": 0,
     "2": 1,
@@ -145,6 +154,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/detail",
     "/ping",
     "/cancel",
+    "/esc",
     "/tmux",
     "/workerbee",
     "/plan",
@@ -187,6 +197,55 @@ class CustomSlashCommand:
     @property
     def uses_arg(self) -> bool:
         return "{arg}" in self.prompt
+
+
+@dataclass(frozen=True)
+class PlanChoice:
+    label: str
+    id: str | None = None
+    description: str | None = None
+    raw: Any = None
+
+    @property
+    def display_label(self) -> str:
+        if self.description:
+            return f"{self.label}: {self.description}"
+        return self.label
+
+    def payload(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"label": self.label}
+        if self.id:
+            data["id"] = self.id
+        if self.description:
+            data["description"] = self.description
+        if self.raw is not None:
+            data["option"] = self.raw
+        return data
+
+
+@dataclass(frozen=True)
+class SlashCompletionContext:
+    input_id: str
+    line: int
+    start_col: int
+    end_col: int
+    prefix: str
+
+
+@dataclass(frozen=True)
+class SlashCompletionState:
+    input_id: str
+    line: int
+    start_col: int
+    original_prefix: str
+    matches: tuple[str, ...]
+    index: int
+
+
+@dataclass(frozen=True)
+class PlanSelection:
+    index: int
+    notes: str = ""
 
 
 CYBERPUNK_PALETTE = {
@@ -635,6 +694,59 @@ def list_value(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def plan_choice_from_value(value: Any) -> PlanChoice | None:
+    if isinstance(value, str):
+        label = value.strip()
+        return PlanChoice(label=label, raw=value) if label else None
+    if isinstance(value, dict):
+        raw_id = value.get("id")
+        option_id = str(raw_id).strip() if raw_id is not None else None
+        raw_label = value.get("label")
+        label = str(raw_label).strip() if raw_label is not None else ""
+        if not label and option_id:
+            label = option_id
+        raw_description = value.get("description")
+        description = (
+            str(raw_description).strip() if raw_description is not None else None
+        )
+        if description == "":
+            description = None
+        return (
+            PlanChoice(
+                label=label,
+                id=option_id or None,
+                description=description,
+                raw=value,
+            )
+            if label
+            else None
+        )
+    label = str(value).strip()
+    return PlanChoice(label=label, raw=value) if label else None
+
+
+def plan_choices_from_value(value: object) -> list[PlanChoice]:
+    choices: list[PlanChoice] = []
+    for option in list_value(value):
+        choice = plan_choice_from_value(option)
+        if choice is not None:
+            choices.append(choice)
+    return choices
+
+
+def parse_plan_selection_command(message: str) -> PlanSelection | None:
+    match = PLAN_SELECTION_PATTERN.match(message.strip())
+    if match is None:
+        return None
+    index = int(match.group("index"))
+    notes = (match.group("notes") or "").strip()
+    return PlanSelection(index=index, notes=notes)
+
+
+def is_plan_toggle_message(message: str) -> bool:
+    return message.strip().lower() == PLAN_SLASH_COMMAND
+
+
 def format_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     if seconds < 60:
@@ -654,6 +766,25 @@ def format_count(value: int) -> str:
 
 class FollowUpTextArea(TextArea):
     async def _on_key(self, event: Key) -> None:
+        completion_direction = slash_completion_direction(event)
+        if completion_direction is not None:
+            complete = getattr(self.app, "complete_slash_command", None)
+            if complete is not None and complete(self, direction=completion_direction):
+                event.stop()
+                event.prevent_default()
+                return
+        if event.key == "up":
+            recall = getattr(self.app, "recall_sent_message", None)
+            if recall is not None and recall(self, direction=-1):
+                event.stop()
+                event.prevent_default()
+                return
+        if event.key == "down":
+            recall = getattr(self.app, "recall_sent_message", None)
+            if recall is not None and recall(self, direction=1):
+                event.stop()
+                event.prevent_default()
+                return
         if is_follow_up_newline_key(event):
             event.stop()
             event.prevent_default()
@@ -679,87 +810,6 @@ class FollowUpTextArea(TextArea):
                 )
             return
         await super()._on_key(event)
-
-
-class PlanChoiceScreen(ModalScreen[None]):
-    BINDINGS = [("escape", "dismiss", "Close")]
-
-    def __init__(
-        self,
-        *,
-        agent_id: str,
-        source: str,
-        options: list[str],
-        selected_index: int = 0,
-        tmux_enabled: bool = False,
-    ) -> None:
-        super().__init__()
-        self.agent_id = agent_id
-        self.source = source
-        self.options = options
-        self.selected_index = selected_index if 0 <= selected_index < len(options) else 0
-        self.tmux_enabled = tmux_enabled
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="palette-plan-panel"):
-            yield Static(f"Plan Choice: {self.agent_id}", id="palette-plan-title")
-            yield Static(self.source, id="palette-plan-source")
-            yield Select(
-                [(option, str(index)) for index, option in enumerate(self.options)],
-                value=str(self.selected_index),
-                allow_blank=False,
-                id="palette-plan-option",
-            )
-            yield TextArea(id="palette-plan-notes", soft_wrap=True)
-            with Horizontal(id="palette-plan-actions"):
-                yield Button(
-                    "Send via PBX",
-                    id="palette-plan-send-pbx",
-                    variant="primary",
-                )
-                send_tmux = Button("Send to tmux", id="palette-plan-send-tmux")
-                send_tmux.disabled = not self.tmux_enabled
-                yield send_tmux
-                yield Button("Cancel", id="palette-plan-cancel")
-
-    def selected_option(self) -> str | None:
-        select = self.query_one("#palette-plan-option", Select)
-        index = int_value(select.value)
-        if index is None or index < 0 or index >= len(self.options):
-            return None
-        return self.options[index]
-
-    def submit(self, *, via_tmux: bool) -> None:
-        option = self.selected_option()
-        if option is None:
-            self.notify("Select a plan option first.", severity="warning")
-            return
-        notes = self.query_one("#palette-plan-notes", TextArea).text
-        app = self.app
-        app.run_worker(  # type: ignore[attr-defined]
-            app.submit_palette_plan_choice(  # type: ignore[attr-defined]
-                self.agent_id,
-                option,
-                notes,
-                via_tmux=via_tmux,
-            ),
-            name="palette-plan-choice",
-            exclusive=True,
-        )
-        self.dismiss()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "palette-plan-cancel":
-            event.stop()
-            self.dismiss()
-            return
-        if event.button.id == "palette-plan-send-pbx":
-            event.stop()
-            self.submit(via_tmux=False)
-            return
-        if event.button.id == "palette-plan-send-tmux":
-            event.stop()
-            self.submit(via_tmux=True)
 
 
 class GitDiffScreen(ModalScreen[None]):
@@ -876,6 +926,15 @@ def follow_up_edit_control(event: Key) -> str | None:
     for name in normalized_key_names(event):
         if edit := FOLLOW_UP_EDIT_KEYS.get(name):
             return edit
+    return None
+
+
+def slash_completion_direction(event: Key) -> int | None:
+    names = normalized_key_names(event)
+    if names & SLASH_COMPLETION_FORWARD_KEYS:
+        return 1
+    if names & SLASH_COMPLETION_BACKWARD_KEYS:
+        return -1
     return None
 
 
@@ -1087,47 +1146,6 @@ class AgentPBXTUI(App[None]):
     Screen.custom-theme TextArea.-read-only .text-area--cursor {
         background: $warning;
         color: $background;
-    }
-
-    PlanChoiceScreen {
-        align: center middle;
-    }
-
-    #palette-plan-panel {
-        width: 78;
-        max-width: 92%;
-        height: auto;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #palette-plan-title {
-        height: 1;
-        content-align: center middle;
-        text-style: bold;
-    }
-
-    #palette-plan-source {
-        height: 1;
-        color: $secondary;
-        content-align: center middle;
-    }
-
-    #palette-plan-option {
-        height: 3;
-    }
-
-    #palette-plan-notes {
-        height: 8;
-    }
-
-    #palette-plan-actions {
-        height: 3;
-    }
-
-    #palette-plan-actions Button {
-        width: 1fr;
     }
 
     GitDiffScreen {
@@ -1391,7 +1409,7 @@ class AgentPBXTUI(App[None]):
     #latest-plan-choice-panel,
     #plan-choice-panel {
         display: none;
-        height: 13;
+        height: 8;
         min-height: 0;
         border: tall $secondary;
         padding: 0 1;
@@ -1409,24 +1427,10 @@ class AgentPBXTUI(App[None]):
         height: 4;
     }
 
-    #latest-plan-notes,
-    #plan-notes {
-        height: 4;
-        min-height: 3;
-        max-height: 8;
-        border: tall $accent;
-        background: $surface;
-        scrollbar-size: 0 1;
-    }
-
-    #latest-plan-actions,
-    #plan-actions {
-        height: 3;
-    }
-
-    #latest-plan-actions Button,
-    #plan-actions Button {
-        width: 1fr;
+    #latest-plan-hint,
+    #plan-hint {
+        height: 1;
+        color: $secondary;
     }
 
     #thread-actions {
@@ -1758,11 +1762,21 @@ class AgentPBXTUI(App[None]):
         self.attention_blink_phase = False
         self.attention_agent_id: str | None = None
         self.pending_slash_command_by_agent: dict[str, str] = {}
+        self.plan_mode_active_agent_ids: set[str] = set()
+        self.sent_message_history_by_agent: dict[str, list[str]] = {}
+        self.sent_message_history_cursor: dict[tuple[str, str], int] = {}
+        self.slash_completion_state: dict[str, SlashCompletionState] = {}
         self.event_stream_disconnected = False
         self.last_seen_event_id = int_setting(self.settings, "last_seen_event_id", 0)
         self.flash_generation = 0
         self.agent_jump_prefix_pending = False
         self.agent_jump_prefix_generation = 0
+        self.http_client: httpx.AsyncClient | None = None
+
+    def api_client(self) -> httpx.AsyncClient:
+        if self.http_client is None:
+            self.http_client = httpx.AsyncClient(base_url=self.server, timeout=10)
+        return self.http_client
 
     def composer_hotkeys_text(self) -> str:
         text = "Enter send | Ctrl+J newline | Ctrl+W word"
@@ -1810,20 +1824,10 @@ class AgentPBXTUI(App[None]):
                                 cursor_type="row",
                                 show_row_labels=False,
                             )
-                            yield TextArea(
-                                id="latest-plan-notes",
-                                soft_wrap=True,
+                            yield Static(
+                                "Reply with /plan:1 optional notes.",
+                                id="latest-plan-hint",
                             )
-                            with Horizontal(id="latest-plan-actions"):
-                                yield Button(
-                                    "Send Plan Choice",
-                                    id="latest-send-plan-choice",
-                                    variant="primary",
-                                )
-                                yield Button(
-                                    "Send to Codex Pane",
-                                    id="latest-send-plan-tmux",
-                                )
                         with Vertical(id="tmux-panel"):
                             yield Static("Tmux: -", id="tmux-status")
                             yield TextArea(id="tmux-stream", read_only=True)
@@ -1874,20 +1878,10 @@ class AgentPBXTUI(App[None]):
                                 cursor_type="row",
                                 show_row_labels=False,
                             )
-                            yield TextArea(
-                                id="plan-notes",
-                                soft_wrap=True,
+                            yield Static(
+                                "Reply with /plan:1 optional notes.",
+                                id="plan-hint",
                             )
-                            with Horizontal(id="plan-actions"):
-                                yield Button(
-                                    "Send Plan Choice",
-                                    id="send-plan-choice",
-                                    variant="primary",
-                                )
-                                yield Button(
-                                    "Send to Codex Pane",
-                                    id="send-plan-tmux",
-                                )
                         with Horizontal(id="thread-actions"):
                             yield Button("Export Item", id="export-item")
                             yield Button("Export Marked", id="export-marked")
@@ -1901,6 +1895,7 @@ class AgentPBXTUI(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
+        self.api_client()
         self.apply_theme_class()
         self.update_effective_layout()
         self.apply_layout_class()
@@ -1925,17 +1920,23 @@ class AgentPBXTUI(App[None]):
         self.set_interval(0.8, self.toggle_unseen_attention)
         self.run_worker(self.stream_events(), name="events", exclusive=True)
 
+    async def on_unmount(self) -> None:
+        if self.http_client is not None:
+            await self.http_client.aclose()
+            self.http_client = None
+
     def get_system_commands(self, screen: Any) -> Iterable[SystemCommand]:
         yield from super().get_system_commands(screen)
         yield SystemCommand("/refresh", "Refresh agents, events, and selected agent", self.palette_refresh)
         yield SystemCommand("/detail", "Request detail for the selected agent", self.palette_request_detail)
         yield SystemCommand("/ping", "Ping the selected nohup-mode agent", self.palette_ping)
         yield SystemCommand("/cancel", "Mark the selected agent canceled", self.palette_mark_canceled)
+        yield SystemCommand("/esc", "Send Escape to the selected agent", self.palette_escape)
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
-        yield SystemCommand("/plan", "Send /plan before the selected agent's next prompt", self.palette_prime_plan_prompt)
-        yield SystemCommand("/plan latest", "Choose from latest report plan options", self.palette_plan_latest)
-        yield SystemCommand("/plan thread", "Choose from selected thread plan options", self.palette_plan_thread)
+        yield SystemCommand("/plan", "Toggle plan mode for the selected agent", self.palette_toggle_plan_mode)
+        yield SystemCommand("/plan latest", "Show latest report plan options", self.palette_plan_latest)
+        yield SystemCommand("/plan thread", "Show selected thread plan options", self.palette_plan_thread)
         yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
         yield from self.palette_dynamic_plan_commands()
         if self.tmux_direct_enabled:
@@ -1980,6 +1981,11 @@ class AgentPBXTUI(App[None]):
         if self.palette_agent_id() is None:
             return
         self.run_worker(self.mark_agent_canceled(), name="palette-cancel", exclusive=True)
+
+    def palette_escape(self) -> None:
+        if self.palette_agent_id() is None:
+            return
+        self.run_worker(self.send_escape_key(), name="palette-esc", exclusive=True)
 
     def palette_toggle_tmux(self) -> None:
         self.run_worker(self.action_toggle_tmux_direct(), name="palette-tmux", exclusive=True)
@@ -2112,14 +2118,24 @@ class AgentPBXTUI(App[None]):
         self.notify(f"{label} sent to tmux for {agent_id}.")
         await self.load_tmux_capture(agent_id)
 
-    def palette_prime_plan_prompt(self) -> None:
+    def palette_toggle_plan_mode(self) -> None:
         agent_id = self.palette_agent_id()
         if agent_id is None:
             return
-        self.pending_slash_command_by_agent[agent_id] = PLAN_SLASH_COMMAND
-        self.notify(
-            f"Next prompt for {agent_id} will start plan mode with Agent PBX instructions."
+        state = self.plan_mode_state(agent_id)
+        if state == "pending":
+            self.pending_slash_command_by_agent.pop(agent_id, None)
+            self.update_agent_title()
+            self.notify(f"Plan mode canceled for {agent_id}; /plan was not sent.")
+            return
+        self.run_worker(
+            self.toggle_sent_plan_mode(agent_id),
+            name=f"plan-toggle-{slugify(agent_id)}",
+            exclusive=True,
         )
+
+    def palette_prime_plan_prompt(self) -> None:
+        self.palette_toggle_plan_mode()
 
     def palette_plan_latest(self) -> None:
         context = self.palette_latest_plan_context()
@@ -2127,13 +2143,7 @@ class AgentPBXTUI(App[None]):
             self.notify("No latest plan options for the selected agent.", severity="warning")
             return
         agent_id, options = context
-        selected_index = self.selected_latest_plan_option_index or 0
-        self.open_palette_plan_choice(
-            agent_id,
-            "Latest report",
-            options,
-            selected_index=selected_index,
-        )
+        self.show_plan_options_for_reply(agent_id, options, source="latest report")
 
     def palette_plan_thread(self) -> None:
         context = self.palette_thread_plan_context()
@@ -2141,15 +2151,9 @@ class AgentPBXTUI(App[None]):
             self.notify("No selected thread plan options.", severity="warning")
             return
         agent_id, options = context
-        selected_index = self.selected_plan_option_index or 0
-        self.open_palette_plan_choice(
-            agent_id,
-            "Selected thread item",
-            options,
-            selected_index=selected_index,
-        )
+        self.show_plan_options_for_reply(agent_id, options, source="thread item")
 
-    def palette_latest_plan_context(self) -> tuple[str, list[str]] | None:
+    def palette_latest_plan_context(self) -> tuple[str, list[PlanChoice]] | None:
         agent_id = self.palette_context_agent_id()
         if agent_id is None:
             return None
@@ -2158,7 +2162,7 @@ class AgentPBXTUI(App[None]):
             return None
         return agent_id, options
 
-    def palette_thread_plan_context(self) -> tuple[str, list[str]] | None:
+    def palette_thread_plan_context(self) -> tuple[str, list[PlanChoice]] | None:
         agent_id = self.palette_context_agent_id()
         if agent_id is None:
             return None
@@ -2196,8 +2200,8 @@ class AgentPBXTUI(App[None]):
             for index, option in enumerate(options):
                 yield SystemCommand(
                     f"/plan latest {index + 1}: {self.palette_option_label(option)}",
-                    f"Open latest plan option {index + 1} for {agent_id}",
-                    lambda index=index: self.palette_open_latest_plan_option(index),
+                    f"Prepare /plan:{index + 1} reply for {agent_id}",
+                    lambda index=index: self.palette_prepare_latest_plan_option(index),
                 )
         thread = self.palette_thread_plan_context()
         if thread is not None:
@@ -2205,90 +2209,72 @@ class AgentPBXTUI(App[None]):
             for index, option in enumerate(options):
                 yield SystemCommand(
                     f"/plan thread {index + 1}: {self.palette_option_label(option)}",
-                    f"Open thread plan option {index + 1} for {agent_id}",
-                    lambda index=index: self.palette_open_thread_plan_option(index),
+                    f"Prepare /plan:{index + 1} reply for {agent_id}",
+                    lambda index=index: self.palette_prepare_thread_plan_option(index),
                 )
 
-    def palette_option_label(self, option: str) -> str:
-        label = " ".join(option.strip().split())
+    def palette_option_label(self, option: PlanChoice | str) -> str:
+        choice = option if isinstance(option, PlanChoice) else plan_choice_from_value(option)
+        label = " ".join((choice.display_label if choice else "").strip().split())
         if len(label) > 72:
             return f"{label[:69]}..."
         return label
 
-    def palette_open_latest_plan_option(self, selected_index: int) -> None:
+    def palette_prepare_latest_plan_option(self, selected_index: int) -> None:
         context = self.palette_latest_plan_context()
         if context is None:
             self.notify("No latest plan options for the selected agent.", severity="warning")
             return
         agent_id, options = context
-        self.open_palette_plan_choice(
-            agent_id,
-            "Latest report",
-            options,
-            selected_index=selected_index,
-        )
+        self.prepare_plan_selection_reply(agent_id, selected_index, options)
 
-    def palette_open_thread_plan_option(self, selected_index: int) -> None:
+    def palette_prepare_thread_plan_option(self, selected_index: int) -> None:
         context = self.palette_thread_plan_context()
         if context is None:
             self.notify("No selected thread plan options.", severity="warning")
             return
         agent_id, options = context
-        self.open_palette_plan_choice(
-            agent_id,
-            "Selected thread item",
-            options,
-            selected_index=selected_index,
-        )
+        self.prepare_plan_selection_reply(agent_id, selected_index, options)
 
-    def open_palette_plan_choice(
+    def show_plan_options_for_reply(
         self,
         agent_id: str,
+        options: list[PlanChoice],
+        *,
         source: str,
-        options: list[str],
-        *,
-        selected_index: int = 0,
     ) -> None:
-        self.push_screen(
-            PlanChoiceScreen(
-                agent_id=agent_id,
-                source=source,
-                options=options,
-                selected_index=selected_index,
-                tmux_enabled=self.tmux_direct_enabled,
-            )
+        self.activate_latest_tab()
+        self.notify(
+            f"{len(options)} plan option(s) in {source}; reply with /plan:1 optional notes."
         )
 
-    async def submit_palette_plan_choice(
+    def prepare_plan_selection_reply(
         self,
         agent_id: str,
-        option: str,
-        notes: str = "",
-        *,
-        via_tmux: bool = False,
+        selected_index: int,
+        options: list[PlanChoice],
     ) -> None:
-        message = self.plan_choice_message(option, notes)
-        if via_tmux:
-            if not self.tmux_direct_enabled:
-                self.notify(
-                    "Enable tmux direct mode before sending to Codex pane.",
-                    severity="warning",
-                )
-                return
-            sent = await self.send_text_to_tmux(agent_id, message)
-            if not sent:
-                return
-            self.notify(f"Sent plan choice to Codex pane for {agent_id}.")
-            await self.load_tmux_capture(agent_id)
+        if selected_index < 0 or selected_index >= len(options):
+            self.notify("Plan option is no longer available.", severity="warning")
             return
-        command = await self.queue_command(
-            agent_id,
-            "send_input",
-            {"message": message},
-        )
-        self.notify_queued_command(agent_id, "Plan choice", command)
-        await self.refresh_events()
-        await self.load_thread(agent_id)
+        self.selected_agent_id = agent_id
+        self.query_one("#agent-id", Input).value = agent_id
+        command = f"/plan:{selected_index + 1} "
+        if self.tmux_direct_enabled:
+            target = self.query_one_or_none("#tmux-message", TextArea)
+            if target is None:
+                return
+            target.text = command
+            target.focus()
+        else:
+            target = self.query_one_or_none("#message", TextArea)
+            if target is None:
+                return
+            target.text = command
+            target.focus()
+            self.resize_message_input()
+        self.update_agent_title()
+        self.notify(f"Prepared {command.strip()} for {agent_id}; add notes and press Enter.")
 
     def palette_hide_agent(self) -> None:
         self.run_worker(
@@ -2390,22 +2376,8 @@ class AgentPBXTUI(App[None]):
         if enabled:
             self.tmux_detached_agent_ids.clear()
         self.apply_tmux_class()
-        self.update_plan_tmux_button_state()
         self.save_settings()
         return enabled
-
-    def update_plan_tmux_button_state(self) -> None:
-        send_tmux = self.query_one_or_none("#send-plan-tmux", Button)
-        if send_tmux is not None:
-            send_tmux.disabled = (
-                not self.tmux_direct_enabled or self.selected_plan_option() is None
-            )
-        latest_send_tmux = self.query_one_or_none("#latest-send-plan-tmux", Button)
-        if latest_send_tmux is not None:
-            latest_send_tmux.disabled = (
-                not self.tmux_direct_enabled
-                or self.selected_latest_plan_option() is None
-            )
 
     def query_one_or_none(
         self, selector: str, widget_type: type[WidgetType]
@@ -2536,10 +2508,11 @@ class AgentPBXTUI(App[None]):
 
     async def refresh_agents(self) -> None:
         try:
-            async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
-                response = await client.get("/v1/agents", headers=auth_headers(self.token))
-                response.raise_for_status()
-                agents = response.json()
+            response = await self.api_client().get(
+                "/v1/agents", headers=auth_headers(self.token)
+            )
+            response.raise_for_status()
+            agents = response.json()
         except Exception as exc:
             detail = self.query_one_or_none("#detail", TextArea)
             if detail is not None:
@@ -2986,10 +2959,11 @@ class AgentPBXTUI(App[None]):
 
     async def refresh_events(self) -> None:
         try:
-            async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
-                response = await client.get("/v1/events", headers=auth_headers(self.token))
-                response.raise_for_status()
-                self.events = response.json()[-50:]
+            response = await self.api_client().get(
+                "/v1/events", headers=auth_headers(self.token)
+            )
+            response.raise_for_status()
+            self.events = response.json()[-50:]
         except Exception:
             return
         previous_last_seen_event_id = self.last_seen_event_id
@@ -3069,6 +3043,232 @@ class AgentPBXTUI(App[None]):
         if event.text_area.id == "message":
             self.resize_message_input()
 
+    def sent_history_agent_id(self, text_area: TextArea) -> str | None:
+        if text_area.id == "tmux-message":
+            agent_id = self.selected_agent_id
+            if agent_id:
+                return agent_id
+        agent_input = self.query_one_or_none("#agent-id", Input)
+        if agent_input is not None and agent_input.value.strip():
+            return agent_input.value.strip()
+        return self.selected_agent_id
+
+    def record_sent_message(self, agent_id: str, message: str) -> None:
+        if not message.strip():
+            return
+        history = self.sent_message_history_by_agent.setdefault(agent_id, [])
+        if not history or history[-1] != message:
+            history.append(message)
+        if len(history) > SENT_MESSAGE_HISTORY_LIMIT:
+            del history[: len(history) - SENT_MESSAGE_HISTORY_LIMIT]
+        self.sent_message_history_cursor = {
+            key: value
+            for key, value in self.sent_message_history_cursor.items()
+            if key[0] != agent_id
+        }
+
+    def recall_sent_message(self, text_area: TextArea, *, direction: int) -> bool:
+        agent_id = self.sent_history_agent_id(text_area)
+        if not agent_id:
+            return False
+        history = self.sent_message_history_by_agent.get(agent_id) or []
+        if not history:
+            return False
+        input_id = text_area.id or "message"
+        key = (agent_id, input_id)
+        current = self.sent_message_history_cursor.get(key)
+        current_text = text_area.text
+        if current is None:
+            if current_text.strip():
+                return False
+            next_index = len(history) - 1
+        elif 0 <= current < len(history) and current_text == history[current]:
+            next_index = current + direction
+            if next_index >= len(history):
+                text_area.text = ""
+                self.sent_message_history_cursor.pop(key, None)
+                if text_area.id == "message":
+                    self.resize_message_input()
+                return True
+            next_index = max(0, next_index)
+        elif current_text.strip():
+            return False
+        else:
+            next_index = len(history) - 1
+        text_area.text = history[next_index]
+        last_line = text_area.text.split("\n")[-1]
+        text_area.move_cursor((text_area.text.count("\n"), len(last_line)))
+        self.sent_message_history_cursor[key] = next_index
+        if text_area.id == "message":
+            self.resize_message_input()
+        return True
+
+    def slash_command_entries(self) -> list[SystemCommand]:
+        entries: list[SystemCommand] = []
+        seen: set[str] = set()
+        for command in self.get_system_commands(self.screen):
+            title = command.title.strip()
+            key = title.lower()
+            if not title.startswith("/") or key in seen:
+                continue
+            seen.add(key)
+            entries.append(command)
+        return entries
+
+    def slash_command_titles(self) -> list[str]:
+        return [command.title for command in self.slash_command_entries()]
+
+    def slash_command_for_text(self, text: str) -> SystemCommand | None:
+        stripped = text.strip()
+        if not stripped or "\n" in stripped:
+            return None
+        for command in self.slash_command_entries():
+            if command.title.lower() == stripped.lower():
+                return command
+        return None
+
+    def slash_completion_context(
+        self, text_area: TextArea
+    ) -> SlashCompletionContext | None:
+        input_id = text_area.id or "message"
+        row, column = text_area.cursor_location
+        lines = text_area.text.split("\n")
+        if row < 0 or row >= len(lines):
+            return None
+        line = lines[row]
+        column = min(max(0, column), len(line))
+        if not line.startswith("/") or column == 0:
+            return None
+        suffix = line[column:]
+        if suffix.strip():
+            return None
+        prefix = line[:column]
+        if not prefix.startswith("/"):
+            return None
+        return SlashCompletionContext(
+            input_id=input_id,
+            line=row,
+            start_col=0,
+            end_col=column,
+            prefix=prefix,
+        )
+
+    def slash_completion_matches(self, prefix: str) -> tuple[str, ...]:
+        prefix_key = prefix.lower()
+        return tuple(
+            title
+            for title in self.slash_command_titles()
+            if title.lower().startswith(prefix_key)
+        )
+
+    def slash_completion_index(
+        self,
+        context: SlashCompletionContext,
+        matches: tuple[str, ...],
+        *,
+        direction: int,
+    ) -> int:
+        state = self.slash_completion_state.get(context.input_id)
+        if (
+            state is not None
+            and state.line == context.line
+            and state.start_col == context.start_col
+            and state.matches == matches
+            and 0 <= state.index < len(matches)
+            and context.prefix.lower() == matches[state.index].lower()
+        ):
+            return (state.index + direction) % len(matches)
+        exact_index = next(
+            (
+                index
+                for index, title in enumerate(matches)
+                if title.lower() == context.prefix.lower()
+            ),
+            None,
+        )
+        if exact_index is not None:
+            if len(matches) == 1:
+                return exact_index
+            return (exact_index + direction) % len(matches)
+        return 0 if direction > 0 else len(matches) - 1
+
+    def apply_slash_completion(
+        self,
+        text_area: TextArea,
+        context: SlashCompletionContext,
+        completion: str,
+    ) -> None:
+        lines = text_area.text.split("\n")
+        line = lines[context.line]
+        lines[context.line] = (
+            line[: context.start_col] + completion + line[context.end_col :]
+        )
+        text_area.text = "\n".join(lines)
+        text_area.move_cursor((context.line, context.start_col + len(completion)))
+        if text_area.id == "message":
+            self.resize_message_input()
+
+    def complete_slash_command(self, text_area: TextArea, *, direction: int) -> bool:
+        context = self.slash_completion_context(text_area)
+        if context is None:
+            return False
+        state = self.slash_completion_state.get(context.input_id)
+        if (
+            state is not None
+            and state.line == context.line
+            and state.start_col == context.start_col
+            and 0 <= state.index < len(state.matches)
+            and context.prefix.lower() == state.matches[state.index].lower()
+        ):
+            matches = state.matches
+        else:
+            matches = self.slash_completion_matches(context.prefix)
+        if not matches:
+            self.slash_completion_state.pop(context.input_id, None)
+            self.notify(
+                f"No slash command matches {context.prefix!r}.",
+                severity="warning",
+            )
+            return True
+        index = self.slash_completion_index(context, matches, direction=direction)
+        completion = matches[index]
+        self.apply_slash_completion(text_area, context, completion)
+        self.slash_completion_state[context.input_id] = SlashCompletionState(
+            input_id=context.input_id,
+            line=context.line,
+            start_col=context.start_col,
+            original_prefix=context.prefix,
+            matches=matches,
+            index=index,
+        )
+        return True
+
+    async def execute_local_slash_command_from_input(
+        self,
+        text_area: TextArea,
+        message: str,
+    ) -> bool:
+        command = self.slash_command_for_text(message)
+        if command is None:
+            return False
+        agent_id = self.sent_history_agent_id(text_area)
+        if agent_id:
+            self.selected_agent_id = agent_id
+            agent_input = self.query_one_or_none("#agent-id", Input)
+            if agent_input is not None:
+                agent_input.value = agent_id
+        original_text = text_area.text
+        result = command.callback()
+        if inspect.isawaitable(result):
+            await result
+        if agent_id:
+            self.record_sent_message(agent_id, message)
+        if text_area.text == original_text:
+            text_area.text = ""
+            if text_area.id == "message":
+                self.resize_message_input()
+        return True
+
     def on_tabbed_content_tab_activated(
         self, event: TabbedContent.TabActivated
     ) -> None:
@@ -3096,9 +3296,7 @@ class AgentPBXTUI(App[None]):
         was_compact_home = self.is_compact_layout() and self.compact_view == "home"
         self.selected_agent_id = agent_id
         self.query_one("#agent-id", Input).value = self.selected_agent_id
-        agent_title = self.query_one_or_none("#agent-title", Static)
-        if agent_title is not None:
-            agent_title.update(f"Agent: {agent_id}")
+        self.update_agent_title()
         if self.is_compact_layout():
             self.show_compact_agent()
         if was_compact_home or self.active_agent_tab in {"latest-tab", "thread-tab"}:
@@ -3108,6 +3306,26 @@ class AgentPBXTUI(App[None]):
             self.mark_latest_seen(agent_id)
         elif self.active_agent_tab == "workerbee-tab":
             await self.load_workerbee_status(agent_id)
+
+    def plan_mode_state(self, agent_id: str | None) -> str:
+        if not agent_id:
+            return "off"
+        if self.pending_slash_command_by_agent.get(agent_id) == PLAN_SLASH_COMMAND:
+            return "pending"
+        if agent_id in self.plan_mode_active_agent_ids:
+            return "on"
+        return "off"
+
+    def update_agent_title(self) -> None:
+        title = self.query_one_or_none("#agent-title", Static)
+        if title is None:
+            return
+        agent_id = self.selected_agent_id
+        if not agent_id:
+            title.update("Agent: -")
+            return
+        state = self.plan_mode_state(agent_id)
+        title.update(f"Agent: {agent_id} | Plan: {state}")
 
     def activate_latest_tab(self) -> None:
         tabs = self.query_one("#agent-tabs", TabbedContent)
@@ -3141,14 +3359,13 @@ class AgentPBXTUI(App[None]):
         if detail is None:
             return
         try:
-            async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
-                response = await client.get(
-                    f"/v1/agents/{agent_id}/reports",
-                    params={"limit": 1},
-                    headers=auth_headers(self.token),
-                )
-                response.raise_for_status()
-                reports = response.json()
+            response = await self.api_client().get(
+                f"/v1/agents/{agent_id}/reports",
+                params={"limit": 1},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            reports = response.json()
         except Exception as exc:
             detail.text = f"Unable to load report for {agent_id}: {exc}"
             self.render_latest_plan_choice_panel(None)
@@ -3160,11 +3377,7 @@ class AgentPBXTUI(App[None]):
             return
         report = reports[0]
         self.latest_report_by_agent[agent_id] = report
-        plan_options = [
-            str(option)
-            for option in list_value(report.get("plan_options"))
-            if str(option).strip()
-        ]
+        plan_options = self.plan_options_for_report(report)
         lines = [
             f"Agent: {report['agent_id']}",
             f"Status: {report['status']}",
@@ -3174,7 +3387,13 @@ class AgentPBXTUI(App[None]):
             str(report["detail"]),
         ]
         if plan_options:
-            lines.extend(["", "Plan Options:", *[f"- {option}" for option in plan_options]])
+            lines.extend(
+                [
+                    "",
+                    "Plan Options:",
+                    *[f"- {option.display_label}" for option in plan_options],
+                ]
+            )
         detail.text = "\n".join(lines)
         self.render_latest_plan_choice_panel(report)
 
@@ -3433,14 +3652,13 @@ class AgentPBXTUI(App[None]):
     async def load_thread(self, agent_id: str) -> None:
         thread_detail = self.query_one("#thread-detail", TextArea)
         try:
-            async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
-                response = await client.get(
-                    f"/v1/agents/{agent_id}/thread",
-                    params={"limit": 100},
-                    headers=auth_headers(self.token),
-                )
-                response.raise_for_status()
-                thread = response.json()
+            response = await self.api_client().get(
+                f"/v1/agents/{agent_id}/thread",
+                params={"limit": 100},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            thread = response.json()
         except Exception as exc:
             self.thread_items = {}
             self.thread_order = []
@@ -3516,18 +3734,6 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "delete-queued":
             await self.delete_queued_thread_commands()
             return
-        if event.button.id == "send-plan-choice":
-            await self.send_plan_choice()
-            return
-        if event.button.id == "send-plan-tmux":
-            await self.send_plan_choice_to_tmux()
-            return
-        if event.button.id == "latest-send-plan-choice":
-            await self.send_latest_plan_choice()
-            return
-        if event.button.id == "latest-send-plan-tmux":
-            await self.send_latest_plan_choice_to_tmux()
-            return
         if event.button.id == "workerbee-refresh":
             if self.selected_agent_id:
                 await self.load_workerbee_status(self.selected_agent_id)
@@ -3543,10 +3749,33 @@ class AgentPBXTUI(App[None]):
         if self.tmux_direct_enabled:
             await self.send_tmux_input()
             return
-        agent_id = self.query_one("#agent-id", Input).value.strip()
         message_input = self.query_one("#message", TextArea)
+        agent_id = self.sent_history_agent_id(message_input) or ""
         message = message_input.text.strip()
-        if not agent_id or not message:
+        if not message:
+            return
+        if await self.execute_local_slash_command_from_input(message_input, message):
+            return
+        if not agent_id:
+            return
+        if is_plan_toggle_message(message):
+            toggled = await self.toggle_plan_mode_from_input(agent_id, via_tmux=False)
+            if toggled:
+                self.record_sent_message(agent_id, message)
+                message_input.text = ""
+                self.resize_message_input()
+            return
+        selection = parse_plan_selection_command(message)
+        if selection is not None:
+            sent_selection = await self.send_plan_selection(
+                agent_id,
+                selection,
+                via_tmux=False,
+            )
+            if sent_selection:
+                self.record_sent_message(agent_id, message)
+                message_input.text = ""
+                self.resize_message_input()
             return
         if self.should_send_plan_prompt(agent_id, message):
             sent_plan = await self.send_plan_prompt(
@@ -3555,6 +3784,7 @@ class AgentPBXTUI(App[None]):
                 via_tmux=False,
             )
             if sent_plan:
+                self.record_sent_message(agent_id, message)
                 self.clear_pending_slash_command(agent_id)
                 message_input.text = ""
                 self.resize_message_input()
@@ -3574,6 +3804,7 @@ class AgentPBXTUI(App[None]):
             {"message": message},
         )
         self.clear_pending_slash_command(agent_id)
+        self.record_sent_message(agent_id, message)
         message_input.text = ""
         self.resize_message_input()
         self.notify_queued_command(agent_id, "Input", command)
@@ -3592,10 +3823,34 @@ class AgentPBXTUI(App[None]):
         self.query_one("#composer").styles.height = height + 7
 
     async def send_tmux_input(self) -> None:
-        agent_id = self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
         message_input = self.query_one("#tmux-message", TextArea)
+        agent_id = self.sent_history_agent_id(message_input) or ""
         message = message_input.text
-        if not agent_id or not message.strip():
+        if not message.strip():
+            return
+        if await self.execute_local_slash_command_from_input(
+            message_input, message.strip()
+        ):
+            return
+        if not agent_id:
+            return
+        if is_plan_toggle_message(message):
+            toggled = await self.toggle_plan_mode_from_input(agent_id, via_tmux=True)
+            if toggled:
+                self.record_sent_message(agent_id, message)
+                message_input.text = ""
+                await self.load_tmux_capture(agent_id)
+            return
+        selection = parse_plan_selection_command(message)
+        if selection is not None:
+            sent_selection = await self.send_plan_selection(
+                agent_id,
+                selection,
+                via_tmux=True,
+            )
+            if sent_selection:
+                self.record_sent_message(agent_id, message)
+                message_input.text = ""
             return
         if self.should_send_plan_prompt(agent_id, message):
             sent_plan = await self.send_plan_prompt(
@@ -3604,6 +3859,7 @@ class AgentPBXTUI(App[None]):
                 via_tmux=True,
             )
             if sent_plan:
+                self.record_sent_message(agent_id, message)
                 self.clear_pending_slash_command(agent_id)
                 message_input.text = ""
                 await self.load_tmux_capture(agent_id)
@@ -3620,6 +3876,7 @@ class AgentPBXTUI(App[None]):
         if not sent:
             return
         self.clear_pending_slash_command(agent_id)
+        self.record_sent_message(agent_id, message)
         message_input.text = ""
         await self.load_tmux_capture(agent_id)
 
@@ -3638,6 +3895,7 @@ class AgentPBXTUI(App[None]):
 
     def clear_pending_slash_command(self, agent_id: str) -> None:
         self.pending_slash_command_by_agent.pop(agent_id, None)
+        self.update_agent_title()
 
     def should_send_plan_prompt(self, agent_id: str, message: str) -> bool:
         command = self.pending_slash_command_by_agent.get(agent_id)
@@ -3646,6 +3904,51 @@ class AgentPBXTUI(App[None]):
             and bool(message.strip())
             and not message.strip().startswith("/")
         )
+
+    async def toggle_plan_mode_from_input(
+        self,
+        agent_id: str,
+        *,
+        via_tmux: bool,
+    ) -> bool:
+        if self.plan_mode_state(agent_id) == "pending":
+            self.pending_slash_command_by_agent.pop(agent_id, None)
+            self.update_agent_title()
+            self.notify(f"Plan mode canceled for {agent_id}; /plan was not sent.")
+            return True
+        return await self.toggle_sent_plan_mode(agent_id, via_tmux=via_tmux)
+
+    async def toggle_sent_plan_mode(
+        self,
+        agent_id: str,
+        *,
+        via_tmux: bool | None = None,
+    ) -> bool:
+        use_tmux = self.tmux_direct_enabled if via_tmux is None else via_tmux
+        if use_tmux:
+            sent = await self.send_keys_to_tmux(agent_id, PLAN_SLASH_COMMAND)
+            if not sent:
+                return False
+            await self.load_tmux_capture(agent_id)
+        else:
+            command = await self.queue_command(
+                agent_id,
+                "send_input",
+                {"message": PLAN_SLASH_COMMAND},
+            )
+            self.notify_queued_command(agent_id, "Plan toggle", command)
+            await self.refresh_events()
+            await self.load_thread(agent_id)
+        if agent_id in self.plan_mode_active_agent_ids:
+            self.plan_mode_active_agent_ids.discard(agent_id)
+            self.notify(f"Plan mode toggled off for {agent_id}.")
+        else:
+            self.plan_mode_active_agent_ids.add(agent_id)
+            self.notify(f"Plan mode toggled on for {agent_id}.")
+        self.pending_slash_command_by_agent.pop(agent_id, None)
+        self.update_agent_title()
+        self.render_agents()
+        return True
 
     async def send_plan_prompt(
         self,
@@ -3664,6 +3967,9 @@ class AgentPBXTUI(App[None]):
             if not sent_prompt:
                 return False
             self.notify(f"Plan prompt sent to tmux for {agent_id}.")
+            self.plan_mode_active_agent_ids.add(agent_id)
+            self.update_agent_title()
+            self.render_agents()
             return True
         await self.queue_command(
             agent_id,
@@ -3678,6 +3984,9 @@ class AgentPBXTUI(App[None]):
         self.notify_queued_command(agent_id, "Plan prompt", command)
         await self.refresh_events()
         await self.load_thread(agent_id)
+        self.plan_mode_active_agent_ids.add(agent_id)
+        self.update_agent_title()
+        self.render_agents()
         return True
 
     async def send_text_to_tmux(self, agent_id: str, message: str) -> bool:
@@ -3710,6 +4019,19 @@ class AgentPBXTUI(App[None]):
             return False
         return True
 
+    async def send_key_to_tmux(self, agent_id: str, key: str) -> bool:
+        status = self.query_one_or_none("#tmux-status", Static)
+        pane = await self.resolve_tmux_send_pane(agent_id, status=status)
+        if pane is None:
+            return False
+        try:
+            await asyncio.to_thread(tmux_support.send_key, pane.pane_id, key)
+        except Exception as exc:
+            if status is not None:
+                status.update(f"Tmux: send failed ({exc})")
+            return False
+        return True
+
     async def resolve_tmux_send_pane(
         self,
         agent_id: str,
@@ -3733,7 +4055,7 @@ class AgentPBXTUI(App[None]):
             return None
         return pane
 
-    def selected_plan_option(self) -> str | None:
+    def selected_plan_option(self) -> PlanChoice | None:
         item = (
             self.thread_items.get(self.selected_thread_item_id)
             if self.selected_thread_item_id
@@ -3749,7 +4071,7 @@ class AgentPBXTUI(App[None]):
             return None
         return options[self.selected_plan_option_index]
 
-    def selected_latest_plan_option(self) -> str | None:
+    def selected_latest_plan_option(self) -> PlanChoice | None:
         report = (
             self.latest_report_by_agent.get(self.selected_agent_id)
             if self.selected_agent_id
@@ -3765,117 +4087,153 @@ class AgentPBXTUI(App[None]):
             return None
         return options[self.selected_latest_plan_option_index]
 
-    def plan_options_for_item(self, item: dict[str, Any] | None) -> list[str]:
+    def plan_options_for_item(self, item: dict[str, Any] | None) -> list[PlanChoice]:
         if not item or item.get("kind") != "report":
             return []
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        return [
-            str(option)
-            for option in list_value(metadata.get("plan_options"))
-            if str(option).strip()
-        ]
+        return plan_choices_from_value(metadata.get("plan_options"))
 
-    def plan_options_for_report(self, report: dict[str, Any] | None) -> list[str]:
+    def plan_options_for_report(self, report: dict[str, Any] | None) -> list[PlanChoice]:
         if not report:
             return []
-        return [
-            str(option)
-            for option in list_value(report.get("plan_options"))
-            if str(option).strip()
-        ]
+        return plan_choices_from_value(report.get("plan_options"))
 
-    def plan_choice_message(self, option: str, notes: str = "") -> str:
-        message = f"Selected plan option: {option.strip()}"
+    def plan_choice_message(self, option: PlanChoice, notes: str = "") -> str:
+        message = f"Selected plan option: {option.label.strip()}"
         clean_notes = notes.strip()
         if clean_notes:
             message = f"{message}\n\nOperator notes:\n{clean_notes}"
         return message
 
+    def plan_choice_payload(self, option: PlanChoice, notes: str = "") -> dict[str, Any]:
+        return {
+            "message": self.plan_choice_message(option, notes),
+            "plan_choice": option.payload(),
+        }
+
+    def current_plan_options_for_agent(self, agent_id: str) -> list[PlanChoice]:
+        if agent_id != self.selected_agent_id:
+            return []
+        latest = self.plan_options_for_report(self.latest_report_by_agent.get(agent_id))
+        item = (
+            self.thread_items.get(self.selected_thread_item_id)
+            if self.selected_thread_item_id
+            else None
+        )
+        thread = self.plan_options_for_item(item)
+        if self.active_agent_tab == "thread-tab" and thread:
+            return thread
+        return latest or thread
+
+    def plan_option_for_selection(
+        self,
+        agent_id: str,
+        selection: PlanSelection,
+    ) -> PlanChoice | None:
+        options = self.current_plan_options_for_agent(agent_id)
+        if not options:
+            raw_index = str(selection.index)
+            return PlanChoice(label=raw_index, raw=raw_index)
+        selected_index = selection.index - 1
+        if selected_index < 0 or selected_index >= len(options):
+            return None
+        return options[selected_index]
+
+    async def send_plan_selection(
+        self,
+        agent_id: str,
+        selection: PlanSelection,
+        *,
+        via_tmux: bool,
+    ) -> bool:
+        option = self.plan_option_for_selection(agent_id, selection)
+        if option is None:
+            self.notify(
+                f"Plan option {selection.index} is not available for {agent_id}.",
+                severity="warning",
+            )
+            return False
+        message = self.plan_choice_message(option, selection.notes)
+        if via_tmux:
+            sent = await self.send_text_to_tmux(agent_id, message)
+            if not sent:
+                return False
+            self.notify(f"Sent /plan:{selection.index} reply to Codex pane for {agent_id}.")
+            await self.load_tmux_capture(agent_id)
+            return True
+        command = await self.queue_command(
+            agent_id,
+            "send_input",
+            self.plan_choice_payload(option, selection.notes),
+        )
+        self.notify_queued_command(agent_id, "Plan choice", command)
+        await self.refresh_events()
+        await self.load_thread(agent_id)
+        return True
+
     async def send_plan_choice(self) -> None:
         agent_id = (
             self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
         )
-        option = self.selected_plan_option()
-        if not agent_id or option is None:
+        if not agent_id or self.selected_plan_option_index is None:
             self.notify("Select a plan option first.", severity="warning")
             return
-        notes_input = self.query_one("#plan-notes", TextArea)
-        message = self.plan_choice_message(option, notes_input.text)
-        command = await self.queue_command(
+        await self.send_plan_selection(
             agent_id,
-            "send_input",
-            {"message": message},
+            PlanSelection(index=self.selected_plan_option_index + 1),
+            via_tmux=False,
         )
-        notes_input.text = ""
-        self.notify_queued_command(agent_id, "Plan choice", command)
-        await self.refresh_events()
-        await self.load_thread(agent_id)
 
     async def send_plan_choice_to_tmux(self) -> None:
         agent_id = (
             self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
         )
-        option = self.selected_plan_option()
         if not self.tmux_direct_enabled:
             self.notify(
                 "Enable tmux direct mode before sending to Codex pane.",
                 severity="warning",
             )
             return
-        if not agent_id or option is None:
+        if not agent_id or self.selected_plan_option_index is None:
             self.notify("Select a plan option first.", severity="warning")
             return
-        notes_input = self.query_one("#plan-notes", TextArea)
-        message = self.plan_choice_message(option, notes_input.text)
-        sent = await self.send_text_to_tmux(agent_id, message)
-        if not sent:
-            return
-        notes_input.text = ""
-        self.notify(f"Sent plan choice to Codex pane for {agent_id}.")
-        await self.load_tmux_capture(agent_id)
+        await self.send_plan_selection(
+            agent_id,
+            PlanSelection(index=self.selected_plan_option_index + 1),
+            via_tmux=True,
+        )
 
     async def send_latest_plan_choice(self) -> None:
         agent_id = (
             self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
         )
-        option = self.selected_latest_plan_option()
-        if not agent_id or option is None:
+        if not agent_id or self.selected_latest_plan_option_index is None:
             self.notify("Select a plan option first.", severity="warning")
             return
-        notes_input = self.query_one("#latest-plan-notes", TextArea)
-        message = self.plan_choice_message(option, notes_input.text)
-        command = await self.queue_command(
+        await self.send_plan_selection(
             agent_id,
-            "send_input",
-            {"message": message},
+            PlanSelection(index=self.selected_latest_plan_option_index + 1),
+            via_tmux=False,
         )
-        notes_input.text = ""
-        self.notify_queued_command(agent_id, "Plan choice", command)
-        await self.refresh_events()
-        await self.load_thread(agent_id)
 
     async def send_latest_plan_choice_to_tmux(self) -> None:
         agent_id = (
             self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
         )
-        option = self.selected_latest_plan_option()
         if not self.tmux_direct_enabled:
             self.notify(
                 "Enable tmux direct mode before sending to Codex pane.",
                 severity="warning",
             )
             return
-        if not agent_id or option is None:
+        if not agent_id or self.selected_latest_plan_option_index is None:
             self.notify("Select a plan option first.", severity="warning")
             return
-        notes_input = self.query_one("#latest-plan-notes", TextArea)
-        message = self.plan_choice_message(option, notes_input.text)
-        sent = await self.send_text_to_tmux(agent_id, message)
-        if not sent:
-            return
-        notes_input.text = ""
-        self.notify(f"Sent plan choice to Codex pane for {agent_id}.")
-        await self.load_tmux_capture(agent_id)
+        await self.send_plan_selection(
+            agent_id,
+            PlanSelection(index=self.selected_latest_plan_option_index + 1),
+            via_tmux=True,
+        )
 
     async def request_detail(self) -> None:
         agent_id = self.query_one("#agent-id", Input).value.strip()
@@ -3891,6 +4249,37 @@ class AgentPBXTUI(App[None]):
             f"Command: {command['command_id']}\n\n"
             f"{self.command_delivery_note(agent_id)}"
         )
+        await self.refresh_events()
+        await self.load_thread(agent_id)
+
+    async def send_escape_key(self) -> None:
+        agent_id = self.query_one("#agent-id", Input).value.strip()
+        if not agent_id:
+            return
+        if self.tmux_direct_enabled:
+            sent = await self.send_key_to_tmux(agent_id, "Escape")
+            if not sent:
+                return
+            self.notify(f"Sent Escape to Codex pane for {agent_id}.")
+            await self.load_tmux_capture(agent_id)
+            return
+        command = await self.queue_command(
+            agent_id,
+            "send_key",
+            {
+                "key": "escape",
+                "request": (
+                    "Send an Escape key event to the agent session if supported; "
+                    "otherwise report that key injection is unavailable."
+                ),
+            },
+        )
+        self.query_one("#detail", TextArea).text = (
+            f"Escape key request queued for {agent_id}.\n"
+            f"Command: {command['command_id']}\n\n"
+            f"{self.command_delivery_note(agent_id)}"
+        )
+        self.notify_queued_command(agent_id, "Escape", command)
         await self.refresh_events()
         await self.load_thread(agent_id)
 
@@ -4031,63 +4420,59 @@ class AgentPBXTUI(App[None]):
     async def queue_command(
         self, agent_id: str, command_type: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
-            response = await client.post(
-                "/v1/commands",
-                json={
-                    "agent_id": agent_id,
-                    "type": command_type,
-                    "payload": payload,
-                },
-                headers=auth_headers(self.token),
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self.api_client().post(
+            "/v1/commands",
+            json={
+                "agent_id": agent_id,
+                "type": command_type,
+                "payload": payload,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def delete_agent(
         self, agent_id: str, *, delete_thread: bool = False
     ) -> dict[str, Any]:
-        async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
-            response = await client.delete(
-                f"/v1/agents/{agent_id}",
-                params={"delete_thread": delete_thread},
-                headers=auth_headers(self.token),
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self.api_client().delete(
+            f"/v1/agents/{agent_id}",
+            params={"delete_thread": delete_thread},
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def create_agent_report(
         self, agent_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
-            response = await client.post(
-                f"/v1/agents/{agent_id}/reports",
-                json=payload,
-                headers=auth_headers(self.token),
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self.api_client().post(
+            f"/v1/agents/{agent_id}/reports",
+            json=payload,
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def delete_queued_command(self, command_id: str) -> dict[str, Any]:
-        async with httpx.AsyncClient(base_url=self.server, timeout=10) as client:
-            response = await client.delete(
-                f"/v1/commands/{command_id}",
-                headers=auth_headers(self.token),
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self.api_client().delete(
+            f"/v1/commands/{command_id}",
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def load_workerbee_status(self, agent_id: str) -> None:
         detail = self.query_one("#workerbee-detail", TextArea)
         detail.text = f"Loading WorkerBee status for {agent_id}..."
         try:
-            async with httpx.AsyncClient(base_url=self.server, timeout=15) as client:
-                response = await client.get(
-                    f"/v1/agents/{agent_id}/workerbee",
-                    headers=auth_headers(self.token),
-                )
-                response.raise_for_status()
-                status = response.json()
+            response = await self.api_client().get(
+                f"/v1/agents/{agent_id}/workerbee",
+                headers=auth_headers(self.token),
+                timeout=15,
+            )
+            response.raise_for_status()
+            status = response.json()
         except Exception as exc:
             detail.text = f"Unable to load WorkerBee status for {agent_id}: {exc}"
             return
@@ -4611,60 +4996,42 @@ class AgentPBXTUI(App[None]):
     def render_latest_plan_choice_panel(self, report: dict[str, Any] | None) -> None:
         panel = self.query_one_or_none("#latest-plan-choice-panel", Vertical)
         table = self.query_one_or_none("#latest-plan-options", DataTable)
-        notes = self.query_one_or_none("#latest-plan-notes", TextArea)
-        send = self.query_one_or_none("#latest-send-plan-choice", Button)
-        send_tmux = self.query_one_or_none("#latest-send-plan-tmux", Button)
-        if panel is None or table is None or notes is None:
+        hint = self.query_one_or_none("#latest-plan-hint", Static)
+        if panel is None or table is None:
             return
         options = self.plan_options_for_report(report)
         table.clear()
         self.selected_latest_plan_option_index = None
         if not options:
             panel.styles.display = "none"
-            notes.text = ""
-            if send is not None:
-                send.disabled = True
-            if send_tmux is not None:
-                send_tmux.disabled = True
             return
         panel.styles.display = "block"
         for index, option in enumerate(options):
-            table.add_row(str(index + 1), option, key=str(index))
+            table.add_row(str(index + 1), option.display_label, key=str(index))
         self.selected_latest_plan_option_index = 0
         table.move_cursor(row=0, animate=False, scroll=False)
-        if send is not None:
-            send.disabled = False
-        if send_tmux is not None:
-            send_tmux.disabled = not self.tmux_direct_enabled
+        if hint is not None:
+            hint.update("Reply with /plan:1 optional notes.")
 
     def render_plan_choice_panel(self, item: dict[str, Any] | None) -> None:
         panel = self.query_one_or_none("#plan-choice-panel", Vertical)
         table = self.query_one_or_none("#plan-options", DataTable)
-        notes = self.query_one_or_none("#plan-notes", TextArea)
-        send = self.query_one_or_none("#send-plan-choice", Button)
-        send_tmux = self.query_one_or_none("#send-plan-tmux", Button)
-        if panel is None or table is None or notes is None:
+        hint = self.query_one_or_none("#plan-hint", Static)
+        if panel is None or table is None:
             return
         options = self.plan_options_for_item(item)
         table.clear()
         self.selected_plan_option_index = None
         if not options:
             panel.styles.display = "none"
-            notes.text = ""
-            if send is not None:
-                send.disabled = True
-            if send_tmux is not None:
-                send_tmux.disabled = True
             return
         panel.styles.display = "block"
         for index, option in enumerate(options):
-            table.add_row(str(index + 1), option, key=str(index))
+            table.add_row(str(index + 1), option.display_label, key=str(index))
         self.selected_plan_option_index = 0
         table.move_cursor(row=0, animate=False, scroll=False)
-        if send is not None:
-            send.disabled = False
-        if send_tmux is not None:
-            send_tmux.disabled = not self.tmux_direct_enabled
+        if hint is not None:
+            hint.update("Reply with /plan:1 optional notes.")
 
     def select_plan_option(self, row_key: str) -> None:
         parsed = int_value(row_key)
@@ -4678,7 +5045,6 @@ class AgentPBXTUI(App[None]):
         if parsed < 0 or parsed >= len(self.plan_options_for_item(item)):
             return
         self.selected_plan_option_index = parsed
-        self.update_plan_tmux_button_state()
 
     def select_latest_plan_option(self, row_key: str) -> None:
         parsed = int_value(row_key)
@@ -4692,7 +5058,6 @@ class AgentPBXTUI(App[None]):
         if parsed < 0 or parsed >= len(self.plan_options_for_report(report)):
             return
         self.selected_latest_plan_option_index = parsed
-        self.update_plan_tmux_button_state()
 
     def current_thread_item_id(self) -> str | None:
         table = self.query_one("#thread", DataTable)
@@ -4859,9 +5224,15 @@ class AgentPBXTUI(App[None]):
             if result is not None:
                 lines.extend(["", "Result:", json.dumps(result, indent=2, sort_keys=True)])
         elif item["kind"] == "report":
-            plan_options = metadata.get("plan_options") or []
+            plan_options = plan_choices_from_value(metadata.get("plan_options"))
             if plan_options:
-                lines.extend(["", "Plan Options:", *[f"- {option}" for option in plan_options]])
+                lines.extend(
+                    [
+                        "",
+                        "Plan Options:",
+                        *[f"- {option.display_label}" for option in plan_options],
+                    ]
+                )
         return "\n".join(lines)
 
     def should_alert(self, event: dict[str, Any]) -> bool:

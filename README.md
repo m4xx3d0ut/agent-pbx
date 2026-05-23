@@ -74,7 +74,11 @@ python -m pytest
 agent-pbx mcp serve --host 127.0.0.1 --port 8765
 ```
 
-The server defaults to localhost. LAN binding requires bearer-token authentication and explicit operator intent.
+The server defaults to localhost. LAN binding requires bearer-token
+authentication and explicit operator intent. Runtime tokens and paired tokens
+are admin/operator tokens for the PBX service: a holder can use both API and MCP
+control surfaces. Role-scoped operator and agent tokens are future hardening
+work for less-trusted LAN deployments.
 
 ## Local Environment
 
@@ -199,7 +203,7 @@ Use `Ping` in the TUI to intentionally keep a live nohup-mode agent polling
 longer. Agents handle `ping` as a keepalive: reply with a `status="working"`
 pong report, ack with `{"pong": true}`, then start another 300s bounded poll
 window. Each ping extends polling in five-minute increments. In report mode,
-`Ping`, `Request Detail`, `Send Input`, and queued plan choices wait in the PBX
+`Ping`, `Request Detail`, `Send Input`, and queued plan replies wait in the PBX
 queue until the agent polls; use tmux direct mode for no-poll local interaction.
 
 When an operator asks an agent to stop using PBX, the agent should send a final
@@ -315,17 +319,28 @@ sequence is ignored while typing in follow-up inputs, avoiding terminal
 `Alt+number` tab-switching conflicts.
 
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
-commands such as `/detail`, `/ping`, `/tmux`, `/workerbee`, `/theme minimal`,
-and `/layout compact`. Use `/plan` when no plan is active to submit Codex's
-`/plan` slash command before the selected agent's next prompt. In tmux direct
-mode, Agent PBX types `/plan` with tmux key events, waits briefly for Codex to
-enter plan mode, then sends one combined prompt: Agent PBX planning instructions
-followed by your plan request. Slash commands are typed rather than bracketed
-pasted so Codex handles them as interactive commands. When the selected agent
-has structured plan options, the palette also shows
-`/plan latest`, `/plan thread`, and direct entries such as
-`/plan latest 2: ...`; selecting one opens a plan-choice modal with optional
-notes before sending through PBX or, in tmux direct mode, to the Codex pane.
+commands such as `/detail`, `/ping`, `/esc`, `/tmux`, `/workerbee`, `/theme
+minimal`, and `/layout compact`. `/cancel` marks a stale or abandoned session
+canceled in PBX; it does not send an Escape key. Use `/esc` when you need a real
+Escape key event. In tmux direct mode, `/esc` sends `tmux send-keys Escape` to
+the selected Codex pane. Outside tmux direct mode, it queues a `send_key`
+command with `key="escape"` for nohup-mode agents that poll PBX.
+
+In the Latest input, type `/` and press `Tab` to complete slash commands inline.
+Repeated `Tab` cycles matches; exact local commands such as `/esc` or
+`/theme minimal` execute locally on `Enter` instead of being sent to the agent.
+
+Use `/plan` to toggle Codex plan mode for the selected agent. In tmux direct
+mode, Agent PBX types `/plan` with tmux key events so Codex handles it as an
+interactive slash command; outside tmux mode, it queues the same `send_input`
+command for agents that poll PBX.
+
+When a plan response presents choices, reply from the Latest input or palette
+with `/plan:1 optional notes` or `/plan sel:1 optional notes`. Agent PBX turns
+that into the normal `Selected plan option:` follow-up and preserves structured
+choice metadata when the latest report or selected thread item includes
+`plan_options`. Palette entries such as `/plan latest 2: ...` and
+`/plan thread 1: ...` prefill the reply syntax for quick editing.
 When tmux direct mode is enabled, the palette also exposes git helpers:
 `/gitstatus` sends `!git status`, `/gitdiff` opens an optional target prompt
 and sends `!git diff`, and `/gitstageandcommit` asks Codex to stage and commit
@@ -474,10 +489,13 @@ poll stats. Hidden agents reappear when they register again.
 When a report includes `plan_options`, the Latest and Thread tabs show a
 plan-choice panel. Agents must set `needs_input=true` and
 `plan_options=[...]`; writing choices only in report text creates history, but
-no interactive controls. In nohup mode, select an option, add optional notes,
-then use `Send Plan Choice` to queue a normal `send_input` follow-up. In report
-mode with tmux direct enabled, use `Send to Codex Pane` to paste the same choice
-message directly into the local Codex pane without requiring the agent to poll.
+the operator still replies with `/plan:N` syntax. In nohup mode, the reply is
+queued as a normal `send_input` follow-up. In report mode with tmux direct
+enabled, the same reply is sent directly into the local Codex pane without
+requiring the agent to poll. Plan options may be strings or objects with `id`,
+`label`, and optional `description`. Object options let the TUI include stable
+choice metadata in the queued `send_input` payload while preserving the
+human-readable `Selected plan option:` message.
 
 Use `Space` on a Thread row to mark it, then export `Item`, `Marked`, or `All`
 to Markdown under `artifacts/thread-exports/`. Set
@@ -514,7 +532,8 @@ until the operator explicitly asks it to stop or starts a new session. Default
 `pbx_report_turn` and must not poll. `use Agent PBX nohup` is explicit queue
 pickup mode: the agent reports, registers `pbx_nohup_explicit=true`, polls
 queued commands with `pbx_poll_commands`, and acks handled commands with
-`pbx_ack_command`.
+`pbx_ack_command(agent_id=...)`. A command can be acknowledged only after it has
+been delivered to, and is owned by, that agent.
 
 `Request Detail` queues a `request_detail` command. A new detailed report appears
 only after the target agent polls that command and responds with a new
@@ -527,3 +546,5 @@ API/TUI shows `stale-working` or `stale-running` while preserving the raw last
 reported status. Use `Mark Canceled` in the Latest controls when an agent was
 cancelled from its CLI session and can no longer report cleanup itself; this
 writes a `status="canceled"` report to the thread and clears the working state.
+Use `/esc` instead when the goal is to dismiss or back out of an active Codex
+prompt, modal, or plan UI.

@@ -83,6 +83,7 @@ async def run_sim_agent(
                     client,
                     f"/v1/commands/{command['command_id']}/ack",
                     {
+                        "agent_id": agent_id,
                         "result": (
                             {"handled_by": agent_id, "ok": True, "pong": True}
                             if command["type"] == "ping"

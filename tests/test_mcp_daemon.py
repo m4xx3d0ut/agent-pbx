@@ -12,6 +12,7 @@ from agent_pbx.mcp_daemon import (
     restart_mcp_daemon,
     start_mcp_daemon,
     stop_mcp_daemon,
+    _pid_matches_metadata,
 )
 from agent_pbx.paths import default_state_root
 
@@ -50,6 +51,31 @@ def test_mcp_daemon_status_reports_stale_metadata(
     assert status["running"] is False
     assert status["stale"] is True
     assert status["mcp_url"] == "http://127.0.0.1:9876/mcp"
+
+
+def test_pid_match_rejects_unreadable_proc_cmdline_on_linux(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, port=9876)
+
+    def fail_read_bytes(_path: Path) -> bytes:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr("agent_pbx.mcp_daemon.Path.read_bytes", fail_read_bytes)
+    monkeypatch.setattr(
+        "agent_pbx.mcp_daemon.Path.exists",
+        lambda path: str(path) == "/proc",
+    )
+
+    assert (
+        _pid_matches_metadata(
+            4321,
+            config,
+            {"state_root": str(config.resolved_state_root)},
+        )
+        is False
+    )
 
 
 def test_start_mcp_daemon_writes_detached_agent_pbx_argv(

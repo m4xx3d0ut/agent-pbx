@@ -464,7 +464,7 @@ def _pid_matches_metadata(
     try:
         raw = cmdline_path.read_bytes()
     except OSError:
-        return True
+        return not Path("/proc").exists()
     cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
     return "agent_pbx" in cmdline and "mcp" in cmdline and "serve" in cmdline
 

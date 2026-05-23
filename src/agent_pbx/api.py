@@ -246,6 +246,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     async def create_command(
         request: CommandCreateRequest, store: Store = Depends(get_store)
     ) -> dict[str, object]:
+        if request.agent_id is not None and store.get_agent(request.agent_id) is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
         command = store.create_command(request)
         store.append_event(
             "command_queued",
@@ -305,6 +307,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         limit: int = 10,
         store: Store = Depends(get_store),
     ) -> list[dict[str, object]]:
+        if store.get_agent(agent_id) is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
         commands = await poll_commands_until(
             store,
             agent_id,
@@ -336,9 +340,25 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         request: CommandAckRequest,
         store: Store = Depends(get_store),
     ) -> dict[str, object]:
-        command = store.ack_command(command_id, request.result)
-        if command is None:
+        existing = store.get_command(command_id)
+        if existing is None:
             raise HTTPException(status_code=404, detail="command not found")
+        if existing["agent_id"] != request.agent_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="command is not owned by agent",
+            )
+        if existing["status"] != "delivered":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"command is {existing['status']}, not delivered",
+            )
+        command = store.ack_command(command_id, request.agent_id, request.result)
+        if command is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="command is no longer delivered for agent",
+            )
         store.append_event(
             "command_acked",
             {
@@ -369,7 +389,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         async def generate() -> object:
             after_id = last_event_id or 0
             while not await request.is_disconnected():
-                events = store.list_events(after_id=after_id)
+                events = await asyncio.to_thread(store.list_events, after_id=after_id)
                 if events:
                     for event in events:
                         after_id = int(event["event_id"])

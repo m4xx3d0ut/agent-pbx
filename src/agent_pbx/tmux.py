@@ -188,6 +188,14 @@ def send_literal_keys(
         )
 
 
+def send_key(target: str, key: str, *, tmux_bin: str = "tmux") -> None:
+    subprocess.run(
+        [tmux_bin, "send-keys", "-t", target, key],
+        check=True,
+        text=True,
+    )
+
+
 def score_pane_for_agent(pane: TmuxPane, agent: Mapping[str, Any]) -> int:
     metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
     agent_cwd = str(metadata.get("cwd") or "")

@@ -97,7 +97,7 @@ def build_mcp_server(store: Store) -> FastMCP:
         detail: str,
         status: str = "done",
         needs_input: bool = False,
-        plan_options: list[str] | None = None,
+        plan_options: list[str | dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         logger.debug("mcp.tool.start name=pbx_report_turn agent_id=%s status=%s", agent_id, status)
         if store.get_agent(agent_id) is None:
@@ -140,6 +140,8 @@ def build_mcp_server(store: Store) -> FastMCP:
         interval_seconds: float = 5,
     ) -> list[dict[str, Any]]:
         logger.debug("mcp.tool.start name=pbx_poll_commands agent_id=%s", agent_id)
+        if store.get_agent(agent_id) is None:
+            raise ValueError("agent not registered")
         commands = await poll_commands_until(
             store,
             agent_id,
@@ -168,14 +170,22 @@ def build_mcp_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     def pbx_ack_command(
-        command_id: str, result: dict[str, Any] | None = None
+        command_id: str, agent_id: str, result: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         logger.debug("mcp.tool.start name=pbx_ack_command command_id=%s", command_id)
+        request = CommandAckRequest(agent_id=agent_id, result=result or {})
+        existing = store.get_command(command_id)
+        if existing is None:
+            raise ValueError("command not found")
+        if existing["agent_id"] != request.agent_id:
+            raise ValueError("command is not owned by agent")
+        if existing["status"] != "delivered":
+            raise ValueError(f"command is {existing['status']}, not delivered")
         command = store.ack_command(
-            command_id, CommandAckRequest(result=result or {}).result
+            command_id, request.agent_id, request.result
         )
         if command is None:
-            raise ValueError("command not found")
+            raise ValueError("command is no longer delivered for agent")
         store.append_event(
             "command_acked",
             {
@@ -199,6 +209,8 @@ def build_mcp_server(store: Store) -> FastMCP:
             agent_id,
             command_type,
         )
+        if agent_id is not None and store.get_agent(agent_id) is None:
+            raise ValueError("agent not registered")
         command = store.create_command(
             CommandCreateRequest(
                 agent_id=agent_id,

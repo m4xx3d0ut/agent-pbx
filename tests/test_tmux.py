@@ -196,3 +196,17 @@ def test_tmux_send_literal_keys_types_and_submits(monkeypatch) -> None:
         ["tmux", "send-keys", "-t", "%1", "C-m"],
     ]
     assert sleeps == [tmux.DEFAULT_SUBMIT_DELAY_SECONDS]
+
+
+def test_tmux_send_key_sends_named_key_without_submit(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    tmux.send_key("%1", "Escape")
+
+    assert calls == [["tmux", "send-keys", "-t", "%1", "Escape"]]
