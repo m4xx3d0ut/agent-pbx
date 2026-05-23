@@ -1590,6 +1590,8 @@ class AgentPBXTUI(App[None]):
         ("r", "refresh", "Refresh"),
         ("s", "settings", "Settings"),
         ("ctrl+t", "toggle_tmux_direct", "Tmux"),
+        Binding("f8", "toggle_tmux_direct", "Tmux", key_display="F8"),
+        Binding("alt+t", "toggle_tmux_direct", "Tmux", key_display="Alt+T", show=False),
         Binding("d", "hide_agent", "Hide Agent", priority=True),
         Binding(
             "shift+d",
@@ -1781,13 +1783,13 @@ class AgentPBXTUI(App[None]):
     def composer_hotkeys_text(self) -> str:
         text = "Enter send | Ctrl+J newline | Ctrl+W word"
         if self.tmux_features_available:
-            text += " | Ctrl+T tmux"
+            text += " | Ctrl+T/F8 tmux"
         return text
 
     def tmux_hotkeys_text(self) -> str:
         if self.is_tiny_layout():
-            return "Enter send | C-J nl | C-W word | C-T PBX"
-        return "Enter send | Ctrl+J newline | Ctrl+W word | Ctrl+T PBX"
+            return "Enter send | C-J nl | C-W word | C-T/F8 PBX"
+        return "Enter send | Ctrl+J newline | Ctrl+W word | Ctrl+T/F8 PBX"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)

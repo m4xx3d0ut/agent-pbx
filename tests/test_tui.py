@@ -71,6 +71,17 @@ def test_tui_constructs() -> None:
     assert ("s", "settings", "Settings") in app.BINDINGS
     assert ("ctrl+t", "toggle_tmux_direct", "Tmux") in app.BINDINGS
     assert any(
+        getattr(binding, "key", None) == "f8"
+        and getattr(binding, "action", None) == "toggle_tmux_direct"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "alt+t"
+        and getattr(binding, "action", None) == "toggle_tmux_direct"
+        and getattr(binding, "show", True) is False
+        for binding in app.BINDINGS
+    )
+    assert any(
         getattr(binding, "key", None) == "d"
         and getattr(binding, "action", None) == "hide_agent"
         for binding in app.BINDINGS
@@ -80,10 +91,9 @@ def test_tui_constructs() -> None:
         and getattr(binding, "action", None) == "purge_agent"
         for binding in app.BINDINGS
     )
+    alt_number_keys = {f"alt+{value}" for value in "1234567890"}
     assert not any(
-        str(getattr(binding, "key", "")).startswith("alt+")
-        and "jump_agent" in str(getattr(binding, "action", ""))
-        for binding in app.BINDINGS
+        str(getattr(binding, "key", "")) in alt_number_keys for binding in app.BINDINGS
     )
     assert app.server == "http://127.0.0.1:8765"
     assert app.token == "test"
@@ -460,7 +470,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         hotkey_text = str(hotkeys.renderable)
         assert "Ctrl+J newline" in hotkey_text
         assert "Ctrl+W word" in hotkey_text
-        assert "Ctrl+T tmux" in hotkey_text
+        assert "Ctrl+T/F8 tmux" in hotkey_text
         assert "Ctrl+A/E" not in hotkey_text
         assert "Ctrl+U" not in hotkey_text
         assert "start/end" not in hotkey_text
@@ -524,7 +534,7 @@ async def test_tui_disables_tmux_controls_when_unavailable(monkeypatch) -> None:
 
         assert app.tmux_features_available is False
         assert tmux_direct.disabled is True
-        assert "Ctrl+T tmux" not in str(hotkeys.renderable)
+        assert "Ctrl+T/F8 tmux" not in str(hotkeys.renderable)
 
 
 async def test_tui_select_agent_updates_composer_and_loads_report() -> None:
@@ -909,7 +919,7 @@ async def test_tui_tmux_toggle_hotkey_only_from_latest() -> None:
         assert app.tmux_direct_enabled is True
         assert app.screen.has_class("tmux-direct")
 
-        await pilot.press("ctrl+t")
+        await pilot.press("f8")
         await pilot.pause()
         assert app.tmux_direct_enabled is False
 

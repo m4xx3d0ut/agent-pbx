@@ -267,6 +267,30 @@ then every random 30-60 seconds, and stops after five minutes.
 agent-pbx mcp start --debug --debug-smoke --token dev-token
 ```
 
+## TUI Demo GIF
+
+Use `scripts/record_tui_demo.sh` to create a reproducible terminal demo for
+docs or release notes. The script starts an isolated demo MCP/API daemon with
+debug smoke, seeds deterministic demo agents, opens the TUI in a fixed-size tmux
+session, records it with `asciinema`, and renders a GIF with `agg`.
+
+```bash
+# Install asciinema and agg with your system package manager or upstream releases.
+AGENT_PBX_WORKERBEE_BIN=/path/to/workerbee scripts/record_tui_demo.sh
+```
+
+Artifacts are written to `artifacts/tui-demo/`:
+
+- `agent-pbx-tui-demo.cast` is the terminal recording.
+- `agent-pbx-tui-demo.gif` is the rendered info GIF.
+- `mcp-restart.json` and `mcp-stop.json` capture daemon lifecycle output.
+
+Set `--manual` to drive the TUI yourself while recording, `--no-render` to keep
+only the cast file, or `--skip-mcp` to record against an already running server.
+If `AGENT_PBX_WORKERBEE_BIN` is set, the demo agent with `metadata.cwd` pointing
+at this repository can populate the WorkerBee tab; otherwise the tab shows the
+normal not-configured remediation.
+
 ## TUI Notifications
 
 The TUI keeps visual flash and terminal bell notifications off by default for
@@ -427,8 +451,11 @@ commands such as `/status` are sent unchanged. The TUI auto-matches panes by
 agent cwd/project/title and provides `Auto`, `Select Pane`, and `Detach`
 controls for manual correction. Tmux controls are disabled when `tmux` is not
 available; set `AGENT_PBX_TUI_TMUX_SHOW=1` to show them on a tmux-capable host
-outside an attached tmux client. Press `Ctrl+T` from `Latest` to toggle tmux
-direct mode without opening settings. `AGENT_PBX_TUI_TMUX_CAPTURE_LINES=0`
+outside an attached tmux client. Press `Ctrl+T` or `F8` from `Latest` to toggle
+tmux direct mode without opening settings. `F8` is the preferred Android
+Termux/SSH shortcut because Termux can emit it with `Volume Up+8`; `Alt+T` is
+kept as a hidden compatibility binding for terminals that send Meta-T, but
+Termux maps its volume special layer plus `T` to Tab. `AGENT_PBX_TUI_TMUX_CAPTURE_LINES=0`
 captures only the visible pane by default; set a positive value to include
 scrollback when you intentionally need older output. Set
 `AGENT_PBX_TUI_TMUX_REFRESH_SECONDS=1.5` to tune the snapshot refresh cadence;
