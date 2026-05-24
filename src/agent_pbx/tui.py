@@ -1507,6 +1507,31 @@ class AgentPBXTUI(App[None]):
         width: 1fr;
     }
 
+    #file-path {
+        height: 1;
+        color: $secondary;
+        content-align: left middle;
+    }
+
+    #files {
+        height: 10;
+        min-height: 5;
+    }
+
+    #file-preview {
+        height: 1fr;
+        min-height: 12;
+    }
+
+    #file-actions {
+        height: 3;
+    }
+
+    #file-actions Button {
+        width: 1fr;
+        min-width: 1;
+    }
+
     #workerbee-detail {
         height: 1fr;
         min-height: 12;
@@ -1597,11 +1622,13 @@ class AgentPBXTUI(App[None]):
 
     Screen.tiny-agent #detail,
     Screen.tiny-agent #tmux-stream,
+    Screen.tiny-agent #file-preview,
     Screen.tiny-agent #workerbee-detail {
         min-height: 4;
     }
 
-    Screen.tiny-agent #thread {
+    Screen.tiny-agent #thread,
+    Screen.tiny-agent #files {
         height: 5;
         min-height: 4;
     }
@@ -1818,6 +1845,8 @@ class AgentPBXTUI(App[None]):
             "latest_viewed_at_by_agent",
         )
         self.workerbee_status_by_agent: dict[str, dict[str, Any]] = {}
+        self.file_path_by_agent: dict[str, str] = {}
+        self.file_entries_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
         self.tmux_agent_targets = str_map_setting(self.settings, "tmux_agent_targets")
         self.tmux_manual_override_agent_ids: set[str] = set()
         self.tmux_detached_agent_ids: set[str] = set()
@@ -1956,6 +1985,17 @@ class AgentPBXTUI(App[None]):
                             yield Button("Export All", id="export-all")
                             yield Button("Clear Marks", id="clear-marks")
                             yield Button("Delete Queued", id="delete-queued")
+                    with TabPane("Files", id="files-tab"):
+                        yield Static("Path: .", id="file-path")
+                        yield DataTable(
+                            id="files",
+                            cursor_type="row",
+                            show_row_labels=False,
+                        )
+                        yield TextArea(id="file-preview", read_only=True)
+                        with Horizontal(id="file-actions"):
+                            yield Button("Refresh Files", id="files-refresh")
+                            yield Button("Up", id="files-up")
                     with TabPane("WorkerBee", id="workerbee-tab"):
                         yield TextArea(id="workerbee-detail", read_only=True)
                         with Horizontal(id="workerbee-actions"):
@@ -1974,6 +2014,8 @@ class AgentPBXTUI(App[None]):
         events.add_columns("ID", "Type", "Subject")
         thread = self.query_one("#thread", DataTable)
         thread.add_columns("M", "Time", "Kind", "Plan", "Status", "Summary")
+        files = self.query_one("#files", DataTable)
+        files.add_columns("Type", "Name", "Size", "Modified")
         latest_plan_options = self.query_one("#latest-plan-options", DataTable)
         latest_plan_options.add_columns("#", "Option")
         plan_options = self.query_one("#plan-options", DataTable)
@@ -3063,6 +3105,9 @@ class AgentPBXTUI(App[None]):
         if event.data_table.id == "thread":
             self.select_thread_item(str(event.row_key.value))
             return
+        if event.data_table.id == "files":
+            await self.select_file_entry(str(event.row_key.value))
+            return
         if event.data_table.id == "plan-options":
             self.select_plan_option(str(event.row_key.value))
             return
@@ -3076,6 +3121,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.data_table.id == "thread":
             self.select_thread_item(str(event.cell_key.row_key.value))
+            return
+        if event.data_table.id == "files":
+            await self.select_file_entry(str(event.cell_key.row_key.value))
             return
         if event.data_table.id == "plan-options":
             self.select_plan_option(str(event.cell_key.row_key.value))
@@ -3394,6 +3442,12 @@ class AgentPBXTUI(App[None]):
                 name="workerbee-status",
                 exclusive=True,
             )
+        if self.active_agent_tab == "files-tab" and self.selected_agent_id:
+            self.run_worker(
+                self.load_agent_files(self.selected_agent_id),
+                name="agent-files",
+                exclusive=True,
+            )
 
     async def select_agent(self, agent_id: str) -> None:
         if agent_id != self.selected_agent_id:
@@ -3409,8 +3463,6 @@ class AgentPBXTUI(App[None]):
         await self.refresh_selected_agent(self.selected_agent_id)
         if self.active_agent_tab == "latest-tab":
             self.mark_latest_seen(agent_id)
-        elif self.active_agent_tab == "workerbee-tab":
-            await self.load_workerbee_status(agent_id)
 
     def plan_mode_state(self, agent_id: str | None) -> str:
         if not agent_id:
@@ -3438,7 +3490,11 @@ class AgentPBXTUI(App[None]):
         self.active_agent_tab = "latest-tab"
 
     async def refresh_selected_agent(self, agent_id: str) -> None:
-        if self.tmux_direct_enabled:
+        if self.active_agent_tab == "files-tab":
+            await self.load_agent_files(agent_id)
+        elif self.active_agent_tab == "workerbee-tab":
+            await self.load_workerbee_status(agent_id)
+        elif self.tmux_direct_enabled:
             await self.load_tmux_capture(agent_id)
         else:
             await self.load_latest_report(agent_id)
@@ -3838,6 +3894,14 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "delete-queued":
             await self.delete_queued_thread_commands()
+            return
+        if event.button.id == "files-refresh":
+            if self.selected_agent_id:
+                await self.load_agent_files(self.selected_agent_id)
+            return
+        if event.button.id == "files-up":
+            if self.selected_agent_id:
+                await self.load_parent_agent_files(self.selected_agent_id)
             return
         if event.button.id == "workerbee-refresh":
             if self.selected_agent_id:
@@ -4566,6 +4630,204 @@ class AgentPBXTUI(App[None]):
         )
         response.raise_for_status()
         return response.json()
+
+    async def load_agent_files(self, agent_id: str, path: str | None = None) -> None:
+        current_path = path if path is not None else self.file_path_by_agent.get(agent_id, ".")
+        path_label = self.query_one("#file-path", Static)
+        preview = self.query_one("#file-preview", TextArea)
+        path_label.update(f"Path: {current_path or '.'}")
+        preview.text = f"Loading files for {agent_id}..."
+        try:
+            response = await self.api_client().get(
+                f"/v1/agents/{agent_id}/files",
+                params={"path": current_path or "."},
+                headers=auth_headers(self.token),
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self.render_file_error(agent_id, f"Unable to load files for {agent_id}: {exc}")
+            return
+        self.render_file_list(payload)
+
+    async def load_parent_agent_files(self, agent_id: str) -> None:
+        current = self.file_path_by_agent.get(agent_id, ".")
+        parent = "."
+        entries = self.file_entries_by_agent.get(agent_id, {})
+        current_entry = entries.get(current)
+        if isinstance(current_entry, dict):
+            parent = str(current_entry.get("parent") or ".")
+        else:
+            parts = [part for part in current.split("/") if part and part != "."]
+            parent = "/".join(parts[:-1]) if len(parts) > 1 else "."
+        await self.load_agent_files(agent_id, parent)
+
+    async def select_file_entry(self, row_key: str) -> None:
+        agent_id = self.selected_agent_id
+        if not agent_id:
+            return
+        entry = self.file_entries_by_agent.get(agent_id, {}).get(row_key)
+        if not entry:
+            return
+        if entry.get("kind") == "directory":
+            await self.load_agent_files(agent_id, str(entry.get("path") or "."))
+            return
+        await self.load_file_preview(agent_id, str(entry.get("path") or row_key))
+
+    async def load_file_preview(self, agent_id: str, path: str) -> None:
+        preview = self.query_one("#file-preview", TextArea)
+        preview.text = f"Loading {path}..."
+        try:
+            response = await self.api_client().get(
+                f"/v1/agents/{agent_id}/files/preview",
+                params={"path": path},
+                headers=auth_headers(self.token),
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            preview.text = f"Unable to preview {path}: {exc}"
+            return
+        preview.text = self.format_file_preview(payload)
+
+    def render_file_error(self, agent_id: str, message: str) -> None:
+        table = self.query_one("#files", DataTable)
+        table.clear()
+        self.file_entries_by_agent[agent_id] = {}
+        self.query_one("#file-preview", TextArea).text = message
+
+    def render_file_list(self, payload: dict[str, Any]) -> None:
+        agent_id = str(payload.get("agent_id") or self.selected_agent_id or "")
+        path = str(payload.get("path") or ".")
+        self.file_path_by_agent[agent_id] = path
+        entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+        parent = payload.get("parent")
+        entry_map: dict[str, dict[str, Any]] = {}
+        table = self.query_one("#files", DataTable)
+        table.clear()
+        self.query_one("#file-path", Static).update(f"Path: {path}")
+        if parent:
+            parent_entry = {
+                "name": "..",
+                "path": str(parent),
+                "kind": "directory",
+                "parent": parent,
+            }
+            entry_map[".."] = parent_entry
+            table.add_row("DIR", "..", "", "", key="..")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_path = str(entry.get("path") or entry.get("name") or "")
+            if not entry_path:
+                continue
+            entry_map[entry_path] = entry
+            table.add_row(
+                self.file_entry_type(entry),
+                str(entry.get("name") or entry_path),
+                self.format_file_size(entry.get("size")),
+                self.format_file_mtime(entry.get("mtime")),
+                key=entry_path,
+            )
+        self.file_entries_by_agent[agent_id] = entry_map
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else None
+        preview = self.query_one("#file-preview", TextArea)
+        if error:
+            preview.text = self.format_file_error(error)
+        else:
+            preview.text = (
+                f"Agent: {agent_id}\n"
+                f"Cwd: {payload.get('cwd') or '-'}\n"
+                f"Path: {path}\n"
+                f"Entries: {len(entries)}\n\n"
+                "Select a directory to browse it or a file to preview it."
+            )
+
+    def file_entry_type(self, entry: dict[str, Any]) -> str:
+        if entry.get("kind") == "directory":
+            return "DIR"
+        if entry.get("is_gif"):
+            return "GIF"
+        if entry.get("is_image"):
+            return "IMG"
+        if entry.get("is_text"):
+            return "TXT"
+        return "BIN" if entry.get("kind") == "file" else "OTHER"
+
+    def format_file_preview(self, payload: dict[str, Any]) -> str:
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else None
+        if error:
+            return self.format_file_error(error)
+        lines = [
+            f"Path: {payload.get('path') or '-'}",
+            f"Type: {self.file_entry_type(payload)}",
+            f"Size: {self.format_file_size(payload.get('size'))}",
+            f"Modified: {self.format_file_mtime(payload.get('mtime'))}",
+            f"MIME: {payload.get('mime_type') or '-'}",
+        ]
+        if payload.get("is_image"):
+            dimensions = self.format_image_dimensions(payload)
+            lines.extend(
+                [
+                    f"Image: {'GIF' if payload.get('is_gif') else 'yes'}",
+                    f"Dimensions: {dimensions}",
+                    "",
+                    "Image/GIF rendering is metadata-only in this TUI version.",
+                ]
+            )
+            return "\n".join(lines)
+        text = payload.get("text")
+        if text is not None:
+            lines.extend(["", str(text)])
+            if payload.get("truncated"):
+                lines.extend(["", "[Preview truncated]"])
+            return "\n".join(lines)
+        lines.extend(["", "Binary preview is not available."])
+        return "\n".join(lines)
+
+    def format_file_error(self, error: dict[str, Any]) -> str:
+        lines = [
+            "Files unavailable",
+            f"Code: {error.get('code', 'FILE_ERROR')}",
+            f"Message: {error.get('message', '')}",
+        ]
+        remediation = error.get("remediation")
+        if remediation:
+            lines.append(f"Remediation: {remediation}")
+        return "\n".join(lines)
+
+    def format_image_dimensions(self, payload: dict[str, Any]) -> str:
+        width = payload.get("image_width")
+        height = payload.get("image_height")
+        if width and height:
+            return f"{width}x{height}"
+        return "-"
+
+    def format_file_size(self, value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            size = int(value)
+        except (TypeError, ValueError):
+            return ""
+        units = ["B", "KiB", "MiB", "GiB"]
+        amount = float(size)
+        for unit in units:
+            if amount < 1024 or unit == units[-1]:
+                return f"{amount:.1f} {unit}" if unit != "B" else f"{size} B"
+            amount /= 1024
+        return f"{size} B"
+
+    def format_file_mtime(self, value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            return ""
+        return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M")
 
     async def load_workerbee_status(self, agent_id: str) -> None:
         detail = self.query_one("#workerbee-detail", TextArea)

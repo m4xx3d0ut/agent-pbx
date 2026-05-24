@@ -417,6 +417,10 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         export_marked = app.query_one("#export-marked", Button)
         export_all = app.query_one("#export-all", Button)
         delete_queued = app.query_one("#delete-queued", Button)
+        files = app.query_one("#files", DataTable)
+        file_preview = app.query_one("#file-preview", TextArea)
+        files_refresh = app.query_one("#files-refresh", Button)
+        files_up = app.query_one("#files-up", Button)
         latest_plan_hint = app.query_one("#latest-plan-hint", Static)
         plan_hint = app.query_one("#plan-hint", Static)
         workerbee_detail = app.query_one("#workerbee-detail", TextArea)
@@ -432,6 +436,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert agents.show_row_labels is False
         assert thread.cursor_type == "row"
         assert thread.show_row_labels is False
+        assert files.cursor_type == "row"
+        assert files.show_row_labels is False
         assert hide_agent.label.plain == "Hide Agent (d)"
         assert purge_agent.label.plain == "Purge Agent (D)"
         assert request_detail.label.plain == "Request Detail"
@@ -441,12 +447,17 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert export_marked.label.plain == "Export Marked"
         assert export_all.label.plain == "Export All"
         assert delete_queued.label.plain == "Delete Queued"
+        assert file_preview.read_only is True
+        assert files_refresh.label.plain == "Refresh Files"
+        assert files_up.label.plain == "Up"
         assert latest_plan_hint.renderable == "Reply with /plan:1 optional notes."
         assert plan_hint.renderable == "Reply with /plan:1 optional notes."
         assert workerbee_detail.read_only is True
         assert workerbee_refresh.label.plain == "Refresh WorkerBee"
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
+        assert "#files {\n        height: 10;" in app.CSS
+        assert "#file-preview {\n        height: 1fr;" in app.CSS
         assert "#latest-plan-choice-panel,\n    #plan-choice-panel {" in app.CSS
         assert "#latest-plan-hint,\n    #plan-hint {" in app.CSS
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
@@ -1252,6 +1263,148 @@ def test_tui_workerbee_does_not_poll_while_active() -> None:
 
     assert "refresh_workerbee_if_active" not in source
     assert "load_workerbee_status" not in source
+
+
+async def test_tui_files_tab_loads_directory_and_preview() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class Response:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.payload
+
+    class Client:
+        async def get(
+            self,
+            path: str,
+            *,
+            params: dict[str, str] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            params = params or {}
+            calls.append((path, params))
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path.endswith("/files/preview"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": params["path"],
+                        "kind": "file",
+                        "size": 12,
+                        "mtime": 123.0,
+                        "extension": ".py",
+                        "mime_type": "text/x-python",
+                        "is_text": True,
+                        "is_image": False,
+                        "is_gif": False,
+                        "text": "print('ok')\n",
+                        "truncated": False,
+                        "error": None,
+                    }
+                )
+            if params.get("path") == "src":
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": "src",
+                        "parent": ".",
+                        "entries": [
+                            {
+                                "name": "app.py",
+                                "path": "src/app.py",
+                                "kind": "file",
+                                "size": 12,
+                                "mtime": 123.0,
+                                "extension": ".py",
+                                "mime_type": "text/x-python",
+                                "is_text": True,
+                                "is_image": False,
+                                "is_gif": False,
+                            }
+                        ],
+                        "error": None,
+                    }
+                )
+            return Response(
+                {
+                    "agent_id": "agent-1",
+                    "cwd": "/repo",
+                    "path": ".",
+                    "parent": None,
+                    "entries": [
+                        {
+                            "name": "src",
+                            "path": "src",
+                            "kind": "directory",
+                            "size": None,
+                            "mtime": 123.0,
+                            "extension": "",
+                            "mime_type": None,
+                            "is_text": False,
+                            "is_image": False,
+                            "is_gif": False,
+                        }
+                    ],
+                    "error": None,
+                }
+            )
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        await app.load_agent_files("agent-1")
+        await app.select_file_entry("src")
+        await app.select_file_entry("src/app.py")
+
+        assert app.query_one("#file-path", Static).renderable == "Path: src"
+        assert "print('ok')" in app.query_one("#file-preview", TextArea).text
+
+    assert calls == [
+        ("/v1/agents", {}),
+        ("/v1/events", {}),
+        ("/v1/agents/agent-1/files", {"path": "."}),
+        ("/v1/agents/agent-1/files", {"path": "src"}),
+        ("/v1/agents/agent-1/files/preview", {"path": "src/app.py"}),
+    ]
+
+
+def test_tui_formats_image_file_preview_as_metadata_only() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    rendered = app.format_file_preview(
+        {
+            "path": "docs/assets/demo.gif",
+            "kind": "file",
+            "size": 128,
+            "mtime": 123.0,
+            "mime_type": "image/gif",
+            "is_text": False,
+            "is_image": True,
+            "is_gif": True,
+            "image_width": 2,
+            "image_height": 3,
+            "text": None,
+            "truncated": False,
+            "error": None,
+        }
+    )
+
+    assert "Image: GIF" in rendered
+    assert "Dimensions: 2x3" in rendered
+    assert "metadata-only" in rendered
 
 
 def test_tui_extracts_event_agent_id() -> None:

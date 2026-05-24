@@ -154,3 +154,44 @@ class WorkerBeeStatusResponse(BaseModel):
     global_dashboard: dict[str, Any] | None = None
     app_status: dict[str, Any] | None = None
     latest_deployment: dict[str, Any] | None = None
+
+
+class FileEntry(BaseModel):
+    name: str
+    path: str
+    kind: Literal["directory", "file", "other"]
+    size: int | None = None
+    mtime: float | None = None
+    extension: str | None = None
+    mime_type: str | None = None
+    is_text: bool = False
+    is_image: bool = False
+    is_gif: bool = False
+
+
+class FileListResponse(BaseModel):
+    agent_id: str
+    cwd: str | None = None
+    path: str
+    parent: str | None = None
+    entries: list[FileEntry] = Field(default_factory=list)
+    error: dict[str, Any] | None = None
+
+
+class FilePreviewResponse(BaseModel):
+    agent_id: str
+    cwd: str | None = None
+    path: str
+    kind: Literal["file", "directory", "error"]
+    size: int | None = None
+    mtime: float | None = None
+    extension: str | None = None
+    mime_type: str | None = None
+    is_text: bool = False
+    is_image: bool = False
+    is_gif: bool = False
+    image_width: int | None = None
+    image_height: int | None = None
+    text: str | None = None
+    truncated: bool = False
+    error: dict[str, Any] | None = None

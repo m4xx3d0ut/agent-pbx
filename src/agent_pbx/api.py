@@ -24,6 +24,7 @@ from . import __version__
 from .auth import get_store, require_token
 from .config import ServerConfig
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
+from .files import AgentFileService
 from .mcp_tools import create_mcp_asgi_app
 from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .polling import poll_commands as poll_commands_until
@@ -34,6 +35,8 @@ from .schemas import (
     CommandCreateRequest,
     CommandResponse,
     EventResponse,
+    FileListResponse,
+    FilePreviewResponse,
     ReportCreateRequest,
     ReportResponse,
     ThreadItemResponse,
@@ -87,6 +90,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     )
     app.state.config = resolved_config
     app.state.store = store
+    app.state.files = AgentFileService()
     app.state.workerbee = WorkerBeeStatusService(
         workerbee_bin=resolved_config.workerbee_bin,
         timeout_seconds=resolved_config.workerbee_timeout_seconds,
@@ -237,6 +241,40 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="agent not registered")
         workerbee = request.app.state.workerbee
         return await asyncio.to_thread(workerbee.status_for_agent, agent)
+
+    @app.get(
+        "/v1/agents/{agent_id}/files",
+        response_model=FileListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_agent_files(
+        agent_id: str,
+        request: Request,
+        path: str = ".",
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        files = request.app.state.files
+        return await asyncio.to_thread(files.list_for_agent, agent, path=path)
+
+    @app.get(
+        "/v1/agents/{agent_id}/files/preview",
+        response_model=FilePreviewResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def preview_agent_file(
+        agent_id: str,
+        request: Request,
+        path: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        files = request.app.state.files
+        return await asyncio.to_thread(files.preview_for_agent, agent, path=path)
 
     @app.post(
         "/v1/commands",

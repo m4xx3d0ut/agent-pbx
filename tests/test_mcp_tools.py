@@ -107,6 +107,32 @@ async def test_mcp_reporting_and_command_tools(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_set_active_unhides_dismissed_agent(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {"agent_id": "agent-1", "project": "demo"},
+    )
+    store.dismiss_agent("agent-1")
+
+    assert store.list_agents() == []
+
+    active = tool_json(
+        await mcp.call_tool(
+            "pbx_set_active",
+            {"agent_id": "agent-1", "active": True},
+        )
+    )
+
+    assert active["agent_id"] == "agent-1"
+    assert active["pbx_active"] is True
+    assert [agent["agent_id"] for agent in store.list_agents()] == ["agent-1"]
+
+
+@pytest.mark.asyncio
 async def test_mcp_agent_runbook_tool(tmp_path: Path) -> None:
     store = Store(tmp_path / "pbx.sqlite")
     store.init()

@@ -249,6 +249,19 @@ project name, mode, running state, dashboard URLs, app readiness, latest
 deployment metadata, ingress URLs, workloads, and validation findings. The v1
 tab does not start, stop, deploy, or mutate WorkerBee projects.
 
+## Files TUI Browser
+
+The TUI includes a read-only `Files` tab for the selected agent project. Agents
+must register with `metadata.cwd`; Agent PBX lists files relative to that
+directory and rejects absolute paths, parent traversal, and symlink escapes.
+Generated or noisy directories such as `.git`, `.venv`, `node_modules`,
+`artifacts`, and `runs` are hidden by default.
+
+Selecting a text file shows a bounded text preview. Binary files, images, and
+GIFs show metadata such as size, MIME type, and image dimensions when
+detectable. Inline image/GIF rendering is intentionally deferred because
+terminal image support varies across desktop terminals, SSH, tmux, and Termux.
+
 ## Debug Runs
 
 Use `--debug` on the foreground server or daemon for verbose PBX request and

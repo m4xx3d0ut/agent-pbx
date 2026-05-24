@@ -427,6 +427,34 @@ def test_dismiss_agent_hides_from_list_but_keeps_thread_until_reconnect(
     ]
 
 
+def test_dismissed_agent_reappears_on_report_or_poll(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    for agent_id in ("report-agent", "poll-agent"):
+        client.post(
+            "/v1/agents/register",
+            json={"agent_id": agent_id, "project": "demo"},
+        )
+        client.delete(f"/v1/agents/{agent_id}")
+
+    assert client.get("/v1/agents").json() == []
+
+    report = client.post(
+        "/v1/agents/report-agent/reports",
+        json={
+            "project": "demo",
+            "status": "running",
+            "summary": "Back on PBX",
+            "detail": "A dismissed agent that reports should reappear.",
+        },
+    )
+    polled = client.get("/v1/agents/poll-agent/commands?wait_seconds=0")
+    visible = {agent["agent_id"] for agent in client.get("/v1/agents").json()}
+
+    assert report.status_code == 200
+    assert polled.status_code == 200
+    assert visible == {"report-agent", "poll-agent"}
+
+
 def test_dismiss_agent_with_delete_thread_purges_agent_history(tmp_path: Path) -> None:
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
     client.post(
@@ -512,4 +540,89 @@ def test_agent_workerbee_status_endpoint(tmp_path: Path, monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["project"] == "demo-dev-123"
     assert response.json()["description"] == "no app workload deployed yet"
+    assert missing.status_code == 404
+
+
+def test_agent_files_list_and_preview_are_scoped_to_agent_cwd(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("hello from repo\n", encoding="utf-8")
+    (repo / ".git").mkdir()
+    (repo / ".git" / "config").write_text("ignored\n", encoding="utf-8")
+    src = repo / "src"
+    src.mkdir()
+    (src / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    (repo / "outside-link").symlink_to(outside)
+    (repo / "pixel.gif").write_bytes(b"GIF89a\x02\x00\x03\x00\x80\x00\x00\x00\x00\x00")
+
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "agent-1",
+            "project": "demo",
+            "metadata": {"cwd": str(repo)},
+        },
+    )
+
+    listing = client.get("/v1/agents/agent-1/files")
+    text_preview = client.get(
+        "/v1/agents/agent-1/files/preview",
+        params={"path": "README.md"},
+    )
+    nested_listing = client.get(
+        "/v1/agents/agent-1/files",
+        params={"path": "src"},
+    )
+    gif_preview = client.get(
+        "/v1/agents/agent-1/files/preview",
+        params={"path": "pixel.gif"},
+    )
+    traversal = client.get(
+        "/v1/agents/agent-1/files/preview",
+        params={"path": "../outside.txt"},
+    )
+
+    assert listing.status_code == 200
+    entries = {entry["name"]: entry for entry in listing.json()["entries"]}
+    assert ".git" not in entries
+    assert "outside-link" not in entries
+    assert entries["src"]["kind"] == "directory"
+    assert entries["README.md"]["is_text"] is True
+    assert entries["pixel.gif"]["is_image"] is True
+    assert entries["pixel.gif"]["is_gif"] is True
+    assert text_preview.json()["text"] == "hello from repo\n"
+    assert text_preview.json()["truncated"] is False
+    assert nested_listing.json()["parent"] == "."
+    assert nested_listing.json()["entries"][0]["name"] == "app.py"
+    assert gif_preview.json()["is_image"] is True
+    assert gif_preview.json()["is_gif"] is True
+    assert gif_preview.json()["image_width"] == 2
+    assert gif_preview.json()["image_height"] == 3
+    assert gif_preview.json()["text"] is None
+    assert traversal.status_code == 200
+    assert traversal.json()["error"]["code"] == "PATH_OUTSIDE_CWD"
+
+
+def test_agent_files_reports_missing_cwd_as_structured_error(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+
+    listing = client.get("/v1/agents/agent-1/files")
+    preview = client.get(
+        "/v1/agents/agent-1/files/preview",
+        params={"path": "README.md"},
+    )
+    missing = client.get("/v1/agents/missing/files")
+
+    assert listing.status_code == 200
+    assert listing.json()["entries"] == []
+    assert listing.json()["error"]["code"] == "AGENT_CWD_MISSING"
+    assert preview.status_code == 200
+    assert preview.json()["error"]["code"] == "AGENT_CWD_MISSING"
     assert missing.status_code == 404

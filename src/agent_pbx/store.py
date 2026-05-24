@@ -367,7 +367,7 @@ class Store:
             cursor = conn.execute(
                 """
                 UPDATE agents
-                SET pbx_active = ?, last_seen_at = ?
+                SET pbx_active = ?, last_seen_at = ?, dismissed_at = NULL
                 WHERE agent_id = ?
                 """,
                 (int(active), current, agent_id),
@@ -382,7 +382,8 @@ class Store:
         with self.connect() as conn:
             conn.execute(
                 """
-                UPDATE agents SET status = ?, last_seen_at = ?
+                UPDATE agents
+                SET status = ?, last_seen_at = ?, dismissed_at = NULL
                 WHERE agent_id = ?
                 """,
                 (request.status, current, agent_id),
@@ -532,7 +533,7 @@ class Store:
         current = now_ts()
         with self.connect() as conn:
             conn.execute(
-                "UPDATE agents SET last_poll_at = ? WHERE agent_id = ?",
+                "UPDATE agents SET last_poll_at = ?, dismissed_at = NULL WHERE agent_id = ?",
                 (current, agent_id),
             )
             rows = conn.execute(
