@@ -239,6 +239,7 @@ commands; the TUI only renders the API result.
 
 ```bash
 export AGENT_PBX_WORKERBEE_BIN=/home/m4xx3d0ut/git/k1s-wt/k1s-workerbee/.venv/bin/workerbee
+export AGENT_PBX_WORKERBEE_TIMEOUT_SECONDS=20
 agent-pbx mcp restart --token dev-token
 agent-pbx tui --token dev-token
 ```
@@ -248,6 +249,10 @@ the selected agent is in a WorkerBee project, the tab shows the WorkerBee
 project name, mode, running state, dashboard URLs, app readiness, latest
 deployment metadata, ingress URLs, workloads, and validation findings. The v1
 tab does not start, stop, deploy, or mutate WorkerBee projects.
+`AGENT_PBX_WORKERBEE_TIMEOUT_SECONDS` defaults to `20` because `workerbee
+projects` can take more than ten seconds on hosts with many projects. Agent PBX
+also serializes same-agent WorkerBee checks and caches results briefly to avoid
+WorkerBee project-lock collisions from repeated refreshes.
 
 ## Files TUI Browser
 

@@ -5093,6 +5093,11 @@ class AgentPBXTUI(App[None]):
         latest_deployment = status.get("latest_deployment")
         project_card = status.get("project_card")
         global_dashboard = status.get("global_dashboard")
+        dashboard_error = (
+            status.get("dashboard_error")
+            if isinstance(status.get("dashboard_error"), dict)
+            else None
+        )
         lines.extend(
             [
                 "",
@@ -5110,6 +5115,7 @@ class AgentPBXTUI(App[None]):
         lines.extend(self.format_workerbee_deployment(latest_deployment))
         lines.extend(self.format_workerbee_project_card(project_card))
         lines.extend(self.format_workerbee_global_dashboard(global_dashboard))
+        lines.extend(self.format_workerbee_dashboard_error(dashboard_error))
         return "\n".join(lines)
 
     def format_workerbee_app_status(self, app_status: object) -> list[str]:
@@ -5201,6 +5207,22 @@ class AgentPBXTUI(App[None]):
             value = dashboard.get(key)
             if value is not None:
                 lines.append(f"{label}: {value}")
+        return lines
+
+    def format_workerbee_dashboard_error(
+        self,
+        error: dict[str, Any] | None,
+    ) -> list[str]:
+        if not error:
+            return []
+        lines = [
+            "",
+            "Dashboard Warning",
+            f"Code: {error.get('code', 'WORKERBEE_DASHBOARD_ERROR')}",
+            f"Message: {error.get('message', '')}",
+        ]
+        if "retryable" in error:
+            lines.append(f"Retryable: {error.get('retryable')}")
         return lines
 
     def format_workerbee_workload(self, workload: object) -> str:

@@ -16,7 +16,7 @@ from urllib.request import urlopen
 
 from .paths import default_state_root
 from .store import Store
-from .workerbee import WORKERBEE_BIN_ENV
+from .workerbee import WORKERBEE_BIN_ENV, WORKERBEE_CACHE_ENV, WORKERBEE_TIMEOUT_ENV
 
 
 MCP_DAEMON_FILE = "mcp-daemon.json"
@@ -36,6 +36,8 @@ class MCPDaemonConfig:
     debug_smoke: bool = False
     log_level: str | None = None
     workerbee_bin: Path | None = None
+    workerbee_timeout_seconds: float = 20.0
+    workerbee_cache_seconds: float = 10.0
 
     @property
     def resolved_state_root(self) -> Path:
@@ -88,6 +90,8 @@ def config_from_args(
     debug_smoke: bool = False,
     log_level: str | None = None,
     workerbee_bin: Path | None = None,
+    workerbee_timeout_seconds: float = 20.0,
+    workerbee_cache_seconds: float = 10.0,
 ) -> MCPDaemonConfig:
     return MCPDaemonConfig(
         state_root=(state_root or default_state_root()).expanduser().resolve(),
@@ -100,6 +104,8 @@ def config_from_args(
         debug_smoke=debug_smoke,
         log_level=log_level,
         workerbee_bin=workerbee_bin.expanduser() if workerbee_bin else None,
+        workerbee_timeout_seconds=workerbee_timeout_seconds,
+        workerbee_cache_seconds=workerbee_cache_seconds,
     )
 
 
@@ -131,6 +137,8 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         child_env["AGENT_PBX_TOKEN"] = config.token
     if config.workerbee_bin:
         child_env[WORKERBEE_BIN_ENV] = str(config.workerbee_bin.expanduser())
+    child_env[WORKERBEE_TIMEOUT_ENV] = str(config.workerbee_timeout_seconds)
+    child_env[WORKERBEE_CACHE_ENV] = str(config.workerbee_cache_seconds)
 
     argv = _serve_argv(config)
     log = open(config.log_file, "ab")  # noqa: SIM115 - passed to detached child
@@ -161,6 +169,8 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "debug": config.debug,
         "debug_smoke": config.debug_smoke,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
+        "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
+        "workerbee_cache_seconds": config.workerbee_cache_seconds,
         "mcp_url": config.mcp_url,
         "health_url": config.health_url,
         "log_file": str(config.log_file),
@@ -263,6 +273,8 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "metadata_file": str(config.metadata_file),
         "codex_command": config.codex_command,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
+        "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
+        "workerbee_cache_seconds": config.workerbee_cache_seconds,
     }
 
 

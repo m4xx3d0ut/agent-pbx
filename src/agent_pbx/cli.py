@@ -31,7 +31,11 @@ from .sim_agent import run_sim_agent
 from .sim_client import run_sim_client
 from .store import Store
 from .tui import run_tui
-from .workerbee import env_workerbee_bin
+from .workerbee import (
+    env_workerbee_bin,
+    env_workerbee_cache_seconds,
+    env_workerbee_timeout_seconds,
+)
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
@@ -97,6 +101,18 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
             choices=["critical", "error", "warning", "info", "debug", "trace"],
             help="Override Uvicorn log level. Defaults to debug when --debug is set.",
+        )
+        command.add_argument(
+            "--workerbee-timeout",
+            type=float,
+            default=env_workerbee_timeout_seconds(),
+            help="WorkerBee command timeout in seconds.",
+        )
+        command.add_argument(
+            "--workerbee-cache",
+            type=float,
+            default=env_workerbee_cache_seconds(),
+            help="WorkerBee status cache duration in seconds.",
         )
 
     serve = subcommands.add_parser(
@@ -301,6 +317,16 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         or env_flag("AGENT_PBX_DEBUG_SMOKE"),
         log_level=getattr(args, "log_level", None),
         workerbee_bin=env_workerbee_bin(),
+        workerbee_timeout_seconds=getattr(
+            args,
+            "workerbee_timeout",
+            env_workerbee_timeout_seconds(),
+        ),
+        workerbee_cache_seconds=getattr(
+            args,
+            "workerbee_cache",
+            env_workerbee_cache_seconds(),
+        ),
     )
 
 
@@ -331,6 +357,8 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         debug=daemon_config.debug,
         debug_smoke=daemon_config.debug_smoke,
         workerbee_bin=daemon_config.workerbee_bin,
+        workerbee_timeout_seconds=daemon_config.workerbee_timeout_seconds,
+        workerbee_cache_seconds=daemon_config.workerbee_cache_seconds,
     )
     log_level = daemon_config.log_level or ("debug" if daemon_config.debug else "info")
     if daemon_config.debug:
@@ -363,6 +391,8 @@ def _print_mcp_status(result: dict[str, object]) -> None:
         "metadata_file",
         "codex_command",
         "workerbee_bin",
+        "workerbee_timeout_seconds",
+        "workerbee_cache_seconds",
         "pid",
         "running",
         "stale",

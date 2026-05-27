@@ -1497,6 +1497,11 @@ def test_tui_formats_workerbee_status() -> None:
         "latest_deployment": None,
         "project_card": {"status_kind": "stopped", "exposed_route_summary": "none"},
         "global_dashboard": {"dashboard_url": "https://dashboard.local/", "running": True},
+        "dashboard_error": {
+            "code": "WORKERBEE_TIMEOUT",
+            "message": "WorkerBee command timed out after 20s",
+            "retryable": True,
+        },
     }
 
     rendered = app.format_workerbee_status(status)
@@ -1505,6 +1510,8 @@ def test_tui_formats_workerbee_status() -> None:
     assert "Name: demo-dev-123" in rendered
     assert "No deployment recorded yet." in rendered
     assert "Global Dashboard" in rendered
+    assert "Dashboard Warning" in rendered
+    assert "Code: WORKERBEE_TIMEOUT" in rendered
 
 
 def test_tui_workerbee_does_not_poll_while_active() -> None:

@@ -4,12 +4,15 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import threading
 import time
 from typing import Any, Callable
 
 
 WORKERBEE_BIN_ENV = "AGENT_PBX_WORKERBEE_BIN"
-DEFAULT_WORKERBEE_TIMEOUT_SECONDS = 10.0
+WORKERBEE_TIMEOUT_ENV = "AGENT_PBX_WORKERBEE_TIMEOUT_SECONDS"
+WORKERBEE_CACHE_ENV = "AGENT_PBX_WORKERBEE_CACHE_SECONDS"
+DEFAULT_WORKERBEE_TIMEOUT_SECONDS = 20.0
 DEFAULT_WORKERBEE_CACHE_SECONDS = 10.0
 
 Runner = Callable[
@@ -33,25 +36,53 @@ class WorkerBeeStatusService:
         self.cache_seconds = cache_seconds
         self.runner = runner or run_workerbee_command
         self.clock = clock
-        self._cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+        self._cache: dict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = {}
+        self._lock_guard = threading.Lock()
+        self._locks: dict[tuple[str, str, str], threading.Lock] = {}
 
     def status_for_agent(self, agent: dict[str, Any]) -> dict[str, Any]:
         agent_id = str(agent.get("agent_id") or "")
+        agent_project = str(agent.get("project") or "")
         cwd = agent_cwd(agent)
         bin_result = self.resolve_workerbee_bin()
-        cache_key = (agent_id, cwd or "", bin_result.get("workerbee_bin") or "")
+        cache_key = (
+            agent_id,
+            agent_project,
+            cwd or "",
+            bin_result.get("workerbee_bin") or "",
+        )
         cached = self._cache.get(cache_key)
         now = self.clock()
         if cached is not None and now - cached[0] <= self.cache_seconds:
             return dict(cached[1])
 
-        status = self._status_for_agent_uncached(agent_id, cwd, bin_result, checked_at=now)
-        self._cache[cache_key] = (now, status)
+        with self.cache_key_lock(cache_key):
+            cached = self._cache.get(cache_key)
+            now = self.clock()
+            if cached is not None and now - cached[0] <= self.cache_seconds:
+                return dict(cached[1])
+            status = self._status_for_agent_uncached(
+                agent_id,
+                agent_project,
+                cwd,
+                bin_result,
+                checked_at=now,
+            )
+            self._cache[cache_key] = (now, status)
         return dict(status)
+
+    def cache_key_lock(self, cache_key: tuple[str, str, str, str]) -> threading.Lock:
+        with self._lock_guard:
+            lock = self._locks.get(cache_key)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[cache_key] = lock
+            return lock
 
     def _status_for_agent_uncached(
         self,
         agent_id: str,
+        agent_project: str,
         cwd: str | None,
         bin_result: dict[str, Any],
         *,
@@ -61,6 +92,7 @@ class WorkerBeeStatusService:
             "configured": bool(bin_result.get("configured")),
             "available": False,
             "agent_id": agent_id,
+            "agent_project": agent_project or None,
             "cwd": cwd,
             "workerbee_bin": bin_result.get("workerbee_bin"),
             "checked_at": checked_at,
@@ -75,6 +107,7 @@ class WorkerBeeStatusService:
             "project_status": None,
             "project_card": None,
             "global_dashboard": None,
+            "dashboard_error": None,
             "app_status": None,
             "latest_deployment": None,
         }
@@ -129,48 +162,74 @@ class WorkerBeeStatusService:
                 projects_data,
                 project=str(data.get("project") or ""),
                 cwd=str(cwd_path),
+                preferred_project=agent_project,
             )
         else:
             dashboard_error = projects_payload["error"]
 
+        status_project = str(data.get("project") or "")
+        card_project = str(value_from(project_card, "project") or "")
+        use_project_card = bool(project_card) and (
+            bool(agent_project and card_project == agent_project)
+            or bool(card_project and card_project != status_project)
+        )
         project_status = dict_value(data, "project_status")
+        primary_status = project_card if use_project_card else project_status
+        fallback_status = project_status if use_project_card else project_card
         app_status = (
-            dict_value(project_status, "app_status")
-            or dict_value(project_card, "app_status")
+            dict_value(primary_status, "app_status")
+            or dict_value(fallback_status, "app_status")
             or None
         )
         latest_deployment = (
-            dict_value(project_status, "latest_deployment")
-            or dict_value(project_card, "latest_deployment")
+            dict_value(primary_status, "latest_deployment")
+            or dict_value(fallback_status, "latest_deployment")
             or None
         )
-        error = dashboard_error if dashboard_error and not project_status else None
+        project = value_from(primary_status, "project") or data.get("project")
+        mode = (
+            value_from(primary_status, "mode")
+            or data.get("mode")
+            or project_status.get("mode")
+            or value_from(fallback_status, "mode")
+        )
+        running = bool_value(
+            value_from(primary_status, "running"),
+            project_status.get("running"),
+            value_from(fallback_status, "running"),
+        )
+        dashboard_url = (
+            value_from(primary_status, "dashboard_url")
+            or value_from(primary_status, "stack_dashboard_url")
+            or value_from(primary_status, "profile_dashboard_url")
+            or data.get("dashboard_url")
+            or value_from(fallback_status, "dashboard_url")
+            or value_from(fallback_status, "stack_dashboard_url")
+            or value_from(fallback_status, "profile_dashboard_url")
+        )
+        state_dir = (
+            value_from(primary_status, "state_dir")
+            or data.get("state_dir")
+            or project_status.get("state_dir")
+            or value_from(fallback_status, "state_dir")
+        )
         return {
             **base,
             "configured": True,
             "available": True,
             "workerbee_bin": workerbee_bin,
-            "project": data.get("project") or value_from(project_card, "project"),
-            "mode": data.get("mode")
-            or project_status.get("mode")
-            or value_from(project_card, "mode"),
-            "running": bool_value(
-                project_status.get("running"),
-                value_from(project_card, "running"),
-            ),
+            "project": project,
+            "mode": mode,
+            "running": running,
             "status_kind": value_from(project_card, "status_kind"),
-            "dashboard_url": data.get("dashboard_url")
-            or value_from(project_card, "dashboard_url")
-            or value_from(project_card, "stack_dashboard_url")
-            or value_from(project_card, "profile_dashboard_url"),
-            "state_dir": data.get("state_dir")
-            or project_status.get("state_dir")
-            or value_from(project_card, "state_dir"),
+            "dashboard_url": dashboard_url,
+            "state_dir": state_dir,
             "description": workerbee_description(app_status, latest_deployment),
-            "error": error,
+            "error": None,
             "project_status": project_status or data,
             "project_card": project_card,
             "global_dashboard": global_dashboard,
+            "dashboard_error": dashboard_error,
             "app_status": app_status,
             "latest_deployment": latest_deployment,
         }
@@ -301,6 +360,29 @@ def env_workerbee_bin() -> Path | None:
     return Path(value).expanduser() if value else None
 
 
+def env_workerbee_timeout_seconds(
+    default: float = DEFAULT_WORKERBEE_TIMEOUT_SECONDS,
+) -> float:
+    return env_float(WORKERBEE_TIMEOUT_ENV, default)
+
+
+def env_workerbee_cache_seconds(
+    default: float = DEFAULT_WORKERBEE_CACHE_SECONDS,
+) -> float:
+    return env_float(WORKERBEE_CACHE_ENV, default)
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
 def agent_cwd(agent: dict[str, Any]) -> str | None:
     metadata = agent.get("metadata")
     if not isinstance(metadata, dict):
@@ -316,15 +398,32 @@ def find_project_card(
     *,
     project: str,
     cwd: str,
+    preferred_project: str = "",
 ) -> dict[str, Any] | None:
     projects = projects_payload.get("projects")
     if not isinstance(projects, list):
         return None
     cwd_path = str(Path(cwd).expanduser())
+    for candidate_project in (preferred_project, project):
+        if not candidate_project:
+            continue
+        for item in projects:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("project") or "") == candidate_project:
+                return item
     for item in projects:
         if not isinstance(item, dict):
             continue
-        if project and str(item.get("project") or "") == project:
+        if str(item.get("cwd_hint") or "") == cwd_path and bool(item.get("running")):
+            return item
+    for item in projects:
+        if not isinstance(item, dict):
+            continue
+        if (
+            str(item.get("cwd_hint") or "") == cwd_path
+            and bool(item.get("explicit_project"))
+        ):
             return item
     for item in projects:
         if not isinstance(item, dict):

@@ -138,6 +138,7 @@ class WorkerBeeStatusResponse(BaseModel):
     configured: bool
     available: bool
     agent_id: str
+    agent_project: str | None = None
     cwd: str | None = None
     workerbee_bin: str | None = None
     checked_at: float
@@ -152,6 +153,7 @@ class WorkerBeeStatusResponse(BaseModel):
     project_status: dict[str, Any] | None = None
     project_card: dict[str, Any] | None = None
     global_dashboard: dict[str, Any] | None = None
+    dashboard_error: dict[str, Any] | None = None
     app_status: dict[str, Any] | None = None
     latest_deployment: dict[str, Any] | None = None
 
