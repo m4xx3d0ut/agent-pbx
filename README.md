@@ -484,6 +484,13 @@ focuses on transcript changes instead of the live prompt buffer.
 On tiny terminals, tmux direct mode hides the pane action button row, shortens
 the editor hotkey text, and focuses the tmux input box so the transcript and
 input both stay visible.
+If touch focus behaves differently over Termux/SSH, set
+`AGENT_PBX_TUI_MOUSE_DEBUG=1` before launching the TUI to log mouse-down and
+click routing details through Textual logging.
+For touchscreen sessions where tap focus is unreliable, bind Termux extra keys
+to Agent PBX focus shortcuts: `F1` focuses Agents, `F2` Events, `F3` the right
+view, and `F4` the input box. One compact Termux row is:
+`extra-keys = [['F1','F2','F3','F4','F8'],['ESC','TAB','CTRL','ALT','LEFT','DOWN','UP','RIGHT']]`.
 
 When tmux is available, the Agents table may show a local `Live` hint. `active`
 means the captured pane text changed recently, `idle 1m` means the pane has not

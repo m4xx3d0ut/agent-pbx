@@ -30,7 +30,7 @@ from agent_pbx.tui import (
     slash_completion_direction,
     tmux_features_available,
 )
-from textual.events import Click, Key
+from textual.events import Click, Key, MouseDown
 from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static, TextArea
 
 
@@ -55,6 +55,7 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_TMUX_SHOW",
         "AGENT_PBX_TUI_TMUX_CAPTURE_LINES",
         "AGENT_PBX_TUI_TMUX_REFRESH_SECONDS",
+        "AGENT_PBX_TUI_MOUSE_DEBUG",
         "AGENT_PBX_TUI_COMMANDS_FILE",
     ]:
         monkeypatch.delenv(name, raising=False)
@@ -66,6 +67,10 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
     )
 
 
+def mouse_down(widget, *, button: int = 1) -> MouseDown:
+    return MouseDown(widget, 0, 0, 0, 0, button, False, False, False)
+
+
 def test_tui_constructs() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", token="test")
 
@@ -75,6 +80,26 @@ def test_tui_constructs() -> None:
     assert any(
         getattr(binding, "key", None) == "f8"
         and getattr(binding, "action", None) == "toggle_tmux_direct"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "f1"
+        and getattr(binding, "action", None) == "focus_agents"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "f2"
+        and getattr(binding, "action", None) == "focus_events"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "f3"
+        and getattr(binding, "action", None) == "focus_right_pane"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "f4"
+        and getattr(binding, "action", None) == "focus_latest_input"
         for binding in app.BINDINGS
     )
     assert any(
@@ -481,6 +506,10 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert hotkeys.region.y >= buttons.region.bottom
         assert hotkeys.region.right <= composer.region.right
         hotkey_text = str(hotkeys.renderable)
+        assert "F1 Agents" in hotkey_text
+        assert "F2 Events" in hotkey_text
+        assert "F3 View" in hotkey_text
+        assert "F4 Input" in hotkey_text
         assert "Ctrl+J newline" in hotkey_text
         assert "Ctrl+W word" in hotkey_text
         assert "Ctrl+T/F8 tmux" in hotkey_text
@@ -752,6 +781,226 @@ async def test_tui_tmux_prepare_clears_stale_visible_stream() -> None:
     assert changed is True
     assert unchanged is False
     assert stream.text == "Loading tmux pane %76 (agent-pbx:0.2)..."
+
+
+async def test_tui_tmux_stream_focus_snaps_to_newest_line() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        stream = app.query_one("#tmux-stream", TextArea)
+        message = app.query_one("#tmux-message", TextArea)
+        stream.text = "\n".join(f"line {index}" for index in range(40))
+        stream.move_cursor((0, 0))
+        stream.scroll_home(animate=False)
+        message.focus()
+        await pilot.pause()
+
+        stream.focus()
+        await pilot.pause()
+
+    assert stream.cursor_location == (39, len("line 39"))
+    assert stream.scroll_x == 0
+    assert stream.scroll_target_x == 0
+    assert stream.is_vertical_scroll_end
+
+
+async def test_tui_tmux_prepare_starts_stream_at_bottom() -> None:
+    pane = tmux_support.TmuxPane(
+        "agent-pbx",
+        "0",
+        "2",
+        "%76",
+        True,
+        "node",
+        "agent-pbx",
+        "/home/me/agent-pbx",
+        142,
+        45,
+        500,
+    )
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test():
+        stream = app.query_one("#tmux-stream", TextArea)
+
+        app.prepare_tmux_stream_for_capture(
+            stream,
+            cache_key="agent-1:%76",
+            pane=pane,
+        )
+
+    expected = "Loading tmux pane %76 (agent-pbx:0.2)..."
+    assert stream.text == expected
+    assert stream.cursor_location == (0, len(expected))
+    assert stream.is_vertical_scroll_end
+
+
+async def test_tui_tmux_update_preserves_manual_scroll_when_not_at_bottom() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(100, 20)
+        await pilot.pause()
+        stream = app.query_one("#tmux-stream", TextArea)
+        stream.text = "\n".join(f"old {index}" for index in range(80))
+        app.snap_tmux_stream_to_bottom(stream)
+        await pilot.pause()
+
+        stream.move_cursor((0, 0))
+        stream.scroll_home(animate=False)
+        scroll_y = stream.scroll_y
+        scroll_target_y = stream.scroll_target_y
+
+        changed = app.update_tmux_stream(
+            stream,
+            "\n".join(f"new {index}" for index in range(90)),
+            cache_key="agent:%1",
+        )
+
+    assert changed is True
+    assert stream.scroll_y == scroll_y
+    assert stream.scroll_target_y == scroll_target_y
+    assert stream.cursor_location == (0, 0)
+
+
+async def test_tui_mouse_down_focuses_tapped_sections() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        agents = app.query_one("#agents", DataTable)
+        events = app.query_one("#events", DataTable)
+        tmux_panel = app.query_one("#tmux-panel")
+        stream = app.query_one("#tmux-stream", TextArea)
+        message = app.query_one("#tmux-message", TextArea)
+
+        app.on_mouse_down(mouse_down(agents))
+        await pilot.pause()
+        assert app.focused is agents
+
+        app.on_mouse_down(mouse_down(events))
+        await pilot.pause()
+        assert app.focused is events
+
+        app.on_mouse_down(mouse_down(tmux_panel))
+        await pilot.pause()
+        assert app.focused is stream
+
+        app.on_mouse_down(mouse_down(stream))
+        await pilot.pause()
+        assert app.focused is stream
+
+        app.on_mouse_down(mouse_down(message))
+        await pilot.pause()
+        assert app.focused is message
+
+
+async def test_tui_mouse_down_on_tmux_stream_only_snaps_when_focus_enters() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        stream = app.query_one("#tmux-stream", TextArea)
+        message = app.query_one("#tmux-message", TextArea)
+        stream.text = "\n".join(f"line {index}" for index in range(40))
+        stream.move_cursor((0, 0))
+        stream.scroll_home(animate=False)
+
+        message.focus()
+        await pilot.pause()
+        app.on_mouse_down(mouse_down(stream))
+        await pilot.pause()
+        first_tap_location = stream.cursor_location
+
+        stream.move_cursor((0, 0))
+        stream.scroll_home(animate=False)
+        app.on_mouse_down(mouse_down(stream))
+        await pilot.pause()
+        second_tap_location = stream.cursor_location
+
+    assert first_tap_location == (39, len("line 39"))
+    assert second_tap_location == (0, 0)
+
+
+async def test_tui_function_keys_focus_split_sections() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        agents = app.query_one("#agents", DataTable)
+        events = app.query_one("#events", DataTable)
+        stream = app.query_one("#tmux-stream", TextArea)
+        message = app.query_one("#tmux-message", TextArea)
+
+        await pilot.press("f1")
+        await pilot.pause()
+        assert app.focused is agents
+
+        await pilot.press("f2")
+        await pilot.pause()
+        assert app.focused is events
+
+        await pilot.press("f3")
+        await pilot.pause()
+        assert app.focused is stream
+
+        await pilot.press("f4")
+        await pilot.pause()
+        assert app.focused is message
+
+
+async def test_tui_function_keys_switch_compact_views() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async def fake_refresh_selected_agent(agent_id: str) -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.refresh_selected_agent = fake_refresh_selected_agent  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(53, 20)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "project": "agent-pbx",
+                "status": "working",
+                "last_seen_at": 123.0,
+                "metadata": {"cwd": "/home/me/agent-pbx"},
+            }
+        }
+        app.render_agents()
+        agents = app.query_one("#agents", DataTable)
+        events = app.query_one("#events", DataTable)
+        stream = app.query_one("#tmux-stream", TextArea)
+        message = app.query_one("#tmux-message", TextArea)
+
+        await pilot.press("f2")
+        await pilot.pause()
+        assert app.compact_view == "home"
+        assert app.tiny_show_events is True
+        assert app.focused is events
+
+        await pilot.press("f3")
+        await pilot.pause()
+        assert app.compact_view == "agent"
+        assert app.selected_agent_id == "agent-1"
+        assert app.focused is stream
+
+        await pilot.press("f4")
+        await pilot.pause()
+        assert app.compact_view == "agent"
+        assert app.active_agent_tab == "latest-tab"
+        assert app.focused is message
+
+        await pilot.press("f1")
+        await pilot.pause()
+        assert app.compact_view == "home"
+        assert app.tiny_show_events is False
+        assert app.focused is agents
 
 
 def test_tui_tmux_liveness_formats_activity(monkeypatch) -> None:

@@ -23,9 +23,10 @@ from textual.app import App, ComposeResult, ScreenStackError, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.events import Click, Key, Resize
+from textual.events import Click, Focus, Key, MouseDown, Resize
 from textual.screen import ModalScreen
 from textual.theme import Theme
+from textual.widget import Widget
 from textual.widgets import (
     Button,
     Checkbox,
@@ -123,6 +124,38 @@ AGENT_JUMP_KEYS = {
     "8": 7,
     "9": 8,
     "0": 9,
+}
+MOUSE_FOCUS_TARGET_IDS = {
+    "agents",
+    "events",
+    "detail",
+    "tmux-stream",
+    "tmux-message",
+    "thread",
+    "thread-detail",
+    "files",
+    "file-preview",
+    "workerbee-detail",
+    "message",
+    "agent-id",
+    "plan-options",
+    "latest-plan-options",
+}
+MOUSE_FOCUS_CONTAINER_TARGETS = {
+    "left": "#agents",
+    "agent-actions": "#agents",
+    "latest-tab": "#detail",
+    "latest-plan-choice-panel": "#latest-plan-options",
+    "tmux-panel": "#tmux-stream",
+    "tmux-actions": "#tmux-message",
+    "composer": "#message",
+    "composer-inputs": "#message",
+    "composer-actions": "#message",
+    "thread-tab": "#thread",
+    "thread-actions": "#thread",
+    "files-tab": "#files",
+    "files-actions": "#files",
+    "workerbee-tab": "#workerbee-detail",
 }
 TMUX_WORKING_INFERABLE_STATUSES = {
     "blocked",
@@ -811,6 +844,14 @@ class FollowUpTextArea(TextArea):
                 )
             return
         await super()._on_key(event)
+
+
+class TmuxStreamTextArea(TextArea):
+    def _on_focus(self, event: Focus) -> None:
+        super()._on_focus(event)
+        snap = getattr(self.app, "snap_tmux_stream_to_bottom", None)
+        if snap is not None:
+            snap(self)
 
 
 class GitDiffScreen(ModalScreen[None]):
@@ -1682,6 +1723,10 @@ class AgentPBXTUI(App[None]):
     BINDINGS = [
         ("r", "refresh", "Refresh"),
         ("s", "settings", "Settings"),
+        Binding("f1", "focus_agents", "Agents", key_display="F1", priority=True),
+        Binding("f2", "focus_events", "Events", key_display="F2", priority=True),
+        Binding("f3", "focus_right_pane", "View", key_display="F3", priority=True),
+        Binding("f4", "focus_latest_input", "Input", key_display="F4", priority=True),
         ("ctrl+t", "toggle_tmux_direct", "Tmux"),
         Binding("f8", "toggle_tmux_direct", "Tmux", key_display="F8"),
         Binding("alt+t", "toggle_tmux_direct", "Tmux", key_display="Alt+T", show=False),
@@ -1856,6 +1901,7 @@ class AgentPBXTUI(App[None]):
         self.tmux_liveness_by_agent: dict[str, TmuxLiveness] = {}
         self.tmux_panes: list[tmux_support.TmuxPane] = []
         self.tmux_refreshing = False
+        self.mouse_debug_enabled = env_flag("AGENT_PBX_TUI_MOUSE_DEBUG")
         self.attention_blink_phase = False
         self.attention_agent_id: str | None = None
         self.pending_slash_command_by_agent: dict[str, str] = {}
@@ -1876,15 +1922,18 @@ class AgentPBXTUI(App[None]):
         return self.http_client
 
     def composer_hotkeys_text(self) -> str:
-        text = "Enter send | Ctrl+J newline | Ctrl+W word"
+        text = "F1 Agents | F2 Events | F3 View | F4 Input | Enter send | Ctrl+J newline | Ctrl+W word"
         if self.tmux_features_available:
             text += " | Ctrl+T/F8 tmux"
         return text
 
     def tmux_hotkeys_text(self) -> str:
         if self.is_tiny_layout():
-            return "Enter send | C-J nl | C-W word | C-T/F8 PBX"
-        return "Enter send | Ctrl+J newline | Ctrl+W word | Ctrl+T/F8 PBX"
+            return "F1 Agt | F2 Evt | F3 View | F4 In | Enter send | C-J nl | C-W word | C-T/F8 PBX"
+        return (
+            "F1 Agents | F2 Events | F3 View | F4 Input | Enter send | "
+            "Ctrl+J newline | Ctrl+W word | Ctrl+T/F8 PBX"
+        )
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -1927,7 +1976,7 @@ class AgentPBXTUI(App[None]):
                             )
                         with Vertical(id="tmux-panel"):
                             yield Static("Tmux: -", id="tmux-status")
-                            yield TextArea(id="tmux-stream", read_only=True)
+                            yield TmuxStreamTextArea(id="tmux-stream", read_only=True)
                             with Horizontal(id="tmux-actions"):
                                 yield Button("Auto", id="tmux-auto")
                                 yield Button("Select Pane", id="tmux-select")
@@ -2454,6 +2503,83 @@ class AgentPBXTUI(App[None]):
                 theme_name=self.ui_theme,
             )
         )
+
+    def action_focus_agents(self) -> None:
+        if self.is_collapsed_layout():
+            self.compact_view = "home"
+            self.tiny_show_events = False
+            self.apply_layout_class()
+        if self.selected_agent_id in self.agents:
+            self.move_agent_cursor(self.selected_agent_id, focus=True)
+            return
+        agents = self.query_one_or_none("#agents", DataTable)
+        if agents is not None:
+            agents.focus()
+
+    def action_focus_events(self) -> None:
+        if self.is_collapsed_layout():
+            self.compact_view = "home"
+            if self.is_tiny_layout():
+                self.tiny_show_events = True
+            self.apply_layout_class()
+        events = self.query_one_or_none("#events", DataTable)
+        if events is not None:
+            events.focus()
+
+    async def action_focus_right_pane(self) -> None:
+        if not await self.ensure_agent_pane_visible():
+            return
+        self.focus_right_pane_content()
+
+    async def action_focus_latest_input(self) -> None:
+        if not await self.ensure_agent_pane_visible():
+            return
+        self.activate_latest_tab()
+        if self.tmux_direct_enabled:
+            target = self.query_one_or_none("#tmux-message", TextArea)
+        else:
+            target = self.query_one_or_none("#message", TextArea)
+        if target is not None:
+            target.focus()
+
+    async def ensure_agent_pane_visible(self) -> bool:
+        agent_id = self.selected_agent_id or self.agent_id_at_cursor()
+        if self.is_collapsed_layout():
+            if not agent_id:
+                self.notify(
+                    "Select an agent before focusing the agent pane.",
+                    severity="warning",
+                )
+                return False
+            if agent_id != self.selected_agent_id:
+                await self.select_agent(agent_id)
+            else:
+                self.show_compact_agent()
+        elif agent_id and agent_id != self.selected_agent_id:
+            await self.select_agent(agent_id)
+        return True
+
+    def focus_right_pane_content(self) -> None:
+        target: Widget | None = None
+        if self.active_agent_tab == "latest-tab":
+            if self.tmux_direct_enabled:
+                target = self.query_one_or_none("#tmux-stream", TextArea)
+            else:
+                target = self.query_one_or_none("#detail", TextArea)
+        elif self.active_agent_tab == "thread-tab":
+            target = self.query_one_or_none("#thread-detail", TextArea)
+            if target is None:
+                target = self.query_one_or_none("#thread", DataTable)
+        elif self.active_agent_tab == "files-tab":
+            target = self.query_one_or_none("#file-preview", TextArea)
+            if target is None:
+                target = self.query_one_or_none("#files", DataTable)
+        elif self.active_agent_tab == "workerbee-tab":
+            target = self.query_one_or_none("#workerbee-detail", TextArea)
+        if target is None:
+            target = self.query_one_or_none("#detail", TextArea)
+        if target is not None:
+            target.focus()
 
     def action_back(self) -> None:
         if self.is_compact_layout() and self.compact_view == "agent":
@@ -3163,11 +3289,68 @@ class AgentPBXTUI(App[None]):
             self.toggle_tiny_events()
             return
 
+    def on_mouse_down(self, event: MouseDown) -> None:
+        target = self.mouse_focus_target(event)
+        self.log_mouse_event("mouse_down", event, target)
+        if target is None or event.button not in {0, 1}:
+            return
+        try:
+            target.focus()
+        except Exception:
+            return
+
     async def on_click(self, event: Click) -> None:
+        self.log_mouse_event("click", event, self.mouse_focus_target(event))
         if getattr(event.widget, "id", None) == "attention":
             opened = await self.open_attention_latest()
             if opened:
                 event.stop()
+
+    def mouse_focus_target(self, event: MouseDown | Click) -> Widget | None:
+        widget = event.widget
+        if widget is None:
+            return None
+        for candidate in self.widget_ancestry(widget):
+            candidate_id = getattr(candidate, "id", None)
+            if isinstance(candidate, (Button, Checkbox, DataTable, Input, Select, TextArea)):
+                return candidate
+            if candidate_id in MOUSE_FOCUS_TARGET_IDS and getattr(
+                candidate, "can_focus", False
+            ):
+                return candidate
+            selector = self.mouse_focus_container_selector(candidate_id)
+            if selector is not None:
+                target = self.query_one_or_none(selector, Widget)
+                if target is not None:
+                    return target
+        return None
+
+    def widget_ancestry(self, widget: Widget) -> Iterable[Widget]:
+        current: Any = widget
+        while isinstance(current, Widget):
+            yield current
+            current = getattr(current, "parent", None)
+
+    def mouse_focus_container_selector(self, widget_id: str | None) -> str | None:
+        if widget_id == "latest-tab" and self.tmux_direct_enabled:
+            return "#tmux-stream"
+        return MOUSE_FOCUS_CONTAINER_TARGETS.get(widget_id or "")
+
+    def log_mouse_event(
+        self,
+        event_name: str,
+        event: MouseDown | Click,
+        target: Widget | None,
+    ) -> None:
+        if not self.mouse_debug_enabled:
+            return
+        widget_id = getattr(event.widget, "id", None) or type(event.widget).__name__
+        target_id = getattr(target, "id", None) if target is not None else None
+        self.log(
+            f"{event_name} widget={widget_id} target={target_id} "
+            f"button={event.button} x={event.x} y={event.y} "
+            f"screen_x={event.screen_x} screen_y={event.screen_y}"
+        )
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id == "message":
@@ -3669,7 +3852,7 @@ class AgentPBXTUI(App[None]):
             return False
         self.tmux_visible_capture_key = cache_key
         stream.text = f"Loading tmux pane {pane.pane_id} ({pane.target_label})..."
-        stream.scroll_home(animate=False)
+        self.snap_tmux_stream_to_bottom(stream)
         return True
 
     def update_tmux_status(
@@ -3714,16 +3897,41 @@ class AgentPBXTUI(App[None]):
             return False
         if stream.text == captured:
             return False
-        at_bottom = bool(getattr(stream, "is_vertical_scroll_end", True))
+        at_bottom = self.tmux_stream_is_at_bottom(stream)
         scroll_y = stream.scroll_y
         scroll_target_y = stream.scroll_target_y
         stream.text = captured
         if at_bottom:
-            stream.scroll_end(animate=False)
+            self.snap_tmux_stream_to_bottom(stream)
         else:
             stream.scroll_y = scroll_y
             stream.scroll_target_y = scroll_target_y
         return True
+
+    def tmux_stream_is_at_bottom(self, stream: TextArea) -> bool:
+        max_scroll_y = float(getattr(stream, "max_scroll_y", 0) or 0)
+        if max_scroll_y <= 0:
+            return True
+        scroll_y = float(getattr(stream, "scroll_y", 0) or 0)
+        scroll_target_y = float(getattr(stream, "scroll_target_y", scroll_y) or 0)
+        return max(scroll_y, scroll_target_y) >= max_scroll_y - 1
+
+    def snap_tmux_stream_to_bottom(self, stream: TextArea | None = None) -> None:
+        if stream is None:
+            stream = self.query_one_or_none("#tmux-stream", TextArea)
+        if stream is None:
+            return
+        lines = stream.text.split("\n")
+        row = max(0, len(lines) - 1)
+        column = len(lines[-1]) if lines else 0
+        location = (row, column)
+        try:
+            stream.move_cursor(location, center=False)
+        except Exception:
+            stream.selection = (location, location)
+        stream.scroll_end(animate=False)
+        stream.scroll_x = 0
+        stream.scroll_target_x = 0
 
     def resolve_tmux_pane(
         self,
