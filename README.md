@@ -267,6 +267,13 @@ GIFs show metadata such as size, MIME type, and image dimensions when
 detectable. Inline image/GIF rendering is intentionally deferred because
 terminal image support varies across desktop terminals, SSH, tmux, and Termux.
 
+The Latest input can complete cached project paths with `@`. Open or refresh a
+directory in the `Files` tab, then type a project-relative reference such as
+`@src/ag` and press `Tab`. Completion is cache-first: Agent PBX only completes
+directories already read by the Files tab, so `@src/<Tab>` requires `src` to
+have been opened or refreshed first. The same completion works in tmux direct
+input.
+
 ## Debug Runs
 
 Use `--debug` on the foreground server or daemon for verbose PBX request and
@@ -372,8 +379,9 @@ Escape key event. In tmux direct mode, `/esc` sends `tmux send-keys Escape` to
 the selected Codex pane. Outside tmux direct mode, it queues a `send_key`
 command with `key="escape"` for nohup-mode agents that poll PBX.
 
-In the Latest input, type `/` and press `Tab` to complete slash commands inline.
-Repeated `Tab` cycles matches; exact local commands such as `/esc` or
+In the Latest input, type `/` and press `Tab` to complete slash commands inline,
+or type `@` and press `Tab` to complete cached project paths from the Files
+tab. Repeated `Tab` cycles matches; exact local commands such as `/esc` or
 `/theme minimal` execute locally on `Enter` instead of being sent to the agent.
 
 Use `/plan` to toggle Codex plan mode for the selected agent. In tmux direct
@@ -387,7 +395,8 @@ that into the normal `Selected plan option:` follow-up and preserves structured
 choice metadata when the latest report or selected thread item includes
 `plan_options`. Palette entries such as `/plan latest 2: ...` and
 `/plan thread 1: ...` prefill the reply syntax for quick editing.
-When tmux direct mode is enabled, the palette also exposes git helpers:
+When tmux direct mode is enabled for the selected agent, the palette also
+exposes git helpers:
 `/gitstatus` sends `!git status`, `/gitdiff` opens an optional target prompt
 and sends `!git diff`, `/gitpush` sends `!git push origin HEAD` by default or
 `!git push origin <branch>` when given a branch/ref, and `/gitstageandcommit`
@@ -398,8 +407,8 @@ Custom palette slash commands can be defined in
 `${XDG_CONFIG_HOME:-~/.config}/agent-pbx/slash-commands.json`, or another file
 set with `AGENT_PBX_TUI_COMMANDS_FILE=/path/to/slash-commands.json`. They are
 local TUI shortcuts for tmux direct mode: Agent PBX sends the configured prompt
-into the selected Codex pane, but does not create MCP tools or PBX queued
-commands. Reload them without restarting the TUI with `/commands reload`.
+into the selected agent's Codex pane, but does not create MCP tools or PBX
+queued commands. Reload them without restarting the TUI with `/commands reload`.
 
 ```json
 {
@@ -467,19 +476,22 @@ custom theme if another theme is selected.
 
 Experimental local-only tmux direct mode is available for workflows where the
 TUI, MCP server, tmux, and Codex pane all run on the same host. Enable it with
-`AGENT_PBX_TUI_TMUX=1` or the `Tmux direct` setting. When enabled, the selected
-agent's `Latest` tab shows a captured tmux pane instead of the PBX latest
-report and queue buttons. Agent PBX still records normal reports in `Thread`,
-but follow-up input is pasted directly into the selected tmux pane, so slash
+`AGENT_PBX_TUI_TMUX=1` or the `Tmux direct default` setting for agents without
+an explicit override. Press `Ctrl+T` or `F8` from `Latest` to toggle tmux direct
+mode for only the currently selected agent. This lets one agent's `Latest` tab
+show a captured tmux pane while another agent still shows the normal PBX latest
+report and queue buttons.
+
+Agent PBX still records normal reports in `Thread`, but follow-up input for a
+tmux-enabled agent is pasted directly into the selected tmux pane, so slash
 commands such as `/status` are sent unchanged. The TUI auto-matches panes by
 agent cwd/project/title and provides `Auto`, `Select Pane`, and `Detach`
 controls for manual correction. Tmux controls are disabled when `tmux` is not
 available; set `AGENT_PBX_TUI_TMUX_SHOW=1` to show them on a tmux-capable host
-outside an attached tmux client. Press `Ctrl+T` or `F8` from `Latest` to toggle
-tmux direct mode without opening settings. `F8` is the preferred Android
-Termux/SSH shortcut because Termux can emit it with `Volume Up+8`; `Alt+T` is
-kept as a hidden compatibility binding for terminals that send Meta-T, but
-Termux maps its volume special layer plus `T` to Tab. `AGENT_PBX_TUI_TMUX_CAPTURE_LINES=0`
+outside an attached tmux client. `F8` is the preferred Android Termux/SSH
+shortcut because Termux can emit it with `Volume Up+8`; `Alt+T` is kept as a
+hidden compatibility binding for terminals that send Meta-T, but Termux maps
+its volume special layer plus `T` to Tab. `AGENT_PBX_TUI_TMUX_CAPTURE_LINES=0`
 captures only the visible pane by default; set a positive value to include
 scrollback when you intentionally need older output. Set
 `AGENT_PBX_TUI_TMUX_REFRESH_SECONDS=1.5` to tune the snapshot refresh cadence;
@@ -497,13 +509,15 @@ to Agent PBX focus shortcuts: `F1` focuses Agents, `F2` Events, `F3` the right
 view, and `F4` the input box. One compact Termux row is:
 `extra-keys = [['F1','F2','F3','F4','F8'],['ESC','TAB','CTRL','ALT','LEFT','DOWN','UP','RIGHT']]`.
 
-When tmux is available, the Agents table may show a local `Live` hint. `active`
-means the captured pane text changed recently, `idle 1m` means the pane has not
-visibly changed for the idle threshold, and `stale` means the selected pane
-target is gone or invalid. When `Live` is `active` and the last PBX report is a
-terminal status such as `done` or `completed`, the TUI displays
-`tmux-working` in `Status` to make the local pane activity visible. This does
-not rewrite the stored PBX report.
+When tmux is available, the Agents table may show a local `Live` hint. `pbx`
+means that agent is using the standard PBX latest report view, `tmux` means
+tmux direct is enabled but has not captured a pane yet, `active` means the
+captured pane text changed recently, `idle 1m` means the pane has not visibly
+changed for the idle threshold, and `stale` means the selected pane target is
+gone or invalid. When tmux direct is enabled for an agent, `Live` is `active`,
+and the last PBX report is a terminal status such as `done` or `completed`, the
+TUI displays `tmux-working` in `Status` to make the local pane activity visible.
+This does not rewrite the stored PBX report.
 
 The tmux read path is snapshot-based: Agent PBX uses `capture-pane` to show the
 rendered pane state a human would see. Tmux paste buffers are used for sending

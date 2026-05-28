@@ -176,6 +176,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "layout": "compact",
                 "split_percent": 61,
                 "tmux_direct": True,
+                "tmux_direct_agent_modes": {"agent-1": True, "agent-2": False},
                 "tmux_capture_lines": 250,
                 "tmux_agent_targets": {"agent-1": "%1"},
                 "export_dir": str(tmp_path / "exports"),
@@ -198,6 +199,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.layout_mode == "compact"
     assert app.split_percent == 61
     assert app.tmux_direct_enabled is True
+    assert app.tmux_direct_agent_modes == {"agent-1": True, "agent-2": False}
     assert app.tmux_capture_lines == 250
     assert app.tmux_agent_targets == {"agent-1": "%1"}
     assert app.export_dir == tmp_path / "exports"
@@ -263,6 +265,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     app.terminal_bell_enabled = True
     app.agent_blink_enabled = False
     app.tmux_direct_enabled = True
+    app.tmux_direct_agent_modes = {"agent-1": True, "agent-2": False}
     app.tmux_capture_lines = 333
     app.tmux_agent_targets = {"agent-1": "%2"}
     app.layout_mode = "compact"
@@ -276,6 +279,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["terminal_bell"] is True
     assert saved["agent_blink"] is False
     assert saved["tmux_direct"] is True
+    assert saved["tmux_direct_agent_modes"] == {"agent-1": True, "agent-2": False}
     assert saved["tmux_capture_lines"] == 333
     assert saved["tmux_agent_targets"] == {"agent-1": "%2"}
     assert saved["theme"] == "1337"
@@ -1173,20 +1177,87 @@ async def test_tui_tmux_toggle_hotkey_only_from_latest() -> None:
         app.selected_agent_id = "agent-1"
         app.active_agent_tab = "thread-tab"
         await app.action_toggle_tmux_direct()
-        assert app.tmux_direct_enabled is False
+        assert app.is_tmux_direct_enabled("agent-1") is False
 
         app.active_agent_tab = "latest-tab"
         await pilot.press("ctrl+t")
         await pilot.pause()
-        assert app.tmux_direct_enabled is True
+        assert app.tmux_direct_enabled is False
+        assert app.tmux_direct_agent_modes == {"agent-1": True}
+        assert app.is_tmux_direct_enabled("agent-1") is True
         assert app.screen.has_class("tmux-direct")
 
         await pilot.press("f8")
         await pilot.pause()
-        assert app.tmux_direct_enabled is False
+        assert app.tmux_direct_agent_modes == {"agent-1": False}
+        assert app.is_tmux_direct_enabled("agent-1") is False
 
     assert captures == ["agent-1"]
     assert reports == ["agent-1"]
+
+
+async def test_tui_tmux_direct_is_tracked_per_agent() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    captures: list[str] = []
+    reports: list[str] = []
+    threads: list[str] = []
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        reports.append(agent_id)
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "project": "agent-pbx",
+                "status": "done",
+                "last_seen_at": 123.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "project": "other",
+                "status": "done",
+                "last_seen_at": 124.0,
+            },
+        }
+        await app.select_agent("agent-1")
+        await pilot.pause()
+
+        assert app.screen.has_class("tmux-direct") is False
+        assert reports == ["agent-1"]
+
+        await app.action_toggle_tmux_direct()
+        await pilot.pause()
+
+        assert app.tmux_direct_enabled is False
+        assert app.tmux_direct_agent_modes == {"agent-1": True}
+        assert app.screen.has_class("tmux-direct") is True
+        assert captures == ["agent-1"]
+
+        await app.select_agent("agent-2")
+        await pilot.pause()
+
+        assert app.screen.has_class("tmux-direct") is False
+        assert app.is_tmux_direct_enabled("agent-2") is False
+        assert reports[-1] == "agent-2"
+
+        await app.select_agent("agent-1")
+        await pilot.pause()
+
+        assert app.screen.has_class("tmux-direct") is True
+        assert captures[-1] == "agent-1"
+
+    assert threads == ["agent-1", "agent-2", "agent-1"]
 
 
 def test_tui_tmux_resolve_uses_manual_override_and_detach() -> None:
@@ -1282,7 +1353,10 @@ async def test_tui_compact_layout_opens_agent_view_and_back(monkeypatch) -> None
         assert app.screen.has_class("compact-agent")
         assert tabs.active == "latest-tab"
         assert app.active_agent_tab == "latest-tab"
-        assert str(app.query_one("#agent-title").renderable) == "Agent: agent-1 | Plan: off"
+        assert (
+            str(app.query_one("#agent-title").renderable)
+            == "Agent: agent-1 | View: pbx | Plan: off"
+        )
         assert app.query_one("#right").region.width >= 58
         message = app.query_one("#message", TextArea)
         buttons = app.query_one("#composer-buttons")
@@ -1627,6 +1701,8 @@ async def test_tui_files_tab_loads_directory_and_preview() -> None:
 
         assert app.query_one("#file-path", Static).renderable == "Path: src"
         assert "print('ok')" in app.query_one("#file-preview", TextArea).text
+        assert "src" in app.file_directory_entries_by_agent["agent-1"]["."]
+        assert "src/app.py" in app.file_directory_entries_by_agent["agent-1"]["src"]
 
     assert calls == [
         ("/v1/agents", {}),
@@ -1635,6 +1711,91 @@ async def test_tui_files_tab_loads_directory_and_preview() -> None:
         ("/v1/agents/agent-1/files", {"path": "src"}),
         ("/v1/agents/agent-1/files/preview", {"path": "src/app.py"}),
     ]
+
+
+async def test_tui_file_completion_uses_cached_files() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.file_directory_entries_by_agent = {
+            "agent-1": {
+                ".": {
+                    "README.md": {
+                        "name": "README.md",
+                        "path": "README.md",
+                        "kind": "file",
+                    },
+                    "src": {
+                        "name": "src",
+                        "path": "src",
+                        "kind": "directory",
+                    },
+                },
+                "src": {
+                    "src/app.py": {
+                        "name": "app.py",
+                        "path": "src/app.py",
+                        "kind": "file",
+                    },
+                    "src/agent_pbx": {
+                        "name": "agent_pbx",
+                        "path": "src/agent_pbx",
+                        "kind": "directory",
+                    },
+                },
+            }
+        }
+        message = app.query_one("#message", TextArea)
+
+        message.text = "review @RE"
+        message.move_cursor((0, len(message.text)))
+        assert app.complete_file_reference(message, direction=1) is True
+        assert message.text == "review @README.md"
+
+        message.text = "open @sr"
+        message.move_cursor((0, len(message.text)))
+        assert app.complete_file_reference(message, direction=1) is True
+        assert message.text == "open @src/"
+
+        message.text = "edit @src/ap"
+        message.move_cursor((0, len(message.text)))
+        assert app.complete_file_reference(message, direction=1) is True
+        assert message.text == "edit @src/app.py"
+
+
+async def test_tui_file_completion_works_in_tmux_input() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.file_directory_entries_by_agent = {
+            "agent-1": {
+                ".": {
+                    "docs": {
+                        "name": "docs",
+                        "path": "docs",
+                        "kind": "directory",
+                    },
+                }
+            }
+        }
+        message = app.query_one("#tmux-message", TextArea)
+
+        message.text = "summarize @do"
+        message.move_cursor((0, len(message.text)))
+        assert app.complete_file_reference(message, direction=1) is True
+        assert message.text == "summarize @docs/"
+
+
+def test_tui_file_completion_ignores_email_like_tokens() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    text_area = TextArea()
+    text_area.text = "mail dev@example"
+    text_area.move_cursor((0, len(text_area.text)))
+
+    assert app.file_completion_context(text_area) is None
 
 
 def test_tui_formats_image_file_preview_as_metadata_only() -> None:

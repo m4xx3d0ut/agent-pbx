@@ -277,6 +277,27 @@ class SlashCompletionState:
 
 
 @dataclass(frozen=True)
+class FileCompletionContext:
+    input_id: str
+    line: int
+    start_col: int
+    end_col: int
+    prefix: str
+    directory: str
+    name_prefix: str
+
+
+@dataclass(frozen=True)
+class FileCompletionState:
+    input_id: str
+    line: int
+    start_col: int
+    original_prefix: str
+    matches: tuple[str, ...]
+    index: int
+
+
+@dataclass(frozen=True)
 class PlanSelection:
     index: int
     notes: str = ""
@@ -682,6 +703,30 @@ def slugify(value: str) -> str:
     return slug or "agent"
 
 
+def normalize_project_path(path: str) -> str | None:
+    clean = path.strip()
+    if clean.startswith("/"):
+        return None
+    parts: list[str] = []
+    for part in clean.split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            return None
+        parts.append(part)
+    return "/".join(parts) or "."
+
+
+def split_file_completion_prefix(prefix: str) -> tuple[str, str] | None:
+    if "/" not in prefix:
+        return ".", prefix
+    directory, _, name_prefix = prefix.rpartition("/")
+    normalized = normalize_project_path(directory or ".")
+    if normalized is None:
+        return None
+    return normalized, name_prefix
+
+
 def float_value(value: object) -> float | None:
     try:
         return float(value)  # type: ignore[arg-type]
@@ -722,6 +767,24 @@ def str_map_setting(settings: dict[str, Any], key: str) -> dict[str, str]:
         for item_key, item_value in value.items()
         if isinstance(item_key, str) and isinstance(item_value, str)
     }
+
+
+def bool_map_setting(settings: dict[str, Any], key: str) -> dict[str, bool]:
+    value = settings.get(key)
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, bool] = {}
+    for item_key, item_value in value.items():
+        if not isinstance(item_key, str):
+            continue
+        if isinstance(item_value, bool):
+            result[item_key] = item_value
+            continue
+        if isinstance(item_value, str):
+            parsed = parse_env_bool(item_value)
+            if parsed is not None:
+                result[item_key] = parsed
+    return result
 
 
 def list_value(value: object) -> list[Any]:
@@ -802,6 +865,14 @@ class FollowUpTextArea(TextArea):
     async def _on_key(self, event: Key) -> None:
         completion_direction = slash_completion_direction(event)
         if completion_direction is not None:
+            complete_file = getattr(self.app, "complete_file_reference", None)
+            if complete_file is not None and complete_file(
+                self,
+                direction=completion_direction,
+            ):
+                event.stop()
+                event.prevent_default()
+                return
             complete = getattr(self.app, "complete_slash_command", None)
             if complete is not None and complete(self, direction=completion_direction):
                 event.stop()
@@ -1117,7 +1188,7 @@ class SettingsScreen(ModalScreen[None]):
                     yield Button("Reset", id="split-reset")
                     yield Button("Widen", id="split-widen")
                 tmux_direct = Checkbox(
-                    "Tmux direct",
+                    "Tmux direct default",
                     value=self.tmux_direct_enabled,
                     id="tmux-direct",
                 )
@@ -1815,6 +1886,10 @@ class AgentPBXTUI(App[None]):
         )
         if tmux_direct is None and tmux_direct_setting is not None:
             self.tmux_direct_enabled = tmux_direct_setting
+        self.tmux_direct_agent_modes = bool_map_setting(
+            self.settings,
+            "tmux_direct_agent_modes",
+        )
         self.tmux_features_available = tmux_features_available(
             tmux_direct_enabled=self.tmux_direct_enabled
         )
@@ -1823,6 +1898,8 @@ class AgentPBXTUI(App[None]):
         )
         if self.tmux_direct_enabled and not self.tmux_features_available:
             self.tmux_direct_enabled = False
+        if not self.tmux_features_available:
+            self.tmux_direct_agent_modes = {}
         capture_lines_setting = int_setting(
             self.settings,
             "tmux_capture_lines",
@@ -1892,6 +1969,10 @@ class AgentPBXTUI(App[None]):
         self.workerbee_status_by_agent: dict[str, dict[str, Any]] = {}
         self.file_path_by_agent: dict[str, str] = {}
         self.file_entries_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
+        self.file_directory_entries_by_agent: dict[
+            str,
+            dict[str, dict[str, dict[str, Any]]],
+        ] = {}
         self.tmux_agent_targets = str_map_setting(self.settings, "tmux_agent_targets")
         self.tmux_manual_override_agent_ids: set[str] = set()
         self.tmux_detached_agent_ids: set[str] = set()
@@ -1909,6 +1990,7 @@ class AgentPBXTUI(App[None]):
         self.sent_message_history_by_agent: dict[str, list[str]] = {}
         self.sent_message_history_cursor: dict[tuple[str, str], int] = {}
         self.slash_completion_state: dict[str, SlashCompletionState] = {}
+        self.file_completion_state: dict[str, FileCompletionState] = {}
         self.event_stream_disconnected = False
         self.last_seen_event_id = int_setting(self.settings, "last_seen_event_id", 0)
         self.flash_generation = 0
@@ -2098,7 +2180,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/plan thread", "Show selected thread plan options", self.palette_plan_thread)
         yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
         yield from self.palette_dynamic_plan_commands()
-        if self.tmux_direct_enabled:
+        if self.is_tmux_direct_enabled():
             yield SystemCommand("/gitstatus", "Run !git status in the selected tmux pane", self.palette_git_status)
             yield SystemCommand("/gitdiff", "Run !git diff with an optional target in tmux", self.palette_git_diff)
             yield SystemCommand("/gitpush", "Run !git push origin with an optional branch in tmux", self.palette_git_push)
@@ -2224,10 +2306,16 @@ class AgentPBXTUI(App[None]):
         self.notify(f"Custom slash commands: {first}{suffix}", severity="warning")
 
     def palette_tmux_agent_id(self) -> str | None:
-        if not self.tmux_direct_enabled:
-            self.notify("Enable tmux direct mode before using this command.", severity="warning")
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
             return None
-        return self.palette_agent_id()
+        if not self.is_tmux_direct_enabled(agent_id):
+            self.notify(
+                f"Enable tmux direct mode for {agent_id} before using this command.",
+                severity="warning",
+            )
+            return None
+        return agent_id
 
     def palette_git_status(self) -> None:
         agent_id = self.palette_tmux_agent_id()
@@ -2282,8 +2370,11 @@ class AgentPBXTUI(App[None]):
     async def palette_send_tmux_prompt(
         self, agent_id: str, prompt: str, label: str
     ) -> None:
-        if not self.tmux_direct_enabled:
-            self.notify("Enable tmux direct mode before using this command.", severity="warning")
+        if not self.is_tmux_direct_enabled(agent_id):
+            self.notify(
+                f"Enable tmux direct mode for {agent_id} before using this command.",
+                severity="warning",
+            )
             return
         sent = await self.send_text_to_tmux(agent_id, prompt)
         if not sent:
@@ -2433,7 +2524,7 @@ class AgentPBXTUI(App[None]):
         self.selected_agent_id = agent_id
         self.query_one("#agent-id", Input).value = agent_id
         command = f"/plan:{selected_index + 1} "
-        if self.tmux_direct_enabled:
+        if self.is_tmux_direct_enabled(agent_id):
             target = self.query_one_or_none("#tmux-message", TextArea)
             if target is None:
                 return
@@ -2535,7 +2626,7 @@ class AgentPBXTUI(App[None]):
         if not await self.ensure_agent_pane_visible():
             return
         self.activate_latest_tab()
-        if self.tmux_direct_enabled:
+        if self.is_tmux_direct_enabled():
             target = self.query_one_or_none("#tmux-message", TextArea)
         else:
             target = self.query_one_or_none("#message", TextArea)
@@ -2562,7 +2653,7 @@ class AgentPBXTUI(App[None]):
     def focus_right_pane_content(self) -> None:
         target: Widget | None = None
         if self.active_agent_tab == "latest-tab":
-            if self.tmux_direct_enabled:
+            if self.is_tmux_direct_enabled():
                 target = self.query_one_or_none("#tmux-stream", TextArea)
             else:
                 target = self.query_one_or_none("#detail", TextArea)
@@ -2606,13 +2697,49 @@ class AgentPBXTUI(App[None]):
     async def action_toggle_tmux_direct(self) -> None:
         if self.active_agent_tab != "latest-tab":
             return
-        enabled = self.set_tmux_direct_enabled(not self.tmux_direct_enabled)
         if not self.selected_agent_id:
+            enabled = self.set_tmux_direct_enabled(not self.tmux_direct_enabled)
+            if enabled:
+                self.notify("Tmux direct default enabled for agents without overrides.")
+            else:
+                self.notify("Tmux direct default disabled for agents without overrides.")
             return
+        enabled = self.set_agent_tmux_direct_enabled(
+            self.selected_agent_id,
+            not self.is_tmux_direct_enabled(self.selected_agent_id),
+        )
         if enabled:
             await self.load_tmux_capture(self.selected_agent_id)
         else:
             await self.load_latest_report(self.selected_agent_id)
+
+    def is_tmux_direct_enabled(self, agent_id: str | None = None) -> bool:
+        if not self.tmux_features_available:
+            return False
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if resolved_agent_id and resolved_agent_id in self.tmux_direct_agent_modes:
+            return self.tmux_direct_agent_modes[resolved_agent_id]
+        return self.tmux_direct_enabled
+
+    def set_agent_tmux_direct_enabled(self, agent_id: str, enabled: bool) -> bool:
+        if enabled and not self.tmux_features_available:
+            self.notify(
+                "Tmux direct is unavailable in this terminal. Start inside tmux "
+                "or set AGENT_PBX_TUI_TMUX_SHOW=1 on a host with tmux.",
+                severity="warning",
+            )
+            enabled = False
+        self.tmux_direct_agent_modes[agent_id] = enabled
+        if enabled:
+            self.tmux_detached_agent_ids.discard(agent_id)
+        self.apply_tmux_class()
+        self.update_agent_title()
+        self.render_agents()
+        self.save_settings()
+        self.notify(
+            f"Tmux direct {'enabled' if enabled else 'disabled'} for {agent_id}."
+        )
+        return enabled
 
     def set_tmux_direct_enabled(self, enabled: bool) -> bool:
         if enabled and not self.tmux_features_available:
@@ -2624,8 +2751,13 @@ class AgentPBXTUI(App[None]):
             enabled = False
         self.tmux_direct_enabled = enabled
         if enabled:
-            self.tmux_detached_agent_ids.clear()
+            self.tmux_detached_agent_ids = {
+                agent_id
+                for agent_id in self.tmux_detached_agent_ids
+                if self.tmux_direct_agent_modes.get(agent_id) is False
+            }
         self.apply_tmux_class()
+        self.update_agent_title()
         self.save_settings()
         return enabled
 
@@ -2951,6 +3083,8 @@ class AgentPBXTUI(App[None]):
         agent_id = str(agent.get("agent_id") or "")
         if not agent_id or not self.tmux_features_available:
             return False
+        if not self.is_tmux_direct_enabled(agent_id):
+            return False
         if status.strip().lower() not in TMUX_WORKING_INFERABLE_STATUSES:
             return False
         return self.tmux_liveness_level(agent_id) == "active"
@@ -3016,9 +3150,11 @@ class AgentPBXTUI(App[None]):
         return "idle"
 
     def format_tmux_liveness(self, agent_id: str) -> str:
+        if not self.is_tmux_direct_enabled(agent_id):
+            return "pbx"
         entry = self.tmux_liveness_by_agent.get(agent_id)
         if entry is None:
-            return "-"
+            return "tmux"
         if entry.state == "stale":
             return "stale"
         if entry.state != "captured":
@@ -3114,8 +3250,13 @@ class AgentPBXTUI(App[None]):
                 "stale": "bold yellow",
                 "never": "bold red",
             }.get(level)
-            if style is None and self.tmux_features_available:
-                tmux_level = self.tmux_liveness_level(str(agent.get("agent_id") or ""))
+            agent_id = str(agent.get("agent_id") or "")
+            if (
+                style is None
+                and self.tmux_features_available
+                and self.is_tmux_direct_enabled(agent_id)
+            ):
+                tmux_level = self.tmux_liveness_level(agent_id)
                 style = {
                     "active": "bold cyan",
                     "idle": "dim",
@@ -3332,7 +3473,7 @@ class AgentPBXTUI(App[None]):
             current = getattr(current, "parent", None)
 
     def mouse_focus_container_selector(self, widget_id: str | None) -> str | None:
-        if widget_id == "latest-tab" and self.tmux_direct_enabled:
+        if widget_id == "latest-tab" and self.is_tmux_direct_enabled():
             return "#tmux-stream"
         return MOUSE_FOCUS_CONTAINER_TARGETS.get(widget_id or "")
 
@@ -3439,6 +3580,161 @@ class AgentPBXTUI(App[None]):
             if command.title.lower() == stripped.lower():
                 return command
         return None
+
+    def file_completion_context(
+        self,
+        text_area: TextArea,
+    ) -> FileCompletionContext | None:
+        input_id = text_area.id or "message"
+        row, column = text_area.cursor_location
+        lines = text_area.text.split("\n")
+        if row < 0 or row >= len(lines):
+            return None
+        line = lines[row]
+        column = min(max(0, column), len(line))
+        start_col = line.rfind("@", 0, column)
+        if start_col < 0:
+            return None
+        before = line[start_col:column]
+        if any(char.isspace() for char in before):
+            return None
+        if start_col > 0 and not line[start_col - 1].isspace():
+            if line[start_col - 1] not in "([{'\"`":
+                return None
+        end_col = column
+        while end_col < len(line) and not line[end_col].isspace():
+            end_col += 1
+        prefix = line[start_col:column]
+        split = split_file_completion_prefix(prefix[1:])
+        if split is None:
+            return None
+        directory, name_prefix = split
+        return FileCompletionContext(
+            input_id=input_id,
+            line=row,
+            start_col=start_col,
+            end_col=end_col,
+            prefix=prefix,
+            directory=directory,
+            name_prefix=name_prefix,
+        )
+
+    def file_completion_matches(
+        self,
+        context: FileCompletionContext,
+        agent_id: str,
+    ) -> tuple[str, ...]:
+        entries = self.file_directory_entries_by_agent.get(agent_id, {}).get(
+            context.directory
+        )
+        if not entries:
+            return ()
+        prefix_key = context.name_prefix.lower()
+        candidates: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        for entry in entries.values():
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "")
+            if not name or name == ".." or not name.lower().startswith(prefix_key):
+                continue
+            path = normalize_project_path(str(entry.get("path") or name))
+            if path is None:
+                continue
+            is_directory = entry.get("kind") == "directory"
+            completion = f"@{path}{'/' if is_directory else ''}"
+            if completion in seen:
+                continue
+            seen.add(completion)
+            candidates.append((0 if is_directory else 1, completion))
+        candidates.sort(key=lambda item: (item[0], item[1].lower()))
+        return tuple(completion for _kind, completion in candidates)
+
+    def file_completion_index(
+        self,
+        context: FileCompletionContext,
+        matches: tuple[str, ...],
+        *,
+        direction: int,
+    ) -> int:
+        state = self.file_completion_state.get(context.input_id)
+        if (
+            state is not None
+            and state.line == context.line
+            and state.start_col == context.start_col
+            and state.matches == matches
+            and 0 <= state.index < len(matches)
+            and context.prefix.lower() == matches[state.index].lower()
+        ):
+            return (state.index + direction) % len(matches)
+        exact_index = next(
+            (
+                index
+                for index, title in enumerate(matches)
+                if title.lower() == context.prefix.lower()
+            ),
+            None,
+        )
+        if exact_index is not None:
+            if len(matches) == 1:
+                return exact_index
+            return (exact_index + direction) % len(matches)
+        return 0 if direction > 0 else len(matches) - 1
+
+    def apply_file_completion(
+        self,
+        text_area: TextArea,
+        context: FileCompletionContext,
+        completion: str,
+    ) -> None:
+        lines = text_area.text.split("\n")
+        line = lines[context.line]
+        lines[context.line] = (
+            line[: context.start_col] + completion + line[context.end_col :]
+        )
+        text_area.text = "\n".join(lines)
+        text_area.move_cursor((context.line, context.start_col + len(completion)))
+        if text_area.id == "message":
+            self.resize_message_input()
+
+    def complete_file_reference(self, text_area: TextArea, *, direction: int) -> bool:
+        context = self.file_completion_context(text_area)
+        if context is None:
+            return False
+        agent_id = self.sent_history_agent_id(text_area)
+        if not agent_id:
+            self.notify("Select an agent before completing @file references.", severity="warning")
+            return True
+        state = self.file_completion_state.get(context.input_id)
+        if (
+            state is not None
+            and state.line == context.line
+            and state.start_col == context.start_col
+            and 0 <= state.index < len(state.matches)
+            and context.prefix.lower() == state.matches[state.index].lower()
+        ):
+            matches = state.matches
+        else:
+            matches = self.file_completion_matches(context, agent_id)
+        if not matches:
+            self.file_completion_state.pop(context.input_id, None)
+            self.notify(
+                f"No cached file matches {context.prefix!r}; open or refresh Files for {context.directory}.",
+                severity="warning",
+            )
+            return True
+        index = self.file_completion_index(context, matches, direction=direction)
+        completion = matches[index]
+        self.apply_file_completion(text_area, context, completion)
+        self.file_completion_state[context.input_id] = FileCompletionState(
+            input_id=context.input_id,
+            line=context.line,
+            start_col=context.start_col,
+            original_prefix=context.prefix,
+            matches=matches,
+            index=index,
+        )
+        return True
 
     def slash_completion_context(
         self, text_area: TextArea
@@ -3569,14 +3865,14 @@ class AgentPBXTUI(App[None]):
                 agent_input = self.query_one_or_none("#agent-id", Input)
                 if agent_input is not None:
                     agent_input.value = agent_id
-            if not self.tmux_direct_enabled:
-                self.notify(
-                    "Enable tmux direct mode before using this command.",
-                    severity="warning",
-                )
-                return True
             if not agent_id:
                 self.notify("Select an agent first.", severity="warning")
+                return True
+            if not self.is_tmux_direct_enabled(agent_id):
+                self.notify(
+                    f"Enable tmux direct mode for {agent_id} before using this command.",
+                    severity="warning",
+                )
                 return True
             await self.palette_git_push_target(agent_id, git_push_branch)
             self.record_sent_message(agent_id, message)
@@ -3613,7 +3909,8 @@ class AgentPBXTUI(App[None]):
         self.active_agent_tab = str(event.pane.id)
         if self.active_agent_tab == "latest-tab" and self.selected_agent_id:
             self.mark_latest_seen(self.selected_agent_id)
-            if self.tmux_direct_enabled:
+            self.apply_tmux_class()
+            if self.is_tmux_direct_enabled(self.selected_agent_id):
                 self.run_worker(
                     self.load_tmux_capture(self.selected_agent_id),
                     name="tmux-capture",
@@ -3639,6 +3936,7 @@ class AgentPBXTUI(App[None]):
         self.selected_agent_id = agent_id
         self.query_one("#agent-id", Input).value = self.selected_agent_id
         self.update_agent_title()
+        self.apply_tmux_class()
         if self.is_compact_layout():
             self.show_compact_agent()
         if was_compact_home or self.active_agent_tab in {"latest-tab", "thread-tab"}:
@@ -3665,7 +3963,8 @@ class AgentPBXTUI(App[None]):
             title.update("Agent: -")
             return
         state = self.plan_mode_state(agent_id)
-        title.update(f"Agent: {agent_id} | Plan: {state}")
+        view = "tmux" if self.is_tmux_direct_enabled(agent_id) else "pbx"
+        title.update(f"Agent: {agent_id} | View: {view} | Plan: {state}")
 
     def activate_latest_tab(self) -> None:
         tabs = self.query_one("#agent-tabs", TabbedContent)
@@ -3677,7 +3976,7 @@ class AgentPBXTUI(App[None]):
             await self.load_agent_files(agent_id)
         elif self.active_agent_tab == "workerbee-tab":
             await self.load_workerbee_status(agent_id)
-        elif self.tmux_direct_enabled:
+        elif self.is_tmux_direct_enabled(agent_id):
             await self.load_tmux_capture(agent_id)
         else:
             await self.load_latest_report(agent_id)
@@ -3743,7 +4042,7 @@ class AgentPBXTUI(App[None]):
 
     async def refresh_tmux_capture_if_active(self) -> None:
         if (
-            not self.tmux_direct_enabled
+            not self.is_tmux_direct_enabled(self.selected_agent_id)
             or self.active_agent_tab != "latest-tab"
             or not self.selected_agent_id
             or self.tmux_refreshing
@@ -4123,7 +4422,7 @@ class AgentPBXTUI(App[None]):
             return
 
     async def send_input(self) -> None:
-        if self.tmux_direct_enabled:
+        if self.is_tmux_direct_enabled():
             await self.send_tmux_input()
             return
         message_input = self.query_one("#message", TextArea)
@@ -4301,7 +4600,11 @@ class AgentPBXTUI(App[None]):
         *,
         via_tmux: bool | None = None,
     ) -> bool:
-        use_tmux = self.tmux_direct_enabled if via_tmux is None else via_tmux
+        use_tmux = (
+            self.is_tmux_direct_enabled(agent_id)
+            if via_tmux is None
+            else via_tmux
+        )
         if use_tmux:
             sent = await self.send_keys_to_tmux(agent_id, PLAN_SLASH_COMMAND)
             if not sent:
@@ -4565,9 +4868,9 @@ class AgentPBXTUI(App[None]):
         agent_id = (
             self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
         )
-        if not self.tmux_direct_enabled:
+        if not self.is_tmux_direct_enabled(agent_id):
             self.notify(
-                "Enable tmux direct mode before sending to Codex pane.",
+                f"Enable tmux direct mode for {agent_id} before sending to Codex pane.",
                 severity="warning",
             )
             return
@@ -4597,9 +4900,9 @@ class AgentPBXTUI(App[None]):
         agent_id = (
             self.selected_agent_id or self.query_one("#agent-id", Input).value.strip()
         )
-        if not self.tmux_direct_enabled:
+        if not self.is_tmux_direct_enabled(agent_id):
             self.notify(
-                "Enable tmux direct mode before sending to Codex pane.",
+                f"Enable tmux direct mode for {agent_id} before sending to Codex pane.",
                 severity="warning",
             )
             return
@@ -4633,7 +4936,7 @@ class AgentPBXTUI(App[None]):
         agent_id = self.query_one("#agent-id", Input).value.strip()
         if not agent_id:
             return
-        if self.tmux_direct_enabled:
+        if self.is_tmux_direct_enabled(agent_id):
             sent = await self.send_key_to_tmux(agent_id, "Escape")
             if not sent:
                 return
@@ -4754,8 +5057,10 @@ class AgentPBXTUI(App[None]):
         self.unseen_latest_agent_ids.discard(agent_id)
         self.latest_report_by_agent.pop(agent_id, None)
         self.workerbee_status_by_agent.pop(agent_id, None)
+        self.file_directory_entries_by_agent.pop(agent_id, None)
         self.tmux_liveness_by_agent.pop(agent_id, None)
         self.tmux_agent_targets.pop(agent_id, None)
+        self.tmux_direct_agent_modes.pop(agent_id, None)
         self.tmux_manual_override_agent_ids.discard(agent_id)
         self.tmux_detached_agent_ids.discard(agent_id)
         if self.selected_agent_id == agent_id:
@@ -4940,6 +5245,7 @@ class AgentPBXTUI(App[None]):
                 key=entry_path,
             )
         self.file_entries_by_agent[agent_id] = entry_map
+        self.file_directory_entries_by_agent.setdefault(agent_id, {})[path] = entry_map
         error = payload.get("error") if isinstance(payload.get("error"), dict) else None
         preview = self.query_one("#file-preview", TextArea)
         if error:
@@ -5252,7 +5558,7 @@ class AgentPBXTUI(App[None]):
             if self.selected_agent_id:
                 worker = (
                     self.load_tmux_capture(self.selected_agent_id)
-                    if enabled
+                    if self.is_tmux_direct_enabled(self.selected_agent_id)
                     else self.load_latest_report(self.selected_agent_id)
                 )
                 self.run_worker(
@@ -5260,6 +5566,7 @@ class AgentPBXTUI(App[None]):
                     name="tmux-toggle",
                     exclusive=True,
                 )
+            self.render_agents()
 
     def set_ui_theme(self, theme_name: str) -> None:
         self.ui_theme = self.resolve_theme(theme_name)
@@ -5378,7 +5685,7 @@ class AgentPBXTUI(App[None]):
         else:
             if isinstance(self.focused, (Input, TextArea)):
                 return
-            if self.tmux_direct_enabled and self.active_agent_tab == "latest-tab":
+            if self.is_tmux_direct_enabled() and self.active_agent_tab == "latest-tab":
                 tmux_message = self.query_one_or_none("#tmux-message", TextArea)
                 if tmux_message is not None:
                     tmux_message.focus()
@@ -5393,7 +5700,7 @@ class AgentPBXTUI(App[None]):
         except ScreenStackError:
             return
         for screen in screens:
-            screen.set_class(self.tmux_direct_enabled, "tmux-direct")
+            screen.set_class(self.is_tmux_direct_enabled(), "tmux-direct")
 
     def show_compact_home(self) -> None:
         if not self.is_collapsed_layout():
@@ -5429,6 +5736,7 @@ class AgentPBXTUI(App[None]):
             "split_percent": self.split_percent,
             "export_dir": str(self.export_dir),
             "tmux_direct": self.tmux_direct_enabled,
+            "tmux_direct_agent_modes": self.tmux_direct_agent_modes,
             "tmux_capture_lines": self.tmux_capture_lines,
             "tmux_agent_targets": self.tmux_agent_targets,
             "latest_viewed_at_by_agent": self.latest_viewed_at_by_agent,
