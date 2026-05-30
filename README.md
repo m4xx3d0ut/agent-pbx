@@ -262,10 +262,15 @@ directory and rejects absolute paths, parent traversal, and symlink escapes.
 Generated or noisy directories such as `.git`, `.venv`, `node_modules`,
 `artifacts`, and `runs` are hidden by default.
 
-Selecting a text file shows a bounded text preview. Binary files, images, and
-GIFs show metadata such as size, MIME type, and image dimensions when
-detectable. Inline image/GIF rendering is intentionally deferred because
-terminal image support varies across desktop terminals, SSH, tmux, and Termux.
+Selecting a text file shows a bounded text preview. PNG images and GIF first
+frames render as a terminal-native color block preview plus a grayscale text
+fallback when Agent PBX can decode them; other binary files and unsupported
+image formats show metadata such as size, MIME type, and image dimensions when
+detectable. Install `agent-pbx[images]` to enable optional Pillow decoding for
+additional formats such as JPEG and WebP. If `chafa` is installed on the host,
+Agent PBX can use it as a best-effort fallback renderer. The preview avoids
+terminal-specific image protocols, so it works across desktop terminals, SSH,
+tmux, and Termux.
 
 The Latest input can complete cached project paths with `@`. Open or refresh a
 directory in the `Files` tab, then type a project-relative reference such as
@@ -372,12 +377,14 @@ sequence is ignored while typing in follow-up inputs, avoiding terminal
 `Alt+number` tab-switching conflicts.
 
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
-commands such as `/detail`, `/ping`, `/esc`, `/tmux`, `/workerbee`, `/theme
+commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/tmux`, `/workerbee`, `/theme
 minimal`, and `/layout compact`. `/cancel` marks a stale or abandoned session
 canceled in PBX; it does not send an Escape key. Use `/esc` when you need a real
 Escape key event. In tmux direct mode, `/esc` sends `tmux send-keys Escape` to
 the selected Codex pane. Outside tmux direct mode, it queues a `send_key`
-command with `key="escape"` for nohup-mode agents that poll PBX.
+command with `key="escape"` for nohup-mode agents that poll PBX. Use `/ctrlc`
+in tmux direct mode to send `tmux send-keys C-c` to the selected Codex pane,
+for example to back out of a `/side` chat.
 
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete cached project paths from the Files
@@ -619,4 +626,5 @@ reported status. Use `Mark Canceled` in the Latest controls when an agent was
 cancelled from its CLI session and can no longer report cleanup itself; this
 writes a `status="canceled"` report to the thread and clears the working state.
 Use `/esc` instead when the goal is to dismiss or back out of an active Codex
-prompt, modal, or plan UI.
+prompt, modal, or plan UI. Use `/ctrlc` in tmux direct mode when the Codex UI
+expects Ctrl+C, such as returning from a `/side` chat.

@@ -31,7 +31,29 @@ from agent_pbx.tui import (
     tmux_features_available,
 )
 from textual.events import Click, Key, MouseDown
-from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static, TextArea
+from textual.widgets import (
+    Button,
+    Checkbox,
+    DataTable,
+    Input,
+    RichLog,
+    Select,
+    Static,
+    TextArea,
+)
+
+
+def rich_log_plain(log: RichLog) -> str:
+    lines: list[str] = []
+    for strip in log.lines:
+        lines.append("".join(segment.text for segment in strip))
+    for deferred in getattr(log, "_deferred_renders", []):
+        content = getattr(deferred, "content", "")
+        if isinstance(content, Text):
+            lines.append(content.plain)
+        else:
+            lines.append(str(content))
+    return "\n".join(lines)
 
 
 @pytest.fixture(autouse=True)
@@ -447,7 +469,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         export_all = app.query_one("#export-all", Button)
         delete_queued = app.query_one("#delete-queued", Button)
         files = app.query_one("#files", DataTable)
-        file_preview = app.query_one("#file-preview", TextArea)
+        file_preview = app.query_one("#file-preview", RichLog)
         files_refresh = app.query_one("#files-refresh", Button)
         files_up = app.query_one("#files-up", Button)
         latest_plan_hint = app.query_one("#latest-plan-hint", Static)
@@ -476,7 +498,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert export_marked.label.plain == "Export Marked"
         assert export_all.label.plain == "Export All"
         assert delete_queued.label.plain == "Delete Queued"
-        assert file_preview.read_only is True
+        assert file_preview.can_focus is True
         assert files_refresh.label.plain == "Refresh Files"
         assert files_up.label.plain == "Up"
         assert latest_plan_hint.renderable == "Reply with /plan:1 optional notes."
@@ -1698,9 +1720,10 @@ async def test_tui_files_tab_loads_directory_and_preview() -> None:
         await app.load_agent_files("agent-1")
         await app.select_file_entry("src")
         await app.select_file_entry("src/app.py")
+        await pilot.pause()
 
         assert app.query_one("#file-path", Static).renderable == "Path: src"
-        assert "print('ok')" in app.query_one("#file-preview", TextArea).text
+        assert "print('ok')" in rich_log_plain(app.query_one("#file-preview", RichLog))
         assert "src" in app.file_directory_entries_by_agent["agent-1"]["."]
         assert "src/app.py" in app.file_directory_entries_by_agent["agent-1"]["src"]
 
@@ -1798,7 +1821,7 @@ def test_tui_file_completion_ignores_email_like_tokens() -> None:
     assert app.file_completion_context(text_area) is None
 
 
-def test_tui_formats_image_file_preview_as_metadata_only() -> None:
+def test_tui_formats_image_file_preview_as_rendered_text() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
     rendered = app.format_file_preview(
@@ -1813,6 +1836,9 @@ def test_tui_formats_image_file_preview_as_metadata_only() -> None:
             "is_gif": True,
             "image_width": 2,
             "image_height": 3,
+            "image_preview": "@@\n::",
+            "image_preview_ansi": None,
+            "image_preview_format": "grayscale-ascii",
             "text": None,
             "truncated": False,
             "error": None,
@@ -1821,7 +1847,66 @@ def test_tui_formats_image_file_preview_as_metadata_only() -> None:
 
     assert "Image: GIF" in rendered
     assert "Dimensions: 2x3" in rendered
-    assert "metadata-only" in rendered
+    assert "GIF Preview (first frame)" in rendered
+    assert "@@\n::" in rendered
+
+
+def test_tui_formats_color_image_file_preview_as_rich_text() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    renderables = app.format_file_preview_renderables(
+        {
+            "path": "docs/assets/demo.png",
+            "kind": "file",
+            "size": 128,
+            "mtime": 123.0,
+            "mime_type": "image/png",
+            "is_text": False,
+            "is_image": True,
+            "is_gif": False,
+            "image_width": 2,
+            "image_height": 2,
+            "image_preview": "@@",
+            "image_preview_ansi": "\x1b[38;2;255;0;0m\x1b[48;2;0;0;255m▀\x1b[0m",
+            "image_preview_format": "ansi-truecolor-halfblocks",
+            "text": None,
+            "truncated": False,
+            "error": None,
+        }
+    )
+
+    assert len(renderables) == 1
+    assert isinstance(renderables[0], Text)
+    assert "Image Preview (color)" in renderables[0].plain
+    assert "▀" in renderables[0].plain
+
+
+def test_tui_formats_image_file_preview_without_rendered_text() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    rendered = app.format_file_preview(
+        {
+            "path": "docs/assets/photo.jpg",
+            "kind": "file",
+            "size": 128,
+            "mtime": 123.0,
+            "mime_type": "image/jpeg",
+            "is_text": False,
+            "is_image": True,
+            "is_gif": False,
+            "image_width": 2,
+            "image_height": 3,
+            "image_preview": None,
+            "image_preview_ansi": None,
+            "image_preview_format": None,
+            "text": None,
+            "truncated": False,
+            "error": None,
+        }
+    )
+
+    assert "Image: yes" in rendered
+    assert "Image preview is metadata-only." in rendered
 
 
 def test_tui_extracts_event_agent_id() -> None:
@@ -1858,6 +1943,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/detail" in titles
     assert "/ping" in titles
     assert "/esc" in titles
+    assert "/ctrlc" in titles
     assert "/tmux" in titles
     assert "/workerbee" in titles
     assert "/plan" in titles
@@ -2185,6 +2271,33 @@ async def test_tui_palette_escape_uses_selected_agent() -> None:
     assert calls == ["agent-1"]
 
 
+async def test_tui_palette_ctrl_c_uses_selected_agent() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[str] = []
+
+    async def fake_send_ctrl_c_key() -> None:
+        calls.append(app.query_one("#agent-id", Input).value)
+
+    app.send_ctrl_c_key = fake_send_ctrl_c_key  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.palette_ctrl_c()
+        await pilot.pause()
+
+    assert calls == ["agent-1"]
+
+
 async def test_tui_follow_up_tab_completes_slash_command() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -2224,6 +2337,18 @@ async def test_tui_tmux_follow_up_tab_completes_tmux_only_command() -> None:
         await message._on_key(Key("tab", "\t"))
 
     assert message.text == "/gitstatus"
+
+
+async def test_tui_follow_up_tab_completes_ctrl_c_command() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        message = app.query_one("#message", TextArea)
+        message.text = "/ctr"
+        message.move_cursor((0, len("/ctr")))
+        await message._on_key(Key("tab", "\t"))
+
+    assert message.text == "/ctrlc"
 
 
 async def test_tui_follow_up_exact_slash_command_executes_locally() -> None:
@@ -3997,6 +4122,54 @@ async def test_tui_escape_sends_tmux_escape_key() -> None:
 
     assert sent == [("agent-1", "Escape")]
     assert captures == ["agent-1"]
+
+
+async def test_tui_ctrl_c_sends_tmux_interrupt_key() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    async def fake_send_key_to_tmux(agent_id: str, key: str) -> bool:
+        sent.append((agent_id, key))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.send_key_to_tmux = fake_send_key_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.query_one("#agent-id", Input).value = "agent-1"
+        await app.send_ctrl_c_key()
+
+    assert sent == [("agent-1", "C-c")]
+    assert captures == ["agent-1"]
+
+
+async def test_tui_ctrl_c_requires_tmux_direct() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    sent: list[tuple[str, str]] = []
+    notifications: list[tuple[str, str | None]] = []
+
+    async def fake_send_key_to_tmux(agent_id: str, key: str) -> bool:
+        sent.append((agent_id, key))
+        return True
+
+    app.send_key_to_tmux = fake_send_key_to_tmux  # type: ignore[method-assign]
+    app.notify = lambda message, **kwargs: notifications.append(  # type: ignore[method-assign]
+        (str(message), kwargs.get("severity"))
+    )
+
+    async with app.run_test():
+        app.query_one("#agent-id", Input).value = "agent-1"
+        await app.send_ctrl_c_key()
+
+    assert sent == []
+    assert (
+        "Enable tmux direct mode for agent-1 before sending Ctrl+C.",
+        "warning",
+    ) in notifications
 
 
 async def test_tui_ping_queues_keepalive_command() -> None:

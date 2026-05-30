@@ -1,12 +1,45 @@
+import base64
 import sqlite3
+import struct
 import time
 from pathlib import Path
+import zlib
 
 from fastapi.testclient import TestClient
 
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
 from agent_pbx.store import STALE_WORKING_SECONDS
+
+
+def tiny_png_bytes() -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return len(data).to_bytes(4, "big") + kind + data + b"\0\0\0\0"
+
+    raw = bytes(
+        [
+            0,
+            255,
+            0,
+            0,
+            0,
+            255,
+            0,
+            0,
+            0,
+            0,
+            255,
+            255,
+            255,
+            255,
+        ]
+    )
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
 
 
 def test_report_command_event_workflow(tmp_path: Path) -> None:
@@ -555,7 +588,10 @@ def test_agent_files_list_and_preview_are_scoped_to_agent_cwd(tmp_path: Path) ->
     outside = tmp_path / "outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     (repo / "outside-link").symlink_to(outside)
-    (repo / "pixel.gif").write_bytes(b"GIF89a\x02\x00\x03\x00\x80\x00\x00\x00\x00\x00")
+    (repo / "pixel.gif").write_bytes(
+        base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+    )
+    (repo / "pixel.png").write_bytes(tiny_png_bytes())
 
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
     client.post(
@@ -580,6 +616,10 @@ def test_agent_files_list_and_preview_are_scoped_to_agent_cwd(tmp_path: Path) ->
         "/v1/agents/agent-1/files/preview",
         params={"path": "pixel.gif"},
     )
+    png_preview = client.get(
+        "/v1/agents/agent-1/files/preview",
+        params={"path": "pixel.png"},
+    )
     traversal = client.get(
         "/v1/agents/agent-1/files/preview",
         params={"path": "../outside.txt"},
@@ -593,15 +633,26 @@ def test_agent_files_list_and_preview_are_scoped_to_agent_cwd(tmp_path: Path) ->
     assert entries["README.md"]["is_text"] is True
     assert entries["pixel.gif"]["is_image"] is True
     assert entries["pixel.gif"]["is_gif"] is True
+    assert entries["pixel.png"]["is_image"] is True
     assert text_preview.json()["text"] == "hello from repo\n"
     assert text_preview.json()["truncated"] is False
     assert nested_listing.json()["parent"] == "."
     assert nested_listing.json()["entries"][0]["name"] == "app.py"
     assert gif_preview.json()["is_image"] is True
     assert gif_preview.json()["is_gif"] is True
-    assert gif_preview.json()["image_width"] == 2
-    assert gif_preview.json()["image_height"] == 3
+    assert gif_preview.json()["image_width"] == 1
+    assert gif_preview.json()["image_height"] == 1
     assert gif_preview.json()["text"] is None
+    assert gif_preview.json()["image_preview"]
+    assert gif_preview.json()["image_preview_ansi"]
+    assert gif_preview.json()["image_preview_format"] == "ansi-truecolor-halfblocks"
+    assert png_preview.json()["is_image"] is True
+    assert png_preview.json()["is_gif"] is False
+    assert png_preview.json()["image_width"] == 2
+    assert png_preview.json()["image_height"] == 2
+    assert png_preview.json()["image_preview"]
+    assert png_preview.json()["image_preview_ansi"]
+    assert png_preview.json()["image_preview_format"] == "ansi-truecolor-halfblocks"
     assert traversal.status_code == 200
     assert traversal.json()["error"]["code"] == "PATH_OUTSIDE_CWD"
 

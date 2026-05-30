@@ -34,6 +34,7 @@ from textual.widgets import (
     Footer,
     Header,
     Input,
+    RichLog,
     Select,
     Static,
     TabbedContent,
@@ -188,6 +189,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/ping",
     "/cancel",
     "/esc",
+    "/ctrlc",
     "/tmux",
     "/workerbee",
     "/plan",
@@ -2123,7 +2125,13 @@ class AgentPBXTUI(App[None]):
                             cursor_type="row",
                             show_row_labels=False,
                         )
-                        yield TextArea(id="file-preview", read_only=True)
+                        yield RichLog(
+                            id="file-preview",
+                            wrap=False,
+                            highlight=False,
+                            markup=False,
+                            auto_scroll=False,
+                        )
                         with Horizontal(id="file-actions"):
                             yield Button("Refresh Files", id="files-refresh")
                             yield Button("Up", id="files-up")
@@ -2173,6 +2181,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/ping", "Ping the selected nohup-mode agent", self.palette_ping)
         yield SystemCommand("/cancel", "Mark the selected agent canceled", self.palette_mark_canceled)
         yield SystemCommand("/esc", "Send Escape to the selected agent", self.palette_escape)
+        yield SystemCommand("/ctrlc", "Send Ctrl+C to the selected tmux pane", self.palette_ctrl_c)
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         yield SystemCommand("/plan", "Toggle plan mode for the selected agent", self.palette_toggle_plan_mode)
@@ -2228,6 +2237,11 @@ class AgentPBXTUI(App[None]):
         if self.palette_agent_id() is None:
             return
         self.run_worker(self.send_escape_key(), name="palette-esc", exclusive=True)
+
+    def palette_ctrl_c(self) -> None:
+        if self.palette_agent_id() is None:
+            return
+        self.run_worker(self.send_ctrl_c_key(), name="palette-ctrlc", exclusive=True)
 
     def palette_toggle_tmux(self) -> None:
         self.run_worker(self.action_toggle_tmux_direct(), name="palette-tmux", exclusive=True)
@@ -2662,7 +2676,7 @@ class AgentPBXTUI(App[None]):
             if target is None:
                 target = self.query_one_or_none("#thread", DataTable)
         elif self.active_agent_tab == "files-tab":
-            target = self.query_one_or_none("#file-preview", TextArea)
+            target = self.query_one_or_none("#file-preview", RichLog)
             if target is None:
                 target = self.query_one_or_none("#files", DataTable)
         elif self.active_agent_tab == "workerbee-tab":
@@ -3453,7 +3467,10 @@ class AgentPBXTUI(App[None]):
             return None
         for candidate in self.widget_ancestry(widget):
             candidate_id = getattr(candidate, "id", None)
-            if isinstance(candidate, (Button, Checkbox, DataTable, Input, Select, TextArea)):
+            if isinstance(
+                candidate,
+                (Button, Checkbox, DataTable, Input, RichLog, Select, TextArea),
+            ):
                 return candidate
             if candidate_id in MOUSE_FOCUS_TARGET_IDS and getattr(
                 candidate, "can_focus", False
@@ -4963,6 +4980,22 @@ class AgentPBXTUI(App[None]):
         await self.refresh_events()
         await self.load_thread(agent_id)
 
+    async def send_ctrl_c_key(self) -> None:
+        agent_id = self.query_one("#agent-id", Input).value.strip()
+        if not agent_id:
+            return
+        if not self.is_tmux_direct_enabled(agent_id):
+            self.notify(
+                f"Enable tmux direct mode for {agent_id} before sending Ctrl+C.",
+                severity="warning",
+            )
+            return
+        sent = await self.send_key_to_tmux(agent_id, "C-c")
+        if not sent:
+            return
+        self.notify(f"Sent Ctrl+C to Codex pane for {agent_id}.")
+        await self.load_tmux_capture(agent_id)
+
     async def ping_agent(self) -> None:
         agent_id = self.query_one("#agent-id", Input).value.strip()
         if not agent_id:
@@ -5147,9 +5180,8 @@ class AgentPBXTUI(App[None]):
     async def load_agent_files(self, agent_id: str, path: str | None = None) -> None:
         current_path = path if path is not None else self.file_path_by_agent.get(agent_id, ".")
         path_label = self.query_one("#file-path", Static)
-        preview = self.query_one("#file-preview", TextArea)
         path_label.update(f"Path: {current_path or '.'}")
-        preview.text = f"Loading files for {agent_id}..."
+        self.set_file_preview_text(f"Loading files for {agent_id}...")
         try:
             response = await self.api_client().get(
                 f"/v1/agents/{agent_id}/files",
@@ -5189,8 +5221,7 @@ class AgentPBXTUI(App[None]):
         await self.load_file_preview(agent_id, str(entry.get("path") or row_key))
 
     async def load_file_preview(self, agent_id: str, path: str) -> None:
-        preview = self.query_one("#file-preview", TextArea)
-        preview.text = f"Loading {path}..."
+        self.set_file_preview_text(f"Loading {path}...")
         try:
             response = await self.api_client().get(
                 f"/v1/agents/{agent_id}/files/preview",
@@ -5201,15 +5232,15 @@ class AgentPBXTUI(App[None]):
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
-            preview.text = f"Unable to preview {path}: {exc}"
+            self.set_file_preview_text(f"Unable to preview {path}: {exc}")
             return
-        preview.text = self.format_file_preview(payload)
+        self.set_file_preview_payload(payload)
 
     def render_file_error(self, agent_id: str, message: str) -> None:
         table = self.query_one("#files", DataTable)
         table.clear()
         self.file_entries_by_agent[agent_id] = {}
-        self.query_one("#file-preview", TextArea).text = message
+        self.set_file_preview_text(message)
 
     def render_file_list(self, payload: dict[str, Any]) -> None:
         agent_id = str(payload.get("agent_id") or self.selected_agent_id or "")
@@ -5247,17 +5278,29 @@ class AgentPBXTUI(App[None]):
         self.file_entries_by_agent[agent_id] = entry_map
         self.file_directory_entries_by_agent.setdefault(agent_id, {})[path] = entry_map
         error = payload.get("error") if isinstance(payload.get("error"), dict) else None
-        preview = self.query_one("#file-preview", TextArea)
         if error:
-            preview.text = self.format_file_error(error)
+            self.set_file_preview_text(self.format_file_error(error))
         else:
-            preview.text = (
+            self.set_file_preview_text(
                 f"Agent: {agent_id}\n"
                 f"Cwd: {payload.get('cwd') or '-'}\n"
                 f"Path: {path}\n"
                 f"Entries: {len(entries)}\n\n"
                 "Select a directory to browse it or a file to preview it."
             )
+
+    def set_file_preview_text(self, text: str) -> None:
+        preview = self.query_one("#file-preview", RichLog)
+        preview.clear()
+        preview.write(text)
+        preview.scroll_home(animate=False, immediate=True)
+
+    def set_file_preview_payload(self, payload: dict[str, Any]) -> None:
+        preview = self.query_one("#file-preview", RichLog)
+        preview.clear()
+        for renderable in self.format_file_preview_renderables(payload):
+            preview.write(renderable)
+        preview.scroll_home(animate=False, immediate=True)
 
     def file_entry_type(self, entry: dict[str, Any]) -> str:
         if entry.get("kind") == "directory":
@@ -5270,27 +5313,48 @@ class AgentPBXTUI(App[None]):
             return "TXT"
         return "BIN" if entry.get("kind") == "file" else "OTHER"
 
+    def format_file_preview_renderables(
+        self,
+        payload: dict[str, Any],
+    ) -> list[str | Text]:
+        ansi_preview = str(payload.get("image_preview_ansi") or "").rstrip()
+        if not payload.get("is_image") or not ansi_preview:
+            return [self.format_file_preview(payload)]
+        lines = self.format_file_preview_header(payload)
+        lines.extend(
+            [
+                f"Image: {'GIF' if payload.get('is_gif') else 'yes'}",
+                f"Dimensions: {self.format_image_dimensions(payload)}",
+                "",
+                self.image_preview_label(payload, color=True),
+            ]
+        )
+        text = Text("\n".join(lines) + "\n")
+        text.append(Text.from_ansi(ansi_preview))
+        if payload.get("truncated"):
+            text.append("\n\n[Preview truncated]")
+        return [text]
+
     def format_file_preview(self, payload: dict[str, Any]) -> str:
         error = payload.get("error") if isinstance(payload.get("error"), dict) else None
         if error:
             return self.format_file_error(error)
-        lines = [
-            f"Path: {payload.get('path') or '-'}",
-            f"Type: {self.file_entry_type(payload)}",
-            f"Size: {self.format_file_size(payload.get('size'))}",
-            f"Modified: {self.format_file_mtime(payload.get('mtime'))}",
-            f"MIME: {payload.get('mime_type') or '-'}",
-        ]
+        lines = self.format_file_preview_header(payload)
         if payload.get("is_image"):
             dimensions = self.format_image_dimensions(payload)
             lines.extend(
                 [
                     f"Image: {'GIF' if payload.get('is_gif') else 'yes'}",
                     f"Dimensions: {dimensions}",
-                    "",
-                    "Image/GIF rendering is metadata-only in this TUI version.",
                 ]
             )
+            preview = str(payload.get("image_preview") or "").rstrip()
+            if preview:
+                lines.extend(["", self.image_preview_label(payload), preview])
+                if payload.get("truncated"):
+                    lines.extend(["", "[Preview truncated]"])
+                return "\n".join(lines)
+            lines.extend(["", "Image preview is metadata-only."])
             return "\n".join(lines)
         text = payload.get("text")
         if text is not None:
@@ -5300,6 +5364,19 @@ class AgentPBXTUI(App[None]):
             return "\n".join(lines)
         lines.extend(["", "Binary preview is not available."])
         return "\n".join(lines)
+
+    def format_file_preview_header(self, payload: dict[str, Any]) -> list[str]:
+        return [
+            f"Path: {payload.get('path') or '-'}",
+            f"Type: {self.file_entry_type(payload)}",
+            f"Size: {self.format_file_size(payload.get('size'))}",
+            f"Modified: {self.format_file_mtime(payload.get('mtime'))}",
+            f"MIME: {payload.get('mime_type') or '-'}",
+        ]
+
+    def image_preview_label(self, payload: dict[str, Any], *, color: bool = False) -> str:
+        base = "GIF Preview (first frame)" if payload.get("is_gif") else "Image Preview"
+        return f"{base} (color)" if color else base
 
     def format_file_error(self, error: dict[str, Any]) -> str:
         lines = [

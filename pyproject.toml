@@ -25,6 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+images = [
+    "Pillow>=10,<12",
+]
 dev = [
     "build>=1,<2",
     "pytest>=8,<9",

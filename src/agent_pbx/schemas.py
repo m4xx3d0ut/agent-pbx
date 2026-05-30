@@ -194,6 +194,9 @@ class FilePreviewResponse(BaseModel):
     is_gif: bool = False
     image_width: int | None = None
     image_height: int | None = None
+    image_preview: str | None = None
+    image_preview_ansi: str | None = None
+    image_preview_format: str | None = None
     text: str | None = None
     truncated: bool = False
     error: dict[str, Any] | None = None
