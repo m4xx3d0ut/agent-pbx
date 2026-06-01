@@ -174,15 +174,16 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         report = store.create_report(agent_id, request)
         store.append_event(
             "report_created",
-            {
-                "report_id": report["report_id"],
-                "agent_id": agent_id,
-                "status": request.status,
-                "summary": request.summary,
-                "needs_input": request.needs_input,
-            },
-            report["report_id"],
-        )
+                {
+                    "report_id": report["report_id"],
+                    "agent_id": agent_id,
+                    "status": request.status,
+                    "summary": request.summary,
+                    "needs_input": request.needs_input,
+                    "created_at": report["created_at"],
+                },
+                report["report_id"],
+            )
         return report
 
     @app.get(
@@ -211,6 +212,31 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         if store.get_agent(agent_id) is None:
             raise HTTPException(status_code=404, detail="agent not registered")
         return store.list_reports(agent_id, limit=limit)
+
+    @app.post(
+        "/v1/agents/{agent_id}/latest/seen",
+        response_model=AgentResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def mark_agent_latest_seen(
+        agent_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        if store.get_agent(agent_id) is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        agent = store.mark_latest_report_seen(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        store.append_event(
+            "latest_seen",
+            {
+                "agent_id": agent_id,
+                "project": agent["project"],
+                "latest_report_seen_at": agent.get("latest_report_seen_at"),
+            },
+            agent_id,
+        )
+        return agent
 
     @app.get(
         "/v1/agents/{agent_id}/thread",
@@ -414,9 +440,15 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         dependencies=[Depends(require_token)],
     )
     async def list_events(
-        after_id: int = 0, store: Store = Depends(get_store)
+        after_id: int = 0,
+        limit: int = 100,
+        tail: bool = False,
+        store: Store = Depends(get_store),
     ) -> list[dict[str, object]]:
-        return store.list_events(after_id=after_id)
+        bounded_limit = min(500, max(1, limit))
+        if tail:
+            return store.list_recent_events(limit=bounded_limit)
+        return store.list_events(after_id=after_id, limit=bounded_limit)
 
     @app.get("/v1/events/stream", dependencies=[Depends(require_token)])
     async def event_stream(

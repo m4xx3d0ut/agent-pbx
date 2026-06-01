@@ -46,7 +46,7 @@ agent-pbx --version
 The installer uses the active virtual environment when `VIRTUAL_ENV` is set.
 Otherwise it creates a standalone venv under
 `${XDG_DATA_HOME:-~/.local/share}/agent-pbx` and writes an `agent-pbx` wrapper
-to `~/.local/bin`.
+and an `agent-pbx-tui` wrapper to `~/.local/bin`.
 
 ### Build and install from a local wheelhouse
 
@@ -111,6 +111,37 @@ agent-pbx mcp status
 codex mcp add agent-pbx --url "$AGENT_PBX_MCP_URL"
 agent-pbx tui
 ```
+
+## Portable TUI Launcher
+
+Use `agent-pbx-tui` for TUI-only clients on another local machine or small LAN
+terminal. It reads a local dotenv-style config before launching, so the server
+address and token do not need to be typed every time:
+
+```bash
+agent-pbx-tui --init-config
+$EDITOR ~/.config/agent-pbx/tui.env
+agent-pbx-tui
+```
+
+Set the MCP/API host by IP or DNS name and keep the token private:
+
+```text
+AGENT_PBX_SERVER_URL=http://192.168.29.111:8767
+AGENT_PBX_TOKEN=dev-token
+AGENT_PBX_TUI_LAYOUT=tiny
+AGENT_PBX_TUI_THEME=cyberpunk
+AGENT_PBX_TUI_LOW_POWER=1
+AGENT_PBX_TUI_TMUX=0
+```
+
+The default config path is
+`${XDG_CONFIG_HOME:-~/.config}/agent-pbx/tui.env`; override it with
+`AGENT_PBX_TUI_CONFIG=/path/to/tui.env` or `agent-pbx-tui --config
+/path/to/tui.env`. Environment variables override config values, and
+`agent-pbx-tui --server ... --token ...` overrides both. The config parser
+supports `KEY=value`, `export KEY=value`, shell-style quotes, comments, and
+`${VAR}` references without executing the file as a shell script.
 
 ## Background MCP Daemon
 
@@ -361,8 +392,23 @@ the home screen. Override with
 `AGENT_PBX_TUI_LAYOUT=adaptive|split|compact|tiny` or the `Layout` setting.
 Selecting an agent in compact or tiny mode opens a full-width view with
 `Latest`, `Thread`, and `WorkerBee` tabs; press `b` to return to the agent
-list. In tiny mode, press `e` on the home screen to toggle between Agents and
-Events.
+list. In tiny mode, press `e` on the home screen for Events and `a` to return
+to Agents.
+
+For very low-power terminals where the TUI is mostly an alert board, enable
+low-power watch mode. It keeps server event alerts active, slows periodic
+safety refreshes, avoids rendering hidden Events in tiny mode, and skips hidden
+selected-agent detail refreshes until you open an agent:
+
+```bash
+AGENT_PBX_TUI_LAYOUT=tiny \
+AGENT_PBX_TUI_THEME=cyberpunk \
+AGENT_PBX_TUI_TMUX=0 \
+AGENT_PBX_TUI_LOW_POWER=1 \
+AGENT_PBX_TUI_AGENT_REFRESH_SECONDS=15 \
+AGENT_PBX_TUI_ATTENTION_BLINK_SECONDS=3 \
+agent-pbx tui --server http://192.168.1.25:8767 --token "$AGENT_PBX_TOKEN"
+```
 
 In split layout, adjust the Agents/right-pane width with `[` and `]`; press
 `0` to reset to the default 42% Agents width. The same controls are available
@@ -511,9 +557,12 @@ input both stay visible.
 If touch focus behaves differently over Termux/SSH, set
 `AGENT_PBX_TUI_MOUSE_DEBUG=1` before launching the TUI to log mouse-down and
 click routing details through Textual logging.
-For touchscreen sessions where tap focus is unreliable, bind Termux extra keys
-to Agent PBX focus shortcuts: `F1` focuses Agents, `F2` Events, `F3` the right
-view, and `F4` the input box. One compact Termux row is:
+For touchscreen sessions where tap focus is unreliable, use the plain-key
+focus fallbacks: `a` focuses Agents, `e` Events, `v` the selected agent view,
+and `i` the input box. These are ignored while typing in follow-up inputs.
+Function-key shortcuts remain available on terminals that send them: `F1`
+Agents, `F2` Events, `F3` view, `F4` input, and `F8` tmux direct. One compact
+Termux row for those terminals is:
 `extra-keys = [['F1','F2','F3','F4','F8'],['ESC','TAB','CTRL','ALT','LEFT','DOWN','UP','RIGHT']]`.
 
 When tmux is available, the Agents table may show a local `Live` hint. `pbx`

@@ -36,6 +36,7 @@ dev = [
 
 [project.scripts]
 agent-pbx = "agent_pbx.cli:main"
+agent-pbx-tui = "agent_pbx.tui_cli:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "agent_pbx.__version__"}

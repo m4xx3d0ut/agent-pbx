@@ -93,7 +93,12 @@ if [ "$install_mode" = "standalone" ]; then
 #!/usr/bin/env sh
 exec "$target_python" -m agent_pbx "\$@"
 EOF
+  cat >"$BIN_DIR/agent-pbx-tui" <<EOF
+#!/usr/bin/env sh
+exec "$target_python" -m agent_pbx.tui_cli "\$@"
+EOF
   chmod +x "$BIN_DIR/agent-pbx"
+  chmod +x "$BIN_DIR/agent-pbx-tui"
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
@@ -112,3 +117,4 @@ fi
 log ""
 log "Agent PBX installed ($install_mode)."
 log "Verify with: $agent_pbx_cmd --version"
+log "Run the TUI with: agent-pbx-tui"

@@ -112,6 +112,119 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
         "command_delivered",
         "command_acked",
     ]
+    assert events.json()[1]["payload"]["created_at"] == report.json()["created_at"]
+
+
+def test_mark_latest_report_seen_is_shared_state(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    report = client.post(
+        "/v1/agents/agent-1/reports",
+        json={
+            "project": "demo",
+            "status": "done",
+            "summary": "Done",
+            "detail": "Details",
+        },
+    ).json()
+    before = client.get("/v1/agents").json()[0]
+
+    seen = client.post("/v1/agents/agent-1/latest/seen")
+    after = client.get("/v1/agents").json()[0]
+    events = client.get("/v1/events").json()
+
+    assert before["latest_report_id"] == report["report_id"]
+    assert before["latest_report_created_at"] == report["created_at"]
+    assert before["latest_report_seen_at"] is None
+    assert seen.status_code == 200
+    assert seen.json()["latest_report_seen_at"] == report["created_at"]
+    assert after["latest_report_seen_at"] == report["created_at"]
+    assert events[-1]["type"] == "latest_seen"
+    assert events[-1]["payload"]["agent_id"] == "agent-1"
+    assert events[-1]["payload"]["latest_report_seen_at"] == report["created_at"]
+
+
+def test_events_tail_returns_latest_events(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    for index in range(105):
+        client.post(
+            "/v1/agents/register",
+            json={"agent_id": f"agent-{index:03d}", "project": "demo"},
+        )
+
+    first_page = client.get("/v1/events", params={"limit": 5}).json()
+    latest_page = client.get(
+        "/v1/events",
+        params={"tail": "true", "limit": 5},
+    ).json()
+
+    assert [event["subject_id"] for event in first_page] == [
+        "agent-000",
+        "agent-001",
+        "agent-002",
+        "agent-003",
+        "agent-004",
+    ]
+    assert [event["subject_id"] for event in latest_page] == [
+        "agent-100",
+        "agent-101",
+        "agent-102",
+        "agent-103",
+        "agent-104",
+    ]
+    assert [event["event_id"] for event in latest_page] == sorted(
+        event["event_id"] for event in latest_page
+    )
+
+
+def test_schema_upgrade_backfills_existing_latest_reports_as_seen(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "pbx.sqlite"
+    client = TestClient(create_app(ServerConfig(db_path=db_path)))
+
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    report = client.post(
+        "/v1/agents/agent-1/reports",
+        json={
+            "project": "demo",
+            "status": "done",
+            "summary": "Historical report",
+            "detail": "Existing before shared seen migration",
+        },
+    ).json()
+    before = client.get("/v1/agents").json()[0]
+    assert before["latest_report_seen_at"] is None
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE metadata SET value = '6' WHERE key = 'schema_version'"
+        )
+
+    upgraded = TestClient(create_app(ServerConfig(db_path=db_path)))
+    after = upgraded.get("/v1/agents").json()[0]
+    assert after["latest_report_seen_at"] == report["created_at"]
+
+    new_report = upgraded.post(
+        "/v1/agents/agent-1/reports",
+        json={
+            "project": "demo",
+            "status": "working",
+            "summary": "New report",
+            "detail": "Should still be unseen after migration",
+        },
+    ).json()
+    current = upgraded.get("/v1/agents").json()[0]
+    assert current["latest_report_created_at"] == new_report["created_at"]
+    assert current["latest_report_seen_at"] == report["created_at"]
 
 
 def test_agent_thread_merges_reports_and_commands(tmp_path: Path) -> None:

@@ -26,6 +26,7 @@ from textual.css.query import NoMatches
 from textual.events import Click, Focus, Key, MouseDown, Resize
 from textual.screen import ModalScreen
 from textual.theme import Theme
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import (
     Button,
@@ -80,6 +81,12 @@ DEFAULT_SLASH_COMMANDS_FILE = Path("agent-pbx/slash-commands.json")
 DEFAULT_TMUX_CAPTURE_LINES = 0
 DEFAULT_TMUX_REFRESH_SECONDS = 1.5
 MIN_TMUX_REFRESH_SECONDS = 0.25
+DEFAULT_AGENT_REFRESH_SECONDS = 2.0
+LOW_POWER_AGENT_REFRESH_SECONDS = 15.0
+MIN_AGENT_REFRESH_SECONDS = 1.0
+DEFAULT_ATTENTION_BLINK_SECONDS = 0.8
+LOW_POWER_ATTENTION_BLINK_SECONDS = 3.0
+MIN_ATTENTION_BLINK_SECONDS = 0.5
 FOLLOW_UP_MIN_HEIGHT = 8
 FOLLOW_UP_MAX_HEIGHT = 15
 SENT_MESSAGE_HISTORY_LIMIT = 100
@@ -537,6 +544,26 @@ def env_tmux_refresh_seconds_value() -> float | None:
     return max(MIN_TMUX_REFRESH_SECONDS, parsed)
 
 
+def env_agent_refresh_seconds_value() -> float | None:
+    value = os.getenv("AGENT_PBX_TUI_AGENT_REFRESH_SECONDS", "").strip()
+    if not value:
+        return None
+    parsed = float_value(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return max(MIN_AGENT_REFRESH_SECONDS, parsed)
+
+
+def env_attention_blink_seconds_value() -> float | None:
+    value = os.getenv("AGENT_PBX_TUI_ATTENTION_BLINK_SECONDS", "").strip()
+    if not value:
+        return None
+    parsed = float_value(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return max(MIN_ATTENTION_BLINK_SECONDS, parsed)
+
+
 def is_local_server_url(server: str) -> bool:
     parsed = urlparse(server)
     host = (parsed.hostname or "").strip().lower()
@@ -919,7 +946,16 @@ class FollowUpTextArea(TextArea):
         await super()._on_key(event)
 
 
-class TmuxStreamTextArea(TextArea):
+class NavigationTextArea(TextArea):
+    async def _on_key(self, event: Key) -> None:
+        if self.read_only:
+            handle_shortcut = getattr(self.app, "handle_focus_shortcut_key", None)
+            if handle_shortcut is not None and handle_shortcut(event):
+                return
+        await super()._on_key(event)
+
+
+class TmuxStreamTextArea(NavigationTextArea):
     def _on_focus(self, event: Focus) -> None:
         super()._on_focus(event)
         snap = getattr(self.app, "snap_tmux_stream_to_bottom", None)
@@ -1137,6 +1173,7 @@ class SettingsScreen(ModalScreen[None]):
         visual_flash_enabled: bool,
         terminal_bell_enabled: bool,
         agent_blink_enabled: bool,
+        low_power_enabled: bool,
         layout_mode: str,
         split_percent: int,
         tmux_direct_enabled: bool,
@@ -1148,6 +1185,7 @@ class SettingsScreen(ModalScreen[None]):
         self.visual_flash_enabled = visual_flash_enabled
         self.terminal_bell_enabled = terminal_bell_enabled
         self.agent_blink_enabled = agent_blink_enabled
+        self.low_power_enabled = low_power_enabled
         self.layout_mode = layout_mode
         self.split_percent = split_percent
         self.tmux_direct_enabled = tmux_direct_enabled
@@ -1173,6 +1211,11 @@ class SettingsScreen(ModalScreen[None]):
                     "Unseen blink",
                     value=self.agent_blink_enabled,
                     id="agent-blink",
+                )
+                yield Checkbox(
+                    "Low-power watch mode",
+                    value=self.low_power_enabled,
+                    id="low-power",
                 )
                 yield Static("Layout", id="layout-mode-label")
                 yield Select(
@@ -1752,14 +1795,15 @@ class AgentPBXTUI(App[None]):
     }
 
     Screen.tiny-agent #composer {
-        min-height: 11;
-        max-height: 14;
+        min-height: 6;
+        max-height: 6;
         padding: 0;
     }
 
     Screen.tiny-agent #composer-inputs {
-        height: 8;
-        min-height: 8;
+        height: 1;
+        min-height: 1;
+        max-height: 1;
     }
 
     Screen.tiny-agent #agent-id,
@@ -1770,6 +1814,9 @@ class AgentPBXTUI(App[None]):
 
     Screen.tiny-agent #message {
         width: 100%;
+        height: 1;
+        min-height: 1;
+        max-height: 1;
     }
 
     Screen.tiny-agent #composer-actions {
@@ -1880,6 +1927,12 @@ class AgentPBXTUI(App[None]):
         )
         if agent_blink is None and agent_blink_setting is not None:
             self.agent_blink_enabled = agent_blink_setting
+        low_power_setting = env_flag_value(
+            "AGENT_PBX_TUI_LOW_POWER", "AGENT_PBX_TUI_WATCH_MODE"
+        )
+        self.low_power_enabled = bool_setting(self.settings, "low_power", False)
+        if low_power_setting is not None:
+            self.low_power_enabled = low_power_setting
         tmux_direct_setting = env_flag_value("AGENT_PBX_TUI_TMUX")
         self.tmux_direct_enabled = (
             bool_setting(self.settings, "tmux_direct", False)
@@ -1919,6 +1972,8 @@ class AgentPBXTUI(App[None]):
         self.tmux_refresh_seconds = (
             env_tmux_refresh_seconds_value() or DEFAULT_TMUX_REFRESH_SECONDS
         )
+        self.agent_refresh_seconds = self.resolve_agent_refresh_seconds()
+        self.attention_blink_seconds = self.resolve_attention_blink_seconds()
         export_dir_setting = str_setting(
             self.settings,
             "export_dir",
@@ -1951,6 +2006,7 @@ class AgentPBXTUI(App[None]):
             else clamp_split_percent(split_percent_setting)
         )
         self.rendered_agent_columns: tuple[str, ...] = ()
+        self.rendered_agents_signature: tuple[Any, ...] | None = None
         self.agents: dict[str, dict[str, Any]] = {}
         self.selected_agent_id: str | None = None
         self.events: list[dict[str, Any]] = []
@@ -1999,6 +2055,25 @@ class AgentPBXTUI(App[None]):
         self.agent_jump_prefix_pending = False
         self.agent_jump_prefix_generation = 0
         self.http_client: httpx.AsyncClient | None = None
+        self.agent_refresh_timer: Timer | None = None
+        self.tmux_refresh_timer: Timer | None = None
+        self.attention_blink_timer: Timer | None = None
+
+    def resolve_agent_refresh_seconds(self) -> float:
+        default = (
+            LOW_POWER_AGENT_REFRESH_SECONDS
+            if self.low_power_enabled
+            else DEFAULT_AGENT_REFRESH_SECONDS
+        )
+        return env_agent_refresh_seconds_value() or default
+
+    def resolve_attention_blink_seconds(self) -> float:
+        default = (
+            LOW_POWER_ATTENTION_BLINK_SECONDS
+            if self.low_power_enabled
+            else DEFAULT_ATTENTION_BLINK_SECONDS
+        )
+        return env_attention_blink_seconds_value() or default
 
     def api_client(self) -> httpx.AsyncClient:
         if self.http_client is None:
@@ -2006,14 +2081,19 @@ class AgentPBXTUI(App[None]):
         return self.http_client
 
     def composer_hotkeys_text(self) -> str:
-        text = "F1 Agents | F2 Events | F3 View | F4 Input | Enter send | Ctrl+J newline | Ctrl+W word"
+        nav = (
+            "a Agents | e Events | v View | i Input"
+            if self.is_tiny_layout() or self.low_power_enabled
+            else "F1 Agents | F2 Events | F3 View | F4 Input"
+        )
+        text = f"{nav} | Enter send | Ctrl+J newline | Ctrl+W word"
         if self.tmux_features_available:
             text += " | Ctrl+T/F8 tmux"
         return text
 
     def tmux_hotkeys_text(self) -> str:
-        if self.is_tiny_layout():
-            return "F1 Agt | F2 Evt | F3 View | F4 In | Enter send | C-J nl | C-W word | C-T/F8 PBX"
+        if self.is_tiny_layout() or self.low_power_enabled:
+            return "a Agt | e Evt | v View | i In | Enter send | C-J nl | C-W word | C-T/F8 PBX"
         return (
             "F1 Agents | F2 Events | F3 View | F4 Input | Enter send | "
             "Ctrl+J newline | Ctrl+W word | Ctrl+T/F8 PBX"
@@ -2043,7 +2123,7 @@ class AgentPBXTUI(App[None]):
                 yield Static("Agent: -", id="agent-title")
                 with TabbedContent(initial="latest-tab", id="agent-tabs"):
                     with TabPane("Latest", id="latest-tab"):
-                        yield TextArea(id="detail", read_only=True)
+                        yield NavigationTextArea(id="detail", read_only=True)
                         with Vertical(id="latest-plan-choice-panel"):
                             yield Static(
                                 "Plan Options",
@@ -2100,7 +2180,7 @@ class AgentPBXTUI(App[None]):
                             cursor_type="row",
                             show_row_labels=False,
                         )
-                        yield TextArea(id="thread-detail", read_only=True)
+                        yield NavigationTextArea(id="thread-detail", read_only=True)
                         with Vertical(id="plan-choice-panel"):
                             yield Static("Plan Options", id="plan-choice-title")
                             yield DataTable(
@@ -2136,7 +2216,7 @@ class AgentPBXTUI(App[None]):
                             yield Button("Refresh Files", id="files-refresh")
                             yield Button("Up", id="files-up")
                     with TabPane("WorkerBee", id="workerbee-tab"):
-                        yield TextArea(id="workerbee-detail", read_only=True)
+                        yield NavigationTextArea(id="workerbee-detail", read_only=True)
                         with Horizontal(id="workerbee-actions"):
                             yield Button("Refresh WorkerBee", id="workerbee-refresh")
         yield Footer()
@@ -2164,15 +2244,65 @@ class AgentPBXTUI(App[None]):
         await self.refresh_agents()
         await self.refresh_events()
         self.notify_custom_slash_command_errors()
-        self.set_interval(2.0, self.refresh_agents)
-        self.set_interval(self.tmux_refresh_seconds, self.refresh_tmux_capture_if_active)
-        self.set_interval(0.8, self.toggle_unseen_attention)
-        self.run_worker(self.stream_events(), name="events", exclusive=True)
+        self.restart_refresh_timers()
+        self.run_worker(
+            self.stream_events(),
+            name="events",
+            group="event-stream",
+            exclusive=True,
+            exit_on_error=False,
+        )
 
     async def on_unmount(self) -> None:
+        self.stop_refresh_timers()
         if self.http_client is not None:
             await self.http_client.aclose()
             self.http_client = None
+
+    def stop_refresh_timers(self) -> None:
+        for timer in (
+            self.agent_refresh_timer,
+            self.tmux_refresh_timer,
+            self.attention_blink_timer,
+        ):
+            if timer is not None:
+                timer.stop()
+        self.agent_refresh_timer = None
+        self.tmux_refresh_timer = None
+        self.attention_blink_timer = None
+
+    def restart_refresh_timers(self) -> None:
+        self.stop_refresh_timers()
+        self.agent_refresh_seconds = self.resolve_agent_refresh_seconds()
+        self.attention_blink_seconds = self.resolve_attention_blink_seconds()
+        self.agent_refresh_timer = self.set_interval(
+            self.agent_refresh_seconds,
+            self.schedule_refresh_agents,
+        )
+        self.tmux_refresh_timer = self.set_interval(
+            self.tmux_refresh_seconds,
+            self.schedule_refresh_tmux_capture,
+        )
+        self.attention_blink_timer = self.set_interval(
+            self.attention_blink_seconds,
+            self.toggle_unseen_attention,
+        )
+
+    def schedule_refresh_agents(self) -> None:
+        self.run_worker(
+            self.refresh_agents,
+            name="agents-periodic-refresh",
+            group="agents-refresh",
+            exclusive=True,
+        )
+
+    def schedule_refresh_tmux_capture(self) -> None:
+        self.run_worker(
+            self.refresh_tmux_capture_if_active,
+            name="tmux-periodic-refresh",
+            group="tmux-refresh",
+            exclusive=True,
+        )
 
     def get_system_commands(self, screen: Any) -> Iterable[SystemCommand]:
         yield from super().get_system_commands(screen)
@@ -2600,6 +2730,7 @@ class AgentPBXTUI(App[None]):
                 visual_flash_enabled=self.visual_flash_enabled,
                 terminal_bell_enabled=self.terminal_bell_enabled,
                 agent_blink_enabled=self.agent_blink_enabled,
+                low_power_enabled=self.low_power_enabled,
                 layout_mode=self.layout_mode,
                 split_percent=self.split_percent,
                 tmux_direct_enabled=self.tmux_direct_enabled,
@@ -2627,6 +2758,7 @@ class AgentPBXTUI(App[None]):
             if self.is_tiny_layout():
                 self.tiny_show_events = True
             self.apply_layout_class()
+            self.render_events()
         events = self.query_one_or_none("#events", DataTable)
         if events is not None:
             events.focus()
@@ -2917,36 +3049,53 @@ class AgentPBXTUI(App[None]):
 
         previous_last_seen = self.agent_last_seen_at.copy()
         self.agents = {str(agent["agent_id"]): agent for agent in agents}
-        self.update_unseen_from_agent_refresh(previous_last_seen)
-        self.render_agents()
+        unseen_state_changed = self.update_unseen_from_agent_refresh(previous_last_seen)
+        signature = self.agents_render_signature()
+        if unseen_state_changed or signature != self.rendered_agents_signature:
+            self.render_agents(signature=signature)
         self.render_unseen_attention()
 
     def update_unseen_from_agent_refresh(
         self, previous_last_seen: dict[str, float]
-    ) -> None:
+    ) -> bool:
+        previous_unseen = set(self.unseen_latest_agent_ids)
+        viewed_changed = False
         self.unseen_latest_agent_ids.intersection_update(self.agents)
         for agent_id, agent in self.agents.items():
-            current_last_seen = self.agent_last_seen(agent_id)
-            if current_last_seen is None:
+            current_report_at = self.latest_report_timestamp(agent_id)
+            if current_report_at is None:
                 continue
             previous = previous_last_seen.get(agent_id)
             latest_viewed_at = self.latest_viewed_at_by_agent.get(agent_id)
-            if latest_viewed_at is not None and current_last_seen <= latest_viewed_at:
+            shared_seen_at = self.shared_latest_seen_at(agent_id)
+            if shared_seen_at is not None and current_report_at <= shared_seen_at:
+                if (
+                    latest_viewed_at is None
+                    or latest_viewed_at < shared_seen_at
+                ):
+                    self.latest_viewed_at_by_agent[agent_id] = shared_seen_at
+                    viewed_changed = True
+                self.unseen_latest_agent_ids.discard(agent_id)
+            elif latest_viewed_at is not None and current_report_at <= latest_viewed_at:
                 self.unseen_latest_agent_ids.discard(agent_id)
             elif previous is None:
-                if latest_viewed_at is not None and current_last_seen > latest_viewed_at:
-                    if self.is_latest_engaged(agent_id):
-                        self.latest_viewed_at_by_agent[agent_id] = current_last_seen
-                        self.unseen_latest_agent_ids.discard(agent_id)
-                    else:
-                        self.unseen_latest_agent_ids.add(agent_id)
-            elif current_last_seen > previous:
                 if self.is_latest_engaged(agent_id):
-                    self.latest_viewed_at_by_agent[agent_id] = current_last_seen
+                    self.latest_viewed_at_by_agent[agent_id] = current_report_at
+                    viewed_changed = viewed_changed or latest_viewed_at != current_report_at
+                    self.unseen_latest_agent_ids.discard(agent_id)
+                elif latest_viewed_at is None or current_report_at > latest_viewed_at:
+                    self.unseen_latest_agent_ids.add(agent_id)
+            elif current_report_at > previous:
+                if self.is_latest_engaged(agent_id):
+                    self.latest_viewed_at_by_agent[agent_id] = current_report_at
+                    viewed_changed = viewed_changed or latest_viewed_at != current_report_at
                     self.unseen_latest_agent_ids.discard(agent_id)
                 else:
                     self.unseen_latest_agent_ids.add(agent_id)
-            self.agent_last_seen_at[agent_id] = current_last_seen
+            self.agent_last_seen_at[agent_id] = current_report_at
+        if viewed_changed:
+            self.save_settings()
+        return previous_unseen != self.unseen_latest_agent_ids or viewed_changed
 
     def agent_last_seen(self, agent_id: str) -> float | None:
         agent = self.agents.get(agent_id)
@@ -2957,12 +3106,47 @@ class AgentPBXTUI(App[None]):
         except (KeyError, TypeError, ValueError):
             return None
 
+    def latest_report_timestamp(self, agent_id: str) -> float | None:
+        agent = self.agents.get(agent_id)
+        if agent is None:
+            return None
+        for key in ("latest_report_created_at", "last_seen_at"):
+            try:
+                value = agent.get(key)
+                if value is not None:
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def shared_latest_seen_at(self, agent_id: str) -> float | None:
+        agent = self.agents.get(agent_id)
+        if agent is None:
+            return None
+        try:
+            value = agent.get("latest_report_seen_at")
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     def is_latest_engaged(self, agent_id: str) -> bool:
         if self.is_compact_layout() and self.compact_view != "agent":
             return False
         return agent_id == self.selected_agent_id and self.active_agent_tab == "latest-tab"
 
-    def render_agents(self) -> None:
+    def agents_render_signature(self) -> tuple[Any, ...]:
+        return (
+            self.desired_agent_columns(),
+            tuple(
+                (
+                    str(agent["agent_id"]),
+                    tuple(str(value) for value in self.agent_row_values(agent)),
+                )
+                for agent in self.agents.values()
+            ),
+        )
+
+    def render_agents(self, signature: tuple[Any, ...] | None = None) -> None:
         table = self.query_one_or_none("#agents", DataTable)
         if table is None:
             return
@@ -2992,6 +3176,7 @@ class AgentPBXTUI(App[None]):
         table.scroll_target_x = scroll_target_x
         table.scroll_y = scroll_y
         table.scroll_target_y = scroll_target_y
+        self.rendered_agents_signature = signature or self.agents_render_signature()
 
     def agent_id_at_cursor(self) -> str | None:
         table = self.query_one_or_none("#agents", DataTable)
@@ -3365,19 +3550,25 @@ class AgentPBXTUI(App[None]):
     async def refresh_events(self) -> None:
         try:
             response = await self.api_client().get(
-                "/v1/events", headers=auth_headers(self.token)
+                "/v1/events",
+                params={"tail": "true", "limit": 50},
+                headers=auth_headers(self.token),
             )
             response.raise_for_status()
             self.events = response.json()[-50:]
         except Exception:
             return
         previous_last_seen_event_id = self.last_seen_event_id
-        self.last_seen_event_id = max(
-            [self.last_seen_event_id, *[int(event["event_id"]) for event in self.events]]
-        )
+        if self.events:
+            self.last_seen_event_id = max(int(event["event_id"]) for event in self.events)
         if self.last_seen_event_id != previous_last_seen_event_id:
             self.save_settings()
         self.render_events()
+
+    def selected_agent_detail_visible(self) -> bool:
+        if not self.selected_agent_id:
+            return False
+        return not (self.is_collapsed_layout() and self.compact_view != "agent")
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "agents":
@@ -3422,7 +3613,7 @@ class AgentPBXTUI(App[None]):
             event.stop()
             self.toggle_current_thread_mark()
             return
-        if isinstance(focused, (Input, TextArea)):
+        if isinstance(focused, (Input, FollowUpTextArea)):
             self.clear_agent_jump_prefix()
             return
         if self.handle_agent_jump_key(event):
@@ -3439,10 +3630,40 @@ class AgentPBXTUI(App[None]):
             event.stop()
             self.reset_split_percent()
             return
-        if event.key == "e" or event.character == "e":
-            event.stop()
-            self.toggle_tiny_events()
+        if self.handle_focus_shortcut_key(event):
             return
+
+    def handle_focus_shortcut_key(self, event: Key) -> bool:
+        key = str(event.character or event.key or "").lower()
+        if key == "a":
+            event.stop()
+            event.prevent_default()
+            self.action_focus_agents()
+            return True
+        if key == "e":
+            event.stop()
+            event.prevent_default()
+            self.action_focus_events()
+            return True
+        if key == "v":
+            event.stop()
+            event.prevent_default()
+            self.run_worker(
+                self.action_focus_right_pane(),
+                name="key-focus-right-pane",
+                exclusive=True,
+            )
+            return True
+        if key == "i":
+            event.stop()
+            event.prevent_default()
+            self.run_worker(
+                self.action_focus_latest_input(),
+                name="key-focus-latest-input",
+                exclusive=True,
+            )
+            return True
+        return False
 
     def on_mouse_down(self, event: MouseDown) -> None:
         target = self.mouse_focus_target(event)
@@ -4000,11 +4221,20 @@ class AgentPBXTUI(App[None]):
         await self.load_thread(agent_id)
 
     def mark_latest_seen(self, agent_id: str) -> None:
-        last_seen = self.agent_last_seen(agent_id)
+        last_seen = self.latest_report_timestamp(agent_id)
         changed = False
+        should_sync_remote = False
         if last_seen is not None:
             changed = self.latest_viewed_at_by_agent.get(agent_id) != last_seen
             self.latest_viewed_at_by_agent[agent_id] = last_seen
+            shared_seen_at = self.shared_latest_seen_at(agent_id)
+            should_sync_remote = shared_seen_at is None or shared_seen_at < last_seen
+        if (changed or should_sync_remote) and self.is_running:
+            self.run_worker(
+                self.mark_latest_seen_remote(agent_id),
+                name=f"latest-seen-{agent_id}",
+                exclusive=True,
+            )
         if agent_id not in self.unseen_latest_agent_ids:
             if changed:
                 self.save_settings()
@@ -4013,6 +4243,30 @@ class AgentPBXTUI(App[None]):
         self.render_agents()
         self.render_unseen_attention()
         self.save_settings()
+
+    async def mark_latest_seen_remote(self, agent_id: str) -> None:
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/latest/seen",
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            agent = response.json()
+        except Exception:
+            return
+        if isinstance(agent, dict):
+            existing = self.agents.get(agent_id)
+            if existing is not None:
+                existing["latest_report_seen_at"] = agent.get("latest_report_seen_at")
+            else:
+                self.agents[agent_id] = agent
+            seen_at = self.shared_latest_seen_at(agent_id)
+            if seen_at is not None:
+                self.latest_viewed_at_by_agent[agent_id] = max(
+                    self.latest_viewed_at_by_agent.get(agent_id, 0.0),
+                    seen_at,
+                )
+                self.save_settings()
 
     async def load_latest_report(self, agent_id: str) -> None:
         detail = self.query_one_or_none("#detail", TextArea)
@@ -4506,6 +4760,19 @@ class AgentPBXTUI(App[None]):
 
     def resize_message_input(self) -> None:
         message_input = self.query_one("#message", TextArea)
+        if self.is_tiny_layout():
+            message_input.styles.height = 1
+            message_input.styles.min_height = 1
+            message_input.styles.max_height = 1
+            composer_inputs = self.query_one("#composer-inputs")
+            composer_inputs.styles.height = 1
+            composer_inputs.styles.min_height = 1
+            composer_inputs.styles.max_height = 1
+            composer = self.query_one("#composer")
+            composer.styles.height = 6
+            composer.styles.min_height = 6
+            composer.styles.max_height = 6
+            return
         line_count = max(1, message_input.text.count("\n") + 1)
         height = min(
             FOLLOW_UP_MAX_HEIGHT,
@@ -5630,6 +5897,16 @@ class AgentPBXTUI(App[None]):
                 self.render_unseen_attention()
             self.render_agents()
             self.save_settings()
+        elif event.checkbox.id == "low-power":
+            self.low_power_enabled = event.value
+            self.restart_refresh_timers()
+            self.update_hotkey_labels()
+            self.save_settings()
+            state = "enabled" if event.value else "disabled"
+            self.notify(
+                f"Low-power watch mode {state}; agent refresh every "
+                f"{self.agent_refresh_seconds:g}s."
+            )
         elif event.checkbox.id == "tmux-direct":
             enabled = self.set_tmux_direct_enabled(event.value)
             if self.selected_agent_id:
@@ -5748,6 +6025,9 @@ class AgentPBXTUI(App[None]):
                 button.label = Text(label)
 
     def update_hotkey_labels(self) -> None:
+        composer_hotkeys = self.query_one_or_none("#composer-hotkeys", Static)
+        if composer_hotkeys is not None:
+            composer_hotkeys.update(self.composer_hotkeys_text())
         tmux_hotkeys = self.query_one_or_none("#tmux-hotkeys", Static)
         if tmux_hotkeys is not None:
             tmux_hotkeys.update(self.tmux_hotkeys_text())
@@ -5808,6 +6088,7 @@ class AgentPBXTUI(App[None]):
             "visual_flash": self.visual_flash_enabled,
             "terminal_bell": self.terminal_bell_enabled,
             "agent_blink": self.agent_blink_enabled,
+            "low_power": self.low_power_enabled,
             "theme": self.ui_theme,
             "layout": self.layout_mode,
             "split_percent": self.split_percent,
@@ -5874,8 +6155,13 @@ class AgentPBXTUI(App[None]):
         event_type = str(event.get("type"))
         agent_id = self.event_agent_id(event)
         selected_agent_id = self.selected_agent_id
-        if event_type == "report_created" and agent_id == selected_agent_id:
+        selected_detail_visible = (
+            agent_id == selected_agent_id and self.selected_agent_detail_visible()
+        )
+        if event_type == "report_created" and selected_detail_visible:
             self.activate_latest_tab()
+        if event_type == "report_created" and agent_id:
+            self.apply_report_created_event(agent_id, event)
         if event_type in {
             "agent_registered",
             "report_created",
@@ -5885,19 +6171,24 @@ class AgentPBXTUI(App[None]):
             "command_deleted",
             "agent_pbx_active_changed",
             "agent_dismissed",
+            "latest_seen",
         }:
             self.run_worker(
-                self.refresh_agents(),
+                self.refresh_agents,
                 name="agents-refresh",
+                group="agents-refresh",
                 exclusive=True,
             )
         if event_type == "report_created" and agent_id:
             self.mark_latest_unseen(agent_id)
-        if selected_agent_id and agent_id == selected_agent_id:
+        if event_type == "latest_seen" and agent_id:
+            self.apply_latest_seen_event(agent_id, event)
+        if selected_agent_id and selected_detail_visible:
             if event_type == "report_created":
                 self.run_worker(
                     self.refresh_selected_agent(selected_agent_id),
                     name="selected-agent-report",
+                    group="selected-agent-refresh",
                     exclusive=True,
                 )
             elif event_type in {
@@ -5909,12 +6200,32 @@ class AgentPBXTUI(App[None]):
                 self.run_worker(
                     self.load_thread(selected_agent_id),
                     name="selected-agent-thread",
+                    group="selected-agent-refresh",
                     exclusive=True,
                 )
         if self.should_alert(event):
             self.alert_for_event(event)
 
     def mark_latest_unseen(self, agent_id: str) -> None:
+        current_report_at = self.latest_report_timestamp(agent_id)
+        latest_viewed_at = self.latest_viewed_at_by_agent.get(agent_id)
+        shared_seen_at = self.shared_latest_seen_at(agent_id)
+        if current_report_at is not None:
+            if shared_seen_at is not None and current_report_at <= shared_seen_at:
+                if latest_viewed_at is None or latest_viewed_at < shared_seen_at:
+                    self.latest_viewed_at_by_agent[agent_id] = shared_seen_at
+                    self.save_settings()
+                if agent_id in self.unseen_latest_agent_ids:
+                    self.unseen_latest_agent_ids.discard(agent_id)
+                    self.render_agents()
+                    self.render_unseen_attention()
+                return
+            if latest_viewed_at is not None and current_report_at <= latest_viewed_at:
+                if agent_id in self.unseen_latest_agent_ids:
+                    self.unseen_latest_agent_ids.discard(agent_id)
+                    self.render_agents()
+                    self.render_unseen_attention()
+                return
         if self.is_latest_engaged(agent_id):
             self.mark_latest_seen(agent_id)
             return
@@ -5922,8 +6233,70 @@ class AgentPBXTUI(App[None]):
         self.render_agents()
         self.render_unseen_attention()
 
+    def apply_latest_seen_event(self, agent_id: str, event: dict[str, Any]) -> None:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return
+        seen_at = float_value(payload.get("latest_report_seen_at"))
+        if seen_at is None:
+            return
+        current_report_at = self.latest_report_timestamp(agent_id)
+        agent = self.agents.get(agent_id)
+        if agent is not None:
+            existing_seen_at = self.shared_latest_seen_at(agent_id) or 0.0
+            agent["latest_report_seen_at"] = max(existing_seen_at, seen_at)
+        self.latest_viewed_at_by_agent[agent_id] = max(
+            self.latest_viewed_at_by_agent.get(agent_id, 0.0),
+            seen_at,
+        )
+        if current_report_at is None or current_report_at <= seen_at:
+            self.unseen_latest_agent_ids.discard(agent_id)
+        self.render_agents()
+        self.render_unseen_attention()
+        self.save_settings()
+
+    def apply_report_created_event(self, agent_id: str, event: dict[str, Any]) -> None:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return
+        agent = self.agents.get(agent_id)
+        if agent is None:
+            return
+        status = str(payload.get("status") or "").strip()
+        if not status:
+            return
+        event_at = float_value(payload.get("created_at"))
+        if event_at is None:
+            event_at = float_value(event.get("created_at"))
+        agent["status"] = status
+        agent["effective_status"] = status
+        agent["status_stale"] = False
+        agent["status_age_seconds"] = 0.0
+        agent["latest_report_status"] = status
+        agent["latest_report_needs_input"] = bool(payload.get("needs_input", False))
+        agent["latest_report_action_required"] = bool(payload.get("needs_input", False))
+        if event_at is not None:
+            agent["last_seen_at"] = max(
+                self.agent_last_seen(agent_id) or 0.0,
+                event_at,
+            )
+            agent["latest_report_created_at"] = max(
+                self.latest_report_timestamp(agent_id) or 0.0,
+                event_at,
+            )
+        self.render_agents()
+
     def render_events(self) -> None:
-        table = self.query_one("#events", DataTable)
+        if (
+            self.low_power_enabled
+            and self.is_tiny_layout()
+            and self.compact_view == "home"
+            and not self.tiny_show_events
+        ):
+            return
+        table = self.query_one_or_none("#events", DataTable)
+        if table is None:
+            return
         table.clear()
         for event in self.events[-50:]:
             table.add_row(

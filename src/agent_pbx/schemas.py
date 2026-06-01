@@ -46,6 +46,8 @@ class AgentResponse(BaseModel):
     estimated_visible_tokens_per_hour: int = 0
     usage_warning: str | None = None
     latest_report_id: str | None = None
+    latest_report_created_at: float | None = None
+    latest_report_seen_at: float | None = None
     latest_report_status: str | None = None
     latest_report_needs_input: bool = False
     latest_report_plan_option_count: int = 0

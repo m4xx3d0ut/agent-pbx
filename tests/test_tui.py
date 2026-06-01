@@ -65,6 +65,10 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_BELL",
         "AGENT_PBX_TUI_TERMINAL_BELL",
         "AGENT_PBX_TUI_AGENT_BLINK",
+        "AGENT_PBX_TUI_LOW_POWER",
+        "AGENT_PBX_TUI_WATCH_MODE",
+        "AGENT_PBX_TUI_AGENT_REFRESH_SECONDS",
+        "AGENT_PBX_TUI_ATTENTION_BLINK_SECONDS",
         "AGENT_PBX_TUI_THEME",
         "AGENT_PBX_TUI_1337",
         "AGENT_PBX_TUI_CUSTOM_THEME_NAME",
@@ -194,6 +198,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "visual_flash": True,
                 "terminal_bell": True,
                 "agent_blink": False,
+                "low_power": True,
                 "theme": "1337",
                 "layout": "compact",
                 "split_percent": 61,
@@ -217,6 +222,9 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.visual_flash_enabled is True
     assert app.terminal_bell_enabled is True
     assert app.agent_blink_enabled is False
+    assert app.low_power_enabled is True
+    assert app.agent_refresh_seconds == 15.0
+    assert app.attention_blink_seconds == 3.0
     assert app.ui_theme == "1337"
     assert app.layout_mode == "compact"
     assert app.split_percent == 61
@@ -236,6 +244,7 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
             {
                 "visual_flash": True,
                 "agent_blink": False,
+                "low_power": False,
                 "tmux_direct": False,
                 "theme": "1337",
                 "layout": "split",
@@ -246,6 +255,9 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     )
     monkeypatch.setenv("AGENT_PBX_TUI_FLASH", "0")
     monkeypatch.setenv("AGENT_PBX_TUI_AGENT_BLINK", "1")
+    monkeypatch.setenv("AGENT_PBX_TUI_LOW_POWER", "1")
+    monkeypatch.setenv("AGENT_PBX_TUI_AGENT_REFRESH_SECONDS", "22.5")
+    monkeypatch.setenv("AGENT_PBX_TUI_ATTENTION_BLINK_SECONDS", "4.5")
     monkeypatch.setenv("AGENT_PBX_TUI_TMUX", "1")
     monkeypatch.setenv("AGENT_PBX_TUI_TMUX_CAPTURE_LINES", "750")
     monkeypatch.setenv("AGENT_PBX_TUI_TMUX_REFRESH_SECONDS", "2.75")
@@ -260,12 +272,140 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
 
     assert app.visual_flash_enabled is False
     assert app.agent_blink_enabled is True
+    assert app.low_power_enabled is True
+    assert app.agent_refresh_seconds == 22.5
+    assert app.attention_blink_seconds == 4.5
     assert app.tmux_direct_enabled is True
     assert app.tmux_capture_lines == 750
     assert app.tmux_refresh_seconds == 2.75
     assert app.ui_theme == "cyberpunk"
     assert app.layout_mode == "compact"
     assert app.split_percent == 72
+
+
+async def test_tui_event_stream_worker_uses_isolated_group() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    worker_calls: list[dict[str, object]] = []
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    def fake_run_worker(work, *_args, **kwargs):  # type: ignore[no-untyped-def]
+        worker_calls.append(kwargs)
+        if inspect.iscoroutine(work):
+            work.close()
+        return None
+
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.run_worker = fake_run_worker  # type: ignore[method-assign]
+
+    async with app.run_test():
+        pass
+
+    event_workers = [
+        call for call in worker_calls if call.get("name") == "events"
+    ]
+    assert event_workers == [
+        {
+            "name": "events",
+            "group": "event-stream",
+            "exclusive": True,
+            "exit_on_error": False,
+        }
+    ]
+
+
+def test_tui_refresh_workers_use_non_default_groups() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    worker_calls: list[dict[str, object]] = []
+
+    def fake_run_worker(work, *_args, **kwargs):  # type: ignore[no-untyped-def]
+        worker_calls.append(kwargs)
+        if inspect.iscoroutine(work):
+            work.close()
+        return None
+
+    app.run_worker = fake_run_worker  # type: ignore[method-assign]
+
+    app.schedule_refresh_agents()
+    app.schedule_refresh_tmux_capture()
+
+    assert worker_calls == [
+        {
+            "name": "agents-periodic-refresh",
+            "group": "agents-refresh",
+            "exclusive": True,
+        },
+        {
+            "name": "tmux-periodic-refresh",
+            "group": "tmux-refresh",
+            "exclusive": True,
+        },
+    ]
+
+
+async def test_tui_refresh_events_uses_tail_and_resets_stale_watermark(
+    tmp_path: Path,
+) -> None:
+    settings_file = tmp_path / "settings.json"
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        settings_file=settings_file,
+    )
+    events = [
+        {
+            "event_id": 7,
+            "type": "agent_registered",
+            "subject_id": "agent-7",
+            "payload": {"agent_id": "agent-7"},
+            "created_at": 7.0,
+        },
+        {
+            "event_id": 8,
+            "type": "report_created",
+            "subject_id": "report-8",
+            "payload": {"agent_id": "agent-8"},
+            "created_at": 8.0,
+        },
+    ]
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict[str, object]]:
+            return events
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def get(self, path, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append({"path": path, **kwargs})
+            return FakeResponse()
+
+    fake_client = FakeClient()
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    app.api_client = lambda: fake_client  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+
+    async with app.run_test():
+        fake_client.calls.clear()
+        app.last_seen_event_id = 999
+        await app.refresh_events()
+
+    assert fake_client.calls[-1]["path"] == "/v1/events"
+    assert fake_client.calls[-1]["params"] == {"tail": "true", "limit": 50}
+    assert app.last_seen_event_id == 8
+    saved = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert saved["last_seen_event_id"] == 8
 
 
 def test_tui_env_allows_visible_tmux_capture(monkeypatch) -> None:
@@ -286,6 +426,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     app.visual_flash_enabled = True
     app.terminal_bell_enabled = True
     app.agent_blink_enabled = False
+    app.low_power_enabled = True
     app.tmux_direct_enabled = True
     app.tmux_direct_agent_modes = {"agent-1": True, "agent-2": False}
     app.tmux_capture_lines = 333
@@ -300,6 +441,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["visual_flash"] is True
     assert saved["terminal_bell"] is True
     assert saved["agent_blink"] is False
+    assert saved["low_power"] is True
     assert saved["tmux_direct"] is True
     assert saved["tmux_direct_agent_modes"] == {"agent-1": True, "agent-2": False}
     assert saved["tmux_capture_lines"] == 333
@@ -567,6 +709,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         visual = app.screen.query_one("#visual-flash", Checkbox)
         bell = app.screen.query_one("#terminal-bell", Checkbox)
         agent_blink = app.screen.query_one("#agent-blink", Checkbox)
+        low_power = app.screen.query_one("#low-power", Checkbox)
         layout_mode = app.screen.query_one("#layout-mode", Select)
         split_label = app.screen.query_one("#split-percent-label", Static)
         split_narrow = app.screen.query_one("#split-narrow", Button)
@@ -579,6 +722,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert visual.value is True
         assert bell.value is False
         assert agent_blink.value is True
+        assert low_power.value is False
         assert layout_mode.value == "adaptive"
         assert str(split_label.renderable) == "Agents width: 42%"
         assert split_narrow.label.plain == "Narrow"
@@ -758,6 +902,47 @@ async def test_tui_tiny_tmux_direct_keeps_stream_and_input_visible(
         assert hotkeys.region.bottom <= app.size.height
         assert "C-J nl" in str(hotkeys.renderable)
         assert app.focused is message
+
+
+async def test_tui_tiny_layout_minimizes_latest_input(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "tiny")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=False)
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(53, 20)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "project": "agent-pbx",
+                "status": "done",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.render_agents()
+        await app.open_agent_latest("agent-1")
+        await pilot.pause()
+
+        detail = app.query_one("#detail", TextArea)
+        composer = app.query_one("#composer")
+        composer_inputs = app.query_one("#composer-inputs")
+        message = app.query_one("#message", TextArea)
+        actions = app.query_one("#composer-actions")
+        hotkeys = app.query_one("#composer-hotkeys", Static)
+
+        message.text = "\n".join(f"line {index}" for index in range(8))
+        app.resize_message_input()
+        await pilot.pause()
+
+        assert app.screen.has_class("tiny-agent")
+        assert not app.screen.has_class("tmux-direct")
+        assert detail.region.height >= 6
+        assert composer.region.height == 6
+        assert composer_inputs.styles.height.value == 1
+        assert message.styles.height.value == 1
+        assert message.region.height <= 2
+        assert actions.region.y >= message.region.y + 1
+        assert hotkeys.region.bottom <= composer.region.bottom
 
 
 async def test_tui_tmux_update_skips_unchanged_capture() -> None:
@@ -970,6 +1155,40 @@ async def test_tui_function_keys_focus_split_sections() -> None:
         assert app.focused is stream
 
         await pilot.press("f4")
+        await pilot.pause()
+        assert app.focused is message
+
+
+async def test_tui_plain_keys_focus_split_sections_for_tiny_terminals() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        agents = app.query_one("#agents", DataTable)
+        events = app.query_one("#events", DataTable)
+        stream = app.query_one("#tmux-stream", TextArea)
+        message = app.query_one("#tmux-message", TextArea)
+
+        await pilot.press("a")
+        await pilot.pause()
+        assert app.focused is agents
+
+        await pilot.press("e")
+        await pilot.pause()
+        assert app.focused is events
+
+        await pilot.press("v")
+        await pilot.pause()
+        assert app.focused is stream
+
+        await pilot.press("i")
+        await pilot.pause()
+        assert app.focused is message
+
+        message.text = ""
+        message.focus()
+        await pilot.press("a")
         await pilot.pause()
         assert app.focused is message
 
@@ -1729,7 +1948,7 @@ async def test_tui_files_tab_loads_directory_and_preview() -> None:
 
     assert calls == [
         ("/v1/agents", {}),
-        ("/v1/events", {}),
+        ("/v1/events", {"tail": "true", "limit": 50}),
         ("/v1/agents/agent-1/files", {"path": "."}),
         ("/v1/agents/agent-1/files", {"path": "src"}),
         ("/v1/agents/agent-1/files/preview", {"path": "src/app.py"}),
@@ -3619,6 +3838,112 @@ def test_tui_persisted_latest_seen_marks_new_offline_report() -> None:
     assert app.unseen_latest_agent_ids == {"agent-1"}
 
 
+def test_tui_shared_latest_seen_prevents_startup_alert() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "done",
+            "project": "agent-pbx",
+            "last_seen_at": 102.0,
+            "latest_report_created_at": 101.0,
+            "latest_report_seen_at": 101.0,
+        }
+    }
+
+    app.update_unseen_from_agent_refresh({})
+
+    assert app.unseen_latest_agent_ids == set()
+    assert app.latest_viewed_at_by_agent == {"agent-1": 101.0}
+
+
+def test_tui_startup_marks_unviewed_latest_report_new() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "done",
+            "project": "agent-pbx",
+            "last_seen_at": 102.0,
+            "latest_report_created_at": 101.0,
+            "latest_report_seen_at": None,
+        }
+    }
+
+    app.update_unseen_from_agent_refresh({})
+
+    assert app.unseen_latest_agent_ids == {"agent-1"}
+
+
+def test_tui_shared_latest_seen_does_not_clear_newer_report() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.latest_viewed_at_by_agent = {"agent-1": 100.0}
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "done",
+            "project": "agent-pbx",
+            "last_seen_at": 102.0,
+            "latest_report_created_at": 102.0,
+            "latest_report_seen_at": 101.0,
+        }
+    }
+
+    app.update_unseen_from_agent_refresh({})
+
+    assert app.unseen_latest_agent_ids == {"agent-1"}
+
+
+def test_tui_shared_latest_seen_refresh_clears_existing_marker() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.latest_viewed_at_by_agent = {"agent-1": 100.0}
+    app.unseen_latest_agent_ids = {"agent-1"}
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "done",
+            "project": "agent-pbx",
+            "last_seen_at": 102.0,
+            "latest_report_created_at": 102.0,
+            "latest_report_seen_at": 102.0,
+        }
+    }
+
+    app.update_unseen_from_agent_refresh({"agent-1": 102.0})
+
+    assert app.unseen_latest_agent_ids == set()
+    assert app.latest_viewed_at_by_agent == {"agent-1": 102.0}
+
+
+def test_tui_shared_latest_seen_refresh_persists_watermark(
+    tmp_path: Path,
+) -> None:
+    settings_file = tmp_path / "settings.json"
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        settings_file=settings_file,
+    )
+    app.latest_viewed_at_by_agent = {"agent-1": 100.0}
+    app.unseen_latest_agent_ids = {"agent-1"}
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "done",
+            "project": "agent-pbx",
+            "last_seen_at": 102.0,
+            "latest_report_created_at": 102.0,
+            "latest_report_seen_at": 102.0,
+        }
+    }
+
+    changed = app.update_unseen_from_agent_refresh({"agent-1": 102.0})
+
+    saved = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert changed is True
+    assert app.unseen_latest_agent_ids == set()
+    assert saved["latest_viewed_at_by_agent"] == {"agent-1": 102.0}
+
+
 def test_tui_mark_latest_seen_persists_watermark(tmp_path: Path) -> None:
     settings_file = tmp_path / "settings.json"
     app = AgentPBXTUI(
@@ -3638,6 +3963,113 @@ def test_tui_mark_latest_seen_persists_watermark(tmp_path: Path) -> None:
 
     saved = json.loads(settings_file.read_text(encoding="utf-8"))
     assert saved["latest_viewed_at_by_agent"] == {"agent-1": 123.0}
+
+
+async def test_tui_mark_latest_seen_syncs_when_server_seen_is_missing() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    worker_coros = []
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+                "latest_report_created_at": 123.0,
+                "latest_report_seen_at": None,
+            }
+        }
+        app.latest_viewed_at_by_agent = {"agent-1": 123.0}
+
+        def fake_run_worker(work, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            worker_coros.append(work)
+            return None
+
+        app.run_worker = fake_run_worker  # type: ignore[method-assign]
+        app.mark_latest_seen("agent-1")
+        for coro in worker_coros:
+            coro.close()
+
+    assert len(worker_coros) == 1
+
+
+async def test_tui_latest_seen_event_clears_remote_unseen_marker() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 102.0,
+                "latest_report_created_at": 102.0,
+                "latest_report_seen_at": None,
+            }
+        }
+        app.unseen_latest_agent_ids = {"agent-1"}
+        app.render_agents()
+        app.render_unseen_attention()
+
+        app.handle_event(
+            {
+                "event_id": 10,
+                "type": "latest_seen",
+                "subject_id": "agent-1",
+                "payload": {
+                    "agent_id": "agent-1",
+                    "latest_report_seen_at": 102.0,
+                },
+            }
+        )
+        table = app.query_one("#agents", DataTable)
+        row = table.get_row("agent-1")
+
+    assert app.unseen_latest_agent_ids == set()
+    assert app.latest_viewed_at_by_agent["agent-1"] == 102.0
+    assert app.agents["agent-1"]["latest_report_seen_at"] == 102.0
+    assert row[0] == ""
+
+
+async def test_tui_replayed_report_event_respects_shared_seen_marker() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "effective_status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 200.0,
+                "latest_report_created_at": 200.0,
+                "latest_report_seen_at": 200.0,
+            }
+        }
+        app.render_agents()
+
+        event = {
+            "event_id": 11,
+            "type": "report_created",
+            "subject_id": "report-1",
+            "created_at": 200.0,
+            "payload": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "summary": "Already seen",
+                "needs_input": False,
+                "created_at": 200.0,
+            },
+        }
+        app.apply_report_created_event("agent-1", event)
+        app.mark_latest_unseen("agent-1")
+        table = app.query_one("#agents", DataTable)
+        row = table.get_row("agent-1")
+
+    assert app.unseen_latest_agent_ids == set()
+    assert app.latest_viewed_at_by_agent == {"agent-1": 200.0}
+    assert row[0] == ""
 
 
 async def test_tui_unseen_latest_blinks_attention_bar() -> None:
@@ -3825,8 +4257,8 @@ async def test_tui_selected_report_event_opens_latest_from_thread() -> None:
     async with app.run_test() as pilot:
         await pilot.resize_terminal(120, 32)
         await pilot.pause()
-        def fake_run_worker(coro, *_args, **_kwargs):  # type: ignore[no-untyped-def]
-            worker_coros.append(coro)
+        def fake_run_worker(work, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            worker_coros.append(work() if callable(work) else work)
             return None
 
         app.run_worker = fake_run_worker  # type: ignore[method-assign]
@@ -3880,8 +4312,8 @@ async def test_tui_command_events_refresh_agent_queue_state() -> None:
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
 
     async with app.run_test():
-        def fake_run_worker(coro, *_args, **_kwargs):  # type: ignore[no-untyped-def]
-            worker_coros.append(coro)
+        def fake_run_worker(work, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            worker_coros.append(work() if callable(work) else work)
             return None
 
         app.run_worker = fake_run_worker  # type: ignore[method-assign]
@@ -3898,6 +4330,60 @@ async def test_tui_command_events_refresh_agent_queue_state() -> None:
             await coro
 
     assert refreshed_agents == 1
+
+
+async def test_tui_report_event_patches_visible_agent_status() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    worker_coros = []
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+
+    async with app.run_test():
+        def fake_run_worker(work, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            worker_coros.append(work() if callable(work) else work)
+            return None
+
+        app.run_worker = fake_run_worker  # type: ignore[method-assign]
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "effective_status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 100.0,
+                "latest_report_created_at": 100.0,
+            }
+        }
+        app.render_agents()
+
+        app.handle_event(
+            {
+                "event_id": 1,
+                "type": "report_created",
+                "subject_id": "report-1",
+                "created_at": 125.0,
+                "payload": {
+                    "agent_id": "agent-1",
+                    "status": "working",
+                    "summary": "Working",
+                    "needs_input": False,
+                    "created_at": 125.0,
+                },
+            }
+        )
+        table = app.query_one("#agents", DataTable)
+        row = table.get_row("agent-1")
+        for coro in worker_coros:
+            await coro
+
+    assert app.agents["agent-1"]["status"] == "working"
+    assert app.agents["agent-1"]["effective_status"] == "working"
+    assert app.agents["agent-1"]["last_seen_at"] == 125.0
+    assert app.agents["agent-1"]["latest_report_created_at"] == 125.0
+    assert "working" in [str(value) for value in row]
 
 
 async def test_tui_agent_status_refresh_marks_unseen_latest() -> None:

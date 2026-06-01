@@ -16,7 +16,7 @@ from .schemas import (
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -83,6 +83,7 @@ class Store:
                     created_at REAL NOT NULL,
                     last_seen_at REAL NOT NULL,
                     last_poll_at REAL,
+                    latest_report_seen_at REAL,
                     dismissed_at REAL
                 );
 
@@ -129,11 +130,9 @@ class Store:
                 );
                 """
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
+            previous_schema_version = self._schema_version(conn)
             self._ensure_column(conn, "agents", "last_poll_at", "REAL")
+            self._ensure_column(conn, "agents", "latest_report_seen_at", "REAL")
             self._ensure_column(conn, "agents", "dismissed_at", "REAL")
             self._ensure_column(
                 conn,
@@ -141,6 +140,43 @@ class Store:
                 "pbx_active",
                 "INTEGER NOT NULL DEFAULT 1",
             )
+            if previous_schema_version < 7:
+                self._backfill_latest_report_seen(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+
+    @staticmethod
+    def _schema_version(conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT value FROM metadata WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            return 0
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _backfill_latest_report_seen(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            UPDATE agents
+            SET latest_report_seen_at = (
+                SELECT MAX(reports.created_at)
+                FROM reports
+                WHERE reports.agent_id = agents.agent_id
+            )
+            WHERE latest_report_seen_at IS NULL
+              AND EXISTS (
+                SELECT 1
+                FROM reports
+                WHERE reports.agent_id = agents.agent_id
+              )
+            """
+        )
 
     @staticmethod
     def _ensure_column(
@@ -277,6 +313,23 @@ class Store:
             ).fetchall()
         return [self._event_from_row(row) for row in rows]
 
+    def list_recent_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT event_id, type, subject_id, payload_json, created_at
+                FROM (
+                    SELECT event_id, type, subject_id, payload_json, created_at
+                    FROM events
+                    ORDER BY event_id DESC
+                    LIMIT ?
+                )
+                ORDER BY event_id ASC
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._event_from_row(row) for row in rows]
+
     def register_agent(self, request: AgentRegisterRequest) -> dict[str, Any]:
         current = now_ts()
         metadata_json = json.dumps(request.metadata)
@@ -313,7 +366,8 @@ class Store:
             row = conn.execute(
                 """
                 SELECT agent_id, project, name, status, pbx_active, metadata_json,
-                       created_at, last_seen_at, last_poll_at, dismissed_at
+                       created_at, last_seen_at, last_poll_at,
+                       latest_report_seen_at, dismissed_at
                 FROM agents
                 WHERE agent_id = ?
                 """,
@@ -326,7 +380,8 @@ class Store:
             rows = conn.execute(
                 """
                 SELECT agent_id, project, name, status, pbx_active, metadata_json,
-                       created_at, last_seen_at, last_poll_at, dismissed_at
+                       created_at, last_seen_at, last_poll_at,
+                       latest_report_seen_at, dismissed_at
                 FROM agents
                 WHERE dismissed_at IS NULL
                 ORDER BY last_seen_at DESC, agent_id ASC
@@ -411,6 +466,38 @@ class Store:
         if report is None:
             raise RuntimeError("report insert failed")
         return report
+
+    def mark_latest_report_seen(self, agent_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT created_at
+                FROM reports
+                WHERE agent_id = ?
+                ORDER BY created_at DESC, report_id DESC
+                LIMIT 1
+                """,
+                (agent_id,),
+            ).fetchone()
+            if row is None:
+                exists = conn.execute(
+                    "SELECT 1 FROM agents WHERE agent_id = ?",
+                    (agent_id,),
+                ).fetchone()
+                return self.get_agent(agent_id) if exists is not None else None
+            seen_at = float(row["created_at"])
+            cursor = conn.execute(
+                """
+                UPDATE agents
+                SET latest_report_seen_at = MAX(
+                    COALESCE(latest_report_seen_at, 0),
+                    ?
+                )
+                WHERE agent_id = ?
+                """,
+                (seen_at, agent_id),
+            )
+        return self.get_agent(agent_id) if cursor.rowcount else None
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -606,6 +693,7 @@ class Store:
         data["estimated_visible_tokens_per_hour"] = 0
         data["usage_warning"] = None
         data["latest_report_id"] = None
+        data["latest_report_created_at"] = None
         data["latest_report_status"] = None
         data["latest_report_needs_input"] = False
         data["latest_report_plan_option_count"] = 0
@@ -637,7 +725,7 @@ class Store:
     ) -> None:
         row = conn.execute(
             """
-            SELECT report_id, status, needs_input, plan_options_json
+            SELECT report_id, status, needs_input, plan_options_json, created_at
             FROM reports
             WHERE agent_id = ?
             ORDER BY created_at DESC, report_id DESC
@@ -654,6 +742,7 @@ class Store:
         option_count = len(plan_options) if isinstance(plan_options, list) else 0
         needs_input = bool(row["needs_input"])
         agent["latest_report_id"] = row["report_id"]
+        agent["latest_report_created_at"] = row["created_at"]
         agent["latest_report_status"] = row["status"]
         agent["latest_report_needs_input"] = needs_input
         agent["latest_report_plan_option_count"] = option_count
