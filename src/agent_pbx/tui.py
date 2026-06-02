@@ -122,6 +122,11 @@ PLAN_SELECTION_PATTERN = re.compile(
     r"(?:\s+(?P<notes>.*))?$",
     re.IGNORECASE | re.DOTALL,
 )
+CODEX_NATIVE_PLAN_SELECTOR_CHOICES = {
+    1: "start coding",
+    2: "clear context & start",
+    3: "stay in plan mode",
+}
 AGENT_JUMP_KEYS = {
     "1": 0,
     "2": 1,
@@ -203,6 +208,9 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/plan",
     "/plan latest",
     "/plan thread",
+    "/plan select 1",
+    "/plan select 2",
+    "/plan select 3",
     "/gitstatus",
     "/gitdiff",
     "/gitpush",
@@ -710,6 +718,46 @@ def render_custom_slash_prompt(command: CustomSlashCommand, arg: str = "") -> st
 
 def render_plan_prompt(message: str) -> str:
     return f"{PLAN_PBX_CONTEXT_PROMPT}\n\n{message.strip()}"
+
+
+def contains_codex_native_plan_selector(text: str) -> bool:
+    lines = [" ".join(line.casefold().split()) for line in text.splitlines()]
+    if not lines:
+        return False
+    start_terms = (
+        "start coding",
+        "start implementation",
+        "begin coding",
+        "start work",
+    )
+    stay_terms = (
+        "stay in plan",
+        "stay in planning",
+        "keep planning",
+        "continue planning",
+        "remain in plan",
+    )
+
+    def choice_line(index: int, terms: tuple[str, ...]) -> bool:
+        pattern = re.compile(rf"^[^\w/]*{index}[.)]?\s+(?P<label>.+)$")
+        for line in lines[-40:]:
+            match = pattern.match(line)
+            if match is None:
+                continue
+            label = match.group("label")
+            if len(label) > 120:
+                continue
+            if any(term in label for term in terms):
+                return True
+        return False
+
+    return all(
+        (
+            choice_line(1, start_terms),
+            choice_line(2, ("clear", "discard")),
+            choice_line(3, stay_terms),
+        )
+    )
 
 
 def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME_NAME) -> set[str]:
@@ -2060,6 +2108,7 @@ class AgentPBXTUI(App[None]):
         self.attention_agent_id: str | None = None
         self.pending_slash_command_by_agent: dict[str, str] = {}
         self.plan_mode_active_agent_ids: set[str] = set()
+        self.tmux_plan_selector_agent_ids: set[str] = set()
         self.sent_message_history_by_agent: dict[str, list[str]] = {}
         self.sent_message_history_cursor: dict[tuple[str, str], int] = {}
         self.slash_completion_state: dict[str, SlashCompletionState] = {}
@@ -2336,6 +2385,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/plan latest", "Show latest report plan options", self.palette_plan_latest)
         yield SystemCommand("/plan thread", "Show selected thread plan options", self.palette_plan_thread)
         yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
+        yield from self.palette_native_plan_selector_commands()
         yield from self.palette_dynamic_plan_commands()
         if self.is_tmux_direct_enabled():
             yield SystemCommand("/gitstatus", "Run !git status in the selected tmux pane", self.palette_git_status)
@@ -2578,6 +2628,34 @@ class AgentPBXTUI(App[None]):
             return
         agent_id, options = context
         self.show_plan_options_for_reply(agent_id, options, source="thread item")
+
+    def palette_native_plan_selector_commands(self) -> Iterable[SystemCommand]:
+        agent_id = self.palette_context_agent_id()
+        if (
+            agent_id is None
+            or not self.is_tmux_direct_enabled(agent_id)
+            or not self.tmux_native_plan_selector_pending(agent_id)
+        ):
+            return
+        for index, label in CODEX_NATIVE_PLAN_SELECTOR_CHOICES.items():
+            yield SystemCommand(
+                f"/plan select {index}: {label}",
+                f"Press {index} in the Codex plan selector for {agent_id}",
+                lambda index=index: self.palette_send_native_plan_selection(index),
+            )
+
+    def palette_send_native_plan_selection(self, index: int) -> None:
+        agent_id = self.palette_tmux_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.send_native_plan_selection(
+                agent_id,
+                PlanSelection(index=index),
+            ),
+            name=f"palette-plan-select-{slugify(agent_id)}-{index}",
+            exclusive=True,
+        )
 
     def palette_latest_plan_context(self) -> tuple[str, list[PlanChoice]] | None:
         agent_id = self.palette_context_agent_id()
@@ -3477,6 +3555,9 @@ class AgentPBXTUI(App[None]):
         )
 
     def format_plan_state(self, agent: dict[str, Any]) -> str:
+        agent_id = str(agent.get("agent_id") or "")
+        if agent_id in self.tmux_plan_selector_agent_ids:
+            return "SELECT"
         option_count = int_value(agent.get("latest_report_plan_option_count")) or 0
         if option_count > 0:
             return f"PLAN:{option_count}"
@@ -3575,7 +3656,10 @@ class AgentPBXTUI(App[None]):
         return f"{prefix}{format_count(tokens)}t p{polls} r{reports} g{pings}"
 
     def toggle_unseen_attention(self) -> None:
-        if not self.agent_blink_enabled or not self.unseen_latest_agent_ids:
+        has_attention_target = bool(
+            self.unseen_latest_agent_ids or self.tmux_plan_selector_agent_ids
+        )
+        if not self.agent_blink_enabled or not has_attention_target:
             if self.attention_blink_phase:
                 self.attention_blink_phase = False
                 self.render_unseen_attention()
@@ -3586,6 +3670,23 @@ class AgentPBXTUI(App[None]):
     def render_unseen_attention(self) -> None:
         attention = self.query_one_or_none("#attention", Static)
         if attention is None:
+            return
+        if self.tmux_plan_selector_agent_ids:
+            agent_ids = sorted(self.tmux_plan_selector_agent_ids)
+            self.attention_agent_id = agent_ids[0]
+            agents = ", ".join(agent_ids[:3])
+            extra = len(agent_ids) - 3
+            if extra > 0:
+                agents = f"{agents}, +{extra}"
+            marker = "PLAN!" if self.attention_blink_phase else "PLAN"
+            attention.update(
+                f"{marker} selection pending: {agents} "
+                "(/plan:1 start, /plan:2 clear context & start, /plan:3 stay)"
+            )
+            attention.add_class("unseen-active")
+            self.set_attention_flash_class(
+                self.agent_blink_enabled and self.attention_blink_phase
+            )
             return
         if not self.agent_blink_enabled or not self.unseen_latest_agent_ids:
             if attention.has_class("unseen-active"):
@@ -3613,6 +3714,9 @@ class AgentPBXTUI(App[None]):
             return
 
     def attention_target_agent_id(self) -> str | None:
+        for agent_id in sorted(self.tmux_plan_selector_agent_ids):
+            if agent_id in self.agents:
+                return agent_id
         if self.attention_agent_id in self.agents:
             return self.attention_agent_id
         for agent_id in sorted(self.unseen_latest_agent_ids):
@@ -4283,6 +4387,8 @@ class AgentPBXTUI(App[None]):
     def plan_mode_state(self, agent_id: str | None) -> str:
         if not agent_id:
             return "off"
+        if agent_id in self.tmux_plan_selector_agent_ids:
+            return "select"
         if self.pending_slash_command_by_agent.get(agent_id) == PLAN_SLASH_COMMAND:
             return "pending"
         if agent_id in self.plan_mode_active_agent_ids:
@@ -4444,6 +4550,7 @@ class AgentPBXTUI(App[None]):
         pane, mode = self.resolve_tmux_pane(agent_id, panes)
         if pane is None:
             self.tmux_visible_capture_key = None
+            self.update_tmux_plan_selector_state(agent_id, "")
             self.record_tmux_liveness_state(
                 agent_id,
                 "stale" if mode == "stale" else mode,
@@ -4484,16 +4591,23 @@ class AgentPBXTUI(App[None]):
                 f"Tmux: {pane.pane_id} capture failed",
                 cache_key=agent_id,
             )
+            self.update_tmux_plan_selector_state(agent_id, "")
             self.record_tmux_liveness_state(agent_id, "unavailable", pane_id=pane.pane_id)
             stream.text = f"Unable to capture tmux pane {pane.pane_id}: {exc}"
             self.render_agents()
             return
         displayed = self.crop_tmux_capture_for_display(captured or "(empty tmux pane)")
+        self.update_tmux_plan_selector_state(agent_id, displayed)
         self.record_tmux_capture_liveness(agent_id, pane.pane_id, displayed)
         self.update_tmux_stream(
             stream,
             displayed,
             cache_key=cache_key,
+        )
+        selector_note = (
+            " selector pending: /plan:1 start /plan:2 clear context & start /plan:3 stay"
+            if agent_id in self.tmux_plan_selector_agent_ids
+            else ""
         )
         self.update_tmux_status(
             status,
@@ -4503,10 +4617,47 @@ class AgentPBXTUI(App[None]):
                 f"{self.tmux_capture_mode_label()} "
                 "cropped "
                 f"{pane.current_command} {pane.width}x{pane.height}"
+                f"{selector_note}"
             ),
             cache_key=agent_id,
         )
         self.render_agents()
+
+    def update_tmux_plan_selector_state(self, agent_id: str, captured: str) -> bool:
+        was_pending = agent_id in self.tmux_plan_selector_agent_ids
+        is_pending = contains_codex_native_plan_selector(captured)
+        if is_pending:
+            self.tmux_plan_selector_agent_ids.add(agent_id)
+        else:
+            self.tmux_plan_selector_agent_ids.discard(agent_id)
+        if was_pending == is_pending:
+            return False
+        self.update_agent_title()
+        self.render_unseen_attention()
+        return True
+
+    def tmux_native_plan_selector_pending(self, agent_id: str) -> bool:
+        if agent_id in self.tmux_plan_selector_agent_ids:
+            if (
+                agent_id == self.selected_agent_id
+                and str(self.tmux_visible_capture_key or "").startswith(f"{agent_id}:")
+            ):
+                stream = self.query_one_or_none("#tmux-stream", TextArea)
+                if stream is not None and not contains_codex_native_plan_selector(stream.text):
+                    self.update_tmux_plan_selector_state(agent_id, stream.text)
+                    return False
+            return True
+        if agent_id != self.selected_agent_id:
+            return False
+        if not str(self.tmux_visible_capture_key or "").startswith(f"{agent_id}:"):
+            return False
+        stream = self.query_one_or_none("#tmux-stream", TextArea)
+        if stream is None or not contains_codex_native_plan_selector(stream.text):
+            return False
+        self.tmux_plan_selector_agent_ids.add(agent_id)
+        self.update_agent_title()
+        self.render_unseen_attention()
+        return True
 
     def prepare_tmux_stream_for_capture(
         self,
@@ -5195,13 +5346,39 @@ class AgentPBXTUI(App[None]):
         selection: PlanSelection,
     ) -> PlanChoice | None:
         options = self.current_plan_options_for_agent(agent_id)
-        if not options:
-            raw_index = str(selection.index)
-            return PlanChoice(label=raw_index, raw=raw_index)
         selected_index = selection.index - 1
         if selected_index < 0 or selected_index >= len(options):
             return None
         return options[selected_index]
+
+    async def send_native_plan_selection(
+        self,
+        agent_id: str,
+        selection: PlanSelection,
+    ) -> bool:
+        label = CODEX_NATIVE_PLAN_SELECTOR_CHOICES.get(selection.index)
+        if label is None:
+            self.notify(
+                f"Codex plan selector option {selection.index} is not available.",
+                severity="warning",
+            )
+            return False
+        sent = await self.send_key_to_tmux(agent_id, str(selection.index))
+        if not sent:
+            return False
+        self.tmux_plan_selector_agent_ids.discard(agent_id)
+        self.update_agent_title()
+        self.render_agents()
+        self.render_unseen_attention()
+        if selection.notes:
+            self.notify(
+                "Notes are ignored for Codex native plan selector choices.",
+                severity="warning",
+            )
+        self.notify(f"Pressed {selection.index} ({label}) in Codex plan selector.")
+        await asyncio.sleep(SLASH_COMMAND_FOLLOWUP_DELAY_SECONDS)
+        await self.load_tmux_capture(agent_id)
+        return True
 
     async def send_plan_selection(
         self,
@@ -5210,6 +5387,9 @@ class AgentPBXTUI(App[None]):
         *,
         via_tmux: bool,
     ) -> bool:
+        options = self.current_plan_options_for_agent(agent_id)
+        if via_tmux and not options and self.tmux_native_plan_selector_pending(agent_id):
+            return await self.send_native_plan_selection(agent_id, selection)
         option = self.plan_option_for_selection(agent_id, selection)
         if option is None:
             self.notify(
@@ -6839,7 +7019,7 @@ class AgentPBXTUI(App[None]):
         if attention is None:
             self.set_attention_flash_class(False)
             return
-        if not self.unseen_latest_agent_ids:
+        if not self.unseen_latest_agent_ids and not self.tmux_plan_selector_agent_ids:
             attention.update("")
             attention.remove_class("attention-active")
             self.attention_agent_id = None
