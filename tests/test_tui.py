@@ -1700,6 +1700,38 @@ async def test_tui_tiny_layout_opens_agent_view(monkeypatch) -> None:
     assert threads == ["agent-1"]
 
 
+async def test_tui_tiny_agents_columns_include_project(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "tiny")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(53, 20)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "running",
+                "effective_status": "running",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+                "latest_report_created_at": 123.0,
+            }
+        }
+        app.render_agents()
+        table = app.query_one("#agents", DataTable)
+        row = table.get_row("agent-1")
+
+    assert app.desired_agent_columns()[:5] == (
+        "New",
+        "Agent",
+        "Status",
+        "Project",
+        "Queue",
+    )
+    assert row[2] == "running"
+    assert row[3] == "agent-pbx"
+
+
 async def test_tui_compact_alert_opens_agent_latest(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "compact")
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
@@ -3873,6 +3905,24 @@ def test_tui_startup_marks_unviewed_latest_report_new() -> None:
     app.update_unseen_from_agent_refresh({})
 
     assert app.unseen_latest_agent_ids == {"agent-1"}
+
+
+def test_tui_agent_without_latest_report_does_not_mark_new() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "online",
+            "project": "agent-pbx",
+            "last_seen_at": 102.0,
+            "latest_report_created_at": None,
+            "latest_report_seen_at": None,
+        }
+    }
+
+    app.update_unseen_from_agent_refresh({})
+
+    assert app.unseen_latest_agent_ids == set()
 
 
 def test_tui_shared_latest_seen_does_not_clear_newer_report() -> None:

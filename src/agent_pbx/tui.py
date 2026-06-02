@@ -2957,7 +2957,7 @@ class AgentPBXTUI(App[None]):
     def desired_agent_columns(self) -> tuple[str, ...]:
         live = ("Live",) if self.tmux_features_available else ()
         if self.effective_layout_mode == TINY_TUI_LAYOUT:
-            return ("New", "Agent", "Status", "Queue", *live)
+            return ("New", "Agent", "Status", "Project", "Queue", *live)
         if self.effective_layout_mode == COMPACT_TUI_LAYOUT:
             return ("New", "Agent", "Plan", "Status", "Queue", *live, "Poll")
         return (
@@ -3110,6 +3110,14 @@ class AgentPBXTUI(App[None]):
         agent = self.agents.get(agent_id)
         if agent is None:
             return None
+        if "latest_report_created_at" in agent:
+            try:
+                value = agent.get("latest_report_created_at")
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+        # Older Agent PBX servers did not include latest_report_created_at.
+        # Fall back to last_seen_at only for those legacy responses.
         for key in ("latest_report_created_at", "last_seen_at"):
             try:
                 value = agent.get(key)
