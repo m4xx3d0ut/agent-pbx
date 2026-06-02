@@ -238,6 +238,51 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         )
         return agent
 
+    async def set_agent_star(
+        agent_id: str,
+        *,
+        starred: bool,
+        store: Store,
+    ) -> dict[str, object]:
+        if store.get_agent(agent_id) is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        agent = store.set_agent_starred(agent_id, starred=starred)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        store.append_event(
+            "agent_starred_changed",
+            {
+                "agent_id": agent_id,
+                "project": agent["project"],
+                "starred": agent["starred"],
+                "starred_at": agent.get("starred_at"),
+            },
+            agent_id,
+        )
+        return agent
+
+    @app.post(
+        "/v1/agents/{agent_id}/star",
+        response_model=AgentResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def star_agent(
+        agent_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        return await set_agent_star(agent_id, starred=True, store=store)
+
+    @app.delete(
+        "/v1/agents/{agent_id}/star",
+        response_model=AgentResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def unstar_agent(
+        agent_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        return await set_agent_star(agent_id, starred=False, store=store)
+
     @app.get(
         "/v1/agents/{agent_id}/thread",
         response_model=list[ThreadItemResponse],

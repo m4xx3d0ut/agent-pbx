@@ -112,6 +112,11 @@ codex mcp add agent-pbx --url "$AGENT_PBX_MCP_URL"
 agent-pbx tui
 ```
 
+`agent-pbx mcp restart` preserves the previous daemon host and port when
+`--host`, `--port`, `AGENT_PBX_HOST`, and `AGENT_PBX_PORT` are not provided.
+This avoids accidentally moving a LAN-bound daemon back to localhost during a
+restart. Explicit flags and sourced `local.env` values still take precedence.
+
 ## Portable TUI Launcher
 
 Use `agent-pbx-tui` for TUI-only clients on another local machine or small LAN
@@ -421,6 +426,12 @@ Use `g` followed by `1` through `9` to jump directly to the first nine visible
 agents' `Latest` tabs; `g` then `0` jumps to the tenth visible agent. The
 sequence is ignored while typing in follow-up inputs, avoiding terminal
 `Alt+number` tab-switching conflicts.
+
+Press `p` from the Agents table, or use `Star/Unstar`, to pin an agent near the
+top of the Agents list. Starred agents are sorted by latest activity above
+unstarred agents, which are also sorted by latest activity. Star selections
+sync through the Agent PBX server so a workstation TUI and a remote watch TUI
+show the same pinned agents; the TUI settings file keeps a local cache/fallback.
 
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/tmux`, `/workerbee`, `/theme

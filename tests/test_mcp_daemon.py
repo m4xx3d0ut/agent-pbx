@@ -268,6 +268,29 @@ def test_mcp_cli_parser_uses_local_env_defaults(monkeypatch) -> None:
     assert override.server == "http://localhost:9999"
 
 
+def test_mcp_restart_preserves_previous_bind_without_env(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AGENT_PBX_HOST", raising=False)
+    monkeypatch.delenv("AGENT_PBX_PORT", raising=False)
+    previous = config_from_args(state_root=tmp_path)
+    previous.metadata_file.parent.mkdir(parents=True, exist_ok=True)
+    previous.metadata_file.write_text(
+        json.dumps({"host": REMOTE_BIND_HOST, "port": 8767}),
+        encoding="utf-8",
+    )
+
+    parser = build_parser()
+    restart = parser.parse_args(["mcp", "restart", "--state-root", str(tmp_path)])
+    config = _daemon_config(restart)
+
+    assert restart.host is None
+    assert restart.port is None
+    assert config.host == REMOTE_BIND_HOST
+    assert config.port == 8767
+
+
 def test_foreground_mcp_serve_refuses_lan_without_token(
     tmp_path: Path,
     monkeypatch,

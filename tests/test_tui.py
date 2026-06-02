@@ -135,6 +135,11 @@ def test_tui_constructs() -> None:
         for binding in app.BINDINGS
     )
     assert any(
+        getattr(binding, "key", None) == "p"
+        and getattr(binding, "action", None) == "toggle_star_agent"
+        for binding in app.BINDINGS
+    )
+    assert any(
         getattr(binding, "key", None) == "d"
         and getattr(binding, "action", None) == "hide_agent"
         for binding in app.BINDINGS
@@ -206,6 +211,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "tmux_direct_agent_modes": {"agent-1": True, "agent-2": False},
                 "tmux_capture_lines": 250,
                 "tmux_agent_targets": {"agent-1": "%1"},
+                "starred_agent_ids": ["agent-1"],
                 "export_dir": str(tmp_path / "exports"),
                 "latest_viewed_at_by_agent": {"agent-1": 123.0},
                 "last_seen_event_id": 42,
@@ -232,6 +238,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.tmux_direct_agent_modes == {"agent-1": True, "agent-2": False}
     assert app.tmux_capture_lines == 250
     assert app.tmux_agent_targets == {"agent-1": "%1"}
+    assert app.starred_agent_ids == {"agent-1"}
     assert app.export_dir == tmp_path / "exports"
     assert app.latest_viewed_at_by_agent == {"agent-1": 123.0}
     assert app.last_seen_event_id == 42
@@ -317,6 +324,21 @@ async def test_tui_event_stream_worker_uses_isolated_group() -> None:
             "exit_on_error": False,
         }
     ]
+
+
+def test_tui_event_stream_parser_ignores_keepalive_and_bad_data() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert app.event_from_sse_line(": keepalive") is None
+    assert app.event_from_sse_line("data:") is None
+    assert app.event_from_sse_line("data: not-json") is None
+    assert app.event_from_sse_line('data: {"type": "report_created"}') is None
+    assert app.event_from_sse_line(
+        'data: {"event_id": "12", "type": "report_created"}'
+    ) == {
+        "event_id": 12,
+        "type": "report_created",
+    }
 
 
 def test_tui_refresh_workers_use_non_default_groups() -> None:
@@ -431,6 +453,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     app.tmux_direct_agent_modes = {"agent-1": True, "agent-2": False}
     app.tmux_capture_lines = 333
     app.tmux_agent_targets = {"agent-1": "%2"}
+    app.starred_agent_ids = {"agent-2", "agent-1"}
     app.layout_mode = "compact"
     app.split_percent = 57
     app.latest_viewed_at_by_agent = {"agent-1": 123.0}
@@ -446,6 +469,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["tmux_direct_agent_modes"] == {"agent-1": True, "agent-2": False}
     assert saved["tmux_capture_lines"] == 333
     assert saved["tmux_agent_targets"] == {"agent-1": "%2"}
+    assert saved["starred_agent_ids"] == ["agent-1", "agent-2"]
     assert saved["theme"] == "1337"
     assert saved["layout"] == "compact"
     assert saved["split_percent"] == 57
@@ -601,6 +625,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         await pilot.pause()
         agents = app.query_one("#agents", DataTable)
         thread = app.query_one("#thread", DataTable)
+        star_agent = app.query_one("#star-agent", Button)
         hide_agent = app.query_one("#hide-agent", Button)
         purge_agent = app.query_one("#purge-agent", Button)
         request_detail = app.query_one("#request-detail", Button)
@@ -631,6 +656,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert thread.show_row_labels is False
         assert files.cursor_type == "row"
         assert files.show_row_labels is False
+        assert star_agent.label.plain == "Star/Unstar (p)"
         assert hide_agent.label.plain == "Hide Agent (d)"
         assert purge_agent.label.plain == "Purge Agent (D)"
         assert request_detail.label.plain == "Request Detail"
@@ -1721,15 +1747,159 @@ async def test_tui_tiny_agents_columns_include_project(monkeypatch) -> None:
         table = app.query_one("#agents", DataTable)
         row = table.get_row("agent-1")
 
-    assert app.desired_agent_columns()[:5] == (
+    assert app.desired_agent_columns()[:6] == (
+        "*",
         "New",
         "Agent",
         "Status",
         "Project",
         "Queue",
     )
-    assert row[2] == "running"
-    assert row[3] == "agent-pbx"
+    assert row[3] == "running"
+    assert row[4] == "agent-pbx"
+
+
+async def test_tui_starred_agents_sort_above_unstarred_by_freshness(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "tiny")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(53, 20)
+        await pilot.pause()
+        app.agents = {
+            "old-star": {
+                "agent_id": "old-star",
+                "status": "done",
+                "project": "demo",
+                "last_seen_at": 100.0,
+            },
+            "new-unstarred": {
+                "agent_id": "new-unstarred",
+                "status": "working",
+                "project": "demo",
+                "last_seen_at": 300.0,
+            },
+            "new-star": {
+                "agent_id": "new-star",
+                "status": "working",
+                "project": "demo",
+                "last_seen_at": 200.0,
+            },
+        }
+        app.starred_agent_ids = {"old-star", "new-star"}
+        app.render_agents()
+        table = app.query_one("#agents", DataTable)
+        ordered = [str(row.key.value) for row in table.ordered_rows]
+
+    assert ordered == ["new-star", "old-star", "new-unstarred"]
+    assert table.get_row("new-star")[0] == "*"
+    assert table.get_row("new-unstarred")[0] == ""
+
+
+async def test_tui_toggle_star_agent_persists_and_preserves_focus(
+    tmp_path: Path,
+) -> None:
+    settings_file = tmp_path / "settings.json"
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        settings_file=settings_file,
+    )
+    app.queue_agent_star_sync = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "demo",
+                "last_seen_at": 100.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "status": "working",
+                "project": "demo",
+                "last_seen_at": 200.0,
+            },
+        }
+        app.render_agents()
+        app.focus_agent_row("agent-1")
+        app.toggle_selected_agent_star()
+        table = app.query_one("#agents", DataTable)
+        cursor_agent_id = app.agent_id_at_cursor()
+        ordered = [str(row.key.value) for row in table.ordered_rows]
+        starred_cell = table.get_row("agent-1")[0]
+        saved = json.loads(settings_file.read_text(encoding="utf-8"))
+
+    assert app.starred_agent_ids == {"agent-1"}
+    assert saved["starred_agent_ids"] == ["agent-1"]
+    assert cursor_agent_id == "agent-1"
+    assert ordered == ["agent-1", "agent-2"]
+    assert starred_cell == "*"
+
+
+def test_tui_syncs_starred_agents_from_server_state() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.starred_agent_ids = {"local-stale"}
+    app.local_starred_agent_ids = {"local-stale"}
+    app.agents = {
+        "local-stale": {
+            "agent_id": "local-stale",
+            "status": "done",
+            "project": "demo",
+            "last_seen_at": 100.0,
+            "starred": False,
+            "starred_at": None,
+        },
+        "remote-star": {
+            "agent_id": "remote-star",
+            "status": "done",
+            "project": "demo",
+            "last_seen_at": 200.0,
+            "starred": True,
+            "starred_at": 123.0,
+        },
+    }
+
+    changed = app.sync_starred_from_agent_refresh()
+
+    assert changed is True
+    assert app.starred_agent_ids == {"remote-star"}
+
+
+def test_tui_migrates_local_starred_agents_when_server_has_none() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, bool]] = []
+    app.starred_agent_ids = {"agent-1"}
+    app.local_starred_agent_ids = {"agent-1"}
+    app.queue_agent_star_sync = (  # type: ignore[method-assign]
+        lambda agent_id, starred: queued.append((agent_id, starred))
+    )
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "done",
+            "project": "demo",
+            "last_seen_at": 100.0,
+            "starred": False,
+            "starred_at": None,
+        },
+        "agent-2": {
+            "agent_id": "agent-2",
+            "status": "done",
+            "project": "demo",
+            "last_seen_at": 200.0,
+            "starred": False,
+            "starred_at": None,
+        },
+    }
+
+    changed = app.sync_starred_from_agent_refresh()
+
+    assert changed is False
+    assert app.starred_agent_ids == {"agent-1"}
+    assert queued == [("agent-1", True)]
 
 
 async def test_tui_compact_alert_opens_agent_latest(monkeypatch) -> None:
@@ -3613,9 +3783,9 @@ async def test_tui_purge_selected_agent_uses_cursor_and_deletes_thread() -> None
         await app.dismiss_selected_agent(delete_thread=True)
         detail = app.query_one("#detail", TextArea).text
 
-    assert deleted == [("agent-2", True)]
-    assert app.selected_agent_id == "agent-1"
-    assert "Purged agent-2." in detail
+    assert deleted == [("agent-1", True)]
+    assert app.selected_agent_id is None
+    assert "Purged agent-1." in detail
     assert "Thread data was deleted" in detail
 
 
@@ -3662,7 +3832,7 @@ async def test_tui_agent_hide_and_purge_hotkeys_trigger_from_agents_table() -> N
         await pilot.press("shift+d")
         await pilot.pause()
 
-    assert deleted == [("agent-1", False), ("agent-2", True)]
+    assert deleted == [("agent-2", False), ("agent-1", True)]
 
 
 async def test_tui_agent_hide_hotkey_ignored_in_text_inputs() -> None:
@@ -3730,20 +3900,20 @@ async def test_tui_agent_jump_sequence_opens_latest_by_visible_row() -> None:
         await pilot.press("3")
         await pilot.pause()
 
-        assert app.selected_agent_id == "agent-3"
+        assert app.selected_agent_id == "agent-8"
         assert app.active_agent_tab == "latest-tab"
         assert tabs.active == "latest-tab"
-        assert app.agent_id_at_cursor() == "agent-3"
+        assert app.agent_id_at_cursor() == "agent-8"
 
         await pilot.press("g")
         await pilot.press("0")
         await pilot.pause()
 
-        assert app.selected_agent_id == "agent-10"
-        assert app.agent_id_at_cursor() == "agent-10"
+        assert app.selected_agent_id == "agent-1"
+        assert app.agent_id_at_cursor() == "agent-1"
 
-    assert loaded == ["agent-3", "agent-10"]
-    assert threads == ["agent-3", "agent-10"]
+    assert loaded == ["agent-8", "agent-1"]
+    assert threads == ["agent-8", "agent-1"]
 
 
 async def test_tui_agent_jump_sequence_opens_compact_agent_view() -> None:
@@ -4079,7 +4249,48 @@ async def test_tui_latest_seen_event_clears_remote_unseen_marker() -> None:
     assert app.unseen_latest_agent_ids == set()
     assert app.latest_viewed_at_by_agent["agent-1"] == 102.0
     assert app.agents["agent-1"]["latest_report_seen_at"] == 102.0
-    assert row[0] == ""
+    assert row[1] == ""
+
+
+async def test_tui_agent_starred_event_updates_visible_row() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 100.0,
+                "starred": False,
+                "starred_at": None,
+            }
+        }
+        app.render_agents()
+        app.handle_event(
+            {
+                "event_id": 10,
+                "type": "agent_starred_changed",
+                "subject_id": "agent-1",
+                "payload": {
+                    "agent_id": "agent-1",
+                    "starred": True,
+                    "starred_at": 123.0,
+                },
+            }
+        )
+        table = app.query_one("#agents", DataTable)
+        row = table.get_row("agent-1")
+
+    assert app.starred_agent_ids == {"agent-1"}
+    assert app.agents["agent-1"]["starred"] is True
+    assert app.agents["agent-1"]["starred_at"] == 123.0
+    assert row[0] == "*"
 
 
 async def test_tui_replayed_report_event_respects_shared_seen_marker() -> None:
@@ -4119,7 +4330,7 @@ async def test_tui_replayed_report_event_respects_shared_seen_marker() -> None:
 
     assert app.unseen_latest_agent_ids == set()
     assert app.latest_viewed_at_by_agent == {"agent-1": 200.0}
-    assert row[0] == ""
+    assert row[1] == ""
 
 
 async def test_tui_unseen_latest_blinks_attention_bar() -> None:
@@ -4207,7 +4418,7 @@ async def test_tui_clicking_unseen_alert_opens_first_latest() -> None:
     assert app.active_agent_tab == "latest-tab"
     assert tabs.active == "latest-tab"
     assert app.unseen_latest_agent_ids == set()
-    assert cursor_row == 1
+    assert cursor_row == 0
     assert cursor_agent_id == "agent-2"
     assert focused is agents
     assert loaded == ["agent-2"]
@@ -4280,7 +4491,7 @@ async def test_tui_clicking_flash_alert_opens_event_agent_latest_from_thread() -
     assert app.active_agent_tab == "latest-tab"
     assert tabs.active == "latest-tab"
     assert app.unseen_latest_agent_ids == set()
-    assert cursor_row == 1
+    assert cursor_row == 0
     assert cursor_agent_id == "agent-2"
     assert focused is agents
     assert loaded == ["agent-2"]
@@ -4463,7 +4674,7 @@ async def test_tui_agent_status_refresh_marks_unseen_latest() -> None:
         row = table.get_row("agent-1")
 
     assert app.unseen_latest_agent_ids == {"agent-1"}
-    assert row[0] == "NEW"
+    assert row[1] == "NEW"
 
 
 async def test_tui_agent_status_refresh_does_not_mark_engaged_latest() -> None:
@@ -4497,7 +4708,7 @@ async def test_tui_agent_status_refresh_does_not_mark_engaged_latest() -> None:
 
     assert app.unseen_latest_agent_ids == set()
     assert app.latest_viewed_at_by_agent["agent-1"] == 101.0
-    assert row[0] == ""
+    assert row[1] == ""
 
 
 async def test_tui_agent_refresh_preserves_cursor_position() -> None:
@@ -4522,12 +4733,14 @@ async def test_tui_agent_refresh_preserves_cursor_position() -> None:
         app.render_agents()
         table = app.query_one("#agents", DataTable)
         table.move_cursor(row=1, animate=False)
+        original_cursor_agent_id = app.agent_id_at_cursor()
         app.agents["agent-1"]["status"] = "completed"
         app.render_agents()
         cursor_agent_id = app.agent_id_at_cursor()
 
     assert table.cursor_row == 1
-    assert cursor_agent_id == "agent-2"
+    assert original_cursor_agent_id == "agent-1"
+    assert cursor_agent_id == original_cursor_agent_id
 
 
 async def test_tui_agent_refresh_preserves_table_scroll() -> None:

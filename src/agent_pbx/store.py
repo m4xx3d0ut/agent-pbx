@@ -16,7 +16,7 @@ from .schemas import (
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -84,6 +84,7 @@ class Store:
                     last_seen_at REAL NOT NULL,
                     last_poll_at REAL,
                     latest_report_seen_at REAL,
+                    starred_at REAL,
                     dismissed_at REAL
                 );
 
@@ -133,6 +134,7 @@ class Store:
             previous_schema_version = self._schema_version(conn)
             self._ensure_column(conn, "agents", "last_poll_at", "REAL")
             self._ensure_column(conn, "agents", "latest_report_seen_at", "REAL")
+            self._ensure_column(conn, "agents", "starred_at", "REAL")
             self._ensure_column(conn, "agents", "dismissed_at", "REAL")
             self._ensure_column(
                 conn,
@@ -367,7 +369,7 @@ class Store:
                 """
                 SELECT agent_id, project, name, status, pbx_active, metadata_json,
                        created_at, last_seen_at, last_poll_at,
-                       latest_report_seen_at, dismissed_at
+                       latest_report_seen_at, starred_at, dismissed_at
                 FROM agents
                 WHERE agent_id = ?
                 """,
@@ -381,7 +383,7 @@ class Store:
                 """
                 SELECT agent_id, project, name, status, pbx_active, metadata_json,
                        created_at, last_seen_at, last_poll_at,
-                       latest_report_seen_at, dismissed_at
+                       latest_report_seen_at, starred_at, dismissed_at
                 FROM agents
                 WHERE dismissed_at IS NULL
                 ORDER BY last_seen_at DESC, agent_id ASC
@@ -496,6 +498,21 @@ class Store:
                 WHERE agent_id = ?
                 """,
                 (seen_at, agent_id),
+            )
+        return self.get_agent(agent_id) if cursor.rowcount else None
+
+    def set_agent_starred(
+        self, agent_id: str, *, starred: bool
+    ) -> dict[str, Any] | None:
+        starred_at = now_ts() if starred else None
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE agents
+                SET starred_at = ?
+                WHERE agent_id = ?
+                """,
+                (starred_at, agent_id),
             )
         return self.get_agent(agent_id) if cursor.rowcount else None
 
@@ -682,6 +699,7 @@ class Store:
     def _agent_from_row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["pbx_active"] = bool(data["pbx_active"])
+        data["starred"] = data.get("starred_at") is not None
         data["metadata"] = json.loads(data.pop("metadata_json"))
         Store._add_effective_status(data)
         data["queued_command_count"] = 0

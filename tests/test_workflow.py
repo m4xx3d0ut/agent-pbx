@@ -148,6 +148,40 @@ def test_mark_latest_report_seen_is_shared_state(tmp_path: Path) -> None:
     assert events[-1]["payload"]["latest_report_seen_at"] == report["created_at"]
 
 
+def test_star_agent_is_shared_state(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    before = client.get("/v1/agents").json()[0]
+    starred = client.post("/v1/agents/agent-1/star")
+    after_star = client.get("/v1/agents").json()[0]
+    unstarred = client.delete("/v1/agents/agent-1/star")
+    after_unstar = client.get("/v1/agents").json()[0]
+    events = client.get("/v1/events").json()
+
+    assert before["starred"] is False
+    assert before["starred_at"] is None
+    assert starred.status_code == 200
+    assert starred.json()["starred"] is True
+    assert starred.json()["starred_at"] is not None
+    assert after_star["starred"] is True
+    assert after_star["starred_at"] == starred.json()["starred_at"]
+    assert unstarred.status_code == 200
+    assert unstarred.json()["starred"] is False
+    assert unstarred.json()["starred_at"] is None
+    assert after_unstar["starred"] is False
+    assert after_unstar["starred_at"] is None
+    assert [event["type"] for event in events[-2:]] == [
+        "agent_starred_changed",
+        "agent_starred_changed",
+    ]
+    assert events[-2]["payload"]["starred"] is True
+    assert events[-1]["payload"]["starred"] is False
+
+
 def test_events_tail_returns_latest_events(tmp_path: Path) -> None:
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
 

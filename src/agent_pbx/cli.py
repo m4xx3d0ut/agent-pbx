@@ -52,9 +52,24 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_int_value(name: str) -> int | None:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 def env_text(name: str, default: str) -> str:
     value = os.getenv(name, "").strip()
     return value or default
+
+
+def env_text_value(name: str) -> str | None:
+    value = os.getenv(name, "").strip()
+    return value or None
 
 
 def default_host() -> str:
@@ -79,9 +94,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
-    def add_server_flags(command: argparse.ArgumentParser) -> None:
-        command.add_argument("--host", default=default_host())
-        command.add_argument("--port", type=int, default=default_port())
+    def add_server_flags(
+        command: argparse.ArgumentParser,
+        *,
+        preserve_restart_defaults: bool = False,
+    ) -> None:
+        host_default = (
+            env_text_value("AGENT_PBX_HOST")
+            if preserve_restart_defaults
+            else default_host()
+        )
+        port_default = (
+            env_int_value("AGENT_PBX_PORT")
+            if preserve_restart_defaults
+            else default_port()
+        )
+        command.add_argument("--host", default=host_default)
+        command.add_argument("--port", type=int, default=port_default)
         command.add_argument("--state-root", type=Path, default=None)
         command.add_argument("--db", type=Path, default=None)
         command.add_argument("--token", default=None)
@@ -156,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     restart_mcp = mcp_subcommands.add_parser(
         "restart", help="Restart Agent PBX MCP in the background."
     )
-    add_server_flags(restart_mcp)
+    add_server_flags(restart_mcp, preserve_restart_defaults=True)
     restart_mcp.add_argument("--timeout", type=float, default=30.0)
     status_mcp = mcp_subcommands.add_parser(
         "status", help="Show background Agent PBX MCP status."
@@ -305,10 +334,22 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
+    host = getattr(args, "host", None)
+    port = getattr(args, "port", None)
+    if (
+        getattr(args, "command", None) == "mcp"
+        and getattr(args, "mcp_command", None) == "restart"
+        and (host is None or port is None)
+    ):
+        metadata = _daemon_metadata_defaults(args)
+        if host is None:
+            host = metadata.get("host")
+        if port is None:
+            port = metadata.get("port")
     return config_from_args(
         state_root=getattr(args, "state_root", None),
-        host=getattr(args, "host", "127.0.0.1"),
-        port=getattr(args, "port", 8765),
+        host=str(host or default_host()),
+        port=int(port or default_port()),
         db_path=getattr(args, "db", None),
         token=getattr(args, "token", None) or os.getenv("AGENT_PBX_TOKEN"),
         allow_insecure_lan=bool(getattr(args, "allow_insecure_lan", False)),
@@ -328,6 +369,30 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
             env_workerbee_cache_seconds(),
         ),
     )
+
+
+def _daemon_metadata_defaults(args: argparse.Namespace) -> dict[str, object]:
+    base = config_from_args(
+        state_root=getattr(args, "state_root", None),
+        db_path=getattr(args, "db", None),
+    )
+    try:
+        data = json.loads(base.metadata_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    defaults: dict[str, object] = {}
+    host = data.get("host")
+    if isinstance(host, str) and host.strip():
+        defaults["host"] = host.strip()
+    try:
+        port = int(data.get("port"))
+    except (TypeError, ValueError):
+        port = 0
+    if port > 0:
+        defaults["port"] = port
+    return defaults
 
 
 def _serve_foreground(args: argparse.Namespace) -> int:

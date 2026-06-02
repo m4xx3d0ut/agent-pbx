@@ -50,6 +50,7 @@ from . import tmux as tmux_support
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
 ATTENTION_EVENT_TYPES = {"agent_registered", "report_created", "command_acked"}
+STARRED_AGENT_COLUMN = "*"
 DEFAULT_TUI_THEME = "cyberpunk"
 MINIMAL_TUI_THEME = "minimal"
 DEFAULT_CUSTOM_THEME_NAME = "1337"
@@ -814,6 +815,13 @@ def bool_map_setting(settings: dict[str, Any], key: str) -> dict[str, bool]:
             if parsed is not None:
                 result[item_key] = parsed
     return result
+
+
+def str_set_setting(settings: dict[str, Any], key: str) -> set[str]:
+    value = settings.get(key)
+    if not isinstance(value, list):
+        return set()
+    return {item for item in value if isinstance(item, str) and item.strip()}
 
 
 def list_value(value: object) -> list[Any]:
@@ -1850,6 +1858,7 @@ class AgentPBXTUI(App[None]):
         ("ctrl+t", "toggle_tmux_direct", "Tmux"),
         Binding("f8", "toggle_tmux_direct", "Tmux", key_display="F8"),
         Binding("alt+t", "toggle_tmux_direct", "Tmux", key_display="Alt+T", show=False),
+        Binding("p", "toggle_star_agent", "Star Agent", priority=True),
         Binding("d", "hide_agent", "Hide Agent", priority=True),
         Binding(
             "shift+d",
@@ -2019,6 +2028,12 @@ class AgentPBXTUI(App[None]):
         self.marked_thread_item_ids: set[str] = set()
         self.active_agent_tab = "latest-tab"
         self.unseen_latest_agent_ids: set[str] = set()
+        self.local_starred_agent_ids = str_set_setting(
+            self.settings,
+            "starred_agent_ids",
+        )
+        self.starred_agent_ids = set(self.local_starred_agent_ids)
+        self.remote_star_state_seen = False
         self.agent_last_seen_at: dict[str, float] = {}
         self.latest_viewed_at_by_agent = float_map_setting(
             self.settings,
@@ -2050,6 +2065,8 @@ class AgentPBXTUI(App[None]):
         self.slash_completion_state: dict[str, SlashCompletionState] = {}
         self.file_completion_state: dict[str, FileCompletionState] = {}
         self.event_stream_disconnected = False
+        self.event_stream_error_count = 0
+        self.event_stream_last_error = ""
         self.last_seen_event_id = int_setting(self.settings, "last_seen_event_id", 0)
         self.flash_generation = 0
         self.agent_jump_prefix_pending = False
@@ -2111,6 +2128,7 @@ class AgentPBXTUI(App[None]):
                     show_row_labels=False,
                 )
                 with Horizontal(id="agent-actions"):
+                    yield Button("Star/Unstar (p)", id="star-agent")
                     yield Button("Hide Agent (d)", id="hide-agent")
                     yield Button("Purge Agent (D)", id="purge-agent")
                 yield Static("Events", id="events-title")
@@ -2840,6 +2858,11 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def action_toggle_star_agent(self) -> None:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        self.toggle_selected_agent_star()
+
     async def action_toggle_tmux_direct(self) -> None:
         if self.active_agent_tab != "latest-tab":
             return
@@ -2957,10 +2980,28 @@ class AgentPBXTUI(App[None]):
     def desired_agent_columns(self) -> tuple[str, ...]:
         live = ("Live",) if self.tmux_features_available else ()
         if self.effective_layout_mode == TINY_TUI_LAYOUT:
-            return ("New", "Agent", "Status", "Project", "Queue", *live)
+            return (
+                STARRED_AGENT_COLUMN,
+                "New",
+                "Agent",
+                "Status",
+                "Project",
+                "Queue",
+                *live,
+            )
         if self.effective_layout_mode == COMPACT_TUI_LAYOUT:
-            return ("New", "Agent", "Plan", "Status", "Queue", *live, "Poll")
+            return (
+                STARRED_AGENT_COLUMN,
+                "New",
+                "Agent",
+                "Plan",
+                "Status",
+                "Queue",
+                *live,
+                "Poll",
+            )
         return (
+            STARRED_AGENT_COLUMN,
             "New",
             "Agent",
             "PBX",
@@ -2988,6 +3029,7 @@ class AgentPBXTUI(App[None]):
     def agent_row_values(self, agent: dict[str, Any]) -> list[str]:
         agent_id = str(agent["agent_id"])
         values = {
+            STARRED_AGENT_COLUMN: "*" if agent_id in self.starred_agent_ids else "",
             "New": "NEW" if agent_id in self.unseen_latest_agent_ids else "",
             "Agent": agent_id,
             "PBX": self.format_pbx_active(agent),
@@ -3050,8 +3092,13 @@ class AgentPBXTUI(App[None]):
         previous_last_seen = self.agent_last_seen_at.copy()
         self.agents = {str(agent["agent_id"]): agent for agent in agents}
         unseen_state_changed = self.update_unseen_from_agent_refresh(previous_last_seen)
+        star_state_changed = self.sync_starred_from_agent_refresh()
         signature = self.agents_render_signature()
-        if unseen_state_changed or signature != self.rendered_agents_signature:
+        if (
+            unseen_state_changed
+            or star_state_changed
+            or signature != self.rendered_agents_signature
+        ):
             self.render_agents(signature=signature)
         self.render_unseen_attention()
 
@@ -3137,20 +3184,62 @@ class AgentPBXTUI(App[None]):
         except (TypeError, ValueError):
             return None
 
+    def sync_starred_from_agent_refresh(self) -> bool:
+        if not self.agents:
+            return False
+        if not all(
+            "starred" in agent or "starred_at" in agent
+            for agent in self.agents.values()
+        ):
+            return False
+        previous = set(self.starred_agent_ids)
+        remote_starred = {
+            str(agent_id)
+            for agent_id, agent in self.agents.items()
+            if bool(agent.get("starred")) or float_value(agent.get("starred_at")) is not None
+        }
+        seed_starred: set[str] = set()
+        if not self.remote_star_state_seen:
+            self.remote_star_state_seen = True
+            if not remote_starred:
+                seed_starred = {
+                    agent_id
+                    for agent_id in self.local_starred_agent_ids
+                    if agent_id in self.agents
+                }
+                for agent_id in sorted(seed_starred):
+                    self.queue_agent_star_sync(agent_id, True)
+        self.starred_agent_ids = remote_starred | seed_starred
+        if self.starred_agent_ids != previous:
+            self.save_settings()
+            return True
+        return False
+
     def is_latest_engaged(self, agent_id: str) -> bool:
         if self.is_compact_layout() and self.compact_view != "agent":
             return False
         return agent_id == self.selected_agent_id and self.active_agent_tab == "latest-tab"
 
+    def ordered_agents(self) -> list[dict[str, Any]]:
+        return sorted(
+            self.agents.values(),
+            key=lambda agent: (
+                str(agent.get("agent_id") or "") not in self.starred_agent_ids,
+                -(float_value(agent.get("last_seen_at")) or 0.0),
+                str(agent.get("agent_id") or ""),
+            ),
+        )
+
     def agents_render_signature(self) -> tuple[Any, ...]:
         return (
             self.desired_agent_columns(),
+            tuple(sorted(self.starred_agent_ids)),
             tuple(
                 (
                     str(agent["agent_id"]),
                     tuple(str(value) for value in self.agent_row_values(agent)),
                 )
-                for agent in self.agents.values()
+                for agent in self.ordered_agents()
             ),
         )
 
@@ -3165,7 +3254,7 @@ class AgentPBXTUI(App[None]):
         cursor_agent_id = self.agent_id_at_cursor()
         self.render_agent_columns(table)
         table.clear()
-        for agent in self.agents.values():
+        for agent in self.ordered_agents():
             agent_id = str(agent["agent_id"])
             row = self.agent_row_values(agent)
             cells = self.style_agent_row(
@@ -4693,6 +4782,9 @@ class AgentPBXTUI(App[None]):
             if self.selected_agent_id:
                 await self.load_workerbee_status(self.selected_agent_id)
             return
+        if event.button.id == "star-agent":
+            self.toggle_selected_agent_star()
+            return
         if event.button.id == "hide-agent":
             await self.dismiss_selected_agent(delete_thread=False)
             return
@@ -5350,6 +5442,67 @@ class AgentPBXTUI(App[None]):
             if value:
                 return value
         return None
+
+    def toggle_selected_agent_star(self) -> None:
+        agent_id = self.selected_or_cursor_agent_id()
+        if not agent_id:
+            self.notify("Select an agent before starring it.", severity="warning")
+            return
+        starred = agent_id not in self.starred_agent_ids
+        self.update_agent_star_state(agent_id, starred=starred, focus=True)
+        self.queue_agent_star_sync(agent_id, starred)
+        self.notify(f"{'Starred' if starred else 'Unstarred'} {agent_id}.")
+
+    def update_agent_star_state(
+        self,
+        agent_id: str,
+        *,
+        starred: bool,
+        starred_at: float | None = None,
+        focus: bool = False,
+    ) -> None:
+        if starred:
+            self.starred_agent_ids.add(agent_id)
+        else:
+            self.starred_agent_ids.discard(agent_id)
+        agent = self.agents.get(agent_id)
+        if agent is not None:
+            agent["starred"] = starred
+            agent["starred_at"] = starred_at if starred else None
+        self.save_settings()
+        self.render_agents()
+        if focus:
+            self.focus_agent_row(agent_id)
+
+    def queue_agent_star_sync(self, agent_id: str, starred: bool) -> None:
+        if not self.is_running:
+            return
+        self.run_worker(
+            self.set_agent_starred_remote(agent_id, starred=starred),
+            name=f"agent-star-{agent_id}",
+            group=f"agent-star-{agent_id}",
+            exclusive=True,
+        )
+
+    async def set_agent_starred_remote(self, agent_id: str, *, starred: bool) -> None:
+        try:
+            method = self.api_client().post if starred else self.api_client().delete
+            response = await method(
+                f"/v1/agents/{agent_id}/star",
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            agent = response.json()
+        except Exception:
+            return
+        if isinstance(agent, dict):
+            if agent_id not in self.agents:
+                self.agents[agent_id] = agent
+            self.update_agent_star_state(
+                agent_id,
+                starred=bool(agent.get("starred")),
+                starred_at=float_value(agent.get("starred_at")),
+            )
 
     async def dismiss_selected_agent(self, *, delete_thread: bool) -> None:
         agent_id = self.selected_or_cursor_agent_id()
@@ -6105,6 +6258,7 @@ class AgentPBXTUI(App[None]):
             "tmux_direct_agent_modes": self.tmux_direct_agent_modes,
             "tmux_capture_lines": self.tmux_capture_lines,
             "tmux_agent_targets": self.tmux_agent_targets,
+            "starred_agent_ids": sorted(self.starred_agent_ids),
             "latest_viewed_at_by_agent": self.latest_viewed_at_by_agent,
             "last_seen_event_id": self.last_seen_event_id,
         }
@@ -6132,28 +6286,61 @@ class AgentPBXTUI(App[None]):
                         response.raise_for_status()
                         if self.event_stream_disconnected:
                             self.event_stream_disconnected = False
-                            self.call_later(self.notify_stream_reconnected)
+                            if not self.low_power_enabled:
+                                self.call_later(self.notify_stream_reconnected)
+                        self.event_stream_error_count = 0
+                        self.event_stream_last_error = ""
                         async for line in response.aiter_lines():
-                            if line.startswith("data: "):
-                                event = json.loads(line[6:])
-                                event_id = int(event["event_id"])
-                                if event_id <= self.last_seen_event_id:
-                                    continue
-                                self.last_seen_event_id = event_id
-                                self.save_settings()
-                                self.events.append(event)
-                                self.events = self.events[-50:]
-                                self.call_later(self.handle_event, event)
+                            event = self.event_from_sse_line(line)
+                            if event is None:
+                                continue
+                            event_id = int(event["event_id"])
+                            if event_id <= self.last_seen_event_id:
+                                continue
+                            self.last_seen_event_id = event_id
+                            self.save_settings()
+                            self.events.append(event)
+                            self.events = self.events[-50:]
+                            self.call_later(self.handle_event, event)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                self.event_stream_error_count += 1
+                self.event_stream_last_error = f"{type(exc).__name__}: {exc}"
                 if not self.event_stream_disconnected:
                     self.event_stream_disconnected = True
-                    self.call_later(self.notify_stream_disconnected)
+                    if not self.low_power_enabled:
+                        self.call_later(self.notify_stream_disconnected)
                 await asyncio.sleep(2)
 
+    def event_from_sse_line(self, line: str) -> dict[str, Any] | None:
+        if not line.startswith("data:"):
+            return None
+        raw_event = line.partition(":")[2].strip()
+        if not raw_event:
+            return None
+        try:
+            event = json.loads(raw_event)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(event, dict):
+            return None
+        try:
+            event["event_id"] = int(event["event_id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return event
+
     def notify_stream_disconnected(self) -> None:
-        self.notify("Event stream disconnected; retrying.", severity="warning")
+        detail = (
+            f" ({self.event_stream_last_error})"
+            if self.event_stream_last_error
+            else ""
+        )
+        self.notify(
+            f"Event stream disconnected; polling fallback active{detail}.",
+            severity="warning",
+        )
 
     def notify_stream_reconnected(self) -> None:
         self.notify("Event stream reconnected.")
@@ -6170,6 +6357,8 @@ class AgentPBXTUI(App[None]):
             self.activate_latest_tab()
         if event_type == "report_created" and agent_id:
             self.apply_report_created_event(agent_id, event)
+        if event_type == "agent_starred_changed" and agent_id:
+            self.apply_agent_starred_event(agent_id, event)
         if event_type in {
             "agent_registered",
             "report_created",
@@ -6180,6 +6369,7 @@ class AgentPBXTUI(App[None]):
             "agent_pbx_active_changed",
             "agent_dismissed",
             "latest_seen",
+            "agent_starred_changed",
         }:
             self.run_worker(
                 self.refresh_agents,
@@ -6213,6 +6403,17 @@ class AgentPBXTUI(App[None]):
                 )
         if self.should_alert(event):
             self.alert_for_event(event)
+
+    def apply_agent_starred_event(self, agent_id: str, event: dict[str, Any]) -> None:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return
+        starred = bool(payload.get("starred"))
+        self.update_agent_star_state(
+            agent_id,
+            starred=starred,
+            starred_at=float_value(payload.get("starred_at")),
+        )
 
     def mark_latest_unseen(self, agent_id: str) -> None:
         current_report_at = self.latest_report_timestamp(agent_id)

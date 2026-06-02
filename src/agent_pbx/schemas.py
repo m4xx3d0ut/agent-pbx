@@ -37,6 +37,8 @@ class AgentResponse(BaseModel):
     created_at: float
     last_seen_at: float
     last_poll_at: float | None = None
+    starred: bool = False
+    starred_at: float | None = None
     queued_command_count: int = 0
     oldest_queued_command_age_seconds: float | None = None
     polls_per_hour: int = 0
