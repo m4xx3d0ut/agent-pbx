@@ -2103,6 +2103,7 @@ class AgentPBXTUI(App[None]):
         self.tmux_liveness_by_agent: dict[str, TmuxLiveness] = {}
         self.tmux_panes: list[tmux_support.TmuxPane] = []
         self.tmux_refreshing = False
+        self.tmux_plan_selector_pane_by_agent: dict[str, str] = {}
         self.mouse_debug_enabled = env_flag("AGENT_PBX_TUI_MOUSE_DEBUG")
         self.attention_blink_phase = False
         self.attention_agent_id: str | None = None
@@ -4548,6 +4549,11 @@ class AgentPBXTUI(App[None]):
             return
         self.tmux_panes = panes
         pane, mode = self.resolve_tmux_pane(agent_id, panes)
+        if pane is None and mode == "auto":
+            selector_pane = await self.resolve_tmux_plan_selector_pane(agent_id, panes)
+            if selector_pane is not None:
+                pane = selector_pane
+                mode = "selector"
         if pane is None:
             self.tmux_visible_capture_key = None
             self.update_tmux_plan_selector_state(agent_id, "")
@@ -4597,7 +4603,11 @@ class AgentPBXTUI(App[None]):
             self.render_agents()
             return
         displayed = self.crop_tmux_capture_for_display(captured or "(empty tmux pane)")
-        self.update_tmux_plan_selector_state(agent_id, displayed)
+        self.update_tmux_plan_selector_state(
+            agent_id,
+            displayed,
+            pane_id=pane.pane_id,
+        )
         self.record_tmux_capture_liveness(agent_id, pane.pane_id, displayed)
         self.update_tmux_stream(
             stream,
@@ -4623,13 +4633,59 @@ class AgentPBXTUI(App[None]):
         )
         self.render_agents()
 
-    def update_tmux_plan_selector_state(self, agent_id: str, captured: str) -> bool:
+    async def resolve_tmux_plan_selector_pane(
+        self,
+        agent_id: str,
+        panes: list[tmux_support.TmuxPane],
+    ) -> tmux_support.TmuxPane | None:
+        if agent_id in self.tmux_detached_agent_ids:
+            return None
+        agent = self.agents.get(agent_id, {"agent_id": agent_id})
+        candidates = [
+            pane
+            for pane in tmux_support.ranked_panes_for_agent(panes, agent)
+            if tmux_support.pane_matches_agent(pane, agent)
+        ]
+        selector_matches: list[tuple[tmux_support.TmuxPane, str]] = []
+        for pane in candidates:
+            try:
+                captured = await asyncio.to_thread(
+                    tmux_support.capture_pane,
+                    pane.pane_id,
+                    lines=self.tmux_capture_lines,
+                )
+            except Exception:
+                continue
+            displayed = self.crop_tmux_capture_for_display(captured or "")
+            if contains_codex_native_plan_selector(displayed):
+                selector_matches.append((pane, displayed))
+        if len(selector_matches) != 1:
+            self.update_tmux_plan_selector_state(agent_id, "")
+            return None
+        pane, displayed = selector_matches[0]
+        self.update_tmux_plan_selector_state(
+            agent_id,
+            displayed,
+            pane_id=pane.pane_id,
+        )
+        return pane
+
+    def update_tmux_plan_selector_state(
+        self,
+        agent_id: str,
+        captured: str,
+        *,
+        pane_id: str | None = None,
+    ) -> bool:
         was_pending = agent_id in self.tmux_plan_selector_agent_ids
         is_pending = contains_codex_native_plan_selector(captured)
         if is_pending:
             self.tmux_plan_selector_agent_ids.add(agent_id)
+            if pane_id:
+                self.tmux_plan_selector_pane_by_agent[agent_id] = pane_id
         else:
             self.tmux_plan_selector_agent_ids.discard(agent_id)
+            self.tmux_plan_selector_pane_by_agent.pop(agent_id, None)
         if was_pending == is_pending:
             return False
         self.update_agent_title()
@@ -4655,9 +4711,20 @@ class AgentPBXTUI(App[None]):
         if stream is None or not contains_codex_native_plan_selector(stream.text):
             return False
         self.tmux_plan_selector_agent_ids.add(agent_id)
+        pane_id = self.tmux_visible_pane_id_for_agent(agent_id)
+        if pane_id:
+            self.tmux_plan_selector_pane_by_agent[agent_id] = pane_id
         self.update_agent_title()
         self.render_unseen_attention()
         return True
+
+    def tmux_visible_pane_id_for_agent(self, agent_id: str) -> str | None:
+        prefix = f"{agent_id}:"
+        cache_key = str(self.tmux_visible_capture_key or "")
+        if not cache_key.startswith(prefix):
+            return None
+        pane_id = cache_key[len(prefix) :]
+        return pane_id or None
 
     def prepare_tmux_stream_for_capture(
         self,
@@ -5239,8 +5306,17 @@ class AgentPBXTUI(App[None]):
         pane = await self.resolve_tmux_send_pane(agent_id, status=status)
         if pane is None:
             return False
+        return await self.send_key_to_tmux_pane(pane.pane_id, key, status=status)
+
+    async def send_key_to_tmux_pane(
+        self,
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
         try:
-            await asyncio.to_thread(tmux_support.send_key, pane.pane_id, key)
+            await asyncio.to_thread(tmux_support.send_key, pane_id, key)
         except Exception as exc:
             if status is not None:
                 status.update(f"Tmux: send failed ({exc})")
@@ -5363,10 +5439,35 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return False
-        sent = await self.send_key_to_tmux(agent_id, str(selection.index))
+        status = self.query_one_or_none("#tmux-status", Static)
+        pane_id = self.tmux_plan_selector_pane_by_agent.get(agent_id)
+        sent = False
+        if pane_id:
+            sent = await self.send_key_to_tmux_pane(
+                pane_id,
+                str(selection.index),
+                status=status,
+            )
+        if not sent:
+            try:
+                panes = await asyncio.to_thread(tmux_support.list_panes)
+            except Exception:
+                panes = []
+            if panes:
+                self.tmux_panes = panes
+                pane = await self.resolve_tmux_plan_selector_pane(agent_id, panes)
+                if pane is not None:
+                    sent = await self.send_key_to_tmux_pane(
+                        pane.pane_id,
+                        str(selection.index),
+                        status=status,
+                    )
+        if not sent:
+            sent = await self.send_key_to_tmux(agent_id, str(selection.index))
         if not sent:
             return False
         self.tmux_plan_selector_agent_ids.discard(agent_id)
+        self.tmux_plan_selector_pane_by_agent.pop(agent_id, None)
         self.update_agent_title()
         self.render_agents()
         self.render_unseen_attention()
