@@ -2635,7 +2635,10 @@ class AgentPBXTUI(App[None]):
         if (
             agent_id is None
             or not self.is_tmux_direct_enabled(agent_id)
-            or not self.tmux_native_plan_selector_pending(agent_id)
+            or not (
+                self.tmux_native_plan_selector_pending(agent_id)
+                or self.tmux_visible_native_plan_selector_pending()
+            )
         ):
             return
         for index, label in CODEX_NATIVE_PLAN_SELECTOR_CHOICES.items():
@@ -4646,19 +4649,7 @@ class AgentPBXTUI(App[None]):
             for pane in tmux_support.ranked_panes_for_agent(panes, agent)
             if tmux_support.pane_matches_agent(pane, agent)
         ]
-        selector_matches: list[tuple[tmux_support.TmuxPane, str]] = []
-        for pane in candidates:
-            try:
-                captured = await asyncio.to_thread(
-                    tmux_support.capture_pane,
-                    pane.pane_id,
-                    lines=self.tmux_capture_lines,
-                )
-            except Exception:
-                continue
-            displayed = self.crop_tmux_capture_for_display(captured or "")
-            if contains_codex_native_plan_selector(displayed):
-                selector_matches.append((pane, displayed))
+        selector_matches = await self.tmux_plan_selector_matches(candidates)
         if len(selector_matches) != 1:
             self.update_tmux_plan_selector_state(agent_id, "")
             return None
@@ -4669,6 +4660,29 @@ class AgentPBXTUI(App[None]):
             pane_id=pane.pane_id,
         )
         return pane
+
+    async def tmux_plan_selector_matches(
+        self,
+        panes: Iterable[tmux_support.TmuxPane],
+    ) -> list[tuple[tmux_support.TmuxPane, str]]:
+        matches: list[tuple[tmux_support.TmuxPane, str]] = []
+        seen_pane_ids: set[str] = set()
+        for pane in panes:
+            if pane.pane_id in seen_pane_ids:
+                continue
+            seen_pane_ids.add(pane.pane_id)
+            try:
+                captured = await asyncio.to_thread(
+                    tmux_support.capture_pane,
+                    pane.pane_id,
+                    lines=self.tmux_capture_lines,
+                )
+            except Exception:
+                continue
+            displayed = self.crop_tmux_capture_for_display(captured or "")
+            if contains_codex_native_plan_selector(displayed):
+                matches.append((pane, displayed))
+        return matches
 
     def update_tmux_plan_selector_state(
         self,
@@ -4691,6 +4705,9 @@ class AgentPBXTUI(App[None]):
         self.update_agent_title()
         self.render_unseen_attention()
         return True
+
+    def tmux_visible_native_plan_selector_pending(self) -> bool:
+        return self.tmux_visible_plan_selector_pane_id() is not None
 
     def tmux_native_plan_selector_pending(self, agent_id: str) -> bool:
         if agent_id in self.tmux_plan_selector_agent_ids:
@@ -4718,13 +4735,34 @@ class AgentPBXTUI(App[None]):
         self.render_unseen_attention()
         return True
 
+    def tmux_agent_id_from_capture_key(self, cache_key: str | None) -> str | None:
+        value = str(cache_key or "")
+        if ":" not in value:
+            return None
+        agent_id, pane_id = value.rsplit(":", 1)
+        if not agent_id or not pane_id:
+            return None
+        return agent_id
+
+    def tmux_pane_id_from_capture_key(self, cache_key: str | None) -> str | None:
+        value = str(cache_key or "")
+        if ":" not in value:
+            return None
+        _, pane_id = value.rsplit(":", 1)
+        return pane_id or None
+
+    def tmux_visible_plan_selector_pane_id(self) -> str | None:
+        stream = self.query_one_or_none("#tmux-stream", TextArea)
+        if stream is None or not contains_codex_native_plan_selector(stream.text):
+            return None
+        return self.tmux_pane_id_from_capture_key(self.tmux_visible_capture_key)
+
     def tmux_visible_pane_id_for_agent(self, agent_id: str) -> str | None:
         prefix = f"{agent_id}:"
         cache_key = str(self.tmux_visible_capture_key or "")
         if not cache_key.startswith(prefix):
             return None
-        pane_id = cache_key[len(prefix) :]
-        return pane_id or None
+        return self.tmux_pane_id_from_capture_key(cache_key)
 
     def prepare_tmux_stream_for_capture(
         self,
@@ -5431,6 +5469,8 @@ class AgentPBXTUI(App[None]):
         self,
         agent_id: str,
         selection: PlanSelection,
+        *,
+        notify_missing: bool = True,
     ) -> bool:
         label = CODEX_NATIVE_PLAN_SELECTOR_CHOICES.get(selection.index)
         if label is None:
@@ -5440,34 +5480,26 @@ class AgentPBXTUI(App[None]):
             )
             return False
         status = self.query_one_or_none("#tmux-status", Static)
-        pane_id = self.tmux_plan_selector_pane_by_agent.get(agent_id)
-        sent = False
-        if pane_id:
-            sent = await self.send_key_to_tmux_pane(
-                pane_id,
-                str(selection.index),
-                status=status,
-            )
-        if not sent:
-            try:
-                panes = await asyncio.to_thread(tmux_support.list_panes)
-            except Exception:
-                panes = []
-            if panes:
-                self.tmux_panes = panes
-                pane = await self.resolve_tmux_plan_selector_pane(agent_id, panes)
-                if pane is not None:
-                    sent = await self.send_key_to_tmux_pane(
-                        pane.pane_id,
-                        str(selection.index),
-                        status=status,
-                    )
-        if not sent:
-            sent = await self.send_key_to_tmux(agent_id, str(selection.index))
+        pane_id = await self.resolve_native_plan_selection_pane_id(
+            agent_id,
+            status=status,
+            notify_missing=notify_missing,
+        )
+        if pane_id is None:
+            return False
+        sent = await self.send_key_to_tmux_pane(
+            pane_id,
+            str(selection.index),
+            status=status,
+        )
         if not sent:
             return False
         self.tmux_plan_selector_agent_ids.discard(agent_id)
         self.tmux_plan_selector_pane_by_agent.pop(agent_id, None)
+        visible_agent_id = self.tmux_agent_id_from_capture_key(self.tmux_visible_capture_key)
+        if visible_agent_id and visible_agent_id != agent_id:
+            self.tmux_plan_selector_agent_ids.discard(visible_agent_id)
+            self.tmux_plan_selector_pane_by_agent.pop(visible_agent_id, None)
         self.update_agent_title()
         self.render_agents()
         self.render_unseen_attention()
@@ -5481,6 +5513,68 @@ class AgentPBXTUI(App[None]):
         await self.load_tmux_capture(agent_id)
         return True
 
+    async def resolve_native_plan_selection_pane_id(
+        self,
+        agent_id: str,
+        *,
+        status: Static | None = None,
+        notify_missing: bool = True,
+    ) -> str | None:
+        visible_pane_id = self.tmux_visible_plan_selector_pane_id()
+        if visible_pane_id:
+            return visible_pane_id
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes)
+        except Exception as exc:
+            if status is not None:
+                status.update(f"Tmux: unavailable ({exc})")
+            return None
+        self.tmux_panes = panes
+        stored_pane_id = self.tmux_plan_selector_pane_by_agent.get(agent_id)
+        if stored_pane_id:
+            stored_panes = [pane for pane in panes if pane.pane_id == stored_pane_id]
+            stored_matches = await self.tmux_plan_selector_matches(stored_panes)
+            if stored_matches:
+                pane, displayed = stored_matches[0]
+                self.update_tmux_plan_selector_state(
+                    agent_id,
+                    displayed,
+                    pane_id=pane.pane_id,
+                )
+                return pane.pane_id
+            self.update_tmux_plan_selector_state(agent_id, "")
+        pane = await self.resolve_tmux_plan_selector_pane(agent_id, panes)
+        if pane is not None:
+            return pane.pane_id
+        selector_matches = await self.tmux_plan_selector_matches(panes)
+        if len(selector_matches) == 1:
+            pane, displayed = selector_matches[0]
+            self.update_tmux_plan_selector_state(
+                agent_id,
+                displayed,
+                pane_id=pane.pane_id,
+            )
+            return pane.pane_id
+        if len(selector_matches) > 1:
+            labels = ", ".join(
+                f"{pane.pane_id} {pane.target_label}" for pane, _ in selector_matches[:4]
+            )
+            extra = len(selector_matches) - 4
+            if extra > 0:
+                labels = f"{labels}, +{extra}"
+            self.notify(
+                f"Multiple Codex plan selectors are visible in tmux: {labels}. "
+                "Select the target pane first.",
+                severity="warning",
+            )
+            return None
+        if notify_missing:
+            self.notify(
+                "No Codex native plan selector is visible in tmux for /plan selection.",
+                severity="warning",
+            )
+        return None
+
     async def send_plan_selection(
         self,
         agent_id: str,
@@ -5489,8 +5583,16 @@ class AgentPBXTUI(App[None]):
         via_tmux: bool,
     ) -> bool:
         options = self.current_plan_options_for_agent(agent_id)
-        if via_tmux and not options and self.tmux_native_plan_selector_pending(agent_id):
-            return await self.send_native_plan_selection(agent_id, selection)
+        if via_tmux and selection.index in CODEX_NATIVE_PLAN_SELECTOR_CHOICES:
+            sent_native = await self.send_native_plan_selection(
+                agent_id,
+                selection,
+                notify_missing=not options,
+            )
+            if sent_native:
+                return True
+            if not options:
+                return False
         option = self.plan_option_for_selection(agent_id, selection)
         if option is None:
             self.notify(

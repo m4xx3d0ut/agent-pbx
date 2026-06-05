@@ -5218,15 +5218,20 @@ async def test_tui_plan_selection_to_tmux_presses_native_selector_key() -> None:
         sent_text.append((agent_id, message))
         return True
 
-    async def fake_send_key_to_tmux(agent_id: str, key: str) -> bool:
-        sent_keys.append((agent_id, key))
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_keys.append((pane_id, key))
         return True
 
     async def fake_load_tmux_capture(agent_id: str) -> None:
         captures.append(agent_id)
 
     app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
-    app.send_key_to_tmux = fake_send_key_to_tmux  # type: ignore[method-assign]
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
 
     async with app.run_test():
@@ -5240,10 +5245,15 @@ async def test_tui_plan_selection_to_tmux_presses_native_selector_key() -> None:
         }
         app.selected_agent_id = "agent-1"
         app.tmux_plan_selector_agent_ids.add("agent-1")
+        app.tmux_plan_selector_pane_by_agent["agent-1"] = "%9"
+        app.tmux_visible_capture_key = "agent-1:%9"
+        app.query_one("#tmux-stream", TextArea).text = (
+            "1 Start coding\n2 Clear context & start\n3 Stay in plan mode"
+        )
         app.query_one("#tmux-message", TextArea).text = "/plan:2"
         await app.send_tmux_input()
 
-    assert sent_keys == [("agent-1", "2")]
+    assert sent_keys == [("%9", "2")]
     assert sent_text == []
     assert captures == ["agent-1"]
     assert "agent-1" not in app.tmux_plan_selector_agent_ids
@@ -5253,6 +5263,80 @@ async def test_tui_plan_selection_uses_recorded_native_selector_pane() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     sent_keys: list[tuple[str, str]] = []
     captures: list[str] = []
+    pane = tmux_support.TmuxPane(
+        "s",
+        "0",
+        "1",
+        "%9",
+        True,
+        "node",
+        "agent-pbx",
+        "/home/me/agent-pbx",
+        80,
+        24,
+        100,
+    )
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return [pane]
+
+    def fake_capture_pane(target: str, **_: object) -> str:
+        return "1 Start coding\n2 Clear context & start\n3 Stay in plan mode"
+
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_keys.append((pane_id, key))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(tmux_support, "capture_pane", fake_capture_pane)
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    try:
+        async with app.run_test():
+            app.agents = {
+                "agent-1": {
+                    "agent_id": "agent-1",
+                    "status": "plan",
+                    "project": "agent-pbx",
+                    "last_seen_at": 123.0,
+                }
+            }
+            app.selected_agent_id = "agent-1"
+            app.tmux_plan_selector_agent_ids.add("agent-1")
+            app.tmux_plan_selector_pane_by_agent["agent-1"] = "%9"
+            sent = await app.send_native_plan_selection(
+                "agent-1",
+                PlanSelection(index=3),
+            )
+    finally:
+        monkeypatch.undo()
+
+    assert sent is True
+    assert sent_keys == [("%9", "3")]
+    assert captures == ["agent-1"]
+    assert "agent-1" not in app.tmux_plan_selector_agent_ids
+    assert "agent-1" not in app.tmux_plan_selector_pane_by_agent
+
+
+async def test_tui_plan_selection_uses_visible_native_selector_pane() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent_keys: list[tuple[str, str]] = []
+    captures: list[str] = []
+    selector_text = (
+        "› 1. Yes, implement this plan          Switch to Default and start coding.\n"
+        "  2. Yes, clear context and implement  Fresh thread. Context: 26% used.\n"
+        "  3. No, stay in Plan mode             Continue planning with the model."
+    )
 
     async def fake_send_key_to_tmux_pane(
         pane_id: str,
@@ -5274,23 +5358,178 @@ async def test_tui_plan_selection_uses_recorded_native_selector_pane() -> None:
             "agent-1": {
                 "agent_id": "agent-1",
                 "status": "plan",
+                "project": "one",
+                "last_seen_at": 123.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "status": "plan",
+                "project": "two",
+                "last_seen_at": 124.0,
+            },
+        }
+        app.selected_agent_id = "agent-2"
+        app.latest_report_by_agent["agent-2"] = {"plan_options": ["Structured option"]}
+        app.tmux_visible_capture_key = "agent-1:%9"
+        app.query_one("#tmux-stream", TextArea).text = selector_text
+        sent = await app.send_plan_selection(
+            "agent-2",
+            PlanSelection(index=1),
+            via_tmux=True,
+        )
+
+    assert sent is True
+    assert sent_keys == [("%9", "1")]
+    assert captures == ["agent-2"]
+
+
+async def test_tui_plan_selection_uses_unique_global_native_selector_pane(
+    monkeypatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_pane = tmux_support.TmuxPane(
+        "s",
+        "0",
+        "1",
+        "%1",
+        True,
+        "node",
+        "agent-pbx",
+        "/home/me/agent-pbx",
+        80,
+        24,
+        100,
+    )
+    selector_pane = tmux_support.TmuxPane(
+        "s",
+        "0",
+        "2",
+        "%2",
+        False,
+        "node",
+        "other",
+        "/home/me/other",
+        80,
+        24,
+        100,
+    )
+    selector_text = (
+        "  1. Yes, implement this plan          Switch to Default and start coding.\n"
+        "  2. Yes, clear context and implement  Fresh thread. Context: 26% used.\n"
+        "  3. No, stay in Plan mode             Continue planning with the model."
+    )
+    sent_keys: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return [agent_pane, selector_pane]
+
+    def fake_capture_pane(target: str, **_: object) -> str:
+        return selector_text if target == "%2" else "No plan selector here."
+
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_keys.append((pane_id, key))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(tmux_support, "capture_pane", fake_capture_pane)
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
                 "project": "agent-pbx",
+                "metadata": {"cwd": "/home/me/agent-pbx"},
                 "last_seen_at": 123.0,
             }
         }
         app.selected_agent_id = "agent-1"
-        app.tmux_plan_selector_agent_ids.add("agent-1")
-        app.tmux_plan_selector_pane_by_agent["agent-1"] = "%9"
-        sent = await app.send_native_plan_selection(
+        sent = await app.send_plan_selection(
             "agent-1",
-            PlanSelection(index=3),
+            PlanSelection(index=2),
+            via_tmux=True,
         )
 
     assert sent is True
-    assert sent_keys == [("%9", "3")]
+    assert sent_keys == [("%2", "2")]
     assert captures == ["agent-1"]
-    assert "agent-1" not in app.tmux_plan_selector_agent_ids
     assert "agent-1" not in app.tmux_plan_selector_pane_by_agent
+
+
+async def test_tui_plan_selection_refuses_multiple_global_native_selectors(
+    monkeypatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    panes = [
+        tmux_support.TmuxPane(
+            "s",
+            "0",
+            str(index),
+            f"%{index}",
+            False,
+            "node",
+            f"other-{index}",
+            f"/home/me/other-{index}",
+            80,
+            24,
+            100,
+        )
+        for index in (1, 2)
+    ]
+    selector_text = (
+        "  1. Yes, implement this plan          Switch to Default and start coding.\n"
+        "  2. Yes, clear context and implement  Fresh thread. Context: 26% used.\n"
+        "  3. No, stay in Plan mode             Continue planning with the model."
+    )
+    sent_keys: list[tuple[str, str]] = []
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return panes
+
+    def fake_capture_pane(target: str, **_: object) -> str:
+        return selector_text
+
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_keys.append((pane_id, key))
+        return True
+
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(tmux_support, "capture_pane", fake_capture_pane)
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "project": "agent-pbx",
+                "metadata": {"cwd": "/home/me/agent-pbx"},
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        sent = await app.send_plan_selection(
+            "agent-1",
+            PlanSelection(index=1),
+            via_tmux=True,
+        )
+
+    assert sent is False
+    assert sent_keys == []
 
 
 async def test_tui_native_plan_selector_sets_attention_banner() -> None:
