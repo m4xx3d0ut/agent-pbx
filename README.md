@@ -87,7 +87,7 @@ work for less-trusted LAN deployments.
 ## Local Environment
 
 Use `local.env.example` as the template for machine-specific MCP and client
-defaults:
+defaults. From a source checkout, keep a repo-local config in `local.env`:
 
 ```bash
 cp local.env.example local.env
@@ -95,11 +95,26 @@ $EDITOR local.env
 source ./local.env
 ```
 
-`local.env` is gitignored because it may contain local tokens and absolute
-paths. After sourcing it, the CLI reads `AGENT_PBX_HOST`, `AGENT_PBX_PORT`,
-`AGENT_PBX_TOKEN`, `AGENT_PBX_SERVER_URL`, `AGENT_PBX_DEBUG`, and
-`AGENT_PBX_WORKERBEE_BIN` as defaults. Explicit host, port, server, and token
-flags still take precedence.
+For a user/global install, copy the same file to the XDG user config path:
+
+```bash
+mkdir -p ~/.config/agent-pbx
+cp local.env.example ~/.config/agent-pbx/local.env
+chmod 600 ~/.config/agent-pbx/local.env
+$EDITOR ~/.config/agent-pbx/local.env
+```
+
+The installed `agent-pbx` command automatically reads
+`${XDG_CONFIG_HOME:-~/.config}/agent-pbx/local.env` before parsing command
+defaults. Override the path with `AGENT_PBX_CONFIG=/path/to/local.env` or skip
+it with `AGENT_PBX_NO_CONFIG=1`. Shell environment variables and explicit CLI
+flags still take precedence over file values.
+
+Both `local.env` paths are intentionally private because they may contain local
+tokens, Joplin credentials, and absolute executable paths. Common values include
+`AGENT_PBX_HOST`, `AGENT_PBX_PORT`, `AGENT_PBX_TOKEN`,
+`AGENT_PBX_SERVER_URL`, `AGENT_PBX_DEBUG`, `AGENT_PBX_WORKERBEE_BIN`, and the
+optional Joplin settings.
 
 For the common local workflow:
 

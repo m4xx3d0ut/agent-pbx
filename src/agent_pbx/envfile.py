@@ -9,6 +9,8 @@ from typing import Mapping
 
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ENV_REF_PATTERN = re.compile(r"\$(?:{([A-Za-z_][A-Za-z0-9_]*)}|([A-Za-z_][A-Za-z0-9_]*))")
+TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
+DEFAULT_USER_ENV_FILE = Path("agent-pbx/local.env")
 
 
 def parse_env_file(
@@ -66,3 +68,27 @@ def expand_env_refs(value: str, env: Mapping[str, str]) -> str:
 def apply_env_defaults(values: Mapping[str, str]) -> None:
     for key, value in values.items():
         os.environ.setdefault(key, value)
+
+
+def default_user_env_path() -> Path:
+    value = os.getenv("AGENT_PBX_CONFIG", "").strip()
+    if value:
+        return Path(value).expanduser()
+    config_home = os.getenv("XDG_CONFIG_HOME", "").strip()
+    base = Path(config_home).expanduser() if config_home else Path.home() / ".config"
+    return base / DEFAULT_USER_ENV_FILE
+
+
+def load_user_env_defaults(path: Path | None = None) -> dict[str, str]:
+    if os.getenv("AGENT_PBX_NO_CONFIG", "").strip().lower() in TRUE_ENV_VALUES:
+        return {}
+    config_path = (path or default_user_env_path()).expanduser()
+    values = parse_env_file(config_path)
+    apply_env_defaults(
+        {
+            key: value
+            for key, value in values.items()
+            if key.startswith("AGENT_PBX_")
+        }
+    )
+    return values

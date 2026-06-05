@@ -268,6 +268,67 @@ def test_mcp_cli_parser_uses_local_env_defaults(monkeypatch) -> None:
     assert override.server == "http://localhost:9999"
 
 
+def test_cli_loads_user_env_config_defaults(monkeypatch, tmp_path: Path) -> None:
+    config = tmp_path / "config" / "agent-pbx" / "local.env"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                "AGENT_PBX_HOST=127.0.0.2",
+                "AGENT_PBX_PORT=9876",
+                "AGENT_PBX_SERVER_URL=http://${AGENT_PBX_HOST}:${AGENT_PBX_PORT}",
+                "AGENT_PBX_TOKEN=config-token",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("AGENT_PBX_CONFIG", raising=False)
+    monkeypatch.delenv("AGENT_PBX_HOST", raising=False)
+    monkeypatch.delenv("AGENT_PBX_PORT", raising=False)
+    monkeypatch.delenv("AGENT_PBX_SERVER_URL", raising=False)
+    monkeypatch.delenv("AGENT_PBX_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "agent_pbx.cli.run_tui",
+        lambda *, server, token: calls.append((server, token)),
+    )
+
+    result = main(["tui"])
+
+    assert result == 0
+    assert calls == [("http://127.0.0.2:9876", "config-token")]
+
+
+def test_cli_environment_overrides_user_env_config(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "config" / "agent-pbx" / "local.env"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "AGENT_PBX_SERVER_URL=http://config:8767\n"
+        "AGENT_PBX_TOKEN=config-token\n",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("AGENT_PBX_CONFIG", raising=False)
+    monkeypatch.setenv("AGENT_PBX_SERVER_URL", "http://env:8767")
+    monkeypatch.setenv("AGENT_PBX_TOKEN", "env-token")
+    monkeypatch.setattr(
+        "agent_pbx.cli.run_tui",
+        lambda *, server, token: calls.append((server, token)),
+    )
+
+    result = main(["tui"])
+
+    assert result == 0
+    assert calls == [("http://env:8767", "env-token")]
+
+
 def test_mcp_restart_preserves_previous_bind_without_env(
     tmp_path: Path,
     monkeypatch,
@@ -300,6 +361,7 @@ def test_foreground_mcp_serve_refuses_lan_without_token(
             "foreground server should not start for unauthenticated LAN bind"
         )
 
+    monkeypatch.setenv("AGENT_PBX_NO_CONFIG", "1")
     monkeypatch.delenv("AGENT_PBX_TOKEN", raising=False)
     monkeypatch.setattr("agent_pbx.cli.uvicorn.run", fail_run)
 

@@ -18,6 +18,7 @@ from .agent import (
 )
 from .api import create_app, create_token_helper_app
 from .config import ServerConfig
+from .envfile import load_user_env_defaults
 from .joplin import (
     env_joplin_config,
 )
@@ -235,6 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_user_env_defaults()
     args = build_parser().parse_args(argv)
     if args.command == "serve":
         return _serve_foreground(args)

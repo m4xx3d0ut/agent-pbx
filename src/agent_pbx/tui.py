@@ -2127,6 +2127,7 @@ class AgentPBXTUI(App[None]):
         )
         self.workerbee_status_by_agent: dict[str, dict[str, Any]] = {}
         self.joplin_configured = False
+        self.joplin_available = False
         self.joplin_status: dict[str, Any] = {}
         self.joplin_notes_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
         self.selected_joplin_note_id: str | None = None
@@ -6381,6 +6382,7 @@ class AgentPBXTUI(App[None]):
             }
         self.joplin_status = status
         self.joplin_configured = bool(status.get("configured"))
+        self.joplin_available = bool(status.get("available"))
         self.apply_joplin_tab_visibility()
         label = self.query_one_or_none("#joplin-status", Static)
         if label is not None:
@@ -6415,6 +6417,10 @@ class AgentPBXTUI(App[None]):
         if table is None or body is None:
             return
         if not self.joplin_configured:
+            table.clear()
+            body.text = self.format_joplin_unavailable(self.joplin_status)
+            return
+        if not self.joplin_available:
             table.clear()
             body.text = self.format_joplin_unavailable(self.joplin_status)
             return
@@ -6495,6 +6501,8 @@ class AgentPBXTUI(App[None]):
                 return
 
     async def save_joplin_note(self, agent_id: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
         note_id = self.selected_joplin_note_id
         if not note_id:
             self.notify("Select a Joplin note before saving.", severity="warning")
@@ -6515,6 +6523,8 @@ class AgentPBXTUI(App[None]):
         await self.load_joplin_notes(agent_id)
 
     async def copy_latest_to_joplin(self, agent_id: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
         try:
             response = await self.api_client().post(
                 f"/v1/agents/{agent_id}/joplin/copy",
@@ -6532,6 +6542,8 @@ class AgentPBXTUI(App[None]):
         await self.load_joplin_notes(agent_id)
 
     async def start_joplin_log(self, agent_id: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
         try:
             response = await self.api_client().post(
                 f"/v1/agents/{agent_id}/joplin/log/start",
@@ -6548,6 +6560,8 @@ class AgentPBXTUI(App[None]):
         await self.load_joplin_notes(agent_id)
 
     async def stop_joplin_log(self, agent_id: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
         try:
             response = await self.api_client().post(
                 f"/v1/agents/{agent_id}/joplin/log/stop",
@@ -6564,6 +6578,24 @@ class AgentPBXTUI(App[None]):
         else:
             self.notify("No active Joplin LOG for this agent.", severity="warning")
         await self.load_joplin_notes(agent_id)
+
+    async def ensure_joplin_available(self) -> bool:
+        await self.refresh_joplin_status()
+        if self.joplin_configured and self.joplin_available:
+            return True
+        self.notify(
+            self.format_joplin_unavailable_summary(self.joplin_status),
+            severity="warning",
+        )
+        return False
+
+    def format_joplin_unavailable_summary(self, status: dict[str, Any]) -> str:
+        error = status.get("error") if isinstance(status.get("error"), dict) else {}
+        code = str(error.get("code") or "JOPLIN_UNAVAILABLE")
+        message = str(error.get("message") or "")
+        if message:
+            return f"{code}: {message}"
+        return code
 
     def format_joplin_unavailable(self, status: dict[str, Any]) -> str:
         error = status.get("error") if isinstance(status.get("error"), dict) else {}

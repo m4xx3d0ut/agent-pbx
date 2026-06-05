@@ -2178,6 +2178,54 @@ async def test_tui_files_tab_loads_directory_and_preview() -> None:
     ]
 
 
+async def test_tui_joplin_unavailable_does_not_call_note_endpoints() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[str] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            calls.append(path)
+            if path == "/v1/joplin/status":
+                return Response(
+                    {
+                        "configured": True,
+                        "available": False,
+                        "notebook": "Agent PBX",
+                        "error": {
+                            "code": "JOPLIN_UNAVAILABLE",
+                            "message": "[Errno 111] Connection refused",
+                        },
+                    }
+                )
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.load_joplin_notes("agent-1")
+        await pilot.pause()
+
+        assert app.joplin_configured is True
+        assert app.joplin_available is False
+        assert "Connection refused" in app.query_one("#joplin-body", TextArea).text
+        assert not any("/joplin/notes" in path for path in calls)
+
+
 async def test_tui_file_completion_uses_cached_files() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
