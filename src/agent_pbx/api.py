@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import (
     BackgroundTasks,
+    Body,
     Depends,
     FastAPI,
     Header,
@@ -25,6 +26,13 @@ from .auth import get_store, require_token
 from .config import ServerConfig
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
+from .joplin import (
+    JoplinConfig,
+    JoplinService,
+    agent_session_id,
+    format_copy_body,
+    scoped_note_title,
+)
 from .mcp_tools import create_mcp_asgi_app
 from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .polling import poll_commands as poll_commands_until
@@ -37,6 +45,13 @@ from .schemas import (
     EventResponse,
     FileListResponse,
     FilePreviewResponse,
+    JoplinCopyRequest,
+    JoplinDocumentRequest,
+    JoplinLogResponse,
+    JoplinNoteResponse,
+    JoplinNoteSummary,
+    JoplinNoteUpdateRequest,
+    JoplinStatusResponse,
     ReportCreateRequest,
     ReportResponse,
     ThreadItemResponse,
@@ -54,7 +69,23 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     resolved_config = config or ServerConfig()
     store = Store(resolved_config.db_path)
     store.init()
-    mcp_asgi_app, mcp_server = create_mcp_asgi_app(store, resolved_config)
+    joplin = JoplinService(
+        JoplinConfig(
+            api_url=resolved_config.joplin_api_url,
+            token=resolved_config.joplin_token,
+            notebook=resolved_config.joplin_notebook,
+            joplin_bin=resolved_config.joplin_bin,
+            profile=resolved_config.joplin_profile,
+            timeout_seconds=resolved_config.joplin_timeout_seconds,
+            sync_on_write=resolved_config.joplin_sync_on_write,
+            webdav_url=resolved_config.joplin_webdav_url,
+            webdav_username=resolved_config.joplin_webdav_username,
+            webdav_password_configured=(
+                resolved_config.joplin_webdav_password_configured
+            ),
+        )
+    )
+    mcp_asgi_app, mcp_server = create_mcp_asgi_app(store, resolved_config, joplin)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -91,6 +122,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.config = resolved_config
     app.state.store = store
     app.state.files = AgentFileService()
+    app.state.joplin = joplin
     app.state.workerbee = WorkerBeeStatusService(
         workerbee_bin=resolved_config.workerbee_bin,
         timeout_seconds=resolved_config.workerbee_timeout_seconds,
@@ -167,6 +199,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     async def create_report(
         agent_id: str,
         request: ReportCreateRequest,
+        http_request: Request,
         store: Store = Depends(get_store),
     ) -> dict[str, object]:
         if store.get_agent(agent_id) is None:
@@ -184,6 +217,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 },
                 report["report_id"],
             )
+        await append_joplin_report_log(http_request, store, report)
         return report
 
     @app.get(
@@ -314,6 +348,167 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         return await asyncio.to_thread(workerbee.status_for_agent, agent)
 
     @app.get(
+        "/v1/joplin/status",
+        response_model=JoplinStatusResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_joplin_status(request: Request) -> dict[str, object]:
+        joplin = request.app.state.joplin
+        return await asyncio.to_thread(joplin.status)
+
+    @app.get(
+        "/v1/agents/{agent_id}/joplin/notes",
+        response_model=list[JoplinNoteSummary],
+        dependencies=[Depends(require_token)],
+    )
+    async def list_agent_joplin_notes(
+        agent_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> list[dict[str, object]]:
+        agent = require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        return await asyncio.to_thread(joplin.list_notes_for_agent, agent)
+
+    @app.get(
+        "/v1/agents/{agent_id}/joplin/notes/{note_id}",
+        response_model=JoplinNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_agent_joplin_note(
+        agent_id: str,
+        note_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        return await asyncio.to_thread(joplin.get_note_for_agent, agent, note_id)
+
+    @app.put(
+        "/v1/agents/{agent_id}/joplin/notes/{note_id}",
+        response_model=JoplinNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def update_agent_joplin_note(
+        agent_id: str,
+        note_id: str,
+        payload: JoplinNoteUpdateRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        return await asyncio.to_thread(
+            joplin.update_note_for_agent,
+            agent,
+            note_id,
+            title=payload.title,
+            body=payload.body,
+        )
+
+    @app.post(
+        "/v1/agents/{agent_id}/joplin/copy",
+        response_model=JoplinNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def copy_agent_joplin_note(
+        agent_id: str,
+        request: Request,
+        payload: JoplinCopyRequest = Body(default_factory=JoplinCopyRequest),
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        source, title, body, metadata = joplin_copy_source(store, agent, payload)
+        note_body = format_copy_body(
+            agent=agent,
+            source=source,
+            title=title,
+            body=body,
+            metadata=metadata,
+        )
+        return await asyncio.to_thread(
+            joplin.create_note_for_agent,
+            agent,
+            event_type="COPY",
+            body=note_body,
+            title=payload.title
+            or scoped_note_title(agent_session_id(agent), "COPY"),
+        )
+
+    @app.post(
+        "/v1/agents/{agent_id}/joplin/log/start",
+        response_model=JoplinLogResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def start_agent_joplin_log(
+        agent_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        log = await asyncio.to_thread(joplin.start_log, store, agent)
+        store.append_event(
+            "joplin_log_started",
+            {"agent_id": agent_id, "note_id": log["note_id"], "title": log["title"]},
+            agent_id,
+        )
+        return log
+
+    @app.post(
+        "/v1/agents/{agent_id}/joplin/log/stop",
+        response_model=JoplinLogResponse | None,
+        dependencies=[Depends(require_token)],
+    )
+    async def stop_agent_joplin_log(
+        agent_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object] | None:
+        require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        log = await asyncio.to_thread(joplin.stop_log, store, agent_id)
+        if log is not None:
+            store.append_event(
+                "joplin_log_stopped",
+                {"agent_id": agent_id, "note_id": log["note_id"]},
+                agent_id,
+            )
+        return log
+
+    @app.post(
+        "/v1/joplin/documents",
+        response_model=JoplinNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def create_joplin_document(
+        payload: JoplinDocumentRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.get_agent(payload.agent_id)
+        if agent is None:
+            agent = {
+                "agent_id": payload.agent_id,
+                "project": payload.project,
+                "metadata": {"session_id": payload.session_id}
+                if payload.session_id
+                else {},
+            }
+        joplin = require_joplin(request)
+        return await asyncio.to_thread(
+            joplin.create_document,
+            agent=agent,
+            title=payload.title,
+            body=payload.body,
+            session_id=payload.session_id,
+            mermaid_blocks=payload.mermaid_blocks,
+            assets=[asset.model_dump(exclude_none=True) for asset in payload.assets],
+        )
+
+    @app.get(
         "/v1/agents/{agent_id}/files",
         response_model=FileListResponse,
         dependencies=[Depends(require_token)],
@@ -353,7 +548,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         dependencies=[Depends(require_token)],
     )
     async def create_command(
-        request: CommandCreateRequest, store: Store = Depends(get_store)
+        request: CommandCreateRequest,
+        http_request: Request,
+        store: Store = Depends(get_store),
     ) -> dict[str, object]:
         if request.agent_id is not None and store.get_agent(request.agent_id) is None:
             raise HTTPException(status_code=404, detail="agent not registered")
@@ -367,6 +564,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             },
             command["command_id"],
         )
+        await append_joplin_command_log(http_request, store, command)
         return command
 
     @app.delete(
@@ -516,6 +714,127 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         return StreamingResponse(generate(), media_type="text/event-stream")
 
     return app
+
+
+def require_agent(store: Store, agent_id: str) -> dict[str, object]:
+    agent = store.get_agent(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="agent not registered")
+    return agent
+
+
+def require_joplin(request: Request) -> JoplinService:
+    joplin = request.app.state.joplin
+    status_payload = joplin.status()
+    if not status_payload.get("configured"):
+        raise HTTPException(status_code=404, detail=status_payload["error"])
+    if status_payload.get("error"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=status_payload["error"],
+        )
+    return joplin
+
+
+def joplin_copy_source(
+    store: Store,
+    agent: dict[str, object],
+    payload: JoplinCopyRequest,
+) -> tuple[str, str, str, dict[str, object]]:
+    agent_id = str(agent["agent_id"])
+    if payload.body is not None:
+        title = payload.title or "Manual Copy"
+        return "manual", title, payload.body, {}
+    if payload.report_id:
+        report = store.get_report(payload.report_id)
+        if report is None or report["agent_id"] != agent_id:
+            raise HTTPException(status_code=404, detail="report not found")
+        return (
+            f"report:{report['report_id']}",
+            str(payload.title or report["summary"]),
+            str(report["detail"]),
+            {
+                "report_id": report["report_id"],
+                "status": report["status"],
+                "summary": report["summary"],
+                "created_at": report["created_at"],
+            },
+        )
+    if payload.thread_item_id:
+        for item in store.list_thread(agent_id, limit=200):
+            if item["item_id"] != payload.thread_item_id:
+                continue
+            return (
+                str(item["item_id"]),
+                str(payload.title or item["title"]),
+                str(item["body"]),
+                {
+                    "kind": item["kind"],
+                    "status": item["status"],
+                    "created_at": item["created_at"],
+                    "metadata": item["metadata"],
+                },
+            )
+        raise HTTPException(status_code=404, detail="thread item not found")
+    latest = store.list_reports(agent_id, limit=1)
+    if not latest:
+        raise HTTPException(status_code=404, detail="latest report not found")
+    report = latest[0]
+    return (
+        f"report:{report['report_id']}",
+        str(payload.title or report["summary"]),
+        str(report["detail"]),
+        {
+            "report_id": report["report_id"],
+            "status": report["status"],
+            "summary": report["summary"],
+            "created_at": report["created_at"],
+        },
+    )
+
+
+async def append_joplin_command_log(
+    request: Request,
+    store: Store,
+    command: dict[str, object],
+) -> None:
+    joplin: JoplinService = request.app.state.joplin
+    if not joplin.config.configured:
+        return
+    try:
+        await asyncio.to_thread(joplin.append_command_log, store, command)
+    except Exception as exc:  # noqa: BLE001 - logging must not break PBX commands
+        store.append_event(
+            "joplin_log_failed",
+            {
+                "agent_id": command.get("agent_id"),
+                "command_id": command.get("command_id"),
+                "message": str(exc),
+            },
+            str(command.get("command_id") or ""),
+        )
+
+
+async def append_joplin_report_log(
+    request: Request,
+    store: Store,
+    report: dict[str, object],
+) -> None:
+    joplin: JoplinService = request.app.state.joplin
+    if not joplin.config.configured:
+        return
+    try:
+        await asyncio.to_thread(joplin.append_report_log, store, report)
+    except Exception as exc:  # noqa: BLE001 - logging must not break PBX reports
+        store.append_event(
+            "joplin_log_failed",
+            {
+                "agent_id": report.get("agent_id"),
+                "report_id": report.get("report_id"),
+                "message": str(exc),
+            },
+            str(report.get("report_id") or ""),
+        )
 
 
 class DebugRequestLogMiddleware(BaseHTTPMiddleware):

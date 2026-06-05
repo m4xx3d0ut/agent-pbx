@@ -16,6 +16,18 @@ from urllib.request import urlopen
 
 from .paths import default_state_root
 from .store import Store
+from .joplin import (
+    JOPLIN_API_URL_ENV,
+    JOPLIN_BIN_ENV,
+    JOPLIN_NOTEBOOK_ENV,
+    JOPLIN_PROFILE_ENV,
+    JOPLIN_SYNC_ON_WRITE_ENV,
+    JOPLIN_TIMEOUT_ENV,
+    JOPLIN_TOKEN_ENV,
+    JOPLIN_WEBDAV_PASSWORD_ENV,
+    JOPLIN_WEBDAV_URL_ENV,
+    JOPLIN_WEBDAV_USERNAME_ENV,
+)
 from .workerbee import WORKERBEE_BIN_ENV, WORKERBEE_CACHE_ENV, WORKERBEE_TIMEOUT_ENV
 
 
@@ -38,6 +50,16 @@ class MCPDaemonConfig:
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
+    joplin_api_url: str | None = None
+    joplin_token: str | None = None
+    joplin_notebook: str = "Agent PBX"
+    joplin_bin: Path | None = None
+    joplin_profile: Path | None = None
+    joplin_timeout_seconds: float = 15.0
+    joplin_sync_on_write: bool = False
+    joplin_webdav_url: str | None = None
+    joplin_webdav_username: str | None = None
+    joplin_webdav_password: str | None = None
 
     @property
     def resolved_state_root(self) -> Path:
@@ -92,6 +114,16 @@ def config_from_args(
     workerbee_bin: Path | None = None,
     workerbee_timeout_seconds: float = 20.0,
     workerbee_cache_seconds: float = 10.0,
+    joplin_api_url: str | None = None,
+    joplin_token: str | None = None,
+    joplin_notebook: str = "Agent PBX",
+    joplin_bin: Path | None = None,
+    joplin_profile: Path | None = None,
+    joplin_timeout_seconds: float = 15.0,
+    joplin_sync_on_write: bool = False,
+    joplin_webdav_url: str | None = None,
+    joplin_webdav_username: str | None = None,
+    joplin_webdav_password: str | None = None,
 ) -> MCPDaemonConfig:
     return MCPDaemonConfig(
         state_root=(state_root or default_state_root()).expanduser().resolve(),
@@ -106,6 +138,16 @@ def config_from_args(
         workerbee_bin=workerbee_bin.expanduser() if workerbee_bin else None,
         workerbee_timeout_seconds=workerbee_timeout_seconds,
         workerbee_cache_seconds=workerbee_cache_seconds,
+        joplin_api_url=joplin_api_url,
+        joplin_token=joplin_token,
+        joplin_notebook=joplin_notebook,
+        joplin_bin=joplin_bin.expanduser() if joplin_bin else None,
+        joplin_profile=joplin_profile.expanduser() if joplin_profile else None,
+        joplin_timeout_seconds=joplin_timeout_seconds,
+        joplin_sync_on_write=joplin_sync_on_write,
+        joplin_webdav_url=joplin_webdav_url,
+        joplin_webdav_username=joplin_webdav_username,
+        joplin_webdav_password=joplin_webdav_password,
     )
 
 
@@ -139,6 +181,24 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         child_env[WORKERBEE_BIN_ENV] = str(config.workerbee_bin.expanduser())
     child_env[WORKERBEE_TIMEOUT_ENV] = str(config.workerbee_timeout_seconds)
     child_env[WORKERBEE_CACHE_ENV] = str(config.workerbee_cache_seconds)
+    if config.joplin_api_url:
+        child_env[JOPLIN_API_URL_ENV] = config.joplin_api_url
+    if config.joplin_token:
+        child_env[JOPLIN_TOKEN_ENV] = config.joplin_token
+    if config.joplin_notebook:
+        child_env[JOPLIN_NOTEBOOK_ENV] = config.joplin_notebook
+    if config.joplin_bin:
+        child_env[JOPLIN_BIN_ENV] = str(config.joplin_bin.expanduser())
+    if config.joplin_profile:
+        child_env[JOPLIN_PROFILE_ENV] = str(config.joplin_profile.expanduser())
+    child_env[JOPLIN_TIMEOUT_ENV] = str(config.joplin_timeout_seconds)
+    child_env[JOPLIN_SYNC_ON_WRITE_ENV] = "1" if config.joplin_sync_on_write else "0"
+    if config.joplin_webdav_url:
+        child_env[JOPLIN_WEBDAV_URL_ENV] = config.joplin_webdav_url
+    if config.joplin_webdav_username:
+        child_env[JOPLIN_WEBDAV_USERNAME_ENV] = config.joplin_webdav_username
+    if config.joplin_webdav_password:
+        child_env[JOPLIN_WEBDAV_PASSWORD_ENV] = config.joplin_webdav_password
 
     argv = _serve_argv(config)
     log = open(config.log_file, "ab")  # noqa: SIM115 - passed to detached child
@@ -171,6 +231,16 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,
+        "joplin_api_url": config.joplin_api_url,
+        "joplin_notebook": config.joplin_notebook,
+        "joplin_configured": bool(config.joplin_api_url and config.joplin_token),
+        "joplin_bin": str(config.joplin_bin) if config.joplin_bin else None,
+        "joplin_profile": str(config.joplin_profile) if config.joplin_profile else None,
+        "joplin_timeout_seconds": config.joplin_timeout_seconds,
+        "joplin_sync_on_write": config.joplin_sync_on_write,
+        "joplin_webdav_url": config.joplin_webdav_url,
+        "joplin_webdav_username": config.joplin_webdav_username,
+        "joplin_webdav_password_configured": bool(config.joplin_webdav_password),
         "mcp_url": config.mcp_url,
         "health_url": config.health_url,
         "log_file": str(config.log_file),
@@ -275,6 +345,16 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,
+        "joplin_api_url": config.joplin_api_url,
+        "joplin_notebook": config.joplin_notebook,
+        "joplin_configured": bool(config.joplin_api_url and config.joplin_token),
+        "joplin_bin": str(config.joplin_bin) if config.joplin_bin else None,
+        "joplin_profile": str(config.joplin_profile) if config.joplin_profile else None,
+        "joplin_timeout_seconds": config.joplin_timeout_seconds,
+        "joplin_sync_on_write": config.joplin_sync_on_write,
+        "joplin_webdav_url": config.joplin_webdav_url,
+        "joplin_webdav_username": config.joplin_webdav_username,
+        "joplin_webdav_password_configured": bool(config.joplin_webdav_password),
     }
 
 

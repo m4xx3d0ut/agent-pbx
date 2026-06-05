@@ -18,6 +18,9 @@ from .agent import (
 )
 from .api import create_app, create_token_helper_app
 from .config import ServerConfig
+from .joplin import (
+    env_joplin_config,
+)
 from .mcp_daemon import (
     MCPDaemonConfig,
     config_from_args,
@@ -346,6 +349,7 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
             host = metadata.get("host")
         if port is None:
             port = metadata.get("port")
+    joplin_config = env_joplin_config()
     return config_from_args(
         state_root=getattr(args, "state_root", None),
         host=str(host or default_host()),
@@ -367,6 +371,18 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
             args,
             "workerbee_cache",
             env_workerbee_cache_seconds(),
+        ),
+        joplin_api_url=joplin_config.api_url,
+        joplin_token=joplin_config.token,
+        joplin_notebook=joplin_config.notebook,
+        joplin_bin=joplin_config.joplin_bin,
+        joplin_profile=joplin_config.profile,
+        joplin_timeout_seconds=joplin_config.timeout_seconds,
+        joplin_sync_on_write=joplin_config.sync_on_write,
+        joplin_webdav_url=joplin_config.webdav_url,
+        joplin_webdav_username=joplin_config.webdav_username,
+        joplin_webdav_password=(
+            os.getenv("AGENT_PBX_JOPLIN_WEBDAV_PASSWORD", "").strip() or None
         ),
     )
 
@@ -424,6 +440,18 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         workerbee_bin=daemon_config.workerbee_bin,
         workerbee_timeout_seconds=daemon_config.workerbee_timeout_seconds,
         workerbee_cache_seconds=daemon_config.workerbee_cache_seconds,
+        joplin_api_url=daemon_config.joplin_api_url,
+        joplin_token=daemon_config.joplin_token,
+        joplin_notebook=daemon_config.joplin_notebook,
+        joplin_bin=daemon_config.joplin_bin,
+        joplin_profile=daemon_config.joplin_profile,
+        joplin_timeout_seconds=daemon_config.joplin_timeout_seconds,
+        joplin_sync_on_write=daemon_config.joplin_sync_on_write,
+        joplin_webdav_url=daemon_config.joplin_webdav_url,
+        joplin_webdav_username=daemon_config.joplin_webdav_username,
+        joplin_webdav_password_configured=bool(
+            daemon_config.joplin_webdav_password
+        ),
     )
     log_level = daemon_config.log_level or ("debug" if daemon_config.debug else "info")
     if daemon_config.debug:
@@ -458,6 +486,16 @@ def _print_mcp_status(result: dict[str, object]) -> None:
         "workerbee_bin",
         "workerbee_timeout_seconds",
         "workerbee_cache_seconds",
+        "joplin_configured",
+        "joplin_api_url",
+        "joplin_notebook",
+        "joplin_bin",
+        "joplin_profile",
+        "joplin_timeout_seconds",
+        "joplin_sync_on_write",
+        "joplin_webdav_url",
+        "joplin_webdav_username",
+        "joplin_webdav_password_configured",
         "pid",
         "running",
         "stale",

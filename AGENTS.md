@@ -127,6 +127,12 @@ helpers to queue work for agents. Do not use it as normal agent-side behavior
 or to self-queue work; in nohup mode, receive queued work through
 `pbx_poll_commands` instead.
 
+If the operator asks for a Joplin note or document, call `pbx_joplin_status`
+first. If Joplin is available, use `pbx_joplin_create_document` to create
+Markdown scoped under the Agent PBX notebook. Mermaid content should be fenced
+as Joplin-safe `mermaid` blocks. Do not put secrets in note bodies, titles, or
+asset metadata.
+
 If a `ping` command is received in nohup mode, treat it as a polling keepalive.
 Respond with a `status="working"` `pbx_report_turn` whose summary starts with
 `Pong`, ack the ping with `{"pong": true}`, then immediately start another

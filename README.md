@@ -290,6 +290,37 @@ projects` can take more than ten seconds on hosts with many projects. Agent PBX
 also serializes same-agent WorkerBee checks and caches results briefly to avoid
 WorkerBee project-lock collisions from repeated refreshes.
 
+## Joplin Notes Integration
+
+Set `AGENT_PBX_JOPLIN_API_URL` and `AGENT_PBX_JOPLIN_TOKEN` before starting the
+Agent PBX daemon to enable the optional `Joplin` tab and MCP document export
+tools. Credentials stay server-side; remote TUI clients only read Agent PBX API
+results.
+
+```bash
+export AGENT_PBX_JOPLIN_API_URL=http://127.0.0.1:41184
+export AGENT_PBX_JOPLIN_TOKEN=<joplin-api-token>
+export AGENT_PBX_JOPLIN_NOTEBOOK="Agent PBX"
+agent-pbx mcp restart --token dev-token
+agent-pbx tui --token dev-token
+```
+
+When first used, Agent PBX lazily creates one top-level Joplin notebook, then
+nests notes as `project > agent`. Note titles use
+`session-id-YYYYmmddTHHMMSSZ-COPY|LOG|DOC`. `Copy Latest` writes the selected
+agent's latest report to a new Markdown note. `Start LOG` creates a growing log
+note and appends queued operator prompts plus terminal agent responses until
+`Stop LOG` is pressed. The tab also lists scoped notes, previews Markdown, and
+saves edits inside the Agent PBX notebook scope only.
+
+Agents can call `pbx_joplin_status` and `pbx_joplin_create_document` when the
+operator asks for a Markdown note or document. Mermaid diagrams should be passed
+as fenced Mermaid blocks so Joplin can render them safely. Default tests use a
+fake Joplin API; for end-to-end development, run a disposable Joplin profile
+against your preferred local WebDAV container and set
+`AGENT_PBX_JOPLIN_WEBDAV_URL`, `AGENT_PBX_JOPLIN_WEBDAV_USERNAME`, and
+`AGENT_PBX_JOPLIN_WEBDAV_PASSWORD` in gitignored `local.env`.
+
 ## Files TUI Browser
 
 The TUI includes a read-only `Files` tab for the selected agent project. Agents
@@ -396,9 +427,9 @@ and very small terminals use a tiny mode that shows only Agents or Events on
 the home screen. Override with
 `AGENT_PBX_TUI_LAYOUT=adaptive|split|compact|tiny` or the `Layout` setting.
 Selecting an agent in compact or tiny mode opens a full-width view with
-`Latest`, `Thread`, and `WorkerBee` tabs; press `b` to return to the agent
-list. In tiny mode, press `e` on the home screen for Events and `a` to return
-to Agents.
+`Latest`, `Thread`, `Files`, `WorkerBee`, and configured optional tabs such as
+`Joplin`; press `b` to return to the agent list. In tiny mode, press `e` on
+the home screen for Events and `a` to return to Agents.
 
 For very low-power terminals where the TUI is mostly an alert board, enable
 low-power watch mode. It keeps server event alerts active, slows periodic
@@ -434,14 +465,14 @@ sync through the Agent PBX server so a workstation TUI and a remote watch TUI
 show the same pinned agents; the TUI settings file keeps a local cache/fallback.
 
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
-commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/tmux`, `/workerbee`, `/theme
-minimal`, and `/layout compact`. `/cancel` marks a stale or abandoned session
-canceled in PBX; it does not send an Escape key. Use `/esc` when you need a real
-Escape key event. In tmux direct mode, `/esc` sends `tmux send-keys Escape` to
-the selected Codex pane. Outside tmux direct mode, it queues a `send_key`
-command with `key="escape"` for nohup-mode agents that poll PBX. Use `/ctrlc`
-in tmux direct mode to send `tmux send-keys C-c` to the selected Codex pane,
-for example to back out of a `/side` chat.
+commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/tmux`, `/workerbee`,
+configured `/joplin`, `/theme minimal`, and `/layout compact`. `/cancel` marks
+a stale or abandoned session canceled in PBX; it does not send an Escape key.
+Use `/esc` when you need a real Escape key event. In tmux direct mode, `/esc`
+sends `tmux send-keys Escape` to the selected Codex pane. Outside tmux direct
+mode, it queues a `send_key` command with `key="escape"` for nohup-mode agents
+that poll PBX. Use `/ctrlc` in tmux direct mode to send `tmux send-keys C-c`
+to the selected Codex pane, for example to back out of a `/side` chat.
 
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete cached project paths from the Files

@@ -162,6 +162,77 @@ class WorkerBeeStatusResponse(BaseModel):
     latest_deployment: dict[str, Any] | None = None
 
 
+class JoplinStatusResponse(BaseModel):
+    configured: bool
+    available: bool
+    api_url: str | None = None
+    notebook: str
+    joplin_bin: str | None = None
+    profile: str | None = None
+    sync_on_write: bool = False
+    webdav_url: str | None = None
+    webdav_username: str | None = None
+    webdav_password_configured: bool = False
+    checked_at: float
+    root_notebook_id: str | None = None
+    error: dict[str, Any] | None = None
+
+
+class JoplinNoteSummary(BaseModel):
+    id: str
+    parent_id: str
+    title: str
+    created_time: int | float | None = None
+    updated_time: int | float | None = None
+
+
+class JoplinNoteResponse(JoplinNoteSummary):
+    body: str = ""
+
+
+class JoplinCopyRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=240)
+    body: str | None = None
+    thread_item_id: str | None = Field(default=None, max_length=160)
+    report_id: str | None = Field(default=None, max_length=120)
+
+
+class JoplinNoteUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=240)
+    body: str | None = None
+
+
+class JoplinLogResponse(BaseModel):
+    log_id: str
+    agent_id: str
+    project: str
+    session_id: str
+    note_id: str
+    title: str
+    active: bool
+    started_at: float
+    stopped_at: float | None = None
+    updated_at: float
+    already_active: bool = False
+
+
+class JoplinAsset(BaseModel):
+    name: str = Field(min_length=1, max_length=240)
+    path: str | None = None
+    content_type: str | None = Field(default=None, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class JoplinDocumentRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=120)
+    project: str = Field(min_length=1, max_length=240)
+    title: str = Field(min_length=1, max_length=240)
+    body: str = Field(min_length=1)
+    session_id: str | None = Field(default=None, max_length=160)
+    mermaid_blocks: list[str] = Field(default_factory=list)
+    assets: list[JoplinAsset] = Field(default_factory=list)
+
+
 class FileEntry(BaseModel):
     name: str
     path: str

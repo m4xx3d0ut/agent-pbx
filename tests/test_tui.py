@@ -645,6 +645,14 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         plan_hint = app.query_one("#plan-hint", Static)
         workerbee_detail = app.query_one("#workerbee-detail", TextArea)
         workerbee_refresh = app.query_one("#workerbee-refresh", Button)
+        joplin_status = app.query_one("#joplin-status", Static)
+        joplin_notes = app.query_one("#joplin-notes", DataTable)
+        joplin_body = app.query_one("#joplin-body", TextArea)
+        joplin_refresh = app.query_one("#joplin-refresh", Button)
+        joplin_copy = app.query_one("#joplin-copy-latest", Button)
+        joplin_log_start = app.query_one("#joplin-log-start", Button)
+        joplin_log_stop = app.query_one("#joplin-log-stop", Button)
+        joplin_save = app.query_one("#joplin-save", Button)
         composer = app.query_one("#composer")
         agent_id = app.query_one("#agent-id", Input)
         message = app.query_one("#message", TextArea)
@@ -675,6 +683,14 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert plan_hint.renderable == "Reply with /plan:1 optional notes."
         assert workerbee_detail.read_only is True
         assert workerbee_refresh.label.plain == "Refresh WorkerBee"
+        assert str(joplin_status.renderable).startswith("Joplin:")
+        assert joplin_notes.cursor_type == "row"
+        assert joplin_body.read_only is False
+        assert joplin_refresh.label.plain == "Refresh"
+        assert joplin_copy.label.plain == "Copy Latest"
+        assert joplin_log_start.label.plain == "Start LOG"
+        assert joplin_log_stop.label.plain == "Stop LOG"
+        assert joplin_save.label.plain == "Save"
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
         assert "#files {\n        height: 10;" in app.CSS
@@ -682,6 +698,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "#latest-plan-choice-panel,\n    #plan-choice-panel {" in app.CSS
         assert "#latest-plan-hint,\n    #plan-hint {" in app.CSS
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
+        assert "#joplin-notes {\n        height: 8;" in app.CSS
+        assert "#joplin-body {\n        height: 1fr;" in app.CSS
         assert "#tmux-message {\n        height: 8;" in app.CSS
         assert "Notification Options" not in app.CSS
         assert message.soft_wrap is True
@@ -2151,6 +2169,7 @@ async def test_tui_files_tab_loads_directory_and_preview() -> None:
         assert "src/app.py" in app.file_directory_entries_by_agent["agent-1"]["src"]
 
     assert calls == [
+        ("/v1/joplin/status", {}),
         ("/v1/agents", {}),
         ("/v1/events", {"tail": "true", "limit": 50}),
         ("/v1/agents/agent-1/files", {"path": "."}),

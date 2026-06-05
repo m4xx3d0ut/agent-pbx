@@ -19,6 +19,16 @@ class ServerConfig:
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
+    joplin_api_url: str | None = None
+    joplin_token: str | None = None
+    joplin_notebook: str = "Agent PBX"
+    joplin_bin: Path | None = None
+    joplin_profile: Path | None = None
+    joplin_timeout_seconds: float = 15.0
+    joplin_sync_on_write: bool = False
+    joplin_webdav_url: str | None = None
+    joplin_webdav_username: str | None = None
+    joplin_webdav_password_configured: bool = False
 
     @property
     def lan_bound(self) -> bool:

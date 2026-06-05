@@ -16,7 +16,7 @@ from .schemas import (
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -128,6 +128,20 @@ class Store:
                     subject_id TEXT,
                     payload_json TEXT NOT NULL,
                     created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS joplin_logs (
+                    log_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    note_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    active INTEGER NOT NULL,
+                    started_at REAL NOT NULL,
+                    stopped_at REAL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
                 );
                 """
             )
@@ -408,6 +422,7 @@ class Store:
                 conn.execute("DELETE FROM reports WHERE agent_id = ?", (agent_id,))
                 conn.execute("DELETE FROM commands WHERE agent_id = ?", (agent_id,))
                 conn.execute("DELETE FROM poll_events WHERE agent_id = ?", (agent_id,))
+                conn.execute("DELETE FROM joplin_logs WHERE agent_id = ?", (agent_id,))
             cursor = conn.execute(
                 """
                 UPDATE agents
@@ -515,6 +530,101 @@ class Store:
                 (starred_at, agent_id),
             )
         return self.get_agent(agent_id) if cursor.rowcount else None
+
+    def start_joplin_log(
+        self,
+        *,
+        agent_id: str,
+        project: str,
+        session_id: str,
+        note_id: str,
+        title: str,
+    ) -> dict[str, Any]:
+        log_id = str(uuid.uuid4())
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE joplin_logs
+                SET active = 0, stopped_at = COALESCE(stopped_at, ?), updated_at = ?
+                WHERE agent_id = ? AND active = 1
+                """,
+                (current, current, agent_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO joplin_logs
+                    (log_id, agent_id, project, session_id, note_id, title,
+                     active, started_at, stopped_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?)
+                """,
+                (
+                    log_id,
+                    agent_id,
+                    project,
+                    session_id,
+                    note_id,
+                    title,
+                    current,
+                    current,
+                ),
+            )
+        log = self.get_joplin_log(log_id)
+        if log is None:
+            raise RuntimeError("joplin log insert failed")
+        return log
+
+    def get_joplin_log(self, log_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT log_id, agent_id, project, session_id, note_id, title,
+                       active, started_at, stopped_at, updated_at
+                FROM joplin_logs
+                WHERE log_id = ?
+                """,
+                (log_id,),
+            ).fetchone()
+        return self._joplin_log_from_row(row) if row else None
+
+    def get_active_joplin_log(self, agent_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT log_id, agent_id, project, session_id, note_id, title,
+                       active, started_at, stopped_at, updated_at
+                FROM joplin_logs
+                WHERE agent_id = ? AND active = 1
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (agent_id,),
+            ).fetchone()
+        return self._joplin_log_from_row(row) if row else None
+
+    def stop_active_joplin_log(self, agent_id: str) -> dict[str, Any] | None:
+        active = self.get_active_joplin_log(agent_id)
+        if active is None:
+            return None
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE joplin_logs
+                SET active = 0, stopped_at = ?, updated_at = ?
+                WHERE log_id = ?
+                """,
+                (current, current, active["log_id"]),
+            )
+        return self.get_joplin_log(active["log_id"])
+
+    def touch_joplin_log(self, log_id: str) -> None:
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE joplin_logs SET updated_at = ? WHERE log_id = ?",
+                (current, log_id),
+            )
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -866,6 +976,12 @@ class Store:
     def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["payload"] = json.loads(data.pop("payload_json"))
+        return data
+
+    @staticmethod
+    def _joplin_log_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["active"] = bool(data["active"])
         return data
 
     @staticmethod

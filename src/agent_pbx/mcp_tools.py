@@ -9,6 +9,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .agent import runbook_payload
 from .config import ServerConfig
+from .joplin import JoplinService
 from .polling import poll_commands as poll_commands_until
 from .schemas import (
     AgentRegisterRequest,
@@ -23,7 +24,7 @@ from .store import Store
 logger = logging.getLogger("agent_pbx.mcp")
 
 
-def build_mcp_server(store: Store) -> FastMCP:
+def build_mcp_server(store: Store, joplin: JoplinService | None = None) -> FastMCP:
     mcp = FastMCP(
         "Agent PBX",
         instructions=(
@@ -124,12 +125,47 @@ def build_mcp_server(store: Store) -> FastMCP:
             },
             report["report_id"],
         )
+        append_joplin_report_log(store, joplin, report)
         logger.debug(
             "mcp.tool.finish name=pbx_report_turn agent_id=%s report_id=%s",
             agent_id,
             report["report_id"],
         )
         return report
+
+    @mcp.tool()
+    def pbx_joplin_status() -> dict[str, Any]:
+        """Return Agent PBX Joplin integration status."""
+        if joplin is None:
+            return JoplinService().status()
+        return joplin.status()
+
+    @mcp.tool()
+    def pbx_joplin_create_document(
+        agent_id: str,
+        project: str,
+        title: str,
+        body: str,
+        session_id: str | None = None,
+        mermaid_blocks: list[str] | None = None,
+        assets: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Create a scoped Markdown note in the Agent PBX Joplin notebook."""
+        if joplin is None or not joplin.config.configured:
+            raise ValueError("Joplin is not configured")
+        agent = store.get_agent(agent_id) or {
+            "agent_id": agent_id,
+            "project": project,
+            "metadata": {"session_id": session_id} if session_id else {},
+        }
+        return joplin.create_document(
+            agent=agent,
+            title=title,
+            body=body,
+            session_id=session_id,
+            mermaid_blocks=mermaid_blocks or [],
+            assets=assets or [],
+        )
 
     @mcp.tool()
     async def pbx_poll_commands(
@@ -227,6 +263,7 @@ def build_mcp_server(store: Store) -> FastMCP:
             },
             command["command_id"],
         )
+        append_joplin_command_log(store, joplin, command)
         logger.debug(
             "mcp.tool.finish name=pbx_queue_command command_id=%s",
             command["command_id"],
@@ -236,8 +273,54 @@ def build_mcp_server(store: Store) -> FastMCP:
     return mcp
 
 
-def create_mcp_asgi_app(store: Store, config: ServerConfig) -> tuple[ASGIApp, FastMCP]:
-    mcp = build_mcp_server(store)
+def append_joplin_command_log(
+    store: Store,
+    joplin: JoplinService | None,
+    command: dict[str, Any],
+) -> None:
+    if joplin is None or not joplin.config.configured:
+        return
+    try:
+        joplin.append_command_log(store, command)
+    except Exception as exc:  # noqa: BLE001 - MCP command queuing must not fail logs
+        store.append_event(
+            "joplin_log_failed",
+            {
+                "agent_id": command.get("agent_id"),
+                "command_id": command.get("command_id"),
+                "message": str(exc),
+            },
+            str(command.get("command_id") or ""),
+        )
+
+
+def append_joplin_report_log(
+    store: Store,
+    joplin: JoplinService | None,
+    report: dict[str, Any],
+) -> None:
+    if joplin is None or not joplin.config.configured:
+        return
+    try:
+        joplin.append_report_log(store, report)
+    except Exception as exc:  # noqa: BLE001 - MCP reports must not fail logs
+        store.append_event(
+            "joplin_log_failed",
+            {
+                "agent_id": report.get("agent_id"),
+                "report_id": report.get("report_id"),
+                "message": str(exc),
+            },
+            str(report.get("report_id") or ""),
+        )
+
+
+def create_mcp_asgi_app(
+    store: Store,
+    config: ServerConfig,
+    joplin: JoplinService | None = None,
+) -> tuple[ASGIApp, FastMCP]:
+    mcp = build_mcp_server(store, joplin=joplin)
     return BearerAuthASGIMiddleware(mcp.streamable_http_app(), store, config), mcp
 
 

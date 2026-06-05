@@ -150,6 +150,8 @@ MOUSE_FOCUS_TARGET_IDS = {
     "files",
     "file-preview",
     "workerbee-detail",
+    "joplin-notes",
+    "joplin-body",
     "message",
     "agent-id",
     "plan-options",
@@ -170,6 +172,8 @@ MOUSE_FOCUS_CONTAINER_TARGETS = {
     "files-tab": "#files",
     "files-actions": "#files",
     "workerbee-tab": "#workerbee-detail",
+    "joplin-tab": "#joplin-notes",
+    "joplin-actions": "#joplin-body",
 }
 TMUX_WORKING_INFERABLE_STATUSES = {
     "blocked",
@@ -205,6 +209,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/ctrlc",
     "/tmux",
     "/workerbee",
+    "/joplin",
     "/plan",
     "/plan latest",
     "/plan thread",
@@ -1758,6 +1763,37 @@ class AgentPBXTUI(App[None]):
         width: 1fr;
     }
 
+    #joplin-status {
+        height: 1;
+        color: $secondary;
+        content-align: left middle;
+    }
+
+    #joplin-notes {
+        height: 8;
+        min-height: 4;
+    }
+
+    #joplin-body {
+        height: 1fr;
+        min-height: 12;
+        border: tall $accent;
+        background: $surface;
+        scrollbar-size: 0 1;
+        scrollbar-color: $accent;
+        scrollbar-color-hover: $warning;
+        scrollbar-background: $surface;
+    }
+
+    #joplin-actions {
+        height: 3;
+    }
+
+    #joplin-actions Button {
+        width: 1fr;
+        min-width: 1;
+    }
+
     #events {
         height: 12;
     }
@@ -1836,12 +1872,14 @@ class AgentPBXTUI(App[None]):
     Screen.tiny-agent #detail,
     Screen.tiny-agent #tmux-stream,
     Screen.tiny-agent #file-preview,
-    Screen.tiny-agent #workerbee-detail {
+    Screen.tiny-agent #workerbee-detail,
+    Screen.tiny-agent #joplin-body {
         min-height: 4;
     }
 
     Screen.tiny-agent #thread,
-    Screen.tiny-agent #files {
+    Screen.tiny-agent #files,
+    Screen.tiny-agent #joplin-notes {
         height: 5;
         min-height: 4;
     }
@@ -2088,6 +2126,10 @@ class AgentPBXTUI(App[None]):
             "latest_viewed_at_by_agent",
         )
         self.workerbee_status_by_agent: dict[str, dict[str, Any]] = {}
+        self.joplin_configured = False
+        self.joplin_status: dict[str, Any] = {}
+        self.joplin_notes_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
+        self.selected_joplin_note_id: str | None = None
         self.file_path_by_agent: dict[str, str] = {}
         self.file_entries_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
         self.file_directory_entries_by_agent: dict[
@@ -2287,6 +2329,20 @@ class AgentPBXTUI(App[None]):
                         yield NavigationTextArea(id="workerbee-detail", read_only=True)
                         with Horizontal(id="workerbee-actions"):
                             yield Button("Refresh WorkerBee", id="workerbee-refresh")
+                    with TabPane("Joplin", id="joplin-tab"):
+                        yield Static("Joplin: checking...", id="joplin-status")
+                        yield DataTable(
+                            id="joplin-notes",
+                            cursor_type="row",
+                            show_row_labels=False,
+                        )
+                        yield NavigationTextArea(id="joplin-body")
+                        with Horizontal(id="joplin-actions"):
+                            yield Button("Refresh", id="joplin-refresh")
+                            yield Button("Copy Latest", id="joplin-copy-latest")
+                            yield Button("Start LOG", id="joplin-log-start")
+                            yield Button("Stop LOG", id="joplin-log-stop")
+                            yield Button("Save", id="joplin-save", variant="primary")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -2303,12 +2359,15 @@ class AgentPBXTUI(App[None]):
         thread.add_columns("M", "Time", "Kind", "Plan", "Status", "Summary")
         files = self.query_one("#files", DataTable)
         files.add_columns("Type", "Name", "Size", "Modified")
+        joplin_notes = self.query_one("#joplin-notes", DataTable)
+        joplin_notes.add_columns("Updated", "Title")
         latest_plan_options = self.query_one("#latest-plan-options", DataTable)
         latest_plan_options.add_columns("#", "Option")
         plan_options = self.query_one("#plan-options", DataTable)
         plan_options.add_columns("#", "Option")
         self.render_latest_plan_choice_panel(None)
         self.render_plan_choice_panel(None)
+        await self.refresh_joplin_status()
         await self.refresh_agents()
         await self.refresh_events()
         self.notify_custom_slash_command_errors()
@@ -2382,6 +2441,8 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/ctrlc", "Send Ctrl+C to the selected tmux pane", self.palette_ctrl_c)
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
+        if self.joplin_configured:
+            yield SystemCommand("/joplin", "Open and refresh the Joplin tab", self.palette_joplin)
         yield SystemCommand("/plan", "Toggle plan mode for the selected agent", self.palette_toggle_plan_mode)
         yield SystemCommand("/plan latest", "Show latest report plan options", self.palette_plan_latest)
         yield SystemCommand("/plan thread", "Show selected thread plan options", self.palette_plan_thread)
@@ -2452,6 +2513,16 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.open_workerbee_for_agent(agent_id),
             name="palette-workerbee",
+            exclusive=True,
+        )
+
+    def palette_joplin(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_joplin_for_agent(agent_id),
+            name="palette-joplin",
             exclusive=True,
         )
 
@@ -2816,13 +2887,30 @@ class AgentPBXTUI(App[None]):
         else:
             await self.load_workerbee_status(agent_id)
 
+    async def open_joplin_for_agent(self, agent_id: str) -> None:
+        await self.refresh_joplin_status()
+        if not self.joplin_configured:
+            self.notify("Joplin is not configured on this Agent PBX server.", severity="warning")
+            return
+        tabs = self.query_one_or_none("#agent-tabs", TabbedContent)
+        if tabs is not None:
+            tabs.active = "joplin-tab"
+        self.active_agent_tab = "joplin-tab"
+        if agent_id in self.agents:
+            await self.select_agent(agent_id)
+        else:
+            await self.load_joplin_notes(agent_id)
+
     async def action_refresh(self) -> None:
         await self.refresh_agents()
         await self.refresh_events()
+        await self.refresh_joplin_status()
         if self.selected_agent_id:
             await self.refresh_selected_agent(self.selected_agent_id)
             if self.active_agent_tab == "workerbee-tab":
                 await self.load_workerbee_status(self.selected_agent_id)
+            elif self.active_agent_tab == "joplin-tab":
+                await self.load_joplin_notes(self.selected_agent_id)
 
     def action_settings(self) -> None:
         self.push_screen(
@@ -2913,6 +3001,10 @@ class AgentPBXTUI(App[None]):
                 target = self.query_one_or_none("#files", DataTable)
         elif self.active_agent_tab == "workerbee-tab":
             target = self.query_one_or_none("#workerbee-detail", TextArea)
+        elif self.active_agent_tab == "joplin-tab":
+            target = self.query_one_or_none("#joplin-body", TextArea)
+            if target is None:
+                target = self.query_one_or_none("#joplin-notes", DataTable)
         if target is None:
             target = self.query_one_or_none("#detail", TextArea)
         if target is not None:
@@ -3785,6 +3877,9 @@ class AgentPBXTUI(App[None]):
         if event.data_table.id == "files":
             await self.select_file_entry(str(event.row_key.value))
             return
+        if event.data_table.id == "joplin-notes":
+            await self.select_joplin_note(str(event.row_key.value))
+            return
         if event.data_table.id == "plan-options":
             self.select_plan_option(str(event.row_key.value))
             return
@@ -3801,6 +3896,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.data_table.id == "files":
             await self.select_file_entry(str(event.cell_key.row_key.value))
+            return
+        if event.data_table.id == "joplin-notes":
+            await self.select_joplin_note(str(event.cell_key.row_key.value))
             return
         if event.data_table.id == "plan-options":
             self.select_plan_option(str(event.cell_key.row_key.value))
@@ -4371,6 +4469,12 @@ class AgentPBXTUI(App[None]):
                 name="agent-files",
                 exclusive=True,
             )
+        if self.active_agent_tab == "joplin-tab" and self.selected_agent_id:
+            self.run_worker(
+                self.load_joplin_notes(self.selected_agent_id),
+                name="agent-joplin",
+                exclusive=True,
+            )
 
     async def select_agent(self, agent_id: str) -> None:
         if agent_id != self.selected_agent_id:
@@ -4421,6 +4525,8 @@ class AgentPBXTUI(App[None]):
             await self.load_agent_files(agent_id)
         elif self.active_agent_tab == "workerbee-tab":
             await self.load_workerbee_status(agent_id)
+        elif self.active_agent_tab == "joplin-tab":
+            await self.load_joplin_notes(agent_id)
         elif self.is_tmux_direct_enabled(agent_id):
             await self.load_tmux_capture(agent_id)
         else:
@@ -5037,6 +5143,26 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "workerbee-refresh":
             if self.selected_agent_id:
                 await self.load_workerbee_status(self.selected_agent_id)
+            return
+        if event.button.id == "joplin-refresh":
+            if self.selected_agent_id:
+                await self.load_joplin_notes(self.selected_agent_id)
+            return
+        if event.button.id == "joplin-copy-latest":
+            if self.selected_agent_id:
+                await self.copy_latest_to_joplin(self.selected_agent_id)
+            return
+        if event.button.id == "joplin-log-start":
+            if self.selected_agent_id:
+                await self.start_joplin_log(self.selected_agent_id)
+            return
+        if event.button.id == "joplin-log-stop":
+            if self.selected_agent_id:
+                await self.stop_joplin_log(self.selected_agent_id)
+            return
+        if event.button.id == "joplin-save":
+            if self.selected_agent_id:
+                await self.save_joplin_note(self.selected_agent_id)
             return
         if event.button.id == "star-agent":
             self.toggle_selected_agent_star()
@@ -5901,6 +6027,7 @@ class AgentPBXTUI(App[None]):
         self.unseen_latest_agent_ids.discard(agent_id)
         self.latest_report_by_agent.pop(agent_id, None)
         self.workerbee_status_by_agent.pop(agent_id, None)
+        self.joplin_notes_by_agent.pop(agent_id, None)
         self.file_directory_entries_by_agent.pop(agent_id, None)
         self.tmux_liveness_by_agent.pop(agent_id, None)
         self.tmux_agent_targets.pop(agent_id, None)
@@ -6230,6 +6357,236 @@ class AgentPBXTUI(App[None]):
         except (TypeError, ValueError):
             return ""
         return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+    async def refresh_joplin_status(self) -> None:
+        try:
+            response = await self.api_client().get(
+                "/v1/joplin/status",
+                headers=auth_headers(self.token),
+                timeout=10,
+            )
+            response.raise_for_status()
+            status = response.json()
+            if not isinstance(status, dict):
+                raise ValueError("Joplin status response was not an object")
+        except Exception as exc:
+            status = {
+                "configured": False,
+                "available": False,
+                "notebook": "Agent PBX",
+                "error": {
+                    "code": "JOPLIN_STATUS_UNAVAILABLE",
+                    "message": str(exc),
+                },
+            }
+        self.joplin_status = status
+        self.joplin_configured = bool(status.get("configured"))
+        self.apply_joplin_tab_visibility()
+        label = self.query_one_or_none("#joplin-status", Static)
+        if label is not None:
+            label.update(self.format_joplin_status_line(status))
+
+    def apply_joplin_tab_visibility(self) -> None:
+        tabs = self.query_one_or_none("#agent-tabs", TabbedContent)
+        if tabs is None:
+            return
+        try:
+            if self.joplin_configured:
+                tabs.show_tab("joplin-tab")
+            else:
+                if tabs.active == "joplin-tab":
+                    tabs.active = "latest-tab"
+                    self.active_agent_tab = "latest-tab"
+                tabs.hide_tab("joplin-tab")
+        except Exception:
+            return
+
+    def format_joplin_status_line(self, status: dict[str, Any]) -> str:
+        if status.get("available"):
+            return f"Joplin: {status.get('notebook') or 'Agent PBX'}"
+        error = status.get("error") if isinstance(status.get("error"), dict) else {}
+        code = error.get("code") or "JOPLIN_UNAVAILABLE"
+        return f"Joplin: {code}"
+
+    async def load_joplin_notes(self, agent_id: str) -> None:
+        await self.refresh_joplin_status()
+        table = self.query_one_or_none("#joplin-notes", DataTable)
+        body = self.query_one_or_none("#joplin-body", TextArea)
+        if table is None or body is None:
+            return
+        if not self.joplin_configured:
+            table.clear()
+            body.text = self.format_joplin_unavailable(self.joplin_status)
+            return
+        body.text = f"Loading Joplin notes for {agent_id}..."
+        try:
+            response = await self.api_client().get(
+                f"/v1/agents/{agent_id}/joplin/notes",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            notes = response.json()
+        except Exception as exc:
+            table.clear()
+            body.text = f"Unable to load Joplin notes for {agent_id}: {exc}"
+            return
+        self.render_joplin_notes(agent_id, notes)
+        if notes:
+            note_id = (
+                self.selected_joplin_note_id
+                if self.selected_joplin_note_id in self.joplin_notes_by_agent.get(agent_id, {})
+                else str(notes[0]["id"])
+            )
+            await self.select_joplin_note(note_id)
+        else:
+            self.selected_joplin_note_id = None
+            body.text = "No Agent PBX Joplin notes for this agent yet."
+
+    def render_joplin_notes(
+        self,
+        agent_id: str,
+        notes: list[dict[str, Any]],
+    ) -> None:
+        table = self.query_one("#joplin-notes", DataTable)
+        table.clear()
+        note_map: dict[str, dict[str, Any]] = {}
+        for note in notes:
+            note_id = str(note.get("id") or "")
+            if not note_id:
+                continue
+            note_map[note_id] = note
+            table.add_row(
+                self.format_joplin_time(note.get("updated_time")),
+                str(note.get("title") or note_id),
+                key=note_id,
+            )
+        self.joplin_notes_by_agent[agent_id] = note_map
+
+    async def select_joplin_note(self, note_id: str) -> None:
+        agent_id = self.selected_agent_id
+        if not agent_id:
+            return
+        body = self.query_one("#joplin-body", TextArea)
+        body.text = f"Loading Joplin note {note_id}..."
+        try:
+            response = await self.api_client().get(
+                f"/v1/agents/{agent_id}/joplin/notes/{note_id}",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            note = response.json()
+        except Exception as exc:
+            body.text = f"Unable to load Joplin note {note_id}: {exc}"
+            return
+        self.selected_joplin_note_id = note_id
+        self.joplin_notes_by_agent.setdefault(agent_id, {})[note_id] = note
+        body.text = str(note.get("body") or "")
+        table = self.query_one_or_none("#joplin-notes", DataTable)
+        if table is not None and note_id in self.joplin_notes_by_agent.get(agent_id, {}):
+            try:
+                table.move_cursor(
+                    row=table.get_row_index(note_id),
+                    animate=False,
+                    scroll=False,
+                )
+            except Exception:
+                return
+
+    async def save_joplin_note(self, agent_id: str) -> None:
+        note_id = self.selected_joplin_note_id
+        if not note_id:
+            self.notify("Select a Joplin note before saving.", severity="warning")
+            return
+        body = self.query_one("#joplin-body", TextArea)
+        try:
+            response = await self.api_client().put(
+                f"/v1/agents/{agent_id}/joplin/notes/{note_id}",
+                json={"body": body.text},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"Joplin save failed: {exc}", severity="error")
+            return
+        self.notify("Joplin note saved.")
+        await self.load_joplin_notes(agent_id)
+
+    async def copy_latest_to_joplin(self, agent_id: str) -> None:
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/joplin/copy",
+                json={},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            note = response.json()
+        except Exception as exc:
+            self.notify(f"Joplin copy failed: {exc}", severity="error")
+            return
+        self.selected_joplin_note_id = str(note.get("id") or "")
+        self.notify("Copied latest report to Joplin.")
+        await self.load_joplin_notes(agent_id)
+
+    async def start_joplin_log(self, agent_id: str) -> None:
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/joplin/log/start",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            log = response.json()
+        except Exception as exc:
+            self.notify(f"Joplin LOG start failed: {exc}", severity="error")
+            return
+        state = "already active" if log.get("already_active") else "started"
+        self.notify(f"Joplin LOG {state}.")
+        await self.load_joplin_notes(agent_id)
+
+    async def stop_joplin_log(self, agent_id: str) -> None:
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/joplin/log/stop",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            log = response.json()
+        except Exception as exc:
+            self.notify(f"Joplin LOG stop failed: {exc}", severity="error")
+            return
+        if log:
+            self.notify("Joplin LOG stopped.")
+        else:
+            self.notify("No active Joplin LOG for this agent.", severity="warning")
+        await self.load_joplin_notes(agent_id)
+
+    def format_joplin_unavailable(self, status: dict[str, Any]) -> str:
+        error = status.get("error") if isinstance(status.get("error"), dict) else {}
+        lines = [
+            "Joplin unavailable",
+            f"Code: {error.get('code', 'JOPLIN_UNAVAILABLE')}",
+            f"Message: {error.get('message', '')}",
+        ]
+        remediation = error.get("remediation")
+        if remediation:
+            lines.append(f"Remediation: {remediation}")
+        return "\n".join(lines)
+
+    def format_joplin_time(self, value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            return ""
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
 
     async def load_workerbee_status(self, agent_id: str) -> None:
         detail = self.query_one("#workerbee-detail", TextArea)

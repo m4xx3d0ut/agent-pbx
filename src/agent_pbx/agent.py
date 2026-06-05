@@ -103,6 +103,12 @@ helpers to queue work for agents. Do not use it as normal agent-side behavior
 or to self-queue work; in nohup mode, receive queued work through
 `pbx_poll_commands` instead.
 
+If the operator asks for a Joplin note or document, call `pbx_joplin_status`
+first. If Joplin is available, use `pbx_joplin_create_document` to create
+Markdown scoped under the Agent PBX notebook. Mermaid content should be fenced
+as Joplin-safe `mermaid` blocks. Do not put secrets in note bodies, titles, or
+asset metadata.
+
 If a `ping` command is received in nohup mode, treat it as a polling keepalive.
 Respond with a `status="working"` `pbx_report_turn` whose summary starts with
 `Pong`, ack the ping with `{{"pong": true}}`, then immediately start another
@@ -234,6 +240,16 @@ when it appears in your session.
 queue actions. Agents should receive queued work through `pbx_poll_commands` in
 explicit nohup mode rather than queueing work for themselves.
 
+## Joplin Notes
+
+If the operator asks you to create a Joplin note, export analysis to notes, or
+produce a Markdown document, first call `pbx_joplin_status`. If Joplin is not
+configured or unavailable, report that clearly and continue local work. If it is
+available, use `pbx_joplin_create_document` with the current `agent_id`,
+project, title, body, optional session id, and optional Mermaid blocks. Keep the
+document self-contained, avoid secrets, and prefer fenced `mermaid` blocks for
+diagrams so Joplin can render them safely.
+
 ## Nohup Mode Loop
 
 1. Poll with `pbx_poll_commands` before starting work, after each report,
@@ -351,6 +367,8 @@ def runbook_payload() -> dict[str, Any]:
             "pbx_poll_commands receives queued operator commands in explicit nohup mode only.",
             "pbx_ack_command acknowledges a delivered command for this agent_id after handling it in explicit nohup mode.",
             "pbx_queue_command is for operators, the TUI, tests, and control-plane helpers; agents should not self-queue work.",
+            "pbx_joplin_status reports whether server-side Joplin note export is configured and available.",
+            "pbx_joplin_create_document creates a Markdown note under the scoped Agent PBX Joplin notebook when the operator requests a note or document.",
         ],
         "pbx_modes": [
             "Default 'use Agent PBX' means report mode: register with metadata.pbx_mode='report' and send pbx_report_turn updates.",
@@ -373,6 +391,13 @@ def runbook_payload() -> dict[str, Any]:
             "Do not enter nohup mode because a custom slash command was used.",
             "Treat the resulting text like a normal operator prompt after it reaches the Codex session.",
             "pbx_queue_command is the MCP queueing equivalent for operator/control-plane actions, not normal agent-side behavior.",
+        ],
+        "joplin_notes": [
+            "Call pbx_joplin_status before creating a Joplin note or document.",
+            "If Joplin is unavailable, report that clearly and continue local work.",
+            "Use pbx_joplin_create_document for operator-requested Markdown documents under the Agent PBX notebook.",
+            "Use fenced mermaid blocks for diagrams and avoid secrets in note content or metadata.",
+            "Routine PBX status reports do not need Joplin tools unless the operator asks for note export or LOG/COPY is enabled by the TUI.",
         ],
         "active_loop": [
             "Use pbx_report_turn for milestones, blockers, test results, deployment results, and final outcomes.",
