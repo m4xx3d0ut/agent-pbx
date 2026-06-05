@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 from fastapi import (
     BackgroundTasks,
@@ -27,7 +28,9 @@ from .config import ServerConfig
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
 from .joplin import (
+    JoplinApiError,
     JoplinConfig,
+    JoplinScopeError,
     JoplinService,
     agent_session_id,
     format_copy_body,
@@ -368,7 +371,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     ) -> list[dict[str, object]]:
         agent = require_agent(store, agent_id)
         joplin = require_joplin(request)
-        return await asyncio.to_thread(joplin.list_notes_for_agent, agent)
+        return await run_joplin_call(joplin.list_notes_for_agent, agent)
 
     @app.get(
         "/v1/agents/{agent_id}/joplin/notes/{note_id}",
@@ -383,7 +386,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     ) -> dict[str, object]:
         agent = require_agent(store, agent_id)
         joplin = require_joplin(request)
-        return await asyncio.to_thread(joplin.get_note_for_agent, agent, note_id)
+        return await run_joplin_call(joplin.get_note_for_agent, agent, note_id)
 
     @app.put(
         "/v1/agents/{agent_id}/joplin/notes/{note_id}",
@@ -399,7 +402,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     ) -> dict[str, object]:
         agent = require_agent(store, agent_id)
         joplin = require_joplin(request)
-        return await asyncio.to_thread(
+        return await run_joplin_call(
             joplin.update_note_for_agent,
             agent,
             note_id,
@@ -428,7 +431,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             body=body,
             metadata=metadata,
         )
-        return await asyncio.to_thread(
+        return await run_joplin_call(
             joplin.create_note_for_agent,
             agent,
             event_type="COPY",
@@ -449,7 +452,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     ) -> dict[str, object]:
         agent = require_agent(store, agent_id)
         joplin = require_joplin(request)
-        log = await asyncio.to_thread(joplin.start_log, store, agent)
+        log = await run_joplin_call(joplin.start_log, store, agent)
         store.append_event(
             "joplin_log_started",
             {"agent_id": agent_id, "note_id": log["note_id"], "title": log["title"]},
@@ -469,7 +472,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     ) -> dict[str, object] | None:
         require_agent(store, agent_id)
         joplin = require_joplin(request)
-        log = await asyncio.to_thread(joplin.stop_log, store, agent_id)
+        log = await run_joplin_call(joplin.stop_log, store, agent_id)
         if log is not None:
             store.append_event(
                 "joplin_log_stopped",
@@ -498,7 +501,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 else {},
             }
         joplin = require_joplin(request)
-        return await asyncio.to_thread(
+        return await run_joplin_call(
             joplin.create_document,
             agent=agent,
             title=payload.title,
@@ -734,6 +737,38 @@ def require_joplin(request: Request) -> JoplinService:
             detail=status_payload["error"],
         )
     return joplin
+
+
+async def run_joplin_call(
+    func: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    try:
+        return await asyncio.to_thread(func, *args, **kwargs)
+    except JoplinScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "JOPLIN_NOTE_OUT_OF_SCOPE",
+                "message": str(exc),
+                "retryable": False,
+            },
+        ) from exc
+    except JoplinApiError as exc:
+        response_status = (
+            status.HTTP_404_NOT_FOUND
+            if exc.status_code == status.HTTP_404_NOT_FOUND
+            else status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+        raise HTTPException(
+            status_code=response_status,
+            detail={
+                "code": "JOPLIN_API_ERROR",
+                "message": str(exc),
+                "retryable": response_status != status.HTTP_404_NOT_FOUND,
+            },
+        ) from exc
 
 
 def joplin_copy_source(

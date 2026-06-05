@@ -12,7 +12,7 @@ import pytest
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
 from agent_pbx.mcp_tools import build_mcp_server
-from agent_pbx.joplin import JoplinConfig, JoplinService
+from agent_pbx.joplin import JoplinConfig, JoplinScopeError, JoplinService
 from agent_pbx.schemas import AgentRegisterRequest, CommandCreateRequest, ReportCreateRequest
 from agent_pbx.store import Store
 
@@ -23,6 +23,7 @@ class FakeJoplinApi:
         self.notes: dict[str, dict[str, object]] = {}
         self.next_folder = 1
         self.next_note = 1
+        self.folder_note_requests: list[str] = []
 
     def client(self) -> httpx.Client:
         return httpx.Client(transport=httpx.MockTransport(self.handle))
@@ -44,6 +45,15 @@ class FakeJoplinApi:
             }
             self.folders[folder_id] = folder
             return self.json(folder)
+        if path.startswith("/folders/") and path.endswith("/notes"):
+            folder_id = path.split("/")[2]
+            self.folder_note_requests.append(folder_id)
+            notes = [
+                note
+                for note in self.notes.values()
+                if str(note.get("parent_id") or "") == folder_id
+            ]
+            return self.json({"items": notes, "has_more": False})
         if path == "/notes" and request.method == "GET":
             parent_id = query.get("parent_id", [""])[0]
             notes = [
@@ -241,8 +251,38 @@ def test_joplin_service_creates_scoped_notebooks_and_notes() -> None:
     ]
     assert note["title"] == "Copy"
     assert notes[0]["id"] == note["id"]
+    assert fake.folder_note_requests == [str(note["parent_id"])]
     assert fetched["body"] == "Body"
     assert updated["body"] == "Updated"
+
+
+def test_joplin_service_lists_notes_with_folder_scoped_endpoint() -> None:
+    fake = FakeJoplinApi()
+    service = make_service(fake)
+    agent = {
+        "agent_id": "agent-1",
+        "project": "demo",
+        "metadata": {"session_id": "session-1"},
+    }
+    note = service.create_note_for_agent(
+        agent,
+        event_type="COPY",
+        title="Scoped",
+        body="Body",
+    )
+    fake.notes["outside"] = {
+        "id": "outside",
+        "parent_id": "unrelated-folder",
+        "title": "Outside",
+        "body": "Nope",
+        "created_time": 1_700_000_000_000,
+        "updated_time": 1_700_000_000_000,
+    }
+
+    notes = service.list_notes_for_agent(agent)
+
+    assert [item["id"] for item in notes] == [note["id"]]
+    assert fake.folder_note_requests == [str(note["parent_id"])]
 
 
 def test_joplin_log_appends_operator_prompt_and_terminal_report(tmp_path: Path) -> None:
@@ -335,6 +375,34 @@ def test_joplin_api_status_copy_log_and_update(
     assert stopped.json()["active"] is False
     assert report["report_id"] in fake.report_logs
     assert command["command_id"] in fake.command_logs
+
+
+def test_joplin_api_returns_not_found_for_out_of_scope_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ScopeFailingJoplinService(FakeJoplinService):
+        def get_note_for_agent(
+            self,
+            _agent: dict[str, object],
+            _note_id: str,
+        ) -> dict[str, object]:
+            raise JoplinScopeError("note is outside the selected agent's Joplin scope")
+
+    monkeypatch.setattr(
+        "agent_pbx.api.JoplinService",
+        lambda _config: ScopeFailingJoplinService(),
+    )
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+
+    response = client.get("/v1/agents/agent-1/joplin/notes/outside")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "JOPLIN_NOTE_OUT_OF_SCOPE"
 
 
 @pytest.mark.asyncio

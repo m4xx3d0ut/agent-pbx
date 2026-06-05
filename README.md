@@ -331,10 +331,24 @@ saves edits inside the Agent PBX notebook scope only.
 Agents can call `pbx_joplin_status` and `pbx_joplin_create_document` when the
 operator asks for a Markdown note or document. Mermaid diagrams should be passed
 as fenced Mermaid blocks so Joplin can render them safely. Default tests use a
-fake Joplin API; for end-to-end development, run a disposable Joplin profile
-against your preferred local WebDAV container and set
-`AGENT_PBX_JOPLIN_WEBDAV_URL`, `AGENT_PBX_JOPLIN_WEBDAV_USERNAME`, and
-`AGENT_PBX_JOPLIN_WEBDAV_PASSWORD` in gitignored `local.env`.
+fake Joplin API; for end-to-end development, run a disposable Joplin profile.
+
+Configure WebDAV and end-to-end encryption in Joplin itself, then keep Agent PBX
+pointed at the local REST API. Do not persist WebDAV or E2EE decrypt passwords in
+`local.env`; enter them interactively in the dedicated Joplin profile or use an
+external secret helper outside Agent PBX. A headless profile can be run in tmux:
+
+```bash
+joplin --profile ~/.config/joplin-agent-pbx
+# Inside Joplin: :config sync.target 6
+# Inside Joplin: :sync
+# If encrypted: :e2ee decrypt
+# Inside Joplin: :server start
+```
+
+The Joplin API token is still sensitive. Store it only in
+`${XDG_CONFIG_HOME:-~/.config}/agent-pbx/local.env` or repo-local `local.env`
+with `chmod 600`, and treat the Joplin profile directory as private.
 
 ## Files TUI Browser
 

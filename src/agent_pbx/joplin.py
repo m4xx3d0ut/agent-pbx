@@ -35,6 +35,32 @@ TERMINAL_LOG_STATUSES = {
 }
 
 
+class JoplinApiError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+    @classmethod
+    def from_response(cls, path: str, response: httpx.Response) -> JoplinApiError:
+        message = response.text.strip()
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            raw_error = payload.get("error") or payload.get("message")
+            if raw_error:
+                message = str(raw_error)
+        return cls(
+            f"Joplin API {response.status_code} for {path}: {message}",
+            status_code=response.status_code,
+        )
+
+
+class JoplinScopeError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class JoplinConfig:
     api_url: str | None = None
@@ -118,9 +144,8 @@ class JoplinService:
     def list_notes_for_agent(self, agent: dict[str, Any]) -> list[dict[str, Any]]:
         folder_id = self.ensure_agent_folder(agent)
         notes = self._get_paginated(
-            "/notes",
+            f"/folders/{folder_id}/notes",
             {
-                "parent_id": folder_id,
                 "fields": "id,parent_id,title,created_time,updated_time",
                 "order_by": "updated_time",
                 "order_dir": "DESC",
@@ -136,7 +161,7 @@ class JoplinService:
             params={"fields": "id,parent_id,title,body,created_time,updated_time"},
         )
         if str(note.get("parent_id") or "") != folder_id:
-            raise ValueError("note is outside the selected agent's Joplin scope")
+            raise JoplinScopeError("note is outside the selected agent's Joplin scope")
         return self._note_response(note)
 
     def update_note_for_agent(
@@ -345,9 +370,14 @@ class JoplinService:
                 params=request_params,
                 json=json,
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise JoplinApiError.from_response(path, exc.response) from exc
             data = response.json()
             return data if isinstance(data, dict) else {"items": data}
+        except httpx.HTTPError as exc:
+            raise JoplinApiError(f"Joplin API request failed for {path}: {exc}") from exc
         finally:
             if close_client:
                 client.close()
