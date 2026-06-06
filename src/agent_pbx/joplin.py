@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import threading
 import time
 from typing import Any
 
@@ -92,6 +95,7 @@ class JoplinService:
         self.clock = clock
         self._root_notebook_id: str | None = None
         self._folder_cache: dict[tuple[str | None, str], str] = {}
+        self._sync_lock = threading.Lock()
 
     def status(self) -> dict[str, Any]:
         base = {
@@ -183,7 +187,20 @@ class JoplinService:
         updated = self.get_note_for_agent(agent, note_id)
         if updated["updated_time"] == existing["updated_time"] and payload:
             updated["updated_time"] = self.clock()
+        if payload and self.config.sync_on_write:
+            self.sync()
         return updated
+
+    def delete_note_for_agent(
+        self,
+        agent: dict[str, Any],
+        note_id: str,
+    ) -> dict[str, Any]:
+        existing = self.get_note_for_agent(agent, note_id)
+        self._request("DELETE", f"/notes/{note_id}")
+        if self.config.sync_on_write:
+            self.sync()
+        return existing
 
     def create_note_for_agent(
         self,
@@ -288,6 +305,21 @@ class JoplinService:
         self.append_to_note(str(active["note_id"]), markdown_section("Agent Response", body))
         store.touch_joplin_log(active["log_id"])
 
+    def append_log_section(
+        self,
+        store: Any,
+        agent_id: str,
+        *,
+        title: str,
+        body: str,
+    ) -> dict[str, Any] | None:
+        active = store.get_active_joplin_log(agent_id)
+        if active is None:
+            return None
+        self.append_to_note(str(active["note_id"]), markdown_section(title, body))
+        store.touch_joplin_log(active["log_id"])
+        return store.get_joplin_log(active["log_id"]) or active
+
     def append_to_note(self, note_id: str, markdown: str) -> dict[str, Any]:
         note = self._request(
             "GET",
@@ -343,10 +375,41 @@ class JoplinService:
         return None
 
     def sync(self) -> None:
-        # The Joplin REST API does not expose every CLI sync primitive. Keep this
-        # as a no-op hook so future CLI-backed sync can be added without changing
-        # callers.
-        return None
+        command = self.sync_command()
+        timeout = max(self.config.timeout_seconds, 60.0)
+        with self._sync_lock:
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise JoplinApiError(f"Joplin sync failed: {exc}") from exc
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout).strip()
+            raise JoplinApiError(
+                f"Joplin sync failed with exit code {result.returncode}: {message}"
+            )
+        sync_error = joplin_sync_error(result.stdout, result.stderr)
+        if sync_error:
+            raise JoplinApiError(f"Joplin sync reported an error: {sync_error}")
+
+    def sync_command(self) -> list[str]:
+        joplin_bin = self.config.joplin_bin
+        executable = str(joplin_bin) if joplin_bin else shutil.which("joplin")
+        if not executable:
+            raise JoplinApiError(
+                f"{JOPLIN_SYNC_ON_WRITE_ENV}=1 requires {JOPLIN_BIN_ENV} "
+                "or a joplin executable on PATH"
+            )
+        command = [executable]
+        if self.config.profile:
+            command.extend(["--profile", str(self.config.profile)])
+        command.append("sync")
+        return command
 
     def _request(
         self,
@@ -374,6 +437,8 @@ class JoplinService:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 raise JoplinApiError.from_response(path, exc.response) from exc
+            if not response.content:
+                return {}
             data = response.json()
             return data if isinstance(data, dict) else {"items": data}
         except httpx.HTTPError as exc:
@@ -455,6 +520,21 @@ def env_float(name: str, default: float) -> float:
 
 def env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def joplin_sync_error(stdout: str, stderr: str) -> str:
+    output = "\n".join(part.strip() for part in (stdout, stderr) if part.strip())
+    if not output:
+        return ""
+    markers = (
+        "Last error:",
+        "Master key is not loaded",
+        "Your password is needed to decrypt",
+    )
+    for line in reversed(output.splitlines()):
+        if any(marker in line for marker in markers):
+            return line.strip()
+    return ""
 
 
 def normalize_parent_id(value: object) -> str | None:

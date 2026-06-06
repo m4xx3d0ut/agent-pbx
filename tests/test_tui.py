@@ -13,6 +13,7 @@ from agent_pbx.tui import (
     PlanSelection,
     TMUX_LIVENESS_IDLE_SECONDS,
     DEFAULT_SPLIT_PERCENT,
+    built_in_palette_command_names,
     contains_codex_native_plan_selector,
     env_custom_palette,
     env_flag,
@@ -648,6 +649,9 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         joplin_status = app.query_one("#joplin-status", Static)
         joplin_notes = app.query_one("#joplin-notes", DataTable)
         joplin_body = app.query_one("#joplin-body", TextArea)
+        joplin_new = app.query_one("#joplin-new", Button)
+        joplin_rename = app.query_one("#joplin-rename", Button)
+        joplin_delete = app.query_one("#joplin-delete", Button)
         joplin_refresh = app.query_one("#joplin-refresh", Button)
         joplin_copy = app.query_one("#joplin-copy-latest", Button)
         joplin_log_start = app.query_one("#joplin-log-start", Button)
@@ -686,6 +690,9 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert str(joplin_status.renderable).startswith("Joplin:")
         assert joplin_notes.cursor_type == "row"
         assert joplin_body.read_only is False
+        assert joplin_new.label.plain == "New"
+        assert joplin_rename.label.plain == "Rename"
+        assert joplin_delete.label.plain == "Delete"
         assert joplin_refresh.label.plain == "Refresh"
         assert joplin_copy.label.plain == "Copy Latest"
         assert joplin_log_start.label.plain == "Start LOG"
@@ -700,6 +707,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
         assert "#joplin-notes {\n        height: 8;" in app.CSS
         assert "#joplin-body {\n        height: 1fr;" in app.CSS
+        assert "#joplin-actions {\n        height: 6;" in app.CSS
         assert "#tmux-message {\n        height: 8;" in app.CSS
         assert "Notification Options" not in app.CSS
         assert message.soft_wrap is True
@@ -2494,6 +2502,23 @@ def test_tui_custom_slash_commands_parse_and_validate() -> None:
     assert any("{file}" in error for error in errors)
 
 
+def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
+    names = built_in_palette_command_names()
+
+    assert {
+        "/joplin",
+        "/joplin refresh",
+        "/joplin new",
+        "/joplin rename",
+        "/joplin delete",
+        "/joplin copy",
+        "/joplin copy report",
+        "/joplin log start",
+        "/joplin log stop",
+        "/joplin save",
+    } <= names
+
+
 def test_tui_load_custom_slash_commands_from_file(tmp_path: Path) -> None:
     path = tmp_path / "slash-commands.json"
     path.write_text(
@@ -2861,6 +2886,19 @@ async def test_tui_follow_up_tab_completes_ctrl_c_command() -> None:
     assert message.text == "/ctrlc"
 
 
+async def test_tui_follow_up_tab_completes_joplin_action_command() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.joplin_configured = True
+        message = app.query_one("#message", TextArea)
+        message.text = "/joplin c"
+        message.move_cursor((0, len("/joplin c")))
+        await message._on_key(Key("tab", "\t"))
+
+    assert message.text == "/joplin copy"
+
+
 async def test_tui_follow_up_exact_slash_command_executes_locally() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     calls: list[str] = []
@@ -2881,6 +2919,164 @@ async def test_tui_follow_up_exact_slash_command_executes_locally() -> None:
 
     assert calls == ["agent-1"]
     assert message.text == ""
+
+
+async def test_tui_follow_up_exact_joplin_action_executes_locally() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_joplin_action_for_agent(agent_id: str, action: str) -> None:
+        calls.append((agent_id, action))
+
+    app.joplin_action_for_agent = fake_joplin_action_for_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.joplin_configured = True
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        message = app.query_one("#message", TextArea)
+        message.text = "/joplin copy"
+        await app.send_input()
+        await pilot.pause()
+
+    assert calls == [("agent-1", "copy")]
+    assert message.text == ""
+
+
+async def test_tui_follow_up_exact_joplin_copy_report_executes_locally() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_joplin_action_for_agent(agent_id: str, action: str) -> None:
+        calls.append((agent_id, action))
+
+    app.joplin_action_for_agent = fake_joplin_action_for_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.joplin_configured = True
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        message = app.query_one("#message", TextArea)
+        message.text = "/joplin copy report"
+        await app.send_input()
+        await pilot.pause()
+
+    assert calls == [("agent-1", "copy-report")]
+    assert message.text == ""
+
+
+async def test_tui_joplin_copy_tmux_response_uses_codex_copy_clipboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_features_available = True
+    app.tmux_direct_enabled = True
+    posts: list[dict[str, object]] = []
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+    loaded: list[str] = []
+    clipboard_reads = iter(
+        [
+            ("old clipboard", "fake-clipboard"),
+            ("Codex response markdown", "fake-clipboard"),
+        ]
+    )
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            return Response({"id": "note-1"})
+
+    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_ensure_joplin_available() -> bool:
+        return True
+
+    async def fake_load_joplin_notes(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_clipboard_text",
+        lambda: next(clipboard_reads),
+    )
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
+    app.ensure_joplin_available = fake_ensure_joplin_available  # type: ignore[method-assign]
+    app.load_joplin_notes = fake_load_joplin_notes  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.joplin_configured = True
+        app.sent_message_history_by_agent["agent-1"] = [
+            "first prompt",
+            "last useful prompt",
+            "/joplin copy",
+        ]
+        await app.copy_latest_to_joplin("agent-1")
+
+    assert sent == [("agent-1", "/copy")]
+    assert captures == ["agent-1"]
+    assert loaded == ["agent-1"]
+    assert posts[0]["path"] == "/v1/agents/agent-1/joplin/copy"
+    payload = posts[0]["json"]
+    assert isinstance(payload, dict)
+    assert payload["title"] == "Codex Response - last useful prompt"
+    assert "## Prompt" in str(payload["body"])
+    assert "last useful prompt" in str(payload["body"])
+    assert "## Response" in str(payload["body"])
+    assert "Codex response markdown" in str(payload["body"])
+
+
+async def test_tui_tmux_joplin_log_response_appends_copied_response() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    calls: list[tuple[str, str, str]] = []
+
+    async def fake_wait_for_tmux_log_idle(agent_id: str) -> bool:
+        return agent_id == "agent-1"
+
+    async def fake_copy_tmux_response_text(agent_id: str) -> tuple[str, str] | None:
+        assert agent_id == "agent-1"
+        return "Codex response markdown", "fake-clipboard"
+
+    async def fake_append_joplin_log_section(
+        agent_id: str,
+        *,
+        title: str,
+        body: str,
+    ) -> bool:
+        calls.append((agent_id, title, body))
+        return True
+
+    app.wait_for_tmux_log_idle = fake_wait_for_tmux_log_idle  # type: ignore[method-assign]
+    app.copy_tmux_response_text = fake_copy_tmux_response_text  # type: ignore[method-assign]
+    app.append_joplin_log_section = fake_append_joplin_log_section  # type: ignore[method-assign]
+
+    await app.capture_tmux_joplin_log_response("agent-1")
+
+    assert calls == [
+        (
+            "agent-1",
+            "Agent Response",
+            "Clipboard: fake-clipboard\n\nCodex response markdown",
+        )
+    ]
 
 
 async def test_tui_follow_up_exact_theme_command_executes_without_agent() -> None:

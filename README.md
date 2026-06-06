@@ -316,17 +316,50 @@ results.
 export AGENT_PBX_JOPLIN_API_URL=http://127.0.0.1:41184
 export AGENT_PBX_JOPLIN_TOKEN=<joplin-api-token>
 export AGENT_PBX_JOPLIN_NOTEBOOK="Agent PBX"
+export AGENT_PBX_JOPLIN_BIN="$HOME/.joplin-bin/bin/joplin"
+export AGENT_PBX_JOPLIN_PROFILE="$HOME/.config/joplin-agent-pbx"
+export AGENT_PBX_JOPLIN_SYNC_ON_WRITE=1
 agent-pbx mcp restart --token dev-token
 agent-pbx tui --token dev-token
 ```
+
+Agent PBX writes notes through the local Joplin REST API. To push those writes
+to WebDAV immediately, enable `AGENT_PBX_JOPLIN_SYNC_ON_WRITE=1` and provide a
+Joplin CLI path/profile. After each create, edit, delete, COPY note, or LOG
+append, Agent PBX runs `joplin --profile <profile> sync`. Leave this off if a
+separate Joplin client or background process already syncs the profile.
+If WebDAV sync uses E2EE, the dedicated profile must have its master key loaded;
+otherwise Joplin may exit successfully while reporting `Master key is not
+loaded`, and Agent PBX will surface that as a sync failure.
 
 When first used, Agent PBX lazily creates one top-level Joplin notebook, then
 nests notes as `project > agent`. Note titles use
 `session-id-YYYYmmddTHHMMSSZ-COPY|LOG|DOC`. `Copy Latest` writes the selected
 agent's latest report to a new Markdown note. `Start LOG` creates a growing log
 note and appends queued operator prompts plus terminal agent responses until
-`Stop LOG` is pressed. The tab also lists scoped notes, previews Markdown, and
-saves edits inside the Agent PBX notebook scope only.
+`Stop LOG` is pressed. In tmux direct mode, an active LOG appends prompts sent
+through Agent PBX, waits for the tmux pane to settle, then asks Codex for `/copy`
+and appends the copied response. The tab also lists scoped notes, previews
+Markdown, and supports quick create, rename, delete, and save controls inside
+the Agent PBX notebook scope only.
+
+Joplin actions are available from the tab buttons and the local TUI
+palette/slash commands: `/joplin` opens the tab, `/joplin refresh` reloads
+scoped notes, `/joplin new` creates a scoped note, `/joplin rename` renames the
+selected note, `/joplin delete` confirms and deletes the selected scoped note,
+`/joplin copy` copies the latest Codex response in tmux direct mode, `/joplin
+copy report` copies the latest PBX report, `/joplin log start` and `/joplin log
+stop` control the growing LOG note, and `/joplin save` saves the selected note
+body.
+
+In tmux direct mode, `/joplin copy` sends Codex `/copy` to the selected pane,
+reads the copied response with a local clipboard helper such as `wl-paste`,
+`xclip`, `xsel`, `pbpaste`, `termux-clipboard-get`, or `tmux show-buffer`, then
+creates a Markdown COPY note with the last prompt recorded by the TUI and the
+copied response. If no clipboard reader is available, use `/joplin copy report`
+or configure clipboard integration for the terminal/tmux session. The tmux LOG
+path uses the same `/copy` and clipboard helper flow; it does not append guessed
+screen text when clipboard capture fails.
 
 Agents can call `pbx_joplin_status` and `pbx_joplin_create_document` when the
 operator asks for a Markdown note or document. Mermaid diagrams should be passed
@@ -344,6 +377,15 @@ joplin --profile ~/.config/joplin-agent-pbx
 # Inside Joplin: :sync
 # If encrypted: :e2ee decrypt
 # Inside Joplin: :server start
+```
+
+For E2EE troubleshooting from a shell:
+
+```bash
+joplin --profile ~/.config/joplin-agent-pbx e2ee status
+joplin --profile ~/.config/joplin-agent-pbx
+# Inside Joplin: :e2ee decrypt
+# Then retry: :sync
 ```
 
 The Joplin API token is still sensitive. Store it only in
@@ -495,13 +537,15 @@ show the same pinned agents; the TUI settings file keeps a local cache/fallback.
 
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/tmux`, `/workerbee`,
-configured `/joplin`, `/theme minimal`, and `/layout compact`. `/cancel` marks
-a stale or abandoned session canceled in PBX; it does not send an Escape key.
-Use `/esc` when you need a real Escape key event. In tmux direct mode, `/esc`
-sends `tmux send-keys Escape` to the selected Codex pane. Outside tmux direct
-mode, it queues a `send_key` command with `key="escape"` for nohup-mode agents
-that poll PBX. Use `/ctrlc` in tmux direct mode to send `tmux send-keys C-c`
-to the selected Codex pane, for example to back out of a `/side` chat.
+configured `/joplin`, `/joplin new`, `/joplin rename`, `/joplin delete`,
+`/joplin copy`, `/joplin copy report`, `/theme minimal`, and `/layout compact`.
+`/cancel` marks a stale or abandoned session canceled in PBX; it does not send
+an Escape key. Use `/esc` when you need a real Escape key event. In tmux direct
+mode, `/esc` sends `tmux send-keys Escape` to the selected Codex pane. Outside
+tmux direct mode, it queues a `send_key` command with `key="escape"` for
+nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
+`tmux send-keys C-c` to the selected Codex pane, for example to back out of a
+`/side` chat.
 
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete cached project paths from the Files

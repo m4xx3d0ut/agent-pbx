@@ -12,7 +12,12 @@ import pytest
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
 from agent_pbx.mcp_tools import build_mcp_server
-from agent_pbx.joplin import JoplinConfig, JoplinScopeError, JoplinService
+from agent_pbx.joplin import (
+    JoplinApiError,
+    JoplinConfig,
+    JoplinScopeError,
+    JoplinService,
+)
 from agent_pbx.schemas import AgentRegisterRequest, CommandCreateRequest, ReportCreateRequest
 from agent_pbx.store import Store
 
@@ -87,6 +92,9 @@ class FakeJoplinApi:
                 self.notes[note_id].update(payload)
                 self.notes[note_id]["updated_time"] = 1_700_000_010_000
                 return self.json(self.notes[note_id])
+            if request.method == "DELETE":
+                deleted = self.notes.pop(note_id)
+                return self.json(deleted)
         return self.json({"error": path}, status_code=404)
 
     @staticmethod
@@ -165,6 +173,13 @@ class FakeJoplinService:
             self.notes[note_id]["body"] = body
         return self.notes[note_id]
 
+    def delete_note_for_agent(
+        self,
+        _agent: dict[str, object],
+        note_id: str,
+    ) -> dict[str, object]:
+        return self.notes.pop(note_id)
+
     def create_note_for_agent(
         self,
         _agent: dict[str, object],
@@ -222,6 +237,22 @@ class FakeJoplinService:
     def append_report_log(self, _store: Store, report: dict[str, object]) -> None:
         self.report_logs.append(str(report["report_id"]))
 
+    def append_log_section(
+        self,
+        store: Store,
+        agent_id: str,
+        *,
+        title: str,
+        body: str,
+    ) -> dict[str, object] | None:
+        active = store.get_active_joplin_log(agent_id)
+        if active is None:
+            return None
+        note = self.notes[str(active["note_id"])]
+        note["body"] = f"{note['body']}\n\n## {title}\n\n{body}"
+        store.touch_joplin_log(str(active["log_id"]))
+        return store.get_joplin_log(str(active["log_id"]))
+
 
 def test_joplin_service_creates_scoped_notebooks_and_notes() -> None:
     fake = FakeJoplinApi()
@@ -242,6 +273,7 @@ def test_joplin_service_creates_scoped_notebooks_and_notes() -> None:
     notes = service.list_notes_for_agent(agent)
     fetched = service.get_note_for_agent(agent, note["id"])
     updated = service.update_note_for_agent(agent, note["id"], body="Updated")
+    deleted = service.delete_note_for_agent(agent, note["id"])
 
     assert status["available"] is True
     assert [folder["title"] for folder in fake.folders.values()] == [
@@ -254,6 +286,121 @@ def test_joplin_service_creates_scoped_notebooks_and_notes() -> None:
     assert fake.folder_note_requests == [str(note["parent_id"])]
     assert fetched["body"] == "Body"
     assert updated["body"] == "Updated"
+    assert deleted["id"] == note["id"]
+    assert note["id"] not in fake.notes
+
+
+def test_joplin_service_sync_on_write_runs_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeJoplinApi()
+    profile = tmp_path / "joplin-profile"
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="Done", stderr="")
+
+    monkeypatch.setattr("agent_pbx.joplin.subprocess.run", fake_run)
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=Path("/opt/joplin/bin/joplin"),
+            profile=profile,
+            sync_on_write=True,
+        ),
+        client=fake.client(),
+    )
+    agent = {
+        "agent_id": "agent-1",
+        "project": "demo",
+        "metadata": {"session_id": "session-1"},
+    }
+
+    note = service.create_note_for_agent(
+        agent,
+        event_type="COPY",
+        title="Copy",
+        body="Body",
+    )
+    service.update_note_for_agent(agent, note["id"], title="Renamed")
+    service.delete_note_for_agent(agent, note["id"])
+
+    assert commands == [
+        ["/opt/joplin/bin/joplin", "--profile", str(profile), "sync"],
+        ["/opt/joplin/bin/joplin", "--profile", str(profile), "sync"],
+        ["/opt/joplin/bin/joplin", "--profile", str(profile), "sync"],
+    ]
+
+
+def test_joplin_service_sync_on_write_reports_cli_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeJoplinApi()
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stdout="", stderr="sync target failed")
+
+    monkeypatch.setattr("agent_pbx.joplin.subprocess.run", fake_run)
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            sync_on_write=True,
+        ),
+        client=fake.client(),
+    )
+    agent = {"agent_id": "agent-1", "project": "demo", "metadata": {}}
+
+    with pytest.raises(JoplinApiError, match="sync target failed"):
+        service.create_note_for_agent(
+            agent,
+            event_type="COPY",
+            title="Copy",
+            body="Body",
+        )
+
+
+def test_joplin_service_sync_on_write_reports_zero_exit_last_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeJoplinApi()
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "Synchronization target:  (6)\n"
+                "Last error: Error: Could not encrypt item abc: "
+                "Master key is not loaded: key-1\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("agent_pbx.joplin.subprocess.run", fake_run)
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            sync_on_write=True,
+        ),
+        client=fake.client(),
+    )
+    agent = {"agent_id": "agent-1", "project": "demo", "metadata": {}}
+
+    with pytest.raises(JoplinApiError, match="Master key is not loaded"):
+        service.create_note_for_agent(
+            agent,
+            event_type="COPY",
+            title="Copy",
+            body="Body",
+        )
 
 
 def test_joplin_service_lists_notes_with_folder_scoped_endpoint() -> None:
@@ -301,6 +448,12 @@ def test_joplin_log_appends_operator_prompt_and_terminal_report(tmp_path: Path) 
         )
     )
     service.append_command_log(store, command)
+    service.append_log_section(
+        store,
+        "agent-1",
+        title="Tmux Response",
+        body="Copied from tmux.",
+    )
     report = store.create_report(
         "agent-1",
         ReportCreateRequest(
@@ -316,6 +469,8 @@ def test_joplin_log_appends_operator_prompt_and_terminal_report(tmp_path: Path) 
 
     assert "Operator Prompt" in note["body"]
     assert "Please proceed" in note["body"]
+    assert "Tmux Response" in note["body"]
+    assert "Copied from tmux." in note["body"]
     assert "Agent Response" in note["body"]
     assert "Finished the task." in note["body"]
     assert stopped is not None
@@ -348,6 +503,10 @@ def test_joplin_api_status_copy_log_and_update(
     ).json()
 
     status = client.get("/v1/joplin/status")
+    created = client.post(
+        "/v1/agents/agent-1/joplin/notes",
+        json={"title": "Scratch", "body": "Draft"},
+    )
     copied = client.post("/v1/agents/agent-1/joplin/copy")
     notes = client.get("/v1/agents/agent-1/joplin/notes")
     note_id = copied.json()["id"]
@@ -356,6 +515,10 @@ def test_joplin_api_status_copy_log_and_update(
         json={"body": "Edited"},
     )
     started = client.post("/v1/agents/agent-1/joplin/log/start")
+    appended = client.post(
+        "/v1/agents/agent-1/joplin/log/append",
+        json={"title": "Operator Prompt", "body": "Tmux prompt"},
+    )
     command = client.post(
         "/v1/commands",
         json={
@@ -365,14 +528,19 @@ def test_joplin_api_status_copy_log_and_update(
         },
     ).json()
     stopped = client.post("/v1/agents/agent-1/joplin/log/stop")
+    deleted = client.delete(f"/v1/agents/agent-1/joplin/notes/{created.json()['id']}")
 
     assert status.json()["available"] is True
+    assert created.status_code == 200
+    assert created.json()["title"] == "Scratch"
     assert copied.status_code == 200
     assert "Report detail" in copied.json()["body"]
-    assert notes.json()[0]["id"] == note_id
+    assert any(note["id"] == note_id for note in notes.json())
     assert updated.json()["body"] == "Edited"
     assert started.json()["active"] is True
+    assert appended.json()["active"] is True
     assert stopped.json()["active"] is False
+    assert deleted.json()["title"] == "Scratch"
     assert report["report_id"] in fake.report_logs
     assert command["command_id"] in fake.command_logs
 

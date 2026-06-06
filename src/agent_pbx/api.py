@@ -50,7 +50,9 @@ from .schemas import (
     FilePreviewResponse,
     JoplinCopyRequest,
     JoplinDocumentRequest,
+    JoplinLogAppendRequest,
     JoplinLogResponse,
+    JoplinNoteCreateRequest,
     JoplinNoteResponse,
     JoplinNoteSummary,
     JoplinNoteUpdateRequest,
@@ -373,6 +375,27 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         joplin = require_joplin(request)
         return await run_joplin_call(joplin.list_notes_for_agent, agent)
 
+    @app.post(
+        "/v1/agents/{agent_id}/joplin/notes",
+        response_model=JoplinNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def create_agent_joplin_note(
+        agent_id: str,
+        payload: JoplinNoteCreateRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        return await run_joplin_call(
+            joplin.create_note_for_agent,
+            agent,
+            event_type="NOTE",
+            title=payload.title or scoped_note_title(agent_session_id(agent), "NOTE"),
+            body=payload.body,
+        )
+
     @app.get(
         "/v1/agents/{agent_id}/joplin/notes/{note_id}",
         response_model=JoplinNoteResponse,
@@ -409,6 +432,27 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             title=payload.title,
             body=payload.body,
         )
+
+    @app.delete(
+        "/v1/agents/{agent_id}/joplin/notes/{note_id}",
+        response_model=JoplinNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def delete_agent_joplin_note(
+        agent_id: str,
+        note_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        deleted = await run_joplin_call(joplin.delete_note_for_agent, agent, note_id)
+        store.append_event(
+            "joplin_note_deleted",
+            {"agent_id": agent_id, "note_id": note_id},
+            agent_id,
+        )
+        return deleted
 
     @app.post(
         "/v1/agents/{agent_id}/joplin/copy",
@@ -458,6 +502,34 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             {"agent_id": agent_id, "note_id": log["note_id"], "title": log["title"]},
             agent_id,
         )
+        return log
+
+    @app.post(
+        "/v1/agents/{agent_id}/joplin/log/append",
+        response_model=JoplinLogResponse | None,
+        dependencies=[Depends(require_token)],
+    )
+    async def append_agent_joplin_log(
+        agent_id: str,
+        payload: JoplinLogAppendRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object] | None:
+        require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        log = await run_joplin_call(
+            joplin.append_log_section,
+            store,
+            agent_id,
+            title=payload.title,
+            body=payload.body,
+        )
+        if log is not None:
+            store.append_event(
+                "joplin_log_appended",
+                {"agent_id": agent_id, "note_id": log["note_id"]},
+                agent_id,
+            )
         return log
 
     @app.post(

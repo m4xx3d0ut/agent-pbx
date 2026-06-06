@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import subprocess
 import time
 from typing import Any, TypeVar
 from urllib.parse import urlparse
@@ -88,6 +89,19 @@ MIN_AGENT_REFRESH_SECONDS = 1.0
 DEFAULT_ATTENTION_BLINK_SECONDS = 0.8
 LOW_POWER_ATTENTION_BLINK_SECONDS = 3.0
 MIN_ATTENTION_BLINK_SECONDS = 0.5
+CLIPBOARD_COPY_WAIT_SECONDS = 3.0
+CLIPBOARD_COPY_POLL_SECONDS = 0.2
+JOPLIN_TMUX_LOG_MIN_WAIT_SECONDS = 2.0
+JOPLIN_TMUX_LOG_IDLE_SECONDS = 4.0
+JOPLIN_TMUX_LOG_TIMEOUT_SECONDS = 90.0
+CLIPBOARD_READ_COMMANDS = (
+    ("wl-paste", ("wl-paste", "--no-newline")),
+    ("xclip", ("xclip", "-selection", "clipboard", "-out")),
+    ("xsel", ("xsel", "--clipboard", "--output")),
+    ("pbpaste", ("pbpaste",)),
+    ("termux-clipboard-get", ("termux-clipboard-get",)),
+    ("tmux buffer", ("tmux", "show-buffer")),
+)
 FOLLOW_UP_MIN_HEIGHT = 8
 FOLLOW_UP_MAX_HEIGHT = 15
 SENT_MESSAGE_HISTORY_LIMIT = 100
@@ -210,6 +224,15 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/tmux",
     "/workerbee",
     "/joplin",
+    "/joplin refresh",
+    "/joplin new",
+    "/joplin rename",
+    "/joplin delete",
+    "/joplin copy",
+    "/joplin copy report",
+    "/joplin log start",
+    "/joplin log stop",
+    "/joplin save",
     "/plan",
     "/plan latest",
     "/plan thread",
@@ -771,6 +794,80 @@ def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME
     return names
 
 
+def read_clipboard_text() -> tuple[str, str]:
+    errors: list[str] = []
+    for label, command in CLIPBOARD_READ_COMMANDS:
+        executable = command[0]
+        if shutil.which(executable) is None:
+            continue
+        try:
+            result = subprocess.run(
+                list(command),
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+        if result.returncode == 0:
+            return result.stdout.rstrip("\n"), label
+        message = (result.stderr or result.stdout).strip()
+        if message:
+            errors.append(f"{label}: {message}")
+    if errors:
+        raise RuntimeError("; ".join(errors))
+    raise RuntimeError(
+        "no clipboard reader found; install wl-paste, xclip, xsel, pbpaste, "
+        "termux-clipboard-get, or run inside tmux with a readable tmux buffer"
+    )
+
+
+def latest_nonlocal_sent_prompt(
+    history: list[str],
+    *,
+    is_local_command: Callable[[str], bool],
+) -> str:
+    for message in reversed(history):
+        clean = message.strip()
+        if not clean:
+            continue
+        if is_local_command(clean):
+            continue
+        return clean
+    return ""
+
+
+def joplin_tmux_copy_title(prompt: str) -> str:
+    first_line = next((line.strip() for line in prompt.splitlines() if line.strip()), "")
+    if not first_line:
+        return "Codex Response"
+    if len(first_line) > 96:
+        first_line = f"{first_line[:93].rstrip()}..."
+    return f"Codex Response - {first_line}"
+
+
+def format_joplin_tmux_response_copy_body(prompt: str, response: str) -> str:
+    clean_prompt = prompt.strip()
+    clean_response = response.strip()
+    prompt_body = clean_prompt or "_No prompt was recorded by the Agent PBX TUI._"
+    response_body = clean_response or "_No copied response text was available._"
+    return "\n".join(
+        [
+            "## Prompt",
+            "",
+            "```text",
+            prompt_body,
+            "```",
+            "",
+            "## Response",
+            "",
+            response_body,
+        ]
+    )
+
+
 def bool_setting(settings: dict[str, Any], key: str, default: bool) -> bool:
     value = settings.get(key)
     return value if isinstance(value, bool) else default
@@ -1165,6 +1262,101 @@ class CustomSlashCommandArgScreen(ModalScreen[None]):
             self.submit()
 
 
+class JoplinNoteTitleScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        action: str,
+        current_title: str = "",
+    ) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.action = action
+        self.current_title = current_title
+
+    def compose(self) -> ComposeResult:
+        label = "New Joplin Note" if self.action == "new" else "Rename Joplin Note"
+        with Vertical(id="joplin-title-panel"):
+            yield Static(f"{label}: {self.agent_id}", id="joplin-title-modal-title")
+            yield Input(
+                value=self.current_title,
+                placeholder="Note title",
+                id="joplin-title-input",
+            )
+            with Horizontal(id="joplin-title-actions"):
+                yield Button(
+                    "Create" if self.action == "new" else "Rename",
+                    id="joplin-title-submit",
+                    variant="primary",
+                )
+                yield Button("Cancel", id="joplin-title-cancel")
+
+    def submit(self) -> None:
+        title = self.query_one("#joplin-title-input", Input).value.strip()
+        if not title:
+            self.notify("Joplin note title is required.", severity="warning")
+            return
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.joplin_title_action_for_agent(  # type: ignore[attr-defined]
+                self.agent_id,
+                self.action,
+                title,
+            ),
+            name=f"joplin-{self.action}-{slugify(self.agent_id)}",
+            exclusive=True,
+        )
+        self.dismiss()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "joplin-title-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "joplin-title-submit":
+            event.stop()
+            self.submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "joplin-title-input":
+            event.stop()
+            self.submit()
+
+
+class JoplinDeleteConfirmScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, *, agent_id: str, note_id: str, title: str) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.note_id = note_id
+        self.title = title
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="joplin-delete-panel"):
+            yield Static("Delete Joplin Note", id="joplin-delete-title")
+            yield Static(self.title, id="joplin-delete-note-title")
+            with Horizontal(id="joplin-delete-actions"):
+                yield Button("Delete", id="joplin-delete-confirm", variant="error")
+                yield Button("Cancel", id="joplin-delete-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "joplin-delete-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "joplin-delete-confirm":
+            event.stop()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.delete_joplin_note(self.agent_id, self.note_id),  # type: ignore[attr-defined]
+                name=f"joplin-delete-{slugify(self.agent_id)}",
+                exclusive=True,
+            )
+            self.dismiss()
+
+
 def normalized_key_names(event: Key) -> set[str]:
     values = {event.key, getattr(event, "name", "")}
     values.update(getattr(event, "aliases", []) or [])
@@ -1506,6 +1698,51 @@ class AgentPBXTUI(App[None]):
         width: 1fr;
     }
 
+    JoplinNoteTitleScreen,
+    JoplinDeleteConfirmScreen {
+        align: center middle;
+    }
+
+    #joplin-title-panel,
+    #joplin-delete-panel {
+        width: 64;
+        max-width: 90%;
+        height: auto;
+        border: tall $accent;
+        background: $panel;
+        padding: 1 2;
+    }
+
+    #joplin-title-modal-title,
+    #joplin-delete-title {
+        height: 1;
+        text-style: bold;
+        color: $primary;
+        content-align: center middle;
+    }
+
+    #joplin-title-input,
+    #joplin-delete-note-title {
+        height: 3;
+        margin-top: 1;
+    }
+
+    #joplin-delete-note-title {
+        color: $warning;
+        content-align: center middle;
+    }
+
+    #joplin-title-actions,
+    #joplin-delete-actions {
+        height: 3;
+        margin-top: 1;
+    }
+
+    #joplin-title-actions Button,
+    #joplin-delete-actions Button {
+        width: 1fr;
+    }
+
     SettingsScreen {
         align: center middle;
     }
@@ -1786,10 +2023,16 @@ class AgentPBXTUI(App[None]):
     }
 
     #joplin-actions {
+        height: 6;
+    }
+
+    #joplin-crud-actions,
+    #joplin-log-actions {
         height: 3;
     }
 
-    #joplin-actions Button {
+    #joplin-crud-actions Button,
+    #joplin-log-actions Button {
         width: 1fr;
         min-width: 1;
     }
@@ -2338,12 +2581,17 @@ class AgentPBXTUI(App[None]):
                             show_row_labels=False,
                         )
                         yield NavigationTextArea(id="joplin-body")
-                        with Horizontal(id="joplin-actions"):
-                            yield Button("Refresh", id="joplin-refresh")
-                            yield Button("Copy Latest", id="joplin-copy-latest")
-                            yield Button("Start LOG", id="joplin-log-start")
-                            yield Button("Stop LOG", id="joplin-log-stop")
-                            yield Button("Save", id="joplin-save", variant="primary")
+                        with Vertical(id="joplin-actions"):
+                            with Horizontal(id="joplin-crud-actions"):
+                                yield Button("New", id="joplin-new")
+                                yield Button("Rename", id="joplin-rename")
+                                yield Button("Delete", id="joplin-delete")
+                                yield Button("Save", id="joplin-save", variant="primary")
+                                yield Button("Refresh", id="joplin-refresh")
+                            with Horizontal(id="joplin-log-actions"):
+                                yield Button("Copy Latest", id="joplin-copy-latest")
+                                yield Button("Start LOG", id="joplin-log-start")
+                                yield Button("Stop LOG", id="joplin-log-stop")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -2444,6 +2692,15 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         if self.joplin_configured:
             yield SystemCommand("/joplin", "Open and refresh the Joplin tab", self.palette_joplin)
+            yield SystemCommand("/joplin refresh", "Refresh scoped Joplin notes", self.palette_joplin_refresh)
+            yield SystemCommand("/joplin new", "Create a scoped Joplin note", self.palette_joplin_new)
+            yield SystemCommand("/joplin rename", "Rename the selected Joplin note", self.palette_joplin_rename)
+            yield SystemCommand("/joplin delete", "Delete the selected Joplin note", self.palette_joplin_delete)
+            yield SystemCommand("/joplin copy", "Copy latest tmux response or report to Joplin", self.palette_joplin_copy)
+            yield SystemCommand("/joplin copy report", "Copy latest PBX report to Joplin", self.palette_joplin_copy_report)
+            yield SystemCommand("/joplin log start", "Start Joplin LOG for the selected agent", self.palette_joplin_log_start)
+            yield SystemCommand("/joplin log stop", "Stop Joplin LOG for the selected agent", self.palette_joplin_log_stop)
+            yield SystemCommand("/joplin save", "Save the selected Joplin note body", self.palette_joplin_save)
         yield SystemCommand("/plan", "Toggle plan mode for the selected agent", self.palette_toggle_plan_mode)
         yield SystemCommand("/plan latest", "Show latest report plan options", self.palette_plan_latest)
         yield SystemCommand("/plan thread", "Show selected thread plan options", self.palette_plan_thread)
@@ -2524,6 +2781,84 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.open_joplin_for_agent(agent_id),
             name="palette-joplin",
+            exclusive=True,
+        )
+
+    def palette_joplin_refresh(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_joplin_for_agent(agent_id),
+            name="palette-joplin-refresh",
+            exclusive=True,
+        )
+
+    def palette_joplin_new(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.open_joplin_title_modal(agent_id, action="new")
+
+    def palette_joplin_rename(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.open_joplin_title_modal(agent_id, action="rename")
+
+    def palette_joplin_delete(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.confirm_delete_joplin_note(agent_id)
+
+    def palette_joplin_copy(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "copy"),
+            name="palette-joplin-copy",
+            exclusive=True,
+        )
+
+    def palette_joplin_copy_report(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "copy-report"),
+            name="palette-joplin-copy-report",
+            exclusive=True,
+        )
+
+    def palette_joplin_log_start(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "log-start"),
+            name="palette-joplin-log-start",
+            exclusive=True,
+        )
+
+    def palette_joplin_log_stop(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "log-stop"),
+            name="palette-joplin-log-stop",
+            exclusive=True,
+        )
+
+    def palette_joplin_save(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "save"),
+            name="palette-joplin-save",
             exclusive=True,
         )
 
@@ -2664,6 +2999,7 @@ class AgentPBXTUI(App[None]):
         sent = await self.send_text_to_tmux(agent_id, prompt)
         if not sent:
             return
+        await self.record_tmux_joplin_interaction(agent_id, prompt)
         self.notify(f"{label} sent to tmux for {agent_id}.")
         await self.load_tmux_capture(agent_id)
 
@@ -2893,14 +3229,41 @@ class AgentPBXTUI(App[None]):
         if not self.joplin_configured:
             self.notify("Joplin is not configured on this Agent PBX server.", severity="warning")
             return
-        tabs = self.query_one_or_none("#agent-tabs", TabbedContent)
-        if tabs is not None:
-            tabs.active = "joplin-tab"
-        self.active_agent_tab = "joplin-tab"
+        self.activate_joplin_tab()
         if agent_id in self.agents:
             await self.select_agent(agent_id)
         else:
             await self.load_joplin_notes(agent_id)
+
+    def activate_joplin_tab(self) -> None:
+        tabs = self.query_one_or_none("#agent-tabs", TabbedContent)
+        if tabs is not None:
+            tabs.active = "joplin-tab"
+        self.active_agent_tab = "joplin-tab"
+
+    async def joplin_action_for_agent(self, agent_id: str, action: str) -> None:
+        self.activate_joplin_tab()
+        self.selected_agent_id = agent_id
+        agent_input = self.query_one_or_none("#agent-id", Input)
+        if agent_input is not None:
+            agent_input.value = agent_id
+        self.update_agent_title()
+        if action == "new":
+            self.open_joplin_title_modal(agent_id, action="new")
+        elif action == "rename":
+            self.open_joplin_title_modal(agent_id, action="rename")
+        elif action == "delete":
+            self.confirm_delete_joplin_note(agent_id)
+        elif action == "copy":
+            await self.copy_latest_to_joplin(agent_id)
+        elif action == "copy-report":
+            await self.copy_latest_report_to_joplin(agent_id)
+        elif action == "log-start":
+            await self.start_joplin_log(agent_id)
+        elif action == "log-stop":
+            await self.stop_joplin_log(agent_id)
+        elif action == "save":
+            await self.save_joplin_note(agent_id)
 
     async def action_refresh(self) -> None:
         await self.refresh_agents()
@@ -5145,6 +5508,18 @@ class AgentPBXTUI(App[None]):
             if self.selected_agent_id:
                 await self.load_workerbee_status(self.selected_agent_id)
             return
+        if event.button.id == "joplin-new":
+            if self.selected_agent_id:
+                self.open_joplin_title_modal(self.selected_agent_id, action="new")
+            return
+        if event.button.id == "joplin-rename":
+            if self.selected_agent_id:
+                self.open_joplin_title_modal(self.selected_agent_id, action="rename")
+            return
+        if event.button.id == "joplin-delete":
+            if self.selected_agent_id:
+                self.confirm_delete_joplin_note(self.selected_agent_id)
+            return
         if event.button.id == "joplin-refresh":
             if self.selected_agent_id:
                 await self.load_joplin_notes(self.selected_agent_id)
@@ -5320,6 +5695,7 @@ class AgentPBXTUI(App[None]):
             return
         self.clear_pending_slash_command(agent_id)
         self.record_sent_message(agent_id, message)
+        await self.record_tmux_joplin_interaction(agent_id, message)
         message_input.text = ""
         await self.load_tmux_capture(agent_id)
 
@@ -5413,6 +5789,7 @@ class AgentPBXTUI(App[None]):
             sent_prompt = await self.send_text_to_tmux(agent_id, plan_prompt)
             if not sent_prompt:
                 return False
+            await self.record_tmux_joplin_interaction(agent_id, plan_prompt)
             self.notify(f"Plan prompt sent to tmux for {agent_id}.")
             self.plan_mode_active_agent_ids.add(agent_id)
             self.update_agent_title()
@@ -5732,6 +6109,7 @@ class AgentPBXTUI(App[None]):
             sent = await self.send_text_to_tmux(agent_id, message)
             if not sent:
                 return False
+            await self.record_tmux_joplin_interaction(agent_id, message)
             self.notify(f"Sent /plan:{selection.index} reply to Codex pane for {agent_id}.")
             await self.load_tmux_capture(agent_id)
             return True
@@ -6500,6 +6878,115 @@ class AgentPBXTUI(App[None]):
             except Exception:
                 return
 
+    def current_joplin_note_title(self, agent_id: str, note_id: str | None) -> str:
+        if not note_id:
+            return ""
+        note = self.joplin_notes_by_agent.get(agent_id, {}).get(note_id, {})
+        return str(note.get("title") or note_id)
+
+    def open_joplin_title_modal(self, agent_id: str, *, action: str) -> None:
+        if action == "rename" and not self.selected_joplin_note_id:
+            self.notify("Select a Joplin note before renaming.", severity="warning")
+            return
+        current_title = (
+            self.current_joplin_note_title(agent_id, self.selected_joplin_note_id)
+            if action == "rename"
+            else ""
+        )
+        self.push_screen(
+            JoplinNoteTitleScreen(
+                agent_id=agent_id,
+                action=action,
+                current_title=current_title,
+            )
+        )
+
+    async def joplin_title_action_for_agent(
+        self,
+        agent_id: str,
+        action: str,
+        title: str,
+    ) -> None:
+        if action == "new":
+            await self.create_joplin_note(agent_id, title=title)
+            return
+        if action == "rename":
+            await self.rename_joplin_note(agent_id, title=title)
+            return
+        self.notify(f"Unknown Joplin action: {action}", severity="warning")
+
+    async def create_joplin_note(self, agent_id: str, *, title: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
+        body = f"# {title.strip()}\n\n"
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/joplin/notes",
+                json={"title": title.strip(), "body": body},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            note = response.json()
+        except Exception as exc:
+            self.notify(f"Joplin note create failed: {exc}", severity="error")
+            return
+        self.selected_joplin_note_id = str(note.get("id") or "")
+        self.notify("Joplin note created.")
+        await self.load_joplin_notes(agent_id)
+
+    async def rename_joplin_note(self, agent_id: str, *, title: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
+        note_id = self.selected_joplin_note_id
+        if not note_id:
+            self.notify("Select a Joplin note before renaming.", severity="warning")
+            return
+        try:
+            response = await self.api_client().put(
+                f"/v1/agents/{agent_id}/joplin/notes/{note_id}",
+                json={"title": title.strip()},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"Joplin rename failed: {exc}", severity="error")
+            return
+        self.notify("Joplin note renamed.")
+        await self.load_joplin_notes(agent_id)
+
+    def confirm_delete_joplin_note(self, agent_id: str) -> None:
+        note_id = self.selected_joplin_note_id
+        if not note_id:
+            self.notify("Select a Joplin note before deleting.", severity="warning")
+            return
+        self.push_screen(
+            JoplinDeleteConfirmScreen(
+                agent_id=agent_id,
+                note_id=note_id,
+                title=self.current_joplin_note_title(agent_id, note_id),
+            )
+        )
+
+    async def delete_joplin_note(self, agent_id: str, note_id: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
+        try:
+            response = await self.api_client().delete(
+                f"/v1/agents/{agent_id}/joplin/notes/{note_id}",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"Joplin delete failed: {exc}", severity="error")
+            return
+        if self.selected_joplin_note_id == note_id:
+            self.selected_joplin_note_id = None
+        self.notify("Joplin note deleted.")
+        await self.load_joplin_notes(agent_id)
+
     async def save_joplin_note(self, agent_id: str) -> None:
         if not await self.ensure_joplin_available():
             return
@@ -6523,6 +7010,221 @@ class AgentPBXTUI(App[None]):
         await self.load_joplin_notes(agent_id)
 
     async def copy_latest_to_joplin(self, agent_id: str) -> None:
+        if self.is_tmux_direct_enabled(agent_id):
+            await self.copy_tmux_response_to_joplin(agent_id)
+            return
+        await self.copy_latest_report_to_joplin(agent_id)
+
+    async def copy_tmux_response_text(self, agent_id: str) -> tuple[str, str] | None:
+        try:
+            previous_clipboard, _previous_source = await asyncio.to_thread(
+                read_clipboard_text
+            )
+        except Exception:
+            previous_clipboard = ""
+        sent = await self.send_keys_to_tmux(agent_id, "/copy")
+        if not sent:
+            return None
+        try:
+            return await self.read_copied_tmux_response(
+                previous_clipboard
+            )
+        except Exception as exc:
+            self.notify(f"Joplin copy failed: {exc}", severity="error")
+            return
+
+    async def copy_tmux_response_to_joplin(self, agent_id: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
+        copied = await self.copy_tmux_response_text(agent_id)
+        if copied is None:
+            return
+        response_text, clipboard_source = copied
+        prompt = self.latest_joplin_prompt_for_agent(agent_id)
+        body = format_joplin_tmux_response_copy_body(prompt, response_text)
+        title = joplin_tmux_copy_title(prompt)
+        await self.create_manual_joplin_copy(
+            agent_id,
+            title=title,
+            body=body,
+            success_message=f"Copied Codex response to Joplin via {clipboard_source}.",
+        )
+        await self.load_tmux_capture(agent_id)
+
+    async def append_joplin_log_section(
+        self,
+        agent_id: str,
+        *,
+        title: str,
+        body: str,
+    ) -> bool:
+        if not self.joplin_configured or not self.joplin_available:
+            return False
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/joplin/log/append",
+                json={"title": title, "body": body},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            log = response.json()
+        except Exception as exc:
+            self.notify(f"Joplin LOG append failed: {exc}", severity="error")
+            return False
+        return bool(log)
+
+    def should_auto_log_tmux_message(self, message: str) -> bool:
+        clean = message.strip()
+        if not clean:
+            return False
+        if clean.lower() in {PLAN_SLASH_COMMAND, "/copy"}:
+            return False
+        return True
+
+    async def record_tmux_joplin_interaction(
+        self,
+        agent_id: str,
+        message: str,
+    ) -> None:
+        if not self.should_auto_log_tmux_message(message):
+            return
+        active = await self.append_joplin_log_section(
+            agent_id,
+            title="Operator Prompt",
+            body=message,
+        )
+        if not active:
+            return
+        self.run_worker(
+            self.capture_tmux_joplin_log_response(agent_id),
+            name=f"joplin-tmux-log-{slugify(agent_id)}",
+            group=f"joplin-tmux-log-{slugify(agent_id)}",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def capture_tmux_display_for_agent(self, agent_id: str) -> str | None:
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes)
+        except Exception:
+            return None
+        self.tmux_panes = panes
+        pane, mode = self.resolve_tmux_pane(agent_id, panes)
+        if pane is None and mode == "auto":
+            pane = await self.resolve_tmux_plan_selector_pane(agent_id, panes)
+        if pane is None:
+            return None
+        try:
+            captured = await asyncio.to_thread(
+                tmux_support.capture_pane,
+                pane.pane_id,
+                lines=self.tmux_capture_lines,
+            )
+        except Exception:
+            return None
+        displayed = self.crop_tmux_capture_for_display(captured or "(empty tmux pane)")
+        self.record_tmux_capture_liveness(agent_id, pane.pane_id, displayed)
+        return displayed
+
+    async def wait_for_tmux_log_idle(self, agent_id: str) -> bool:
+        await asyncio.sleep(JOPLIN_TMUX_LOG_MIN_WAIT_SECONDS)
+        deadline = time.monotonic() + JOPLIN_TMUX_LOG_TIMEOUT_SECONDS
+        last_hash: str | None = None
+        stable_since = time.monotonic()
+        while time.monotonic() < deadline:
+            captured = await self.capture_tmux_display_for_agent(agent_id)
+            if captured is None:
+                await asyncio.sleep(1.0)
+                continue
+            capture_hash = hashlib.sha256(
+                captured.encode("utf-8", errors="replace")
+            ).hexdigest()
+            now = time.monotonic()
+            if capture_hash != last_hash:
+                last_hash = capture_hash
+                stable_since = now
+            elif now - stable_since >= JOPLIN_TMUX_LOG_IDLE_SECONDS:
+                return True
+            await asyncio.sleep(1.0)
+        return False
+
+    async def capture_tmux_joplin_log_response(self, agent_id: str) -> None:
+        if not await self.wait_for_tmux_log_idle(agent_id):
+            self.notify(
+                f"Joplin LOG response capture timed out for {agent_id}.",
+                severity="warning",
+            )
+            return
+        copied = await self.copy_tmux_response_text(agent_id)
+        if copied is None:
+            return
+        response_text, clipboard_source = copied
+        body = f"Clipboard: {clipboard_source}\n\n{response_text.strip()}"
+        appended = await self.append_joplin_log_section(
+            agent_id,
+            title="Agent Response",
+            body=body,
+        )
+        if appended and agent_id == self.selected_agent_id:
+            await self.load_joplin_notes(agent_id)
+            if self.active_agent_tab == "latest-tab":
+                await self.load_tmux_capture(agent_id)
+
+    async def read_copied_tmux_response(
+        self,
+        previous_clipboard: str,
+    ) -> tuple[str, str]:
+        deadline = time.monotonic() + CLIPBOARD_COPY_WAIT_SECONDS
+        while True:
+            text, source = await asyncio.to_thread(read_clipboard_text)
+            if text.strip() and text != previous_clipboard:
+                return text, source
+            if time.monotonic() >= deadline:
+                if text.strip():
+                    return text, source
+                break
+            await asyncio.sleep(CLIPBOARD_COPY_POLL_SECONDS)
+        raise RuntimeError(
+            "Codex /copy did not produce readable clipboard text. "
+            "Install a clipboard reader or verify terminal clipboard integration."
+        )
+
+    def latest_joplin_prompt_for_agent(self, agent_id: str) -> str:
+        history = self.sent_message_history_by_agent.get(agent_id) or []
+        return latest_nonlocal_sent_prompt(
+            history,
+            is_local_command=lambda message: self.slash_command_for_text(message)
+            is not None,
+        )
+
+    async def create_manual_joplin_copy(
+        self,
+        agent_id: str,
+        *,
+        title: str,
+        body: str,
+        success_message: str,
+    ) -> None:
+        if not await self.ensure_joplin_available():
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/joplin/copy",
+                json={"title": title, "body": body},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            note = response.json()
+        except Exception as exc:
+            self.notify(f"Joplin copy failed: {exc}", severity="error")
+            return
+        self.selected_joplin_note_id = str(note.get("id") or "")
+        self.notify(success_message)
+        await self.load_joplin_notes(agent_id)
+
+    async def copy_latest_report_to_joplin(self, agent_id: str) -> None:
         if not await self.ensure_joplin_available():
             return
         try:
@@ -6538,7 +7240,7 @@ class AgentPBXTUI(App[None]):
             self.notify(f"Joplin copy failed: {exc}", severity="error")
             return
         self.selected_joplin_note_id = str(note.get("id") or "")
-        self.notify("Copied latest report to Joplin.")
+        self.notify("Copied latest PBX report to Joplin.")
         await self.load_joplin_notes(agent_id)
 
     async def start_joplin_log(self, agent_id: str) -> None:

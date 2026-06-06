@@ -197,9 +197,19 @@ class JoplinCopyRequest(BaseModel):
     report_id: str | None = Field(default=None, max_length=120)
 
 
+class JoplinNoteCreateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=240)
+    body: str = ""
+
+
 class JoplinNoteUpdateRequest(BaseModel):
     title: str | None = Field(default=None, max_length=240)
     body: str | None = None
+
+
+class JoplinLogAppendRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    body: str = Field(min_length=1)
 
 
 class JoplinLogResponse(BaseModel):
