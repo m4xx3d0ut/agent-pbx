@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.7.0 - 2026-06-06
+
+### Highlights
+
+- Adds optional Joplin notes integration with scoped notebooks under
+  `project > agent`, MCP document export, and server-side configuration for
+  local REST API plus CLI/WebDAV sync.
+- Adds the TUI `Joplin` tab for listing, viewing, creating, renaming, deleting,
+  saving, COPY notes, and growing LOG notes within the Agent PBX notebook scope.
+- Adds tmux-direct Joplin COPY/LOG capture using Codex `/copy` and local
+  clipboard helpers, so prompts and copied responses can be written to notes.
+- Adds sync-on-write support that runs `joplin --profile <profile> sync` after
+  note writes, and surfaces Joplin zero-exit E2EE errors such as unloaded master
+  keys.
+- Improves tmux plan-selection routing and alerts, including relaxed scope for
+  visible native Codex plan selectors.
+- Syncs starred agents across TUI clients so workstation and watch-screen TUIs
+  share pinned agent ordering.
+- Expands user configuration defaults, Joplin availability guards, README
+  guidance, and AGENTS/runbook notes for Joplin and tmux-direct workflows.
+
+### Verification
+
+- `python -m pytest`
+- `git diff --check`
+- Joplin CLI sync diagnostics against the dedicated local profile
+
 ## v0.6.0 - 2026-06-02
 
 ### Highlights
