@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.8.0 - 2026-06-08
+
+### Highlights
+
+- Adds a queued Joplin sync gateway with durable sync jobs, sync status
+  reporting, and a `/v1/joplin/sync` API for manual or write-triggered sync.
+- Adds project-scoped Joplin note APIs so notes created directly under an Agent
+  PBX project notebook can be listed, read, edited, deleted, and referenced.
+- Expands the TUI Joplin tab to show project-level notes while keeping COPY and
+  LOG captures attributed under agent/session note folders.
+- Adds `@joplin:` references in the Latest input. Tab completion uses cached
+  project note titles, and send-time expansion fetches fresh note bodies into a
+  Markdown `Joplin Note References` section for Codex review.
+- Updates README and AGENTS/runbook guidance for project-scoped Joplin
+  references, sync-on-write, and operator prompt expansion behavior.
+
+### Verification
+
+- `python -m pytest`
+- `git diff --check`
+- Release wheelhouse build with `scripts/build_wheelhouse.sh`
+
 ## v0.7.0 - 2026-06-06
 
 ### Highlights
