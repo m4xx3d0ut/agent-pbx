@@ -397,6 +397,7 @@ def runbook_payload() -> dict[str, Any]:
             "If Joplin is unavailable, report that clearly and continue local work.",
             "Use pbx_joplin_create_document for operator-requested Markdown documents under the Agent PBX notebook.",
             "Use fenced mermaid blocks for diagrams and avoid secrets in note content or metadata.",
+            "TUI commands such as /joplin sync are local operator actions, not MCP tools or agent-side instructions.",
             "Routine PBX status reports do not need Joplin tools unless the operator asks for note export or LOG/COPY is enabled by the TUI.",
         ],
         "active_loop": [

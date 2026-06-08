@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,12 +10,13 @@ import httpx
 from fastapi.testclient import TestClient
 import pytest
 
-from agent_pbx.api import create_app
+from agent_pbx.api import create_app, run_joplin_sync_worker
 from agent_pbx.config import ServerConfig
 from agent_pbx.mcp_tools import build_mcp_server
 from agent_pbx.joplin import (
     JoplinApiError,
     JoplinConfig,
+    JoplinGateway,
     JoplinScopeError,
     JoplinService,
 )
@@ -129,6 +131,7 @@ class FakeJoplinService:
         self.created: list[dict[str, object]] = []
         self.command_logs: list[str] = []
         self.report_logs: list[str] = []
+        self.sync_calls = 0
         self.notes: dict[str, dict[str, object]] = {}
         self.active_log: dict[str, object] | None = None
 
@@ -252,6 +255,9 @@ class FakeJoplinService:
         note["body"] = f"{note['body']}\n\n## {title}\n\n{body}"
         store.touch_joplin_log(str(active["log_id"]))
         return store.get_joplin_log(str(active["log_id"]))
+
+    def sync(self) -> None:
+        self.sync_calls += 1
 
 
 def test_joplin_service_creates_scoped_notebooks_and_notes() -> None:
@@ -401,6 +407,40 @@ def test_joplin_service_sync_on_write_reports_zero_exit_last_error(
             title="Copy",
             body="Body",
         )
+
+
+def test_joplin_gateway_sync_on_write_enqueues_durable_job(tmp_path: Path) -> None:
+    fake = FakeJoplinApi()
+    store = make_store(tmp_path)
+    gateway = JoplinGateway(
+        store,
+        JoplinService(
+            JoplinConfig(api_url="http://joplin.local", token="secret"),
+            client=fake.client(),
+        ),
+        sync_on_write=True,
+    )
+    agent = store.get_agent("agent-1")
+    assert agent is not None
+
+    note = gateway.create_note_for_agent(
+        agent,
+        event_type="COPY",
+        title="Copy",
+        body="Body",
+    )
+
+    jobs = store.list_joplin_sync_jobs()
+    reopened = Store(tmp_path / "pbx.sqlite")
+    reopened.init()
+    reopened_jobs = reopened.list_joplin_sync_jobs()
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "queued"
+    assert jobs[0]["reason"] == "note_copy_create"
+    assert jobs[0]["agent_id"] == "agent-1"
+    assert jobs[0]["note_id"] == note["id"]
+    assert reopened_jobs[0]["sync_id"] == jobs[0]["sync_id"]
+    assert reopened.joplin_sync_status()["pending"] == 1
 
 
 def test_joplin_service_lists_notes_with_folder_scoped_endpoint() -> None:
@@ -571,6 +611,86 @@ def test_joplin_api_returns_not_found_for_out_of_scope_note(
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "JOPLIN_NOTE_OUT_OF_SCOPE"
+
+
+def test_joplin_api_sync_status_manual_and_sync_on_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeJoplinService()
+    monkeypatch.setattr("agent_pbx.api.JoplinService", lambda _config: fake)
+    app = create_app(
+        ServerConfig(
+            db_path=tmp_path / "pbx.sqlite",
+            joplin_api_url="http://joplin.local",
+            joplin_token="secret",
+            joplin_sync_on_write=True,
+        )
+    )
+    with TestClient(app) as client:
+        client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "agent-1",
+                "project": "demo",
+                "metadata": {"session_id": "session-1"},
+            },
+        )
+        created = client.post(
+            "/v1/agents/agent-1/joplin/notes",
+            json={"title": "Scratch", "body": "Draft"},
+        )
+        manual = client.post("/v1/joplin/sync")
+        status = client.get("/v1/joplin/sync")
+
+    jobs = app.state.store.list_joplin_sync_jobs()
+    reasons = {job["reason"] for job in jobs}
+    assert created.status_code == 200
+    assert manual.status_code == 200
+    assert manual.json()["reason"] == "manual"
+    assert status.status_code == 200
+    assert status.json()["enabled"] is True
+    assert status.json()["sync_on_write"] is True
+    assert {"note_note_create", "manual"}.issubset(reasons)
+
+
+@pytest.mark.asyncio
+async def test_joplin_sync_worker_records_failure_status_and_event(
+    tmp_path: Path,
+) -> None:
+    class FailingGateway:
+        def run_sync_job(self, _job: dict[str, object]) -> None:
+            raise JoplinApiError("sync failed")
+
+    store = make_store(tmp_path)
+    job = store.enqueue_joplin_sync(reason="manual")
+    worker = asyncio.create_task(
+        run_joplin_sync_worker(
+            store,
+            FailingGateway(),  # type: ignore[arg-type]
+            interval_seconds=0.01,
+        )
+    )
+    try:
+        for _ in range(100):
+            if store.joplin_sync_status()["failed"]:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    status = store.joplin_sync_status()
+    failed = store.get_joplin_sync_job(str(job["sync_id"]))
+    events = store.list_events()
+    assert status["failed"] == 1
+    assert status["latest_error"]["sync_id"] == job["sync_id"]
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["error"] == "sync failed"
+    assert events[-1]["type"] == "joplin_sync_failed"
+    assert events[-1]["payload"]["sync_id"] == job["sync_id"]
 
 
 @pytest.mark.asyncio

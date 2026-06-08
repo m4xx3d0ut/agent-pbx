@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
+from dataclasses import replace
 from typing import Any
 
 from fastapi import (
@@ -30,6 +31,7 @@ from .files import AgentFileService
 from .joplin import (
     JoplinApiError,
     JoplinConfig,
+    JoplinGateway,
     JoplinScopeError,
     JoplinService,
     agent_session_id,
@@ -57,6 +59,8 @@ from .schemas import (
     JoplinNoteSummary,
     JoplinNoteUpdateRequest,
     JoplinStatusResponse,
+    JoplinSyncJobResponse,
+    JoplinSyncStatusResponse,
     ReportCreateRequest,
     ReportResponse,
     ThreadItemResponse,
@@ -74,21 +78,24 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     resolved_config = config or ServerConfig()
     store = Store(resolved_config.db_path)
     store.init()
-    joplin = JoplinService(
-        JoplinConfig(
-            api_url=resolved_config.joplin_api_url,
-            token=resolved_config.joplin_token,
-            notebook=resolved_config.joplin_notebook,
-            joplin_bin=resolved_config.joplin_bin,
-            profile=resolved_config.joplin_profile,
-            timeout_seconds=resolved_config.joplin_timeout_seconds,
-            sync_on_write=resolved_config.joplin_sync_on_write,
-            webdav_url=resolved_config.joplin_webdav_url,
-            webdav_username=resolved_config.joplin_webdav_username,
-            webdav_password_configured=(
-                resolved_config.joplin_webdav_password_configured
-            ),
-        )
+    joplin_config = JoplinConfig(
+        api_url=resolved_config.joplin_api_url,
+        token=resolved_config.joplin_token,
+        notebook=resolved_config.joplin_notebook,
+        joplin_bin=resolved_config.joplin_bin,
+        profile=resolved_config.joplin_profile,
+        timeout_seconds=resolved_config.joplin_timeout_seconds,
+        sync_on_write=resolved_config.joplin_sync_on_write,
+        webdav_url=resolved_config.joplin_webdav_url,
+        webdav_username=resolved_config.joplin_webdav_username,
+        webdav_password_configured=(
+            resolved_config.joplin_webdav_password_configured
+        ),
+    )
+    joplin = JoplinGateway(
+        store,
+        JoplinService(replace(joplin_config, sync_on_write=False)),
+        sync_on_write=joplin_config.sync_on_write,
     )
     mcp_asgi_app, mcp_server = create_mcp_asgi_app(store, resolved_config, joplin)
 
@@ -96,6 +103,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         async with mcp_server.session_manager.run():
             smoke_task: asyncio.Task[None] | None = None
+            joplin_sync_task: asyncio.Task[None] | None = None
             if resolved_config.debug_smoke:
                 smoke_config = DebugSmokeConfig(
                     duration_seconds=resolved_config.debug_smoke_duration_seconds,
@@ -110,9 +118,18 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     run_debug_smoke_reports(store, smoke_config),
                     name="agent-pbx-debug-smoke",
                 )
+            if joplin.config.configured:
+                joplin_sync_task = asyncio.create_task(
+                    run_joplin_sync_worker(store, joplin),
+                    name="agent-pbx-joplin-sync",
+                )
             try:
                 yield
             finally:
+                if joplin_sync_task is not None:
+                    joplin_sync_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await joplin_sync_task
                 if smoke_task is not None:
                     smoke_task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -360,6 +377,24 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     async def get_joplin_status(request: Request) -> dict[str, object]:
         joplin = request.app.state.joplin
         return await asyncio.to_thread(joplin.status)
+
+    @app.get(
+        "/v1/joplin/sync",
+        response_model=JoplinSyncStatusResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_joplin_sync_status(request: Request) -> dict[str, object]:
+        joplin = request.app.state.joplin
+        return await asyncio.to_thread(joplin.sync_status)
+
+    @app.post(
+        "/v1/joplin/sync",
+        response_model=JoplinSyncJobResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def enqueue_joplin_sync(request: Request) -> dict[str, object]:
+        joplin = require_joplin(request)
+        return await run_joplin_call(joplin.request_sync, reason="manual")
 
     @app.get(
         "/v1/agents/{agent_id}/joplin/notes",
@@ -798,7 +833,7 @@ def require_agent(store: Store, agent_id: str) -> dict[str, object]:
     return agent
 
 
-def require_joplin(request: Request) -> JoplinService:
+def require_joplin(request: Request) -> JoplinGateway:
     joplin = request.app.state.joplin
     status_payload = joplin.status()
     if not status_payload.get("configured"):
@@ -905,7 +940,7 @@ async def append_joplin_command_log(
     store: Store,
     command: dict[str, object],
 ) -> None:
-    joplin: JoplinService = request.app.state.joplin
+    joplin: JoplinGateway = request.app.state.joplin
     if not joplin.config.configured:
         return
     try:
@@ -927,7 +962,7 @@ async def append_joplin_report_log(
     store: Store,
     report: dict[str, object],
 ) -> None:
-    joplin: JoplinService = request.app.state.joplin
+    joplin: JoplinGateway = request.app.state.joplin
     if not joplin.config.configured:
         return
     try:
@@ -942,6 +977,55 @@ async def append_joplin_report_log(
             },
             str(report.get("report_id") or ""),
         )
+
+
+async def run_joplin_sync_worker(
+    store: Store,
+    joplin: JoplinGateway,
+    *,
+    interval_seconds: float = 2.0,
+) -> None:
+    while True:
+        job = store.claim_next_joplin_sync_job()
+        if job is None:
+            await asyncio.sleep(interval_seconds)
+            continue
+        try:
+            await asyncio.to_thread(joplin.run_sync_job, job)
+        except Exception as exc:  # noqa: BLE001 - sync status should retain cause
+            completed = store.complete_joplin_sync_job(
+                str(job["sync_id"]),
+                success=False,
+                error=str(exc),
+            )
+            store.append_event(
+                "joplin_sync_failed",
+                {
+                    "sync_id": job["sync_id"],
+                    "reason": job["reason"],
+                    "agent_id": job.get("agent_id"),
+                    "note_id": job.get("note_id"),
+                    "message": str(exc),
+                },
+                str(job["sync_id"]),
+            )
+            logger.warning("Joplin sync job failed: %s", completed or job)
+            continue
+        completed = store.complete_joplin_sync_job(
+            str(job["sync_id"]),
+            success=True,
+        )
+        store.append_event(
+            "joplin_sync_succeeded",
+            {
+                "sync_id": job["sync_id"],
+                "reason": job["reason"],
+                "agent_id": job.get("agent_id"),
+                "note_id": job.get("note_id"),
+            },
+            str(job["sync_id"]),
+        )
+        logger.debug("Joplin sync job succeeded: %s", completed or job)
 
 
 class DebugRequestLogMiddleware(BaseHTTPMiddleware):

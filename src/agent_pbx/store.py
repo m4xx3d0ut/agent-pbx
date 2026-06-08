@@ -16,7 +16,7 @@ from .schemas import (
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -143,9 +143,30 @@ class Store:
                     updated_at REAL NOT NULL,
                     FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS joplin_sync_jobs (
+                    sync_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    agent_id TEXT,
+                    note_id TEXT,
+                    error TEXT,
+                    created_at REAL NOT NULL,
+                    started_at REAL,
+                    finished_at REAL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
+                );
                 """
             )
             previous_schema_version = self._schema_version(conn)
+            conn.execute(
+                """
+                UPDATE joplin_sync_jobs
+                SET status = 'queued', started_at = NULL
+                WHERE status = 'running'
+                """
+            )
             self._ensure_column(conn, "agents", "last_poll_at", "REAL")
             self._ensure_column(conn, "agents", "latest_report_seen_at", "REAL")
             self._ensure_column(conn, "agents", "starred_at", "REAL")
@@ -423,6 +444,10 @@ class Store:
                 conn.execute("DELETE FROM commands WHERE agent_id = ?", (agent_id,))
                 conn.execute("DELETE FROM poll_events WHERE agent_id = ?", (agent_id,))
                 conn.execute("DELETE FROM joplin_logs WHERE agent_id = ?", (agent_id,))
+                conn.execute(
+                    "DELETE FROM joplin_sync_jobs WHERE agent_id = ?",
+                    (agent_id,),
+                )
             cursor = conn.execute(
                 """
                 UPDATE agents
@@ -625,6 +650,167 @@ class Store:
                 "UPDATE joplin_logs SET updated_at = ? WHERE log_id = ?",
                 (current, log_id),
             )
+
+    def enqueue_joplin_sync(
+        self,
+        *,
+        reason: str,
+        agent_id: str | None = None,
+        note_id: str | None = None,
+    ) -> dict[str, Any]:
+        sync_id = str(uuid.uuid4())
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO joplin_sync_jobs
+                    (sync_id, status, reason, agent_id, note_id, error,
+                     created_at, started_at, finished_at, attempts)
+                VALUES (?, 'queued', ?, ?, ?, NULL, ?, NULL, NULL, 0)
+                """,
+                (sync_id, reason, agent_id, note_id, current),
+            )
+        job = self.get_joplin_sync_job(sync_id)
+        if job is None:
+            raise RuntimeError("joplin sync job insert failed")
+        return job
+
+    def claim_next_joplin_sync_job(self) -> dict[str, Any] | None:
+        current = now_ts()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT sync_id
+                FROM joplin_sync_jobs
+                WHERE status = 'queued'
+                ORDER BY created_at ASC, sync_id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            sync_id = str(row["sync_id"])
+            cursor = conn.execute(
+                """
+                UPDATE joplin_sync_jobs
+                SET status = 'running',
+                    started_at = ?,
+                    finished_at = NULL,
+                    error = NULL,
+                    attempts = attempts + 1
+                WHERE sync_id = ? AND status = 'queued'
+                """,
+                (current, sync_id),
+            )
+            if not cursor.rowcount:
+                return None
+        return self.get_joplin_sync_job(sync_id)
+
+    def complete_joplin_sync_job(
+        self,
+        sync_id: str,
+        *,
+        success: bool,
+        error: str | None = None,
+    ) -> dict[str, Any] | None:
+        current = now_ts()
+        status = "succeeded" if success else "failed"
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE joplin_sync_jobs
+                SET status = ?, error = ?, finished_at = ?
+                WHERE sync_id = ? AND status = 'running'
+                """,
+                (status, error, current, sync_id),
+            )
+        return self.get_joplin_sync_job(sync_id) if cursor.rowcount else None
+
+    def get_joplin_sync_job(self, sync_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT sync_id, status, reason, agent_id, note_id, error,
+                       created_at, started_at, finished_at, attempts
+                FROM joplin_sync_jobs
+                WHERE sync_id = ?
+                """,
+                (sync_id,),
+            ).fetchone()
+        return self._joplin_sync_job_from_row(row) if row else None
+
+    def list_joplin_sync_jobs(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 100)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT sync_id, status, reason, agent_id, note_id, error,
+                       created_at, started_at, finished_at, attempts
+                FROM joplin_sync_jobs
+                ORDER BY created_at DESC, sync_id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [self._joplin_sync_job_from_row(row) for row in rows]
+
+    def joplin_sync_status(self) -> dict[str, Any]:
+        with self.connect() as conn:
+            count_rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM joplin_sync_jobs
+                GROUP BY status
+                """
+            ).fetchall()
+            latest = conn.execute(
+                """
+                SELECT sync_id, status, reason, agent_id, note_id, error,
+                       created_at, started_at, finished_at, attempts
+                FROM joplin_sync_jobs
+                ORDER BY COALESCE(finished_at, started_at, created_at) DESC,
+                         sync_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            latest_success = conn.execute(
+                """
+                SELECT sync_id, status, reason, agent_id, note_id, error,
+                       created_at, started_at, finished_at, attempts
+                FROM joplin_sync_jobs
+                WHERE status = 'succeeded'
+                ORDER BY finished_at DESC, sync_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            latest_error = conn.execute(
+                """
+                SELECT sync_id, status, reason, agent_id, note_id, error,
+                       created_at, started_at, finished_at, attempts
+                FROM joplin_sync_jobs
+                WHERE status = 'failed'
+                ORDER BY finished_at DESC, sync_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        counts = {str(row["status"]): int(row["count"] or 0) for row in count_rows}
+        return {
+            "pending": counts.get("queued", 0),
+            "running": counts.get("running", 0),
+            "succeeded": counts.get("succeeded", 0),
+            "failed": counts.get("failed", 0),
+            "latest": self._joplin_sync_job_from_row(latest) if latest else None,
+            "latest_success": (
+                self._joplin_sync_job_from_row(latest_success)
+                if latest_success
+                else None
+            ),
+            "latest_error": (
+                self._joplin_sync_job_from_row(latest_error)
+                if latest_error
+                else None
+            ),
+        }
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -983,6 +1169,10 @@ class Store:
         data = dict(row)
         data["active"] = bool(data["active"])
         return data
+
+    @staticmethod
+    def _joplin_sync_job_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
 
     @staticmethod
     def _thread_report(report: dict[str, Any]) -> dict[str, Any]:

@@ -175,7 +175,33 @@ class JoplinStatusResponse(BaseModel):
     webdav_password_configured: bool = False
     checked_at: float
     root_notebook_id: str | None = None
+    sync: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+
+
+class JoplinSyncJobResponse(BaseModel):
+    sync_id: str
+    status: str
+    reason: str
+    agent_id: str | None = None
+    note_id: str | None = None
+    error: str | None = None
+    created_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+    attempts: int = 0
+
+
+class JoplinSyncStatusResponse(BaseModel):
+    enabled: bool
+    sync_on_write: bool = False
+    pending: int = 0
+    running: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    latest: JoplinSyncJobResponse | None = None
+    latest_success: JoplinSyncJobResponse | None = None
+    latest_error: JoplinSyncJobResponse | None = None
 
 
 class JoplinNoteSummary(BaseModel):

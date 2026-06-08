@@ -123,7 +123,8 @@ nohup mode. Treat them like normal operator prompts only after they reach your
 session.
 
 Built-in TUI Joplin commands such as `/joplin`, `/joplin new`,
-`/joplin rename`, `/joplin delete`, `/joplin copy`, and `/joplin log start`
+`/joplin rename`, `/joplin delete`, `/joplin copy`, `/joplin log start`, and
+`/joplin sync`
 are local operator actions for the TUI. They open the Joplin tab, call Agent
 PBX note APIs, edit scoped notes, or in tmux direct mode send Codex `/copy` to
 capture the latest response; they are not instructions for an agent unless the

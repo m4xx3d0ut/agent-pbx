@@ -323,11 +323,13 @@ agent-pbx mcp restart --token dev-token
 agent-pbx tui --token dev-token
 ```
 
-Agent PBX writes notes through the local Joplin REST API. To push those writes
-to WebDAV immediately, enable `AGENT_PBX_JOPLIN_SYNC_ON_WRITE=1` and provide a
-Joplin CLI path/profile. After each create, edit, delete, COPY note, or LOG
-append, Agent PBX runs `joplin --profile <profile> sync`. Leave this off if a
-separate Joplin client or background process already syncs the profile.
+Agent PBX writes notes through the local Joplin REST API. To queue WebDAV syncs
+after writes, enable `AGENT_PBX_JOPLIN_SYNC_ON_WRITE=1` and provide a Joplin CLI
+path/profile. After each create, edit, delete, COPY note, or LOG append, Agent
+PBX records a durable SQLite sync job and a background worker runs
+`joplin --profile <profile> sync`. Note writes return before WebDAV sync
+finishes. Leave this off if a separate Joplin client or background process
+already syncs the profile.
 If WebDAV sync uses E2EE, the dedicated profile must have its master key loaded;
 otherwise Joplin may exit successfully while reporting `Master key is not
 loaded`, and Agent PBX will surface that as a sync failure.
@@ -343,14 +345,19 @@ and appends the copied response. The tab also lists scoped notes, previews
 Markdown, and supports quick create, rename, delete, and save controls inside
 the Agent PBX notebook scope only.
 
+The Joplin tab status line shows queued, running, successful, and failed sync
+state. Press `Sync Now` or use `/joplin sync` to queue a manual sync. Sync
+failures are retained in Agent PBX status/events; they do not roll back the note
+write that triggered them.
+
 Joplin actions are available from the tab buttons and the local TUI
 palette/slash commands: `/joplin` opens the tab, `/joplin refresh` reloads
 scoped notes, `/joplin new` creates a scoped note, `/joplin rename` renames the
 selected note, `/joplin delete` confirms and deletes the selected scoped note,
 `/joplin copy` copies the latest Codex response in tmux direct mode, `/joplin
 copy report` copies the latest PBX report, `/joplin log start` and `/joplin log
-stop` control the growing LOG note, and `/joplin save` saves the selected note
-body.
+stop` control the growing LOG note, `/joplin save` saves the selected note body,
+and `/joplin sync` queues a manual sync job.
 
 In tmux direct mode, `/joplin copy` sends Codex `/copy` to the selected pane,
 reads the copied response with a local clipboard helper such as `wl-paste`,

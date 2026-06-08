@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -483,6 +483,249 @@ class JoplinService:
             **cls._note_summary(note),
             "body": str(note.get("body") or ""),
         }
+
+
+class JoplinGateway:
+    def __init__(
+        self,
+        store: Any,
+        service: JoplinService,
+        *,
+        sync_on_write: bool | None = None,
+        clock: Any = time.time,
+    ) -> None:
+        self.store = store
+        self.service = service
+        self.config = service.config
+        self.sync_on_write = (
+            bool(sync_on_write)
+            if sync_on_write is not None
+            else bool(getattr(service.config, "sync_on_write", False))
+        )
+        self.clock = clock
+
+    @classmethod
+    def from_config(
+        cls,
+        store: Any,
+        config: JoplinConfig,
+        *,
+        client: httpx.Client | None = None,
+        clock: Any = time.time,
+    ) -> JoplinGateway:
+        service = JoplinService(
+            replace(config, sync_on_write=False),
+            client=client,
+            clock=clock,
+        )
+        return cls(store, service, sync_on_write=config.sync_on_write, clock=clock)
+
+    def status(self) -> dict[str, Any]:
+        payload = dict(self.service.status())
+        payload["sync_on_write"] = self.sync_on_write
+        payload["sync"] = self.sync_status()
+        return payload
+
+    def sync_status(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(getattr(self.config, "configured", False)),
+            "sync_on_write": self.sync_on_write,
+            **self.store.joplin_sync_status(),
+        }
+
+    def request_sync(
+        self,
+        *,
+        reason: str = "manual",
+        agent_id: str | None = None,
+        note_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not getattr(self.config, "configured", False):
+            raise RuntimeError("Joplin is not configured")
+        job = self.store.enqueue_joplin_sync(
+            reason=reason,
+            agent_id=agent_id,
+            note_id=note_id,
+        )
+        self.store.append_event(
+            "joplin_sync_queued",
+            {
+                "sync_id": job["sync_id"],
+                "reason": reason,
+                "agent_id": agent_id,
+                "note_id": note_id,
+            },
+            agent_id or note_id or job["sync_id"],
+        )
+        return job
+
+    def run_sync_job(self, job: dict[str, Any]) -> None:
+        self.service.sync()
+
+    def list_notes_for_agent(self, agent: dict[str, Any]) -> list[dict[str, Any]]:
+        return self.service.list_notes_for_agent(agent)
+
+    def get_note_for_agent(self, agent: dict[str, Any], note_id: str) -> dict[str, Any]:
+        return self.service.get_note_for_agent(agent, note_id)
+
+    def update_note_for_agent(
+        self,
+        agent: dict[str, Any],
+        note_id: str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+    ) -> dict[str, Any]:
+        note = self.service.update_note_for_agent(
+            agent,
+            note_id,
+            title=title,
+            body=body,
+        )
+        if title is not None or body is not None:
+            self._enqueue_write_sync("note_update", agent=agent, note_id=note_id)
+        return note
+
+    def delete_note_for_agent(
+        self,
+        agent: dict[str, Any],
+        note_id: str,
+    ) -> dict[str, Any]:
+        note = self.service.delete_note_for_agent(agent, note_id)
+        self._enqueue_write_sync("note_delete", agent=agent, note_id=note_id)
+        return note
+
+    def create_note_for_agent(
+        self,
+        agent: dict[str, Any],
+        *,
+        event_type: str,
+        body: str,
+        title: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        note = self.service.create_note_for_agent(
+            agent,
+            event_type=event_type,
+            body=body,
+            title=title,
+            session_id=session_id,
+        )
+        self._enqueue_write_sync(
+            f"note_{event_type.lower()}_create",
+            agent=agent,
+            note_id=str(note.get("id") or ""),
+        )
+        return note
+
+    def create_document(
+        self,
+        *,
+        agent: dict[str, Any],
+        title: str,
+        body: str,
+        session_id: str | None = None,
+        mermaid_blocks: list[str] | None = None,
+        assets: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        note = self.service.create_document(
+            agent=agent,
+            title=title,
+            body=body,
+            session_id=session_id,
+            mermaid_blocks=mermaid_blocks,
+            assets=assets,
+        )
+        self._enqueue_write_sync(
+            "document_create",
+            agent=agent,
+            note_id=str(note.get("id") or ""),
+        )
+        return note
+
+    def start_log(self, store: Any, agent: dict[str, Any]) -> dict[str, Any]:
+        log = self.service.start_log(store, agent)
+        if not log.get("already_active"):
+            self._enqueue_write_sync(
+                "log_start",
+                agent=agent,
+                note_id=str(log.get("note_id") or ""),
+            )
+        return log
+
+    def stop_log(self, store: Any, agent_id: str) -> dict[str, Any] | None:
+        return self.service.stop_log(store, agent_id)
+
+    def append_command_log(self, store: Any, command: dict[str, Any]) -> None:
+        agent_id = command.get("agent_id")
+        active = (
+            store.get_active_joplin_log(str(agent_id))
+            if agent_id and command.get("type") in {"send_input", "start_task"}
+            else None
+        )
+        self.service.append_command_log(store, command)
+        if active is not None:
+            self._enqueue_write_sync(
+                "log_command_append",
+                agent_id=str(agent_id),
+                note_id=str(active.get("note_id") or ""),
+            )
+
+    def append_report_log(self, store: Any, report: dict[str, Any]) -> None:
+        status = str(report.get("status") or "").lower()
+        active = (
+            store.get_active_joplin_log(str(report.get("agent_id")))
+            if status in TERMINAL_LOG_STATUSES
+            else None
+        )
+        self.service.append_report_log(store, report)
+        if active is not None:
+            self._enqueue_write_sync(
+                "log_report_append",
+                agent_id=str(report.get("agent_id") or ""),
+                note_id=str(active.get("note_id") or ""),
+            )
+
+    def append_log_section(
+        self,
+        store: Any,
+        agent_id: str,
+        *,
+        title: str,
+        body: str,
+    ) -> dict[str, Any] | None:
+        log = self.service.append_log_section(
+            store,
+            agent_id,
+            title=title,
+            body=body,
+        )
+        if log is not None:
+            self._enqueue_write_sync(
+                "log_section_append",
+                agent_id=agent_id,
+                note_id=str(log.get("note_id") or ""),
+            )
+        return log
+
+    def _enqueue_write_sync(
+        self,
+        reason: str,
+        *,
+        agent: dict[str, Any] | None = None,
+        agent_id: str | None = None,
+        note_id: str | None = None,
+    ) -> None:
+        if not self.sync_on_write:
+            return
+        resolved_agent_id = agent_id or (
+            str(agent.get("agent_id")) if agent and agent.get("agent_id") else None
+        )
+        self.request_sync(
+            reason=reason,
+            agent_id=resolved_agent_id,
+            note_id=note_id or None,
+        )
 
 
 def env_joplin_config() -> JoplinConfig:

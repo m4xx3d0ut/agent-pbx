@@ -656,6 +656,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         joplin_copy = app.query_one("#joplin-copy-latest", Button)
         joplin_log_start = app.query_one("#joplin-log-start", Button)
         joplin_log_stop = app.query_one("#joplin-log-stop", Button)
+        joplin_sync = app.query_one("#joplin-sync", Button)
         joplin_save = app.query_one("#joplin-save", Button)
         composer = app.query_one("#composer")
         agent_id = app.query_one("#agent-id", Input)
@@ -697,6 +698,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert joplin_copy.label.plain == "Copy Latest"
         assert joplin_log_start.label.plain == "Start LOG"
         assert joplin_log_stop.label.plain == "Stop LOG"
+        assert joplin_sync.label.plain == "Sync Now"
         assert joplin_save.label.plain == "Save"
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
@@ -2516,6 +2518,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/joplin log start",
         "/joplin log stop",
         "/joplin save",
+        "/joplin sync",
     } <= names
 
 

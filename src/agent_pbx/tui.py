@@ -233,6 +233,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/joplin log start",
     "/joplin log stop",
     "/joplin save",
+    "/joplin sync",
     "/plan",
     "/plan latest",
     "/plan thread",
@@ -2592,6 +2593,7 @@ class AgentPBXTUI(App[None]):
                                 yield Button("Copy Latest", id="joplin-copy-latest")
                                 yield Button("Start LOG", id="joplin-log-start")
                                 yield Button("Stop LOG", id="joplin-log-stop")
+                                yield Button("Sync Now", id="joplin-sync")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -2701,6 +2703,7 @@ class AgentPBXTUI(App[None]):
             yield SystemCommand("/joplin log start", "Start Joplin LOG for the selected agent", self.palette_joplin_log_start)
             yield SystemCommand("/joplin log stop", "Stop Joplin LOG for the selected agent", self.palette_joplin_log_stop)
             yield SystemCommand("/joplin save", "Save the selected Joplin note body", self.palette_joplin_save)
+            yield SystemCommand("/joplin sync", "Queue a Joplin sync job", self.palette_joplin_sync)
         yield SystemCommand("/plan", "Toggle plan mode for the selected agent", self.palette_toggle_plan_mode)
         yield SystemCommand("/plan latest", "Show latest report plan options", self.palette_plan_latest)
         yield SystemCommand("/plan thread", "Show selected thread plan options", self.palette_plan_thread)
@@ -2859,6 +2862,16 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.joplin_action_for_agent(agent_id, "save"),
             name="palette-joplin-save",
+            exclusive=True,
+        )
+
+    def palette_joplin_sync(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "sync"),
+            name="palette-joplin-sync",
             exclusive=True,
         )
 
@@ -3264,6 +3277,10 @@ class AgentPBXTUI(App[None]):
             await self.stop_joplin_log(agent_id)
         elif action == "save":
             await self.save_joplin_note(agent_id)
+        elif action == "sync":
+            await self.sync_joplin_now(agent_id)
+        else:
+            self.notify(f"Unknown Joplin action: {action}", severity="warning")
 
     async def action_refresh(self) -> None:
         await self.refresh_agents()
@@ -5536,6 +5553,10 @@ class AgentPBXTUI(App[None]):
             if self.selected_agent_id:
                 await self.stop_joplin_log(self.selected_agent_id)
             return
+        if event.button.id == "joplin-sync":
+            if self.selected_agent_id:
+                await self.sync_joplin_now(self.selected_agent_id)
+            return
         if event.button.id == "joplin-save":
             if self.selected_agent_id:
                 await self.save_joplin_note(self.selected_agent_id)
@@ -6783,10 +6804,28 @@ class AgentPBXTUI(App[None]):
 
     def format_joplin_status_line(self, status: dict[str, Any]) -> str:
         if status.get("available"):
-            return f"Joplin: {status.get('notebook') or 'Agent PBX'}"
+            sync = status.get("sync") if isinstance(status.get("sync"), dict) else None
+            sync_text = f" | {self.format_joplin_sync_summary(sync)}" if sync else ""
+            return f"Joplin: {status.get('notebook') or 'Agent PBX'}{sync_text}"
         error = status.get("error") if isinstance(status.get("error"), dict) else {}
         code = error.get("code") or "JOPLIN_UNAVAILABLE"
         return f"Joplin: {code}"
+
+    def format_joplin_sync_summary(self, sync: dict[str, Any] | None) -> str:
+        if not sync or not sync.get("enabled"):
+            return "Sync: off"
+        running = int(sync.get("running") or 0)
+        pending = int(sync.get("pending") or 0)
+        if running:
+            return f"Sync: running {running}"
+        if pending:
+            return f"Sync: queued {pending}"
+        latest_error = sync.get("latest_error")
+        if isinstance(latest_error, dict) and latest_error.get("error"):
+            return "Sync: error"
+        if sync.get("latest_success"):
+            return "Sync: ok"
+        return "Sync: ready"
 
     async def load_joplin_notes(self, agent_id: str) -> None:
         await self.refresh_joplin_status()
@@ -7280,6 +7319,24 @@ class AgentPBXTUI(App[None]):
         else:
             self.notify("No active Joplin LOG for this agent.", severity="warning")
         await self.load_joplin_notes(agent_id)
+
+    async def sync_joplin_now(self, agent_id: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
+        try:
+            response = await self.api_client().post(
+                "/v1/joplin/sync",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            job = response.json()
+        except Exception as exc:
+            self.notify(f"Joplin sync failed to queue: {exc}", severity="error")
+            return
+        sync_id = str(job.get("sync_id") or "")
+        self.notify(f"Joplin sync queued {sync_id[:8]}.")
+        await self.refresh_joplin_status()
 
     async def ensure_joplin_available(self) -> bool:
         await self.refresh_joplin_status()
