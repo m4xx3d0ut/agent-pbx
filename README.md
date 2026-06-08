@@ -424,6 +424,23 @@ directories already read by the Files tab, so `@src/<Tab>` requires `src` to
 have been opened or refreshed first. The same completion works in tmux direct
 input.
 
+Joplin project notes can be referenced with `@joplin:`. Open or refresh the
+`Joplin` tab for the selected agent's project, then type `@joplin:Release` and
+press `Tab` to complete cached project note titles. On send, Agent PBX fetches
+each referenced note body fresh and appends a `Joplin Note References` Markdown
+section to the prompt, so
+`Review @joplin:weekly-updates-052926-060826 and @joplin:Release-Checklist`
+gives Codex both note bodies in one message. If a referenced note cannot be
+resolved inside the selected project scope, the prompt is not sent. Reference
+tokens are exact note slugs; use `Tab` completion when title wording is unclear.
+
+The `Joplin` tab lists notes from the selected project folder and its
+descendants under the Agent PBX notebook. That means notes created directly in
+Joplin under the project can be opened, edited, renamed, saved, deleted, and
+referenced from Agent PBX. COPY and LOG actions still create agent/session
+notes so response captures and growing logs remain attributable to a specific
+agent run.
+
 ## Debug Runs
 
 Use `--debug` on the foreground server or daemon for verbose PBX request and
@@ -556,8 +573,10 @@ nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
 
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete cached project paths from the Files
-tab. Repeated `Tab` cycles matches; exact local commands such as `/esc` or
-`/theme minimal` execute locally on `Enter` instead of being sent to the agent.
+tab. Type `@joplin:` and press `Tab` to complete project-scoped Joplin note
+titles from the Joplin tab cache. Repeated `Tab` cycles matches; exact local
+commands such as `/esc` or `/theme minimal` execute locally on `Enter` instead
+of being sent to the agent.
 
 Use `/plan` to toggle Codex plan mode for the selected agent. In tmux direct
 mode, Agent PBX types `/plan` with tmux key events so Codex handles it as an

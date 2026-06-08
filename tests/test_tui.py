@@ -2312,6 +2312,62 @@ async def test_tui_file_completion_works_in_tmux_input() -> None:
         assert message.text == "summarize @docs/"
 
 
+async def test_tui_joplin_note_completion_uses_cached_notes() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.agents = {"agent-1": {"agent_id": "agent-1", "project": "demo"}}
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.joplin_notes_by_agent = {
+            "agent-1": {
+                "note-1": {
+                    "id": "note-1",
+                    "title": "Design Note",
+                },
+                "note-2": {
+                    "id": "note-2",
+                    "title": "Release Checklist",
+                },
+            }
+        }
+        message = app.query_one("#message", TextArea)
+
+        message.text = "review @joplin:Des"
+        message.move_cursor((0, len(message.text)))
+        assert app.complete_file_reference(message, direction=1) is True
+        assert message.text == "review @joplin:Design-Note"
+
+
+async def test_tui_joplin_note_completion_disambiguates_duplicate_titles() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.agents = {"agent-1": {"agent_id": "agent-1", "project": "demo"}}
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.joplin_notes_by_agent = {
+            "agent-1": {
+                "abcdef123456": {
+                    "id": "abcdef123456",
+                    "title": "Meeting Notes",
+                },
+                "fedcba654321": {
+                    "id": "fedcba654321",
+                    "title": "Meeting Notes",
+                },
+            }
+        }
+        message = app.query_one("#message", TextArea)
+
+        message.text = "review @joplin:Meeting"
+        message.move_cursor((0, len(message.text)))
+        assert app.complete_file_reference(message, direction=1) is True
+        assert message.text == "review @joplin:Meeting-Notes~abcdef12"
+        assert app.complete_file_reference(message, direction=1) is True
+        assert message.text == "review @joplin:Meeting-Notes~fedcba65"
+
+
 def test_tui_file_completion_ignores_email_like_tokens() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     text_area = TextArea()
@@ -2319,6 +2375,177 @@ def test_tui_file_completion_ignores_email_like_tokens() -> None:
     text_area.move_cursor((0, len(text_area.text)))
 
     assert app.file_completion_context(text_area) is None
+
+
+async def test_tui_send_input_expands_joplin_note_references() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            if path == "/v1/joplin/status":
+                return Response(
+                    {
+                        "configured": True,
+                        "available": True,
+                        "notebook": "Agent PBX",
+                    }
+                )
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path == "/v1/projects/demo/joplin/notes":
+                return Response(
+                    [
+                        {
+                            "id": "note-1",
+                            "title": "weekly-update-052926-060826",
+                            "updated_time": 123456.0,
+                        }
+                    ]
+                )
+            if path == "/v1/projects/demo/joplin/notes/note-1":
+                return Response(
+                    {
+                        "id": "note-1",
+                        "title": "weekly-update-052926-060826",
+                        "body": "Decision log\n\n```text\nfenced\n```",
+                        "updated_time": 123456.0,
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.agents = {"agent-1": {"agent_id": "agent-1", "project": "demo"}}
+        app.query_one("#agent-id", Input).value = "agent-1"
+        message = app.query_one("#message", TextArea)
+        message.text = "Please review @joplin:weekly-update-052926-060826"
+        await app.send_input()
+        await pilot.pause()
+
+    assert len(queued) == 1
+    sent_message = queued[0][2]["message"]
+    assert "Please review @joplin:weekly-update-052926-060826" in sent_message
+    assert "## Joplin Note References" in sent_message
+    assert "### 1. weekly-update-052926-060826" in sent_message
+    assert "- Ref: `@joplin:weekly-update-052926-060826`" in sent_message
+    assert "- Note ID: `note-1`" in sent_message
+    assert "Decision log" in sent_message
+    assert "````markdown" in sent_message
+    assert app.sent_message_history_by_agent["agent-1"] == [
+        "Please review @joplin:weekly-update-052926-060826"
+    ]
+
+
+async def test_tui_tmux_input_expands_joplin_note_references() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    logged: list[tuple[str, str]] = []
+    captured: list[str] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            if path == "/v1/joplin/status":
+                return Response(
+                    {
+                        "configured": True,
+                        "available": True,
+                        "notebook": "Agent PBX",
+                    }
+                )
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path == "/v1/projects/demo/joplin/notes":
+                return Response([{"id": "note-1", "title": "Runbook"}])
+            if path == "/v1/projects/demo/joplin/notes/note-1":
+                return Response(
+                    {
+                        "id": "note-1",
+                        "title": "Runbook",
+                        "body": "Use the staged workflow.",
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captured.append(agent_id)
+
+    async def fake_record_tmux_joplin_interaction(
+        agent_id: str,
+        message: str,
+    ) -> None:
+        logged.append((agent_id, message))
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.record_tmux_joplin_interaction = fake_record_tmux_joplin_interaction  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.tmux_features_available = True
+        app.tmux_direct_enabled = True
+        app.selected_agent_id = "agent-1"
+        app.agents = {"agent-1": {"agent_id": "agent-1", "project": "demo"}}
+        message = app.query_one("#tmux-message", TextArea)
+        message.text = "Apply @joplin:Runbook"
+        await app.send_input()
+        await pilot.pause()
+
+    assert len(sent) == 1
+    assert sent[0][0] == "agent-1"
+    assert "Apply @joplin:Runbook" in sent[0][1]
+    assert "## Joplin Note References" in sent[0][1]
+    assert "Use the staged workflow." in sent[0][1]
+    assert logged == sent
+    assert captured == ["agent-1"]
+    assert app.sent_message_history_by_agent["agent-1"] == ["Apply @joplin:Runbook"]
 
 
 def test_tui_formats_image_file_preview_as_rendered_text() -> None:

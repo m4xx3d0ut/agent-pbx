@@ -157,8 +157,16 @@ class FakeJoplinService:
             for note in self.notes.values()
         ]
 
+    def list_notes_for_project(self, _project: str) -> list[dict[str, object]]:
+        return self.list_notes_for_agent({})
+
     def get_note_for_agent(
         self, _agent: dict[str, object], note_id: str
+    ) -> dict[str, object]:
+        return self.notes[note_id]
+
+    def get_note_for_project(
+        self, _project: str, note_id: str
     ) -> dict[str, object]:
         return self.notes[note_id]
 
@@ -176,12 +184,53 @@ class FakeJoplinService:
             self.notes[note_id]["body"] = body
         return self.notes[note_id]
 
+    def update_note_for_project(
+        self,
+        _project: str,
+        note_id: str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+    ) -> dict[str, object]:
+        return self.update_note_for_agent(
+            {},
+            note_id,
+            title=title,
+            body=body,
+        )
+
     def delete_note_for_agent(
         self,
         _agent: dict[str, object],
         note_id: str,
     ) -> dict[str, object]:
         return self.notes.pop(note_id)
+
+    def delete_note_for_project(
+        self,
+        _project: str,
+        note_id: str,
+    ) -> dict[str, object]:
+        return self.notes.pop(note_id)
+
+    def create_note_for_project(
+        self,
+        _project: str,
+        *,
+        title: str,
+        body: str,
+    ) -> dict[str, object]:
+        note = {
+            "id": f"note-{len(self.notes) + 1}",
+            "parent_id": "folder-project",
+            "title": title,
+            "body": body,
+            "created_time": 1.0,
+            "updated_time": 1.0,
+        }
+        self.notes[str(note["id"])] = note
+        self.created.append(note)
+        return note
 
     def create_note_for_agent(
         self,
@@ -472,6 +521,51 @@ def test_joplin_service_lists_notes_with_folder_scoped_endpoint() -> None:
     assert fake.folder_note_requests == [str(note["parent_id"])]
 
 
+def test_joplin_service_project_scope_includes_direct_and_descendant_notes() -> None:
+    fake = FakeJoplinApi()
+    service = make_service(fake)
+    agent = {
+        "agent_id": "agent-1",
+        "project": "demo",
+        "metadata": {"session_id": "session-1"},
+    }
+    project_folder = service.ensure_project_folder("demo")
+    fake.notes["weekly"] = {
+        "id": "weekly",
+        "parent_id": project_folder,
+        "title": "weekly-update-052926-060826",
+        "body": "External project note",
+        "created_time": 1_700_000_000_000,
+        "updated_time": 1_700_000_030_000,
+    }
+    agent_note = service.create_note_for_agent(
+        agent,
+        event_type="COPY",
+        title="Agent Copy",
+        body="Agent body",
+    )
+    fake.notes["outside"] = {
+        "id": "outside",
+        "parent_id": "unrelated-folder",
+        "title": "Outside",
+        "body": "Nope",
+        "created_time": 1_700_000_000_000,
+        "updated_time": 1_700_000_040_000,
+    }
+
+    notes = service.list_notes_for_project("demo")
+    fetched = service.get_note_for_project("demo", "weekly")
+    updated = service.update_note_for_project("demo", "weekly", body="Edited")
+    deleted = service.delete_note_for_project("demo", agent_note["id"])
+
+    assert [note["id"] for note in notes] == ["weekly", agent_note["id"]]
+    assert fetched["body"] == "External project note"
+    assert updated["body"] == "Edited"
+    assert deleted["id"] == agent_note["id"]
+    with pytest.raises(JoplinScopeError):
+        service.get_note_for_project("demo", "outside")
+
+
 def test_joplin_log_appends_operator_prompt_and_terminal_report(tmp_path: Path) -> None:
     fake = FakeJoplinApi()
     service = make_service(fake)
@@ -543,6 +637,17 @@ def test_joplin_api_status_copy_log_and_update(
     ).json()
 
     status = client.get("/v1/joplin/status")
+    project_created = client.post(
+        "/v1/projects/demo/joplin/notes",
+        json={"title": "weekly-update-052926-060826", "body": "Project note"},
+    )
+    project_notes = client.get("/v1/projects/demo/joplin/notes")
+    project_note_id = project_created.json()["id"]
+    project_fetched = client.get(f"/v1/projects/demo/joplin/notes/{project_note_id}")
+    project_updated = client.put(
+        f"/v1/projects/demo/joplin/notes/{project_note_id}",
+        json={"body": "Project note edited"},
+    )
     created = client.post(
         "/v1/agents/agent-1/joplin/notes",
         json={"title": "Scratch", "body": "Draft"},
@@ -569,8 +674,16 @@ def test_joplin_api_status_copy_log_and_update(
     ).json()
     stopped = client.post("/v1/agents/agent-1/joplin/log/stop")
     deleted = client.delete(f"/v1/agents/agent-1/joplin/notes/{created.json()['id']}")
+    project_deleted = client.delete(
+        f"/v1/projects/demo/joplin/notes/{project_note_id}"
+    )
 
     assert status.json()["available"] is True
+    assert project_created.status_code == 200
+    assert project_created.json()["title"] == "weekly-update-052926-060826"
+    assert any(note["id"] == project_note_id for note in project_notes.json())
+    assert project_fetched.json()["body"] == "Project note"
+    assert project_updated.json()["body"] == "Project note edited"
     assert created.status_code == 200
     assert created.json()["title"] == "Scratch"
     assert copied.status_code == 200
@@ -581,6 +694,7 @@ def test_joplin_api_status_copy_log_and_update(
     assert appended.json()["active"] is True
     assert stopped.json()["active"] is False
     assert deleted.json()["title"] == "Scratch"
+    assert project_deleted.json()["title"] == "weekly-update-052926-060826"
     assert report["report_id"] in fake.report_logs
     assert command["command_id"] in fake.command_logs
 

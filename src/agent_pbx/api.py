@@ -397,6 +397,82 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         return await run_joplin_call(joplin.request_sync, reason="manual")
 
     @app.get(
+        "/v1/projects/{project}/joplin/notes",
+        response_model=list[JoplinNoteSummary],
+        dependencies=[Depends(require_token)],
+    )
+    async def list_project_joplin_notes(
+        project: str,
+        request: Request,
+    ) -> list[dict[str, object]]:
+        joplin = require_joplin(request)
+        return await run_joplin_call(joplin.list_notes_for_project, project)
+
+    @app.post(
+        "/v1/projects/{project}/joplin/notes",
+        response_model=JoplinNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def create_project_joplin_note(
+        project: str,
+        payload: JoplinNoteCreateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        joplin = require_joplin(request)
+        return await run_joplin_call(
+            joplin.create_note_for_project,
+            project,
+            title=payload.title or scoped_note_title(project, "NOTE"),
+            body=payload.body,
+        )
+
+    @app.get(
+        "/v1/projects/{project}/joplin/notes/{note_id}",
+        response_model=JoplinNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_project_joplin_note(
+        project: str,
+        note_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        joplin = require_joplin(request)
+        return await run_joplin_call(joplin.get_note_for_project, project, note_id)
+
+    @app.put(
+        "/v1/projects/{project}/joplin/notes/{note_id}",
+        response_model=JoplinNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def update_project_joplin_note(
+        project: str,
+        note_id: str,
+        payload: JoplinNoteUpdateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        joplin = require_joplin(request)
+        return await run_joplin_call(
+            joplin.update_note_for_project,
+            project,
+            note_id,
+            title=payload.title,
+            body=payload.body,
+        )
+
+    @app.delete(
+        "/v1/projects/{project}/joplin/notes/{note_id}",
+        response_model=JoplinNoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def delete_project_joplin_note(
+        project: str,
+        note_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        joplin = require_joplin(request)
+        return await run_joplin_call(joplin.delete_note_for_project, project, note_id)
+
+    @app.get(
         "/v1/agents/{agent_id}/joplin/notes",
         response_model=list[JoplinNoteSummary],
         dependencies=[Depends(require_token)],

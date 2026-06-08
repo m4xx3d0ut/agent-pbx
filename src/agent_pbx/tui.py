@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import time
 from typing import Any, TypeVar
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from rich.color import Color, ColorParseError
@@ -214,6 +214,10 @@ THEME_KEYS = (
 CODEX_STATUS_LINE_PATTERN = re.compile(
     r"\b(Working|Thinking|Reading|Editing|Running|Waiting)\b"
 )
+JOPLIN_NOTE_REF_PREFIX = "@joplin:"
+JOPLIN_NOTE_REF_PATTERN = re.compile(
+    r"(?:^|(?<=[\s(\[{'\"`]))(@joplin:[A-Za-z0-9_.~-]+)"
+)
 BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/refresh",
     "/detail",
@@ -345,6 +349,15 @@ class FileCompletionState:
 
 
 @dataclass(frozen=True)
+class JoplinNoteReference:
+    token: str
+    note_id: str
+    title: str
+    body: str
+    updated_time: int | float | None = None
+
+
+@dataclass(frozen=True)
 class PlanSelection:
     index: int
     notes: str = ""
@@ -418,11 +431,9 @@ def env_flag(*names: str, default: bool = False) -> bool:
         value = os.getenv(name)
         if value is None:
             continue
-        normalized = value.strip().lower()
-        if normalized in TRUE_ENV_VALUES:
-            return True
-        if normalized in FALSE_ENV_VALUES:
-            return False
+        parsed = parse_env_bool(value)
+        if parsed is not None:
+            return parsed
     return default
 
 
@@ -431,11 +442,18 @@ def env_flag_value(*names: str) -> bool | None:
         value = os.getenv(name)
         if value is None:
             continue
-        normalized = value.strip().lower()
-        if normalized in TRUE_ENV_VALUES:
-            return True
-        if normalized in FALSE_ENV_VALUES:
-            return False
+        parsed = parse_env_bool(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def parse_env_bool(value: str) -> bool | None:
+    normalized = value.strip().lower()
+    if normalized in TRUE_ENV_VALUES:
+        return True
+    if normalized in FALSE_ENV_VALUES:
+        return False
     return None
 
 
@@ -906,6 +924,114 @@ def split_file_completion_prefix(prefix: str) -> tuple[str, str] | None:
     if normalized is None:
         return None
     return normalized, name_prefix
+
+
+def joplin_note_ref_slug(note: dict[str, Any]) -> str:
+    title = str(note.get("title") or "").strip()
+    note_id = str(note.get("id") or "").strip()
+    return slugify(title or note_id[:12] or "note")
+
+
+def joplin_note_ref_tokens(
+    notes: Iterable[dict[str, Any]],
+) -> dict[str, str]:
+    note_list = [note for note in notes if note.get("id")]
+    slug_counts: dict[str, int] = {}
+    short_id_counts: dict[str, int] = {}
+    for note in note_list:
+        slug = joplin_note_ref_slug(note).lower()
+        short_id = str(note.get("id") or "")[:8].lower()
+        slug_counts[slug] = slug_counts.get(slug, 0) + 1
+        if short_id:
+            short_id_counts[short_id] = short_id_counts.get(short_id, 0) + 1
+    tokens: dict[str, str] = {}
+    for note in note_list:
+        note_id = str(note.get("id") or "")
+        slug = joplin_note_ref_slug(note)
+        slug_key = slug.lower()
+        if slug_counts.get(slug_key, 0) == 1:
+            tokens[f"{JOPLIN_NOTE_REF_PREFIX}{slug}"] = note_id
+        else:
+            tokens[f"{JOPLIN_NOTE_REF_PREFIX}{slug}~{note_id[:8]}"] = note_id
+        tokens[f"{JOPLIN_NOTE_REF_PREFIX}{note_id}"] = note_id
+        if note_id[:8] and short_id_counts.get(note_id[:8].lower(), 0) == 1:
+            tokens[f"{JOPLIN_NOTE_REF_PREFIX}{note_id[:8]}"] = note_id
+    return tokens
+
+
+def joplin_note_ref_completion_tokens(
+    notes: Iterable[dict[str, Any]],
+) -> tuple[str, ...]:
+    note_list = [note for note in notes if note.get("id")]
+    slug_counts: dict[str, int] = {}
+    for note in note_list:
+        slug = joplin_note_ref_slug(note).lower()
+        slug_counts[slug] = slug_counts.get(slug, 0) + 1
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for note in note_list:
+        note_id = str(note.get("id") or "")
+        slug = joplin_note_ref_slug(note)
+        token = (
+            f"{JOPLIN_NOTE_REF_PREFIX}{slug}"
+            if slug_counts.get(slug.lower(), 0) == 1
+            else f"{JOPLIN_NOTE_REF_PREFIX}{slug}~{note_id[:8]}"
+        )
+        if token.lower() in seen:
+            continue
+        seen.add(token.lower())
+        tokens.append(token)
+    return tuple(sorted(tokens, key=str.lower))
+
+
+def joplin_note_ref_tokens_in_message(message: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for match in JOPLIN_NOTE_REF_PATTERN.finditer(message):
+        token = match.group(1)
+        key = token.lower()
+        if key not in seen:
+            seen.add(key)
+            tokens.append(token)
+    return tuple(tokens)
+
+
+def markdown_fence_for(body: str) -> str:
+    fence = "```"
+    while fence in body:
+        fence += "`"
+    return fence
+
+
+def format_joplin_note_references_for_prompt(
+    message: str,
+    references: list[JoplinNoteReference],
+) -> str:
+    if not references:
+        return message
+    lines = [
+        message.rstrip(),
+        "",
+        "---",
+        "",
+        "## Joplin Note References",
+        "",
+    ]
+    for index, reference in enumerate(references, start=1):
+        body = reference.body.rstrip() or "(empty note)"
+        fence = markdown_fence_for(body)
+        lines.extend(
+            [
+                f"### {index}. {reference.title or reference.note_id}",
+                "",
+                f"- Ref: `{reference.token}`",
+                f"- Note ID: `{reference.note_id}`",
+            ]
+        )
+        if reference.updated_time is not None:
+            lines.append(f"- Updated: `{reference.updated_time}`")
+        lines.extend(["", f"{fence}markdown", body, fence, ""])
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def float_value(value: object) -> float | None:
@@ -4572,6 +4698,33 @@ class AgentPBXTUI(App[None]):
         candidates.sort(key=lambda item: (item[0], item[1].lower()))
         return tuple(completion for _kind, completion in candidates)
 
+    def joplin_note_completion_matches(
+        self,
+        context: FileCompletionContext,
+        agent_id: str,
+    ) -> tuple[str, ...]:
+        notes = self.joplin_notes_by_agent.get(agent_id, {})
+        if not notes:
+            return ()
+        prefix_key = context.prefix.lower()
+        return tuple(
+            token
+            for token in joplin_note_ref_completion_tokens(notes.values())
+            if token.lower().startswith(prefix_key)
+        )
+
+    def project_for_agent(self, agent_id: str) -> str:
+        agent = self.agents.get(agent_id)
+        if isinstance(agent, dict) and agent.get("project"):
+            return str(agent["project"])
+        return agent_id
+
+    def project_joplin_notes_url(self, project: str, note_id: str | None = None) -> str:
+        base = f"/v1/projects/{quote(project, safe='')}/joplin/notes"
+        if note_id is None:
+            return base
+        return f"{base}/{quote(note_id, safe='')}"
+
     def file_completion_index(
         self,
         context: FileCompletionContext,
@@ -4627,6 +4780,7 @@ class AgentPBXTUI(App[None]):
         if not agent_id:
             self.notify("Select an agent before completing @file references.", severity="warning")
             return True
+        is_joplin_ref = context.prefix.lower().startswith(JOPLIN_NOTE_REF_PREFIX)
         state = self.file_completion_state.get(context.input_id)
         if (
             state is not None
@@ -4637,13 +4791,23 @@ class AgentPBXTUI(App[None]):
         ):
             matches = state.matches
         else:
-            matches = self.file_completion_matches(context, agent_id)
+            matches = (
+                self.joplin_note_completion_matches(context, agent_id)
+                if is_joplin_ref
+                else self.file_completion_matches(context, agent_id)
+            )
         if not matches:
             self.file_completion_state.pop(context.input_id, None)
-            self.notify(
-                f"No cached file matches {context.prefix!r}; open or refresh Files for {context.directory}.",
-                severity="warning",
-            )
+            if is_joplin_ref:
+                self.notify(
+                    f"No cached Joplin note matches {context.prefix!r}; open or refresh the Joplin tab.",
+                    severity="warning",
+                )
+            else:
+                self.notify(
+                    f"No cached file matches {context.prefix!r}; open or refresh Files for {context.directory}.",
+                    severity="warning",
+                )
             return True
         index = self.file_completion_index(context, matches, direction=direction)
         completion = matches[index]
@@ -5604,9 +5768,15 @@ class AgentPBXTUI(App[None]):
                 self.resize_message_input()
             return
         if self.should_send_plan_prompt(agent_id, message):
-            sent_plan = await self.send_plan_prompt(
+            expanded_message = await self.expand_joplin_note_references(
                 agent_id,
                 message,
+            )
+            if expanded_message is None:
+                return
+            sent_plan = await self.send_plan_prompt(
+                agent_id,
+                expanded_message,
                 via_tmux=False,
             )
             if sent_plan:
@@ -5618,6 +5788,9 @@ class AgentPBXTUI(App[None]):
         pending_slash_commands = self.pending_slash_command_sequence_for_message(
             agent_id, message
         )
+        expanded_message = await self.expand_joplin_note_references(agent_id, message)
+        if expanded_message is None:
+            return
         for pending_slash in pending_slash_commands:
             await self.queue_command(
                 agent_id,
@@ -5627,7 +5800,7 @@ class AgentPBXTUI(App[None]):
         command = await self.queue_command(
             agent_id,
             "send_input",
-            {"message": message},
+            {"message": expanded_message},
         )
         self.clear_pending_slash_command(agent_id)
         self.record_sent_message(agent_id, message)
@@ -5692,9 +5865,15 @@ class AgentPBXTUI(App[None]):
                 message_input.text = ""
             return
         if self.should_send_plan_prompt(agent_id, message):
-            sent_plan = await self.send_plan_prompt(
+            expanded_message = await self.expand_joplin_note_references(
                 agent_id,
                 message,
+            )
+            if expanded_message is None:
+                return
+            sent_plan = await self.send_plan_prompt(
+                agent_id,
+                expanded_message,
                 via_tmux=True,
             )
             if sent_plan:
@@ -5706,17 +5885,20 @@ class AgentPBXTUI(App[None]):
         pending_slash_commands = self.pending_slash_command_sequence_for_message(
             agent_id, message
         )
+        expanded_message = await self.expand_joplin_note_references(agent_id, message)
+        if expanded_message is None:
+            return
         for pending_slash in pending_slash_commands:
             sent_slash = await self.send_text_to_tmux(agent_id, pending_slash)
             if not sent_slash:
                 return
             await asyncio.sleep(SLASH_COMMAND_FOLLOWUP_DELAY_SECONDS)
-        sent = await self.send_text_to_tmux(agent_id, message)
+        sent = await self.send_text_to_tmux(agent_id, expanded_message)
         if not sent:
             return
         self.clear_pending_slash_command(agent_id)
         self.record_sent_message(agent_id, message)
-        await self.record_tmux_joplin_interaction(agent_id, message)
+        await self.record_tmux_joplin_interaction(agent_id, expanded_message)
         message_input.text = ""
         await self.load_tmux_capture(agent_id)
 
@@ -6827,12 +7009,107 @@ class AgentPBXTUI(App[None]):
             return "Sync: ok"
         return "Sync: ready"
 
+    async def fetch_joplin_note_summaries(
+        self,
+        agent_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        await self.refresh_joplin_status()
+        if not (self.joplin_configured and self.joplin_available):
+            raise RuntimeError(self.format_joplin_unavailable_summary(self.joplin_status))
+        project = self.project_for_agent(agent_id)
+        response = await self.api_client().get(
+            self.project_joplin_notes_url(project),
+            headers=auth_headers(self.token),
+            timeout=20,
+        )
+        response.raise_for_status()
+        notes = response.json()
+        if not isinstance(notes, list):
+            raise ValueError("Joplin notes response was not a list")
+        existing = self.joplin_notes_by_agent.get(agent_id, {})
+        note_map: dict[str, dict[str, Any]] = {}
+        for note in notes:
+            if not isinstance(note, dict):
+                continue
+            note_id = str(note.get("id") or "")
+            if not note_id:
+                continue
+            merged = dict(existing.get(note_id, {}))
+            merged.update(note)
+            note_map[note_id] = merged
+        self.joplin_notes_by_agent[agent_id] = note_map
+        return note_map
+
+    def resolve_joplin_note_ref_token(
+        self,
+        token: str,
+        notes: dict[str, dict[str, Any]],
+    ) -> str | None:
+        token_map = joplin_note_ref_tokens(notes.values())
+        lower_map = {candidate.lower(): note_id for candidate, note_id in token_map.items()}
+        return lower_map.get(token.lower())
+
+    async def fetch_joplin_note_for_reference(
+        self,
+        agent_id: str,
+        note_id: str,
+    ) -> dict[str, Any]:
+        project = self.project_for_agent(agent_id)
+        response = await self.api_client().get(
+            self.project_joplin_notes_url(project, note_id),
+            headers=auth_headers(self.token),
+            timeout=20,
+        )
+        response.raise_for_status()
+        note = response.json()
+        if not isinstance(note, dict):
+            raise ValueError(f"Joplin note {note_id} response was not an object")
+        self.joplin_notes_by_agent.setdefault(agent_id, {})[note_id] = note
+        return note
+
+    async def expand_joplin_note_references(
+        self,
+        agent_id: str,
+        message: str,
+    ) -> str | None:
+        tokens = joplin_note_ref_tokens_in_message(message)
+        if not tokens:
+            return message
+        if not agent_id:
+            self.notify(
+                "Select an agent before sending @joplin note references.",
+                severity="warning",
+            )
+            return None
+        try:
+            notes = await self.fetch_joplin_note_summaries(agent_id)
+            references: list[JoplinNoteReference] = []
+            for token in tokens:
+                note_id = self.resolve_joplin_note_ref_token(token, notes)
+                if note_id is None:
+                    raise ValueError(f"No scoped Joplin note matches {token}")
+                note = await self.fetch_joplin_note_for_reference(agent_id, note_id)
+                references.append(
+                    JoplinNoteReference(
+                        token=token,
+                        note_id=note_id,
+                        title=str(note.get("title") or note_id),
+                        body=str(note.get("body") or ""),
+                        updated_time=note.get("updated_time"),
+                    )
+                )
+        except Exception as exc:
+            self.notify(f"Joplin note reference failed: {exc}", severity="error")
+            return None
+        return format_joplin_note_references_for_prompt(message, references)
+
     async def load_joplin_notes(self, agent_id: str) -> None:
         await self.refresh_joplin_status()
         table = self.query_one_or_none("#joplin-notes", DataTable)
         body = self.query_one_or_none("#joplin-body", TextArea)
         if table is None or body is None:
             return
+        project = self.project_for_agent(agent_id)
         if not self.joplin_configured:
             table.clear()
             body.text = self.format_joplin_unavailable(self.joplin_status)
@@ -6841,10 +7118,10 @@ class AgentPBXTUI(App[None]):
             table.clear()
             body.text = self.format_joplin_unavailable(self.joplin_status)
             return
-        body.text = f"Loading Joplin notes for {agent_id}..."
+        body.text = f"Loading project Joplin notes for {project}..."
         try:
             response = await self.api_client().get(
-                f"/v1/agents/{agent_id}/joplin/notes",
+                self.project_joplin_notes_url(project),
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -6852,7 +7129,7 @@ class AgentPBXTUI(App[None]):
             notes = response.json()
         except Exception as exc:
             table.clear()
-            body.text = f"Unable to load Joplin notes for {agent_id}: {exc}"
+            body.text = f"Unable to load Joplin notes for {project}: {exc}"
             return
         self.render_joplin_notes(agent_id, notes)
         if notes:
@@ -6864,7 +7141,7 @@ class AgentPBXTUI(App[None]):
             await self.select_joplin_note(note_id)
         else:
             self.selected_joplin_note_id = None
-            body.text = "No Agent PBX Joplin notes for this agent yet."
+            body.text = "No project-scoped Joplin notes yet."
 
     def render_joplin_notes(
         self,
@@ -6890,11 +7167,12 @@ class AgentPBXTUI(App[None]):
         agent_id = self.selected_agent_id
         if not agent_id:
             return
+        project = self.project_for_agent(agent_id)
         body = self.query_one("#joplin-body", TextArea)
         body.text = f"Loading Joplin note {note_id}..."
         try:
             response = await self.api_client().get(
-                f"/v1/agents/{agent_id}/joplin/notes/{note_id}",
+                self.project_joplin_notes_url(project, note_id),
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -6957,10 +7235,11 @@ class AgentPBXTUI(App[None]):
     async def create_joplin_note(self, agent_id: str, *, title: str) -> None:
         if not await self.ensure_joplin_available():
             return
+        project = self.project_for_agent(agent_id)
         body = f"# {title.strip()}\n\n"
         try:
             response = await self.api_client().post(
-                f"/v1/agents/{agent_id}/joplin/notes",
+                self.project_joplin_notes_url(project),
                 json={"title": title.strip(), "body": body},
                 headers=auth_headers(self.token),
                 timeout=20,
@@ -6981,9 +7260,10 @@ class AgentPBXTUI(App[None]):
         if not note_id:
             self.notify("Select a Joplin note before renaming.", severity="warning")
             return
+        project = self.project_for_agent(agent_id)
         try:
             response = await self.api_client().put(
-                f"/v1/agents/{agent_id}/joplin/notes/{note_id}",
+                self.project_joplin_notes_url(project, note_id),
                 json={"title": title.strip()},
                 headers=auth_headers(self.token),
                 timeout=20,
@@ -7011,9 +7291,10 @@ class AgentPBXTUI(App[None]):
     async def delete_joplin_note(self, agent_id: str, note_id: str) -> None:
         if not await self.ensure_joplin_available():
             return
+        project = self.project_for_agent(agent_id)
         try:
             response = await self.api_client().delete(
-                f"/v1/agents/{agent_id}/joplin/notes/{note_id}",
+                self.project_joplin_notes_url(project, note_id),
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -7033,10 +7314,11 @@ class AgentPBXTUI(App[None]):
         if not note_id:
             self.notify("Select a Joplin note before saving.", severity="warning")
             return
+        project = self.project_for_agent(agent_id)
         body = self.query_one("#joplin-body", TextArea)
         try:
             response = await self.api_client().put(
-                f"/v1/agents/{agent_id}/joplin/notes/{note_id}",
+                self.project_joplin_notes_url(project, note_id),
                 json={"body": body.text},
                 headers=auth_headers(self.token),
                 timeout=20,
@@ -7600,7 +7882,7 @@ class AgentPBXTUI(App[None]):
                 f"{self.agent_refresh_seconds:g}s."
             )
         elif event.checkbox.id == "tmux-direct":
-            enabled = self.set_tmux_direct_enabled(event.value)
+            self.set_tmux_direct_enabled(event.value)
             if self.selected_agent_id:
                 worker = (
                     self.load_tmux_capture(self.selected_agent_id)

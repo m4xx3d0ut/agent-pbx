@@ -130,6 +130,13 @@ PBX note APIs, edit scoped notes, or in tmux direct mode send Codex `/copy` to
 capture the latest response; they are not instructions for an agent unless the
 operator separately asks for Joplin note content in the chat.
 
+Operator prompts may contain `@joplin:<note>` references from the TUI. Agent PBX
+resolves these references at project scope under the Agent PBX Joplin notebook,
+then expands them before delivery by appending a `Joplin Note References`
+Markdown section with each referenced note body. Treat that section as
+operator-supplied context for the current prompt; do not call Joplin tools again
+unless the operator asks you to create, update, or inspect notes directly.
+
 `pbx_queue_command` is exposed for the operator, TUI, tests, and control-plane
 helpers to queue work for agents. Do not use it as normal agent-side behavior
 or to self-queue work; in nohup mode, receive queued work through

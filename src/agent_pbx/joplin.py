@@ -157,6 +157,27 @@ class JoplinService:
         )
         return [self._note_summary(note) for note in notes]
 
+    def list_notes_for_project(self, project: str) -> list[dict[str, Any]]:
+        folder_ids = self.project_folder_ids(project)
+        notes: list[dict[str, Any]] = []
+        for folder_id in sorted(folder_ids):
+            notes.extend(
+                self._get_paginated(
+                    f"/folders/{folder_id}/notes",
+                    {
+                        "fields": "id,parent_id,title,created_time,updated_time",
+                        "order_by": "updated_time",
+                        "order_dir": "DESC",
+                    },
+                )
+            )
+        summaries = [self._note_summary(note) for note in notes]
+        summaries.sort(
+            key=lambda note: float(note.get("updated_time") or 0),
+            reverse=True,
+        )
+        return summaries
+
     def get_note_for_agent(self, agent: dict[str, Any], note_id: str) -> dict[str, Any]:
         folder_id = self.ensure_agent_folder(agent)
         note = self._request(
@@ -167,6 +188,72 @@ class JoplinService:
         if str(note.get("parent_id") or "") != folder_id:
             raise JoplinScopeError("note is outside the selected agent's Joplin scope")
         return self._note_response(note)
+
+    def get_note_for_project(self, project: str, note_id: str) -> dict[str, Any]:
+        folder_ids = self.project_folder_ids(project)
+        note = self._request(
+            "GET",
+            f"/notes/{note_id}",
+            params={"fields": "id,parent_id,title,body,created_time,updated_time"},
+        )
+        if str(note.get("parent_id") or "") not in folder_ids:
+            raise JoplinScopeError("note is outside the selected project's Joplin scope")
+        return self._note_response(note)
+
+    def create_note_for_project(
+        self,
+        project: str,
+        *,
+        title: str,
+        body: str,
+    ) -> dict[str, Any]:
+        folder_id = self.ensure_project_folder(project)
+        note = self._request(
+            "POST",
+            "/notes",
+            json={
+                "parent_id": folder_id,
+                "title": title,
+                "body": body,
+            },
+        )
+        if self.config.sync_on_write:
+            self.sync()
+        return self._note_response(note)
+
+    def update_note_for_project(
+        self,
+        project: str,
+        note_id: str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+    ) -> dict[str, Any]:
+        existing = self.get_note_for_project(project, note_id)
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if body is not None:
+            payload["body"] = body
+        if payload:
+            self._request("PUT", f"/notes/{note_id}", json=payload)
+        updated = self.get_note_for_project(project, note_id)
+        if updated["updated_time"] == existing["updated_time"] and payload:
+            updated["updated_time"] = self.clock()
+        if payload and self.config.sync_on_write:
+            self.sync()
+        return updated
+
+    def delete_note_for_project(
+        self,
+        project: str,
+        note_id: str,
+    ) -> dict[str, Any]:
+        existing = self.get_note_for_project(project, note_id)
+        self._request("DELETE", f"/notes/{note_id}")
+        if self.config.sync_on_write:
+            self.sync()
+        return existing
 
     def update_note_for_agent(
         self,
@@ -333,9 +420,36 @@ class JoplinService:
             self.sync()
         return self._note_response({**note, "body": body})
 
-    def ensure_agent_folder(self, agent: dict[str, Any]) -> str:
+    def ensure_project_folder(self, project: str) -> str:
         root_id = self.ensure_root_notebook()
-        project_id = self.ensure_folder(str(agent["project"]), parent_id=root_id)
+        return self.ensure_folder(project, parent_id=root_id)
+
+    def project_folder_ids(self, project: str) -> set[str]:
+        project_id = self.ensure_project_folder(project)
+        folders = self._get_paginated(
+            "/folders",
+            {"fields": "id,parent_id,title"},
+        )
+        children_by_parent: dict[str, list[str]] = {}
+        for folder in folders:
+            folder_id = str(folder.get("id") or "")
+            parent_id = normalize_parent_id(folder.get("parent_id"))
+            if not folder_id or parent_id is None:
+                continue
+            children_by_parent.setdefault(parent_id, []).append(folder_id)
+        scoped = {project_id}
+        pending = [project_id]
+        while pending:
+            parent_id = pending.pop()
+            for child_id in children_by_parent.get(parent_id, []):
+                if child_id in scoped:
+                    continue
+                scoped.add(child_id)
+                pending.append(child_id)
+        return scoped
+
+    def ensure_agent_folder(self, agent: dict[str, Any]) -> str:
+        project_id = self.ensure_project_folder(str(agent["project"]))
         return self.ensure_folder(str(agent["agent_id"]), parent_id=project_id)
 
     def ensure_root_notebook(self) -> str:
@@ -565,8 +679,55 @@ class JoplinGateway:
     def list_notes_for_agent(self, agent: dict[str, Any]) -> list[dict[str, Any]]:
         return self.service.list_notes_for_agent(agent)
 
+    def list_notes_for_project(self, project: str) -> list[dict[str, Any]]:
+        return self.service.list_notes_for_project(project)
+
     def get_note_for_agent(self, agent: dict[str, Any], note_id: str) -> dict[str, Any]:
         return self.service.get_note_for_agent(agent, note_id)
+
+    def get_note_for_project(self, project: str, note_id: str) -> dict[str, Any]:
+        return self.service.get_note_for_project(project, note_id)
+
+    def create_note_for_project(
+        self,
+        project: str,
+        *,
+        title: str,
+        body: str,
+    ) -> dict[str, Any]:
+        note = self.service.create_note_for_project(project, title=title, body=body)
+        self._enqueue_write_sync(
+            "project_note_create",
+            note_id=str(note.get("id") or ""),
+        )
+        return note
+
+    def update_note_for_project(
+        self,
+        project: str,
+        note_id: str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+    ) -> dict[str, Any]:
+        note = self.service.update_note_for_project(
+            project,
+            note_id,
+            title=title,
+            body=body,
+        )
+        if title is not None or body is not None:
+            self._enqueue_write_sync("project_note_update", note_id=note_id)
+        return note
+
+    def delete_note_for_project(
+        self,
+        project: str,
+        note_id: str,
+    ) -> dict[str, Any]:
+        note = self.service.delete_note_for_project(project, note_id)
+        self._enqueue_write_sync("project_note_delete", note_id=note_id)
+        return note
 
     def update_note_for_agent(
         self,
