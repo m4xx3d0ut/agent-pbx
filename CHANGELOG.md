@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.8.1 - 2026-06-09
+
+### Highlights
+
+- Fixes stale Joplin sync status in the TUI so an older sync failure no longer
+  keeps showing `Sync: error` after a newer successful sync.
+- Adds tmux/Termux-safe Joplin action shortcuts with `Ctrl+G` as the leader,
+  plus `j` as an alternate leader when focus is outside the editable note body.
+- Makes Joplin tab button shortcuts visible directly in the action labels:
+  `New n`, `Ren m`, `Del d`, `Save s`, `Ref r`, `Copy c`, `LOG+ l`,
+  `LOG- x`, and `Sync u`.
+- Fixes `/joplin copy` from the Latest input so it targets the input-selected
+  agent instead of the Agents table cursor.
+- Updates README guidance for the Joplin shortcut workflow.
+
+### Verification
+
+- `python -m pytest`
+- `git diff --check`
+- Release wheelhouse build with `scripts/build_wheelhouse.sh`
+
 ## v0.8.0 - 2026-06-08
 
 ### Highlights
