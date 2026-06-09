@@ -258,6 +258,33 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/layout compact",
     "/layout tiny",
 }
+JOPLIN_SLASH_ACTIONS = {
+    "/joplin": "open",
+    "/joplin refresh": "refresh",
+    "/joplin new": "new",
+    "/joplin rename": "rename",
+    "/joplin delete": "delete",
+    "/joplin copy": "copy",
+    "/joplin copy report": "copy-report",
+    "/joplin log start": "log-start",
+    "/joplin log stop": "log-stop",
+    "/joplin save": "save",
+    "/joplin sync": "sync",
+}
+JOPLIN_SHORTCUT_ACTIONS = {
+    "n": ("new", "new"),
+    "m": ("rename", "rename"),
+    "d": ("delete", "delete"),
+    "s": ("save", "save"),
+    "r": ("refresh", "refresh"),
+    "c": ("copy", "copy"),
+    "l": ("log-start", "log on"),
+    "x": ("log-stop", "log off"),
+    "u": ("sync", "sync"),
+}
+JOPLIN_SHORTCUT_HINT = (
+    "Joplin keys: Ctrl+G, or j outside note body, then the button key"
+)
 WidgetType = TypeVar("WidgetType")
 
 
@@ -1233,6 +1260,12 @@ class FollowUpTextArea(TextArea):
 
 class NavigationTextArea(TextArea):
     async def _on_key(self, event: Key) -> None:
+        handle_joplin_shortcut = getattr(self.app, "handle_joplin_shortcut_key", None)
+        if handle_joplin_shortcut is not None and handle_joplin_shortcut(
+            event,
+            focused=self,
+        ):
+            return
         if self.read_only:
             handle_shortcut = getattr(self.app, "handle_focus_shortcut_key", None)
             if handle_shortcut is not None and handle_shortcut(event):
@@ -2150,7 +2183,7 @@ class AgentPBXTUI(App[None]):
     }
 
     #joplin-actions {
-        height: 6;
+        height: 7;
     }
 
     #joplin-crud-actions,
@@ -2162,6 +2195,13 @@ class AgentPBXTUI(App[None]):
     #joplin-log-actions Button {
         width: 1fr;
         min-width: 1;
+    }
+
+    #joplin-hotkeys {
+        height: 1;
+        color: $secondary;
+        text-style: dim;
+        content-align: left middle;
     }
 
     #events {
@@ -2481,6 +2521,7 @@ class AgentPBXTUI(App[None]):
         self.selected_thread_item_id: str | None = None
         self.selected_plan_option_index: int | None = None
         self.selected_latest_plan_option_index: int | None = None
+        self.joplin_shortcut_pending = False
         self.marked_thread_item_ids: set[str] = set()
         self.active_agent_tab = "latest-tab"
         self.unseen_latest_agent_ids: set[str] = set()
@@ -2578,6 +2619,9 @@ class AgentPBXTUI(App[None]):
             "F1 Agents | F2 Events | F3 View | F4 Input | Enter send | "
             "Ctrl+J newline | Ctrl+W word | Ctrl+T/F8 PBX"
         )
+
+    def joplin_hotkeys_text(self) -> str:
+        return JOPLIN_SHORTCUT_HINT
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -2710,16 +2754,17 @@ class AgentPBXTUI(App[None]):
                         yield NavigationTextArea(id="joplin-body")
                         with Vertical(id="joplin-actions"):
                             with Horizontal(id="joplin-crud-actions"):
-                                yield Button("New", id="joplin-new")
-                                yield Button("Rename", id="joplin-rename")
-                                yield Button("Delete", id="joplin-delete")
-                                yield Button("Save", id="joplin-save", variant="primary")
-                                yield Button("Refresh", id="joplin-refresh")
+                                yield Button("New n", id="joplin-new")
+                                yield Button("Ren m", id="joplin-rename")
+                                yield Button("Del d", id="joplin-delete")
+                                yield Button("Save s", id="joplin-save", variant="primary")
+                                yield Button("Ref r", id="joplin-refresh")
                             with Horizontal(id="joplin-log-actions"):
-                                yield Button("Copy Latest", id="joplin-copy-latest")
-                                yield Button("Start LOG", id="joplin-log-start")
-                                yield Button("Stop LOG", id="joplin-log-stop")
-                                yield Button("Sync Now", id="joplin-sync")
+                                yield Button("Copy c", id="joplin-copy-latest")
+                                yield Button("LOG+ l", id="joplin-log-start")
+                                yield Button("LOG- x", id="joplin-log-stop")
+                                yield Button("Sync u", id="joplin-sync")
+                            yield Static(self.joplin_hotkeys_text(), id="joplin-hotkeys")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -3387,7 +3432,11 @@ class AgentPBXTUI(App[None]):
         if agent_input is not None:
             agent_input.value = agent_id
         self.update_agent_title()
-        if action == "new":
+        if action == "open":
+            await self.load_joplin_notes(agent_id)
+        elif action == "refresh":
+            await self.load_joplin_notes(agent_id)
+        elif action == "new":
             self.open_joplin_title_modal(agent_id, action="new")
         elif action == "rename":
             self.open_joplin_title_modal(agent_id, action="rename")
@@ -4419,6 +4468,8 @@ class AgentPBXTUI(App[None]):
             focused = self.focused
         except ScreenStackError:
             focused = None
+        if self.handle_joplin_shortcut_key(event, focused=focused):
+            return
         if event.key == "space" and thread is not None and focused is thread:
             event.stop()
             self.toggle_current_thread_mark()
@@ -4442,6 +4493,54 @@ class AgentPBXTUI(App[None]):
             return
         if self.handle_focus_shortcut_key(event):
             return
+
+    def handle_joplin_shortcut_key(
+        self,
+        event: Key,
+        *,
+        focused: Widget | None = None,
+    ) -> bool:
+        if self.active_agent_tab != "joplin-tab":
+            self.joplin_shortcut_pending = False
+            return False
+        key_names = normalized_key_names(event)
+        key = str(event.character or event.key or "").lower()
+        editable_focus = isinstance(focused, (Input, TextArea)) and not bool(
+            getattr(focused, "read_only", False)
+        )
+        starts_prefix = "ctrl+g" in key_names or "c-g" in key_names
+        if not starts_prefix and key == "j" and not editable_focus:
+            starts_prefix = True
+        if starts_prefix:
+            event.stop()
+            event.prevent_default()
+            self.joplin_shortcut_pending = True
+            self.notify(JOPLIN_SHORTCUT_HINT)
+            return True
+        if not self.joplin_shortcut_pending:
+            return False
+        event.stop()
+        event.prevent_default()
+        self.joplin_shortcut_pending = False
+        if event.key == "escape":
+            self.notify("Joplin shortcut canceled.")
+            return True
+        action = JOPLIN_SHORTCUT_ACTIONS.get(key)
+        if action is None:
+            self.notify(f"Unknown Joplin shortcut {key!r}.", severity="warning")
+            return True
+        agent_id = self.selected_agent_id or self.palette_context_agent_id()
+        if not agent_id:
+            self.notify("Select an agent first.", severity="warning")
+            return True
+        action_name, label = action
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, action_name),
+            name=f"joplin-shortcut-{slugify(action_name)}",
+            exclusive=True,
+        )
+        self.notify(f"Joplin {label} requested for {agent_id}.")
+        return True
 
     def handle_focus_shortcut_key(self, event: Key) -> bool:
         key = str(event.character or event.key or "").lower()
@@ -4975,6 +5074,17 @@ class AgentPBXTUI(App[None]):
             agent_input = self.query_one_or_none("#agent-id", Input)
             if agent_input is not None:
                 agent_input.value = agent_id
+        joplin_action = JOPLIN_SLASH_ACTIONS.get(command.title.lower())
+        if joplin_action is not None:
+            if not agent_id:
+                self.notify("Select an agent first.", severity="warning")
+                return True
+            await self.joplin_action_for_agent(agent_id, joplin_action)
+            self.record_sent_message(agent_id, message)
+            text_area.text = ""
+            if text_area.id == "message":
+                self.resize_message_input()
+            return True
         original_text = text_area.text
         result = command.callback()
         if inspect.isawaitable(result):

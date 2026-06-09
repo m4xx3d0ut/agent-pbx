@@ -658,6 +658,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         joplin_log_stop = app.query_one("#joplin-log-stop", Button)
         joplin_sync = app.query_one("#joplin-sync", Button)
         joplin_save = app.query_one("#joplin-save", Button)
+        joplin_hotkeys = app.query_one("#joplin-hotkeys", Static)
         composer = app.query_one("#composer")
         agent_id = app.query_one("#agent-id", Input)
         message = app.query_one("#message", TextArea)
@@ -691,15 +692,16 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert str(joplin_status.renderable).startswith("Joplin:")
         assert joplin_notes.cursor_type == "row"
         assert joplin_body.read_only is False
-        assert joplin_new.label.plain == "New"
-        assert joplin_rename.label.plain == "Rename"
-        assert joplin_delete.label.plain == "Delete"
-        assert joplin_refresh.label.plain == "Refresh"
-        assert joplin_copy.label.plain == "Copy Latest"
-        assert joplin_log_start.label.plain == "Start LOG"
-        assert joplin_log_stop.label.plain == "Stop LOG"
-        assert joplin_sync.label.plain == "Sync Now"
-        assert joplin_save.label.plain == "Save"
+        assert joplin_new.label.plain == "New n"
+        assert joplin_rename.label.plain == "Ren m"
+        assert joplin_delete.label.plain == "Del d"
+        assert joplin_refresh.label.plain == "Ref r"
+        assert joplin_copy.label.plain == "Copy c"
+        assert joplin_log_start.label.plain == "LOG+ l"
+        assert joplin_log_stop.label.plain == "LOG- x"
+        assert joplin_sync.label.plain == "Sync u"
+        assert joplin_save.label.plain == "Save s"
+        assert "Ctrl+G" in str(joplin_hotkeys.renderable)
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
         assert "#files {\n        height: 10;" in app.CSS
@@ -709,7 +711,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
         assert "#joplin-notes {\n        height: 8;" in app.CSS
         assert "#joplin-body {\n        height: 1fr;" in app.CSS
-        assert "#joplin-actions {\n        height: 6;" in app.CSS
+        assert "#joplin-actions {\n        height: 7;" in app.CSS
         assert "#tmux-message {\n        height: 8;" in app.CSS
         assert "Notification Options" not in app.CSS
         assert message.soft_wrap is True
@@ -3235,6 +3237,97 @@ async def test_tui_follow_up_exact_joplin_copy_report_executes_locally() -> None
 
     assert calls == [("agent-1", "copy-report")]
     assert message.text == ""
+
+
+async def test_tui_follow_up_joplin_action_uses_input_agent_not_cursor() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_joplin_action_for_agent(agent_id: str, action: str) -> None:
+        calls.append((agent_id, action))
+
+    app.joplin_action_for_agent = fake_joplin_action_for_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.joplin_configured = True
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 124.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            },
+        }
+        app.render_agents()
+        app.move_agent_cursor("agent-2", focus=False)
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        message = app.query_one("#message", TextArea)
+        message.text = "/joplin copy"
+        await app.send_input()
+        await pilot.pause()
+
+    assert calls == [("agent-1", "copy")]
+    assert message.text == ""
+
+
+async def test_tui_joplin_leader_shortcut_runs_action() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_joplin_action_for_agent(agent_id: str, action: str) -> None:
+        calls.append((agent_id, action))
+
+    app.joplin_action_for_agent = fake_joplin_action_for_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.joplin_configured = True
+        app.joplin_available = True
+        app.selected_agent_id = "agent-1"
+        tabs = app.query_one("#agent-tabs")
+        tabs.active = "joplin-tab"
+        app.active_agent_tab = "joplin-tab"
+        notes = app.query_one("#joplin-notes", DataTable)
+        notes.focus()
+        assert app.handle_joplin_shortcut_key(Key("j", "j"), focused=notes) is True
+        assert app.handle_joplin_shortcut_key(Key("c", "c"), focused=notes) is True
+        await pilot.pause()
+
+    assert calls == [("agent-1", "copy")]
+
+
+async def test_tui_joplin_ctrl_g_shortcut_works_from_note_body() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_joplin_action_for_agent(agent_id: str, action: str) -> None:
+        calls.append((agent_id, action))
+
+    app.joplin_action_for_agent = fake_joplin_action_for_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.joplin_configured = True
+        app.joplin_available = True
+        app.selected_agent_id = "agent-1"
+        tabs = app.query_one("#agent-tabs")
+        tabs.active = "joplin-tab"
+        app.active_agent_tab = "joplin-tab"
+        body = app.query_one("#joplin-body", TextArea)
+        body.focus()
+        await body._on_key(Key("ctrl+g", None))
+        await body._on_key(Key("s", "s"))
+        await pilot.pause()
+
+    assert calls == [("agent-1", "save")]
 
 
 async def test_tui_joplin_copy_tmux_response_uses_codex_copy_clipboard(

@@ -359,6 +359,10 @@ copy report` copies the latest PBX report, `/joplin log start` and `/joplin log
 stop` control the growing LOG note, `/joplin save` saves the selected note body,
 and `/joplin sync` queues a manual sync job.
 
+The Joplin tab buttons show their shortcut key directly, such as `New n` and
+`Copy c`. Press `Ctrl+G` then that key; when focus is outside an editable note
+body, `j` can be used instead of `Ctrl+G`.
+
 In tmux direct mode, `/joplin copy` sends Codex `/copy` to the selected pane,
 reads the copied response with a local clipboard helper such as `wl-paste`,
 `xclip`, `xsel`, `pbpaste`, `termux-clipboard-get`, or `tmux show-buffer`, then
