@@ -789,6 +789,46 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert close.label.plain == "Close"
 
 
+def test_tui_joplin_sync_summary_uses_latest_sync_result() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    summary = app.format_joplin_sync_summary(
+        {
+            "enabled": True,
+            "running": 0,
+            "pending": 0,
+            "latest": {"status": "succeeded", "error": None},
+            "latest_success": {"status": "succeeded"},
+            "latest_error": {
+                "status": "failed",
+                "error": "older failure",
+            },
+        }
+    )
+
+    assert summary == "Sync: ok"
+
+
+def test_tui_joplin_sync_summary_reports_current_failure() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    summary = app.format_joplin_sync_summary(
+        {
+            "enabled": True,
+            "running": 0,
+            "pending": 0,
+            "latest": {"status": "failed", "error": "current failure"},
+            "latest_success": {"status": "succeeded"},
+            "latest_error": {
+                "status": "failed",
+                "error": "current failure",
+            },
+        }
+    )
+
+    assert summary == "Sync: error"
+
+
 async def test_tui_disables_tmux_controls_when_unavailable(monkeypatch) -> None:
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr("agent_pbx.tui.shutil.which", lambda name: None)

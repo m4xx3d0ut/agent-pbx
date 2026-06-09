@@ -7002,6 +7002,13 @@ class AgentPBXTUI(App[None]):
             return f"Sync: running {running}"
         if pending:
             return f"Sync: queued {pending}"
+        latest = sync.get("latest")
+        if isinstance(latest, dict):
+            latest_status = str(latest.get("status") or "").lower()
+            if latest_status == "failed" and latest.get("error"):
+                return "Sync: error"
+            if latest_status == "succeeded":
+                return "Sync: ok"
         latest_error = sync.get("latest_error")
         if isinstance(latest_error, dict) and latest_error.get("error"):
             return "Sync: error"
