@@ -29,6 +29,14 @@ from .joplin import (
     JOPLIN_WEBDAV_USERNAME_ENV,
 )
 from .workerbee import WORKERBEE_BIN_ENV, WORKERBEE_CACHE_ENV, WORKERBEE_TIMEOUT_ENV
+from .issues import ISSUES_CLOSE_ENABLED_ENV, ISSUES_ENABLED_ENV
+from .pull_requests import (
+    GITHUB_BIN_ENV,
+    PULL_REQUESTS_ALLOWED_REPOS_ENV,
+    PULL_REQUESTS_ENABLED_ENV,
+    PULL_REQUESTS_MERGE_ENABLED_ENV,
+    PULL_REQUESTS_TIMEOUT_ENV,
+)
 
 
 MCP_DAEMON_FILE = "mcp-daemon.json"
@@ -50,6 +58,13 @@ class MCPDaemonConfig:
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
+    pull_requests_enabled: bool = False
+    pull_request_merge_enabled: bool = False
+    issues_enabled: bool = False
+    issue_close_enabled: bool = False
+    github_bin: str = "gh"
+    pull_request_timeout_seconds: float = 20.0
+    pull_request_allowed_repos: tuple[str, ...] = ()
     joplin_api_url: str | None = None
     joplin_token: str | None = None
     joplin_notebook: str = "Agent PBX"
@@ -114,6 +129,13 @@ def config_from_args(
     workerbee_bin: Path | None = None,
     workerbee_timeout_seconds: float = 20.0,
     workerbee_cache_seconds: float = 10.0,
+    pull_requests_enabled: bool = False,
+    pull_request_merge_enabled: bool = False,
+    issues_enabled: bool = False,
+    issue_close_enabled: bool = False,
+    github_bin: str = "gh",
+    pull_request_timeout_seconds: float = 20.0,
+    pull_request_allowed_repos: tuple[str, ...] = (),
     joplin_api_url: str | None = None,
     joplin_token: str | None = None,
     joplin_notebook: str = "Agent PBX",
@@ -138,6 +160,13 @@ def config_from_args(
         workerbee_bin=workerbee_bin.expanduser() if workerbee_bin else None,
         workerbee_timeout_seconds=workerbee_timeout_seconds,
         workerbee_cache_seconds=workerbee_cache_seconds,
+        pull_requests_enabled=pull_requests_enabled,
+        pull_request_merge_enabled=pull_request_merge_enabled,
+        issues_enabled=issues_enabled,
+        issue_close_enabled=issue_close_enabled,
+        github_bin=github_bin,
+        pull_request_timeout_seconds=pull_request_timeout_seconds,
+        pull_request_allowed_repos=pull_request_allowed_repos,
         joplin_api_url=joplin_api_url,
         joplin_token=joplin_token,
         joplin_notebook=joplin_notebook,
@@ -181,6 +210,23 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         child_env[WORKERBEE_BIN_ENV] = str(config.workerbee_bin.expanduser())
     child_env[WORKERBEE_TIMEOUT_ENV] = str(config.workerbee_timeout_seconds)
     child_env[WORKERBEE_CACHE_ENV] = str(config.workerbee_cache_seconds)
+    child_env[PULL_REQUESTS_ENABLED_ENV] = (
+        "1" if config.pull_requests_enabled else "0"
+    )
+    child_env[PULL_REQUESTS_MERGE_ENABLED_ENV] = (
+        "1" if config.pull_request_merge_enabled else "0"
+    )
+    child_env[ISSUES_ENABLED_ENV] = "1" if config.issues_enabled else "0"
+    child_env[ISSUES_CLOSE_ENABLED_ENV] = (
+        "1" if config.issue_close_enabled else "0"
+    )
+    child_env[GITHUB_BIN_ENV] = config.github_bin
+    child_env[PULL_REQUESTS_TIMEOUT_ENV] = str(
+        config.pull_request_timeout_seconds
+    )
+    child_env[PULL_REQUESTS_ALLOWED_REPOS_ENV] = ",".join(
+        config.pull_request_allowed_repos
+    )
     if config.joplin_api_url:
         child_env[JOPLIN_API_URL_ENV] = config.joplin_api_url
     if config.joplin_token:
@@ -231,6 +277,13 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,
+        "pull_requests_enabled": config.pull_requests_enabled,
+        "pull_request_merge_enabled": config.pull_request_merge_enabled,
+        "issues_enabled": config.issues_enabled,
+        "issue_close_enabled": config.issue_close_enabled,
+        "github_bin": config.github_bin,
+        "pull_request_timeout_seconds": config.pull_request_timeout_seconds,
+        "pull_request_allowed_repos": list(config.pull_request_allowed_repos),
         "joplin_api_url": config.joplin_api_url,
         "joplin_notebook": config.joplin_notebook,
         "joplin_configured": bool(config.joplin_api_url and config.joplin_token),
@@ -345,6 +398,13 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,
+        "pull_requests_enabled": config.pull_requests_enabled,
+        "pull_request_merge_enabled": config.pull_request_merge_enabled,
+        "issues_enabled": config.issues_enabled,
+        "issue_close_enabled": config.issue_close_enabled,
+        "github_bin": config.github_bin,
+        "pull_request_timeout_seconds": config.pull_request_timeout_seconds,
+        "pull_request_allowed_repos": list(config.pull_request_allowed_repos),
         "joplin_api_url": config.joplin_api_url,
         "joplin_notebook": config.joplin_notebook,
         "joplin_configured": bool(config.joplin_api_url and config.joplin_token),

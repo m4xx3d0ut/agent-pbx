@@ -114,7 +114,7 @@ Both `local.env` paths are intentionally private because they may contain local
 tokens, Joplin credentials, and absolute executable paths. Common values include
 `AGENT_PBX_HOST`, `AGENT_PBX_PORT`, `AGENT_PBX_TOKEN`,
 `AGENT_PBX_SERVER_URL`, `AGENT_PBX_DEBUG`, `AGENT_PBX_WORKERBEE_BIN`, and the
-optional Joplin settings.
+optional Pull Request, Issues, and Joplin settings.
 
 For the common local workflow:
 
@@ -305,6 +305,57 @@ projects` can take more than ten seconds on hosts with many projects. Agent PBX
 also serializes same-agent WorkerBee checks and caches results briefly to avoid
 WorkerBee project-lock collisions from repeated refreshes.
 
+## Pull Request Review
+
+Set `AGENT_PBX_PR_ENABLED=1` before starting the daemon to enable the `PRs` tab
+for selected agents whose `metadata.cwd` is inside a GitHub repository. Agent
+PBX uses the authenticated `gh` CLI on the MCP host; remote TUI clients only see
+Agent PBX API results.
+
+```bash
+export AGENT_PBX_PR_ENABLED=1
+export AGENT_PBX_GH_BIN=gh
+export AGENT_PBX_PR_ALLOWED_REPOS=m4xx3d0ut/agent-pbx,m4xx3d0ut/content-tools-studio
+agent-pbx mcp restart --token dev-token
+agent-pbx tui --token dev-token
+```
+
+The `PRs` tab lists open pull requests, status checks, details, changed files,
+and URLs for the selected agent project. `Review` asks the selected agent to
+review the PR; `Validate` asks it to run appropriate WorkerBee checks and report
+results. In tmux direct mode these prompts are sent straight to the Codex pane.
+Otherwise they are queued as `send_input` commands, so the target agent must be
+polling in `use Agent PBX nohup` mode before the request can produce a new
+Latest/Thread report. Agents can call `pbx_pr_context(agent_id, pr_number)` for
+read-only PR context, but there is no agent-side merge tool.
+
+Merging is operator-only and disabled by default. To expose the TUI/API merge
+button, set `AGENT_PBX_PR_MERGE_ENABLED=1`; the merge request still requires
+the server token and exact confirmation text such as `merge PR #12`. Use
+`AGENT_PBX_PR_ALLOWED_REPOS` as a comma-separated allowlist for LAN lab runs.
+If the PR tab reports that a repository is not allowed, add that `owner/repo`
+value to the list or leave the variable empty to allow any repo visible to
+`gh` on the MCP host.
+
+## GitHub Issues
+
+Set `AGENT_PBX_ISSUES_ENABLED=1` before starting the daemon to enable the
+`Issues` tab for selected agents whose `metadata.cwd` is inside an allowed
+GitHub repository. Issues reuse `AGENT_PBX_GH_BIN`,
+`AGENT_PBX_PR_TIMEOUT_SECONDS`, and `AGENT_PBX_PR_ALLOWED_REPOS`.
+
+The `Issues` tab lists open issues and shows issue body, labels, assignees,
+milestone, URL, and recent comments. `Mitigate` asks the selected agent to
+investigate and report a fix path. In tmux direct mode the prompt is sent
+straight to the Codex pane; otherwise it is queued as `send_input` and requires
+the target agent to poll in `use Agent PBX nohup` mode.
+
+Clearing is operator-only and disabled by default. To expose the TUI/API clear
+action, set `AGENT_PBX_ISSUES_CLOSE_ENABLED=1`; each clear still requires a
+mitigation summary comment and exact confirmation text such as
+`clear issue #12`. Agents can call `pbx_issue_context(agent_id, issue_number)`
+for read-only context, but there is no agent-side close/comment tool.
+
 ## Joplin Notes Integration
 
 Set `AGENT_PBX_JOPLIN_API_URL` and `AGENT_PBX_JOPLIN_TOKEN` before starting the
@@ -428,11 +479,11 @@ directories already read by the Files tab, so `@src/<Tab>` requires `src` to
 have been opened or refreshed first. The same completion works in tmux direct
 input.
 
-Joplin project notes can be referenced with `@joplin:`. Open or refresh the
-`Joplin` tab for the selected agent's project, then type `@joplin:Release` and
-press `Tab` to complete cached project note titles. On send, Agent PBX fetches
-each referenced note body fresh and appends a `Joplin Note References` Markdown
-section to the prompt, so
+Joplin project notes can be referenced with `@joplin:`. Type
+`@joplin:Release` and press `Tab` to complete project note titles; if the
+Joplin tab has not been opened yet, Agent PBX lazily loads the selected
+project's note index first. On send, Agent PBX fetches each referenced note body
+fresh and appends a `Joplin Note References` Markdown section to the prompt, so
 `Review @joplin:weekly-updates-052926-060826 and @joplin:Release-Checklist`
 gives Codex both note bodies in one message. If a referenced note cannot be
 resolved inside the selected project scope, the prompt is not sent. Reference
@@ -526,8 +577,8 @@ and very small terminals use a tiny mode that shows only Agents or Events on
 the home screen. Override with
 `AGENT_PBX_TUI_LAYOUT=adaptive|split|compact|tiny` or the `Layout` setting.
 Selecting an agent in compact or tiny mode opens a full-width view with
-`Latest`, `Thread`, `Files`, `WorkerBee`, and configured optional tabs such as
-`Joplin`; press `b` to return to the agent list. In tiny mode, press `e` on
+`Latest`, `Thread`, `Files`, `WorkerBee`, `PRs`, `Issues`, and configured
+optional tabs such as `Joplin`; press `b` to return to the agent list. In tiny mode, press `e` on
 the home screen for Events and `a` to return to Agents.
 
 For very low-power terminals where the TUI is mostly an alert board, enable
@@ -565,6 +616,8 @@ show the same pinned agents; the TUI settings file keeps a local cache/fallback.
 
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/tmux`, `/workerbee`,
+`/pr`, `/pr refresh`, `/pr review`, `/pr validate`, `/pr url`, `/pr merge`,
+`/issue`, `/issue refresh`, `/issue mitigate`, `/issue url`, `/issue clear`,
 configured `/joplin`, `/joplin new`, `/joplin rename`, `/joplin delete`,
 `/joplin copy`, `/joplin copy report`, `/theme minimal`, and `/layout compact`.
 `/cancel` marks a stale or abandoned session canceled in PBX; it does not send
@@ -578,7 +631,7 @@ nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete cached project paths from the Files
 tab. Type `@joplin:` and press `Tab` to complete project-scoped Joplin note
-titles from the Joplin tab cache. Repeated `Tab` cycles matches; exact local
+titles from cache, with lazy loading on first use. Repeated `Tab` cycles matches; exact local
 commands such as `/esc` or `/theme minimal` execute locally on `Enter` instead
 of being sent to the agent.
 

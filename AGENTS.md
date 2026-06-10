@@ -137,6 +137,21 @@ Markdown section with each referenced note body. Treat that section as
 operator-supplied context for the current prompt; do not call Joplin tools again
 unless the operator asks you to create, update, or inspect notes directly.
 
+Built-in TUI pull request commands such as `/pr`, `/pr review`, `/pr validate`,
+`/pr url`, and `/pr merge` are operator actions. `/pr review` and
+`/pr validate` may queue a normal `send_input` prompt asking you to review a PR
+or run validation. When asked for PR context, call `pbx_pr_context(agent_id,
+pr_number)` and report findings through Agent PBX. Do not merge pull requests;
+merge is an operator-only API/TUI action and is not exposed as an agent MCP
+tool.
+
+Built-in TUI issue commands such as `/issue`, `/issue mitigate`, `/issue url`,
+and `/issue clear` are operator actions. `/issue mitigate` may queue a normal
+`send_input` prompt asking you to investigate and mitigate a GitHub issue. When
+asked for issue context, call `pbx_issue_context(agent_id, issue_number)` and
+report findings through Agent PBX. Do not comment on or close issues; clear is
+an operator-only API/TUI action and is not exposed as an agent MCP tool.
+
 `pbx_queue_command` is exposed for the operator, TUI, tests, and control-plane
 helpers to queue work for agents. Do not use it as normal agent-side behavior
 or to self-queue work; in nohup mode, receive queued work through

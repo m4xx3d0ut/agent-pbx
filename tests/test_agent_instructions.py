@@ -20,6 +20,8 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "pbx_register_agent" in instructions
     assert "pbx_agent_runbook" in instructions
     assert "pbx_queue_command" in instructions
+    assert "pbx_pr_context" in instructions
+    assert "pbx_issue_context" in instructions
     assert "pbx_poll_commands" in instructions
     assert "request_detail" in instructions
     assert "pbx_ack_command" in instructions
@@ -67,6 +69,8 @@ def test_runbook_payload_includes_command_guidance() -> None:
     assert any("pbx_agent_runbook" in item for item in payload["session_start"])
     assert any("pbx_queue_command" in item for item in payload["tool_roles"])
     assert any("pbx_report_turn" in item for item in payload["tool_roles"])
+    assert any("pbx_pr_context" in item for item in payload["tool_roles"])
+    assert any("pbx_issue_context" in item for item in payload["tool_roles"])
     assert any("for planning" in item for item in payload["pbx_modes"])
     assert any("nohup" in item for item in payload["pbx_modes"])
     assert any("never calls pbx_poll_commands" in item for item in payload["pbx_modes"])
@@ -99,6 +103,8 @@ def test_runbook_payload_includes_command_guidance() -> None:
     assert any("plan_options" in item for item in payload["plan_options"])
     assert any("Selected plan option:" in item for item in payload["plan_options"])
     assert any("Do not only write choices" in item for item in payload["plan_options"])
+    assert any("pbx_issue_context" in item for item in payload["issue_mitigation"])
+    assert any("operator-only" in item for item in payload["issue_mitigation"])
 
 
 def test_install_agent_instructions_check_missing_target(tmp_path: Path) -> None:

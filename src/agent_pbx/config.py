@@ -19,6 +19,13 @@ class ServerConfig:
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
+    pull_requests_enabled: bool = False
+    pull_request_merge_enabled: bool = False
+    issues_enabled: bool = False
+    issue_close_enabled: bool = False
+    github_bin: str = "gh"
+    pull_request_timeout_seconds: float = 20.0
+    pull_request_allowed_repos: tuple[str, ...] = ()
     joplin_api_url: str | None = None
     joplin_token: str | None = None
     joplin_notebook: str = "Agent PBX"

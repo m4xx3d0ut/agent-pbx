@@ -26,6 +26,10 @@ STALE_WORKING_SECONDS = 600
 STALE_WORKING_STATUSES = {"running", "working"}
 
 
+def _non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 @dataclass(frozen=True)
 class TokenRecord:
     token_hash: str
@@ -369,8 +373,23 @@ class Store:
 
     def register_agent(self, request: AgentRegisterRequest) -> dict[str, Any]:
         current = now_ts()
-        metadata_json = json.dumps(request.metadata)
         with self.connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT name, metadata_json
+                FROM agents
+                WHERE agent_id = ?
+                """,
+                (request.agent_id,),
+            ).fetchone()
+            metadata = self._merged_agent_metadata(
+                existing["metadata_json"] if existing else None,
+                request.metadata,
+            )
+            metadata_json = json.dumps(metadata)
+            name = request.name
+            if name is None and existing:
+                name = existing["name"]
             conn.execute(
                 """
                 INSERT INTO agents
@@ -389,7 +408,7 @@ class Store:
                 (
                     request.agent_id,
                     request.project,
-                    request.name,
+                    name,
                     int(request.pbx_active),
                     metadata_json,
                     current,
@@ -397,6 +416,45 @@ class Store:
                 ),
             )
         return self.get_agent(request.agent_id) or {}
+
+    @staticmethod
+    def _merged_agent_metadata(
+        existing_json: str | None,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        existing: dict[str, Any] = {}
+        if existing_json:
+            try:
+                decoded = json.loads(existing_json)
+            except json.JSONDecodeError:
+                decoded = {}
+            if isinstance(decoded, dict):
+                existing = decoded
+
+        merged = dict(existing)
+        for key, value in metadata.items():
+            if value is None:
+                continue
+            if (
+                key == "cwd"
+                and not _non_empty_string(value)
+                and _non_empty_string(merged.get("cwd"))
+            ):
+                continue
+            merged[key] = value
+        Store._backfill_agent_cwd(merged)
+        return merged
+
+    @staticmethod
+    def _backfill_agent_cwd(metadata: dict[str, Any]) -> None:
+        if _non_empty_string(metadata.get("cwd")):
+            return
+        repo = metadata.get("repo")
+        if not _non_empty_string(repo):
+            return
+        repo_path = Path(str(repo)).expanduser()
+        if repo_path.is_absolute() and repo_path.is_dir():
+            metadata["cwd"] = str(repo_path)
 
     def get_agent(self, agent_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:

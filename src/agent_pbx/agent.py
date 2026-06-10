@@ -98,6 +98,35 @@ Codex pane; they are not MCP tools, PBX queued commands, or a reason to enter
 nohup mode. Treat them like normal operator prompts only after they reach your
 session.
 
+Built-in TUI Joplin commands such as `/joplin`, `/joplin new`,
+`/joplin rename`, `/joplin delete`, `/joplin copy`, `/joplin log start`, and
+`/joplin sync` are local operator actions for the TUI. They open the Joplin
+tab, call Agent PBX note APIs, edit scoped notes, or in tmux direct mode send
+Codex `/copy` to capture the latest response; they are not instructions for an
+agent unless the operator separately asks for Joplin note content in the chat.
+
+Operator prompts may contain `@joplin:<note>` references from the TUI. Agent PBX
+resolves these references at project scope under the Agent PBX Joplin notebook,
+then expands them before delivery by appending a `Joplin Note References`
+Markdown section with each referenced note body. Treat that section as
+operator-supplied context for the current prompt; do not call Joplin tools again
+unless the operator asks you to create, update, or inspect notes directly.
+
+Built-in TUI pull request commands such as `/pr`, `/pr review`, `/pr validate`,
+`/pr url`, and `/pr merge` are operator actions. `/pr review` and
+`/pr validate` may queue a normal `send_input` prompt asking you to review a PR
+or run validation. When asked for PR context, call `pbx_pr_context(agent_id,
+pr_number)` and report findings through Agent PBX. Do not merge pull requests;
+merge is an operator-only API/TUI action and is not exposed as an agent MCP
+tool.
+
+Built-in TUI issue commands such as `/issue`, `/issue mitigate`, `/issue url`,
+and `/issue clear` are operator actions. `/issue mitigate` may queue a normal
+`send_input` prompt asking you to investigate and mitigate a GitHub issue. When
+asked for issue context, call `pbx_issue_context(agent_id, issue_number)` and
+report findings through Agent PBX. Do not comment on or close issues; clear is
+an operator-only API/TUI action and is not exposed as an agent MCP tool.
+
 `pbx_queue_command` is exposed for the operator, TUI, tests, and control-plane
 helpers to queue work for agents. Do not use it as normal agent-side behavior
 or to self-queue work; in nohup mode, receive queued work through
@@ -181,6 +210,11 @@ operator follow-up queues, detailed report history, and TUI visibility.
 - `pbx_queue_command`: operator, TUI, test, and control-plane helper for
   queuing commands. Do not use it as normal agent-side behavior or to self-queue
   work.
+- `pbx_pr_context`: read-only GitHub pull request context for the current
+  agent project. Use it when the operator asks you to review a PR.
+- `pbx_issue_context`: read-only GitHub issue context for the current agent
+  project. Use it when the operator asks you to investigate or mitigate an
+  issue.
 
 ## PBX Modes
 
@@ -249,6 +283,33 @@ available, use `pbx_joplin_create_document` with the current `agent_id`,
 project, title, body, optional session id, and optional Mermaid blocks. Keep the
 document self-contained, avoid secrets, and prefer fenced `mermaid` blocks for
 diagrams so Joplin can render them safely.
+
+## Pull Request Reviews
+
+If the operator asks you to review a pull request, call `pbx_pr_context` with
+your `agent_id` and the PR number. Use the returned title, branches, URL,
+checks, changed files, commits, and body as review context, then inspect the
+workspace as needed. Report findings through `pbx_report_turn`, ordered by
+severity, and include any tests or validation you ran.
+
+If the operator asks for WorkerBee validation of a PR, run the appropriate local
+WorkerBee or project validation commands and report commands, results, and
+artifacts. Do not merge PRs. Merge is an explicit operator-only Agent PBX
+API/TUI action guarded by server config and confirmation text; there is no
+agent-side merge MCP tool.
+
+## GitHub Issues
+
+If the operator asks you to investigate or mitigate a GitHub issue, call
+`pbx_issue_context` with your `agent_id` and the issue number. Use the returned
+title, URL, labels, assignees, body, and comments as issue context, then inspect
+the workspace as needed. Report mitigation findings through `pbx_report_turn`
+with validation evidence.
+
+Do not comment on, edit, or close GitHub issues. Clearing an issue comments on
+and closes it through an explicit operator-only Agent PBX API/TUI action guarded
+by server config and confirmation text; there is no agent-side issue mutation
+MCP tool.
 
 ## Nohup Mode Loop
 
@@ -369,6 +430,8 @@ def runbook_payload() -> dict[str, Any]:
             "pbx_queue_command is for operators, the TUI, tests, and control-plane helpers; agents should not self-queue work.",
             "pbx_joplin_status reports whether server-side Joplin note export is configured and available.",
             "pbx_joplin_create_document creates a Markdown note under the scoped Agent PBX Joplin notebook when the operator requests a note or document.",
+            "pbx_pr_context returns read-only GitHub pull request context for this agent project; agents use it for PR review only.",
+            "pbx_issue_context returns read-only GitHub issue context for this agent project; agents use it for issue mitigation only.",
         ],
         "pbx_modes": [
             "Default 'use Agent PBX' means report mode: register with metadata.pbx_mode='report' and send pbx_report_turn updates.",
@@ -391,6 +454,19 @@ def runbook_payload() -> dict[str, Any]:
             "Do not enter nohup mode because a custom slash command was used.",
             "Treat the resulting text like a normal operator prompt after it reaches the Codex session.",
             "pbx_queue_command is the MCP queueing equivalent for operator/control-plane actions, not normal agent-side behavior.",
+        ],
+        "pull_request_reviews": [
+            "Use pbx_pr_context(agent_id, pr_number) when the operator asks for PR review context.",
+            "Report PR findings through pbx_report_turn, ordered by severity, with tests and validation evidence.",
+            "If asked for WorkerBee validation, run appropriate local validation and report commands, results, and artifacts.",
+            "Do not merge pull requests; merge is operator-only through the Agent PBX API/TUI and is not exposed as an agent MCP tool.",
+            "TUI commands such as /pr review and /pr validate are operator actions that may queue normal send_input prompts to agents.",
+        ],
+        "issue_mitigation": [
+            "Use pbx_issue_context(agent_id, issue_number) when the operator asks for GitHub issue context.",
+            "Report mitigation findings through pbx_report_turn with validation evidence.",
+            "Do not comment on, edit, or close issues; clear is operator-only through the Agent PBX API/TUI and is not exposed as an agent MCP tool.",
+            "TUI commands such as /issue mitigate are operator actions that may queue normal send_input prompts to agents.",
         ],
         "joplin_notes": [
             "Call pbx_joplin_status before creating a Joplin note or document.",

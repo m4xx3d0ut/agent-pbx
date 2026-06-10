@@ -10,7 +10,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .agent import runbook_payload
 from .config import ServerConfig
 from .joplin import JoplinService
+from .issues import IssueService
 from .polling import poll_commands as poll_commands_until
+from .pull_requests import PullRequestService
 from .schemas import (
     AgentRegisterRequest,
     CommandAckRequest,
@@ -24,7 +26,12 @@ from .store import Store
 logger = logging.getLogger("agent_pbx.mcp")
 
 
-def build_mcp_server(store: Store, joplin: JoplinService | None = None) -> FastMCP:
+def build_mcp_server(
+    store: Store,
+    joplin: JoplinService | None = None,
+    pull_requests: PullRequestService | None = None,
+    issues: IssueService | None = None,
+) -> FastMCP:
     mcp = FastMCP(
         "Agent PBX",
         instructions=(
@@ -166,6 +173,26 @@ def build_mcp_server(store: Store, joplin: JoplinService | None = None) -> FastM
             mermaid_blocks=mermaid_blocks or [],
             assets=assets or [],
         )
+
+    @mcp.tool()
+    def pbx_pr_context(agent_id: str, pr_number: int) -> dict[str, Any]:
+        """Return read-only GitHub pull request context for an agent project."""
+        if pull_requests is None:
+            raise ValueError("Pull request integration is not configured")
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise ValueError("agent not registered")
+        return pull_requests.detail_for_agent(agent, pr_number)
+
+    @mcp.tool()
+    def pbx_issue_context(agent_id: str, issue_number: int) -> dict[str, Any]:
+        """Return read-only GitHub issue context for an agent project."""
+        if issues is None:
+            raise ValueError("Issue integration is not configured")
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise ValueError("agent not registered")
+        return issues.detail_for_agent(agent, issue_number)
 
     @mcp.tool()
     async def pbx_poll_commands(
@@ -319,8 +346,15 @@ def create_mcp_asgi_app(
     store: Store,
     config: ServerConfig,
     joplin: JoplinService | None = None,
+    pull_requests: PullRequestService | None = None,
+    issues: IssueService | None = None,
 ) -> tuple[ASGIApp, FastMCP]:
-    mcp = build_mcp_server(store, joplin=joplin)
+    mcp = build_mcp_server(
+        store,
+        joplin=joplin,
+        pull_requests=pull_requests,
+        issues=issues,
+    )
     return BearerAuthASGIMiddleware(mcp.streamable_http_app(), store, config), mcp
 
 

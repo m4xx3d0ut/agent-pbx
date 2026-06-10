@@ -162,6 +162,158 @@ class WorkerBeeStatusResponse(BaseModel):
     latest_deployment: dict[str, Any] | None = None
 
 
+class PullRequestStatusResponse(BaseModel):
+    configured: bool
+    available: bool
+    agent_id: str | None = None
+    agent_project: str | None = None
+    cwd: str | None = None
+    gh_bin: str | None = None
+    merge_enabled: bool = False
+    allowed_repos: list[str] = Field(default_factory=list)
+    checked_at: float
+    repo: str | None = None
+    repo_url: str | None = None
+    error: dict[str, Any] | None = None
+
+
+class PullRequestSummary(BaseModel):
+    number: int
+    title: str
+    state: str
+    is_draft: bool = False
+    author: str | None = None
+    head_ref: str
+    base_ref: str
+    updated_at: str | int | float | None = None
+    url: str
+    labels: list[str] = Field(default_factory=list)
+    review_decision: str | None = None
+    checks: dict[str, Any] = Field(default_factory=dict)
+
+
+class PullRequestListResponse(PullRequestStatusResponse):
+    pull_requests: list[PullRequestSummary] = Field(default_factory=list)
+
+
+class PullRequestDetailResponse(PullRequestSummary):
+    repo: str | None = None
+    repo_url: str | None = None
+    agent_id: str | None = None
+    cwd: str | None = None
+    created_at: str | int | float | None = None
+    body: str = ""
+    merge_state_status: str | None = None
+    mergeable: str | bool | None = None
+    files: list[dict[str, Any]] = Field(default_factory=list)
+    commits: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PullRequestActionRequest(BaseModel):
+    message: str | None = Field(default=None, max_length=2000)
+    queue: bool = True
+
+
+class PullRequestActionResponse(BaseModel):
+    ok: bool = True
+    action: str
+    agent_id: str
+    number: int
+    repo: str | None = None
+    command: CommandResponse | None = None
+    message: str | None = None
+    prompt: str | None = None
+
+
+class PullRequestMergeRequest(BaseModel):
+    method: Literal["squash", "merge", "rebase"] = "squash"
+    confirm: str = Field(min_length=1, max_length=120)
+
+
+class PullRequestMergeResponse(BaseModel):
+    ok: bool = True
+    merged: bool = False
+    number: int
+    method: str
+    repo: str | None = None
+    url: str | None = None
+    output: str = ""
+
+
+class IssueStatusResponse(BaseModel):
+    configured: bool
+    available: bool
+    agent_id: str
+    agent_project: str | None = None
+    cwd: str | None = None
+    gh_bin: str = "gh"
+    close_enabled: bool = False
+    allowed_repos: list[str] = Field(default_factory=list)
+    checked_at: float
+    repo: str | None = None
+    repo_url: str | None = None
+    error: dict[str, Any] | None = None
+
+
+class IssueSummary(BaseModel):
+    number: int
+    title: str
+    state: str
+    author: str | None = None
+    url: str = ""
+    labels: list[str] = Field(default_factory=list)
+    assignees: list[str] = Field(default_factory=list)
+    milestone: str | None = None
+    updated_at: str | int | float | None = None
+    created_at: str | int | float | None = None
+    closed: bool = False
+    closed_at: str | int | float | None = None
+
+
+class IssueListResponse(IssueStatusResponse):
+    state: str = "open"
+    issues: list[IssueSummary] = Field(default_factory=list)
+
+
+class IssueDetailResponse(IssueSummary):
+    repo: str | None = None
+    repo_url: str | None = None
+    agent_id: str | None = None
+    cwd: str | None = None
+    body: str = ""
+    comments: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class IssueActionRequest(BaseModel):
+    message: str | None = Field(default=None, max_length=2000)
+    queue: bool = True
+
+
+class IssueActionResponse(BaseModel):
+    ok: bool = True
+    action: str
+    agent_id: str
+    number: int
+    repo: str | None = None
+    command: CommandResponse | None = None
+    message: str | None = None
+    prompt: str | None = None
+
+
+class IssueClearRequest(BaseModel):
+    comment: str = Field(min_length=1, max_length=12000)
+    confirm: str = Field(min_length=1, max_length=120)
+
+
+class IssueClearResponse(BaseModel):
+    ok: bool = True
+    closed: bool = False
+    number: int
+    repo: str | None = None
+    url: str | None = None
+    output: str = ""
+
+
 class JoplinStatusResponse(BaseModel):
     configured: bool
     available: bool

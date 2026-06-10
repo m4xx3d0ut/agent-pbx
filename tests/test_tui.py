@@ -2030,7 +2030,7 @@ async def test_tui_compact_alert_opens_agent_latest(monkeypatch) -> None:
     assert click._stop_propagation is True
 
 
-async def test_tui_workerbee_tab_keeps_agent_selection_and_loads_status() -> None:
+async def test_tui_workerbee_open_keeps_agent_selection_and_loads_status() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     loaded: list[str] = []
 
@@ -2051,13 +2051,385 @@ async def test_tui_workerbee_tab_keeps_agent_selection_and_loads_status() -> Non
         await pilot.resize_terminal(120, 32)
         await pilot.pause()
         tabs = app.query_one("#agent-tabs")
-        tabs.active = "workerbee-tab"
-        app.active_agent_tab = "workerbee-tab"
-        await app.select_agent("agent-1")
+        await app.open_workerbee_for_agent("agent-1")
 
         assert tabs.active == "workerbee-tab"
         assert app.active_agent_tab == "workerbee-tab"
         assert loaded == ["agent-1"]
+
+
+async def test_tui_pull_requests_open_keeps_agent_selection_and_loads() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    loaded: list[str] = []
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    async def fake_load_pull_requests(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+    app.load_pull_requests = fake_load_pull_requests  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        tabs = app.query_one("#agent-tabs")
+        await app.open_pull_requests_for_agent("agent-1")
+
+        assert tabs.active == "pull-requests-tab"
+        assert app.active_agent_tab == "pull-requests-tab"
+        assert loaded == ["agent-1"]
+
+
+async def test_tui_preserves_per_agent_tab_and_drafts() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    async def fake_load_workerbee_status(agent_id: str) -> None:
+        return None
+
+    async def fake_load_pull_requests(agent_id: str) -> None:
+        return None
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+    app.load_workerbee_status = fake_load_workerbee_status  # type: ignore[method-assign]
+    app.load_pull_requests = fake_load_pull_requests  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "one",
+                "last_seen_at": 1.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "status": "done",
+                "project": "two",
+                "last_seen_at": 2.0,
+            },
+        }
+
+        await app.select_agent("agent-1")
+        app.activate_agent_tab("pull-requests-tab")
+        app.set_agent_draft_text(
+            "agent-1",
+            app.query_one("#message", TextArea),
+            "draft for one",
+        )
+        app.set_agent_draft_text(
+            "agent-1",
+            app.query_one("#tmux-message", TextArea),
+            "tmux draft for one",
+        )
+
+        await app.select_agent("agent-2")
+        assert app.active_agent_tab == "latest-tab"
+        assert app.query_one("#message", TextArea).text == ""
+        app.activate_agent_tab("workerbee-tab")
+        app.set_agent_draft_text(
+            "agent-2",
+            app.query_one("#message", TextArea),
+            "draft for two",
+        )
+
+        await app.select_agent("agent-1")
+        assert app.active_agent_tab == "pull-requests-tab"
+        assert app.query_one("#message", TextArea).text == "draft for one"
+        assert app.query_one("#tmux-message", TextArea).text == "tmux draft for one"
+
+        await app.select_agent("agent-2")
+        assert app.active_agent_tab == "workerbee-tab"
+        assert app.query_one("#message", TextArea).text == "draft for two"
+
+
+def test_tui_formats_pull_request_detail() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    text = app.format_pull_request_detail(
+        {
+            "number": 7,
+            "title": "Improve PR support",
+            "repo": "owner/repo",
+            "url": "https://github.com/owner/repo/pull/7",
+            "state": "OPEN",
+            "is_draft": False,
+            "author": "dev",
+            "head_ref": "feature/prs",
+            "base_ref": "dev",
+            "checks": {"total": 1, "success": 1, "failed": 0, "pending": 0},
+            "labels": ["enhancement"],
+            "files": [{"path": "src/agent_pbx/pull_requests.py", "additions": 10}],
+            "commits": [{"oid": "abc123"}],
+            "body": "Adds PR workflow.",
+        }
+    )
+
+    assert "PR #7 - Improve PR support" in text
+    assert "Repo: owner/repo" in text
+    assert "Checks: 1 ok/1" in text
+    assert "src/agent_pbx/pull_requests.py" in text
+
+
+def test_tui_formats_issue_detail() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    text = app.format_issue_detail(
+        {
+            "number": 9,
+            "title": "Fix issue workflow",
+            "repo": "owner/repo",
+            "url": "https://github.com/owner/repo/issues/9",
+            "state": "OPEN",
+            "author": "reporter",
+            "labels": ["bug"],
+            "assignees": ["dev"],
+            "milestone": "v1",
+            "updated_at": "2026-06-10T12:00:00Z",
+            "body": "Something needs mitigation.",
+            "comments": [{"author": "reviewer", "body": "Confirmed."}],
+        }
+    )
+
+    assert "Issue #9 - Fix issue workflow" in text
+    assert "Repo: owner/repo" in text
+    assert "Labels: bug" in text
+    assert "Confirmed." in text
+
+
+async def test_tui_pull_request_review_queues_with_delivery_note() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    posts: list[tuple[str, dict[str, object]]] = []
+    threads: list[str] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"command": {"command_id": "cmd-1"}}
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append((path, dict(kwargs.get("json") or {})))
+            return Response()
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "metadata": {"pbx_mode": "report"},
+            }
+        }
+        app.pull_requests_by_agent = {"agent-1": {7: {"number": 7}}}
+        app.selected_pull_request_number = 7
+        await app.request_pull_request_review("agent-1")
+        detail = app.query_one("#pull-request-detail", TextArea).text
+
+    assert posts == [
+        ("/v1/agents/agent-1/pull-requests/7/review-request", {"queue": True})
+    ]
+    assert threads == ["agent-1"]
+    assert "Queued PR #7 review for agent-1." in detail
+    assert "Command: cmd-1" in detail
+    assert "requires Agent PBX nohup mode" in detail
+
+
+async def test_tui_issue_mitigation_queues_with_delivery_note() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    posts: list[tuple[str, dict[str, object]]] = []
+    threads: list[str] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"command": {"command_id": "cmd-1"}}
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append((path, dict(kwargs.get("json") or {})))
+            return Response()
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "metadata": {"pbx_mode": "report"},
+            }
+        }
+        app.issues_by_agent = {"agent-1": {9: {"number": 9}}}
+        app.selected_issue_number = 9
+        await app.request_issue_mitigation("agent-1")
+        detail = app.query_one("#issue-detail", TextArea).text
+
+    assert posts == [
+        ("/v1/agents/agent-1/issues/9/mitigation-request", {"queue": True})
+    ]
+    assert threads == ["agent-1"]
+    assert "Queued issue #9 mitigation for agent-1." in detail
+    assert "Command: cmd-1" in detail
+    assert "requires Agent PBX nohup mode" in detail
+
+
+async def test_tui_pull_request_validation_uses_tmux_direct_prompt() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    posts: list[tuple[str, dict[str, object]]] = []
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+    logged: list[tuple[str, str]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "prompt": "Run appropriate WorkerBee validation for GitHub PR #7.",
+                "command": None,
+            }
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append((path, dict(kwargs.get("json") or {})))
+            return Response()
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    async def fake_record_tmux_joplin_interaction(agent_id: str, message: str) -> None:
+        logged.append((agent_id, message))
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.record_tmux_joplin_interaction = fake_record_tmux_joplin_interaction  # type: ignore[method-assign]
+    app.tmux_features_available = True
+    app.tmux_direct_enabled = True
+
+    async with app.run_test():
+        app.tmux_features_available = True
+        app.tmux_direct_enabled = True
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.pull_requests_by_agent = {"agent-1": {7: {"number": 7}}}
+        app.selected_pull_request_number = 7
+        await app.request_pull_request_validation("agent-1")
+        detail = app.query_one("#pull-request-detail", TextArea).text
+
+    assert posts == [
+        (
+            "/v1/agents/agent-1/pull-requests/7/workerbee-validation-request",
+            {"queue": False},
+        )
+    ]
+    assert sent == [
+        ("agent-1", "Run appropriate WorkerBee validation for GitHub PR #7.")
+    ]
+    assert logged == sent
+    assert captures == ["agent-1"]
+    assert "Sent PR #7 WorkerBee validation prompt to tmux" in detail
+
+
+async def test_tui_issue_mitigation_uses_tmux_direct_prompt() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    posts: list[tuple[str, dict[str, object]]] = []
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+    logged: list[tuple[str, str]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "prompt": "Mitigate GitHub Issue #9 in owner/repo.",
+                "command": None,
+            }
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append((path, dict(kwargs.get("json") or {})))
+            return Response()
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    async def fake_record_tmux_joplin_interaction(agent_id: str, message: str) -> None:
+        logged.append((agent_id, message))
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.record_tmux_joplin_interaction = fake_record_tmux_joplin_interaction  # type: ignore[method-assign]
+    app.tmux_features_available = True
+    app.tmux_direct_enabled = True
+
+    async with app.run_test():
+        app.tmux_features_available = True
+        app.tmux_direct_enabled = True
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.issues_by_agent = {"agent-1": {9: {"number": 9}}}
+        app.selected_issue_number = 9
+        await app.request_issue_mitigation("agent-1")
+        detail = app.query_one("#issue-detail", TextArea).text
+
+    assert posts == [
+        ("/v1/agents/agent-1/issues/9/mitigation-request", {"queue": False})
+    ]
+    assert sent == [("agent-1", "Mitigate GitHub Issue #9 in owner/repo.")]
+    assert logged == sent
+    assert captures == ["agent-1"]
+    assert "Sent issue #9 mitigation prompt to tmux" in detail
 
 
 def test_tui_formats_workerbee_status() -> None:
@@ -2408,6 +2780,94 @@ async def test_tui_joplin_note_completion_disambiguates_duplicate_titles() -> No
         assert message.text == "review @joplin:Meeting-Notes~abcdef12"
         assert app.complete_file_reference(message, direction=1) is True
         assert message.text == "review @joplin:Meeting-Notes~fedcba65"
+
+
+async def test_tui_joplin_note_completion_lazy_loads_notes() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[str] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            calls.append(path)
+            if path == "/v1/joplin/status":
+                return Response({"configured": True, "available": True})
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path == "/v1/projects/demo/joplin/notes":
+                return Response(
+                    [
+                        {"id": "note-1", "title": "Release Checklist"},
+                        {"id": "note-2", "title": "Design Notes"},
+                    ]
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.agents = {"agent-1": {"agent_id": "agent-1", "project": "demo"}}
+        app.query_one("#agent-id", Input).value = "agent-1"
+        message = app.query_one("#message", TextArea)
+
+        message.text = "review @joplin:Rel"
+        message.move_cursor((0, len(message.text)))
+        assert await app.complete_file_reference_async(message, direction=1) is True
+
+    assert message.text == "review @joplin:Release-Checklist"
+    assert "/v1/projects/demo/joplin/notes" in calls
+    assert app.joplin_notes_by_agent["agent-1"]["note-1"]["title"] == "Release Checklist"
+
+
+async def test_tui_joplin_note_completion_lazy_loads_in_tmux_input() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            if path == "/v1/joplin/status":
+                return Response({"configured": True, "available": True})
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path == "/v1/projects/demo/joplin/notes":
+                return Response([{"id": "note-1", "title": "Runbook"}])
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.agents = {"agent-1": {"agent_id": "agent-1", "project": "demo"}}
+        message = app.query_one("#tmux-message", TextArea)
+
+        message.text = "apply @joplin:Ru"
+        message.move_cursor((0, len(message.text)))
+        assert await app.complete_file_reference_async(message, direction=1) is True
+
+    assert message.text == "apply @joplin:Runbook"
 
 
 def test_tui_file_completion_ignores_email_like_tokens() -> None:

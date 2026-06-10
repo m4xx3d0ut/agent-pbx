@@ -97,6 +97,13 @@ def test_start_mcp_daemon_writes_detached_agent_pbx_argv(
         token="secret",
         debug=True,
         debug_smoke=True,
+        pull_requests_enabled=True,
+        pull_request_merge_enabled=True,
+        issues_enabled=True,
+        issue_close_enabled=True,
+        github_bin="/usr/bin/gh",
+        pull_request_timeout_seconds=12.0,
+        pull_request_allowed_repos=("owner/repo",),
     )
     monkeypatch.setattr("agent_pbx.mcp_daemon.subprocess.Popen", FakePopen)
     monkeypatch.setattr(
@@ -119,6 +126,13 @@ def test_start_mcp_daemon_writes_detached_agent_pbx_argv(
     assert result["started"] is True
     assert calls["kwargs"]["start_new_session"] is True
     assert calls["kwargs"]["env"]["AGENT_PBX_TOKEN"] == "secret"
+    assert calls["kwargs"]["env"]["AGENT_PBX_PR_ENABLED"] == "1"
+    assert calls["kwargs"]["env"]["AGENT_PBX_PR_MERGE_ENABLED"] == "1"
+    assert calls["kwargs"]["env"]["AGENT_PBX_ISSUES_ENABLED"] == "1"
+    assert calls["kwargs"]["env"]["AGENT_PBX_ISSUES_CLOSE_ENABLED"] == "1"
+    assert calls["kwargs"]["env"]["AGENT_PBX_GH_BIN"] == "/usr/bin/gh"
+    assert calls["kwargs"]["env"]["AGENT_PBX_PR_TIMEOUT_SECONDS"] == "12.0"
+    assert calls["kwargs"]["env"]["AGENT_PBX_PR_ALLOWED_REPOS"] == "owner/repo"
     assert calls["argv"][:3] == [calls["argv"][0], "-m", "agent_pbx"]
     assert "mcp" in calls["argv"]
     assert "serve" in calls["argv"]
@@ -132,6 +146,13 @@ def test_start_mcp_daemon_writes_detached_agent_pbx_argv(
     assert metadata["token_configured"] is True
     assert metadata["ready_at"] == 123.0
     assert metadata["mcp_url"] == "http://127.0.0.1:9876/mcp"
+    assert metadata["pull_requests_enabled"] is True
+    assert metadata["pull_request_merge_enabled"] is True
+    assert metadata["issues_enabled"] is True
+    assert metadata["issue_close_enabled"] is True
+    assert metadata["github_bin"] == "/usr/bin/gh"
+    assert metadata["pull_request_timeout_seconds"] == 12.0
+    assert metadata["pull_request_allowed_repos"] == ["owner/repo"]
 
 
 def test_start_mcp_daemon_fails_fast_when_port_is_in_use(

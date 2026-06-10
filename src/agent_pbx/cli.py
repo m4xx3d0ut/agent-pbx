@@ -22,6 +22,8 @@ from .envfile import load_user_env_defaults
 from .joplin import (
     env_joplin_config,
 )
+from .pull_requests import env_pull_request_config
+from .issues import env_issue_config
 from .mcp_daemon import (
     MCPDaemonConfig,
     config_from_args,
@@ -352,6 +354,8 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         if port is None:
             port = metadata.get("port")
     joplin_config = env_joplin_config()
+    pull_request_config = env_pull_request_config()
+    issue_config = env_issue_config()
     return config_from_args(
         state_root=getattr(args, "state_root", None),
         host=str(host or default_host()),
@@ -374,6 +378,13 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
             "workerbee_cache",
             env_workerbee_cache_seconds(),
         ),
+        pull_requests_enabled=pull_request_config.enabled,
+        pull_request_merge_enabled=pull_request_config.merge_enabled,
+        issues_enabled=issue_config.enabled,
+        issue_close_enabled=issue_config.close_enabled,
+        github_bin=pull_request_config.gh_bin,
+        pull_request_timeout_seconds=pull_request_config.timeout_seconds,
+        pull_request_allowed_repos=pull_request_config.allowed_repos,
         joplin_api_url=joplin_config.api_url,
         joplin_token=joplin_config.token,
         joplin_notebook=joplin_config.notebook,
@@ -442,6 +453,15 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         workerbee_bin=daemon_config.workerbee_bin,
         workerbee_timeout_seconds=daemon_config.workerbee_timeout_seconds,
         workerbee_cache_seconds=daemon_config.workerbee_cache_seconds,
+        pull_requests_enabled=daemon_config.pull_requests_enabled,
+        pull_request_merge_enabled=daemon_config.pull_request_merge_enabled,
+        issues_enabled=daemon_config.issues_enabled,
+        issue_close_enabled=daemon_config.issue_close_enabled,
+        github_bin=daemon_config.github_bin,
+        pull_request_timeout_seconds=(
+            daemon_config.pull_request_timeout_seconds
+        ),
+        pull_request_allowed_repos=daemon_config.pull_request_allowed_repos,
         joplin_api_url=daemon_config.joplin_api_url,
         joplin_token=daemon_config.joplin_token,
         joplin_notebook=daemon_config.joplin_notebook,
@@ -488,6 +508,13 @@ def _print_mcp_status(result: dict[str, object]) -> None:
         "workerbee_bin",
         "workerbee_timeout_seconds",
         "workerbee_cache_seconds",
+        "pull_requests_enabled",
+        "pull_request_merge_enabled",
+        "issues_enabled",
+        "issue_close_enabled",
+        "github_bin",
+        "pull_request_timeout_seconds",
+        "pull_request_allowed_repos",
         "joplin_configured",
         "joplin_api_url",
         "joplin_notebook",
