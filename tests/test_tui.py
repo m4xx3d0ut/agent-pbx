@@ -6559,6 +6559,105 @@ async def test_tui_plan_selection_to_tmux_presses_native_selector_key() -> None:
     assert "agent-1" not in app.tmux_plan_selector_agent_ids
 
 
+async def test_tui_plan_selection_from_latest_input_presses_pending_tmux_selector() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+    sent_keys: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_keys.append((pane_id, key))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "plan",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.tmux_visible_capture_key = "agent-1:%9"
+        app.query_one("#tmux-stream", TextArea).text = (
+            "1 Start coding\n2 Clear context & start\n3 Stay in plan mode"
+        )
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.query_one("#message", TextArea).text = "/plan:1"
+        await app.send_input()
+        message_text = app.query_one("#message", TextArea).text
+
+    assert sent_keys == [("%9", "1")]
+    assert queued == []
+    assert captures == ["agent-1"]
+    assert message_text == ""
+
+
+async def test_tui_tmux_direct_can_send_plan_selection_from_latest_input() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent_keys: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_keys.append((pane_id, key))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    message_text = ""
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "plan",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.tmux_visible_capture_key = "agent-1:%9"
+        app.query_one("#tmux-stream", TextArea).text = (
+            "1 Start coding\n2 Clear context & start\n3 Stay in plan mode"
+        )
+        app.query_one("#tmux-message", TextArea).text = ""
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.query_one("#message", TextArea).text = "/plan:2"
+        await app.send_input()
+        message_text = app.query_one("#message", TextArea).text
+
+    assert sent_keys == [("%9", "2")]
+    assert captures == ["agent-1"]
+    assert message_text == ""
+
+
 async def test_tui_plan_selection_uses_recorded_native_selector_pane() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     sent_keys: list[tuple[str, str]] = []

@@ -6586,16 +6586,34 @@ class AgentPBXTUI(App[None]):
 
     async def send_input(self) -> None:
         if self.is_tmux_direct_enabled():
-            await self.send_tmux_input()
+            focused_input = (
+                self.focused
+                if isinstance(self.focused, TextArea)
+                and self.focused.id in {"message", "tmux-message"}
+                else None
+            )
+            tmux_input = self.query_one_or_none("#tmux-message", TextArea)
+            message_input = self.query_one_or_none("#message", TextArea)
+            if focused_input is not None and focused_input.text.strip():
+                await self.send_tmux_text_area_input(focused_input)
+                return
+            if tmux_input is not None and tmux_input.text.strip():
+                await self.send_tmux_text_area_input(tmux_input)
+                return
+            if message_input is not None and message_input.text.strip():
+                await self.send_tmux_text_area_input(message_input)
+                return
+            if tmux_input is not None:
+                await self.send_tmux_text_area_input(tmux_input)
             return
         message_input = self.query_one("#message", TextArea)
         agent_id = self.sent_history_agent_id(message_input) or ""
         message = message_input.text.strip()
         if not message:
             return
-        if await self.execute_local_slash_command_from_input(message_input, message):
-            return
         if not agent_id:
+            if await self.execute_local_slash_command_from_input(message_input, message):
+                return
             return
         if is_plan_toggle_message(message):
             toggled = await self.toggle_plan_mode_from_input(agent_id, via_tmux=False)
@@ -6613,6 +6631,8 @@ class AgentPBXTUI(App[None]):
             if sent_selection:
                 self.record_sent_message(agent_id, message)
                 self.set_agent_draft_text(agent_id, message_input, "")
+            return
+        if await self.execute_local_slash_command_from_input(message_input, message):
             return
         if self.should_send_plan_prompt(agent_id, message):
             expanded_message = await self.expand_joplin_note_references(
@@ -6681,15 +6701,18 @@ class AgentPBXTUI(App[None]):
 
     async def send_tmux_input(self) -> None:
         message_input = self.query_one("#tmux-message", TextArea)
+        await self.send_tmux_text_area_input(message_input)
+
+    async def send_tmux_text_area_input(self, message_input: TextArea) -> None:
         agent_id = self.sent_history_agent_id(message_input) or ""
         message = message_input.text
         if not message.strip():
             return
-        if await self.execute_local_slash_command_from_input(
-            message_input, message.strip()
-        ):
-            return
         if not agent_id:
+            if await self.execute_local_slash_command_from_input(
+                message_input, message.strip()
+            ):
+                return
             return
         if is_plan_toggle_message(message):
             toggled = await self.toggle_plan_mode_from_input(agent_id, via_tmux=True)
@@ -6708,6 +6731,10 @@ class AgentPBXTUI(App[None]):
             if sent_selection:
                 self.record_sent_message(agent_id, message)
                 self.set_agent_draft_text(agent_id, message_input, "")
+            return
+        if await self.execute_local_slash_command_from_input(
+            message_input, message.strip()
+        ):
             return
         if self.should_send_plan_prompt(agent_id, message):
             expanded_message = await self.expand_joplin_note_references(
@@ -7143,7 +7170,14 @@ class AgentPBXTUI(App[None]):
         via_tmux: bool,
     ) -> bool:
         options = self.current_plan_options_for_agent(agent_id)
-        if via_tmux and selection.index in CODEX_NATIVE_PLAN_SELECTOR_CHOICES:
+        native_pending = (
+            selection.index in CODEX_NATIVE_PLAN_SELECTOR_CHOICES
+            and self.tmux_native_plan_selector_pending(agent_id)
+        )
+        if (
+            selection.index in CODEX_NATIVE_PLAN_SELECTOR_CHOICES
+            and (via_tmux or native_pending)
+        ):
             sent_native = await self.send_native_plan_selection(
                 agent_id,
                 selection,
@@ -7151,7 +7185,7 @@ class AgentPBXTUI(App[None]):
             )
             if sent_native:
                 return True
-            if not options:
+            if not options or native_pending:
                 return False
         option = self.plan_option_for_selection(agent_id, selection)
         if option is None:
