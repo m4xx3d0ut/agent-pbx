@@ -14,14 +14,27 @@ import zlib
 
 IGNORED_DIRS = {
     ".git",
+    ".codex",
+    ".local",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".workerbee",
     ".venv",
     "__pycache__",
-    ".pytest_cache",
     "artifacts",
     "build",
     "dist",
+    "htmlcov",
     "node_modules",
     "runs",
+    "state",
+    "tmp",
+}
+IGNORED_NAMES = {
+    ".env",
+    "coverage.xml",
+    "local.env",
 }
 TEXT_EXTENSIONS = {
     ".cfg",
@@ -138,6 +151,8 @@ class AgentFileService:
         for child in children:
             if len(entries) >= self.list_limit:
                 break
+            if child.name in IGNORED_NAMES:
+                continue
             if child.name in self.ignored_dirs and child.is_dir():
                 continue
             try:

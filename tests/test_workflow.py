@@ -729,6 +729,11 @@ def test_agent_files_list_and_preview_are_scoped_to_agent_cwd(tmp_path: Path) ->
     (repo / "README.md").write_text("hello from repo\n", encoding="utf-8")
     (repo / ".git").mkdir()
     (repo / ".git" / "config").write_text("ignored\n", encoding="utf-8")
+    (repo / "build").mkdir()
+    (repo / "build" / "artifact.bin").write_text("ignored\n", encoding="utf-8")
+    (repo / "artifacts").mkdir()
+    (repo / "artifacts" / "capture.txt").write_text("ignored\n", encoding="utf-8")
+    (repo / "coverage.xml").write_text("<coverage />\n", encoding="utf-8")
     src = repo / "src"
     src.mkdir()
     (src / "app.py").write_text("print('ok')\n", encoding="utf-8")
@@ -775,6 +780,9 @@ def test_agent_files_list_and_preview_are_scoped_to_agent_cwd(tmp_path: Path) ->
     assert listing.status_code == 200
     entries = {entry["name"]: entry for entry in listing.json()["entries"]}
     assert ".git" not in entries
+    assert "build" not in entries
+    assert "artifacts" not in entries
+    assert "coverage.xml" not in entries
     assert "outside-link" not in entries
     assert entries["src"]["kind"] == "directory"
     assert entries["README.md"]["is_text"] is True

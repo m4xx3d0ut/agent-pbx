@@ -234,6 +234,9 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/esc",
     "/ctrlc",
     "/tmux",
+    "/latest",
+    "/thread",
+    "/files",
     "/workerbee",
     "/pr",
     "/pr refresh",
@@ -3140,6 +3143,9 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/esc", "Send Escape to the selected agent", self.palette_escape)
         yield SystemCommand("/ctrlc", "Send Ctrl+C to the selected tmux pane", self.palette_ctrl_c)
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
+        yield SystemCommand("/latest", "Open the Latest tab", self.palette_latest)
+        yield SystemCommand("/thread", "Open the Thread tab", self.palette_thread)
+        yield SystemCommand("/files", "Open and refresh the Files tab", self.palette_files)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         yield SystemCommand("/pr", "Open and refresh pull requests", self.palette_pull_requests)
         yield SystemCommand("/pr refresh", "Refresh pull requests", self.palette_pull_requests_refresh)
@@ -3226,6 +3232,36 @@ class AgentPBXTUI(App[None]):
 
     def palette_toggle_tmux(self) -> None:
         self.run_worker(self.action_toggle_tmux_direct(), name="palette-tmux", exclusive=True)
+
+    def palette_latest(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_latest_for_agent(agent_id),
+            name="palette-latest",
+            exclusive=True,
+        )
+
+    def palette_thread(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_thread_for_agent(agent_id),
+            name="palette-thread",
+            exclusive=True,
+        )
+
+    def palette_files(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_files_for_agent(agent_id),
+            name="palette-files",
+            exclusive=True,
+        )
 
     def palette_workerbee(self) -> None:
         agent_id = self.palette_agent_id()
@@ -3796,6 +3832,31 @@ class AgentPBXTUI(App[None]):
     def palette_set_layout(self, layout_name: str) -> None:
         self.set_layout_mode(layout_name)
         self.notify(f"Layout set to {self.layout_mode}.")
+
+    async def open_latest_for_agent(self, agent_id: str) -> None:
+        if agent_id in self.agents:
+            await self.select_agent(agent_id)
+        else:
+            self.selected_agent_id = agent_id
+        self.activate_latest_tab()
+        await self.load_latest_report(agent_id)
+        await self.load_thread(agent_id)
+
+    async def open_thread_for_agent(self, agent_id: str) -> None:
+        if agent_id in self.agents:
+            await self.select_agent(agent_id)
+        else:
+            self.selected_agent_id = agent_id
+        self.activate_agent_tab("thread-tab")
+        await self.load_thread(agent_id)
+
+    async def open_files_for_agent(self, agent_id: str) -> None:
+        if agent_id in self.agents:
+            await self.select_agent(agent_id)
+        else:
+            self.selected_agent_id = agent_id
+        self.activate_agent_tab("files-tab")
+        await self.load_agent_files(agent_id)
 
     async def open_workerbee_for_agent(self, agent_id: str) -> None:
         if agent_id in self.agents:
@@ -5394,14 +5455,11 @@ class AgentPBXTUI(App[None]):
         context = self.file_completion_context(text_area)
         if context is None:
             return False
-        if not context.prefix.lower().startswith(JOPLIN_NOTE_REF_PREFIX):
-            return self.complete_file_reference(text_area, direction=direction)
         agent_id = self.sent_history_agent_id(text_area)
+        is_joplin_ref = context.prefix.lower().startswith(JOPLIN_NOTE_REF_PREFIX)
         if not agent_id:
-            self.notify(
-                "Select an agent before completing @joplin note references.",
-                severity="warning",
-            )
+            target = "@joplin note" if is_joplin_ref else "@file"
+            self.notify(f"Select an agent before completing {target} references.", severity="warning")
             return True
 
         state = self.file_completion_state.get(context.input_id)
@@ -5414,23 +5472,40 @@ class AgentPBXTUI(App[None]):
         ):
             matches = state.matches
         else:
-            matches = self.joplin_note_completion_matches(context, agent_id)
+            matches = (
+                self.joplin_note_completion_matches(context, agent_id)
+                if is_joplin_ref
+                else self.file_completion_matches(context, agent_id)
+            )
             if not matches:
                 try:
-                    await self.fetch_joplin_note_summaries(agent_id)
+                    if is_joplin_ref:
+                        await self.fetch_joplin_note_summaries(agent_id)
+                    else:
+                        payload = await self.fetch_agent_file_listing(
+                            agent_id,
+                            context.directory,
+                        )
+                        self.cache_file_listing(payload)
                 except Exception as exc:
                     self.file_completion_state.pop(context.input_id, None)
+                    label = "Joplin note" if is_joplin_ref else "File"
                     self.notify(
-                        f"Joplin note completion failed: {exc}",
+                        f"{label} completion failed: {exc}",
                         severity="error",
                     )
                     return True
-                matches = self.joplin_note_completion_matches(context, agent_id)
+                matches = (
+                    self.joplin_note_completion_matches(context, agent_id)
+                    if is_joplin_ref
+                    else self.file_completion_matches(context, agent_id)
+                )
 
         if not matches:
             self.file_completion_state.pop(context.input_id, None)
+            label = "scoped Joplin note" if is_joplin_ref else "project file"
             self.notify(
-                f"No scoped Joplin note matches {context.prefix!r}.",
+                f"No {label} matches {context.prefix!r}.",
                 severity="warning",
             )
             return True
@@ -6917,16 +6992,24 @@ class AgentPBXTUI(App[None]):
             "plan_choice": option.payload(),
         }
 
-    def current_plan_options_for_agent(self, agent_id: str) -> list[PlanChoice]:
-        if agent_id != self.selected_agent_id:
+    def current_thread_plan_options_for_agent(self, agent_id: str) -> list[PlanChoice]:
+        if not self.selected_thread_item_id:
             return []
-        latest = self.plan_options_for_report(self.latest_report_by_agent.get(agent_id))
-        item = (
-            self.thread_items.get(self.selected_thread_item_id)
-            if self.selected_thread_item_id
-            else None
-        )
+        item = self.thread_items.get(self.selected_thread_item_id)
+        if not item:
+            return []
+        item_agent_id = str(item.get("agent_id") or "")
+        if item_agent_id:
+            if item_agent_id != agent_id:
+                return []
+        elif agent_id != self.selected_agent_id:
+            return []
         thread = self.plan_options_for_item(item)
+        return thread
+
+    def current_plan_options_for_agent(self, agent_id: str) -> list[PlanChoice]:
+        latest = self.plan_options_for_report(self.latest_report_by_agent.get(agent_id))
+        thread = self.current_thread_plan_options_for_agent(agent_id)
         if self.active_agent_tab == "thread-tab" and thread:
             return thread
         return latest or thread
@@ -7479,20 +7562,30 @@ class AgentPBXTUI(App[None]):
         response.raise_for_status()
         return response.json()
 
+    async def fetch_agent_file_listing(
+        self,
+        agent_id: str,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        response = await self.api_client().get(
+            f"/v1/agents/{agent_id}/files",
+            params={"path": path or "."},
+            headers=auth_headers(self.token),
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Files response was not an object")
+        return payload
+
     async def load_agent_files(self, agent_id: str, path: str | None = None) -> None:
         current_path = path if path is not None else self.file_path_by_agent.get(agent_id, ".")
         path_label = self.query_one("#file-path", Static)
         path_label.update(f"Path: {current_path or '.'}")
         self.set_file_preview_text(f"Loading files for {agent_id}...")
         try:
-            response = await self.api_client().get(
-                f"/v1/agents/{agent_id}/files",
-                params={"path": current_path or "."},
-                headers=auth_headers(self.token),
-                timeout=15,
-            )
-            response.raise_for_status()
-            payload = response.json()
+            payload = await self.fetch_agent_file_listing(agent_id, current_path or ".")
         except Exception as exc:
             self.render_file_error(agent_id, f"Unable to load files for {agent_id}: {exc}")
             return
@@ -7544,24 +7637,40 @@ class AgentPBXTUI(App[None]):
         self.file_entries_by_agent[agent_id] = {}
         self.set_file_preview_text(message)
 
-    def render_file_list(self, payload: dict[str, Any]) -> None:
+    def cache_file_listing(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         agent_id = str(payload.get("agent_id") or self.selected_agent_id or "")
         path = str(payload.get("path") or ".")
-        self.file_path_by_agent[agent_id] = path
         entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
         parent = payload.get("parent")
         entry_map: dict[str, dict[str, Any]] = {}
-        table = self.query_one("#files", DataTable)
-        table.clear()
-        self.query_one("#file-path", Static).update(f"Path: {path}")
         if parent:
-            parent_entry = {
+            entry_map[".."] = {
                 "name": "..",
                 "path": str(parent),
                 "kind": "directory",
                 "parent": parent,
             }
-            entry_map[".."] = parent_entry
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_path = str(entry.get("path") or entry.get("name") or "")
+            if entry_path:
+                entry_map[entry_path] = entry
+        if agent_id:
+            self.file_path_by_agent[agent_id] = path
+            self.file_entries_by_agent[agent_id] = entry_map
+            self.file_directory_entries_by_agent.setdefault(agent_id, {})[path] = entry_map
+        return entry_map
+
+    def render_file_list(self, payload: dict[str, Any]) -> None:
+        agent_id = str(payload.get("agent_id") or self.selected_agent_id or "")
+        path = str(payload.get("path") or ".")
+        entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+        entry_map = self.cache_file_listing(payload)
+        table = self.query_one("#files", DataTable)
+        table.clear()
+        self.query_one("#file-path", Static).update(f"Path: {path}")
+        if ".." in entry_map:
             table.add_row("DIR", "..", "", "", key="..")
         for entry in entries:
             if not isinstance(entry, dict):
@@ -7577,8 +7686,6 @@ class AgentPBXTUI(App[None]):
                 self.format_file_mtime(entry.get("mtime")),
                 key=entry_path,
             )
-        self.file_entries_by_agent[agent_id] = entry_map
-        self.file_directory_entries_by_agent.setdefault(agent_id, {})[path] = entry_map
         error = payload.get("error") if isinstance(payload.get("error"), dict) else None
         if error:
             self.set_file_preview_text(self.format_file_error(error))

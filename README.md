@@ -472,12 +472,10 @@ Agent PBX can use it as a best-effort fallback renderer. The preview avoids
 terminal-specific image protocols, so it works across desktop terminals, SSH,
 tmux, and Termux.
 
-The Latest input can complete cached project paths with `@`. Open or refresh a
-directory in the `Files` tab, then type a project-relative reference such as
-`@src/ag` and press `Tab`. Completion is cache-first: Agent PBX only completes
-directories already read by the Files tab, so `@src/<Tab>` requires `src` to
-have been opened or refreshed first. The same completion works in tmux direct
-input.
+The Latest input can complete project paths with `@`. Type a project-relative
+reference such as `@README` or `@src/ag` and press `Tab`; Agent PBX loads the
+needed project directory before completing. The same completion works in tmux
+direct input.
 
 Joplin project notes can be referenced with `@joplin:`. Type
 `@joplin:Release` and press `Tab` to complete project note titles; if the
@@ -517,30 +515,6 @@ then every random 30-60 seconds, and stops after five minutes.
 ```bash
 agent-pbx mcp start --debug --debug-smoke --token dev-token
 ```
-
-## TUI Demo GIF
-
-Use `scripts/record_tui_demo.sh` to create a reproducible terminal demo for
-docs or release notes. The script starts an isolated demo MCP/API daemon with
-debug smoke, seeds deterministic demo agents, opens the TUI in a fixed-size tmux
-session, records it with `asciinema`, and renders a GIF with `agg`.
-
-```bash
-# Install asciinema and agg with your system package manager or upstream releases.
-AGENT_PBX_WORKERBEE_BIN=/path/to/workerbee scripts/record_tui_demo.sh
-```
-
-Artifacts are written to `artifacts/tui-demo/`:
-
-- `agent-pbx-tui-demo.cast` is the terminal recording.
-- `agent-pbx-tui-demo.gif` is the rendered info GIF.
-- `mcp-restart.json` and `mcp-stop.json` capture daemon lifecycle output.
-
-Set `--manual` to drive the TUI yourself while recording, `--no-render` to keep
-only the cast file, or `--skip-mcp` to record against an already running server.
-If `AGENT_PBX_WORKERBEE_BIN` is set, the demo agent with `metadata.cwd` pointing
-at this repository can populate the WorkerBee tab; otherwise the tab shows the
-normal not-configured remediation.
 
 ## TUI Notifications
 
@@ -629,9 +603,9 @@ nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
 `/side` chat.
 
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
-or type `@` and press `Tab` to complete cached project paths from the Files
-tab. Type `@joplin:` and press `Tab` to complete project-scoped Joplin note
-titles from cache, with lazy loading on first use. Repeated `Tab` cycles matches; exact local
+or type `@` and press `Tab` to complete project paths. Type `@joplin:` and
+press `Tab` to complete project-scoped Joplin note titles from cache, with lazy
+loading on first use. Repeated `Tab` cycles matches; exact local
 commands such as `/esc` or `/theme minimal` execute locally on `Enter` instead
 of being sent to the agent.
 

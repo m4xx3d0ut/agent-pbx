@@ -2726,6 +2726,90 @@ async def test_tui_file_completion_works_in_tmux_input() -> None:
         assert message.text == "summarize @docs/"
 
 
+async def test_tui_file_completion_lazy_loads_directory() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(
+            self,
+            path: str,
+            *,
+            params: dict[str, str] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            calls.append((path, params or {}))
+            if path == "/v1/joplin/status":
+                return Response({"configured": False, "available": False})
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path == "/v1/agents/agent-1/files":
+                assert params == {"path": "."}
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": ".",
+                        "parent": None,
+                        "entries": [
+                            {
+                                "name": "README.md",
+                                "path": "README.md",
+                                "kind": "file",
+                                "size": 12,
+                                "mtime": 123.0,
+                                "extension": ".md",
+                                "mime_type": "text/markdown",
+                                "is_text": True,
+                                "is_image": False,
+                                "is_gif": False,
+                            },
+                            {
+                                "name": "src",
+                                "path": "src",
+                                "kind": "directory",
+                                "size": None,
+                                "mtime": 123.0,
+                                "extension": "",
+                                "mime_type": None,
+                                "is_text": False,
+                                "is_image": False,
+                                "is_gif": False,
+                            },
+                        ],
+                        "error": None,
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        message = app.query_one("#message", TextArea)
+
+        message.text = "review @RE"
+        message.move_cursor((0, len(message.text)))
+        assert await app.complete_file_reference_async(message, direction=1) is True
+
+    assert message.text == "review @README.md"
+    assert app.file_directory_entries_by_agent["agent-1"]["."]["README.md"]["is_text"] is True
+    assert ("/v1/agents/agent-1/files", {"path": "."}) in calls
+
+
 async def test_tui_joplin_note_completion_uses_cached_notes() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -3174,6 +3258,9 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/esc" in titles
     assert "/ctrlc" in titles
     assert "/tmux" in titles
+    assert "/latest" in titles
+    assert "/thread" in titles
+    assert "/files" in titles
     assert "/workerbee" in titles
     assert "/plan" in titles
     assert "/plan latest" in titles
@@ -4143,6 +4230,72 @@ async def test_tui_plan_selection_command_sends_latest_choice_with_notes() -> No
     ]
     assert refreshed_events == 1
     assert loaded_threads == ["agent-1"]
+
+
+async def test_tui_plan_selection_uses_explicit_target_agent_latest_options() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+    loaded_threads: list[str] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        loaded_threads.append(agent_id)
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "plan",
+                "project": "one",
+                "last_seen_at": 123.0,
+            },
+            "agent-2": {
+                "agent_id": "agent-2",
+                "status": "done",
+                "project": "two",
+                "last_seen_at": 124.0,
+            },
+        }
+        app.selected_agent_id = "agent-2"
+        app.latest_report_by_agent = {
+            "agent-1": {
+                "report_id": "report-1",
+                "agent_id": "agent-1",
+                "plan_options": ["Stay in plan", "Start coding"],
+            }
+        }
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.query_one("#message", TextArea).text = "/plan:2 Use the approved path."
+        await app.send_input()
+        message_text = app.query_one("#message", TextArea).text
+
+    assert queued == [
+        (
+            "agent-1",
+            "send_input",
+            {
+                "message": (
+                    "Selected plan option: Start coding\n\n"
+                    "Operator notes:\nUse the approved path."
+                ),
+                "plan_choice": {"label": "Start coding", "option": "Start coding"},
+            },
+        )
+    ]
+    assert loaded_threads == ["agent-1"]
+    assert message_text == ""
 
 
 async def test_tui_palette_plan_toggles_mode_immediately() -> None:
@@ -6193,6 +6346,67 @@ async def test_tui_plan_selection_command_queues_thread_choice_with_notes() -> N
     ]
     assert threads == ["agent-1"]
     assert message_text == ""
+
+
+async def test_tui_plan_selection_does_not_use_other_agent_thread_choice() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        stale_item = {
+            "item_id": "report:agent-2",
+            "kind": "report",
+            "agent_id": "agent-2",
+            "created_at": 123.0,
+            "status": "blocked",
+            "title": "Other agent choice",
+            "body": "Do not use this for agent-1",
+            "metadata": {"plan_options": ["Other agent option"]},
+        }
+        app.selected_agent_id = "agent-1"
+        app.active_agent_tab = "thread-tab"
+        app.thread_items = {"report:agent-2": stale_item}
+        app.selected_thread_item_id = "report:agent-2"
+        app.latest_report_by_agent = {
+            "agent-1": {
+                "report_id": "report-agent-1",
+                "agent_id": "agent-1",
+                "plan_options": ["Agent one option"],
+            }
+        }
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.query_one("#message", TextArea).text = "/plan:1"
+        await app.send_input()
+
+    assert queued == [
+        (
+            "agent-1",
+            "send_input",
+            {
+                "message": "Selected plan option: Agent one option",
+                "plan_choice": {
+                    "label": "Agent one option",
+                    "option": "Agent one option",
+                },
+            },
+        )
+    ]
 
 
 async def test_tui_latest_plan_choice_queues_follow_up_with_notes() -> None:
