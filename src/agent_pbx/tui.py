@@ -141,6 +141,9 @@ CODEX_NATIVE_PLAN_SELECTOR_CHOICES = {
     2: "clear context & start",
     3: "stay in plan mode",
 }
+CODEX_NATIVE_SELECTOR_LINE_PATTERN = re.compile(
+    r"^\s*(?P<marker>[›❯])?\s*(?P<index>[1-9][0-9]*)[.)]?\s+(?P<label>\S.*)$"
+)
 AGENT_JUMP_KEYS = {
     "1": 0,
     "2": 1,
@@ -831,10 +834,12 @@ def render_plan_prompt(message: str) -> str:
     return f"{PLAN_PBX_CONTEXT_PROMPT}\n\n{message.strip()}"
 
 
-def contains_codex_native_plan_selector(text: str) -> bool:
-    lines = [" ".join(line.casefold().split()) for line in text.splitlines()]
-    if not lines:
-        return False
+def codex_native_plan_selector_indices(text: str) -> tuple[int, ...]:
+    normalized_lines = [
+        " ".join(line.casefold().split()) for line in text.splitlines()
+    ]
+    if not normalized_lines:
+        return ()
     start_terms = (
         "start coding",
         "start implementation",
@@ -848,27 +853,39 @@ def contains_codex_native_plan_selector(text: str) -> bool:
         "continue planning",
         "remain in plan",
     )
+    indexed_labels: dict[int, str] = {}
+    marked_indices: set[int] = set()
+    for line in normalized_lines[-40:]:
+        match = CODEX_NATIVE_SELECTOR_LINE_PATTERN.match(line)
+        if match is None:
+            continue
+        label = match.group("label").strip()
+        if len(label) > 160:
+            continue
+        index = int(match.group("index"))
+        indexed_labels[index] = label
+        if match.group("marker"):
+            marked_indices.add(index)
 
     def choice_line(index: int, terms: tuple[str, ...]) -> bool:
-        pattern = re.compile(rf"^[^\w/]*{index}[.)]?\s+(?P<label>.+)$")
-        for line in lines[-40:]:
-            match = pattern.match(line)
-            if match is None:
-                continue
-            label = match.group("label")
-            if len(label) > 120:
-                continue
-            if any(term in label for term in terms):
-                return True
-        return False
+        label = indexed_labels.get(index, "")
+        return any(term in label for term in terms)
 
-    return all(
+    if all(
         (
             choice_line(1, start_terms),
             choice_line(2, ("clear", "discard")),
             choice_line(3, stay_terms),
         )
-    )
+    ):
+        return tuple(sorted(indexed_labels))
+    if marked_indices and len(indexed_labels) >= 2:
+        return tuple(sorted(indexed_labels))
+    return ()
+
+
+def contains_codex_native_plan_selector(text: str) -> bool:
+    return bool(codex_native_plan_selector_indices(text))
 
 
 def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME_NAME) -> set[str]:
@@ -2808,6 +2825,7 @@ class AgentPBXTUI(App[None]):
         self.tmux_panes: list[tmux_support.TmuxPane] = []
         self.tmux_refreshing = False
         self.tmux_plan_selector_pane_by_agent: dict[str, str] = {}
+        self.tmux_plan_selector_indices_by_agent: dict[str, set[int]] = {}
         self.mouse_debug_enabled = env_flag("AGENT_PBX_TUI_MOUSE_DEBUG")
         self.attention_blink_phase = False
         self.attention_agent_id: str | None = None
@@ -3668,7 +3686,11 @@ class AgentPBXTUI(App[None]):
             )
         ):
             return
-        for index, label in CODEX_NATIVE_PLAN_SELECTOR_CHOICES.items():
+        indices = self.available_native_plan_selector_indices(agent_id)
+        if not indices:
+            indices = set(CODEX_NATIVE_PLAN_SELECTOR_CHOICES)
+        for index in sorted(indices):
+            label = CODEX_NATIVE_PLAN_SELECTOR_CHOICES.get(index, f"option {index}")
             yield SystemCommand(
                 f"/plan select {index}: {label}",
                 f"Press {index} in the Codex plan selector for {agent_id}",
@@ -6155,19 +6177,56 @@ class AgentPBXTUI(App[None]):
         pane_id: str | None = None,
     ) -> bool:
         was_pending = agent_id in self.tmux_plan_selector_agent_ids
-        is_pending = contains_codex_native_plan_selector(captured)
+        indices = set(codex_native_plan_selector_indices(captured))
+        is_pending = bool(indices)
         if is_pending:
             self.tmux_plan_selector_agent_ids.add(agent_id)
+            self.tmux_plan_selector_indices_by_agent[agent_id] = indices
             if pane_id:
                 self.tmux_plan_selector_pane_by_agent[agent_id] = pane_id
         else:
             self.tmux_plan_selector_agent_ids.discard(agent_id)
             self.tmux_plan_selector_pane_by_agent.pop(agent_id, None)
+            self.tmux_plan_selector_indices_by_agent.pop(agent_id, None)
         if was_pending == is_pending:
             return False
         self.update_agent_title()
         self.render_unseen_attention()
         return True
+
+    def native_plan_selector_indices_for_pane(
+        self,
+        agent_id: str,
+        pane_id: str,
+    ) -> set[int]:
+        indices = set(self.tmux_plan_selector_indices_by_agent.get(agent_id, set()))
+        stream = self.query_one_or_none("#tmux-stream", TextArea)
+        visible_pane_id = self.tmux_pane_id_from_capture_key(self.tmux_visible_capture_key)
+        if stream is not None and visible_pane_id == pane_id:
+            visible_indices = set(codex_native_plan_selector_indices(stream.text))
+            indices.update(visible_indices)
+            visible_agent_id = self.tmux_agent_id_from_capture_key(
+                self.tmux_visible_capture_key
+            )
+            if visible_agent_id:
+                self.update_tmux_plan_selector_state(
+                    visible_agent_id,
+                    stream.text,
+                    pane_id=pane_id,
+                )
+        return indices
+
+    def available_native_plan_selector_indices(self, agent_id: str) -> set[int]:
+        pane_id = self.tmux_plan_selector_pane_by_agent.get(agent_id)
+        if pane_id:
+            return self.native_plan_selector_indices_for_pane(agent_id, pane_id)
+        stream = self.query_one_or_none("#tmux-stream", TextArea)
+        if stream is None:
+            return set(self.tmux_plan_selector_indices_by_agent.get(agent_id, set()))
+        visible_pane_id = self.tmux_visible_plan_selector_pane_id()
+        if visible_pane_id is None:
+            return set(self.tmux_plan_selector_indices_by_agent.get(agent_id, set()))
+        return self.native_plan_selector_indices_for_pane(agent_id, visible_pane_id)
 
     def tmux_visible_native_plan_selector_pending(self) -> bool:
         return self.tmux_visible_plan_selector_pane_id() is not None
@@ -6182,6 +6241,12 @@ class AgentPBXTUI(App[None]):
                 if stream is not None and not contains_codex_native_plan_selector(stream.text):
                     self.update_tmux_plan_selector_state(agent_id, stream.text)
                     return False
+                if stream is not None:
+                    self.update_tmux_plan_selector_state(
+                        agent_id,
+                        stream.text,
+                        pane_id=self.tmux_visible_pane_id_for_agent(agent_id),
+                    )
             return True
         if agent_id != self.selected_agent_id:
             return False
@@ -6190,10 +6255,12 @@ class AgentPBXTUI(App[None]):
         stream = self.query_one_or_none("#tmux-stream", TextArea)
         if stream is None or not contains_codex_native_plan_selector(stream.text):
             return False
-        self.tmux_plan_selector_agent_ids.add(agent_id)
         pane_id = self.tmux_visible_pane_id_for_agent(agent_id)
-        if pane_id:
-            self.tmux_plan_selector_pane_by_agent[agent_id] = pane_id
+        self.update_tmux_plan_selector_state(
+            agent_id,
+            stream.text,
+            pane_id=pane_id,
+        )
         self.update_agent_title()
         self.render_unseen_attention()
         return True
@@ -6218,7 +6285,15 @@ class AgentPBXTUI(App[None]):
         stream = self.query_one_or_none("#tmux-stream", TextArea)
         if stream is None or not contains_codex_native_plan_selector(stream.text):
             return None
-        return self.tmux_pane_id_from_capture_key(self.tmux_visible_capture_key)
+        pane_id = self.tmux_pane_id_from_capture_key(self.tmux_visible_capture_key)
+        agent_id = self.tmux_agent_id_from_capture_key(self.tmux_visible_capture_key)
+        if agent_id and pane_id:
+            self.update_tmux_plan_selector_state(
+                agent_id,
+                stream.text,
+                pane_id=pane_id,
+            )
+        return pane_id
 
     def tmux_visible_pane_id_for_agent(self, agent_id: str) -> str | None:
         prefix = f"{agent_id}:"
@@ -7059,13 +7134,10 @@ class AgentPBXTUI(App[None]):
         *,
         notify_missing: bool = True,
     ) -> bool:
-        label = CODEX_NATIVE_PLAN_SELECTOR_CHOICES.get(selection.index)
-        if label is None:
-            self.notify(
-                f"Codex plan selector option {selection.index} is not available.",
-                severity="warning",
-            )
-            return False
+        label = CODEX_NATIVE_PLAN_SELECTOR_CHOICES.get(
+            selection.index,
+            f"option {selection.index}",
+        )
         status = self.query_one_or_none("#tmux-status", Static)
         pane_id = await self.resolve_native_plan_selection_pane_id(
             agent_id,
@@ -7073,6 +7145,21 @@ class AgentPBXTUI(App[None]):
             notify_missing=notify_missing,
         )
         if pane_id is None:
+            return False
+        available_indices = self.native_plan_selector_indices_for_pane(agent_id, pane_id)
+        if not available_indices:
+            self.notify(
+                "No Codex native plan selector options are visible in tmux.",
+                severity="warning",
+            )
+            return False
+        if selection.index not in available_indices:
+            options = ", ".join(str(index) for index in sorted(available_indices))
+            self.notify(
+                f"Codex plan selector option {selection.index} is not visible. "
+                f"Available options: {options}.",
+                severity="warning",
+            )
             return False
         sent = await self.send_key_to_tmux_pane(
             pane_id,
@@ -7083,10 +7170,12 @@ class AgentPBXTUI(App[None]):
             return False
         self.tmux_plan_selector_agent_ids.discard(agent_id)
         self.tmux_plan_selector_pane_by_agent.pop(agent_id, None)
+        self.tmux_plan_selector_indices_by_agent.pop(agent_id, None)
         visible_agent_id = self.tmux_agent_id_from_capture_key(self.tmux_visible_capture_key)
         if visible_agent_id and visible_agent_id != agent_id:
             self.tmux_plan_selector_agent_ids.discard(visible_agent_id)
             self.tmux_plan_selector_pane_by_agent.pop(visible_agent_id, None)
+            self.tmux_plan_selector_indices_by_agent.pop(visible_agent_id, None)
         self.update_agent_title()
         self.render_agents()
         self.render_unseen_attention()
@@ -7170,14 +7259,8 @@ class AgentPBXTUI(App[None]):
         via_tmux: bool,
     ) -> bool:
         options = self.current_plan_options_for_agent(agent_id)
-        native_pending = (
-            selection.index in CODEX_NATIVE_PLAN_SELECTOR_CHOICES
-            and self.tmux_native_plan_selector_pending(agent_id)
-        )
-        if (
-            selection.index in CODEX_NATIVE_PLAN_SELECTOR_CHOICES
-            and (via_tmux or native_pending)
-        ):
+        native_pending = self.tmux_native_plan_selector_pending(agent_id)
+        if via_tmux or native_pending:
             sent_native = await self.send_native_plan_selection(
                 agent_id,
                 selection,

@@ -14,6 +14,7 @@ from agent_pbx.tui import (
     TMUX_LIVENESS_IDLE_SECONDS,
     DEFAULT_SPLIT_PERCENT,
     built_in_palette_command_names,
+    codex_native_plan_selector_indices,
     contains_codex_native_plan_selector,
     env_custom_palette,
     env_flag,
@@ -3398,6 +3399,7 @@ def test_tui_detects_codex_native_plan_selector() -> None:
     """
 
     assert contains_codex_native_plan_selector(capture) is True
+    assert codex_native_plan_selector_indices(capture) == (1, 2, 3)
     assert contains_codex_native_plan_selector("1 Start coding only") is False
     assert (
         contains_codex_native_plan_selector(
@@ -3406,6 +3408,20 @@ def test_tui_detects_codex_native_plan_selector() -> None:
         )
         is False
     )
+
+
+def test_tui_detects_codex_pre_plan_question_selector() -> None:
+    capture = """
+    Pick the approach you want before I draft the implementation plan.
+
+    › 1. Keep the current API shape
+      2. Add a compatibility shim
+      3. Split the migration into phases
+      4. Stop and inspect the affected tests first
+    """
+
+    assert contains_codex_native_plan_selector(capture) is True
+    assert codex_native_plan_selector_indices(capture) == (1, 2, 3, 4)
 
 
 async def test_tui_palette_custom_commands_require_tmux_mode(
@@ -6656,6 +6672,93 @@ async def test_tui_tmux_direct_can_send_plan_selection_from_latest_input() -> No
     assert sent_keys == [("%9", "2")]
     assert captures == ["agent-1"]
     assert message_text == ""
+
+
+async def test_tui_tmux_direct_can_send_pre_plan_question_selection() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent_keys: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_keys.append((pane_id, key))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "plan",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.tmux_visible_capture_key = "agent-1:%9"
+        app.query_one("#tmux-stream", TextArea).text = (
+            "› 1. Keep the current API shape\n"
+            "  2. Add a compatibility shim\n"
+            "  3. Split the migration into phases\n"
+            "  4. Stop and inspect the affected tests first"
+        )
+        app.query_one("#tmux-message", TextArea).text = ""
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.query_one("#message", TextArea).text = "/plan:4"
+        await app.send_input()
+        message_text = app.query_one("#message", TextArea).text
+
+    assert sent_keys == [("%9", "4")]
+    assert captures == ["agent-1"]
+    assert message_text == ""
+
+
+async def test_tui_tmux_direct_refuses_missing_native_plan_option() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent_keys: list[tuple[str, str]] = []
+
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_keys.append((pane_id, key))
+        return True
+
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "plan",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.tmux_visible_capture_key = "agent-1:%9"
+        app.query_one("#tmux-stream", TextArea).text = (
+            "1 Start coding\n2 Clear context & start\n3 Stay in plan mode"
+        )
+        sent = await app.send_plan_selection(
+            "agent-1",
+            PlanSelection(index=4),
+            via_tmux=True,
+        )
+
+    assert sent is False
+    assert sent_keys == []
 
 
 async def test_tui_plan_selection_uses_recorded_native_selector_pane() -> None:
