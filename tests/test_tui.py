@@ -6722,9 +6722,10 @@ async def test_tui_tmux_direct_can_send_pre_plan_question_selection() -> None:
     assert message_text == ""
 
 
-async def test_tui_tmux_direct_refuses_missing_native_plan_option() -> None:
+async def test_tui_tmux_direct_allows_unparsed_native_plan_option() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     sent_keys: list[tuple[str, str]] = []
+    captures: list[str] = []
 
     async def fake_send_key_to_tmux_pane(
         pane_id: str,
@@ -6735,7 +6736,11 @@ async def test_tui_tmux_direct_refuses_missing_native_plan_option() -> None:
         sent_keys.append((pane_id, key))
         return True
 
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
     app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
 
     async with app.run_test():
         app.agents = {
@@ -6757,8 +6762,141 @@ async def test_tui_tmux_direct_refuses_missing_native_plan_option() -> None:
             via_tmux=True,
         )
 
-    assert sent is False
-    assert sent_keys == []
+    assert sent is True
+    assert sent_keys == [("%9", "4")]
+    assert captures == ["agent-1"]
+
+
+async def test_tui_tmux_plan_selection_notes_send_follow_up_comment() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent_keys: list[tuple[str, str]] = []
+    sent_notes: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_keys.append((pane_id, key))
+        return True
+
+    async def fake_send_text_to_tmux_pane(
+        pane_id: str,
+        message: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_notes.append((pane_id, message))
+        return True
+
+    async def fake_record_tmux_joplin_interaction(agent_id: str, message: str) -> None:
+        return None
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+    app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
+    app.record_tmux_joplin_interaction = fake_record_tmux_joplin_interaction  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "plan",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.tmux_visible_capture_key = "agent-1:%9"
+        app.query_one("#tmux-stream", TextArea).text = (
+            "1 Start coding\n2 Clear context & start\n3 Stay in plan mode"
+        )
+        app.query_one("#agent-id", Input).value = "agent-1"
+        app.query_one("#message", TextArea).text = "/plan:3 keep this staged"
+        await app.send_input()
+        message_text = app.query_one("#message", TextArea).text
+
+    assert sent_keys == [("%9", "3")]
+    assert sent_notes == [
+        ("%9", "Plan selection note for option 3:\nkeep this staged")
+    ]
+    assert captures == ["agent-1"]
+    assert message_text == ""
+
+
+async def test_tui_tmux_plan_selection_falls_back_to_selected_pane(
+    monkeypatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    pane = tmux_support.TmuxPane(
+        "s",
+        "0",
+        "1",
+        "%9",
+        True,
+        "node",
+        "agent-pbx",
+        "/home/me/agent-pbx",
+        80,
+        24,
+        100,
+    )
+    sent_keys: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return [pane]
+
+    def fake_capture_pane(target: str, **_: object) -> str:
+        return "Codex is asking a plan-mode question, but this text is not parsed."
+
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent_keys.append((pane_id, key))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(tmux_support, "capture_pane", fake_capture_pane)
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "plan",
+                "project": "agent-pbx",
+                "metadata": {"cwd": "/home/me/agent-pbx"},
+                "last_seen_at": 123.0,
+            }
+        }
+        app.selected_agent_id = "agent-1"
+        app.tmux_agent_targets["agent-1"] = "%9"
+        app.tmux_visible_capture_key = "agent-1:%9"
+        app.query_one("#tmux-stream", TextArea).text = (
+            "Codex is asking a plan-mode question, but this text is not parsed."
+        )
+        sent = await app.send_plan_selection(
+            "agent-1",
+            PlanSelection(index=1),
+            via_tmux=True,
+        )
+
+    assert sent is True
+    assert sent_keys == [("%9", "1")]
+    assert captures == ["agent-1"]
 
 
 async def test_tui_plan_selection_uses_recorded_native_selector_pane() -> None:

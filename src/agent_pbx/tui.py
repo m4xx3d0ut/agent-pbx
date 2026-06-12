@@ -7015,6 +7015,21 @@ class AgentPBXTUI(App[None]):
             return False
         return True
 
+    async def send_text_to_tmux_pane(
+        self,
+        pane_id: str,
+        message: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        try:
+            await asyncio.to_thread(tmux_support.send_text, pane_id, message)
+        except Exception as exc:
+            if status is not None:
+                status.update(f"Tmux: send failed ({exc})")
+            return False
+        return True
+
     async def resolve_tmux_send_pane(
         self,
         agent_id: str,
@@ -7133,6 +7148,7 @@ class AgentPBXTUI(App[None]):
         selection: PlanSelection,
         *,
         notify_missing: bool = True,
+        allow_tmux_pane_fallback: bool = False,
     ) -> bool:
         label = CODEX_NATIVE_PLAN_SELECTOR_CHOICES.get(
             selection.index,
@@ -7142,25 +7158,15 @@ class AgentPBXTUI(App[None]):
         pane_id = await self.resolve_native_plan_selection_pane_id(
             agent_id,
             status=status,
-            notify_missing=notify_missing,
+            notify_missing=notify_missing and not allow_tmux_pane_fallback,
         )
         if pane_id is None:
-            return False
-        available_indices = self.native_plan_selector_indices_for_pane(agent_id, pane_id)
-        if not available_indices:
-            self.notify(
-                "No Codex native plan selector options are visible in tmux.",
-                severity="warning",
-            )
-            return False
-        if selection.index not in available_indices:
-            options = ", ".join(str(index) for index in sorted(available_indices))
-            self.notify(
-                f"Codex plan selector option {selection.index} is not visible. "
-                f"Available options: {options}.",
-                severity="warning",
-            )
-            return False
+            if not allow_tmux_pane_fallback:
+                return False
+            pane = await self.resolve_tmux_send_pane(agent_id, status=status)
+            if pane is None:
+                return False
+            pane_id = pane.pane_id
         sent = await self.send_key_to_tmux_pane(
             pane_id,
             str(selection.index),
@@ -7180,10 +7186,23 @@ class AgentPBXTUI(App[None]):
         self.render_agents()
         self.render_unseen_attention()
         if selection.notes:
-            self.notify(
-                "Notes are ignored for Codex native plan selector choices.",
-                severity="warning",
+            note_message = (
+                f"Plan selection note for option {selection.index}:\n"
+                f"{selection.notes}"
             )
+            await asyncio.sleep(PLAN_MODE_FOLLOWUP_DELAY_SECONDS)
+            note_sent = await self.send_text_to_tmux_pane(
+                pane_id,
+                note_message,
+                status=status,
+            )
+            if note_sent:
+                await self.record_tmux_joplin_interaction(agent_id, note_message)
+            else:
+                self.notify(
+                    "Plan option was selected, but the trailing note could not be sent.",
+                    severity="warning",
+                )
         self.notify(f"Pressed {selection.index} ({label}) in Codex plan selector.")
         await asyncio.sleep(SLASH_COMMAND_FOLLOWUP_DELAY_SECONDS)
         await self.load_tmux_capture(agent_id)
@@ -7265,6 +7284,7 @@ class AgentPBXTUI(App[None]):
                 agent_id,
                 selection,
                 notify_missing=not options,
+                allow_tmux_pane_fallback=via_tmux,
             )
             if sent_native:
                 return True
