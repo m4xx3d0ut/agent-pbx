@@ -104,6 +104,9 @@ def test_start_mcp_daemon_writes_detached_agent_pbx_argv(
         github_bin="/usr/bin/gh",
         pull_request_timeout_seconds=12.0,
         pull_request_allowed_repos=("owner/repo",),
+        github_remote="github",
+        github_ssh_command="ssh -i ~/.ssh/github-m",
+        github_ssh_command_overrides={"owner/repo": "ssh -i ~/.ssh/repo"},
     )
     monkeypatch.setattr("agent_pbx.mcp_daemon.subprocess.Popen", FakePopen)
     monkeypatch.setattr(
@@ -133,6 +136,14 @@ def test_start_mcp_daemon_writes_detached_agent_pbx_argv(
     assert calls["kwargs"]["env"]["AGENT_PBX_GH_BIN"] == "/usr/bin/gh"
     assert calls["kwargs"]["env"]["AGENT_PBX_PR_TIMEOUT_SECONDS"] == "12.0"
     assert calls["kwargs"]["env"]["AGENT_PBX_PR_ALLOWED_REPOS"] == "owner/repo"
+    assert calls["kwargs"]["env"]["AGENT_PBX_GITHUB_REMOTE"] == "github"
+    assert (
+        calls["kwargs"]["env"]["AGENT_PBX_GITHUB_SSH_COMMAND"]
+        == "ssh -i ~/.ssh/github-m"
+    )
+    assert json.loads(
+        calls["kwargs"]["env"]["AGENT_PBX_GITHUB_SSH_COMMAND_OVERRIDES_JSON"]
+    ) == {"owner/repo": "ssh -i ~/.ssh/repo"}
     assert calls["argv"][:3] == [calls["argv"][0], "-m", "agent_pbx"]
     assert "mcp" in calls["argv"]
     assert "serve" in calls["argv"]
@@ -153,6 +164,47 @@ def test_start_mcp_daemon_writes_detached_agent_pbx_argv(
     assert metadata["github_bin"] == "/usr/bin/gh"
     assert metadata["pull_request_timeout_seconds"] == 12.0
     assert metadata["pull_request_allowed_repos"] == ["owner/repo"]
+    assert metadata["github_remote"] == "github"
+    assert metadata["github_ssh_command_configured"] is True
+    assert metadata["github_ssh_command_override_count"] == 1
+    assert "github_ssh_command" not in metadata
+
+
+def test_start_mcp_daemon_does_not_export_unset_github_remote(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    class FakePopen:
+        pid = 4321
+
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            calls["argv"] = argv
+            calls["kwargs"] = kwargs
+
+    config = MCPDaemonConfig(state_root=tmp_path, port=9876)
+    monkeypatch.setattr("agent_pbx.mcp_daemon.subprocess.Popen", FakePopen)
+    monkeypatch.setattr(
+        "agent_pbx.mcp_daemon._mcp_port_available",
+        lambda _config: {"ok": True},
+    )
+    monkeypatch.setattr(
+        "agent_pbx.mcp_daemon._wait_ready",
+        lambda _config, *, timeout: {"ready_at": 123.0},  # noqa: ARG005
+    )
+    monkeypatch.setattr("agent_pbx.mcp_daemon._pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr(
+        "agent_pbx.mcp_daemon._pid_matches_metadata",
+        lambda *_args: True,
+    )
+
+    result = start_mcp_daemon(config, timeout=1)
+
+    assert result["ok"] is True
+    assert "AGENT_PBX_GITHUB_REMOTE" not in calls["kwargs"]["env"]
+    metadata = json.loads(config.metadata_file.read_text(encoding="utf-8"))
+    assert metadata["github_remote"] is None
 
 
 def test_start_mcp_daemon_fails_fast_when_port_is_in_use(

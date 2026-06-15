@@ -11,14 +11,22 @@ from typing import Any, Callable
 
 from .pull_requests import (
     GITHUB_BIN_ENV,
+    GITHUB_REMOTE_ENV,
+    GITHUB_SSH_COMMAND_ENV,
+    GITHUB_SSH_COMMAND_OVERRIDES_ENV,
     PULL_REQUESTS_ALLOWED_REPOS_ENV,
     PULL_REQUESTS_TIMEOUT_ENV,
     agent_cwd,
     author_login,
+    command_repo,
     env_flag,
     env_float,
+    env_json_string_map,
     env_repo_tuple,
+    git_remote_url,
+    github_command_env,
     label_names,
+    parse_github_remote_url,
     run_github_command,
 )
 
@@ -40,6 +48,9 @@ class IssueConfig:
     gh_bin: str = "gh"
     timeout_seconds: float = DEFAULT_ISSUES_TIMEOUT_SECONDS
     allowed_repos: tuple[str, ...] = ()
+    github_remote: str | None = None
+    github_ssh_command: str | None = None
+    github_ssh_command_overrides: dict[str, str] | None = None
 
     @property
     def configured(self) -> bool:
@@ -96,6 +107,11 @@ class IssueService:
             "gh_bin": self.config.gh_bin,
             "close_enabled": self.config.close_enabled,
             "allowed_repos": list(self.config.allowed_repos),
+            "github_remote": self.config.github_remote,
+            "github_ssh_command_configured": bool(self.config.github_ssh_command),
+            "github_ssh_command_override_count": len(
+                self.config.github_ssh_command_overrides or {}
+            ),
             "checked_at": self.clock(),
             "repo": None,
             "repo_url": None,
@@ -143,6 +159,8 @@ class IssueService:
                     str(status["gh_bin"]),
                     "issue",
                     "list",
+                    "--repo",
+                    str(status["repo"]),
                     "--limit",
                     str(min(max(int(limit), 1), 100)),
                     "--state",
@@ -169,6 +187,8 @@ class IssueService:
                 "issue",
                 "view",
                 str(number),
+                "--repo",
+                str(status["repo"]),
                 "--comments",
                 "--json",
                 "number,title,state,author,labels,assignees,milestone,updatedAt,createdAt,url,closed,closedAt,body,comments",
@@ -225,6 +245,8 @@ class IssueService:
                 "issue",
                 "comment",
                 str(number),
+                "--repo",
+                str(status["repo"]),
                 "--body",
                 comment_body,
             ],
@@ -236,6 +258,8 @@ class IssueService:
                 "issue",
                 "close",
                 str(number),
+                "--repo",
+                str(status["repo"]),
             ],
             cwd,
         )
@@ -324,6 +348,9 @@ class IssueService:
         return cwd_path
 
     def resolve_repo(self, gh_bin: Path, cwd: Path) -> dict[str, str]:
+        remote_repo = self.resolve_github_remote_repo(cwd)
+        if remote_repo is not None:
+            return remote_repo
         data = self.run_json(
             [str(gh_bin), "repo", "view", "--json", "nameWithOwner,url"],
             cwd,
@@ -342,6 +369,21 @@ class IssueService:
                 retryable=True,
             )
         return {"name_with_owner": name, "url": str(data.get("url") or "")}
+
+    def resolve_github_remote_repo(self, cwd: Path) -> dict[str, str] | None:
+        remote = (self.config.github_remote or "").strip()
+        if not remote:
+            return None
+        url = git_remote_url(cwd, remote)
+        if not url:
+            return None
+        parsed = parse_github_remote_url(url)
+        if parsed is None:
+            return None
+        return {
+            "name_with_owner": parsed,
+            "url": f"https://github.com/{parsed}",
+        }
 
     def require_repo_allowed(self, repo: str) -> None:
         allowed = {item.lower() for item in self.config.allowed_repos if item.strip()}
@@ -366,8 +408,14 @@ class IssueService:
             ) from exc
 
     def run_command(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        repo = command_repo(argv)
+        env = github_command_env(
+            repo,
+            self.config.github_ssh_command,
+            self.config.github_ssh_command_overrides or {},
+        )
         try:
-            result = self.runner(argv, cwd, self.config.timeout_seconds)
+            result = self.runner(argv, cwd, self.config.timeout_seconds, env)
         except subprocess.TimeoutExpired as exc:
             raise IssueError(
                 "GH_TIMEOUT",
@@ -470,4 +518,9 @@ def env_issue_config() -> IssueConfig:
             DEFAULT_ISSUES_TIMEOUT_SECONDS,
         ),
         allowed_repos=env_repo_tuple(PULL_REQUESTS_ALLOWED_REPOS_ENV),
+        github_remote=os.getenv(GITHUB_REMOTE_ENV, "").strip() or None,
+        github_ssh_command=os.getenv(GITHUB_SSH_COMMAND_ENV, "").strip() or None,
+        github_ssh_command_overrides=env_json_string_map(
+            GITHUB_SSH_COMMAND_OVERRIDES_ENV
+        ),
     )

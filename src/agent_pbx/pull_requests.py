@@ -13,12 +13,15 @@ from typing import Any, Callable
 PULL_REQUESTS_ENABLED_ENV = "AGENT_PBX_PR_ENABLED"
 PULL_REQUESTS_MERGE_ENABLED_ENV = "AGENT_PBX_PR_MERGE_ENABLED"
 GITHUB_BIN_ENV = "AGENT_PBX_GH_BIN"
+GITHUB_REMOTE_ENV = "AGENT_PBX_GITHUB_REMOTE"
+GITHUB_SSH_COMMAND_ENV = "AGENT_PBX_GITHUB_SSH_COMMAND"
+GITHUB_SSH_COMMAND_OVERRIDES_ENV = "AGENT_PBX_GITHUB_SSH_COMMAND_OVERRIDES_JSON"
 PULL_REQUESTS_TIMEOUT_ENV = "AGENT_PBX_PR_TIMEOUT_SECONDS"
 PULL_REQUESTS_ALLOWED_REPOS_ENV = "AGENT_PBX_PR_ALLOWED_REPOS"
 DEFAULT_PULL_REQUESTS_TIMEOUT_SECONDS = 20.0
 
 Runner = Callable[
-    [list[str], Path, float],
+    [list[str], Path, float, dict[str, str] | None],
     subprocess.CompletedProcess[str],
 ]
 
@@ -30,6 +33,9 @@ class PullRequestConfig:
     gh_bin: str = "gh"
     timeout_seconds: float = DEFAULT_PULL_REQUESTS_TIMEOUT_SECONDS
     allowed_repos: tuple[str, ...] = ()
+    github_remote: str | None = None
+    github_ssh_command: str | None = None
+    github_ssh_command_overrides: dict[str, str] | None = None
 
     @property
     def configured(self) -> bool:
@@ -86,6 +92,11 @@ class PullRequestService:
             "gh_bin": self.config.gh_bin,
             "merge_enabled": self.config.merge_enabled,
             "allowed_repos": list(self.config.allowed_repos),
+            "github_remote": self.config.github_remote,
+            "github_ssh_command_configured": bool(self.config.github_ssh_command),
+            "github_ssh_command_override_count": len(
+                self.config.github_ssh_command_overrides or {}
+            ),
             "checked_at": self.clock(),
             "repo": None,
             "repo_url": None,
@@ -126,6 +137,8 @@ class PullRequestService:
                     str(status["gh_bin"]),
                     "pr",
                     "list",
+                    "--repo",
+                    str(status["repo"]),
                     "--limit",
                     str(min(max(int(limit), 1), 100)),
                     "--state",
@@ -151,6 +164,8 @@ class PullRequestService:
                 "pr",
                 "view",
                 str(number),
+                "--repo",
+                str(status["repo"]),
                 "--json",
                 "number,title,state,isDraft,author,headRefName,baseRefName,updatedAt,createdAt,url,body,labels,reviewDecision,statusCheckRollup,mergeStateStatus,mergeable,files,commits",
             ],
@@ -205,6 +220,8 @@ class PullRequestService:
                 "pr",
                 "merge",
                 str(number),
+                "--repo",
+                str(status["repo"]),
                 flag,
             ],
             Path(str(status["cwd"])),
@@ -307,6 +324,9 @@ class PullRequestService:
         return cwd_path
 
     def resolve_repo(self, gh_bin: Path, cwd: Path) -> dict[str, str]:
+        remote_repo = self.resolve_github_remote_repo(cwd)
+        if remote_repo is not None:
+            return remote_repo
         data = self.run_json(
             [str(gh_bin), "repo", "view", "--json", "nameWithOwner,url"],
             cwd,
@@ -325,6 +345,21 @@ class PullRequestService:
                 retryable=True,
             )
         return {"name_with_owner": name, "url": str(data.get("url") or "")}
+
+    def resolve_github_remote_repo(self, cwd: Path) -> dict[str, str] | None:
+        remote = (self.config.github_remote or "").strip()
+        if not remote:
+            return None
+        url = git_remote_url(cwd, remote)
+        if not url:
+            return None
+        parsed = parse_github_remote_url(url)
+        if parsed is None:
+            return None
+        return {
+            "name_with_owner": parsed,
+            "url": f"https://github.com/{parsed}",
+        }
 
     def require_repo_allowed(self, repo: str) -> None:
         allowed = {item.lower() for item in self.config.allowed_repos if item.strip()}
@@ -349,8 +384,14 @@ class PullRequestService:
             ) from exc
 
     def run_command(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        repo = command_repo(argv)
+        env = github_command_env(
+            repo,
+            self.config.github_ssh_command,
+            self.config.github_ssh_command_overrides or {},
+        )
         try:
-            result = self.runner(argv, cwd, self.config.timeout_seconds)
+            result = self.runner(argv, cwd, self.config.timeout_seconds, env)
         except subprocess.TimeoutExpired as exc:
             raise PullRequestError(
                 "GH_TIMEOUT",
@@ -381,7 +422,12 @@ def run_github_command(
     argv: list[str],
     cwd: Path,
     timeout: float,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    merged_env = None
+    if env:
+        merged_env = os.environ.copy()
+        merged_env.update(env)
     return subprocess.run(
         argv,
         cwd=cwd,
@@ -390,7 +436,77 @@ def run_github_command(
         text=True,
         check=False,
         stdin=subprocess.DEVNULL,
+        env=merged_env,
     )
+
+
+def git_remote_url(cwd: Path, remote: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", remote],
+            cwd=cwd,
+            timeout=5,
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    url = result.stdout.strip()
+    return url or None
+
+
+def parse_github_remote_url(url: str) -> str | None:
+    value = url.strip()
+    prefixes = (
+        "git@github.com:",
+        "ssh://git@github.com/",
+        "https://github.com/",
+        "http://github.com/",
+    )
+    repo = ""
+    for prefix in prefixes:
+        if value.startswith(prefix):
+            repo = value[len(prefix) :]
+            break
+    if not repo:
+        return None
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    repo = repo.strip("/")
+    parts = [part for part in repo.split("/") if part]
+    if len(parts) != 2:
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+
+def command_repo(argv: list[str]) -> str | None:
+    for index, value in enumerate(argv):
+        if value == "--repo" and index + 1 < len(argv):
+            repo = argv[index + 1].strip()
+            return repo or None
+        if value.startswith("--repo="):
+            repo = value.split("=", 1)[1].strip()
+            return repo or None
+    return None
+
+
+def github_command_env(
+    repo: str | None,
+    github_ssh_command: str | None,
+    overrides: dict[str, str],
+) -> dict[str, str] | None:
+    command = ""
+    if repo:
+        command = overrides.get(repo.lower(), "").strip()
+    if not command:
+        command = (github_ssh_command or "").strip()
+    if not command:
+        return None
+    return {"GIT_SSH_COMMAND": command}
 
 
 def normalize_pr_summary(item: dict[str, Any]) -> dict[str, Any]:
@@ -501,6 +617,11 @@ def env_pull_request_config() -> PullRequestConfig:
             DEFAULT_PULL_REQUESTS_TIMEOUT_SECONDS,
         ),
         allowed_repos=env_repo_tuple(PULL_REQUESTS_ALLOWED_REPOS_ENV),
+        github_remote=os.getenv(GITHUB_REMOTE_ENV, "").strip() or None,
+        github_ssh_command=os.getenv(GITHUB_SSH_COMMAND_ENV, "").strip() or None,
+        github_ssh_command_overrides=env_json_string_map(
+            GITHUB_SSH_COMMAND_OVERRIDES_ENV
+        ),
     )
 
 
@@ -509,6 +630,25 @@ def env_repo_tuple(name: str) -> tuple[str, ...]:
     if not value:
         return ()
     return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def env_json_string_map(name: str) -> dict[str, str]:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return {}
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, item in data.items():
+        repo = str(key).strip().lower()
+        command = str(item).strip()
+        if repo and command:
+            result[repo] = command
+    return result
 
 
 def env_flag(name: str) -> bool:

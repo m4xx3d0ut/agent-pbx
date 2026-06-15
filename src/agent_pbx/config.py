@@ -26,6 +26,9 @@ class ServerConfig:
     github_bin: str = "gh"
     pull_request_timeout_seconds: float = 20.0
     pull_request_allowed_repos: tuple[str, ...] = ()
+    github_remote: str | None = None
+    github_ssh_command: str | None = None
+    github_ssh_command_overrides: dict[str, str] | None = None
     joplin_api_url: str | None = None
     joplin_token: str | None = None
     joplin_notebook: str = "Agent PBX"

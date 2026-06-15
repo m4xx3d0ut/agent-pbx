@@ -32,6 +32,9 @@ from .workerbee import WORKERBEE_BIN_ENV, WORKERBEE_CACHE_ENV, WORKERBEE_TIMEOUT
 from .issues import ISSUES_CLOSE_ENABLED_ENV, ISSUES_ENABLED_ENV
 from .pull_requests import (
     GITHUB_BIN_ENV,
+    GITHUB_REMOTE_ENV,
+    GITHUB_SSH_COMMAND_ENV,
+    GITHUB_SSH_COMMAND_OVERRIDES_ENV,
     PULL_REQUESTS_ALLOWED_REPOS_ENV,
     PULL_REQUESTS_ENABLED_ENV,
     PULL_REQUESTS_MERGE_ENABLED_ENV,
@@ -42,6 +45,33 @@ from .pull_requests import (
 MCP_DAEMON_FILE = "mcp-daemon.json"
 MCP_DAEMON_LOG = "mcp-daemon.log"
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+TOKEN_ENV = "AGENT_PBX_TOKEN"
+MANAGED_CHILD_ENV_VARS = {
+    TOKEN_ENV,
+    WORKERBEE_BIN_ENV,
+    WORKERBEE_TIMEOUT_ENV,
+    WORKERBEE_CACHE_ENV,
+    PULL_REQUESTS_ENABLED_ENV,
+    PULL_REQUESTS_MERGE_ENABLED_ENV,
+    ISSUES_ENABLED_ENV,
+    ISSUES_CLOSE_ENABLED_ENV,
+    GITHUB_BIN_ENV,
+    PULL_REQUESTS_TIMEOUT_ENV,
+    PULL_REQUESTS_ALLOWED_REPOS_ENV,
+    GITHUB_REMOTE_ENV,
+    GITHUB_SSH_COMMAND_ENV,
+    GITHUB_SSH_COMMAND_OVERRIDES_ENV,
+    JOPLIN_API_URL_ENV,
+    JOPLIN_TOKEN_ENV,
+    JOPLIN_NOTEBOOK_ENV,
+    JOPLIN_BIN_ENV,
+    JOPLIN_PROFILE_ENV,
+    JOPLIN_TIMEOUT_ENV,
+    JOPLIN_SYNC_ON_WRITE_ENV,
+    JOPLIN_WEBDAV_URL_ENV,
+    JOPLIN_WEBDAV_USERNAME_ENV,
+    JOPLIN_WEBDAV_PASSWORD_ENV,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +95,9 @@ class MCPDaemonConfig:
     github_bin: str = "gh"
     pull_request_timeout_seconds: float = 20.0
     pull_request_allowed_repos: tuple[str, ...] = ()
+    github_remote: str | None = None
+    github_ssh_command: str | None = None
+    github_ssh_command_overrides: dict[str, str] | None = None
     joplin_api_url: str | None = None
     joplin_token: str | None = None
     joplin_notebook: str = "Agent PBX"
@@ -136,6 +169,9 @@ def config_from_args(
     github_bin: str = "gh",
     pull_request_timeout_seconds: float = 20.0,
     pull_request_allowed_repos: tuple[str, ...] = (),
+    github_remote: str | None = None,
+    github_ssh_command: str | None = None,
+    github_ssh_command_overrides: dict[str, str] | None = None,
     joplin_api_url: str | None = None,
     joplin_token: str | None = None,
     joplin_notebook: str = "Agent PBX",
@@ -167,6 +203,9 @@ def config_from_args(
         github_bin=github_bin,
         pull_request_timeout_seconds=pull_request_timeout_seconds,
         pull_request_allowed_repos=pull_request_allowed_repos,
+        github_remote=github_remote,
+        github_ssh_command=github_ssh_command,
+        github_ssh_command_overrides=github_ssh_command_overrides or {},
         joplin_api_url=joplin_api_url,
         joplin_token=joplin_token,
         joplin_notebook=joplin_notebook,
@@ -203,48 +242,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
 
     config.global_dir.mkdir(parents=True, exist_ok=True)
     config.resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
-    child_env = os.environ.copy()
-    if config.token:
-        child_env["AGENT_PBX_TOKEN"] = config.token
-    if config.workerbee_bin:
-        child_env[WORKERBEE_BIN_ENV] = str(config.workerbee_bin.expanduser())
-    child_env[WORKERBEE_TIMEOUT_ENV] = str(config.workerbee_timeout_seconds)
-    child_env[WORKERBEE_CACHE_ENV] = str(config.workerbee_cache_seconds)
-    child_env[PULL_REQUESTS_ENABLED_ENV] = (
-        "1" if config.pull_requests_enabled else "0"
-    )
-    child_env[PULL_REQUESTS_MERGE_ENABLED_ENV] = (
-        "1" if config.pull_request_merge_enabled else "0"
-    )
-    child_env[ISSUES_ENABLED_ENV] = "1" if config.issues_enabled else "0"
-    child_env[ISSUES_CLOSE_ENABLED_ENV] = (
-        "1" if config.issue_close_enabled else "0"
-    )
-    child_env[GITHUB_BIN_ENV] = config.github_bin
-    child_env[PULL_REQUESTS_TIMEOUT_ENV] = str(
-        config.pull_request_timeout_seconds
-    )
-    child_env[PULL_REQUESTS_ALLOWED_REPOS_ENV] = ",".join(
-        config.pull_request_allowed_repos
-    )
-    if config.joplin_api_url:
-        child_env[JOPLIN_API_URL_ENV] = config.joplin_api_url
-    if config.joplin_token:
-        child_env[JOPLIN_TOKEN_ENV] = config.joplin_token
-    if config.joplin_notebook:
-        child_env[JOPLIN_NOTEBOOK_ENV] = config.joplin_notebook
-    if config.joplin_bin:
-        child_env[JOPLIN_BIN_ENV] = str(config.joplin_bin.expanduser())
-    if config.joplin_profile:
-        child_env[JOPLIN_PROFILE_ENV] = str(config.joplin_profile.expanduser())
-    child_env[JOPLIN_TIMEOUT_ENV] = str(config.joplin_timeout_seconds)
-    child_env[JOPLIN_SYNC_ON_WRITE_ENV] = "1" if config.joplin_sync_on_write else "0"
-    if config.joplin_webdav_url:
-        child_env[JOPLIN_WEBDAV_URL_ENV] = config.joplin_webdav_url
-    if config.joplin_webdav_username:
-        child_env[JOPLIN_WEBDAV_USERNAME_ENV] = config.joplin_webdav_username
-    if config.joplin_webdav_password:
-        child_env[JOPLIN_WEBDAV_PASSWORD_ENV] = config.joplin_webdav_password
+    child_env = _child_env(config)
 
     argv = _serve_argv(config)
     log = open(config.log_file, "ab")  # noqa: SIM115 - passed to detached child
@@ -284,6 +282,11 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "github_bin": config.github_bin,
         "pull_request_timeout_seconds": config.pull_request_timeout_seconds,
         "pull_request_allowed_repos": list(config.pull_request_allowed_repos),
+        "github_remote": config.github_remote,
+        "github_ssh_command_configured": bool(config.github_ssh_command),
+        "github_ssh_command_override_count": len(
+            config.github_ssh_command_overrides or {}
+        ),
         "joplin_api_url": config.joplin_api_url,
         "joplin_notebook": config.joplin_notebook,
         "joplin_configured": bool(config.joplin_api_url and config.joplin_token),
@@ -310,6 +313,64 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
     metadata.update(ready)
     _write_metadata(config.metadata_file, metadata)
     return {**mcp_daemon_status(config), "ok": True, "started": True}
+
+
+def _child_env(config: MCPDaemonConfig) -> dict[str, str]:
+    child_env = os.environ.copy()
+    for name in MANAGED_CHILD_ENV_VARS:
+        child_env.pop(name, None)
+
+    if config.token:
+        child_env[TOKEN_ENV] = config.token
+    if config.workerbee_bin:
+        child_env[WORKERBEE_BIN_ENV] = str(config.workerbee_bin.expanduser())
+    child_env[WORKERBEE_TIMEOUT_ENV] = str(config.workerbee_timeout_seconds)
+    child_env[WORKERBEE_CACHE_ENV] = str(config.workerbee_cache_seconds)
+    child_env[PULL_REQUESTS_ENABLED_ENV] = (
+        "1" if config.pull_requests_enabled else "0"
+    )
+    child_env[PULL_REQUESTS_MERGE_ENABLED_ENV] = (
+        "1" if config.pull_request_merge_enabled else "0"
+    )
+    child_env[ISSUES_ENABLED_ENV] = "1" if config.issues_enabled else "0"
+    child_env[ISSUES_CLOSE_ENABLED_ENV] = (
+        "1" if config.issue_close_enabled else "0"
+    )
+    child_env[GITHUB_BIN_ENV] = config.github_bin
+    child_env[PULL_REQUESTS_TIMEOUT_ENV] = str(
+        config.pull_request_timeout_seconds
+    )
+    child_env[PULL_REQUESTS_ALLOWED_REPOS_ENV] = ",".join(
+        config.pull_request_allowed_repos
+    )
+    if config.github_remote:
+        child_env[GITHUB_REMOTE_ENV] = config.github_remote
+    if config.github_ssh_command:
+        child_env[GITHUB_SSH_COMMAND_ENV] = config.github_ssh_command
+    if config.github_ssh_command_overrides:
+        child_env[GITHUB_SSH_COMMAND_OVERRIDES_ENV] = json.dumps(
+            config.github_ssh_command_overrides,
+            sort_keys=True,
+        )
+    if config.joplin_api_url:
+        child_env[JOPLIN_API_URL_ENV] = config.joplin_api_url
+    if config.joplin_token:
+        child_env[JOPLIN_TOKEN_ENV] = config.joplin_token
+    if config.joplin_notebook:
+        child_env[JOPLIN_NOTEBOOK_ENV] = config.joplin_notebook
+    if config.joplin_bin:
+        child_env[JOPLIN_BIN_ENV] = str(config.joplin_bin.expanduser())
+    if config.joplin_profile:
+        child_env[JOPLIN_PROFILE_ENV] = str(config.joplin_profile.expanduser())
+    child_env[JOPLIN_TIMEOUT_ENV] = str(config.joplin_timeout_seconds)
+    child_env[JOPLIN_SYNC_ON_WRITE_ENV] = "1" if config.joplin_sync_on_write else "0"
+    if config.joplin_webdav_url:
+        child_env[JOPLIN_WEBDAV_URL_ENV] = config.joplin_webdav_url
+    if config.joplin_webdav_username:
+        child_env[JOPLIN_WEBDAV_USERNAME_ENV] = config.joplin_webdav_username
+    if config.joplin_webdav_password:
+        child_env[JOPLIN_WEBDAV_PASSWORD_ENV] = config.joplin_webdav_password
+    return child_env
 
 
 def stop_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 10.0) -> dict[str, Any]:
@@ -405,6 +466,11 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "github_bin": config.github_bin,
         "pull_request_timeout_seconds": config.pull_request_timeout_seconds,
         "pull_request_allowed_repos": list(config.pull_request_allowed_repos),
+        "github_remote": config.github_remote,
+        "github_ssh_command_configured": bool(config.github_ssh_command),
+        "github_ssh_command_override_count": len(
+            config.github_ssh_command_overrides or {}
+        ),
         "joplin_api_url": config.joplin_api_url,
         "joplin_notebook": config.joplin_notebook,
         "joplin_configured": bool(config.joplin_api_url and config.joplin_token),

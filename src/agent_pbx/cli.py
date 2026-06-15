@@ -385,6 +385,11 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         github_bin=pull_request_config.gh_bin,
         pull_request_timeout_seconds=pull_request_config.timeout_seconds,
         pull_request_allowed_repos=pull_request_config.allowed_repos,
+        github_remote=pull_request_config.github_remote,
+        github_ssh_command=pull_request_config.github_ssh_command,
+        github_ssh_command_overrides=(
+            pull_request_config.github_ssh_command_overrides or {}
+        ),
         joplin_api_url=joplin_config.api_url,
         joplin_token=joplin_config.token,
         joplin_notebook=joplin_config.notebook,

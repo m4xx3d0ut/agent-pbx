@@ -128,6 +128,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             gh_bin=resolved_config.github_bin,
             timeout_seconds=resolved_config.pull_request_timeout_seconds,
             allowed_repos=resolved_config.pull_request_allowed_repos,
+            github_remote=resolved_config.github_remote,
+            github_ssh_command=resolved_config.github_ssh_command,
+            github_ssh_command_overrides=(
+                resolved_config.github_ssh_command_overrides or {}
+            ),
         )
     )
     issues = IssueService(
@@ -137,6 +142,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             gh_bin=resolved_config.github_bin,
             timeout_seconds=resolved_config.pull_request_timeout_seconds,
             allowed_repos=resolved_config.pull_request_allowed_repos,
+            github_remote=resolved_config.github_remote,
+            github_ssh_command=resolved_config.github_ssh_command,
+            github_ssh_command_overrides=(
+                resolved_config.github_ssh_command_overrides or {}
+            ),
         )
     )
     mcp_asgi_app, mcp_server = create_mcp_asgi_app(

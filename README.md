@@ -114,7 +114,7 @@ Both `local.env` paths are intentionally private because they may contain local
 tokens, Joplin credentials, and absolute executable paths. Common values include
 `AGENT_PBX_HOST`, `AGENT_PBX_PORT`, `AGENT_PBX_TOKEN`,
 `AGENT_PBX_SERVER_URL`, `AGENT_PBX_DEBUG`, `AGENT_PBX_WORKERBEE_BIN`, and the
-optional Pull Request, Issues, and Joplin settings.
+optional Pull Request, Issues, GitHub remote/SSH, and Joplin settings.
 
 For the common local workflow:
 
@@ -316,6 +316,10 @@ Agent PBX API results.
 export AGENT_PBX_PR_ENABLED=1
 export AGENT_PBX_GH_BIN=gh
 export AGENT_PBX_PR_ALLOWED_REPOS=m4xx3d0ut/agent-pbx,m4xx3d0ut/content-tools-studio
+# Optional, only when gh cannot infer the intended GitHub repository.
+export AGENT_PBX_GITHUB_REMOTE=upstream
+# Optional, only when GitHub access needs a specific SSH identity.
+export AGENT_PBX_GITHUB_SSH_COMMAND="ssh -i $HOME/.ssh/github-key -o IdentitiesOnly=yes -o IdentityAgent=none"
 agent-pbx mcp restart --token dev-token
 agent-pbx tui --token dev-token
 ```
@@ -337,12 +341,24 @@ If the PR tab reports that a repository is not allowed, add that `owner/repo`
 value to the list or leave the variable empty to allow any repo visible to
 `gh` on the MCP host.
 
+By default, Agent PBX lets `gh` infer the GitHub repository from the selected
+agent's working directory. If a project has multiple remotes and `gh` would pick
+the wrong one, set `AGENT_PBX_GITHUB_REMOTE` to the remote name that points at
+GitHub. Agent PBX then resolves `owner/repo` from that remote and passes
+`--repo owner/repo` to `gh`. If GitHub SSH needs a specific key, set
+`AGENT_PBX_GITHUB_SSH_COMMAND`; for repository-specific keys, set
+`AGENT_PBX_GITHUB_SSH_COMMAND_OVERRIDES_JSON='{"owner/repo":"ssh ..."}'`.
+Per-repo overrides take precedence over the global SSH command. The daemon
+status reports whether an SSH command is configured, but does not expose the
+command string.
+
 ## GitHub Issues
 
 Set `AGENT_PBX_ISSUES_ENABLED=1` before starting the daemon to enable the
 `Issues` tab for selected agents whose `metadata.cwd` is inside an allowed
 GitHub repository. Issues reuse `AGENT_PBX_GH_BIN`,
-`AGENT_PBX_PR_TIMEOUT_SECONDS`, and `AGENT_PBX_PR_ALLOWED_REPOS`.
+`AGENT_PBX_PR_TIMEOUT_SECONDS`, `AGENT_PBX_PR_ALLOWED_REPOS`, and the GitHub
+remote/SSH settings from the PR integration.
 
 The `Issues` tab lists open issues and shows issue body, labels, assignees,
 milestone, URL, and recent comments. `Mitigate` asks the selected agent to

@@ -14,6 +14,7 @@ from agent_pbx.mcp_tools import build_mcp_server
 from agent_pbx.pull_requests import (
     PullRequestConfig,
     PullRequestService,
+    parse_github_remote_url,
 )
 from agent_pbx.store import Store
 
@@ -62,6 +63,7 @@ def fake_runner(
     argv: list[str],
     cwd: Path,
     timeout: float,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if argv[1:4] == ["repo", "view", "--json"]:
         payload: Any = {
@@ -117,6 +119,76 @@ def test_pull_request_service_lists_prs(tmp_path: Path) -> None:
     assert result["repo"] == "owner/repo"
     assert result["pull_requests"][0]["number"] == 7
     assert result["pull_requests"][0]["checks"]["success"] == 1
+
+
+def test_parse_github_remote_url_variants() -> None:
+    assert (
+        parse_github_remote_url("git@github.com:owner/repo.git")
+        == "owner/repo"
+    )
+    assert (
+        parse_github_remote_url("https://github.com/owner/repo.git")
+        == "owner/repo"
+    )
+    assert (
+        parse_github_remote_url("ssh://git@github.com/owner/repo.git")
+        == "owner/repo"
+    )
+    assert parse_github_remote_url("ssh://git@gitea.local/owner/repo.git") is None
+
+
+def test_pull_request_service_prefers_github_remote_and_ssh_override(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "ssh://git@gitea.local/owner/repo.git"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "github", "git@github.com:owner/repo.git"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    gh = make_executable(tmp_path / "gh")
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def runner(
+        argv: list[str],
+        cwd: Path,
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, env))
+        if argv[1:3] == ["pr", "list"]:
+            return subprocess.CompletedProcess(argv, 0, "[]", "")
+        return subprocess.CompletedProcess(argv, 1, "", "unexpected command")
+
+    service = PullRequestService(
+        PullRequestConfig(
+            enabled=True,
+            gh_bin=str(gh),
+            allowed_repos=("owner/repo",),
+            github_remote="github",
+            github_ssh_command="ssh -i ~/.ssh/global",
+            github_ssh_command_overrides={"owner/repo": "ssh -i ~/.ssh/repo"},
+        ),
+        runner=runner,
+    )
+
+    result = service.list_for_agent(
+        {"agent_id": "agent-1", "project": "repo", "metadata": {"cwd": str(repo)}}
+    )
+
+    assert result["available"] is True
+    assert result["repo"] == "owner/repo"
+    assert calls[0][0][1:5] == ["pr", "list", "--repo", "owner/repo"]
+    assert calls[0][1] == {"GIT_SSH_COMMAND": "ssh -i ~/.ssh/repo"}
 
 
 def test_pull_request_api_queues_review_request(tmp_path: Path) -> None:

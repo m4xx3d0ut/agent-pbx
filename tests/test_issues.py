@@ -10,7 +10,7 @@ import pytest
 
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
-from agent_pbx.issues import IssueConfig, IssueService
+from agent_pbx.issues import IssueConfig, IssueService, env_issue_config
 from agent_pbx.mcp_tools import build_mcp_server
 from agent_pbx.store import Store
 
@@ -63,6 +63,7 @@ def fake_runner(
     argv: list[str],
     cwd: Path,
     timeout: float,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if argv[1:4] == ["repo", "view", "--json"]:
         payload: Any = {
@@ -126,6 +127,78 @@ def test_issue_service_lists_issues(tmp_path: Path) -> None:
     assert result["issues"][0]["number"] == 9
     assert result["issues"][0]["labels"] == ["bug"]
     assert result["issues"][0]["assignees"] == ["dev"]
+
+
+def test_issue_service_uses_github_remote_and_global_ssh_command(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "ssh://git@gitea.local/owner/repo.git"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "github", "https://github.com/owner/repo.git"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    gh = make_executable(tmp_path / "gh")
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def runner(
+        argv: list[str],
+        cwd: Path,
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, env))
+        if argv[1:3] == ["issue", "list"]:
+            return subprocess.CompletedProcess(argv, 0, "[]", "")
+        return subprocess.CompletedProcess(argv, 1, "", "unexpected command")
+
+    service = IssueService(
+        IssueConfig(
+            enabled=True,
+            gh_bin=str(gh),
+            allowed_repos=("owner/repo",),
+            github_remote="github",
+            github_ssh_command="ssh -i ~/.ssh/global",
+        ),
+        runner=runner,
+    )
+
+    result = service.list_for_agent(
+        {"agent_id": "agent-1", "project": "repo", "metadata": {"cwd": str(repo)}}
+    )
+
+    assert result["available"] is True
+    assert result["repo"] == "owner/repo"
+    assert calls[0][0][1:5] == ["issue", "list", "--repo", "owner/repo"]
+    assert calls[0][1] == {"GIT_SSH_COMMAND": "ssh -i ~/.ssh/global"}
+
+
+def test_issue_env_config_reads_github_ssh_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_ISSUES_ENABLED", "1")
+    monkeypatch.setenv("AGENT_PBX_GITHUB_REMOTE", "public")
+    monkeypatch.setenv("AGENT_PBX_GITHUB_SSH_COMMAND", "ssh -i ~/.ssh/global")
+    monkeypatch.setenv(
+        "AGENT_PBX_GITHUB_SSH_COMMAND_OVERRIDES_JSON",
+        '{"owner/repo":"ssh -i ~/.ssh/repo"}',
+    )
+
+    config = env_issue_config()
+
+    assert config.enabled is True
+    assert config.github_remote == "public"
+    assert config.github_ssh_command == "ssh -i ~/.ssh/global"
+    assert config.github_ssh_command_overrides == {
+        "owner/repo": "ssh -i ~/.ssh/repo"
+    }
 
 
 def test_issue_api_queues_mitigation_request(tmp_path: Path) -> None:
