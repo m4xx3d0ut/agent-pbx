@@ -5,6 +5,22 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+AgentType = Literal["caller", "operator"]
+CampaignDelivery = Literal["auto", "queue", "tmux"]
+CampaignStatus = Literal["running", "complete", "completed", "blocked", "failed", "canceled"]
+AssignmentState = Literal[
+    "pending",
+    "sent",
+    "waiting",
+    "needs_followup",
+    "complete",
+    "completed",
+    "blocked",
+    "failed",
+    "canceled",
+]
+
+
 CommandType = Literal[
     "request_detail",
     "send_input",
@@ -20,12 +36,18 @@ class AgentRegisterRequest(BaseModel):
     agent_id: str = Field(min_length=1, max_length=120)
     project: str = Field(min_length=1, max_length=240)
     name: str | None = Field(default=None, max_length=120)
+    agent_type: AgentType = "caller"
     metadata: dict[str, Any] = Field(default_factory=dict)
     pbx_active: bool = True
 
 
+class AgentActiveRequest(BaseModel):
+    active: bool
+
+
 class AgentResponse(BaseModel):
     agent_id: str
+    agent_type: AgentType = "caller"
     project: str
     name: str | None
     status: str
@@ -39,6 +61,7 @@ class AgentResponse(BaseModel):
     last_poll_at: float | None = None
     starred: bool = False
     starred_at: float | None = None
+    dismissed_at: float | None = None
     queued_command_count: int = 0
     oldest_queued_command_age_seconds: float | None = None
     polls_per_hour: int = 0
@@ -54,6 +77,7 @@ class AgentResponse(BaseModel):
     latest_report_needs_input: bool = False
     latest_report_plan_option_count: int = 0
     latest_report_action_required: bool = False
+    active_campaign_count: int = 0
 
 
 class StructuredPlanOption(BaseModel):
@@ -82,6 +106,7 @@ class ReportCreateRequest(BaseModel):
     detail: str = Field(min_length=1)
     needs_input: bool = False
     plan_options: list[PlanOption] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReportResponse(BaseModel):
@@ -93,7 +118,151 @@ class ReportResponse(BaseModel):
     detail: str
     needs_input: bool
     plan_options: list[PlanOption]
+    metadata: dict[str, Any]
     created_at: float
+
+
+class OperatorAssignmentCreate(BaseModel):
+    target_agent_id: str = Field(min_length=1, max_length=120)
+    title: str | None = Field(default=None, max_length=400)
+    prompt: str = Field(min_length=1)
+    criteria: list[str] = Field(default_factory=list)
+
+
+class OperatorCampaignStartRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=400)
+    objective: str = Field(min_length=1)
+    criteria: list[str] = Field(default_factory=list)
+    assignments: list[OperatorAssignmentCreate] = Field(default_factory=list)
+    delivery: CampaignDelivery = "auto"
+
+
+class OperatorFollowupRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    target_agent_id: str = Field(min_length=1, max_length=120)
+    message: str = Field(min_length=1)
+    assignment_id: str | None = Field(default=None, max_length=120)
+    delivery: CampaignDelivery = "auto"
+
+
+class OperatorAssignmentReportRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    state: AssignmentState
+    summary: str = Field(min_length=1, max_length=4000)
+    detail: str = Field(min_length=1)
+
+
+class OperatorCampaignFinishRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    status: CampaignStatus
+    summary: str = Field(min_length=1, max_length=4000)
+    detail: str = Field(min_length=1)
+
+
+class OperatorForkEnsureRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    source_caller_agent_id: str = Field(min_length=1, max_length=120)
+    fork_agent_id: str | None = Field(default=None, max_length=120)
+    campaign_id: str | None = Field(default=None, max_length=120)
+    tmux_pane_id: str | None = Field(default=None, max_length=120)
+    fork_codex_session_id: str | None = Field(default=None, max_length=120)
+    status: str | None = Field(default=None, max_length=40)
+    summary: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorForkEdgeCreateRequest(BaseModel):
+    from_fork_id: str = Field(min_length=1, max_length=120)
+    to_fork_id: str = Field(min_length=1, max_length=120)
+    edge_type: str = Field(min_length=1, max_length=40)
+    summary: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorForkEdgeResponse(BaseModel):
+    edge_id: str
+    from_fork_id: str
+    to_fork_id: str
+    edge_type: str
+    summary: str | None = None
+    metadata: dict[str, Any]
+    created_at: float
+
+
+class OperatorForkResponse(BaseModel):
+    operator_fork_id: str
+    logical_operator_agent_id: str
+    fork_agent_id: str
+    source_caller_agent_id: str
+    source_codex_session_id: str
+    fork_codex_session_id: str | None = None
+    campaign_id: str | None = None
+    cwd: str
+    codex_home: str | None = None
+    codex_host_id: str | None = None
+    tmux_pane_id: str | None = None
+    status: str
+    summary: str | None = None
+    metadata: dict[str, Any]
+    created_at: float
+    updated_at: float
+    last_used_at: float
+    completed_at: float | None = None
+    edges: list[OperatorForkEdgeResponse] = Field(default_factory=list)
+
+
+class OperatorForkListResponse(BaseModel):
+    forks: list[OperatorForkResponse] = Field(default_factory=list)
+
+
+class OperatorCampaignEventResponse(BaseModel):
+    event_id: int
+    campaign_id: str
+    assignment_id: str | None = None
+    operator_agent_id: str
+    target_agent_id: str | None = None
+    event_type: str
+    summary: str
+    detail: dict[str, Any]
+    report_id: str | None = None
+    command_id: str | None = None
+    created_at: float
+
+
+class OperatorCampaignAssignmentResponse(BaseModel):
+    assignment_id: str
+    campaign_id: str
+    target_agent_id: str
+    operator_fork_id: str | None = None
+    title: str
+    prompt: str
+    criteria: list[str]
+    state: str
+    last_report_id: str | None = None
+    last_command_id: str | None = None
+    created_at: float
+    updated_at: float
+    completed_at: float | None = None
+
+
+class OperatorCampaignResponse(BaseModel):
+    campaign_id: str
+    operator_agent_id: str
+    title: str
+    objective: str
+    criteria: list[str]
+    status: str
+    summary: str | None = None
+    created_at: float
+    updated_at: float
+    completed_at: float | None = None
+    assignments: list[OperatorCampaignAssignmentResponse] = Field(default_factory=list)
+    events: list[OperatorCampaignEventResponse] = Field(default_factory=list)
+
+
+class OperatorCampaignListResponse(BaseModel):
+    campaigns: list[OperatorCampaignResponse] = Field(default_factory=list)
 
 
 class CommandCreateRequest(BaseModel):

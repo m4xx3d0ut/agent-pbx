@@ -16,12 +16,13 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
 ]
 dependencies = [
-    "fastapi>=0.110,<1",
+    "fastapi>=0.110,<0.137",
     "httpx>=0.27,<1",
     "mcp[cli]>=1.8,<2",
     "pydantic>=2.7,<3",
+    "starlette>=0.46,<1.1",
     "textual>=0.58,<1",
-    "uvicorn[standard]>=0.29,<1",
+    "uvicorn[standard]>=0.29,<0.48",
 ]
 
 [project.optional-dependencies]

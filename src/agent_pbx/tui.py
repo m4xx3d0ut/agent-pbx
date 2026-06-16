@@ -77,6 +77,21 @@ MAX_SPLIT_PERCENT = 75
 SPLIT_PERCENT_STEP = 5
 PBX_REPORT_MODE = "report"
 PBX_NOHUP_MODE = "nohup"
+CALLER_AGENT_TYPE = "caller"
+OPERATOR_AGENT_TYPE = "operator"
+OPERATOR_ROLE_ROOT = "root"
+OPERATOR_ROLE_FORK = "fork"
+DEFAULT_OPERATOR_TMUX_SESSION = "agent-pbx-operators"
+AGENT_PBX_TOKEN_ENV = "AGENT_PBX_TOKEN"
+AGENT_PBX_SERVER_URL_ENV = "AGENT_PBX_SERVER_URL"
+AGENT_PBX_MCP_URL_ENV = "AGENT_PBX_MCP_URL"
+TINY_HOME_AGENTS = "agents"
+TINY_HOME_OPERATORS = "operators"
+TINY_HOME_EVENTS = "events"
+OPERATOR_PANEL_MIN_RATIO = 0.10
+OPERATOR_PANEL_DEFAULT_RATIO = 0.15
+OPERATOR_PANEL_MAX_RATIO = 0.20
+OPERATOR_PANEL_MIN_HEIGHT = 5
 DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
 DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
 DEFAULT_SLASH_COMMANDS_FILE = Path("agent-pbx/slash-commands.json")
@@ -158,6 +173,7 @@ AGENT_JUMP_KEYS = {
 }
 MOUSE_FOCUS_TARGET_IDS = {
     "agents",
+    "operators",
     "events",
     "detail",
     "tmux-stream",
@@ -173,6 +189,8 @@ MOUSE_FOCUS_TARGET_IDS = {
     "issue-detail",
     "joplin-notes",
     "joplin-body",
+    "campaigns",
+    "campaign-detail",
     "message",
     "agent-id",
     "plan-options",
@@ -181,6 +199,7 @@ MOUSE_FOCUS_TARGET_IDS = {
 MOUSE_FOCUS_CONTAINER_TARGETS = {
     "left": "#agents",
     "agent-actions": "#agents",
+    "operator-actions": "#operators",
     "latest-tab": "#detail",
     "latest-plan-choice-panel": "#latest-plan-options",
     "tmux-panel": "#tmux-stream",
@@ -229,6 +248,11 @@ JOPLIN_NOTE_REF_PREFIX = "@joplin:"
 JOPLIN_NOTE_REF_PATTERN = re.compile(
     r"(?:^|(?<=[\s(\[{'\"`]))(@joplin:[A-Za-z0-9_.~-]+)"
 )
+CALLER_AGENT_REF_PREFIX = "@caller:"
+CALLER_AGENT_REF_PATTERN = re.compile(
+    r"(?:^|(?<=[\s(\[{'\"`]))(@caller:[A-Za-z0-9_.~-]+)"
+)
+CALLER_AGENT_REF_SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.-]+$")
 BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/refresh",
     "/detail",
@@ -275,6 +299,8 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/gitstageandcommit",
     "/commands reload",
     "/hide agent",
+    "/show hidden agents",
+    "/unhide agent",
     "/purge agent",
     "/theme cyberpunk",
     "/theme minimal",
@@ -422,6 +448,19 @@ class JoplinNoteReference:
     title: str
     body: str
     updated_time: int | float | None = None
+
+
+@dataclass(frozen=True)
+class CallerAgentReference:
+    token: str
+    agent_id: str
+    name: str | None
+    project: str
+    status: str
+    pbx_mode: str
+    pbx_active: bool
+    active_campaign_count: int
+    tmux_pane: str | None = None
 
 
 @dataclass(frozen=True)
@@ -630,6 +669,89 @@ def env_layout_value() -> str | None:
 
 def clamp_split_percent(value: int) -> int:
     return max(MIN_SPLIT_PERCENT, min(MAX_SPLIT_PERCENT, value))
+
+
+def operator_panel_height(left_height: int) -> int:
+    if left_height <= 0:
+        return OPERATOR_PANEL_MIN_HEIGHT
+    minimum = max(OPERATOR_PANEL_MIN_HEIGHT, round(left_height * OPERATOR_PANEL_MIN_RATIO))
+    maximum = max(minimum, round(left_height * OPERATOR_PANEL_MAX_RATIO))
+    desired = round(left_height * OPERATOR_PANEL_DEFAULT_RATIO)
+    return max(minimum, min(maximum, desired))
+
+
+def agent_pbx_mcp_url(server: str) -> str:
+    return f"{server.rstrip('/')}/mcp"
+
+
+def codex_command_argv(codex_command: str) -> list[str]:
+    argv = shlex.split(codex_command.strip())
+    return argv or ["codex"]
+
+
+def codex_mcp_add_command(codex_command: str, mcp_url: str) -> list[str]:
+    return [
+        *codex_command_argv(codex_command),
+        "mcp",
+        "add",
+        "agent-pbx",
+        "--url",
+        mcp_url,
+        "--bearer-token-env-var",
+        AGENT_PBX_TOKEN_ENV,
+    ]
+
+
+def codex_mcp_remove_command(codex_command: str) -> list[str]:
+    return [*codex_command_argv(codex_command), "mcp", "remove", "agent-pbx"]
+
+
+def process_error_summary(result: subprocess.CompletedProcess[str]) -> str:
+    detail = (result.stderr or result.stdout or "").strip()
+    if detail:
+        return detail
+    return f"exit code {result.returncode}"
+
+
+def configure_codex_mcp(
+    codex_command: str,
+    mcp_url: str,
+    *,
+    timeout: float = 15.0,
+) -> None:
+    add_command = codex_mcp_add_command(codex_command, mcp_url)
+    add = subprocess.run(
+        add_command,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if add.returncode == 0:
+        return
+    add_failure = process_error_summary(add).lower()
+    if "exist" not in add_failure and "already" not in add_failure:
+        raise RuntimeError(f"add failed: {process_error_summary(add)}")
+
+    remove = subprocess.run(
+        codex_mcp_remove_command(codex_command),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    retry = subprocess.run(
+        add_command,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if retry.returncode == 0:
+        return
+
+    details = [f"add failed: {process_error_summary(add)}"]
+    if remove.returncode != 0:
+        details.append(f"remove failed: {process_error_summary(remove)}")
+    details.append(f"retry failed: {process_error_summary(retry)}")
+    raise RuntimeError("; ".join(details))
 
 
 def env_split_percent_value() -> int | None:
@@ -983,6 +1105,10 @@ def slugify(value: str) -> str:
     return slug or "agent"
 
 
+def short_stable_hash(value: str, length: int = 8) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
+
+
 def normalize_project_path(path: str) -> str | None:
     clean = path.strip()
     if clean.startswith("/"):
@@ -1077,6 +1203,81 @@ def joplin_note_ref_tokens_in_message(message: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
+def caller_agent_ref_slug(agent: dict[str, Any]) -> str:
+    name = str(agent.get("name") or "").strip()
+    agent_id = str(agent.get("agent_id") or "").strip()
+    return slugify(name or agent_id)
+
+
+def caller_agent_ref_token_entries(
+    agents: Iterable[dict[str, Any]],
+    *,
+    primary_only: bool = False,
+) -> list[tuple[str, str]]:
+    agent_list = [agent for agent in agents if agent.get("agent_id")]
+    slug_counts: dict[str, int] = {}
+    for agent in agent_list:
+        slug = caller_agent_ref_slug(agent).lower()
+        slug_counts[slug] = slug_counts.get(slug, 0) + 1
+
+    entries: list[tuple[str, str]] = []
+    for agent in agent_list:
+        agent_id = str(agent.get("agent_id") or "")
+        slug = caller_agent_ref_slug(agent)
+        slug_key = slug.lower()
+        suffix = (
+            ""
+            if slug_counts.get(slug_key, 0) == 1
+            else f"~{short_stable_hash(agent_id)}"
+        )
+        entries.append((f"{CALLER_AGENT_REF_PREFIX}{slug}{suffix}", agent_id))
+        if primary_only or not CALLER_AGENT_REF_SAFE_VALUE.match(agent_id):
+            continue
+        entries.append((f"{CALLER_AGENT_REF_PREFIX}{agent_id}", agent_id))
+    return entries
+
+
+def unique_reference_token_map(entries: Iterable[tuple[str, str]]) -> dict[str, str]:
+    by_lower: dict[str, set[str]] = {}
+    original_token: dict[str, str] = {}
+    for token, value in entries:
+        lower = token.lower()
+        by_lower.setdefault(lower, set()).add(value)
+        original_token.setdefault(lower, token)
+    return {
+        original_token[lower]: next(iter(values))
+        for lower, values in by_lower.items()
+        if len(values) == 1
+    }
+
+
+def caller_agent_ref_tokens(
+    agents: Iterable[dict[str, Any]],
+) -> dict[str, str]:
+    return unique_reference_token_map(caller_agent_ref_token_entries(agents))
+
+
+def caller_agent_ref_completion_tokens(
+    agents: Iterable[dict[str, Any]],
+) -> tuple[str, ...]:
+    token_map = unique_reference_token_map(
+        caller_agent_ref_token_entries(agents, primary_only=True)
+    )
+    return tuple(sorted(token_map, key=str.lower))
+
+
+def caller_agent_ref_tokens_in_message(message: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for match in CALLER_AGENT_REF_PATTERN.finditer(message):
+        token = match.group(1)
+        key = token.lower()
+        if key not in seen:
+            seen.add(key)
+            tokens.append(token)
+    return tuple(tokens)
+
+
 def markdown_fence_for(body: str) -> str:
     fence = "```"
     while fence in body:
@@ -1112,6 +1313,41 @@ def format_joplin_note_references_for_prompt(
         if reference.updated_time is not None:
             lines.append(f"- Updated: `{reference.updated_time}`")
         lines.extend(["", f"{fence}markdown", body, fence, ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def format_caller_agent_references_for_prompt(
+    message: str,
+    references: list[CallerAgentReference],
+) -> str:
+    if not references:
+        return message
+    lines = [
+        message.rstrip(),
+        "",
+        "---",
+        "",
+        "## Caller Agent References",
+        "",
+    ]
+    for index, reference in enumerate(references, start=1):
+        title = reference.name or reference.agent_id
+        lines.extend(
+            [
+                f"### {index}. {title}",
+                "",
+                f"- Ref: `{reference.token}`",
+                f"- Agent ID: `{reference.agent_id}`",
+                f"- Project: `{reference.project}`",
+                f"- Status: `{reference.status}`",
+                f"- PBX Mode: `{reference.pbx_mode}`",
+                f"- PBX Active: `{str(reference.pbx_active).lower()}`",
+                f"- Active Campaigns: `{reference.active_campaign_count}`",
+            ]
+        )
+        if reference.tmux_pane:
+            lines.append(f"- Tmux Pane: `{reference.tmux_pane}`")
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1579,6 +1815,45 @@ class JoplinDeleteConfirmScreen(ModalScreen[None]):
             self.dismiss()
 
 
+class OperatorKillConfirmScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, *, agent_id: str, action: str, delete_thread: bool) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.action = action
+        self.delete_thread = delete_thread
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="operator-kill-panel"):
+            yield Static("Kill Operator Pane", id="operator-kill-title")
+            yield Static(
+                f"{self.action.title()} {self.agent_id} and kill its tmux pane?",
+                id="operator-kill-message",
+            )
+            with Horizontal(id="operator-kill-actions"):
+                yield Button(self.action.title(), id="operator-kill-confirm", variant="error")
+                yield Button("Cancel", id="operator-kill-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "operator-kill-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "operator-kill-confirm":
+            event.stop()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.dismiss_selected_agent(  # type: ignore[attr-defined]
+                    agent_id=self.agent_id,
+                    delete_thread=self.delete_thread,
+                    confirmed_operator_kill=True,
+                ),
+                name=f"operator-{self.action}-{slugify(self.agent_id)}",
+                exclusive=True,
+            )
+            self.dismiss()
+
+
 class PullRequestMergeConfirmScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Close")]
 
@@ -1932,12 +2207,29 @@ class AgentPBXTUI(App[None]):
 
     Screen.tiny-home #events-title,
     Screen.tiny-home #events,
+    Screen.tiny-home #operators-title,
+    Screen.tiny-home #operators,
+    Screen.tiny-home #operator-actions,
     Screen.tiny-home #agent-actions {
         display: none;
     }
 
+    Screen.tiny-home.tiny-operators #agents-title,
+    Screen.tiny-home.tiny-operators #agents,
+    Screen.tiny-home.tiny-operators #events-title,
+    Screen.tiny-home.tiny-operators #events {
+        display: none;
+    }
+
+    Screen.tiny-home.tiny-operators #operators-title,
+    Screen.tiny-home.tiny-operators #operators {
+        display: block;
+    }
+
     Screen.tiny-home.tiny-events #agents-title,
-    Screen.tiny-home.tiny-events #agents {
+    Screen.tiny-home.tiny-events #agents,
+    Screen.tiny-home.tiny-events #operators-title,
+    Screen.tiny-home.tiny-events #operators {
         display: none;
     }
 
@@ -2047,6 +2339,7 @@ class AgentPBXTUI(App[None]):
 
     JoplinNoteTitleScreen,
     JoplinDeleteConfirmScreen,
+    OperatorKillConfirmScreen,
     PullRequestMergeConfirmScreen,
     IssueClearConfirmScreen {
         align: center middle;
@@ -2054,6 +2347,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-panel,
     #joplin-delete-panel,
+    #operator-kill-panel,
     #pr-merge-panel,
     #issue-clear-panel {
         width: 64;
@@ -2066,6 +2360,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-modal-title,
     #joplin-delete-title,
+    #operator-kill-title,
     #pr-merge-title,
     #issue-clear-title {
         height: 1;
@@ -2076,6 +2371,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-input,
     #joplin-delete-note-title,
+    #operator-kill-message,
     #pr-merge-confirm,
     #issue-clear-confirm {
         height: 3;
@@ -2103,8 +2399,14 @@ class AgentPBXTUI(App[None]):
         content-align: center middle;
     }
 
+    #operator-kill-message {
+        color: $warning;
+        content-align: center middle;
+    }
+
     #joplin-title-actions,
     #joplin-delete-actions,
+    #operator-kill-actions,
     #pr-merge-actions,
     #issue-clear-actions {
         height: 3;
@@ -2113,6 +2415,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-actions Button,
     #joplin-delete-actions Button,
+    #operator-kill-actions Button,
     #pr-merge-actions Button,
     #issue-clear-actions Button {
         width: 1fr;
@@ -2200,11 +2503,20 @@ class AgentPBXTUI(App[None]):
         height: 1fr;
     }
 
+    #operators {
+        height: 1fr;
+    }
+
     #agent-actions {
         height: 3;
     }
 
-    #agent-actions Button {
+    #operator-actions {
+        height: 3;
+    }
+
+    #agent-actions Button,
+    #operator-actions Button {
         width: 1fr;
     }
 
@@ -2383,13 +2695,15 @@ class AgentPBXTUI(App[None]):
     }
 
     #pull-requests,
-    #issues {
+    #issues,
+    #campaigns {
         height: 8;
         min-height: 4;
     }
 
     #pull-request-detail,
-    #issue-detail {
+    #issue-detail,
+    #campaign-detail {
         height: 1fr;
         min-height: 12;
         border: tall $accent;
@@ -2401,12 +2715,14 @@ class AgentPBXTUI(App[None]):
     }
 
     #pull-request-actions,
-    #issue-actions {
+    #issue-actions,
+    #campaign-actions {
         height: 3;
     }
 
     #pull-request-actions Button,
-    #issue-actions Button {
+    #issue-actions Button,
+    #campaign-actions Button {
         width: 1fr;
         min-width: 1;
     }
@@ -2606,10 +2922,16 @@ class AgentPBXTUI(App[None]):
         Binding("f2", "focus_events", "Events", key_display="F2", priority=True),
         Binding("f3", "focus_right_pane", "View", key_display="F3", priority=True),
         Binding("f4", "focus_latest_input", "Input", key_display="F4", priority=True),
+        Binding("f5", "focus_operators", "Operators", key_display="F5", priority=True),
+        Binding("shift+o", "start_operator", "Start Operator", key_display="O"),
+        Binding("u", "restart_operator", "Restart Operator", priority=True),
+        Binding("x", "stop_operator", "Stop Operator", priority=True),
         ("ctrl+t", "toggle_tmux_direct", "Tmux"),
         Binding("f8", "toggle_tmux_direct", "Tmux", key_display="F8"),
         Binding("alt+t", "toggle_tmux_direct", "Tmux", key_display="Alt+T", show=False),
         Binding("p", "toggle_star_agent", "Star Agent", priority=True),
+        Binding("h", "toggle_hidden_agents", "Hidden", priority=True),
+        Binding("shift+h", "unhide_agent", "Unhide Agent", key_display="H", priority=True),
         Binding("d", "hide_agent", "Hide Agent", priority=True),
         Binding(
             "shift+d",
@@ -2753,7 +3075,13 @@ class AgentPBXTUI(App[None]):
         self.layout_mode = resolve_layout(env_layout_value() or layout_setting)
         self.effective_layout_mode = self.compute_effective_layout()
         self.compact_view = "home"
+        self.tiny_home_panel = TINY_HOME_AGENTS
         self.tiny_show_events = False
+        self.show_hidden_agents = bool_setting(
+            self.settings,
+            "show_hidden_agents",
+            False,
+        )
         split_percent_setting = int_setting(
             self.settings,
             "split_percent",
@@ -2766,6 +3094,7 @@ class AgentPBXTUI(App[None]):
             else clamp_split_percent(split_percent_setting)
         )
         self.rendered_agent_columns: tuple[str, ...] = ()
+        self.rendered_operator_columns: tuple[str, ...] = ()
         self.rendered_agents_signature: tuple[Any, ...] | None = None
         self.agents: dict[str, dict[str, Any]] = {}
         self.selected_agent_id: str | None = None
@@ -2801,6 +3130,9 @@ class AgentPBXTUI(App[None]):
         self.issues_by_agent: dict[str, dict[int, dict[str, Any]]] = {}
         self.selected_issue_number: int | None = None
         self.selected_issue_number_by_agent: dict[str, int] = {}
+        self.campaigns_by_operator: dict[str, dict[str, dict[str, Any]]] = {}
+        self.selected_campaign_id: str | None = None
+        self.selected_campaign_id_by_operator: dict[str, str] = {}
         self.joplin_configured = False
         self.joplin_available = False
         self.joplin_status: dict[str, Any] = {}
@@ -2903,9 +3235,24 @@ class AgentPBXTUI(App[None]):
                     show_row_labels=False,
                 )
                 with Horizontal(id="agent-actions"):
+                    yield Button("Start Operator", id="start-operator")
                     yield Button("Star/Unstar (p)", id="star-agent")
+                    yield Button("Show Hidden (h)", id="toggle-hidden-agents")
+                    yield Button("Unhide (H)", id="unhide-agent")
                     yield Button("Hide Agent (d)", id="hide-agent")
                     yield Button("Purge Agent (D)", id="purge-agent")
+                yield Static("Operators (F5/o)", id="operators-title")
+                yield DataTable(
+                    id="operators",
+                    cursor_type="row",
+                    show_row_labels=False,
+                )
+                with Horizontal(id="operator-actions"):
+                    yield Button("Start (O)", id="operator-start")
+                    yield Button("Restart (u)", id="operator-restart")
+                    yield Button("Stop (x)", id="operator-stop")
+                    yield Button("Hide (d)", id="operator-hide")
+                    yield Button("Purge (D)", id="operator-purge")
                 yield Static("Events", id="events-title")
                 yield DataTable(
                     id="events",
@@ -3039,6 +3386,16 @@ class AgentPBXTUI(App[None]):
                             yield Button("Mitigate", id="issue-mitigate")
                             yield Button("URL", id="issue-url")
                             yield Button("Clear", id="issue-clear", variant="error")
+                    with TabPane("Campaigns", id="campaigns-tab"):
+                        yield Static("Campaigns: select an operator", id="campaign-status")
+                        yield DataTable(
+                            id="campaigns",
+                            cursor_type="row",
+                            show_row_labels=False,
+                        )
+                        yield NavigationTextArea(id="campaign-detail", read_only=True)
+                        with Horizontal(id="campaign-actions"):
+                            yield Button("Refresh", id="campaign-refresh")
                     with TabPane("Joplin", id="joplin-tab"):
                         yield Static("Joplin: checking...", id="joplin-status")
                         yield DataTable(
@@ -3070,6 +3427,8 @@ class AgentPBXTUI(App[None]):
         self.apply_tmux_class()
         agents = self.query_one("#agents", DataTable)
         self.render_agent_columns(agents)
+        operators = self.query_one("#operators", DataTable)
+        self.render_operator_columns(operators)
         events = self.query_one("#events", DataTable)
         events.add_columns("ID", "Type", "Subject")
         thread = self.query_one("#thread", DataTable)
@@ -3080,12 +3439,15 @@ class AgentPBXTUI(App[None]):
         pull_requests.add_columns("#", "State", "Checks", "Title")
         issues = self.query_one("#issues", DataTable)
         issues.add_columns("#", "State", "Labels", "Title", "Updated")
+        campaigns = self.query_one("#campaigns", DataTable)
+        campaigns.add_columns("Status", "Assignments", "Title", "Updated")
         joplin_notes = self.query_one("#joplin-notes", DataTable)
         joplin_notes.add_columns("Updated", "Title")
         latest_plan_options = self.query_one("#latest-plan-options", DataTable)
         latest_plan_options.add_columns("#", "Option")
         plan_options = self.query_one("#plan-options", DataTable)
         plan_options.add_columns("#", "Option")
+        self.update_hidden_agent_button()
         self.render_latest_plan_choice_panel(None)
         self.render_plan_choice_panel(None)
         await self.refresh_joplin_status()
@@ -3191,6 +3553,12 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/plan", "Toggle plan mode for the selected agent", self.palette_toggle_plan_mode)
         yield SystemCommand("/plan latest", "Show latest report plan options", self.palette_plan_latest)
         yield SystemCommand("/plan thread", "Show selected thread plan options", self.palette_plan_thread)
+        yield SystemCommand("/operator start", "Start a new operator agent", self.palette_operator_start)
+        yield SystemCommand("/operator focus", "Focus the Operators table", self.palette_operator_focus)
+        yield SystemCommand("/operator restart", "Restart the selected operator", self.palette_operator_restart)
+        yield SystemCommand("/operator stop", "Stop the selected operator", self.palette_operator_stop)
+        yield SystemCommand("/operator hide", "Hide the selected operator", self.palette_operator_hide)
+        yield SystemCommand("/operator purge", "Purge the selected operator", self.palette_operator_purge)
         yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
         yield from self.palette_native_plan_selector_commands()
         yield from self.palette_dynamic_plan_commands()
@@ -3201,6 +3569,8 @@ class AgentPBXTUI(App[None]):
             yield SystemCommand("/gitstageandcommit", "Ask Codex to stage and commit changes", self.palette_git_stage_and_commit)
             yield from self.palette_custom_slash_commands()
         yield SystemCommand("/hide agent", "Hide the selected agent from the Agents view", self.palette_hide_agent)
+        yield SystemCommand("/show hidden agents", "Toggle hidden agents in the Agents view", self.palette_toggle_hidden_agents)
+        yield SystemCommand("/unhide agent", "Unhide the selected hidden agent", self.palette_unhide_agent)
         yield SystemCommand("/purge agent", "Hide selected agent and delete its thread data", self.palette_purge_agent)
         yield SystemCommand("/theme cyberpunk", "Use the Cyberpunk theme", lambda: self.palette_set_theme(DEFAULT_TUI_THEME))
         yield SystemCommand("/theme minimal", "Use the high-compatibility Minimal theme", lambda: self.palette_set_theme(MINIMAL_TUI_THEME))
@@ -3398,6 +3768,50 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.issue_action_for_agent(agent_id, "clear"),
             name="palette-issue-clear",
+            exclusive=True,
+        )
+
+    def palette_operator_start(self) -> None:
+        self.run_worker(
+            self.start_operator_agent(),
+            name="palette-operator-start",
+            exclusive=True,
+        )
+
+    def palette_operator_focus(self) -> None:
+        self.action_focus_operators()
+
+    def palette_operator_restart(self) -> None:
+        self.run_worker(
+            self.restart_selected_operator(),
+            name="palette-operator-restart",
+            exclusive=True,
+        )
+
+    def palette_operator_stop(self) -> None:
+        self.run_worker(
+            self.stop_selected_operator(),
+            name="palette-operator-stop",
+            exclusive=True,
+        )
+
+    def palette_operator_hide(self) -> None:
+        agent_id = self.selected_operator_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.dismiss_selected_agent(agent_id=agent_id, delete_thread=False),
+            name="palette-operator-hide",
+            exclusive=True,
+        )
+
+    def palette_operator_purge(self) -> None:
+        agent_id = self.selected_operator_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.dismiss_selected_agent(agent_id=agent_id, delete_thread=True),
+            name="palette-operator-purge",
             exclusive=True,
         )
 
@@ -3742,9 +4156,15 @@ class AgentPBXTUI(App[None]):
     def palette_context_agent_id(self) -> str | None:
         if self.selected_agent_id:
             return self.selected_agent_id
+        focused_agent_id = self.focused_agent_table_id()
+        if focused_agent_id:
+            return focused_agent_id
         cursor_agent_id = self.agent_id_at_cursor()
         if cursor_agent_id:
             return cursor_agent_id
+        cursor_operator_id = self.operator_id_at_cursor()
+        if cursor_operator_id:
+            return cursor_operator_id
         agent_input = self.query_one_or_none("#agent-id", Input)
         if agent_input is not None and agent_input.value.strip():
             return agent_input.value.strip()
@@ -3837,6 +4257,16 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.dismiss_selected_agent(delete_thread=False),
             name="palette-hide-agent",
+            exclusive=True,
+        )
+
+    def palette_toggle_hidden_agents(self) -> None:
+        self.action_toggle_hidden_agents()
+
+    def palette_unhide_agent(self) -> None:
+        self.run_worker(
+            self.unhide_selected_agent(),
+            name="palette-unhide-agent",
             exclusive=True,
         )
 
@@ -3990,20 +4420,40 @@ class AgentPBXTUI(App[None]):
     def action_focus_agents(self) -> None:
         if self.is_collapsed_layout():
             self.compact_view = "home"
-            self.tiny_show_events = False
+            self.set_tiny_home_panel(TINY_HOME_AGENTS, apply=False)
             self.apply_layout_class()
         if self.selected_agent_id in self.agents:
-            self.move_agent_cursor(self.selected_agent_id, focus=True)
-            return
+            agent = self.agents[self.selected_agent_id]
+            if self.agent_type(agent) == CALLER_AGENT_TYPE:
+                self.move_agent_cursor(self.selected_agent_id, focus=True)
+                return
         agents = self.query_one_or_none("#agents", DataTable)
         if agents is not None:
             agents.focus()
+
+    def action_focus_operators(self) -> None:
+        operators = self.query_one_or_none("#operators", DataTable)
+        if operators is None:
+            return
+        if not self.operator_agents():
+            self.notify("No operators are registered.", severity="warning")
+            return
+        if self.is_collapsed_layout():
+            self.compact_view = "home"
+            self.set_tiny_home_panel(TINY_HOME_OPERATORS, apply=False)
+            self.apply_layout_class()
+        if self.selected_agent_id in self.agents:
+            agent = self.agents[self.selected_agent_id]
+            if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
+                self.move_operator_cursor(self.selected_agent_id, focus=True)
+                return
+        operators.focus()
 
     def action_focus_events(self) -> None:
         if self.is_collapsed_layout():
             self.compact_view = "home"
             if self.is_tiny_layout():
-                self.tiny_show_events = True
+                self.set_tiny_home_panel(TINY_HOME_EVENTS, apply=False)
             self.apply_layout_class()
             self.render_events()
         events = self.query_one_or_none("#events", DataTable)
@@ -4081,12 +4531,62 @@ class AgentPBXTUI(App[None]):
         if self.is_compact_layout() and self.compact_view == "agent":
             self.show_compact_home()
 
+    def action_start_operator(self) -> None:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        self.run_worker(
+            self.start_operator_agent(),
+            name="start-operator",
+            exclusive=True,
+        )
+
+    def action_restart_operator(self) -> None:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        self.run_worker(
+            self.restart_selected_operator(),
+            name="restart-operator",
+            exclusive=True,
+        )
+
+    def action_stop_operator(self) -> None:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        self.run_worker(
+            self.stop_selected_operator(),
+            name="stop-operator",
+            exclusive=True,
+        )
+
     def action_hide_agent(self) -> None:
         if isinstance(self.focused, (Input, TextArea)):
             return
         self.run_worker(
             self.dismiss_selected_agent(delete_thread=False),
             name="dismiss-agent",
+            exclusive=True,
+        )
+
+    def action_toggle_hidden_agents(self) -> None:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        self.show_hidden_agents = not self.show_hidden_agents
+        self.update_hidden_agent_button()
+        self.save_settings()
+        self.run_worker(
+            self.refresh_agents(),
+            name="toggle-hidden-agents",
+            exclusive=True,
+        )
+        state = "showing" if self.show_hidden_agents else "hiding"
+        self.notify(f"Agents view is now {state} hidden agents.")
+
+    def action_unhide_agent(self) -> None:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        self.run_worker(
+            self.unhide_selected_agent(),
+            name="unhide-agent",
             exclusive=True,
         )
 
@@ -4208,7 +4708,7 @@ class AgentPBXTUI(App[None]):
         self.effective_layout_mode = self.compute_effective_layout(width, height)
         if self.effective_layout_mode == SPLIT_TUI_LAYOUT:
             self.compact_view = "home"
-            self.tiny_show_events = False
+            self.set_tiny_home_panel(TINY_HOME_AGENTS, apply=False)
         changed = previous != self.effective_layout_mode
         return changed
 
@@ -4228,7 +4728,9 @@ class AgentPBXTUI(App[None]):
                 "Status",
                 "Project",
                 "Queue",
+                "Camp",
                 *live,
+                "Hidden",
             )
         if self.effective_layout_mode == COMPACT_TUI_LAYOUT:
             return (
@@ -4238,22 +4740,62 @@ class AgentPBXTUI(App[None]):
                 "Plan",
                 "Status",
                 "Queue",
+                "Camp",
                 *live,
                 "Poll",
+                "Hidden",
             )
         return (
             STARRED_AGENT_COLUMN,
             "New",
             "Agent",
+            "Type",
             "PBX",
             "Plan",
             "Status",
             "Project",
+            "Camp",
             "Last Seen",
             "Queue",
             *live,
             "Poll",
             "Use",
+            "Hidden",
+        )
+
+    def desired_operator_columns(self) -> tuple[str, ...]:
+        live = ("Live",) if self.tmux_features_available else ()
+        if self.effective_layout_mode == TINY_TUI_LAYOUT:
+            return (
+                STARRED_AGENT_COLUMN,
+                "New",
+                "Operator",
+                "Status",
+                "Camp",
+                *live,
+                "Hidden",
+            )
+        if self.effective_layout_mode == COMPACT_TUI_LAYOUT:
+            return (
+                STARRED_AGENT_COLUMN,
+                "New",
+                "Operator",
+                "Status",
+                "Camp",
+                *live,
+                "PBX",
+                "Hidden",
+            )
+        return (
+            STARRED_AGENT_COLUMN,
+            "New",
+            "Operator",
+            "PBX",
+            "Status",
+            "Camp",
+            *live,
+            "Last Seen",
+            "Hidden",
         )
 
     def render_agent_columns(self, table: DataTable | None = None) -> None:
@@ -4267,23 +4809,43 @@ class AgentPBXTUI(App[None]):
         table.add_columns(*columns)
         self.rendered_agent_columns = columns
 
-    def agent_row_values(self, agent: dict[str, Any]) -> list[str]:
+    def render_operator_columns(self, table: DataTable | None = None) -> None:
+        table = table or self.query_one_or_none("#operators", DataTable)
+        if table is None:
+            return
+        columns = self.desired_operator_columns()
+        if columns == self.rendered_operator_columns:
+            return
+        table.clear(columns=True)
+        table.add_columns(*columns)
+        self.rendered_operator_columns = columns
+
+    def agent_row_values(
+        self,
+        agent: dict[str, Any],
+        columns: tuple[str, ...] | None = None,
+    ) -> list[str]:
         agent_id = str(agent["agent_id"])
+        selected_columns = columns or self.rendered_agent_columns
         values = {
             STARRED_AGENT_COLUMN: "*" if agent_id in self.starred_agent_ids else "",
             "New": "NEW" if agent_id in self.unseen_latest_agent_ids else "",
             "Agent": agent_id,
+            "Operator": agent_id,
+            "Type": self.format_agent_type(agent),
             "PBX": self.format_pbx_active(agent),
             "Plan": self.format_plan_state(agent),
             "Status": self.format_agent_status(agent),
             "Project": str(agent["project"]),
+            "Camp": self.format_campaign_count(agent),
             "Last Seen": f"{agent['last_seen_at']:.0f}",
             "Queue": self.format_queue_state(agent),
             "Live": self.format_tmux_liveness(agent_id),
             "Poll": self.format_poll_state(agent),
             "Use": self.format_usage_state(agent),
+            "Hidden": self.format_hidden_state(agent),
         }
-        return [values[column] for column in self.rendered_agent_columns]
+        return [values[column] for column in selected_columns]
 
     def on_resize(self, event: Resize) -> None:
         if self.update_effective_layout(event.size.width, event.size.height):
@@ -4295,7 +4857,7 @@ class AgentPBXTUI(App[None]):
     def set_layout_mode(self, layout_name: str) -> None:
         self.layout_mode = resolve_layout(layout_name)
         self.compact_view = "home"
-        self.tiny_show_events = False
+        self.set_tiny_home_panel(TINY_HOME_AGENTS, apply=False)
         self.update_effective_layout()
         self.apply_layout_class()
         self.render_agents()
@@ -4314,13 +4876,16 @@ class AgentPBXTUI(App[None]):
     def toggle_tiny_events(self) -> None:
         if not (self.is_tiny_layout() and self.compact_view == "home"):
             return
-        self.tiny_show_events = not self.tiny_show_events
+        panel = TINY_HOME_AGENTS if self.tiny_show_events else TINY_HOME_EVENTS
+        self.set_tiny_home_panel(panel, apply=False)
         self.apply_layout_class()
 
     async def refresh_agents(self) -> None:
         try:
             response = await self.api_client().get(
-                "/v1/agents", headers=auth_headers(self.token)
+                "/v1/agents",
+                params={"include_hidden": "true"} if self.show_hidden_agents else None,
+                headers=auth_headers(self.token),
             )
             response.raise_for_status()
             agents = response.json()
@@ -4461,8 +5026,8 @@ class AgentPBXTUI(App[None]):
             return False
         return agent_id == self.selected_agent_id and self.active_agent_tab == "latest-tab"
 
-    def ordered_agents(self) -> list[dict[str, Any]]:
-        return sorted(
+    def ordered_agents(self, agent_type: str | None = None) -> list[dict[str, Any]]:
+        agents = sorted(
             self.agents.values(),
             key=lambda agent: (
                 str(agent.get("agent_id") or "") not in self.starred_agent_ids,
@@ -4470,40 +5035,88 @@ class AgentPBXTUI(App[None]):
                 str(agent.get("agent_id") or ""),
             ),
         )
+        if agent_type is None:
+            return agents
+        return [agent for agent in agents if self.agent_type(agent) == agent_type]
+
+    def caller_agents(self) -> list[dict[str, Any]]:
+        return self.ordered_agents(CALLER_AGENT_TYPE)
+
+    def operator_agents(self) -> list[dict[str, Any]]:
+        return [
+            agent
+            for agent in self.ordered_agents(OPERATOR_AGENT_TYPE)
+            if self.operator_role(agent) != OPERATOR_ROLE_FORK
+        ]
+
+    def operator_fork_agents(self) -> list[dict[str, Any]]:
+        return [
+            agent
+            for agent in self.ordered_agents(OPERATOR_AGENT_TYPE)
+            if self.operator_role(agent) == OPERATOR_ROLE_FORK
+        ]
 
     def agents_render_signature(self) -> tuple[Any, ...]:
         return (
             self.desired_agent_columns(),
+            self.desired_operator_columns(),
             tuple(sorted(self.starred_agent_ids)),
             tuple(
                 (
                     str(agent["agent_id"]),
-                    tuple(str(value) for value in self.agent_row_values(agent)),
+                    tuple(
+                        str(value)
+                        for value in self.agent_row_values(
+                            agent,
+                            self.desired_agent_columns(),
+                        )
+                    ),
                 )
-                for agent in self.ordered_agents()
+                for agent in self.caller_agents()
+            ),
+            tuple(
+                (
+                    str(agent["agent_id"]),
+                    tuple(
+                        str(value)
+                        for value in self.agent_row_values(
+                            agent,
+                            self.desired_operator_columns(),
+                        )
+                    ),
+                )
+                for agent in self.operator_agents()
             ),
         )
 
     def render_agents(self, signature: tuple[Any, ...] | None = None) -> None:
         table = self.query_one_or_none("#agents", DataTable)
-        if table is None:
+        operator_table = self.query_one_or_none("#operators", DataTable)
+        if table is None or operator_table is None:
             return
+        cursor_agent_id = self.agent_id_at_cursor()
+        cursor_operator_id = self.operator_id_at_cursor()
         scroll_x = table.scroll_x
         scroll_target_x = table.scroll_target_x
         scroll_y = table.scroll_y
         scroll_target_y = table.scroll_target_y
-        cursor_agent_id = self.agent_id_at_cursor()
+        operator_scroll_x = operator_table.scroll_x
+        operator_scroll_target_x = operator_table.scroll_target_x
+        operator_scroll_y = operator_table.scroll_y
+        operator_scroll_target_y = operator_table.scroll_target_y
+
         self.render_agent_columns(table)
         table.clear()
-        for agent in self.ordered_agents():
+        caller_agent_ids = {str(agent["agent_id"]) for agent in self.caller_agents()}
+        for agent in self.caller_agents():
             agent_id = str(agent["agent_id"])
-            row = self.agent_row_values(agent)
+            row = self.agent_row_values(agent, self.rendered_agent_columns)
             cells = self.style_agent_row(
                 row,
                 agent,
             )
             table.add_row(*cells, key=agent_id)
-        restore_agent_id = cursor_agent_id if cursor_agent_id in self.agents else None
+        restore_agent_id = cursor_agent_id if cursor_agent_id in caller_agent_ids else None
         if restore_agent_id is not None:
             table.move_cursor(
                 row=table.get_row_index(restore_agent_id),
@@ -4514,10 +5127,41 @@ class AgentPBXTUI(App[None]):
         table.scroll_target_x = scroll_target_x
         table.scroll_y = scroll_y
         table.scroll_target_y = scroll_target_y
+
+        self.render_operator_columns(operator_table)
+        operator_table.clear()
+        operator_agent_ids = {str(agent["agent_id"]) for agent in self.operator_agents()}
+        for agent in self.operator_agents():
+            agent_id = str(agent["agent_id"])
+            row = self.agent_row_values(agent, self.rendered_operator_columns)
+            cells = self.style_agent_row(row, agent)
+            operator_table.add_row(*cells, key=agent_id)
+        restore_operator_id = (
+            cursor_operator_id if cursor_operator_id in operator_agent_ids else None
+        )
+        if restore_operator_id is not None:
+            operator_table.move_cursor(
+                row=operator_table.get_row_index(restore_operator_id),
+                animate=False,
+                scroll=False,
+            )
+        operator_table.scroll_x = operator_scroll_x
+        operator_table.scroll_target_x = operator_scroll_target_x
+        operator_table.scroll_y = operator_scroll_y
+        operator_table.scroll_target_y = operator_scroll_target_y
+        self.apply_tiny_events_visibility()
         self.rendered_agents_signature = signature or self.agents_render_signature()
 
     def agent_id_at_cursor(self) -> str | None:
         table = self.query_one_or_none("#agents", DataTable)
+        if table is None:
+            return None
+        if table.row_count == 0 or not table.is_valid_row_index(table.cursor_row):
+            return None
+        return str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
+
+    def operator_id_at_cursor(self) -> str | None:
+        table = self.query_one_or_none("#operators", DataTable)
         if table is None:
             return None
         if table.row_count == 0 or not table.is_valid_row_index(table.cursor_row):
@@ -4530,8 +5174,29 @@ class AgentPBXTUI(App[None]):
     def move_agent_cursor(self, agent_id: str, *, focus: bool) -> None:
         if agent_id not in self.agents:
             return
+        if self.agent_type(self.agents[agent_id]) == OPERATOR_AGENT_TYPE:
+            self.move_operator_cursor(agent_id, focus=focus)
+            return
         table = self.query_one_or_none("#agents", DataTable)
         if table is None:
+            return
+        if agent_id not in {str(agent["agent_id"]) for agent in self.caller_agents()}:
+            return
+        table.move_cursor(
+            row=table.get_row_index(agent_id),
+            animate=False,
+            scroll=True,
+        )
+        if focus:
+            table.focus()
+
+    def move_operator_cursor(self, agent_id: str, *, focus: bool) -> None:
+        if agent_id not in self.agents:
+            return
+        table = self.query_one_or_none("#operators", DataTable)
+        if table is None:
+            return
+        if agent_id not in {str(agent["agent_id"]) for agent in self.operator_agents()}:
             return
         table.move_cursor(
             row=table.get_row_index(agent_id),
@@ -4609,6 +5274,33 @@ class AgentPBXTUI(App[None]):
 
     def format_pbx_active(self, agent: dict[str, Any]) -> str:
         return self.agent_pbx_mode(agent)
+
+    def agent_type(self, agent: dict[str, Any]) -> str:
+        value = str(agent.get("agent_type") or "").strip().lower()
+        if not value:
+            metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+            value = str(metadata.get("agent_type") or "").strip().lower()
+        return OPERATOR_AGENT_TYPE if value == OPERATOR_AGENT_TYPE else CALLER_AGENT_TYPE
+
+    def format_agent_type(self, agent: dict[str, Any]) -> str:
+        return "op" if self.agent_type(agent) == OPERATOR_AGENT_TYPE else "call"
+
+    def operator_role(self, agent: dict[str, Any]) -> str:
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        role = str(metadata.get("operator_role") or "").strip().lower()
+        if role == OPERATOR_ROLE_FORK:
+            return OPERATOR_ROLE_FORK
+        return OPERATOR_ROLE_ROOT
+
+    def format_campaign_count(self, agent: dict[str, Any]) -> str:
+        count = int_value(agent.get("active_campaign_count")) or 0
+        return str(count) if count else ""
+
+    def is_hidden_agent(self, agent: dict[str, Any]) -> bool:
+        return float_value(agent.get("dismissed_at")) is not None
+
+    def format_hidden_state(self, agent: dict[str, Any]) -> str:
+        return "hidden" if self.is_hidden_agent(agent) else ""
 
     def format_agent_status(self, agent: dict[str, Any]) -> str:
         status = str(agent.get("effective_status") or agent.get("status") or "")
@@ -4782,7 +5474,9 @@ class AgentPBXTUI(App[None]):
     def style_agent_row(
         self, cells: list[str], agent: dict[str, Any]
     ) -> list[str | Text]:
-        if bool(agent.get("status_stale")):
+        if self.is_hidden_agent(agent):
+            style = "dim yellow"
+        elif bool(agent.get("status_stale")):
             style = "bold yellow"
         else:
             level = self.agent_poll_level(agent)
@@ -4804,6 +5498,8 @@ class AgentPBXTUI(App[None]):
                 }.get(tmux_level)
             if style is None and level == "active":
                 style = "bold green"
+            if style is None and self.agent_type(agent) == OPERATOR_AGENT_TYPE:
+                style = "bold magenta"
         if style is None:
             return cells
         return [Text(cell, style=style) for cell in cells]
@@ -4942,7 +5638,7 @@ class AgentPBXTUI(App[None]):
         return not (self.is_collapsed_layout() and self.compact_view != "agent")
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        if event.data_table.id == "agents":
+        if event.data_table.id in {"agents", "operators"}:
             await self.select_agent(str(event.row_key.value))
             return
         if event.data_table.id == "thread":
@@ -4956,6 +5652,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.data_table.id == "issues":
             await self.select_issue(str(event.row_key.value))
+            return
+        if event.data_table.id == "campaigns":
+            self.select_campaign(str(event.row_key.value))
             return
         if event.data_table.id == "joplin-notes":
             await self.select_joplin_note(str(event.row_key.value))
@@ -4982,6 +5681,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.data_table.id == "issues":
             await self.select_issue(str(event.cell_key.row_key.value))
+            return
+        if event.data_table.id == "campaigns":
+            self.select_campaign(str(event.cell_key.row_key.value))
             return
         if event.data_table.id == "joplin-notes":
             await self.select_joplin_note(str(event.cell_key.row_key.value))
@@ -5078,6 +5780,11 @@ class AgentPBXTUI(App[None]):
             event.stop()
             event.prevent_default()
             self.action_focus_agents()
+            return True
+        if key == "o":
+            event.stop()
+            event.prevent_default()
+            self.action_focus_operators()
             return True
         if key == "e":
             event.stop()
@@ -5359,6 +6066,20 @@ class AgentPBXTUI(App[None]):
             if token.lower().startswith(prefix_key)
         )
 
+    def caller_agent_completion_matches(
+        self,
+        context: FileCompletionContext,
+        agent_id: str,
+    ) -> tuple[str, ...]:
+        if not self.is_operator_agent_id(agent_id):
+            return ()
+        prefix_key = context.prefix.lower()
+        return tuple(
+            token
+            for token in caller_agent_ref_completion_tokens(self.caller_agents())
+            if token.lower().startswith(prefix_key)
+        )
+
     def project_for_agent(self, agent_id: str) -> str:
         agent = self.agents.get(agent_id)
         if isinstance(agent, dict) and agent.get("project"):
@@ -5427,6 +6148,13 @@ class AgentPBXTUI(App[None]):
             self.notify("Select an agent before completing @file references.", severity="warning")
             return True
         is_joplin_ref = context.prefix.lower().startswith(JOPLIN_NOTE_REF_PREFIX)
+        is_caller_ref = context.prefix.lower().startswith(CALLER_AGENT_REF_PREFIX)
+        if is_caller_ref and not self.is_operator_agent_id(agent_id):
+            self.notify(
+                "Select an operator before completing @caller references.",
+                severity="warning",
+            )
+            return True
         state = self.file_completion_state.get(context.input_id)
         if (
             state is not None
@@ -5437,14 +6165,20 @@ class AgentPBXTUI(App[None]):
         ):
             matches = state.matches
         else:
-            matches = (
-                self.joplin_note_completion_matches(context, agent_id)
-                if is_joplin_ref
-                else self.file_completion_matches(context, agent_id)
-            )
+            if is_caller_ref:
+                matches = self.caller_agent_completion_matches(context, agent_id)
+            elif is_joplin_ref:
+                matches = self.joplin_note_completion_matches(context, agent_id)
+            else:
+                matches = self.file_completion_matches(context, agent_id)
         if not matches:
             self.file_completion_state.pop(context.input_id, None)
-            if is_joplin_ref:
+            if is_caller_ref:
+                self.notify(
+                    f"No cached caller matches {context.prefix!r}; refresh agents first.",
+                    severity="warning",
+                )
+            elif is_joplin_ref:
                 self.notify(
                     f"No cached Joplin note matches {context.prefix!r}; open or refresh the Joplin tab.",
                     severity="warning",
@@ -5479,9 +6213,21 @@ class AgentPBXTUI(App[None]):
             return False
         agent_id = self.sent_history_agent_id(text_area)
         is_joplin_ref = context.prefix.lower().startswith(JOPLIN_NOTE_REF_PREFIX)
+        is_caller_ref = context.prefix.lower().startswith(CALLER_AGENT_REF_PREFIX)
         if not agent_id:
-            target = "@joplin note" if is_joplin_ref else "@file"
+            if is_caller_ref:
+                target = "@caller"
+            elif is_joplin_ref:
+                target = "@joplin note"
+            else:
+                target = "@file"
             self.notify(f"Select an agent before completing {target} references.", severity="warning")
+            return True
+        if is_caller_ref and not self.is_operator_agent_id(agent_id):
+            self.notify(
+                "Select an operator before completing @caller references.",
+                severity="warning",
+            )
             return True
 
         state = self.file_completion_state.get(context.input_id)
@@ -5494,14 +6240,17 @@ class AgentPBXTUI(App[None]):
         ):
             matches = state.matches
         else:
-            matches = (
-                self.joplin_note_completion_matches(context, agent_id)
-                if is_joplin_ref
-                else self.file_completion_matches(context, agent_id)
-            )
+            if is_caller_ref:
+                matches = self.caller_agent_completion_matches(context, agent_id)
+            elif is_joplin_ref:
+                matches = self.joplin_note_completion_matches(context, agent_id)
+            else:
+                matches = self.file_completion_matches(context, agent_id)
             if not matches:
                 try:
-                    if is_joplin_ref:
+                    if is_caller_ref:
+                        await self.refresh_agents()
+                    elif is_joplin_ref:
                         await self.fetch_joplin_note_summaries(agent_id)
                     else:
                         payload = await self.fetch_agent_file_listing(
@@ -5511,21 +6260,32 @@ class AgentPBXTUI(App[None]):
                         self.cache_file_listing(payload)
                 except Exception as exc:
                     self.file_completion_state.pop(context.input_id, None)
-                    label = "Joplin note" if is_joplin_ref else "File"
+                    if is_caller_ref:
+                        label = "Caller"
+                    elif is_joplin_ref:
+                        label = "Joplin note"
+                    else:
+                        label = "File"
                     self.notify(
                         f"{label} completion failed: {exc}",
                         severity="error",
                     )
                     return True
-                matches = (
-                    self.joplin_note_completion_matches(context, agent_id)
-                    if is_joplin_ref
-                    else self.file_completion_matches(context, agent_id)
-                )
+                if is_caller_ref:
+                    matches = self.caller_agent_completion_matches(context, agent_id)
+                elif is_joplin_ref:
+                    matches = self.joplin_note_completion_matches(context, agent_id)
+                else:
+                    matches = self.file_completion_matches(context, agent_id)
 
         if not matches:
             self.file_completion_state.pop(context.input_id, None)
-            label = "scoped Joplin note" if is_joplin_ref else "project file"
+            if is_caller_ref:
+                label = "caller agent"
+            elif is_joplin_ref:
+                label = "scoped Joplin note"
+            else:
+                label = "project file"
             self.notify(
                 f"No {label} matches {context.prefix!r}.",
                 severity="warning",
@@ -5904,6 +6664,8 @@ class AgentPBXTUI(App[None]):
             await self.load_pull_requests(agent_id)
         elif self.active_agent_tab == "issues-tab":
             await self.load_issues(agent_id)
+        elif self.active_agent_tab == "campaigns-tab":
+            await self.load_operator_campaigns(agent_id)
         elif self.active_agent_tab == "joplin-tab":
             await self.load_joplin_notes(agent_id)
         elif self.is_tmux_direct_enabled(agent_id):
@@ -6649,8 +7411,40 @@ class AgentPBXTUI(App[None]):
             if self.selected_agent_id:
                 await self.save_joplin_note(self.selected_agent_id)
             return
+        if event.button.id == "campaign-refresh":
+            if self.selected_agent_id:
+                await self.load_operator_campaigns(self.selected_agent_id)
+            return
+        if event.button.id == "start-operator":
+            await self.start_operator_agent()
+            return
+        if event.button.id == "operator-start":
+            await self.start_operator_agent()
+            return
+        if event.button.id == "operator-restart":
+            await self.restart_selected_operator()
+            return
+        if event.button.id == "operator-stop":
+            await self.stop_selected_operator()
+            return
+        if event.button.id == "operator-hide":
+            agent_id = self.selected_operator_agent_id()
+            if agent_id:
+                await self.dismiss_selected_agent(agent_id=agent_id, delete_thread=False)
+            return
+        if event.button.id == "operator-purge":
+            agent_id = self.selected_operator_agent_id()
+            if agent_id:
+                await self.dismiss_selected_agent(agent_id=agent_id, delete_thread=True)
+            return
         if event.button.id == "star-agent":
             self.toggle_selected_agent_star()
+            return
+        if event.button.id == "toggle-hidden-agents":
+            self.action_toggle_hidden_agents()
+            return
+        if event.button.id == "unhide-agent":
+            await self.unhide_selected_agent()
             return
         if event.button.id == "hide-agent":
             await self.dismiss_selected_agent(delete_thread=False)
@@ -6709,8 +7503,12 @@ class AgentPBXTUI(App[None]):
             return
         if await self.execute_local_slash_command_from_input(message_input, message):
             return
+        routed_agent_id = await self.route_operator_prompt_to_fork(agent_id, message)
+        if routed_agent_id is None:
+            return
+        agent_id = routed_agent_id
         if self.should_send_plan_prompt(agent_id, message):
-            expanded_message = await self.expand_joplin_note_references(
+            expanded_message = await self.expand_prompt_references(
                 agent_id,
                 message,
             )
@@ -6729,7 +7527,7 @@ class AgentPBXTUI(App[None]):
         pending_slash_commands = self.pending_slash_command_sequence_for_message(
             agent_id, message
         )
-        expanded_message = await self.expand_joplin_note_references(agent_id, message)
+        expanded_message = await self.expand_prompt_references(agent_id, message)
         if expanded_message is None:
             return
         for pending_slash in pending_slash_commands:
@@ -6811,8 +7609,12 @@ class AgentPBXTUI(App[None]):
             message_input, message.strip()
         ):
             return
+        routed_agent_id = await self.route_operator_prompt_to_fork(agent_id, message)
+        if routed_agent_id is None:
+            return
+        agent_id = routed_agent_id
         if self.should_send_plan_prompt(agent_id, message):
-            expanded_message = await self.expand_joplin_note_references(
+            expanded_message = await self.expand_prompt_references(
                 agent_id,
                 message,
             )
@@ -6832,7 +7634,7 @@ class AgentPBXTUI(App[None]):
         pending_slash_commands = self.pending_slash_command_sequence_for_message(
             agent_id, message
         )
-        expanded_message = await self.expand_joplin_note_references(agent_id, message)
+        expanded_message = await self.expand_prompt_references(agent_id, message)
         if expanded_message is None:
             return
         for pending_slash in pending_slash_commands:
@@ -7511,10 +8313,29 @@ class AgentPBXTUI(App[None]):
         await self.refresh_events()
         await self.load_thread(agent_id)
 
+    def focused_agent_table_id(self) -> str | None:
+        try:
+            focused = self.focused
+        except ScreenStackError:
+            focused = None
+        if not isinstance(focused, DataTable):
+            return None
+        if focused.id == "agents":
+            return self.agent_id_at_cursor()
+        if focused.id == "operators":
+            return self.operator_id_at_cursor()
+        return None
+
     def selected_or_cursor_agent_id(self) -> str | None:
+        focused_agent_id = self.focused_agent_table_id()
+        if focused_agent_id:
+            return focused_agent_id
         cursor_agent_id = self.agent_id_at_cursor()
         if cursor_agent_id:
             return cursor_agent_id
+        cursor_operator_id = self.operator_id_at_cursor()
+        if cursor_operator_id:
+            return cursor_operator_id
         if self.selected_agent_id:
             return self.selected_agent_id
         agent_input = self.query_one_or_none("#agent-id", Input)
@@ -7585,10 +8406,51 @@ class AgentPBXTUI(App[None]):
                 starred_at=float_value(agent.get("starred_at")),
             )
 
-    async def dismiss_selected_agent(self, *, delete_thread: bool) -> None:
+    async def unhide_selected_agent(self) -> None:
         agent_id = self.selected_or_cursor_agent_id()
         if not agent_id:
+            self.notify("Select a hidden agent before unhiding it.", severity="warning")
+            return
+        agent = self.agents.get(agent_id)
+        if agent is not None and not self.is_hidden_agent(agent):
+            self.notify(f"{agent_id} is not hidden.", severity="warning")
+            return
+        try:
+            restored = await self.unhide_agent(agent_id)
+        except Exception as exc:
+            self.notify(f"Unable to unhide {agent_id}: {exc}", severity="error")
+            return
+        if isinstance(restored, dict):
+            self.agents[agent_id] = restored
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = f"Unhid {agent_id}.\n\nThe agent is visible in Agents again."
+        self.notify(f"Unhid {agent_id}.")
+        await self.refresh_agents()
+        await self.refresh_events()
+
+    async def dismiss_selected_agent(
+        self,
+        *,
+        delete_thread: bool,
+        agent_id: str | None = None,
+        confirmed_operator_kill: bool = False,
+    ) -> None:
+        agent_id = agent_id or self.selected_or_cursor_agent_id()
+        if not agent_id:
             self.notify("Select an agent before hiding it.", severity="warning")
+            return
+        pane_id = self.tui_owned_operator_pane_id(agent_id)
+        if pane_id and not confirmed_operator_kill:
+            self.push_screen(
+                OperatorKillConfirmScreen(
+                    agent_id=agent_id,
+                    action="purge" if delete_thread else "hide",
+                    delete_thread=delete_thread,
+                )
+            )
+            return
+        if pane_id and not await self.kill_tui_owned_operator_pane(agent_id):
             return
         try:
             await self.delete_agent(agent_id, delete_thread=delete_thread)
@@ -7605,6 +8467,8 @@ class AgentPBXTUI(App[None]):
         self.issue_status_by_agent.pop(agent_id, None)
         self.issues_by_agent.pop(agent_id, None)
         self.selected_issue_number_by_agent.pop(agent_id, None)
+        self.campaigns_by_operator.pop(agent_id, None)
+        self.selected_campaign_id_by_operator.pop(agent_id, None)
         self.joplin_notes_by_agent.pop(agent_id, None)
         self.file_directory_entries_by_agent.pop(agent_id, None)
         self.active_agent_tab_by_agent.pop(agent_id, None)
@@ -7654,6 +8518,741 @@ class AgentPBXTUI(App[None]):
         await self.refresh_agents()
         await self.refresh_events()
 
+    def next_operator_agent_id(self) -> str:
+        index = 0
+        while f"operator-{index}" in self.agents:
+            index += 1
+        return f"operator-{index}"
+
+    def operator_fork_agent_id(
+        self,
+        logical_operator_id: str,
+        source_caller_agent_id: str,
+        source_codex_session_id: str,
+    ) -> str:
+        base = slugify(f"{logical_operator_id}-fork-{source_caller_agent_id}")[:96]
+        digest = short_stable_hash(
+            f"{logical_operator_id}:{source_caller_agent_id}:{source_codex_session_id}"
+        )
+        return f"{base}-{digest}"
+
+    def selected_caller_agent_id_for_fork(self) -> str | None:
+        focused_agent_id = self.focused_agent_table_id()
+        if focused_agent_id and focused_agent_id in self.agents:
+            if self.agent_type(self.agents[focused_agent_id]) == CALLER_AGENT_TYPE:
+                return focused_agent_id
+        cursor_agent_id = self.agent_id_at_cursor()
+        if cursor_agent_id and cursor_agent_id in self.agents:
+            if self.agent_type(self.agents[cursor_agent_id]) == CALLER_AGENT_TYPE:
+                return cursor_agent_id
+        if self.selected_agent_id and self.selected_agent_id in self.agents:
+            if self.agent_type(self.agents[self.selected_agent_id]) == CALLER_AGENT_TYPE:
+                return self.selected_agent_id
+        return None
+
+    def operator_bootstrap_prompt(
+        self,
+        agent_id: str,
+        cwd: str,
+        *,
+        logical_operator_id: str | None = None,
+        source_caller_agent_id: str | None = None,
+        source_codex_session_id: str | None = None,
+    ) -> str:
+        role = OPERATOR_ROLE_FORK if source_caller_agent_id else OPERATOR_ROLE_ROOT
+        logical_id = logical_operator_id or agent_id
+        extra = []
+        if source_caller_agent_id:
+            extra.extend(
+                [
+                    f"- metadata.operator_role: \"{OPERATOR_ROLE_FORK}\"",
+                    f"- metadata.logical_operator_id: {logical_id}",
+                    f"- metadata.source_caller_agent_id: {source_caller_agent_id}",
+                    f"- metadata.source_codex_session_id: {source_codex_session_id or ''}",
+                    "",
+                    "This session is a fork of the caller's Codex session. "
+                    "Keep work for this caller isolated in this fork and report "
+                    "through Agent PBX for the logical operator to review.",
+                ]
+            )
+        else:
+            extra.append(f"- metadata.operator_role: \"{OPERATOR_ROLE_ROOT}\"")
+        return "\n".join(
+            [
+                "Use Agent PBX as an operator agent.",
+                "The TUI launched this Codex session with Agent PBX MCP "
+                "configured and AGENT_PBX_TOKEN in the process environment.",
+                "",
+                "Register this session with:",
+                f"- agent_id: {agent_id}",
+                "- project: agent-pbx-operator",
+                "- agent_type: operator",
+                f"- metadata.cwd: {cwd}",
+                '- metadata.pbx_mode: "report"',
+                '- metadata.agent_type: "operator"',
+                *extra,
+                "",
+                "Call pbx_operator_runbook before starting campaign work. "
+                "Use operator campaign tools to dispatch caller assignments, "
+                "review caller threads, follow up until criteria are met or "
+                "blocked, report each assignment state, and finish campaigns.",
+            ]
+        )
+
+    def operator_cwd(self) -> str:
+        return os.getenv("AGENT_PBX_TUI_OPERATOR_CWD", os.getcwd()).strip() or os.getcwd()
+
+    def operator_codex_command(self) -> str:
+        return os.getenv("AGENT_PBX_TUI_CODEX_BIN", "codex").strip() or "codex"
+
+    def operator_tmux_session_name(self) -> str:
+        return (
+            os.getenv("AGENT_PBX_TUI_OPERATOR_TMUX_SESSION", DEFAULT_OPERATOR_TMUX_SESSION)
+            .strip()
+            or DEFAULT_OPERATOR_TMUX_SESSION
+        )
+
+    def operator_launch_env(
+        self,
+        *,
+        agent_id: str,
+        cwd: str,
+        mcp_url: str,
+    ) -> dict[str, str]:
+        env = {
+            AGENT_PBX_SERVER_URL_ENV: self.server,
+            AGENT_PBX_MCP_URL_ENV: mcp_url,
+            "AGENT_PBX_OPERATOR_ID": agent_id,
+            "AGENT_PBX_OPERATOR_CWD": cwd,
+        }
+        if self.token:
+            env[AGENT_PBX_TOKEN_ENV] = self.token
+        return env
+
+    async def ensure_operator_auth_ready(self) -> bool:
+        try:
+            response = await self.api_client().get(
+                "/v1/auth/check",
+                headers=auth_headers(self.token),
+            )
+        except Exception as exc:
+            self.notify(f"Unable to verify Agent PBX auth: {exc}", severity="error")
+            return False
+        if response.status_code in {401, 403}:
+            if not self.token:
+                self.notify(
+                    "Agent PBX token is required to start an operator.",
+                    severity="error",
+                )
+            else:
+                self.notify("Agent PBX token was rejected.", severity="error")
+            return False
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"Unable to verify Agent PBX auth: {exc}", severity="error")
+            return False
+        return True
+
+    async def configure_operator_codex_mcp(
+        self,
+        *,
+        codex_command: str,
+        mcp_url: str,
+    ) -> None:
+        await asyncio.to_thread(configure_codex_mcp, codex_command, mcp_url)
+
+    def operator_fork_command(
+        self,
+        codex_command: str,
+        source_codex_session_id: str,
+        prompt: str,
+    ) -> str:
+        command_parts = shlex.split(codex_command) if codex_command.strip() else ["codex"]
+        return shlex.join([*command_parts, "fork", source_codex_session_id, prompt])
+
+    async def register_logical_operator(
+        self,
+        agent_id: str,
+        *,
+        cwd: str,
+        codex_command: str,
+        mcp_url: str,
+        session_name: str,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            "/v1/agents/register",
+            json={
+                "agent_id": agent_id,
+                "project": "agent-pbx-operator",
+                "name": agent_id,
+                "agent_type": OPERATOR_AGENT_TYPE,
+                "pbx_active": False,
+                "metadata": {
+                    "agent_type": OPERATOR_AGENT_TYPE,
+                    "operator_role": OPERATOR_ROLE_ROOT,
+                    "pbx_mode": PBX_REPORT_MODE,
+                    "cwd": cwd,
+                    "logical_only": True,
+                    "launched_by": "agent-pbx-tui",
+                    "server_url": self.server,
+                    "mcp_url": mcp_url,
+                    "token_env": AGENT_PBX_TOKEN_ENV,
+                    "tmux_session": session_name,
+                    "codex_command": codex_command,
+                },
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        agent = response.json()
+        if isinstance(agent, dict):
+            self.agents[agent_id] = agent
+            return agent
+        raise RuntimeError("logical operator registration returned a non-object")
+
+    async def record_operator_fork(
+        self,
+        *,
+        logical_operator_id: str,
+        source_caller_agent_id: str,
+        fork_agent_id: str,
+        tmux_pane_id: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            "/v1/operator/forks/ensure",
+            json={
+                "operator_agent_id": logical_operator_id,
+                "source_caller_agent_id": source_caller_agent_id,
+                "fork_agent_id": fork_agent_id,
+                "tmux_pane_id": tmux_pane_id,
+                "status": "running",
+                "summary": "Fork launched from Agent PBX TUI.",
+                "metadata": metadata,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        fork = response.json()
+        if isinstance(fork, dict):
+            return fork
+        raise RuntimeError("operator fork response was not an object")
+
+    async def ensure_operator_fork_from_tui(
+        self,
+        *,
+        logical_operator_id: str,
+        source_caller_agent_id: str,
+    ) -> dict[str, Any] | None:
+        caller = self.agents.get(source_caller_agent_id)
+        if caller is None:
+            self.notify(f"Caller {source_caller_agent_id} is not loaded.", severity="error")
+            return None
+        caller_metadata = caller.get("metadata") if isinstance(caller.get("metadata"), dict) else {}
+        source_session_id = str(caller_metadata.get("codex_session_id") or "").strip()
+        caller_cwd = str(caller_metadata.get("cwd") or "").strip()
+        if not source_session_id:
+            self.notify(
+                f"{source_caller_agent_id} is missing metadata.codex_session_id.",
+                severity="error",
+            )
+            return None
+        if not caller_cwd:
+            self.notify(
+                f"{source_caller_agent_id} is missing metadata.cwd.",
+                severity="error",
+            )
+            return None
+        existing_response = await self.api_client().get(
+            "/v1/operator/forks",
+            params={
+                "operator_agent_id": logical_operator_id,
+                "source_caller_agent_id": source_caller_agent_id,
+                "limit": 20,
+            },
+            headers=auth_headers(self.token),
+        )
+        existing_response.raise_for_status()
+        existing_payload = existing_response.json()
+        existing_forks = (
+            existing_payload.get("forks", [])
+            if isinstance(existing_payload, dict)
+            else []
+        )
+        for fork in existing_forks:
+            if not isinstance(fork, dict):
+                continue
+            if fork.get("source_codex_session_id") != source_session_id:
+                continue
+            if str(fork.get("status") or "").lower() in {"starting", "running", "ready"}:
+                fork_agent_id = str(fork.get("fork_agent_id") or "")
+                tmux_pane_id = str(fork.get("tmux_pane_id") or "").strip()
+                if fork_agent_id and tmux_pane_id:
+                    self.tmux_agent_targets[fork_agent_id] = tmux_pane_id
+                    self.tmux_direct_agent_modes[fork_agent_id] = True
+                    local_agent = self.agents.get(fork_agent_id)
+                    if local_agent is not None:
+                        metadata = (
+                            local_agent.get("metadata")
+                            if isinstance(local_agent.get("metadata"), dict)
+                            else {}
+                        )
+                        local_agent["metadata"] = {**metadata, "tmux_pane_id": tmux_pane_id}
+                return fork
+
+        codex_command = self.operator_codex_command()
+        mcp_url = agent_pbx_mcp_url(self.server)
+        session_name = self.operator_tmux_session_name()
+        await self.configure_operator_codex_mcp(
+            codex_command=codex_command,
+            mcp_url=mcp_url,
+        )
+        fork_agent_id = self.operator_fork_agent_id(
+            logical_operator_id,
+            source_caller_agent_id,
+            source_session_id,
+        )
+        fork_metadata = {
+            "agent_type": OPERATOR_AGENT_TYPE,
+            "operator_role": OPERATOR_ROLE_FORK,
+            "logical_operator_id": logical_operator_id,
+            "source_caller_agent_id": source_caller_agent_id,
+            "source_codex_session_id": source_session_id,
+            "pbx_mode": PBX_REPORT_MODE,
+            "cwd": caller_cwd,
+            "launched_by": "agent-pbx-tui",
+            "server_url": self.server,
+            "mcp_url": mcp_url,
+            "token_env": AGENT_PBX_TOKEN_ENV,
+            "codex_command": codex_command,
+        }
+        register_response = await self.api_client().post(
+            "/v1/agents/register",
+            json={
+                "agent_id": fork_agent_id,
+                "project": str(caller.get("project") or "agent-pbx-operator"),
+                "name": fork_agent_id,
+                "agent_type": OPERATOR_AGENT_TYPE,
+                "metadata": fork_metadata,
+            },
+            headers=auth_headers(self.token),
+        )
+        register_response.raise_for_status()
+        fork_agent = register_response.json()
+        if isinstance(fork_agent, dict):
+            self.agents[fork_agent_id] = fork_agent
+        bootstrap = self.operator_bootstrap_prompt(
+            fork_agent_id,
+            caller_cwd,
+            logical_operator_id=logical_operator_id,
+            source_caller_agent_id=source_caller_agent_id,
+            source_codex_session_id=source_session_id,
+        )
+        command = self.operator_fork_command(codex_command, source_session_id, bootstrap)
+        pane_id = await asyncio.to_thread(
+            tmux_support.launch_pane,
+            session_name=session_name,
+            window_name=fork_agent_id,
+            command=command,
+            cwd=caller_cwd,
+            env=self.operator_launch_env(
+                agent_id=fork_agent_id,
+                cwd=caller_cwd,
+                mcp_url=mcp_url,
+            ),
+        )
+        self.tmux_agent_targets[fork_agent_id] = pane_id
+        self.tmux_manual_override_agent_ids.add(fork_agent_id)
+        self.tmux_detached_agent_ids.discard(fork_agent_id)
+        self.tmux_direct_agent_modes[fork_agent_id] = True
+        fork_metadata["tmux_pane_id"] = pane_id
+        local_agent = self.agents.get(fork_agent_id)
+        if local_agent is not None:
+            metadata = (
+                local_agent.get("metadata")
+                if isinstance(local_agent.get("metadata"), dict)
+                else {}
+            )
+            local_agent["metadata"] = {**metadata, "tmux_pane_id": pane_id}
+        fork = await self.record_operator_fork(
+            logical_operator_id=logical_operator_id,
+            source_caller_agent_id=source_caller_agent_id,
+            fork_agent_id=fork_agent_id,
+            tmux_pane_id=pane_id,
+            metadata=fork_metadata,
+        )
+        self.notify(f"Started fork {fork_agent_id} for {source_caller_agent_id}.")
+        return fork
+
+    async def start_operator_agent(
+        self,
+        agent_id: str | None = None,
+        *,
+        source_caller_agent_id: str | None = None,
+    ) -> None:
+        if not self.tmux_features_available:
+            self.notify(
+                "Tmux is required to start an operator from the TUI.",
+                severity="warning",
+            )
+            return
+        if not await self.ensure_operator_auth_ready():
+            return
+        source_caller_agent_id = source_caller_agent_id or (
+            self.selected_caller_agent_id_for_fork() if agent_id is None else None
+        )
+        agent_id = agent_id or self.next_operator_agent_id()
+        cwd = self.operator_cwd()
+        codex_command = self.operator_codex_command()
+        session_name = self.operator_tmux_session_name()
+        mcp_url = agent_pbx_mcp_url(self.server)
+        try:
+            await self.configure_operator_codex_mcp(
+                codex_command=codex_command,
+                mcp_url=mcp_url,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to configure Codex MCP: {exc}", severity="error")
+            return
+        if source_caller_agent_id:
+            try:
+                await self.register_logical_operator(
+                    agent_id,
+                    cwd=cwd,
+                    codex_command=codex_command,
+                    mcp_url=mcp_url,
+                    session_name=session_name,
+                )
+                fork = await self.ensure_operator_fork_from_tui(
+                    logical_operator_id=agent_id,
+                    source_caller_agent_id=source_caller_agent_id,
+                )
+            except Exception as exc:
+                self.notify(f"Unable to start operator fork: {exc}", severity="error")
+                return
+            if fork is None:
+                return
+            self.save_settings()
+            await self.refresh_agents()
+            await self.open_latest_for_agent(str(fork["fork_agent_id"]))
+            return
+        try:
+            response = await self.api_client().post(
+                "/v1/agents/register",
+                json={
+                    "agent_id": agent_id,
+                    "project": "agent-pbx-operator",
+                    "name": agent_id,
+                    "agent_type": OPERATOR_AGENT_TYPE,
+                    "metadata": {
+                        "agent_type": OPERATOR_AGENT_TYPE,
+                        "operator_role": OPERATOR_ROLE_ROOT,
+                        "pbx_mode": PBX_REPORT_MODE,
+                        "cwd": cwd,
+                        "launched_by": "agent-pbx-tui",
+                        "server_url": self.server,
+                        "mcp_url": mcp_url,
+                        "token_env": AGENT_PBX_TOKEN_ENV,
+                        "tmux_session": session_name,
+                        "codex_command": codex_command,
+                    },
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            agent = response.json()
+            pane_id = await asyncio.to_thread(
+                tmux_support.launch_pane,
+                session_name=session_name,
+                window_name=agent_id,
+                command=codex_command,
+                cwd=cwd,
+                env=self.operator_launch_env(
+                    agent_id=agent_id,
+                    cwd=cwd,
+                    mcp_url=mcp_url,
+                ),
+            )
+        except Exception as exc:
+            self.notify(f"Unable to start operator: {exc}", severity="error")
+            return
+        if isinstance(agent, dict):
+            self.agents[agent_id] = agent
+        self.tmux_agent_targets[agent_id] = pane_id
+        self.tmux_manual_override_agent_ids.add(agent_id)
+        self.tmux_detached_agent_ids.discard(agent_id)
+        self.tmux_direct_agent_modes[agent_id] = True
+        self.save_settings()
+        await asyncio.sleep(1.0)
+        sent = await self.send_text_to_tmux_pane(
+            pane_id,
+            self.operator_bootstrap_prompt(agent_id, cwd),
+        )
+        if not sent:
+            self.notify(f"Started {agent_id}, but bootstrap paste failed.", severity="warning")
+        else:
+            self.notify(f"Started operator {agent_id}.")
+        await self.refresh_agents()
+        await self.open_latest_for_agent(agent_id)
+
+    def is_operator_agent_id(self, agent_id: str) -> bool:
+        agent = self.agents.get(agent_id)
+        return agent is not None and self.agent_type(agent) == OPERATOR_AGENT_TYPE
+
+    def selected_operator_agent_id(self) -> str | None:
+        focused_agent_id = self.focused_agent_table_id()
+        if focused_agent_id and self.is_operator_agent_id(focused_agent_id):
+            return focused_agent_id
+        cursor_operator_id = self.operator_id_at_cursor()
+        if cursor_operator_id and self.is_operator_agent_id(cursor_operator_id):
+            return cursor_operator_id
+        if self.selected_agent_id and self.is_operator_agent_id(self.selected_agent_id):
+            return self.selected_agent_id
+        agent_input = self.query_one_or_none("#agent-id", Input)
+        if agent_input is not None:
+            value = agent_input.value.strip()
+            if value and self.is_operator_agent_id(value):
+                return value
+        self.notify("Select an operator first.", severity="warning")
+        return None
+
+    def tui_owned_operator_pane_id(self, agent_id: str) -> str | None:
+        if not self.is_operator_agent_id(agent_id):
+            return None
+        agent = self.agents.get(agent_id, {})
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        if metadata.get("launched_by") != "agent-pbx-tui":
+            return None
+        return self.tmux_agent_targets.get(agent_id)
+
+    def clear_operator_tmux_state(self, agent_id: str) -> None:
+        self.tmux_agent_targets.pop(agent_id, None)
+        self.tmux_direct_agent_modes.pop(agent_id, None)
+        self.tmux_manual_override_agent_ids.discard(agent_id)
+        self.tmux_detached_agent_ids.discard(agent_id)
+        self.tmux_liveness_by_agent.pop(agent_id, None)
+        self.tmux_plan_selector_agent_ids.discard(agent_id)
+        self.tmux_plan_selector_pane_by_agent.pop(agent_id, None)
+        self.tmux_plan_selector_indices_by_agent.pop(agent_id, None)
+
+    async def kill_tui_owned_operator_pane(self, agent_id: str) -> bool:
+        pane_id = self.tui_owned_operator_pane_id(agent_id)
+        if not pane_id:
+            return True
+        try:
+            await asyncio.to_thread(tmux_support.kill_pane, pane_id)
+        except Exception as exc:
+            self.notify(f"Unable to kill operator pane {pane_id}: {exc}", severity="error")
+            return False
+        self.clear_operator_tmux_state(agent_id)
+        self.save_settings()
+        return True
+
+    async def restart_selected_operator(self) -> None:
+        agent_id = self.selected_operator_agent_id()
+        if not agent_id:
+            return
+        pane_id = self.tmux_agent_targets.get(agent_id)
+        if pane_id and self.tui_owned_operator_pane_id(agent_id) != pane_id:
+            self.notify(
+                f"{agent_id} has a non-TUI-owned tmux pane; detach it before restart.",
+                severity="warning",
+            )
+            return
+        if not await self.kill_tui_owned_operator_pane(agent_id):
+            return
+        await self.start_operator_agent(agent_id=agent_id)
+
+    async def stop_selected_operator(self) -> None:
+        agent_id = self.selected_operator_agent_id()
+        if not agent_id:
+            return
+        pane_id = self.tmux_agent_targets.get(agent_id)
+        if pane_id and self.tui_owned_operator_pane_id(agent_id) != pane_id:
+            self.notify(
+                f"{agent_id} has a non-TUI-owned tmux pane; detach it before stop.",
+                severity="warning",
+            )
+            return
+        if not await self.kill_tui_owned_operator_pane(agent_id):
+            return
+        agent = self.agents.get(agent_id) or {}
+        project = str(agent.get("project") or "agent-pbx-operator")
+        detail = (
+            "The operator pane was stopped from the TUI. The pane was killed "
+            "and Agent PBX reporting was marked inactive."
+        )
+        try:
+            await self.create_agent_report(
+                agent_id,
+                {
+                    "project": project,
+                    "status": "canceled",
+                    "summary": "Operator stopped from TUI",
+                    "detail": detail,
+                    "needs_input": False,
+                    "plan_options": [],
+                },
+            )
+        except Exception as exc:
+            self.notify(f"Unable to record stop report for {agent_id}: {exc}", severity="warning")
+        try:
+            updated = await self.set_agent_pbx_active(agent_id, active=False)
+            if isinstance(updated, dict):
+                self.agents[agent_id] = updated
+        except Exception as exc:
+            self.notify(f"Unable to mark {agent_id} inactive: {exc}", severity="error")
+            return
+        self.notify(f"Stopped operator {agent_id}.")
+        await self.refresh_agents()
+        await self.refresh_events()
+        await self.load_thread(agent_id)
+
+    async def load_operator_campaigns(self, agent_id: str) -> None:
+        status_label = self.query_one_or_none("#campaign-status", Static)
+        detail = self.query_one_or_none("#campaign-detail", TextArea)
+        agent = self.agents.get(agent_id)
+        if agent is None or self.agent_type(agent) != OPERATOR_AGENT_TYPE:
+            self.render_campaigns(agent_id, [])
+            if status_label is not None:
+                status_label.update("Campaigns: select an operator agent")
+            if detail is not None:
+                detail.text = "Campaigns are shown for operator agents only."
+            return
+        if status_label is not None:
+            status_label.update(f"Campaigns: loading for {agent_id}...")
+        try:
+            response = await self.api_client().get(
+                "/v1/operator/campaigns",
+                params={"operator_agent_id": agent_id, "limit": 50},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            campaigns = payload.get("campaigns", []) if isinstance(payload, dict) else []
+            if not isinstance(campaigns, list):
+                campaigns = []
+        except Exception as exc:
+            self.render_campaigns(agent_id, [])
+            if status_label is not None:
+                status_label.update(f"Campaigns: unable to load ({exc})")
+            if detail is not None:
+                detail.text = f"Unable to load campaigns for {agent_id}: {exc}"
+            return
+        self.campaigns_by_operator[agent_id] = {
+            str(campaign.get("campaign_id")): campaign
+            for campaign in campaigns
+            if campaign.get("campaign_id")
+        }
+        self.render_campaigns(agent_id, campaigns)
+        if status_label is not None:
+            status_label.update(f"Campaigns: {len(campaigns)} for {agent_id}")
+        selected = self.selected_campaign_id_by_operator.get(agent_id)
+        if selected in self.campaigns_by_operator.get(agent_id, {}):
+            self.select_campaign(selected)
+        elif campaigns:
+            self.select_campaign(str(campaigns[0]["campaign_id"]))
+        elif detail is not None:
+            detail.text = f"No operator campaigns for {agent_id}."
+
+    def render_campaigns(
+        self,
+        agent_id: str,
+        campaigns: list[dict[str, Any]],
+    ) -> None:
+        table = self.query_one_or_none("#campaigns", DataTable)
+        if table is None:
+            return
+        table.clear()
+        for campaign in campaigns:
+            campaign_id = str(campaign.get("campaign_id") or "")
+            if not campaign_id:
+                continue
+            assignments = campaign.get("assignments") or []
+            states: dict[str, int] = {}
+            if isinstance(assignments, list):
+                for assignment in assignments:
+                    if isinstance(assignment, dict):
+                        state = str(assignment.get("state") or "pending")
+                        states[state] = states.get(state, 0) + 1
+            assignment_text = ", ".join(
+                f"{state}:{count}" for state, count in sorted(states.items())
+            ) or "-"
+            updated = float_value(campaign.get("updated_at"))
+            updated_text = f"{updated:.0f}" if updated is not None else "-"
+            table.add_row(
+                str(campaign.get("status") or "-"),
+                assignment_text,
+                str(campaign.get("title") or campaign_id),
+                updated_text,
+                key=campaign_id,
+            )
+        selected = self.selected_campaign_id_by_operator.get(agent_id)
+        if selected and selected in self.campaigns_by_operator.get(agent_id, {}):
+            try:
+                table.move_cursor(
+                    row=table.get_row_index(selected),
+                    animate=False,
+                    scroll=True,
+                )
+            except Exception:
+                pass
+
+    def select_campaign(self, campaign_id: str) -> None:
+        operator_id = self.selected_agent_id
+        if not operator_id:
+            return
+        campaign = self.campaigns_by_operator.get(operator_id, {}).get(campaign_id)
+        if campaign is None:
+            return
+        self.selected_campaign_id = campaign_id
+        self.selected_campaign_id_by_operator[operator_id] = campaign_id
+        detail = self.query_one_or_none("#campaign-detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_campaign_detail(campaign)
+
+    def format_campaign_detail(self, campaign: dict[str, Any]) -> str:
+        lines = [
+            f"Campaign: {campaign.get('title')}",
+            f"ID: {campaign.get('campaign_id')}",
+            f"Status: {campaign.get('status')}",
+            "",
+            "Objective:",
+            str(campaign.get("objective") or ""),
+        ]
+        criteria = campaign.get("criteria") or []
+        if criteria:
+            lines.extend(["", "Criteria:", *[f"- {item}" for item in criteria]])
+        assignments = campaign.get("assignments") or []
+        if assignments:
+            lines.extend(["", "Assignments:"])
+            for assignment in assignments:
+                if not isinstance(assignment, dict):
+                    continue
+                lines.append(
+                    "- "
+                    f"{assignment.get('target_agent_id')} "
+                    f"[{assignment.get('state')}] "
+                    f"{assignment.get('title')}"
+                )
+                if assignment.get("last_command_id"):
+                    lines.append(f"  command: {assignment.get('last_command_id')}")
+                if assignment.get("last_report_id"):
+                    lines.append(f"  report: {assignment.get('last_report_id')}")
+        events = campaign.get("events") or []
+        if events:
+            lines.extend(["", "Recent Events:"])
+            for event in events[:10]:
+                if not isinstance(event, dict):
+                    continue
+                lines.append(
+                    "- "
+                    f"{event.get('event_type')} "
+                    f"{event.get('summary')}"
+                )
+        return "\n".join(lines)
+
     async def queue_command(
         self, agent_id: str, command_type: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
@@ -7675,6 +9274,28 @@ class AgentPBXTUI(App[None]):
         response = await self.api_client().delete(
             f"/v1/agents/{agent_id}",
             params={"delete_thread": delete_thread},
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def unhide_agent(self, agent_id: str) -> dict[str, Any]:
+        response = await self.api_client().put(
+            f"/v1/agents/{agent_id}/unhide",
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def set_agent_pbx_active(
+        self,
+        agent_id: str,
+        *,
+        active: bool,
+    ) -> dict[str, Any]:
+        response = await self.api_client().put(
+            f"/v1/agents/{agent_id}/pbx-active",
+            json={"active": active},
             headers=auth_headers(self.token),
         )
         response.raise_for_status()
@@ -8082,6 +9703,40 @@ class AgentPBXTUI(App[None]):
         lower_map = {candidate.lower(): note_id for candidate, note_id in token_map.items()}
         return lower_map.get(token.lower())
 
+    def resolve_caller_agent_ref_token(self, token: str) -> str | None:
+        token_map = caller_agent_ref_tokens(self.caller_agents())
+        lower_map = {
+            candidate.lower(): agent_id
+            for candidate, agent_id in token_map.items()
+        }
+        return lower_map.get(token.lower())
+
+    def caller_agent_reference_from_agent(
+        self,
+        token: str,
+        agent: dict[str, Any],
+    ) -> CallerAgentReference:
+        agent_id = str(agent.get("agent_id") or "")
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        tmux_pane = self.tmux_agent_targets.get(agent_id)
+        if not tmux_pane:
+            for key in ("tmux_pane_id", "tmux_pane", "pane_id"):
+                value = metadata.get(key)
+                if isinstance(value, str) and value.strip():
+                    tmux_pane = value.strip()
+                    break
+        return CallerAgentReference(
+            token=token,
+            agent_id=agent_id,
+            name=str(agent["name"]) if agent.get("name") else None,
+            project=str(agent.get("project") or ""),
+            status=self.format_agent_status(agent),
+            pbx_mode=self.agent_pbx_mode(agent),
+            pbx_active=bool(agent.get("pbx_active", True)),
+            active_campaign_count=int_value(agent.get("active_campaign_count")) or 0,
+            tmux_pane=tmux_pane,
+        )
+
     async def fetch_joplin_note_for_reference(
         self,
         agent_id: str,
@@ -8135,6 +9790,82 @@ class AgentPBXTUI(App[None]):
             self.notify(f"Joplin note reference failed: {exc}", severity="error")
             return None
         return format_joplin_note_references_for_prompt(message, references)
+
+    async def expand_caller_agent_references(
+        self,
+        agent_id: str,
+        message: str,
+    ) -> str | None:
+        tokens = caller_agent_ref_tokens_in_message(message)
+        if not tokens:
+            return message
+        if not agent_id or not self.is_operator_agent_id(agent_id):
+            self.notify(
+                "Select an operator before sending @caller references.",
+                severity="warning",
+            )
+            return None
+        try:
+            references: list[CallerAgentReference] = []
+            seen_agent_ids: set[str] = set()
+            for token in tokens:
+                target_agent_id = self.resolve_caller_agent_ref_token(token)
+                if target_agent_id is None:
+                    await self.refresh_agents()
+                    target_agent_id = self.resolve_caller_agent_ref_token(token)
+                if target_agent_id is None:
+                    raise ValueError(f"No caller agent matches {token}")
+                if target_agent_id in seen_agent_ids:
+                    continue
+                target_agent = self.agents.get(target_agent_id)
+                if target_agent is None:
+                    raise ValueError(f"Caller agent {target_agent_id} is not loaded")
+                references.append(
+                    self.caller_agent_reference_from_agent(token, target_agent)
+                )
+                seen_agent_ids.add(target_agent_id)
+        except Exception as exc:
+            self.notify(f"Caller agent reference failed: {exc}", severity="error")
+            return None
+        return format_caller_agent_references_for_prompt(message, references)
+
+    async def expand_prompt_references(
+        self,
+        agent_id: str,
+        message: str,
+    ) -> str | None:
+        expanded_message = await self.expand_joplin_note_references(agent_id, message)
+        if expanded_message is None:
+            return None
+        return await self.expand_caller_agent_references(agent_id, expanded_message)
+
+    async def route_operator_prompt_to_fork(
+        self,
+        agent_id: str,
+        message: str,
+    ) -> str | None:
+        agent = self.agents.get(agent_id)
+        if agent is None or self.agent_type(agent) != OPERATOR_AGENT_TYPE:
+            return agent_id
+        if self.operator_role(agent) == OPERATOR_ROLE_FORK:
+            return agent_id
+        tokens = caller_agent_ref_tokens_in_message(message)
+        if not tokens:
+            return agent_id
+        if len(tokens) > 1:
+            return agent_id
+        source_caller_agent_id = self.resolve_caller_agent_ref_token(tokens[0])
+        if source_caller_agent_id is None:
+            self.notify(f"No caller agent matches {tokens[0]}.", severity="error")
+            return None
+        fork = await self.ensure_operator_fork_from_tui(
+            logical_operator_id=agent_id,
+            source_caller_agent_id=source_caller_agent_id,
+        )
+        if fork is None:
+            return None
+        fork_agent_id = str(fork.get("fork_agent_id") or "")
+        return fork_agent_id or None
 
     async def load_joplin_notes(self, agent_id: str) -> None:
         await self.refresh_joplin_status()
@@ -9718,9 +11449,17 @@ class AgentPBXTUI(App[None]):
             screen.set_class(compact_agent, "compact-agent")
             screen.set_class(tiny_home, "tiny-home")
             screen.set_class(tiny_agent, "tiny-agent")
-            screen.set_class(tiny_home and self.tiny_show_events, "tiny-events")
+            screen.set_class(
+                tiny_home and self.tiny_home_panel == TINY_HOME_OPERATORS,
+                "tiny-operators",
+            )
+            screen.set_class(
+                tiny_home and self.tiny_home_panel == TINY_HOME_EVENTS,
+                "tiny-events",
+            )
         self.apply_layout_dimensions()
         self.render_agent_columns()
+        self.render_operator_columns()
         self.update_tiny_button_labels()
         self.update_hotkey_labels()
         self.restore_layout_focus()
@@ -9750,26 +11489,63 @@ class AgentPBXTUI(App[None]):
     def apply_tiny_events_visibility(self) -> None:
         agents_title = self.query_one_or_none("#agents-title", Static)
         agents = self.query_one_or_none("#agents", DataTable)
+        operators_title = self.query_one_or_none("#operators-title", Static)
+        operators = self.query_one_or_none("#operators", DataTable)
+        operator_actions = self.query_one_or_none("#operator-actions", Horizontal)
         events_title = self.query_one_or_none("#events-title", Static)
         events = self.query_one_or_none("#events", DataTable)
         agent_actions = self.query_one_or_none("#agent-actions", Horizontal)
-        widgets = [agents_title, agents, events_title, events, agent_actions]
+        widgets = [
+            agents_title,
+            agents,
+            operators_title,
+            operators,
+            operator_actions,
+            events_title,
+            events,
+            agent_actions,
+        ]
         if any(widget is None for widget in widgets):
             return
         assert agents_title is not None
         assert agents is not None
+        assert operators_title is not None
+        assert operators is not None
+        assert operator_actions is not None
         assert events_title is not None
         assert events is not None
         assert agent_actions is not None
         tiny_home = self.is_tiny_layout() and self.compact_view == "home"
-        show_events = tiny_home and self.tiny_show_events
-        show_agents = not tiny_home or not show_events
+        operators_available = bool(self.operator_agents())
+        if self.tiny_home_panel == TINY_HOME_OPERATORS and not operators_available:
+            self.set_tiny_home_panel(TINY_HOME_AGENTS, apply=False)
+        show_events = tiny_home and self.tiny_home_panel == TINY_HOME_EVENTS
+        show_operators = (
+            operators_available
+            and (
+                not tiny_home
+                or self.tiny_home_panel == TINY_HOME_OPERATORS
+            )
+        )
+        show_agents = not tiny_home or self.tiny_home_panel == TINY_HOME_AGENTS
         agents_title.styles.display = "block" if show_agents else "none"
         agents.styles.display = "block" if show_agents else "none"
         agent_actions.styles.display = "none" if tiny_home else "block"
+        operators_title.styles.display = "block" if show_operators else "none"
+        operators.styles.display = "block" if show_operators else "none"
+        operator_actions.styles.display = (
+            "block" if show_operators and not tiny_home else "none"
+        )
         events_title.styles.display = "block" if show_events or not tiny_home else "none"
         events.styles.display = "block" if show_events or not tiny_home else "none"
         events.styles.height = "1fr" if show_events else 12
+        if show_operators and tiny_home:
+            operators.styles.height = "1fr"
+        elif show_operators:
+            left = self.query_one_or_none("#left", Vertical)
+            left_height = left.region.height if left is not None else 0
+            total_height = operator_panel_height(left_height)
+            operators.styles.height = max(1, total_height - 4)
 
     def update_tiny_button_labels(self) -> None:
         tiny = self.is_tiny_layout()
@@ -9783,6 +11559,13 @@ class AgentPBXTUI(App[None]):
             button = self.query_one_or_none(f"#{button_id}", Button)
             if button is not None:
                 button.label = Text(label)
+        self.update_hidden_agent_button()
+
+    def update_hidden_agent_button(self) -> None:
+        button = self.query_one_or_none("#toggle-hidden-agents", Button)
+        if button is not None:
+            label = "Hide Hidden (h)" if self.show_hidden_agents else "Show Hidden (h)"
+            button.label = Text(label)
 
     def update_hotkey_labels(self) -> None:
         composer_hotkeys = self.query_one_or_none("#composer-hotkeys", Static)
@@ -9823,7 +11606,7 @@ class AgentPBXTUI(App[None]):
         if not self.is_collapsed_layout():
             return
         self.compact_view = "home"
-        self.tiny_show_events = False
+        self.set_tiny_home_panel(TINY_HOME_AGENTS, apply=False)
         self.apply_layout_class()
         if self.selected_agent_id:
             self.move_agent_cursor(self.selected_agent_id, focus=True)
@@ -9833,6 +11616,16 @@ class AgentPBXTUI(App[None]):
             return
         self.compact_view = "agent"
         self.apply_layout_class()
+
+    def set_tiny_home_panel(self, panel: str, *, apply: bool = True) -> None:
+        if panel not in {TINY_HOME_AGENTS, TINY_HOME_OPERATORS, TINY_HOME_EVENTS}:
+            panel = TINY_HOME_AGENTS
+        if panel == TINY_HOME_OPERATORS and not self.operator_agents():
+            panel = TINY_HOME_AGENTS
+        self.tiny_home_panel = panel
+        self.tiny_show_events = panel == TINY_HOME_EVENTS
+        if apply:
+            self.apply_layout_class()
 
     def resolve_theme(self, theme_name: str) -> str:
         if is_custom_theme_selector(theme_name, self.custom_theme_name):
@@ -9852,6 +11645,7 @@ class AgentPBXTUI(App[None]):
             "theme": self.ui_theme,
             "layout": self.layout_mode,
             "split_percent": self.split_percent,
+            "show_hidden_agents": self.show_hidden_agents,
             "export_dir": str(self.export_dir),
             "tmux_direct": self.tmux_direct_enabled,
             "tmux_direct_agent_modes": self.tmux_direct_agent_modes,
@@ -9967,6 +11761,7 @@ class AgentPBXTUI(App[None]):
             "command_deleted",
             "agent_pbx_active_changed",
             "agent_dismissed",
+            "agent_unhidden",
             "latest_seen",
             "agent_starred_changed",
         }:

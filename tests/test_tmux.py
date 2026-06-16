@@ -137,6 +137,63 @@ def test_tmux_capture_options_use_expected_flags(monkeypatch) -> None:
     ]
 
 
+def test_tmux_launch_pane_injects_environment(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[1] == "has-session":
+            return subprocess.CompletedProcess(args, 1, "", "")
+        if args[1] == "new-session":
+            return subprocess.CompletedProcess(args, 0, "%42\n", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    pane_id = tmux.launch_pane(
+        session_name="operators",
+        window_name="operator-0",
+        command="codex",
+        cwd="/tmp/project",
+        env={"AGENT_PBX_TOKEN": "secret", "AGENT_PBX_MCP_URL": "http://pbx/mcp"},
+    )
+
+    assert pane_id == "%42"
+    assert calls[1] == [
+        "tmux",
+        "new-session",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-s",
+        "operators",
+        "-n",
+        "operator-0",
+        "-c",
+        "/tmp/project",
+        "-e",
+        "AGENT_PBX_TOKEN=secret",
+        "-e",
+        "AGENT_PBX_MCP_URL=http://pbx/mcp",
+        "codex",
+    ]
+
+
+def test_tmux_kill_pane_uses_target(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    tmux.kill_pane("%42")
+
+    assert calls == [["tmux", "kill-pane", "-t", "%42"]]
+
+
 def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:
     calls: list[list[str]] = []
     loaded_text: list[str] = []

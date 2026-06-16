@@ -16,7 +16,7 @@ from .schemas import (
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 12
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -79,6 +79,7 @@ class Store:
 
                 CREATE TABLE IF NOT EXISTS agents (
                     agent_id TEXT PRIMARY KEY,
+                    agent_type TEXT NOT NULL DEFAULT 'caller',
                     project TEXT NOT NULL,
                     name TEXT,
                     status TEXT NOT NULL,
@@ -101,6 +102,7 @@ class Store:
                     detail TEXT NOT NULL,
                     needs_input INTEGER NOT NULL DEFAULT 0,
                     plan_options_json TEXT NOT NULL DEFAULT '[]',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
                     created_at REAL NOT NULL,
                     FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
                 );
@@ -161,6 +163,125 @@ class Store:
                     attempts INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS operator_campaigns (
+                    campaign_id TEXT PRIMARY KEY,
+                    operator_agent_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    objective TEXT NOT NULL,
+                    criteria_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'running',
+                    summary TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    completed_at REAL,
+                    FOREIGN KEY(operator_agent_id) REFERENCES agents(agent_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_campaign_assignments (
+                    assignment_id TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL,
+                    target_agent_id TEXT NOT NULL,
+                    operator_fork_id TEXT,
+                    title TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    criteria_json TEXT NOT NULL DEFAULT '[]',
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    last_report_id TEXT,
+                    last_command_id TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    completed_at REAL,
+                    FOREIGN KEY(campaign_id) REFERENCES operator_campaigns(campaign_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(target_agent_id) REFERENCES agents(agent_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_campaign_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id TEXT NOT NULL,
+                    assignment_id TEXT,
+                    operator_agent_id TEXT NOT NULL,
+                    target_agent_id TEXT,
+                    event_type TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    detail_json TEXT NOT NULL DEFAULT '{}',
+                    report_id TEXT,
+                    command_id TEXT,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(campaign_id) REFERENCES operator_campaigns(campaign_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_forks (
+                    operator_fork_id TEXT PRIMARY KEY,
+                    logical_operator_agent_id TEXT NOT NULL,
+                    fork_agent_id TEXT NOT NULL UNIQUE,
+                    source_caller_agent_id TEXT NOT NULL,
+                    source_codex_session_id TEXT NOT NULL,
+                    fork_codex_session_id TEXT,
+                    campaign_id TEXT,
+                    cwd TEXT NOT NULL,
+                    codex_home TEXT,
+                    codex_host_id TEXT,
+                    tmux_pane_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'starting',
+                    summary TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    last_used_at REAL NOT NULL,
+                    completed_at REAL,
+                    FOREIGN KEY(logical_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(fork_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(source_caller_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(campaign_id) REFERENCES operator_campaigns(campaign_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_fork_edges (
+                    edge_id TEXT PRIMARY KEY,
+                    from_fork_id TEXT NOT NULL,
+                    to_fork_id TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    summary TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(from_fork_id) REFERENCES operator_forks(operator_fork_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(to_fork_id) REFERENCES operator_forks(operator_fork_id)
+                        ON DELETE CASCADE,
+                    UNIQUE(from_fork_id, to_fork_id, edge_type)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_operator_campaigns_operator_updated
+                    ON operator_campaigns(operator_agent_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_campaigns_status_updated
+                    ON operator_campaigns(status, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_assignments_campaign_state
+                    ON operator_campaign_assignments(campaign_id, state);
+                CREATE INDEX IF NOT EXISTS idx_operator_assignments_target_updated
+                    ON operator_campaign_assignments(target_agent_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_events_campaign_created
+                    ON operator_campaign_events(campaign_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_events_assignment_created
+                    ON operator_campaign_events(assignment_id, created_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_forks_source_session
+                    ON operator_forks(
+                        logical_operator_agent_id,
+                        source_caller_agent_id,
+                        source_codex_session_id
+                    );
+                CREATE INDEX IF NOT EXISTS idx_operator_forks_logical_updated
+                    ON operator_forks(logical_operator_agent_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_forks_source_updated
+                    ON operator_forks(source_caller_agent_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_forks_fork_agent
+                    ON operator_forks(fork_agent_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_fork_edges_from
+                    ON operator_fork_edges(from_fork_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_fork_edges_to
+                    ON operator_fork_edges(to_fork_id);
                 """
             )
             previous_schema_version = self._schema_version(conn)
@@ -172,6 +293,12 @@ class Store:
                 """
             )
             self._ensure_column(conn, "agents", "last_poll_at", "REAL")
+            self._ensure_column(
+                conn,
+                "agents",
+                "agent_type",
+                "TEXT NOT NULL DEFAULT 'caller'",
+            )
             self._ensure_column(conn, "agents", "latest_report_seen_at", "REAL")
             self._ensure_column(conn, "agents", "starred_at", "REAL")
             self._ensure_column(conn, "agents", "dismissed_at", "REAL")
@@ -181,6 +308,19 @@ class Store:
                 "pbx_active",
                 "INTEGER NOT NULL DEFAULT 1",
             )
+            self._ensure_column(
+                conn,
+                "reports",
+                "metadata_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._ensure_column(
+                conn,
+                "operator_campaign_assignments",
+                "operator_fork_id",
+                "TEXT",
+            )
+            self._backfill_agent_type(conn)
             if previous_schema_version < 7:
                 self._backfill_latest_report_seen(conn)
             conn.execute(
@@ -218,6 +358,39 @@ class Store:
               )
             """
         )
+
+    @staticmethod
+    def _backfill_agent_type(conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            "SELECT agent_id, agent_type, metadata_json FROM agents"
+        ).fetchall()
+        for row in rows:
+            agent_type = str(row["agent_type"] or "").strip().lower()
+            metadata: dict[str, Any] = {}
+            try:
+                decoded = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                decoded = {}
+            if isinstance(decoded, dict):
+                metadata = decoded
+            metadata_type = str(metadata.get("agent_type") or "").strip().lower()
+            resolved = (
+                metadata_type
+                if metadata_type in {"caller", "operator"}
+                else agent_type
+            )
+            if resolved not in {"caller", "operator"}:
+                resolved = "caller"
+            if metadata_type or resolved == "operator":
+                metadata["agent_type"] = resolved
+            conn.execute(
+                """
+                UPDATE agents
+                SET agent_type = ?, metadata_json = ?
+                WHERE agent_id = ?
+                """,
+                (resolved, json.dumps(metadata), row["agent_id"]),
+            )
 
     @staticmethod
     def _ensure_column(
@@ -373,6 +546,7 @@ class Store:
 
     def register_agent(self, request: AgentRegisterRequest) -> dict[str, Any]:
         current = now_ts()
+        agent_type = self._normalized_agent_type(request.agent_type)
         with self.connect() as conn:
             existing = conn.execute(
                 """
@@ -382,9 +556,12 @@ class Store:
                 """,
                 (request.agent_id,),
             ).fetchone()
+            request_metadata = dict(request.metadata)
+            if agent_type == "operator" or "agent_type" in request_metadata:
+                request_metadata["agent_type"] = agent_type
             metadata = self._merged_agent_metadata(
                 existing["metadata_json"] if existing else None,
-                request.metadata,
+                request_metadata,
             )
             metadata_json = json.dumps(metadata)
             name = request.name
@@ -393,10 +570,11 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO agents
-                    (agent_id, project, name, status, pbx_active, metadata_json,
+                    (agent_id, agent_type, project, name, status, pbx_active, metadata_json,
                      created_at, last_seen_at, dismissed_at)
-                VALUES (?, ?, ?, 'online', ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, 'online', ?, ?, ?, ?, NULL)
                 ON CONFLICT(agent_id) DO UPDATE SET
+                    agent_type = excluded.agent_type,
                     project = excluded.project,
                     name = excluded.name,
                     status = 'online',
@@ -407,6 +585,7 @@ class Store:
                 """,
                 (
                     request.agent_id,
+                    agent_type,
                     request.project,
                     name,
                     int(request.pbx_active),
@@ -416,6 +595,13 @@ class Store:
                 ),
             )
         return self.get_agent(request.agent_id) or {}
+
+    @staticmethod
+    def _normalized_agent_type(value: Any) -> str:
+        agent_type = str(value or "caller").strip().lower()
+        if agent_type == "operator":
+            return "operator"
+        return "caller"
 
     @staticmethod
     def _merged_agent_metadata(
@@ -460,7 +646,7 @@ class Store:
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT agent_id, project, name, status, pbx_active, metadata_json,
+                SELECT agent_id, agent_type, project, name, status, pbx_active, metadata_json,
                        created_at, last_seen_at, last_poll_at,
                        latest_report_seen_at, starred_at, dismissed_at
                 FROM agents
@@ -470,15 +656,16 @@ class Store:
             ).fetchone()
         return self._agent_from_row(row) if row else None
 
-    def list_agents(self) -> list[dict[str, Any]]:
+    def list_agents(self, *, include_hidden: bool = False) -> list[dict[str, Any]]:
+        where_clause = "" if include_hidden else "WHERE dismissed_at IS NULL"
         with self.connect() as conn:
             rows = conn.execute(
-                """
-                SELECT agent_id, project, name, status, pbx_active, metadata_json,
+                f"""
+                SELECT agent_id, agent_type, project, name, status, pbx_active, metadata_json,
                        created_at, last_seen_at, last_poll_at,
                        latest_report_seen_at, starred_at, dismissed_at
                 FROM agents
-                WHERE dismissed_at IS NULL
+                {where_clause}
                 ORDER BY last_seen_at DESC, agent_id ASC
                 """
             ).fetchall()
@@ -486,8 +673,21 @@ class Store:
             for agent in agents:
                 self._add_latest_report_summary(conn, agent)
                 self._add_queue_summary(conn, agent)
+                self._add_campaign_summary(conn, agent)
                 self._add_usage_summary(conn, agent)
         return agents
+
+    def unhide_agent(self, agent_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE agents
+                SET dismissed_at = NULL
+                WHERE agent_id = ?
+                """,
+                (agent_id,),
+            )
+        return self.get_agent(agent_id) if cursor.rowcount else None
 
     def dismiss_agent(
         self, agent_id: str, *, delete_thread: bool = False
@@ -547,8 +747,8 @@ class Store:
                 """
                 INSERT INTO reports
                     (report_id, agent_id, project, status, summary, detail,
-                     needs_input, plan_options_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     needs_input, plan_options_json, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     report_id,
@@ -559,6 +759,7 @@ class Store:
                     request.detail,
                     int(request.needs_input),
                     json.dumps(plan_options_to_jsonable(request.plan_options)),
+                    json.dumps(request.metadata),
                     current,
                 ),
             )
@@ -875,7 +1076,7 @@ class Store:
             row = conn.execute(
                 """
                 SELECT report_id, agent_id, project, status, summary, detail,
-                       needs_input, plan_options_json, created_at
+                       needs_input, plan_options_json, metadata_json, created_at
                 FROM reports
                 WHERE report_id = ?
                 """,
@@ -888,7 +1089,7 @@ class Store:
         if agent_id is None:
             query = """
                 SELECT report_id, agent_id, project, status, summary, detail,
-                       needs_input, plan_options_json, created_at
+                       needs_input, plan_options_json, metadata_json, created_at
                 FROM reports
                 ORDER BY created_at DESC
                 LIMIT ?
@@ -897,7 +1098,7 @@ class Store:
         else:
             query = """
                 SELECT report_id, agent_id, project, status, summary, detail,
-                       needs_input, plan_options_json, created_at
+                       needs_input, plan_options_json, metadata_json, created_at
                 FROM reports
                 WHERE agent_id = ?
                 ORDER BY created_at DESC
@@ -940,7 +1141,763 @@ class Store:
             key=lambda item: (float(item["created_at"]), str(item["item_id"])),
         )
 
-    def create_command(self, request: CommandCreateRequest) -> dict[str, Any]:
+    def create_operator_campaign(
+        self,
+        *,
+        operator_agent_id: str,
+        title: str,
+        objective: str,
+        criteria: list[str],
+        assignments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        campaign_id = str(uuid.uuid4())
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_campaigns
+                    (campaign_id, operator_agent_id, title, objective,
+                     criteria_json, status, summary, created_at, updated_at,
+                     completed_at)
+                VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, ?, NULL)
+                """,
+                (
+                    campaign_id,
+                    operator_agent_id,
+                    title,
+                    objective,
+                    json.dumps(criteria),
+                    current,
+                    current,
+                ),
+            )
+            for assignment in assignments:
+                assignment_id = str(uuid.uuid4())
+                target_agent_id = str(assignment["target_agent_id"])
+                assignment_title = str(
+                    assignment.get("title") or f"Assignment for {target_agent_id}"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO operator_campaign_assignments
+                        (assignment_id, campaign_id, target_agent_id, operator_fork_id, title,
+                         prompt, criteria_json, state, last_report_id,
+                         last_command_id, created_at, updated_at, completed_at)
+                    VALUES (?, ?, ?, NULL, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
+                    """,
+                    (
+                        assignment_id,
+                        campaign_id,
+                        target_agent_id,
+                        assignment_title,
+                        str(assignment["prompt"]),
+                        json.dumps(assignment.get("criteria") or []),
+                        current,
+                        current,
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO operator_campaign_events
+                    (campaign_id, assignment_id, operator_agent_id,
+                     target_agent_id, event_type, summary, detail_json,
+                     report_id, command_id, created_at)
+                VALUES (?, NULL, ?, NULL, 'campaign_started', ?, ?, NULL, NULL, ?)
+                """,
+                (
+                    campaign_id,
+                    operator_agent_id,
+                    f"Campaign started: {title}",
+                    json.dumps({"objective": objective, "criteria": criteria}),
+                    current,
+                ),
+            )
+        campaign = self.get_operator_campaign(campaign_id)
+        if campaign is None:
+            raise RuntimeError("operator campaign insert failed")
+        return campaign
+
+    def get_operator_campaign(self, campaign_id: str) -> dict[str, Any] | None:
+        campaigns = self.list_operator_campaigns(campaign_id=campaign_id, limit=1)
+        return campaigns[0] if campaigns else None
+
+    def list_operator_campaigns(
+        self,
+        *,
+        operator_agent_id: str | None = None,
+        campaign_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        include_events: bool = True,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 200)
+        where: list[str] = []
+        params: list[Any] = []
+        if operator_agent_id:
+            where.append("operator_agent_id = ?")
+            params.append(operator_agent_id)
+        if campaign_id:
+            where.append("campaign_id = ?")
+            params.append(campaign_id)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        query = f"""
+            SELECT campaign_id, operator_agent_id, title, objective,
+                   criteria_json, status, summary, created_at, updated_at,
+                   completed_at
+            FROM operator_campaigns
+            {clause}
+            ORDER BY updated_at DESC, campaign_id ASC
+            LIMIT ?
+        """
+        params.append(safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        campaigns = [self._operator_campaign_from_row(row) for row in rows]
+        for campaign in campaigns:
+            campaign["assignments"] = self.list_operator_campaign_assignments(
+                campaign_id=campaign["campaign_id"]
+            )
+            campaign["events"] = (
+                self.list_operator_campaign_events(
+                    campaign_id=campaign["campaign_id"],
+                    limit=25,
+                )
+                if include_events
+                else []
+            )
+        return campaigns
+
+    def list_operator_campaign_assignments(
+        self,
+        *,
+        campaign_id: str | None = None,
+        target_agent_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        where: list[str] = []
+        params: list[Any] = []
+        if campaign_id:
+            where.append("campaign_id = ?")
+            params.append(campaign_id)
+        if target_agent_id:
+            where.append("target_agent_id = ?")
+            params.append(target_agent_id)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        query = f"""
+            SELECT assignment_id, campaign_id, target_agent_id, operator_fork_id,
+                   title, prompt,
+                   criteria_json, state, last_report_id, last_command_id,
+                   created_at, updated_at, completed_at
+            FROM operator_campaign_assignments
+            {clause}
+            ORDER BY updated_at DESC, assignment_id ASC
+            LIMIT ?
+        """
+        params.append(safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._operator_assignment_from_row(row) for row in rows]
+
+    def get_operator_campaign_assignment(
+        self,
+        assignment_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT assignment_id, campaign_id, target_agent_id, operator_fork_id,
+                       title, prompt,
+                       criteria_json, state, last_report_id, last_command_id,
+                       created_at, updated_at, completed_at
+                FROM operator_campaign_assignments
+                WHERE assignment_id = ?
+                """,
+                (assignment_id,),
+            ).fetchone()
+        return self._operator_assignment_from_row(row) if row else None
+
+    def update_operator_assignment(
+        self,
+        assignment_id: str,
+        *,
+        state: str | None = None,
+        last_report_id: str | None = None,
+        last_command_id: str | None = None,
+        operator_fork_id: str | None = None,
+        complete: bool | None = None,
+    ) -> dict[str, Any] | None:
+        assignment = self.get_operator_campaign_assignment(assignment_id)
+        if assignment is None:
+            return None
+        current = now_ts()
+        completed_at = (
+            current
+            if complete is True
+            else None
+            if complete is False
+            else assignment.get("completed_at")
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE operator_campaign_assignments
+                SET state = COALESCE(?, state),
+                    last_report_id = COALESCE(?, last_report_id),
+                    last_command_id = COALESCE(?, last_command_id),
+                    operator_fork_id = COALESCE(?, operator_fork_id),
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE assignment_id = ?
+                """,
+                (
+                    state,
+                    last_report_id,
+                    last_command_id,
+                    operator_fork_id,
+                    current,
+                    completed_at,
+                    assignment_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE operator_campaigns
+                SET updated_at = ?
+                WHERE campaign_id = ?
+                """,
+                (current, assignment["campaign_id"]),
+            )
+        return self.get_operator_campaign_assignment(assignment_id)
+
+    def update_operator_campaign(
+        self,
+        campaign_id: str,
+        *,
+        status: str | None = None,
+        summary: str | None = None,
+        complete: bool | None = None,
+    ) -> dict[str, Any] | None:
+        campaign = self.get_operator_campaign(campaign_id)
+        if campaign is None:
+            return None
+        current = now_ts()
+        completed_at = (
+            current
+            if complete is True
+            else None
+            if complete is False
+            else campaign.get("completed_at")
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE operator_campaigns
+                SET status = COALESCE(?, status),
+                    summary = COALESCE(?, summary),
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE campaign_id = ?
+                """,
+                (status, summary, current, completed_at, campaign_id),
+            )
+        return self.get_operator_campaign(campaign_id)
+
+    def add_operator_campaign_event(
+        self,
+        *,
+        campaign_id: str,
+        operator_agent_id: str,
+        event_type: str,
+        summary: str,
+        assignment_id: str | None = None,
+        target_agent_id: str | None = None,
+        detail: dict[str, Any] | None = None,
+        report_id: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO operator_campaign_events
+                    (campaign_id, assignment_id, operator_agent_id,
+                     target_agent_id, event_type, summary, detail_json,
+                     report_id, command_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    campaign_id,
+                    assignment_id,
+                    operator_agent_id,
+                    target_agent_id,
+                    event_type,
+                    summary,
+                    json.dumps(detail or {}),
+                    report_id,
+                    command_id,
+                    current,
+                ),
+            )
+            event_id = int(cursor.lastrowid)
+            conn.execute(
+                """
+                UPDATE operator_campaigns
+                SET updated_at = ?
+                WHERE campaign_id = ?
+                """,
+                (current, campaign_id),
+            )
+        event = self.get_operator_campaign_event(event_id)
+        if event is None:
+            raise RuntimeError("operator campaign event insert failed")
+        return event
+
+    def get_operator_campaign_event(self, event_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT event_id, campaign_id, assignment_id, operator_agent_id,
+                       target_agent_id, event_type, summary, detail_json,
+                       report_id, command_id, created_at
+                FROM operator_campaign_events
+                WHERE event_id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+        return self._operator_campaign_event_from_row(row) if row else None
+
+    def list_operator_campaign_events(
+        self,
+        *,
+        campaign_id: str | None = None,
+        assignment_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        where: list[str] = []
+        params: list[Any] = []
+        if campaign_id:
+            where.append("campaign_id = ?")
+            params.append(campaign_id)
+        if assignment_id:
+            where.append("assignment_id = ?")
+            params.append(assignment_id)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        query = f"""
+            SELECT event_id, campaign_id, assignment_id, operator_agent_id,
+                   target_agent_id, event_type, summary, detail_json,
+                   report_id, command_id, created_at
+            FROM operator_campaign_events
+            {clause}
+            ORDER BY created_at DESC, event_id DESC
+            LIMIT ?
+        """
+        params.append(safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._operator_campaign_event_from_row(row) for row in rows]
+
+    def create_operator_fork(
+        self,
+        *,
+        logical_operator_agent_id: str,
+        fork_agent_id: str,
+        source_caller_agent_id: str,
+        source_codex_session_id: str,
+        cwd: str,
+        fork_codex_session_id: str | None = None,
+        campaign_id: str | None = None,
+        codex_home: str | None = None,
+        codex_host_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        status: str = "starting",
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        existing = self.get_operator_fork_for_source(
+            logical_operator_agent_id=logical_operator_agent_id,
+            source_caller_agent_id=source_caller_agent_id,
+            source_codex_session_id=source_codex_session_id,
+        )
+        if existing is not None:
+            updated = self.update_operator_fork(
+                existing["operator_fork_id"],
+                fork_agent_id=fork_agent_id,
+                fork_codex_session_id=fork_codex_session_id,
+                campaign_id=campaign_id,
+                cwd=cwd,
+                codex_home=codex_home,
+                codex_host_id=codex_host_id,
+                tmux_pane_id=tmux_pane_id,
+                status=status,
+                summary=summary,
+                metadata=metadata,
+                touch=True,
+            )
+            if updated is None:
+                raise RuntimeError("operator fork update failed")
+            return updated
+
+        operator_fork_id = str(uuid.uuid4())
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_forks
+                    (operator_fork_id, logical_operator_agent_id, fork_agent_id,
+                     source_caller_agent_id, source_codex_session_id,
+                     fork_codex_session_id, campaign_id, cwd, codex_home,
+                     codex_host_id, tmux_pane_id, status, summary,
+                     metadata_json, created_at, updated_at, last_used_at,
+                     completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    operator_fork_id,
+                    logical_operator_agent_id,
+                    fork_agent_id,
+                    source_caller_agent_id,
+                    source_codex_session_id,
+                    fork_codex_session_id,
+                    campaign_id,
+                    cwd,
+                    codex_home,
+                    codex_host_id,
+                    tmux_pane_id,
+                    status,
+                    summary,
+                    json.dumps(metadata or {}),
+                    current,
+                    current,
+                    current,
+                ),
+            )
+        fork = self.get_operator_fork(operator_fork_id)
+        if fork is None:
+            raise RuntimeError("operator fork insert failed")
+        return fork
+
+    def get_operator_fork(self, operator_fork_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT operator_fork_id, logical_operator_agent_id, fork_agent_id,
+                       source_caller_agent_id, source_codex_session_id,
+                       fork_codex_session_id, campaign_id, cwd, codex_home,
+                       codex_host_id, tmux_pane_id, status, summary,
+                       metadata_json, created_at, updated_at, last_used_at,
+                       completed_at
+                FROM operator_forks
+                WHERE operator_fork_id = ?
+                """,
+                (operator_fork_id,),
+            ).fetchone()
+        return self._operator_fork_from_row(row) if row else None
+
+    def get_operator_fork_for_source(
+        self,
+        *,
+        logical_operator_agent_id: str,
+        source_caller_agent_id: str,
+        source_codex_session_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT operator_fork_id, logical_operator_agent_id, fork_agent_id,
+                       source_caller_agent_id, source_codex_session_id,
+                       fork_codex_session_id, campaign_id, cwd, codex_home,
+                       codex_host_id, tmux_pane_id, status, summary,
+                       metadata_json, created_at, updated_at, last_used_at,
+                       completed_at
+                FROM operator_forks
+                WHERE logical_operator_agent_id = ?
+                  AND source_caller_agent_id = ?
+                  AND source_codex_session_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (
+                    logical_operator_agent_id,
+                    source_caller_agent_id,
+                    source_codex_session_id,
+                ),
+            ).fetchone()
+        return self._operator_fork_from_row(row) if row else None
+
+    def get_operator_fork_for_agent(self, fork_agent_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT operator_fork_id, logical_operator_agent_id, fork_agent_id,
+                       source_caller_agent_id, source_codex_session_id,
+                       fork_codex_session_id, campaign_id, cwd, codex_home,
+                       codex_host_id, tmux_pane_id, status, summary,
+                       metadata_json, created_at, updated_at, last_used_at,
+                       completed_at
+                FROM operator_forks
+                WHERE fork_agent_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (fork_agent_id,),
+            ).fetchone()
+        return self._operator_fork_from_row(row) if row else None
+
+    def list_operator_forks(
+        self,
+        *,
+        logical_operator_agent_id: str | None = None,
+        source_caller_agent_id: str | None = None,
+        campaign_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        include_edges: bool = True,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        where: list[str] = []
+        params: list[Any] = []
+        if logical_operator_agent_id:
+            where.append("logical_operator_agent_id = ?")
+            params.append(logical_operator_agent_id)
+        if source_caller_agent_id:
+            where.append("source_caller_agent_id = ?")
+            params.append(source_caller_agent_id)
+        if campaign_id:
+            where.append("campaign_id = ?")
+            params.append(campaign_id)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        query = f"""
+            SELECT operator_fork_id, logical_operator_agent_id, fork_agent_id,
+                   source_caller_agent_id, source_codex_session_id,
+                   fork_codex_session_id, campaign_id, cwd, codex_home,
+                   codex_host_id, tmux_pane_id, status, summary,
+                   metadata_json, created_at, updated_at, last_used_at,
+                   completed_at
+            FROM operator_forks
+            {clause}
+            ORDER BY updated_at DESC, operator_fork_id ASC
+            LIMIT ?
+        """
+        params.append(safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        forks = [self._operator_fork_from_row(row) for row in rows]
+        if include_edges:
+            for fork in forks:
+                fork["edges"] = self.list_operator_fork_edges(
+                    operator_fork_id=fork["operator_fork_id"]
+                )
+        return forks
+
+    def update_operator_fork(
+        self,
+        operator_fork_id: str,
+        *,
+        fork_agent_id: str | None = None,
+        fork_codex_session_id: str | None = None,
+        campaign_id: str | None = None,
+        cwd: str | None = None,
+        codex_home: str | None = None,
+        codex_host_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        status: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        touch: bool = False,
+        complete: bool | None = None,
+    ) -> dict[str, Any] | None:
+        fork = self.get_operator_fork(operator_fork_id)
+        if fork is None:
+            return None
+        current = now_ts()
+        completed_at = (
+            current
+            if complete is True
+            else None
+            if complete is False
+            else fork.get("completed_at")
+        )
+        merged_metadata = dict(fork.get("metadata") or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_forks
+                SET fork_agent_id = COALESCE(?, fork_agent_id),
+                    fork_codex_session_id = COALESCE(?, fork_codex_session_id),
+                    campaign_id = COALESCE(?, campaign_id),
+                    cwd = COALESCE(?, cwd),
+                    codex_home = COALESCE(?, codex_home),
+                    codex_host_id = COALESCE(?, codex_host_id),
+                    tmux_pane_id = COALESCE(?, tmux_pane_id),
+                    status = COALESCE(?, status),
+                    summary = COALESCE(?, summary),
+                    metadata_json = ?,
+                    updated_at = ?,
+                    last_used_at = CASE WHEN ? THEN ? ELSE last_used_at END,
+                    completed_at = ?
+                WHERE operator_fork_id = ?
+                """,
+                (
+                    fork_agent_id,
+                    fork_codex_session_id,
+                    campaign_id,
+                    cwd,
+                    codex_home,
+                    codex_host_id,
+                    tmux_pane_id,
+                    status,
+                    summary,
+                    json.dumps(merged_metadata),
+                    current,
+                    int(touch),
+                    current,
+                    completed_at,
+                    operator_fork_id,
+                ),
+            )
+        return self.get_operator_fork(operator_fork_id) if cursor.rowcount else None
+
+    def create_operator_fork_edge(
+        self,
+        *,
+        from_fork_id: str,
+        to_fork_id: str,
+        edge_type: str,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_type = str(edge_type or "").strip().lower()
+        if normalized_type not in {"related", "depends_on", "blocks"}:
+            raise ValueError("edge_type must be related, depends_on, or blocks")
+        if from_fork_id == to_fork_id:
+            raise ValueError("operator fork edge cannot point to itself")
+        current = now_ts()
+        with self.connect() as conn:
+            if self._operator_fork_edge_path_exists(conn, to_fork_id, from_fork_id):
+                raise ValueError("operator fork edge would create a cycle")
+            existing = conn.execute(
+                """
+                SELECT edge_id
+                FROM operator_fork_edges
+                WHERE from_fork_id = ? AND to_fork_id = ? AND edge_type = ?
+                """,
+                (from_fork_id, to_fork_id, normalized_type),
+            ).fetchone()
+            if existing is not None:
+                edge_id = str(existing["edge_id"])
+                conn.execute(
+                    """
+                    UPDATE operator_fork_edges
+                    SET summary = COALESCE(?, summary),
+                        metadata_json = ?
+                    WHERE edge_id = ?
+                    """,
+                    (summary, json.dumps(metadata or {}), edge_id),
+                )
+            else:
+                edge_id = str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO operator_fork_edges
+                        (edge_id, from_fork_id, to_fork_id, edge_type,
+                         summary, metadata_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        edge_id,
+                        from_fork_id,
+                        to_fork_id,
+                        normalized_type,
+                        summary,
+                        json.dumps(metadata or {}),
+                        current,
+                    ),
+                )
+        edge = self.get_operator_fork_edge(edge_id)
+        if edge is None:
+            raise RuntimeError("operator fork edge insert failed")
+        return edge
+
+    @staticmethod
+    def _operator_fork_edge_path_exists(
+        conn: sqlite3.Connection,
+        start_fork_id: str,
+        target_fork_id: str,
+    ) -> bool:
+        pending = [start_fork_id]
+        seen: set[str] = set()
+        while pending:
+            fork_id = pending.pop()
+            if fork_id == target_fork_id:
+                return True
+            if fork_id in seen:
+                continue
+            seen.add(fork_id)
+            rows = conn.execute(
+                """
+                SELECT to_fork_id
+                FROM operator_fork_edges
+                WHERE from_fork_id = ?
+                """,
+                (fork_id,),
+            ).fetchall()
+            pending.extend(str(row["to_fork_id"]) for row in rows)
+        return False
+
+    def get_operator_fork_edge(self, edge_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT edge_id, from_fork_id, to_fork_id, edge_type,
+                       summary, metadata_json, created_at
+                FROM operator_fork_edges
+                WHERE edge_id = ?
+                """,
+                (edge_id,),
+            ).fetchone()
+        return self._operator_fork_edge_from_row(row) if row else None
+
+    def list_operator_fork_edges(
+        self,
+        *,
+        operator_fork_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        where = ""
+        params: list[Any] = []
+        if operator_fork_id:
+            where = "WHERE from_fork_id = ? OR to_fork_id = ?"
+            params.extend([operator_fork_id, operator_fork_id])
+        query = f"""
+            SELECT edge_id, from_fork_id, to_fork_id, edge_type,
+                   summary, metadata_json, created_at
+            FROM operator_fork_edges
+            {where}
+            ORDER BY created_at DESC, edge_id DESC
+            LIMIT ?
+        """
+        params.append(safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._operator_fork_edge_from_row(row) for row in rows]
+
+    def create_command(
+        self,
+        request: CommandCreateRequest,
+        *,
+        status: str = "queued",
+    ) -> dict[str, Any]:
         command_id = str(uuid.uuid4())
         current = now_ts()
         with self.connect() as conn:
@@ -948,13 +1905,14 @@ class Store:
                 """
                 INSERT INTO commands
                     (command_id, agent_id, type, payload_json, status, created_at)
-                VALUES (?, ?, ?, ?, 'queued', ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     command_id,
                     request.agent_id,
                     request.type,
                     json.dumps(request.payload),
+                    status,
                     current,
                 ),
             )
@@ -1052,6 +2010,7 @@ class Store:
     @staticmethod
     def _agent_from_row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
+        data["agent_type"] = Store._normalized_agent_type(data.get("agent_type"))
         data["pbx_active"] = bool(data["pbx_active"])
         data["starred"] = data.get("starred_at") is not None
         data["metadata"] = json.loads(data.pop("metadata_json"))
@@ -1070,6 +2029,7 @@ class Store:
         data["latest_report_needs_input"] = False
         data["latest_report_plan_option_count"] = 0
         data["latest_report_action_required"] = False
+        data["active_campaign_count"] = 0
         return data
 
     @staticmethod
@@ -1141,6 +2101,35 @@ class Store:
         )
 
     @staticmethod
+    def _add_campaign_summary(
+        conn: sqlite3.Connection, agent: dict[str, Any]
+    ) -> None:
+        agent_id = agent["agent_id"]
+        if agent.get("agent_type") == "operator":
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS active_count
+                FROM operator_campaigns
+                WHERE operator_agent_id = ?
+                  AND status NOT IN ('complete', 'completed', 'blocked',
+                                     'failed', 'canceled')
+                """,
+                (agent_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS active_count
+                FROM operator_campaign_assignments
+                WHERE target_agent_id = ?
+                  AND state NOT IN ('complete', 'completed', 'blocked',
+                                    'failed', 'canceled')
+                """,
+                (agent_id,),
+            ).fetchone()
+        agent["active_campaign_count"] = int(row["active_count"] or 0) if row else 0
+
+    @staticmethod
     def _add_usage_summary(
         conn: sqlite3.Connection, agent: dict[str, Any]
     ) -> None:
@@ -1204,6 +2193,12 @@ class Store:
         data = dict(row)
         data["needs_input"] = bool(data["needs_input"])
         data["plan_options"] = json.loads(data.pop("plan_options_json"))
+        metadata_json = data.pop("metadata_json", "{}")
+        try:
+            metadata = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
         return data
 
     @staticmethod
@@ -1233,6 +2228,54 @@ class Store:
         return dict(row)
 
     @staticmethod
+    def _operator_campaign_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["criteria"] = json.loads(data.pop("criteria_json"))
+        data["assignments"] = []
+        data["events"] = []
+        return data
+
+    @staticmethod
+    def _operator_assignment_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["criteria"] = json.loads(data.pop("criteria_json"))
+        return data
+
+    @staticmethod
+    def _operator_campaign_event_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        detail_json = data.pop("detail_json")
+        try:
+            detail = json.loads(detail_json)
+        except json.JSONDecodeError:
+            detail = {}
+        data["detail"] = detail if isinstance(detail, dict) else {}
+        return data
+
+    @staticmethod
+    def _operator_fork_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        metadata_json = data.pop("metadata_json")
+        try:
+            metadata = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        data["edges"] = []
+        return data
+
+    @staticmethod
+    def _operator_fork_edge_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        metadata_json = data.pop("metadata_json")
+        try:
+            metadata = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return data
+
+    @staticmethod
     def _thread_report(report: dict[str, Any]) -> dict[str, Any]:
         return {
             "item_id": f"report:{report['report_id']}",
@@ -1247,6 +2290,7 @@ class Store:
                 "project": report["project"],
                 "needs_input": report["needs_input"],
                 "plan_options": report["plan_options"],
+                "report_metadata": report.get("metadata", {}),
             },
         }
 

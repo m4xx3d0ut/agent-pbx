@@ -123,7 +123,8 @@ source .venv/bin/activate
 source ./local.env
 agent-pbx mcp restart
 agent-pbx mcp status
-codex mcp add agent-pbx --url "$AGENT_PBX_MCP_URL"
+codex mcp add agent-pbx --url "$AGENT_PBX_MCP_URL" \
+  --bearer-token-env-var AGENT_PBX_TOKEN
 agent-pbx tui
 ```
 
@@ -181,7 +182,8 @@ lifecycle management. Use `agent-pbx mcp serve` or the compatibility command
 metadata path, and a Codex connection command:
 
 ```bash
-codex mcp add agent-pbx --url http://127.0.0.1:8765/mcp
+codex mcp add agent-pbx --url http://127.0.0.1:8765/mcp \
+  --bearer-token-env-var AGENT_PBX_TOKEN
 ```
 
 If the requested port is already in use, `agent-pbx mcp start` fails fast. Stop
@@ -270,6 +272,41 @@ The TUI `Use` column shows a rough PBX-visible usage gauge per agent for the
 last hour: estimated tokens plus poll, report, and ping counts. Estimates use
 payload text size and fixed weights for polling overhead; they are not exact
 Codex billing, but they identify noisy agents and verbose check-ins.
+
+## Operator Agents and Campaigns
+
+Agent PBX supports two agent types. Existing sessions default to
+`agent_type="caller"`. The TUI can also start an `agent_type="operator"` from a
+caller by forking that caller's current Codex session with `codex fork`. A
+logical operator can own one forked operator session per caller session, letting
+it track each caller independently while preserving the caller's transcript
+context.
+
+Caller sessions must register `metadata.cwd` and `metadata.codex_session_id`
+before Agent PBX can create a fork. V1 fork creation is local-only: if a caller
+session is on another host, Agent PBX records a blocked fork state instead of
+guessing or using `codex fork --last`.
+
+Campaign state is stored in dedicated SQLite tables for fast TUI/API queries:
+`operator_campaigns`, `operator_campaign_assignments`, and
+`operator_campaign_events`. Fork state and optional planning DAG links are
+stored in `operator_forks` and `operator_fork_edges`. Reports and commands still
+provide the audit trail and link back to campaigns with report metadata and
+command payload fields such as `campaign_id`, `assignment_id`,
+`operator_agent_id`, and `operator_fork_id`.
+
+The operator loop is:
+
+1. Call `pbx_operator_runbook`.
+2. Start a campaign with title, objective, criteria, and one assignment per
+   caller.
+3. On first interaction with each caller, create or reuse the caller's forked
+   operator session.
+4. Dispatch and follow up through the fork session. `delivery="auto"` queues
+   nohup forks and uses tmux for report-mode forks.
+5. Review caller and fork threads, send follow-ups, and report each assignment as
+   complete, blocked, or needing follow-up.
+6. Finish the campaign when all assignments have explicit final states.
 
 ## Planned Local Validation
 
@@ -503,6 +540,14 @@ gives Codex both note bodies in one message. If a referenced note cannot be
 resolved inside the selected project scope, the prompt is not sent. Reference
 tokens are exact note slugs; use `Tab` completion when title wording is unclear.
 
+Operator prompts can reference caller agents with `@caller:`. Select an
+operator agent, type `@caller:project` or `@caller:Backend`, and press `Tab` to
+complete known caller agents from the Agents table. On send, a single
+`@caller:` reference creates or reuses that caller's fork and routes the prompt
+to the forked operator session. Agent PBX also appends a `Caller Agent
+References` Markdown section with the exact `agent_id`, project, PBX mode,
+status, active campaign count, and tmux pane when known.
+
 The `Joplin` tab lists notes from the selected project folder and its
 descendants under the Agent PBX notebook. That means notes created directly in
 Joplin under the project can be opened, edited, renamed, saved, deleted, and
@@ -603,13 +648,17 @@ top of the Agents list. Starred agents are sorted by latest activity above
 unstarred agents, which are also sorted by latest activity. Star selections
 sync through the Agent PBX server so a workstation TUI and a remote watch TUI
 show the same pinned agents; the TUI settings file keeps a local cache/fallback.
+Press `h` or `Show Hidden` to include hidden agents in the Agents table; hidden
+rows show a `Hidden` marker. Select a hidden row and press `H` or `Unhide` to
+restore it without waiting for the agent to reconnect.
 
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/tmux`, `/workerbee`,
 `/pr`, `/pr refresh`, `/pr review`, `/pr validate`, `/pr url`, `/pr merge`,
 `/issue`, `/issue refresh`, `/issue mitigate`, `/issue url`, `/issue clear`,
 configured `/joplin`, `/joplin new`, `/joplin rename`, `/joplin delete`,
-`/joplin copy`, `/joplin copy report`, `/theme minimal`, and `/layout compact`.
+`/joplin copy`, `/joplin copy report`, `/show hidden agents`, `/unhide agent`,
+`/theme minimal`, and `/layout compact`.
 `/cancel` marks a stale or abandoned session canceled in PBX; it does not send
 an Escape key. Use `/esc` when you need a real Escape key event. In tmux direct
 mode, `/esc` sends `tmux send-keys Escape` to the selected Codex pane. Outside
@@ -621,7 +670,8 @@ nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete project paths. Type `@joplin:` and
 press `Tab` to complete project-scoped Joplin note titles from cache, with lazy
-loading on first use. Repeated `Tab` cycles matches; exact local
+loading on first use. Type `@caller:` while an operator is selected to complete
+caller agent references. Repeated `Tab` cycles matches; exact local
 commands such as `/esc` or `/theme minimal` execute locally on `Enter` instead
 of being sent to the agent.
 
@@ -800,7 +850,8 @@ payload/result in the thread detail pane.
 Use `Hide Agent` or press `d` from the Agents list to remove a stale agent from
 the view while keeping its thread history. Use `Purge Agent` or press `D` to
 hide the agent and delete its reports, queued commands, command history, and
-poll stats. Hidden agents reappear when they register again.
+poll stats. Hidden agents reappear when they register again, or when you enable
+`Show Hidden` and use `Unhide`.
 
 When a report includes `plan_options`, the Latest and Thread tabs show a
 plan-choice panel. Agents must set `needs_input=true` and

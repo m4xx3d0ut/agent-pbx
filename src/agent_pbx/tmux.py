@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 from typing import Any, Mapping, Sequence
@@ -25,6 +26,7 @@ TMUX_PANE_FORMAT = "\t".join(
 )
 DEFAULT_SUBMIT_DELAY_SECONDS = 0.08
 FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
+ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,84 @@ def list_panes(tmux_bin: str = "tmux") -> list[TmuxPane]:
         if pane is not None:
             panes.append(pane)
     return panes
+
+
+def session_exists(session_name: str, *, tmux_bin: str = "tmux") -> bool:
+    result = subprocess.run(
+        [tmux_bin, "has-session", "-t", session_name],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def launch_pane(
+    *,
+    session_name: str,
+    window_name: str,
+    command: str,
+    cwd: str | None = None,
+    env: Mapping[str, str] | None = None,
+    tmux_bin: str = "tmux",
+) -> str:
+    args: list[str]
+    if session_exists(session_name, tmux_bin=tmux_bin):
+        args = [
+            tmux_bin,
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            session_name,
+            "-n",
+            window_name,
+        ]
+    else:
+        args = [
+            tmux_bin,
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-s",
+            session_name,
+            "-n",
+            window_name,
+        ]
+    if cwd:
+        args.extend(["-c", cwd])
+    if env:
+        for key, value in env.items():
+            if not ENV_KEY_PATTERN.match(key):
+                raise ValueError(f"invalid tmux environment key: {key!r}")
+            args.extend(["-e", f"{key}={value}"])
+    args.append(command)
+    result = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "tmux launch failed").strip()
+        raise RuntimeError(message)
+    pane_id = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    if not pane_id:
+        raise RuntimeError("tmux did not return a launched pane id")
+    return pane_id
+
+
+def kill_pane(target: str, *, tmux_bin: str = "tmux") -> None:
+    result = subprocess.run(
+        [tmux_bin, "kill-pane", "-t", target],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "tmux kill-pane failed").strip()
+        raise RuntimeError(message)
 
 
 def capture_start_arg(lines: int) -> str:

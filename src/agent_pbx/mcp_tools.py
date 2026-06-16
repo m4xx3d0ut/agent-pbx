@@ -11,12 +11,14 @@ from .agent import runbook_payload
 from .config import ServerConfig
 from .joplin import JoplinService
 from .issues import IssueService
+from .operator import OperatorService, operator_runbook_payload
 from .polling import poll_commands as poll_commands_until
 from .pull_requests import PullRequestService
 from .schemas import (
     AgentRegisterRequest,
     CommandAckRequest,
     CommandCreateRequest,
+    OperatorAssignmentCreate,
     ReportCreateRequest,
 )
 from .security import constant_time_equal
@@ -42,6 +44,7 @@ def build_mcp_server(
         streamable_http_path="/",
         stateless_http=True,
     )
+    operator_service = OperatorService(store)
 
     @mcp.tool()
     def pbx_agent_runbook() -> dict[str, Any]:
@@ -49,10 +52,85 @@ def build_mcp_server(
         return runbook_payload()
 
     @mcp.tool()
+    def pbx_operator_runbook() -> dict[str, Any]:
+        """Return Agent PBX operator-agent campaign guidance."""
+        return operator_runbook_payload()
+
+    @mcp.tool()
+    def pbx_operator_list_agents(agent_type: str = "caller") -> list[dict[str, Any]]:
+        """List Agent PBX agents visible to operator workflows."""
+        return operator_service.list_agents(agent_type=agent_type)
+
+    @mcp.tool()
+    def pbx_operator_get_thread(agent_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Return a caller or operator thread for operator review."""
+        return operator_service.get_thread(agent_id, limit=limit)
+
+    @mcp.tool()
+    def pbx_operator_list_forks(
+        operator_agent_id: str | None = None,
+        source_caller_agent_id: str | None = None,
+        campaign_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List forked operator sessions tracked for caller session coordination."""
+        return operator_service.list_forks(
+            operator_agent_id=operator_agent_id,
+            source_caller_agent_id=source_caller_agent_id,
+            campaign_id=campaign_id,
+            status=status,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_ensure_fork(
+        operator_agent_id: str,
+        source_caller_agent_id: str,
+        fork_agent_id: str | None = None,
+        campaign_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        fork_codex_session_id: str | None = None,
+        status: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Ensure a per-caller operator fork record exists."""
+        return operator_service.ensure_fork(
+            operator_agent_id=operator_agent_id,
+            source_caller_agent_id=source_caller_agent_id,
+            fork_agent_id=fork_agent_id,
+            campaign_id=campaign_id,
+            tmux_pane_id=tmux_pane_id,
+            fork_codex_session_id=fork_codex_session_id,
+            status=status,
+            summary=summary,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_link_forks(
+        from_fork_id: str,
+        to_fork_id: str,
+        edge_type: str,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a DAG edge between operator forks."""
+        return operator_service.link_forks(
+            from_fork_id=from_fork_id,
+            to_fork_id=to_fork_id,
+            edge_type=edge_type,
+            summary=summary,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
     def pbx_register_agent(
         agent_id: str,
         project: str,
         name: str | None = None,
+        agent_type: str = "caller",
         metadata: dict[str, Any] | None = None,
         pbx_active: bool = True,
     ) -> dict[str, Any]:
@@ -62,13 +140,19 @@ def build_mcp_server(
                 agent_id=agent_id,
                 project=project,
                 name=name,
+                agent_type=agent_type,  # type: ignore[arg-type]
                 metadata=metadata or {},
                 pbx_active=pbx_active,
             )
         )
         store.append_event(
             "agent_registered",
-            {"agent_id": agent_id, "project": project, "pbx_active": pbx_active},
+            {
+                "agent_id": agent_id,
+                "project": project,
+                "agent_type": agent.get("agent_type", "caller"),
+                "pbx_active": pbx_active,
+            },
             agent_id,
         )
         logger.debug("mcp.tool.finish name=pbx_register_agent agent_id=%s", agent_id)
@@ -106,6 +190,7 @@ def build_mcp_server(
         status: str = "done",
         needs_input: bool = False,
         plan_options: list[str | dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         logger.debug("mcp.tool.start name=pbx_report_turn agent_id=%s status=%s", agent_id, status)
         if store.get_agent(agent_id) is None:
@@ -119,6 +204,7 @@ def build_mcp_server(
                 detail=detail,
                 needs_input=needs_input,
                 plan_options=plan_options or [],
+                metadata=metadata or {},
             ),
         )
         store.append_event(
@@ -139,6 +225,99 @@ def build_mcp_server(
             report["report_id"],
         )
         return report
+
+    @mcp.tool()
+    def pbx_operator_start_campaign(
+        operator_agent_id: str,
+        title: str,
+        objective: str,
+        criteria: list[str] | None = None,
+        assignments: list[dict[str, Any]] | None = None,
+        delivery: str = "auto",
+    ) -> dict[str, Any]:
+        """Start a tracked operator campaign and dispatch caller assignments."""
+        parsed_assignments = [
+            OperatorAssignmentCreate(**assignment)
+            for assignment in (assignments or [])
+        ]
+        return operator_service.start_campaign(
+            operator_agent_id=operator_agent_id,
+            title=title,
+            objective=objective,
+            criteria=criteria or [],
+            assignments=parsed_assignments,
+            delivery=delivery,
+        )
+
+    @mcp.tool()
+    def pbx_operator_send_followup(
+        operator_agent_id: str,
+        campaign_id: str,
+        target_agent_id: str,
+        message: str,
+        assignment_id: str | None = None,
+        delivery: str = "auto",
+    ) -> dict[str, Any]:
+        """Send a tracked campaign follow-up to a caller agent."""
+        return operator_service.send_followup(
+            operator_agent_id=operator_agent_id,
+            campaign_id=campaign_id,
+            target_agent_id=target_agent_id,
+            message=message,
+            assignment_id=assignment_id,
+            delivery=delivery,
+        )
+
+    @mcp.tool()
+    def pbx_operator_campaign_status(
+        operator_agent_id: str | None = None,
+        campaign_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return tracked operator campaign state."""
+        return operator_service.campaign_status(
+            operator_agent_id=operator_agent_id,
+            campaign_id=campaign_id,
+            status=status,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_report_assignment(
+        operator_agent_id: str,
+        campaign_id: str,
+        assignment_id: str,
+        state: str,
+        summary: str,
+        detail: str,
+    ) -> dict[str, Any]:
+        """Record operator review state for a campaign assignment."""
+        return operator_service.report_assignment(
+            operator_agent_id=operator_agent_id,
+            campaign_id=campaign_id,
+            assignment_id=assignment_id,
+            state=state,
+            summary=summary,
+            detail=detail,
+        )
+
+    @mcp.tool()
+    def pbx_operator_finish_campaign(
+        operator_agent_id: str,
+        campaign_id: str,
+        status: str,
+        summary: str,
+        detail: str,
+    ) -> dict[str, Any]:
+        """Record final state for an operator campaign."""
+        return operator_service.finish_campaign(
+            operator_agent_id=operator_agent_id,
+            campaign_id=campaign_id,
+            status=status,
+            summary=summary,
+            detail=detail,
+        )
 
     @mcp.tool()
     def pbx_joplin_status() -> dict[str, Any]:

@@ -44,6 +44,7 @@ from .issues import (
     IssueService,
 )
 from .mcp_tools import create_mcp_asgi_app
+from .operator import OperatorService, operator_runbook_payload
 from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .polling import poll_commands as poll_commands_until
 from .pull_requests import (
@@ -52,6 +53,7 @@ from .pull_requests import (
     PullRequestService,
 )
 from .schemas import (
+    AgentActiveRequest,
     AgentRegisterRequest,
     AgentResponse,
     CommandAckRequest,
@@ -71,6 +73,18 @@ from .schemas import (
     JoplinStatusResponse,
     JoplinSyncJobResponse,
     JoplinSyncStatusResponse,
+    OperatorCampaignAssignmentResponse,
+    OperatorCampaignFinishRequest,
+    OperatorCampaignListResponse,
+    OperatorCampaignResponse,
+    OperatorCampaignStartRequest,
+    OperatorForkEdgeCreateRequest,
+    OperatorForkEdgeResponse,
+    OperatorForkEnsureRequest,
+    OperatorForkListResponse,
+    OperatorForkResponse,
+    OperatorFollowupRequest,
+    OperatorAssignmentReportRequest,
     IssueActionRequest,
     IssueActionResponse,
     IssueClearRequest,
@@ -210,6 +224,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     )
     app.state.pull_requests = pull_requests
     app.state.issues = issues
+    app.state.operator_service = OperatorService(store)
     if resolved_config.debug:
         app.add_middleware(DebugRequestLogMiddleware)
     app.mount("/mcp", mcp_asgi_app)
@@ -233,7 +248,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         agent = store.register_agent(request)
         store.append_event(
             "agent_registered",
-            {"agent_id": request.agent_id, "project": request.project},
+            {
+                "agent_id": request.agent_id,
+                "project": request.project,
+                "agent_type": request.agent_type,
+            },
             request.agent_id,
         )
         return agent
@@ -243,8 +262,57 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         response_model=list[AgentResponse],
         dependencies=[Depends(require_token)],
     )
-    async def list_agents(store: Store = Depends(get_store)) -> list[dict[str, object]]:
-        return store.list_agents()
+    async def list_agents(
+        include_hidden: bool = False,
+        store: Store = Depends(get_store),
+    ) -> list[dict[str, object]]:
+        return store.list_agents(include_hidden=include_hidden)
+
+    @app.put(
+        "/v1/agents/{agent_id}/pbx-active",
+        response_model=AgentResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def set_agent_pbx_active(
+        agent_id: str,
+        request: AgentActiveRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.set_agent_pbx_active(agent_id, request.active)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        store.append_event(
+            "agent_pbx_active_changed",
+            {
+                "agent_id": agent_id,
+                "project": agent["project"],
+                "pbx_active": agent["pbx_active"],
+            },
+            agent_id,
+        )
+        return agent
+
+    @app.put(
+        "/v1/agents/{agent_id}/unhide",
+        response_model=AgentResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def unhide_agent(
+        agent_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.unhide_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        store.append_event(
+            "agent_unhidden",
+            {
+                "agent_id": agent_id,
+                "project": agent["project"],
+            },
+            agent_id,
+        )
+        return agent
 
     @app.delete(
         "/v1/agents/{agent_id}",
@@ -1196,6 +1264,184 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         files = request.app.state.files
         return await asyncio.to_thread(files.preview_for_agent, agent, path=path)
 
+    @app.get(
+        "/v1/operator/runbook",
+        dependencies=[Depends(require_token)],
+    )
+    async def get_operator_runbook() -> dict[str, object]:
+        return operator_runbook_payload()
+
+    @app.get(
+        "/v1/operator/forks",
+        response_model=OperatorForkListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_forks(
+        request: Request,
+        operator_agent_id: str | None = None,
+        source_caller_agent_id: str | None = None,
+        campaign_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        forks = await asyncio.to_thread(
+            operator_service.list_forks,
+            operator_agent_id=operator_agent_id,
+            source_caller_agent_id=source_caller_agent_id,
+            campaign_id=campaign_id,
+            status=status,
+            limit=limit,
+        )
+        return {"forks": forks}
+
+    @app.post(
+        "/v1/operator/forks/ensure",
+        response_model=OperatorForkResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def ensure_operator_fork(
+        payload: OperatorForkEnsureRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.ensure_fork,
+            operator_agent_id=payload.operator_agent_id,
+            source_caller_agent_id=payload.source_caller_agent_id,
+            fork_agent_id=payload.fork_agent_id,
+            campaign_id=payload.campaign_id,
+            tmux_pane_id=payload.tmux_pane_id,
+            fork_codex_session_id=payload.fork_codex_session_id,
+            status=payload.status,
+            summary=payload.summary,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/fork-edges",
+        response_model=OperatorForkEdgeResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def link_operator_forks(
+        payload: OperatorForkEdgeCreateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.link_forks,
+            from_fork_id=payload.from_fork_id,
+            to_fork_id=payload.to_fork_id,
+            edge_type=payload.edge_type,
+            summary=payload.summary,
+            metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/campaigns",
+        response_model=OperatorCampaignListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_campaigns(
+        request: Request,
+        operator_agent_id: str | None = None,
+        campaign_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        campaigns = await asyncio.to_thread(
+            operator_service.campaign_status,
+            operator_agent_id=operator_agent_id,
+            campaign_id=campaign_id,
+            status=status,
+            limit=limit,
+        )
+        return {"campaigns": campaigns}
+
+    @app.post(
+        "/v1/operator/campaigns",
+        response_model=OperatorCampaignResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def start_operator_campaign(
+        payload: OperatorCampaignStartRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.start_campaign,
+            operator_agent_id=payload.operator_agent_id,
+            title=payload.title,
+            objective=payload.objective,
+            criteria=payload.criteria,
+            assignments=payload.assignments,
+            delivery=payload.delivery,
+        )
+
+    @app.post(
+        "/v1/operator/campaigns/{campaign_id}/followups",
+        response_model=CommandResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def send_operator_campaign_followup(
+        campaign_id: str,
+        payload: OperatorFollowupRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.send_followup,
+            operator_agent_id=payload.operator_agent_id,
+            campaign_id=campaign_id,
+            target_agent_id=payload.target_agent_id,
+            message=payload.message,
+            assignment_id=payload.assignment_id,
+            delivery=payload.delivery,
+        )
+
+    @app.post(
+        "/v1/operator/campaigns/{campaign_id}/assignments/{assignment_id}/report",
+        response_model=OperatorCampaignAssignmentResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def report_operator_campaign_assignment(
+        campaign_id: str,
+        assignment_id: str,
+        payload: OperatorAssignmentReportRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.report_assignment,
+            operator_agent_id=payload.operator_agent_id,
+            campaign_id=campaign_id,
+            assignment_id=assignment_id,
+            state=payload.state,
+            summary=payload.summary,
+            detail=payload.detail,
+        )
+
+    @app.post(
+        "/v1/operator/campaigns/{campaign_id}/finish",
+        response_model=OperatorCampaignResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def finish_operator_campaign(
+        campaign_id: str,
+        payload: OperatorCampaignFinishRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.finish_campaign,
+            operator_agent_id=payload.operator_agent_id,
+            campaign_id=campaign_id,
+            status=payload.status,
+            summary=payload.summary,
+            detail=payload.detail,
+        )
+
     @app.post(
         "/v1/commands",
         response_model=CommandResponse,
@@ -1462,6 +1708,32 @@ async def run_issue_call(
         raise HTTPException(
             status_code=response_status,
             detail=exc.as_error(),
+        ) from exc
+
+
+async def run_operator_call(
+    func: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    try:
+        return await asyncio.to_thread(func, *args, **kwargs)
+    except ValueError as exc:
+        message = str(exc)
+        response_status = (
+            status.HTTP_409_CONFLICT
+            if "tmux" in message or "delivery" in message
+            else status.HTTP_400_BAD_REQUEST
+        )
+        if "not registered" in message or "not found" in message:
+            response_status = status.HTTP_404_NOT_FOUND
+        raise HTTPException(
+            status_code=response_status,
+            detail={
+                "code": "OPERATOR_CAMPAIGN_ERROR",
+                "message": message,
+                "retryable": response_status == status.HTTP_409_CONFLICT,
+            },
         ) from exc
 
 

@@ -16,6 +16,8 @@ def agent_instructions_markdown() -> str:
 When the operator asks you to use Agent PBX, register this session with
 `pbx_register_agent` using a stable `agent_id`, the current project name, and
 metadata containing the absolute `cwd`, task goal, and `pbx_mode="report"`.
+Include `metadata.codex_session_id` when the current Codex session id is known;
+operator fork creation blocks until callers expose that session id.
 Registration defaults `pbx_active=true`; treat that as "Use Agent PBX" being on
 for this session until the operator explicitly asks you to stop using PBX or
 starts a new session.
@@ -132,6 +134,13 @@ helpers to queue work for agents. Do not use it as normal agent-side behavior
 or to self-queue work; in nohup mode, receive queued work through
 `pbx_poll_commands` instead.
 
+Agent PBX supports two agent types. The default `agent_type="caller"` is a
+project-working agent that reports or polls according to PBX mode. An
+`agent_type="operator"` session coordinates callers through tracked campaigns:
+call `pbx_operator_runbook`, create campaigns with one assignment per caller,
+inspect caller threads, send follow-ups, report assignment state, and finish the
+campaign. Operator agents must not poll or ack commands for caller agent IDs.
+
 If the operator asks for a Joplin note or document, call `pbx_joplin_status`
 first. If Joplin is available, use `pbx_joplin_create_document` to create
 Markdown scoped under the Agent PBX notebook. Mermaid content should be fenced
@@ -188,8 +197,9 @@ operator follow-up queues, detailed report history, and TUI visibility.
 
 1. Choose a stable `agent_id`, for example `codex-agent-pbx-main`.
 2. Call `pbx_register_agent` with the current project and metadata such as
-   `cwd`, `task`, `pbx_mode`, and relevant environment notes. The default
-   `pbx_active=true` means Agent PBX visibility is on.
+   `cwd`, `task`, `pbx_mode`, `codex_session_id` when known, and relevant
+   environment notes. The default `pbx_active=true` means Agent PBX visibility
+   is on.
 3. Immediately call `pbx_report_turn` with `status="working"` so the operator
    can see that the session is connected.
 4. If the local AGENTS.md guidance is unclear or stale, call
@@ -215,6 +225,10 @@ operator follow-up queues, detailed report history, and TUI visibility.
 - `pbx_issue_context`: read-only GitHub issue context for the current agent
   project. Use it when the operator asks you to investigate or mitigate an
   issue.
+- `pbx_operator_runbook`: fetch campaign guidance for operator agents.
+- `pbx_operator_*`: operator-only campaign tools for dispatching caller
+  assignments, reviewing caller threads, reporting assignment state, and
+  finishing campaigns.
 
 ## PBX Modes
 
@@ -252,6 +266,19 @@ not call PBX tools again unless the operator starts a new PBX session.
    least once every five minutes.
 4. Do not claim queue pickup in report mode; PBX queue buttons require nohup
    mode, while tmux direct mode bypasses the PBX queue.
+
+## Operator Agents
+
+Operator agents register with `agent_type="operator"` and
+`metadata.agent_type="operator"`. They coordinate caller agents through
+campaign tools rather than polling or acking caller commands. Use
+`pbx_operator_runbook` before starting campaign work, then create a tracked
+campaign, dispatch one assignment per caller, inspect caller threads, send
+follow-ups until each assignment satisfies its criteria or is blocked, report
+each assignment state, and finish the campaign.
+
+Caller agents are the default `agent_type="caller"` and keep the normal report
+or nohup behavior described above.
 
 ## Local Tmux Direct Mode
 
@@ -416,7 +443,7 @@ def runbook_payload() -> dict[str, Any]:
         ),
         "session_start": [
             "Choose a stable agent_id such as codex-agent-pbx-main.",
-            "Call pbx_register_agent with project, name, cwd, task, and metadata.pbx_mode; pbx_active defaults true.",
+            "Call pbx_register_agent with project, name, cwd, task, metadata.pbx_mode, and metadata.codex_session_id when known; pbx_active defaults true.",
             "Send an initial pbx_report_turn with status='working'.",
             "Call pbx_agent_runbook if local AGENTS.md guidance is unclear or stale.",
         ],
@@ -432,6 +459,14 @@ def runbook_payload() -> dict[str, Any]:
             "pbx_joplin_create_document creates a Markdown note under the scoped Agent PBX Joplin notebook when the operator requests a note or document.",
             "pbx_pr_context returns read-only GitHub pull request context for this agent project; agents use it for PR review only.",
             "pbx_issue_context returns read-only GitHub issue context for this agent project; agents use it for issue mitigation only.",
+            "pbx_operator_runbook returns operator-agent campaign guidance.",
+            "pbx_operator_* tools are for operator agents to create tracked campaigns, dispatch caller assignments, inspect caller threads, update assignment state, and finish campaigns.",
+        ],
+        "agent_types": [
+            "caller is the default agent_type and keeps existing report/nohup behavior.",
+            "operator agents register with agent_type='operator' and metadata.agent_type='operator'.",
+            "Operators coordinate callers through campaign tools and do not poll or ack commands for caller agent_ids.",
+            "Campaign tables are the source of truth for campaign state; reports and commands are linked audit artifacts.",
         ],
         "pbx_modes": [
             "Default 'use Agent PBX' means report mode: register with metadata.pbx_mode='report' and send pbx_report_turn updates.",

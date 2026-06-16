@@ -115,6 +115,28 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
     assert events.json()[1]["payload"]["created_at"] == report.json()["created_at"]
 
 
+def test_set_agent_pbx_active_endpoint_updates_agent_and_events(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    registered = client.post(
+        "/v1/agents/register",
+        json={"agent_id": "operator-0", "project": "ops", "agent_type": "operator"},
+    )
+    updated = client.put("/v1/agents/operator-0/pbx-active", json={"active": False})
+    missing = client.put("/v1/agents/missing/pbx-active", json={"active": False})
+    events = client.get("/v1/events")
+
+    assert registered.status_code == 200
+    assert updated.status_code == 200
+    assert updated.json()["pbx_active"] is False
+    assert missing.status_code == 404
+    assert [event["type"] for event in events.json()] == [
+        "agent_registered",
+        "agent_pbx_active_changed",
+    ]
+    assert events.json()[-1]["payload"]["pbx_active"] is False
+
+
 def test_mark_latest_report_seen_is_shared_state(tmp_path: Path) -> None:
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
 
@@ -604,6 +626,33 @@ def test_dismiss_agent_hides_from_list_but_keeps_thread_until_reconnect(
         "command_queued",
         "agent_dismissed",
         "agent_registered",
+    ]
+
+
+def test_hidden_agents_can_be_listed_and_unhidden(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    client.delete("/v1/agents/agent-1")
+
+    visible = client.get("/v1/agents").json()
+    hidden = client.get("/v1/agents?include_hidden=true").json()
+    restored = client.put("/v1/agents/agent-1/unhide")
+    visible_after_restore = client.get("/v1/agents").json()
+    events = client.get("/v1/events").json()
+
+    assert visible == []
+    assert hidden[0]["agent_id"] == "agent-1"
+    assert hidden[0]["dismissed_at"] is not None
+    assert restored.status_code == 200
+    assert restored.json()["dismissed_at"] is None
+    assert visible_after_restore[0]["agent_id"] == "agent-1"
+    assert [event["type"] for event in events] == [
+        "agent_registered",
+        "agent_dismissed",
+        "agent_unhidden",
     ]
 
 

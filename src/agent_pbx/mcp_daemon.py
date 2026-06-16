@@ -141,7 +141,10 @@ class MCPDaemonConfig:
 
     @property
     def codex_command(self) -> str:
-        return f"codex mcp add agent-pbx --url {self.mcp_url}"
+        command = f"codex mcp add agent-pbx --url {self.mcp_url}"
+        if self.token:
+            command += f" --bearer-token-env-var {TOKEN_ENV}"
+        return command
 
     @property
     def lan_bound(self) -> bool:
