@@ -225,7 +225,7 @@ def test_tui_operator_bindings_and_mcp_command_helpers() -> None:
         "--bearer-token-env-var",
         "AGENT_PBX_TOKEN",
     ]
-    assert operator_panel_height(100) == 15
+    assert operator_panel_height(100) == 20
     assert operator_panel_height(20) == 5
 
 
@@ -3707,6 +3707,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/thread" in titles
     assert "/files" in titles
     assert "/workerbee" in titles
+    assert "/campaigns" in titles
     assert "/plan" in titles
     assert "/plan latest" in titles
     assert "/plan thread" in titles
@@ -3769,6 +3770,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
     names = built_in_palette_command_names()
 
     assert {
+        "/campaigns",
         "/joplin",
         "/joplin refresh",
         "/joplin new",

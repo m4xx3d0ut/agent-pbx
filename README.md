@@ -1,7 +1,7 @@
 # Agent PBX
 
 <p align="center">
-  <img src="docs/assets/agent-pbx-tui.gif" alt="Agent PBX TUI showing agent status, latest reports, and thread history" width="800">
+  <img src="docs/assets/agent-pbx-tui.gif" alt="Agent PBX TUI showing caller agents, operator agents, campaigns, and workflow tabs" width="1200">
 </p>
 
 Agent PBX is a local/LAN MCP service for collecting agent turn reports, storing

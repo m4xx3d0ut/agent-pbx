@@ -14,12 +14,12 @@ JOPLIN_SERVER="${AGENT_PBX_DEMO_JOPLIN_SERVER:-http://${HOST}:${JOPLIN_PORT}}"
 SESSION="${AGENT_PBX_DEMO_SESSION:-agent-pbx-demo-$$}"
 TMUX_SOCKET="${AGENT_PBX_DEMO_TMUX_SOCKET:-${OUT_DIR}/tmux.sock}"
 DEMO_PROJECT_DIR="${AGENT_PBX_DEMO_PROJECT_DIR:-/tmp/agent-pbx-demo-project}"
-COLS="${AGENT_PBX_DEMO_COLS:-120}"
-ROWS="${AGENT_PBX_DEMO_ROWS:-36}"
+COLS="${AGENT_PBX_DEMO_COLS:-180}"
+ROWS="${AGENT_PBX_DEMO_ROWS:-54}"
 TITLE="${AGENT_PBX_DEMO_TITLE:-Agent PBX TUI demo}"
 THEME="${AGENT_PBX_DEMO_THEME:-cyberpunk}"
 LAYOUT="${AGENT_PBX_DEMO_LAYOUT:-split}"
-MAX_RECORD_SECONDS="${AGENT_PBX_DEMO_MAX_RECORD_SECONDS:-60}"
+MAX_RECORD_SECONDS="${AGENT_PBX_DEMO_MAX_RECORD_SECONDS:-75}"
 CAST_PATH="${AGENT_PBX_DEMO_CAST:-${OUT_DIR}/agent-pbx-tui-demo.cast}"
 GIF_PATH="${AGENT_PBX_DEMO_GIF:-${ROOT_DIR}/docs/assets/agent-pbx-tui.gif}"
 if [[ -z "${AGENT_PBX_BIN:-}" && -x "${ROOT_DIR}/.venv/bin/agent-pbx" ]]; then
@@ -29,6 +29,14 @@ elif [[ -z "${AGENT_PBX_BIN:-}" ]]; then
 fi
 ASCIINEMA_BIN="${ASCIINEMA_BIN:-asciinema}"
 AGG_BIN="${AGG_BIN:-agg}"
+FFMPEG_BIN="${FFMPEG_BIN:-ffmpeg}"
+RENDER_FONT_SIZE="${AGENT_PBX_DEMO_RENDER_FONT_SIZE:-17}"
+RENDER_LINE_HEIGHT="${AGENT_PBX_DEMO_RENDER_LINE_HEIGHT:-1.12}"
+RENDER_WIDTH="${AGENT_PBX_DEMO_RENDER_WIDTH:-1920}"
+RENDER_HEIGHT="${AGENT_PBX_DEMO_RENDER_HEIGHT:-1080}"
+RENDER_FPS="${AGENT_PBX_DEMO_RENDER_FPS:-30}"
+RENDER_SELECT="${AGENT_PBX_DEMO_RENDER_SELECT:-0..60}"
+RENDER_EXACT_SIZE="${AGENT_PBX_DEMO_RENDER_EXACT_SIZE:-0}"
 WORKERBEE_BIN="${AGENT_PBX_WORKERBEE_BIN:-}"
 DEMO_FIXTURES="${AGENT_PBX_DEMO_FIXTURES:-1}"
 DEMO_BIN_DIR="${OUT_DIR}/bin"
@@ -51,17 +59,21 @@ Required tools:
 
 Optional tools:
   agg        render the .cast file to GIF
+  ffmpeg     exact-size GIF rendering when --exact-size is used
   workerbee  expose WorkerBee status in the TUI when AGENT_PBX_WORKERBEE_BIN is set
 
 Options:
   --out-dir PATH       Artifact directory. Default: artifacts/tui-demo
   --port PORT          Demo MCP port. Default: 8771
   --token TOKEN        Demo bearer token. Default: demo-token
-  --cols N             Recording terminal width. Default: 120
-  --rows N             Recording terminal height. Default: 36
+  --cols N             Recording terminal width. Default: 180
+  --rows N             Recording terminal height. Default: 54
   --theme NAME         TUI theme. Default: cyberpunk
   --layout NAME        TUI layout. Default: split
-  --max-seconds N      Scripted recording timeout. Default: 60
+  --max-seconds N      Scripted recording timeout. Default: 75
+  --render-size WxH    Exact GIF output size. Default: 1920x1080
+  --render-select SEL  agg frame selector. Default: 0..60
+  --exact-size         Resize/re-encode to --render-size with ffmpeg.
   --manual             Record without scripted key presses; quit the TUI to stop.
   --skip-mcp           Use an already running MCP/API server.
   --keep-mcp           Leave the demo MCP daemon running after recording.
@@ -137,6 +149,23 @@ while [[ $# -gt 0 ]]; do
       MAX_RECORD_SECONDS="$2"
       shift 2
       ;;
+    --render-size)
+      if [[ "$2" != *x* ]]; then
+        fail "--render-size must be WIDTHxHEIGHT"
+      fi
+      RENDER_WIDTH="${2%x*}"
+      RENDER_HEIGHT="${2#*x}"
+      RENDER_EXACT_SIZE=1
+      shift 2
+      ;;
+    --render-select)
+      RENDER_SELECT="$2"
+      shift 2
+      ;;
+    --exact-size)
+      RENDER_EXACT_SIZE=1
+      shift
+      ;;
     --manual)
       MANUAL=1
       shift
@@ -202,6 +231,9 @@ check_requirements() {
   need_cmd "$ASCIINEMA_BIN"
   if [[ "$RENDER" == "1" ]]; then
     need_cmd "$AGG_BIN"
+    if [[ "$RENDER_EXACT_SIZE" == "1" ]]; then
+      need_cmd "$FFMPEG_BIN"
+    fi
   fi
   if [[ -n "$WORKERBEE_BIN" && ! -x "$WORKERBEE_BIN" ]]; then
     fail "AGENT_PBX_WORKERBEE_BIN is set but not executable: $WORKERBEE_BIN"
@@ -609,19 +641,67 @@ agents = [
         "agent_id": "sun-tzu-smoke-1",
         "project": "agent-pbx",
         "name": "Sun Tzu Smoke 1",
-        "metadata": {"cwd": cwd, "pbx_mode": "report", "demo": True},
+        "metadata": {
+            "cwd": cwd,
+            "pbx_mode": "report",
+            "demo": True,
+            "codex_session_id": "session-sun-tzu-smoke-1",
+            "codex_host_id": "local",
+        },
     },
     {
         "agent_id": "sun-tzu-smoke-3",
         "project": "agent-pbx",
         "name": "Sun Tzu Smoke 3",
-        "metadata": {"cwd": cwd, "pbx_mode": "report", "demo": True},
+        "metadata": {
+            "cwd": cwd,
+            "pbx_mode": "report",
+            "demo": True,
+            "codex_session_id": "session-sun-tzu-smoke-3",
+            "codex_host_id": "local",
+        },
     },
     {
         "agent_id": "sun-tzu-smoke-2",
         "project": "agent-pbx",
         "name": "Sun Tzu Smoke 2",
-        "metadata": {"cwd": cwd, "pbx_mode": "nohup", "demo": True},
+        "metadata": {
+            "cwd": cwd,
+            "pbx_mode": "nohup",
+            "demo": True,
+            "codex_session_id": "session-sun-tzu-smoke-2",
+            "codex_host_id": "local",
+        },
+    },
+    {
+        "agent_id": "operator-0",
+        "project": "agent-pbx-operator",
+        "name": "Operator 0",
+        "agent_type": "operator",
+        "metadata": {
+            "cwd": cwd,
+            "pbx_mode": "report",
+            "demo": True,
+            "agent_type": "operator",
+            "operator_role": "root",
+            "launched_by": "agent-pbx-tui",
+            "server_url": server,
+        },
+    },
+    {
+        "agent_id": "operator-1",
+        "project": "agent-pbx-operator",
+        "name": "Operator 1",
+        "agent_type": "operator",
+        "metadata": {
+            "cwd": cwd,
+            "pbx_mode": "report",
+            "demo": True,
+            "agent_type": "operator",
+            "operator_role": "root",
+            "launched_by": "agent-pbx-tui",
+            "server_url": server,
+        },
     },
 ]
 
@@ -695,6 +775,111 @@ request(
         "payload": {"request": "Show the detailed smoke quote response."},
     },
 )
+
+request(
+    "POST",
+    "/v1/agents/operator-0/reports",
+    {
+        "project": "agent-pbx-operator",
+        "status": "working",
+        "summary": "Coordinating caller forks for the README demo.",
+        "detail": (
+            "Operator 0 is tracking forked sessions for caller agents.\n\n"
+            "The demo shows the Operators split, queued fork assignments, and "
+            "campaign state without requiring live Codex panes."
+        ),
+        "needs_input": False,
+        "plan_options": [],
+        "metadata": {"source": "operator_demo"},
+    },
+)
+request(
+    "POST",
+    "/v1/agents/operator-1/reports",
+    {
+        "project": "agent-pbx-operator",
+        "status": "idle",
+        "summary": "Ready for a second operator campaign.",
+        "detail": (
+            "Operator 1 is registered as an operator-type agent so the demo can "
+            "show multiple operator rows."
+        ),
+        "needs_input": False,
+        "plan_options": [],
+        "metadata": {"source": "operator_demo"},
+    },
+)
+
+for caller in ("sun-tzu-smoke-1", "sun-tzu-smoke-3"):
+    request(
+        "POST",
+        "/v1/operator/forks/ensure",
+        {
+            "operator_agent_id": "operator-0",
+            "source_caller_agent_id": caller,
+            "fork_agent_id": f"operator-0-fork-{caller}",
+            "fork_codex_session_id": f"fork-session-{caller}",
+            "status": "ready",
+            "summary": f"Fork session ready for {caller}.",
+            "metadata": {
+                "demo": True,
+                "pbx_mode": "nohup",
+                "codex_session_id": f"fork-session-{caller}",
+                "agent_type": "operator",
+                "operator_role": "fork",
+            },
+        },
+    )
+
+campaign = request(
+    "POST",
+    "/v1/operator/campaigns",
+    {
+        "operator_agent_id": "operator-0",
+        "title": "README operator rollout",
+        "objective": (
+            "Coordinate caller agents through independent forked operator sessions "
+            "and report completion by assignment."
+        ),
+        "criteria": [
+            "Each caller receives a scoped prompt through its fork.",
+            "The operator records assignment state before finishing.",
+            "Blocked callers remain explicit in campaign history.",
+        ],
+        "assignments": [
+            {
+                "target_agent_id": "sun-tzu-smoke-1",
+                "title": "Validate operator split",
+                "prompt": "Review the new Operators split and report any regressions.",
+                "criteria": ["Operators appear between Agents and Events."],
+            },
+            {
+                "target_agent_id": "sun-tzu-smoke-3",
+                "title": "Review caller references",
+                "prompt": "Check @caller completion and campaign routing for the demo.",
+                "criteria": ["@caller references resolve to registered callers."],
+            },
+        ],
+        "delivery": "queue",
+    },
+)
+assignments = campaign.get("assignments") if isinstance(campaign, dict) else []
+if isinstance(assignments, list) and assignments:
+    first = assignments[0]
+    if isinstance(first, dict):
+        request(
+            "POST",
+            f"/v1/operator/campaigns/{campaign['campaign_id']}/assignments/{first['assignment_id']}/report",
+            {
+                "operator_agent_id": "operator-0",
+                "state": "needs_followup",
+                "summary": "Caller fork needs one follow-up before completion.",
+                "detail": (
+                    "The first fork has acknowledged the assignment and needs "
+                    "one follow-up pass before the operator can mark it complete."
+                ),
+            },
+        )
 PY
 }
 
@@ -728,6 +913,16 @@ drive_demo() {
   sleep 2
   tmux_demo send-keys -t "$SESSION" Enter
   sleep 3
+  send_palette "/operator focus"
+  sleep 2
+  tmux_demo send-keys -t "$SESSION" Enter
+  sleep 3
+  send_palette "/campaigns"
+  sleep 5
+  tmux_demo send-keys -t "$SESSION" F1
+  sleep 1
+  tmux_demo send-keys -t "$SESSION" Enter
+  sleep 2
   send_palette "/latest"
   sleep 5
   send_palette "/thread"
@@ -778,7 +973,37 @@ render_gif() {
     return
   fi
   log "Rendering ${GIF_PATH}"
-  "$AGG_BIN" --cols "$COLS" --rows "$ROWS" "$CAST_PATH" "$GIF_PATH"
+  local raw_gif="${OUT_DIR}/agent-pbx-tui-demo.raw.gif"
+  local palette="${OUT_DIR}/agent-pbx-tui-demo.palette.png"
+  local agg_output="$GIF_PATH"
+  if [[ "$RENDER_EXACT_SIZE" == "1" ]]; then
+    agg_output="$raw_gif"
+  fi
+  "$AGG_BIN" \
+    --quiet \
+    --font-size "$RENDER_FONT_SIZE" \
+    --line-height "$RENDER_LINE_HEIGHT" \
+    --cols "$COLS" \
+    --rows "$ROWS" \
+    --select "$RENDER_SELECT" \
+    "$CAST_PATH" \
+    "$agg_output"
+  if [[ "$RENDER_EXACT_SIZE" != "1" ]]; then
+    return
+  fi
+  "$FFMPEG_BIN" \
+    -y \
+    -v warning \
+    -i "$raw_gif" \
+    -vf "fps=${RENDER_FPS},scale=${RENDER_WIDTH}:${RENDER_HEIGHT}:flags=lanczos,palettegen=stats_mode=diff:max_colors=256" \
+    "$palette"
+  "$FFMPEG_BIN" \
+    -y \
+    -v warning \
+    -i "$raw_gif" \
+    -i "$palette" \
+    -lavfi "fps=${RENDER_FPS},scale=${RENDER_WIDTH}:${RENDER_HEIGHT}:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
+    "$GIF_PATH"
 }
 
 check_requirements

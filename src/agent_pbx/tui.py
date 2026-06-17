@@ -89,7 +89,7 @@ TINY_HOME_AGENTS = "agents"
 TINY_HOME_OPERATORS = "operators"
 TINY_HOME_EVENTS = "events"
 OPERATOR_PANEL_MIN_RATIO = 0.10
-OPERATOR_PANEL_DEFAULT_RATIO = 0.15
+OPERATOR_PANEL_DEFAULT_RATIO = 0.20
 OPERATOR_PANEL_MAX_RATIO = 0.20
 OPERATOR_PANEL_MIN_HEIGHT = 5
 DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
@@ -265,6 +265,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/thread",
     "/files",
     "/workerbee",
+    "/campaigns",
     "/pr",
     "/pr refresh",
     "/pr review",
@@ -3527,6 +3528,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/thread", "Open the Thread tab", self.palette_thread)
         yield SystemCommand("/files", "Open and refresh the Files tab", self.palette_files)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
+        yield SystemCommand("/campaigns", "Open and refresh operator campaigns", self.palette_campaigns)
         yield SystemCommand("/pr", "Open and refresh pull requests", self.palette_pull_requests)
         yield SystemCommand("/pr refresh", "Refresh pull requests", self.palette_pull_requests_refresh)
         yield SystemCommand("/pr review", "Ask selected agent to review the selected PR", self.palette_pull_request_review)
@@ -3658,6 +3660,16 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.open_workerbee_for_agent(agent_id),
             name="palette-workerbee",
+            exclusive=True,
+        )
+
+    def palette_campaigns(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_campaigns_for_agent(agent_id),
+            name="palette-campaigns",
             exclusive=True,
         )
 
@@ -4317,6 +4329,14 @@ class AgentPBXTUI(App[None]):
             self.selected_agent_id = agent_id
         self.activate_agent_tab("workerbee-tab")
         await self.load_workerbee_status(agent_id)
+
+    async def open_campaigns_for_agent(self, agent_id: str) -> None:
+        if agent_id in self.agents:
+            await self.select_agent(agent_id)
+        else:
+            self.selected_agent_id = agent_id
+        self.activate_agent_tab("campaigns-tab")
+        await self.load_operator_campaigns(agent_id)
 
     async def open_pull_requests_for_agent(self, agent_id: str) -> None:
         if agent_id in self.agents:
