@@ -16,6 +16,10 @@ def agent_instructions_markdown() -> str:
 When the operator asks you to use Agent PBX, register this session with
 `pbx_register_agent` using a stable `agent_id`, the current project name, and
 metadata containing the absolute `cwd`, task goal, and `pbx_mode="report"`.
+If the environment contains `AGENT_PBX_AGENT_ID`, use that value exactly; the
+TUI uses it for operator and fork identities. Otherwise choose a project-specific
+stable caller id such as `codex-k1s-workerbee-private`, not a generic id shared
+across repositories.
 Include `metadata.codex_session_id` when the current Codex session id is known;
 operator fork creation blocks until callers expose that session id.
 Registration defaults `pbx_active=true`; treat that as "Use Agent PBX" being on
@@ -62,6 +66,11 @@ During long-running work that is progressing normally, send a
 `status="working"` `pbx_report_turn` check-in at least once every five minutes
 until the work completes. Include what is still running and the last meaningful
 progress signal. In nohup mode, poll for queued commands after each check-in.
+
+Do not report control-plane, TUI, operator-fork, or routing diagnostics as
+`status="blocked"` under a caller agent unless the caller's actual assigned work
+is blocked. Report those diagnostics from the operator or fork session, or use
+`status="working"` with detail when the caller itself remains usable.
 
 If you observe cancellation before the session exits, send a final
 `status="canceled"` `pbx_report_turn` that states the operator cancelled the CLI
@@ -195,7 +204,9 @@ operator follow-up queues, detailed report history, and TUI visibility.
 
 ## Session Start
 
-1. Choose a stable `agent_id`, for example `codex-agent-pbx-main`.
+1. If `AGENT_PBX_AGENT_ID` is set, use it exactly. Otherwise choose a
+   project-specific stable caller id such as `codex-k1s-workerbee-private`;
+   do not reuse a generic id such as `codex-agent-pbx-main` across projects.
 2. Call `pbx_register_agent` with the current project and metadata such as
    `cwd`, `task`, `pbx_mode`, `codex_session_id` when known, and relevant
    environment notes. The default `pbx_active=true` means Agent PBX visibility
@@ -442,7 +453,7 @@ def runbook_payload() -> dict[str, Any]:
             "long polling, and command acking."
         ),
         "session_start": [
-            "Choose a stable agent_id such as codex-agent-pbx-main.",
+            "Use AGENT_PBX_AGENT_ID exactly when it is set; otherwise choose a project-specific stable caller id such as codex-k1s-workerbee-private, not a shared generic id.",
             "Call pbx_register_agent with project, name, cwd, task, metadata.pbx_mode, and metadata.codex_session_id when known; pbx_active defaults true.",
             "Send an initial pbx_report_turn with status='working'.",
             "Call pbx_agent_runbook if local AGENTS.md guidance is unclear or stale.",
@@ -514,6 +525,7 @@ def runbook_payload() -> dict[str, Any]:
         "active_loop": [
             "Use pbx_report_turn for milestones, blockers, test results, deployment results, and final outcomes.",
             "Keep summary concise and put complete notes in detail.",
+            "Do not report TUI, operator-fork, or routing diagnostics as caller status='blocked' unless the caller's assigned work is actually blocked.",
             "In report mode, do not call pbx_poll_commands and do not claim queued command pickup.",
             "In nohup mode, call pbx_poll_commands before work, after each report, before turn end, and periodically during long work.",
             "Polling is the alert pickup mechanism for PBX-queued follow-up in nohup mode.",
@@ -617,14 +629,25 @@ def install_agent_instructions(
 
     if has_start != has_end:
         raise ValueError(f"{target} contains partial Agent PBX instruction markers")
-    if check or installed:
+    if check:
+        return result
+    block = agent_instructions_markdown().rstrip()
+    if installed:
+        start = text.index(AGENT_INSTRUCTIONS_START)
+        end = text.index(AGENT_INSTRUCTIONS_END) + len(AGENT_INSTRUCTIONS_END)
+        if text[start:end].strip() == block:
+            return result
+        text = f"{text[:start]}{block}{text[end:]}"
+        if not text.endswith("\n"):
+            text += "\n"
+        target.write_text(text, encoding="utf-8")
+        result.update({"changed": True})
         return result
     if not exists and not allow_create:
         raise ValueError(f"{target} does not exist; use --allow-create to create it")
     if exists and not append:
         raise ValueError(f"{target} has no Agent PBX block; use --append to add it")
 
-    block = agent_instructions_markdown().rstrip()
     if text and not text.endswith("\n"):
         text += "\n"
     if text.strip():

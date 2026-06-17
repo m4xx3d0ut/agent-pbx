@@ -131,16 +131,64 @@ class OperatorService:
                 source_codex_session_id=source_session_id,
             )
             if existing is not None:
-                return self.store.update_operator_fork(
+                resolved_fork_agent_id = fork_agent_id or str(existing["fork_agent_id"])
+                ready_status = str(status or "").strip().lower() in FORK_READY_STATUSES
+                launching = bool(tmux_pane_id or fork_codex_session_id or ready_status)
+                existing_metadata = (
+                    existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+                )
+                fork_metadata = {
+                    **existing_metadata,
+                    "agent_type": OPERATOR_AGENT_TYPE,
+                    "operator_role": "fork",
+                    "logical_operator_id": logical_operator_id,
+                    "source_caller_agent_id": source_caller_agent_id,
+                    "source_codex_session_id": source_session_id,
+                }
+                if launching and not blocked_reason:
+                    fork_metadata["operator_fork_pending"] = False
+                    fork_agent = self.store.get_agent(resolved_fork_agent_id) or {}
+                    self.store.register_agent(
+                        AgentRegisterRequest(
+                            agent_id=resolved_fork_agent_id,
+                            project=str(
+                                fork_agent.get("project")
+                                or operator.get("project")
+                                or "agent-pbx-operator"
+                            ),
+                            name=(
+                                str(fork_agent["name"])
+                                if fork_agent.get("name")
+                                else resolved_fork_agent_id
+                            ),
+                            agent_type=OPERATOR_AGENT_TYPE,
+                            metadata={**fork_metadata, **(metadata or {})},
+                            pbx_active=True,
+                        )
+                    )
+                updated = self.store.update_operator_fork(
                     existing["operator_fork_id"],
+                    fork_agent_id=resolved_fork_agent_id,
                     campaign_id=campaign_id,
                     tmux_pane_id=tmux_pane_id,
                     fork_codex_session_id=fork_codex_session_id,
                     status=status,
                     summary=summary,
-                    metadata=metadata,
+                    metadata={**fork_metadata, **(metadata or {})},
                     touch=True,
                 ) or existing
+                if launching and not blocked_reason:
+                    self.store.append_event(
+                        "operator_fork_ensured",
+                        {
+                            "operator_fork_id": updated["operator_fork_id"],
+                            "logical_operator_agent_id": logical_operator_id,
+                            "source_caller_agent_id": source_caller_agent_id,
+                            "fork_agent_id": resolved_fork_agent_id,
+                        },
+                        updated["operator_fork_id"],
+                    )
+                return updated
         if not blocked_reason and not tmux_pane_id and fork_agent_id is None:
             blocked_reason = (
                 "operator fork has not been launched; use the TUI to create the "

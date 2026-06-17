@@ -40,6 +40,12 @@ The planned server may run on localhost or a LAN. Default to localhost-only bind
 When the operator asks you to use Agent PBX, register this session with
 `pbx_register_agent` using a stable `agent_id`, the current project name, and
 metadata containing the absolute `cwd`, task goal, and `pbx_mode="report"`.
+If the environment contains `AGENT_PBX_AGENT_ID`, use that value exactly; the
+TUI uses it for operator and fork identities. Otherwise choose a project-specific
+stable caller id such as `codex-k1s-workerbee-private`, not a generic id shared
+across repositories.
+Include `metadata.codex_session_id` when the current Codex session id is known;
+operator fork creation blocks until callers expose that session id.
 Registration defaults `pbx_active=true`; treat that as "Use Agent PBX" being on
 for this session until the operator explicitly asks you to stop using PBX or
 starts a new session.
@@ -85,6 +91,11 @@ During long-running work that is progressing normally, send a
 until the work completes. Include what is still running and the last meaningful
 progress signal. In nohup mode, poll for queued commands after each check-in.
 
+Do not report control-plane, TUI, operator-fork, or routing diagnostics as
+`status="blocked"` under a caller agent unless the caller's actual assigned work
+is blocked. Report those diagnostics from the operator or fork session, or use
+`status="working"` with detail when the caller itself remains usable.
+
 If you observe cancellation before the session exits, send a final
 `status="canceled"` `pbx_report_turn` that states the operator cancelled the CLI
 session. If the process exits before you can report, the operator can use
@@ -124,11 +135,10 @@ session.
 
 Built-in TUI Joplin commands such as `/joplin`, `/joplin new`,
 `/joplin rename`, `/joplin delete`, `/joplin copy`, `/joplin log start`, and
-`/joplin sync`
-are local operator actions for the TUI. They open the Joplin tab, call Agent
-PBX note APIs, edit scoped notes, or in tmux direct mode send Codex `/copy` to
-capture the latest response; they are not instructions for an agent unless the
-operator separately asks for Joplin note content in the chat.
+`/joplin sync` are local operator actions for the TUI. They open the Joplin
+tab, call Agent PBX note APIs, edit scoped notes, or in tmux direct mode send
+Codex `/copy` to capture the latest response; they are not instructions for an
+agent unless the operator separately asks for Joplin note content in the chat.
 
 Operator prompts may contain `@joplin:<note>` references from the TUI. Agent PBX
 resolves these references at project scope under the Agent PBX Joplin notebook,
@@ -156,6 +166,13 @@ an operator-only API/TUI action and is not exposed as an agent MCP tool.
 helpers to queue work for agents. Do not use it as normal agent-side behavior
 or to self-queue work; in nohup mode, receive queued work through
 `pbx_poll_commands` instead.
+
+Agent PBX supports two agent types. The default `agent_type="caller"` is a
+project-working agent that reports or polls according to PBX mode. An
+`agent_type="operator"` session coordinates callers through tracked campaigns:
+call `pbx_operator_runbook`, create campaigns with one assignment per caller,
+inspect caller threads, send follow-ups, report assignment state, and finish the
+campaign. Operator agents must not poll or ack commands for caller agent IDs.
 
 If the operator asks for a Joplin note or document, call `pbx_joplin_status`
 first. If Joplin is available, use `pbx_joplin_create_document` to create

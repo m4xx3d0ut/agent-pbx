@@ -7,7 +7,7 @@ from agent_pbx import tmux
 
 def test_tmux_parse_pane_line() -> None:
     pane = tmux.parse_pane_line(
-        "agent-pbx\t0\t2\t%76\t1\tnode\tagent-pbx\t/home/me/agent-pbx\t142\t45\t2640"
+        "agent-pbx\t0\t2\t%76\t1\tnode\tagent-pbx\t/home/me/agent-pbx\t142\t45\t2640\toperator-0"
     )
 
     assert pane is not None
@@ -19,6 +19,16 @@ def test_tmux_parse_pane_line() -> None:
     assert pane.width == 142
     assert pane.height == 45
     assert pane.history_size == 2640
+    assert pane.window_name == "operator-0"
+
+
+def test_tmux_parse_pane_line_keeps_legacy_output_compatible() -> None:
+    pane = tmux.parse_pane_line(
+        "agent-pbx\t0\t2\t%76\t1\tnode\tagent-pbx\t/home/me/agent-pbx\t142\t45\t2640"
+    )
+
+    assert pane is not None
+    assert pane.window_name == ""
 
 
 def test_tmux_choose_pane_for_agent_prefers_matching_codex_pane() -> None:
@@ -80,7 +90,7 @@ def test_tmux_list_and_capture_use_expected_commands(monkeypatch) -> None:
             return subprocess.CompletedProcess(
                 args,
                 0,
-                "s\t0\t1\t%1\t0\tnode\tagent\t/tmp/project\t80\t24\t200\n",
+                "s\t0\t1\t%1\t0\tnode\tagent\t/tmp/project\t80\t24\t200\tagent\n",
                 "",
             )
         if args[1] == "capture-pane":

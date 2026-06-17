@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .agent import runbook_payload
+from .codex_sessions import enrich_codex_session_metadata
 from .config import ServerConfig
 from .joplin import JoplinService
 from .issues import IssueService
@@ -135,13 +136,19 @@ def build_mcp_server(
         pbx_active: bool = True,
     ) -> dict[str, Any]:
         logger.debug("mcp.tool.start name=pbx_register_agent agent_id=%s", agent_id)
+        request_metadata = metadata or {}
+        enriched_metadata = (
+            enrich_codex_session_metadata(request_metadata)
+            if str(agent_type).strip().lower() == "caller"
+            else request_metadata
+        )
         agent = store.register_agent(
             AgentRegisterRequest(
                 agent_id=agent_id,
                 project=project,
                 name=name,
                 agent_type=agent_type,  # type: ignore[arg-type]
-                metadata=metadata or {},
+                metadata=enriched_metadata,
                 pbx_active=pbx_active,
             )
         )

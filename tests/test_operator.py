@@ -313,3 +313,47 @@ def test_operator_campaign_blocks_when_caller_has_no_codex_session(tmp_path: Pat
     assert assignment["state"] == "blocked"
     assert forks[0]["status"] == "blocked"
     assert "metadata.codex_session_id" in forks[0]["summary"]
+
+
+def test_operator_pending_fork_can_be_activated_after_tui_launch(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Pending fork",
+        objective="Create pending fork state before launch.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Work."}],
+        delivery="tmux",
+    )
+    pending = store.list_operator_forks(logical_operator_agent_id="operator-0")[0]
+    pending_agent = store.get_agent(pending["fork_agent_id"])
+
+    assert campaign["assignments"][0]["state"] == "blocked"
+    assert pending["status"] == "blocked"
+    assert pending["metadata"]["operator_fork_pending"] is True
+    assert pending_agent is not None
+    assert pending_agent["pbx_active"] is False
+
+    activated = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id=pending["fork_agent_id"],
+        tmux_pane_id="%42",
+        status="running",
+        summary="Fork launched from Agent PBX TUI.",
+        metadata={"pbx_mode": "report", "tmux_pane_id": "%42"},
+    )
+    activated_agent = store.get_agent(pending["fork_agent_id"])
+
+    assert activated["operator_fork_id"] == pending["operator_fork_id"]
+    assert activated["status"] == "running"
+    assert activated["tmux_pane_id"] == "%42"
+    assert activated["metadata"]["operator_fork_pending"] is False
+    assert activated_agent is not None
+    assert activated_agent["pbx_active"] is True
+    assert activated_agent["metadata"]["operator_fork_pending"] is False
+    assert activated_agent["metadata"]["tmux_pane_id"] == "%42"

@@ -8,6 +8,32 @@ from agent_pbx.mcp_tools import build_mcp_server
 from agent_pbx.store import Store
 
 
+def write_codex_session(codex_home: Path, cwd: Path, session_id: str) -> None:
+    session_path = (
+        codex_home
+        / "sessions"
+        / "2026"
+        / "06"
+        / "17"
+        / f"rollout-2026-06-17T18-52-25-{session_id}.jsonl"
+    )
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "cwd": str(cwd),
+                    "timestamp": "2026-06-17T18:52:25.014Z",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def tool_json(result: object) -> object:
     if isinstance(result, tuple) and len(result) == 2:
         content, structured = result
@@ -104,6 +130,71 @@ async def test_mcp_reporting_and_command_tools(tmp_path: Path) -> None:
         "agent_id": "agent-1",
         "pbx_active": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_mcp_register_agent_infers_codex_session_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    cwd = tmp_path / "repo"
+    session_id = "019ed6ed-6e25-7d82-bf2f-0b3c377bd3c9"
+    cwd.mkdir()
+    write_codex_session(codex_home, cwd, session_id)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    agent = tool_json(
+        await mcp.call_tool(
+            "pbx_register_agent",
+            {
+                "agent_id": "codex-k1s-workerbee-private-20260617",
+                "project": "k1s-workerbee-private",
+                "metadata": {"cwd": str(cwd), "pbx_mode": "report"},
+            },
+        )
+    )
+
+    assert agent["metadata"]["codex_session_id"] == session_id
+    assert agent["metadata"]["codex_thread_id"] == session_id
+
+
+@pytest.mark.asyncio
+async def test_mcp_register_operator_does_not_infer_codex_session_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    cwd = tmp_path / "repo"
+    session_id = "019ed6ed-6e25-7d82-bf2f-0b3c377bd3c9"
+    cwd.mkdir()
+    write_codex_session(codex_home, cwd, session_id)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    agent = tool_json(
+        await mcp.call_tool(
+            "pbx_register_agent",
+            {
+                "agent_id": "operator-0-fork-caller-1",
+                "project": "agent-pbx-operator",
+                "agent_type": "operator",
+                "metadata": {
+                    "cwd": str(cwd),
+                    "operator_role": "fork",
+                    "source_codex_session_id": session_id,
+                },
+            },
+        )
+    )
+
+    assert "codex_session_id" not in agent["metadata"]
+    assert agent["metadata"]["source_codex_session_id"] == session_id
 
 
 @pytest.mark.asyncio

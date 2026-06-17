@@ -257,6 +257,8 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/refresh",
     "/detail",
     "/ping",
+    "/unblock",
+    "/working",
     "/cancel",
     "/esc",
     "/ctrlc",
@@ -294,6 +296,8 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/plan select 1",
     "/plan select 2",
     "/plan select 3",
+    "/operator fork next",
+    "/operator fork prev",
     "/gitstatus",
     "/gitdiff",
     "/gitpush",
@@ -462,6 +466,10 @@ class CallerAgentReference:
     pbx_active: bool
     active_campaign_count: int
     tmux_pane: str | None = None
+    active_operator_fork_id: str | None = None
+    active_fork_agent_id: str | None = None
+    active_fork_source_session_id: str | None = None
+    active_fork_tmux_pane: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1348,6 +1356,16 @@ def format_caller_agent_references_for_prompt(
         )
         if reference.tmux_pane:
             lines.append(f"- Tmux Pane: `{reference.tmux_pane}`")
+        if reference.active_operator_fork_id:
+            lines.append(f"- Active Operator Fork ID: `{reference.active_operator_fork_id}`")
+        if reference.active_fork_agent_id:
+            lines.append(f"- Active Fork Agent ID: `{reference.active_fork_agent_id}`")
+        if reference.active_fork_source_session_id:
+            lines.append(
+                f"- Active Fork Source Session: `{reference.active_fork_source_session_id}`"
+            )
+        if reference.active_fork_tmux_pane:
+            lines.append(f"- Active Fork Tmux Pane: `{reference.active_fork_tmux_pane}`")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -2924,6 +2942,8 @@ class AgentPBXTUI(App[None]):
         Binding("f3", "focus_right_pane", "View", key_display="F3", priority=True),
         Binding("f4", "focus_latest_input", "Input", key_display="F4", priority=True),
         Binding("f5", "focus_operators", "Operators", key_display="F5", priority=True),
+        Binding("f6", "prev_operator_fork", "Prev Fork", key_display="F6", priority=True),
+        Binding("f7", "next_operator_fork", "Next Fork", key_display="F7", priority=True),
         Binding("shift+o", "start_operator", "Start Operator", key_display="O"),
         Binding("u", "restart_operator", "Restart Operator", priority=True),
         Binding("x", "stop_operator", "Stop Operator", priority=True),
@@ -3149,6 +3169,7 @@ class AgentPBXTUI(App[None]):
         self.message_draft_by_agent: dict[str, str] = {}
         self.tmux_message_draft_by_agent: dict[str, str] = {}
         self.tmux_agent_targets = str_map_setting(self.settings, "tmux_agent_targets")
+        self.selected_operator_fork_target_by_operator: dict[str, str] = {}
         self.tmux_manual_override_agent_ids: set[str] = set()
         self.tmux_detached_agent_ids: set[str] = set()
         self.tmux_last_capture_by_pane: dict[str, str] = {}
@@ -3252,6 +3273,8 @@ class AgentPBXTUI(App[None]):
                     yield Button("Start (O)", id="operator-start")
                     yield Button("Restart (u)", id="operator-restart")
                     yield Button("Stop (x)", id="operator-stop")
+                    yield Button("Prev Fork (F6)", id="operator-fork-prev")
+                    yield Button("Next Fork (F7)", id="operator-fork-next")
                     yield Button("Hide (d)", id="operator-hide")
                     yield Button("Purge (D)", id="operator-purge")
                 yield Static("Events", id="events-title")
@@ -3310,6 +3333,7 @@ class AgentPBXTUI(App[None]):
                                         id="request-detail",
                                     )
                                     yield Button("Ping", id="ping-agent")
+                                    yield Button("Mark Working", id="mark-working")
                                     yield Button("Mark Canceled", id="mark-canceled")
                             yield Static(
                                 self.composer_hotkeys_text(),
@@ -3520,6 +3544,8 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/refresh", "Refresh agents, events, and selected agent", self.palette_refresh)
         yield SystemCommand("/detail", "Request detail for the selected agent", self.palette_request_detail)
         yield SystemCommand("/ping", "Ping the selected nohup-mode agent", self.palette_ping)
+        yield SystemCommand("/unblock", "Mark the selected agent working", self.palette_mark_working)
+        yield SystemCommand("/working", "Mark the selected agent working", self.palette_mark_working)
         yield SystemCommand("/cancel", "Mark the selected agent canceled", self.palette_mark_canceled)
         yield SystemCommand("/esc", "Send Escape to the selected agent", self.palette_escape)
         yield SystemCommand("/ctrlc", "Send Ctrl+C to the selected tmux pane", self.palette_ctrl_c)
@@ -3561,6 +3587,8 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator stop", "Stop the selected operator", self.palette_operator_stop)
         yield SystemCommand("/operator hide", "Hide the selected operator", self.palette_operator_hide)
         yield SystemCommand("/operator purge", "Purge the selected operator", self.palette_operator_purge)
+        yield SystemCommand("/operator fork next", "View the next fork pane for the selected operator", self.palette_operator_fork_next)
+        yield SystemCommand("/operator fork prev", "View the previous fork pane for the selected operator", self.palette_operator_fork_prev)
         yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
         yield from self.palette_native_plan_selector_commands()
         yield from self.palette_dynamic_plan_commands()
@@ -3604,6 +3632,11 @@ class AgentPBXTUI(App[None]):
         if self.palette_agent_id() is None:
             return
         self.run_worker(self.ping_agent(), name="palette-ping", exclusive=True)
+
+    def palette_mark_working(self) -> None:
+        if self.palette_agent_id() is None:
+            return
+        self.run_worker(self.mark_agent_working(), name="palette-working", exclusive=True)
 
     def palette_mark_canceled(self) -> None:
         if self.palette_agent_id() is None:
@@ -3824,6 +3857,20 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.dismiss_selected_agent(agent_id=agent_id, delete_thread=True),
             name="palette-operator-purge",
+            exclusive=True,
+        )
+
+    def palette_operator_fork_next(self) -> None:
+        self.run_worker(
+            self.cycle_selected_operator_fork(1),
+            name="palette-operator-fork-next",
+            exclusive=True,
+        )
+
+    def palette_operator_fork_prev(self) -> None:
+        self.run_worker(
+            self.cycle_selected_operator_fork(-1),
+            name="palette-operator-fork-prev",
             exclusive=True,
         )
 
@@ -4455,7 +4502,7 @@ class AgentPBXTUI(App[None]):
         operators = self.query_one_or_none("#operators", DataTable)
         if operators is None:
             return
-        if not self.operator_agents():
+        if not self.operator_table_agents():
             self.notify("No operators are registered.", severity="warning")
             return
         if self.is_collapsed_layout():
@@ -4575,6 +4622,24 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.stop_selected_operator(),
             name="stop-operator",
+            exclusive=True,
+        )
+
+    def action_next_operator_fork(self) -> None:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        self.run_worker(
+            self.cycle_selected_operator_fork(1),
+            name="next-operator-fork",
+            exclusive=True,
+        )
+
+    def action_prev_operator_fork(self) -> None:
+        if isinstance(self.focused, (Input, TextArea)):
+            return
+        self.run_worker(
+            self.cycle_selected_operator_fork(-1),
+            name="prev-operator-fork",
             exclusive=True,
         )
 
@@ -5076,6 +5141,107 @@ class AgentPBXTUI(App[None]):
             if self.operator_role(agent) == OPERATOR_ROLE_FORK
         ]
 
+    def logical_operator_id_for_agent(self, agent: dict[str, Any]) -> str:
+        agent_id = str(agent.get("agent_id") or "").strip()
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        logical_operator_id = str(metadata.get("logical_operator_id") or "").strip()
+        if logical_operator_id:
+            return logical_operator_id
+        if self.operator_role(agent) == OPERATOR_ROLE_FORK and "-fork-" in agent_id:
+            logical_operator_id, _, _ = agent_id.partition("-fork-")
+            if logical_operator_id:
+                return logical_operator_id
+        return agent_id
+
+    def operator_fork_sort_key(self, fork: dict[str, Any]) -> tuple[Any, ...]:
+        metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+        return (
+            str(metadata.get("source_caller_agent_id") or ""),
+            str(metadata.get("source_codex_session_id") or ""),
+            -(float_value(fork.get("last_seen_at")) or 0.0),
+            str(fork.get("agent_id") or ""),
+        )
+
+    def operator_forks_for_logical_operator(
+        self, logical_operator_id: str
+    ) -> list[dict[str, Any]]:
+        return sorted(
+            [
+                fork
+                for fork in self.operator_fork_agents()
+                if self.logical_operator_id_for_agent(fork) == logical_operator_id
+            ],
+            key=self.operator_fork_sort_key,
+        )
+
+    def operator_table_agents(self) -> list[dict[str, Any]]:
+        roots = self.operator_agents()
+        forks_by_operator: dict[str, list[dict[str, Any]]] = {}
+        for fork in self.operator_fork_agents():
+            forks_by_operator.setdefault(
+                self.logical_operator_id_for_agent(fork),
+                [],
+            ).append(fork)
+        rows: list[dict[str, Any]] = []
+        for root in roots:
+            logical_operator_id = self.logical_operator_id_for_agent(root)
+            rows.append(root)
+            rows.extend(
+                sorted(
+                    forks_by_operator.pop(logical_operator_id, []),
+                    key=self.operator_fork_sort_key,
+                )
+            )
+        for logical_operator_id in sorted(forks_by_operator):
+            rows.extend(
+                sorted(
+                    forks_by_operator[logical_operator_id],
+                    key=self.operator_fork_sort_key,
+                )
+            )
+        return rows
+
+    def active_operator_fork_for_caller(
+        self,
+        caller: dict[str, Any],
+        *,
+        logical_operator_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        caller_agent_id = str(caller.get("agent_id") or "").strip()
+        caller_metadata = (
+            caller.get("metadata") if isinstance(caller.get("metadata"), dict) else {}
+        )
+        source_session_id = str(caller_metadata.get("codex_session_id") or "").strip()
+        if not caller_agent_id or not source_session_id:
+            return None
+        ready_statuses = {"active", "online", "ready", "running", "starting", "working"}
+        for fork in self.operator_fork_agents():
+            if (
+                logical_operator_id
+                and self.logical_operator_id_for_agent(fork) != logical_operator_id
+            ):
+                continue
+            metadata = (
+                fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+            )
+            if str(metadata.get("source_caller_agent_id") or "").strip() != caller_agent_id:
+                continue
+            if str(metadata.get("source_codex_session_id") or "").strip() != source_session_id:
+                continue
+            pending = str(metadata.get("operator_fork_pending") or "").strip().lower()
+            if pending in {"1", "true", "yes"}:
+                continue
+            if not bool(fork.get("pbx_active", True)):
+                continue
+            status = (
+                str(fork.get("effective_status") or fork.get("status") or "")
+                .strip()
+                .lower()
+            )
+            if status in ready_statuses:
+                return fork
+        return None
+
     def agents_render_signature(self) -> tuple[Any, ...]:
         return (
             self.desired_agent_columns(),
@@ -5105,7 +5271,7 @@ class AgentPBXTUI(App[None]):
                         )
                     ),
                 )
-                for agent in self.operator_agents()
+                for agent in self.operator_table_agents()
             ),
         )
 
@@ -5150,8 +5316,10 @@ class AgentPBXTUI(App[None]):
 
         self.render_operator_columns(operator_table)
         operator_table.clear()
-        operator_agent_ids = {str(agent["agent_id"]) for agent in self.operator_agents()}
-        for agent in self.operator_agents():
+        operator_agent_ids = {
+            str(agent["agent_id"]) for agent in self.operator_table_agents()
+        }
+        for agent in self.operator_table_agents():
             agent_id = str(agent["agent_id"])
             row = self.agent_row_values(agent, self.rendered_operator_columns)
             cells = self.style_agent_row(row, agent)
@@ -5216,7 +5384,7 @@ class AgentPBXTUI(App[None]):
         table = self.query_one_or_none("#operators", DataTable)
         if table is None:
             return
-        if agent_id not in {str(agent["agent_id"]) for agent in self.operator_agents()}:
+        if agent_id not in {str(agent["agent_id"]) for agent in self.operator_table_agents()}:
             return
         table.move_cursor(
             row=table.get_row_index(agent_id),
@@ -5324,6 +5492,12 @@ class AgentPBXTUI(App[None]):
 
     def format_agent_status(self, agent: dict[str, Any]) -> str:
         status = str(agent.get("effective_status") or agent.get("status") or "")
+        if (
+            self.agent_type(agent) == CALLER_AGENT_TYPE
+            and status.strip().lower() == "blocked"
+            and self.active_operator_fork_for_caller(agent) is not None
+        ):
+            return "blocked/fork-ready"
         if self.infer_tmux_working_status(agent, status):
             return "tmux-working"
         return status
@@ -5687,7 +5861,7 @@ class AgentPBXTUI(App[None]):
             return
 
     async def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
-        if event.data_table.id == "agents":
+        if event.data_table.id in {"agents", "operators"}:
             await self.select_agent(str(event.cell_key.row_key.value))
             return
         if event.data_table.id == "thread":
@@ -6524,44 +6698,45 @@ class AgentPBXTUI(App[None]):
         if event.tabbed_content.id != "agent-tabs":
             return
         self.active_agent_tab = str(event.pane.id)
-        if self.selected_agent_id:
-            self.active_agent_tab_by_agent[self.selected_agent_id] = self.active_agent_tab
-        if self.active_agent_tab == "latest-tab" and self.selected_agent_id:
-            self.mark_latest_seen(self.selected_agent_id)
+        agent_id = self.selected_agent_id
+        if agent_id:
+            self.active_agent_tab_by_agent[agent_id] = self.active_agent_tab
+        if self.active_agent_tab == "latest-tab" and agent_id:
+            self.mark_latest_seen(agent_id)
             self.apply_tmux_class()
-            if self.is_tmux_direct_enabled(self.selected_agent_id):
-                self.run_worker(
-                    self.load_tmux_capture(self.selected_agent_id),
+            if self.is_tmux_direct_enabled(agent_id):
+                self.run_async_worker(
+                    lambda agent_id=agent_id: self.load_tmux_capture(agent_id),
                     name="tmux-capture",
                     exclusive=True,
                 )
-        if self.active_agent_tab == "workerbee-tab" and self.selected_agent_id:
-            self.run_worker(
-                self.load_workerbee_status(self.selected_agent_id),
+        if self.active_agent_tab == "workerbee-tab" and agent_id:
+            self.run_async_worker(
+                lambda agent_id=agent_id: self.load_workerbee_status(agent_id),
                 name="workerbee-status",
                 exclusive=True,
             )
-        if self.active_agent_tab == "pull-requests-tab" and self.selected_agent_id:
-            self.run_worker(
-                self.load_pull_requests(self.selected_agent_id),
+        if self.active_agent_tab == "pull-requests-tab" and agent_id:
+            self.run_async_worker(
+                lambda agent_id=agent_id: self.load_pull_requests(agent_id),
                 name="pull-requests",
                 exclusive=True,
             )
-        if self.active_agent_tab == "issues-tab" and self.selected_agent_id:
-            self.run_worker(
-                self.load_issues(self.selected_agent_id),
+        if self.active_agent_tab == "issues-tab" and agent_id:
+            self.run_async_worker(
+                lambda agent_id=agent_id: self.load_issues(agent_id),
                 name="issues",
                 exclusive=True,
             )
-        if self.active_agent_tab == "files-tab" and self.selected_agent_id:
-            self.run_worker(
-                self.load_agent_files(self.selected_agent_id),
+        if self.active_agent_tab == "files-tab" and agent_id:
+            self.run_async_worker(
+                lambda agent_id=agent_id: self.load_agent_files(agent_id),
                 name="agent-files",
                 exclusive=True,
             )
-        if self.active_agent_tab == "joplin-tab" and self.selected_agent_id:
-            self.run_worker(
-                self.load_joplin_notes(self.selected_agent_id),
+        if self.active_agent_tab == "joplin-tab" and agent_id:
+            self.run_async_worker(
+                lambda agent_id=agent_id: self.load_joplin_notes(agent_id),
                 name="agent-joplin",
                 exclusive=True,
             )
@@ -6675,6 +6850,33 @@ class AgentPBXTUI(App[None]):
     def activate_latest_tab(self) -> None:
         self.activate_agent_tab("latest-tab")
 
+    def run_async_worker(
+        self,
+        work_factory: Callable[[], Any],
+        *,
+        name: str | None = "",
+        group: str = "default",
+        description: str = "",
+        exit_on_error: bool = True,
+        start: bool = True,
+        exclusive: bool = False,
+    ) -> Any:
+        async def runner() -> Any:
+            result = work_factory()
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        return self.run_worker(
+            runner,
+            name=name,
+            group=group,
+            description=description,
+            exit_on_error=exit_on_error,
+            start=start,
+            exclusive=exclusive,
+        )
+
     async def refresh_selected_agent(self, agent_id: str) -> None:
         if self.active_agent_tab == "files-tab":
             await self.load_agent_files(agent_id)
@@ -6704,8 +6906,8 @@ class AgentPBXTUI(App[None]):
             shared_seen_at = self.shared_latest_seen_at(agent_id)
             should_sync_remote = shared_seen_at is None or shared_seen_at < last_seen
         if (changed or should_sync_remote) and self.is_running:
-            self.run_worker(
-                self.mark_latest_seen_remote(agent_id),
+            self.run_async_worker(
+                lambda agent_id=agent_id: self.mark_latest_seen_remote(agent_id),
                 name=f"latest-seen-{agent_id}",
                 exclusive=True,
             )
@@ -6913,7 +7115,10 @@ class AgentPBXTUI(App[None]):
         agent = self.agents.get(agent_id, {"agent_id": agent_id})
         candidates = [
             pane
-            for pane in tmux_support.ranked_panes_for_agent(panes, agent)
+            for pane in tmux_support.ranked_panes_for_agent(
+                self.tmux_candidate_panes_for_agent(agent, panes),
+                agent,
+            )
             if tmux_support.pane_matches_agent(pane, agent)
         ]
         selector_matches = await self.tmux_plan_selector_matches(candidates)
@@ -7176,6 +7381,47 @@ class AgentPBXTUI(App[None]):
         stream.scroll_x = 0
         stream.scroll_target_x = 0
 
+    def is_operator_tmux_pane(self, pane: tmux_support.TmuxPane) -> bool:
+        return pane.session_name == self.operator_tmux_session_name()
+
+    def tmux_pane_matches_operator_agent(
+        self,
+        agent: dict[str, Any],
+        pane: tmux_support.TmuxPane,
+    ) -> bool:
+        agent_id = str(agent.get("agent_id") or "").strip()
+        if not agent_id:
+            return False
+        return pane.window_name == agent_id or pane.title == agent_id
+
+    def tmux_pane_allowed_for_agent(
+        self,
+        agent: dict[str, Any],
+        pane: tmux_support.TmuxPane,
+    ) -> bool:
+        agent_type = self.agent_type(agent)
+        if agent_type == CALLER_AGENT_TYPE:
+            return not self.is_operator_tmux_pane(pane)
+        if agent_type == OPERATOR_AGENT_TYPE:
+            return (
+                self.is_operator_tmux_pane(pane)
+                and self.tmux_pane_matches_operator_agent(agent, pane)
+            )
+        return True
+
+    def tmux_candidate_panes_for_agent(
+        self,
+        agent: dict[str, Any],
+        panes: list[tmux_support.TmuxPane],
+    ) -> list[tmux_support.TmuxPane]:
+        return [
+            pane for pane in panes if self.tmux_pane_allowed_for_agent(agent, pane)
+        ]
+
+    def clear_saved_tmux_target(self, agent_id: str) -> None:
+        self.tmux_agent_targets.pop(agent_id, None)
+        self.tmux_manual_override_agent_ids.discard(agent_id)
+
     def resolve_tmux_pane(
         self,
         agent_id: str,
@@ -7188,14 +7434,23 @@ class AgentPBXTUI(App[None]):
         if manual_target:
             for pane in panes:
                 if pane.pane_id == manual_target or pane.target_label == manual_target:
+                    if not self.tmux_pane_allowed_for_agent(agent, pane):
+                        self.clear_saved_tmux_target(agent_id)
+                        self.save_settings()
+                        break
                     if (
                         agent_id not in self.tmux_manual_override_agent_ids
                         and not tmux_support.pane_matches_agent(pane, agent)
                     ):
-                        return None, "stale"
+                        self.clear_saved_tmux_target(agent_id)
+                        self.save_settings()
+                        break
                     return pane, "manual"
-            return None, "stale"
-        pane = tmux_support.choose_pane_for_agent(panes, agent)
+            else:
+                self.clear_saved_tmux_target(agent_id)
+                self.save_settings()
+        candidate_panes = self.tmux_candidate_panes_for_agent(agent, panes)
+        pane = tmux_support.choose_pane_for_agent(candidate_panes, agent)
         if pane is None:
             return None, "auto"
         return pane, "auto"
@@ -7218,7 +7473,15 @@ class AgentPBXTUI(App[None]):
                 stream.text = "No tmux panes are available."
             return
         agent = self.agents.get(agent_id, {"agent_id": agent_id})
-        ranked = tmux_support.ranked_panes_for_agent(panes, agent)
+        ranked = tmux_support.ranked_panes_for_agent(
+            self.tmux_candidate_panes_for_agent(agent, panes),
+            agent,
+        )
+        if not ranked:
+            stream = self.query_one_or_none("#tmux-stream", TextArea)
+            if stream is not None:
+                stream.text = "No tmux panes match this agent type."
+            return
         current = self.tmux_agent_targets.get(agent_id)
         current_index = next(
             (
@@ -7328,6 +7591,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "ping-agent":
             await self.ping_agent()
+            return
+        if event.button.id == "mark-working":
+            await self.mark_agent_working()
             return
         if event.button.id == "mark-canceled":
             await self.mark_agent_canceled()
@@ -7446,6 +7712,12 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "operator-stop":
             await self.stop_selected_operator()
+            return
+        if event.button.id == "operator-fork-prev":
+            await self.cycle_selected_operator_fork(-1)
+            return
+        if event.button.id == "operator-fork-next":
+            await self.cycle_selected_operator_fork(1)
             return
         if event.button.id == "operator-hide":
             agent_id = self.selected_operator_agent_id()
@@ -8295,6 +8567,71 @@ class AgentPBXTUI(App[None]):
         await self.refresh_events()
         await self.load_thread(agent_id)
 
+    async def mark_agent_working(self) -> None:
+        agent_id = self.query_one("#agent-id", Input).value.strip()
+        if not agent_id:
+            return
+        agent = self.agents.get(agent_id)
+        project = str((agent or {}).get("project") or "").strip()
+        if not project:
+            self.notify("Select a known agent before marking working.", severity="warning")
+            return
+        previous_status = str((agent or {}).get("status") or "-")
+        previous_effective = str((agent or {}).get("effective_status") or previous_status)
+        latest_report_id = str((agent or {}).get("latest_report_id") or "").strip()
+        active_fork = self.active_operator_fork_for_caller(agent or {})
+        metadata: dict[str, Any] = {"manual_unblock": True}
+        detail_lines = [
+            "The operator marked this agent working from the TUI to clear a stale "
+            "terminal/problem status after verifying the session is no longer blocked.",
+            "",
+            f"Previous status: {previous_status}",
+            f"Previous effective status: {previous_effective}",
+        ]
+        if latest_report_id:
+            metadata["resolved_report_id"] = latest_report_id
+            detail_lines.append(f"Resolved report: {latest_report_id}")
+        if active_fork is not None:
+            fork_metadata = (
+                active_fork.get("metadata")
+                if isinstance(active_fork.get("metadata"), dict)
+                else {}
+            )
+            fork_agent_id = str(active_fork.get("agent_id") or "").strip()
+            source_session_id = str(fork_metadata.get("source_codex_session_id") or "").strip()
+            tmux_pane_id = str(fork_metadata.get("tmux_pane_id") or "").strip()
+            if fork_agent_id:
+                metadata["active_fork_agent_id"] = fork_agent_id
+                detail_lines.append(f"Active fork agent: {fork_agent_id}")
+            if source_session_id:
+                metadata["active_source_codex_session_id"] = source_session_id
+                detail_lines.append(f"Active fork source session: {source_session_id}")
+            if tmux_pane_id:
+                metadata["active_fork_tmux_pane_id"] = tmux_pane_id
+                detail_lines.append(f"Active fork tmux pane: {tmux_pane_id}")
+        detail = "\n".join(detail_lines)
+        report = await self.create_agent_report(
+            agent_id,
+            {
+                "project": project,
+                "status": "working",
+                "summary": "Agent marked working by operator",
+                "detail": detail,
+                "needs_input": False,
+                "plan_options": [],
+                "metadata": metadata,
+            },
+        )
+        self.query_one("#detail", TextArea).text = (
+            f"Marked {agent_id} working.\n"
+            f"Report: {report['report_id']}\n\n"
+            f"{detail}"
+        )
+        self.notify(f"Marked {agent_id} working.")
+        await self.refresh_agents()
+        await self.refresh_events()
+        await self.load_thread(agent_id)
+
     async def mark_agent_canceled(self) -> None:
         agent_id = self.query_one("#agent-id", Input).value.strip()
         if not agent_id:
@@ -8596,12 +8933,25 @@ class AgentPBXTUI(App[None]):
                 ]
             )
         else:
-            extra.append(f"- metadata.operator_role: \"{OPERATOR_ROLE_ROOT}\"")
+            extra.extend(
+                [
+                    f"- metadata.operator_role: \"{OPERATOR_ROLE_ROOT}\"",
+                    "",
+                    "This root operator session is the persistent coordination "
+                    "pane for the logical operator. Keep campaign state, planning, "
+                    "and human follow-up handling here. Caller-specific execution "
+                    "runs in fork sessions under this operator; use @caller "
+                    "references and operator campaign tools to target one or more "
+                    "forks without abandoning this root session.",
+                ]
+            )
         return "\n".join(
             [
                 "Use Agent PBX as an operator agent.",
                 "The TUI launched this Codex session with Agent PBX MCP "
                 "configured and AGENT_PBX_TOKEN in the process environment.",
+                "These launch-specific operator identity instructions override "
+                "repository AGENTS.md guidance about caller agent registration.",
                 "",
                 "Register this session with:",
                 f"- agent_id: {agent_id}",
@@ -8638,13 +8988,29 @@ class AgentPBXTUI(App[None]):
         agent_id: str,
         cwd: str,
         mcp_url: str,
+        operator_role: str = OPERATOR_ROLE_ROOT,
+        logical_operator_id: str | None = None,
+        source_caller_agent_id: str | None = None,
+        source_codex_session_id: str | None = None,
     ) -> dict[str, str]:
+        logical_id = logical_operator_id or agent_id
         env = {
             AGENT_PBX_SERVER_URL_ENV: self.server,
             AGENT_PBX_MCP_URL_ENV: mcp_url,
+            "AGENT_PBX_AGENT_ID": agent_id,
+            "AGENT_PBX_AGENT_TYPE": OPERATOR_AGENT_TYPE,
+            "AGENT_PBX_AGENT_PROJECT": "agent-pbx-operator",
+            "AGENT_PBX_PBX_MODE": PBX_REPORT_MODE,
             "AGENT_PBX_OPERATOR_ID": agent_id,
+            "AGENT_PBX_OPERATOR_ROLE": operator_role,
+            "AGENT_PBX_LOGICAL_OPERATOR_ID": logical_id,
             "AGENT_PBX_OPERATOR_CWD": cwd,
+            "AGENT_PBX_CWD": cwd,
         }
+        if source_caller_agent_id:
+            env["AGENT_PBX_SOURCE_CALLER_AGENT_ID"] = source_caller_agent_id
+        if source_codex_session_id:
+            env["AGENT_PBX_SOURCE_CODEX_SESSION_ID"] = source_codex_session_id
         if self.token:
             env[AGENT_PBX_TOKEN_ENV] = self.token
         return env
@@ -8691,7 +9057,7 @@ class AgentPBXTUI(App[None]):
         command_parts = shlex.split(codex_command) if codex_command.strip() else ["codex"]
         return shlex.join([*command_parts, "fork", source_codex_session_id, prompt])
 
-    async def register_logical_operator(
+    def operator_root_metadata(
         self,
         agent_id: str,
         *,
@@ -8699,6 +9065,34 @@ class AgentPBXTUI(App[None]):
         codex_command: str,
         mcp_url: str,
         session_name: str,
+        tmux_pane_id: str | None = None,
+    ) -> dict[str, Any]:
+        metadata = {
+            "agent_type": OPERATOR_AGENT_TYPE,
+            "operator_role": OPERATOR_ROLE_ROOT,
+            "pbx_mode": PBX_REPORT_MODE,
+            "cwd": cwd,
+            "logical_only": False,
+            "launched_by": "agent-pbx-tui",
+            "server_url": self.server,
+            "mcp_url": mcp_url,
+            "token_env": AGENT_PBX_TOKEN_ENV,
+            "tmux_session": session_name,
+            "codex_command": codex_command,
+        }
+        if tmux_pane_id:
+            metadata["tmux_pane_id"] = tmux_pane_id
+        return metadata
+
+    async def register_operator_root(
+        self,
+        agent_id: str,
+        *,
+        cwd: str,
+        codex_command: str,
+        mcp_url: str,
+        session_name: str,
+        tmux_pane_id: str | None = None,
     ) -> dict[str, Any]:
         response = await self.api_client().post(
             "/v1/agents/register",
@@ -8707,20 +9101,15 @@ class AgentPBXTUI(App[None]):
                 "project": "agent-pbx-operator",
                 "name": agent_id,
                 "agent_type": OPERATOR_AGENT_TYPE,
-                "pbx_active": False,
-                "metadata": {
-                    "agent_type": OPERATOR_AGENT_TYPE,
-                    "operator_role": OPERATOR_ROLE_ROOT,
-                    "pbx_mode": PBX_REPORT_MODE,
-                    "cwd": cwd,
-                    "logical_only": True,
-                    "launched_by": "agent-pbx-tui",
-                    "server_url": self.server,
-                    "mcp_url": mcp_url,
-                    "token_env": AGENT_PBX_TOKEN_ENV,
-                    "tmux_session": session_name,
-                    "codex_command": codex_command,
-                },
+                "pbx_active": True,
+                "metadata": self.operator_root_metadata(
+                    agent_id,
+                    cwd=cwd,
+                    codex_command=codex_command,
+                    mcp_url=mcp_url,
+                    session_name=session_name,
+                    tmux_pane_id=tmux_pane_id,
+                ),
             },
             headers=auth_headers(self.token),
         )
@@ -8729,7 +9118,87 @@ class AgentPBXTUI(App[None]):
         if isinstance(agent, dict):
             self.agents[agent_id] = agent
             return agent
-        raise RuntimeError("logical operator registration returned a non-object")
+        raise RuntimeError("operator root registration returned a non-object")
+
+    async def live_operator_root_pane_id(self, agent_id: str) -> str | None:
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes)
+        except Exception:
+            return None
+        agent = self.agents.get(
+            agent_id,
+            {"agent_id": agent_id, "agent_type": OPERATOR_AGENT_TYPE},
+        )
+        for pane in panes:
+            if self.tmux_pane_allowed_for_agent(agent, pane):
+                return pane.pane_id
+        return None
+
+    async def ensure_operator_root_from_tui(
+        self,
+        *,
+        agent_id: str,
+        cwd: str,
+        codex_command: str,
+        mcp_url: str,
+        session_name: str,
+    ) -> tuple[dict[str, Any], str, bool]:
+        agent = await self.register_operator_root(
+            agent_id,
+            cwd=cwd,
+            codex_command=codex_command,
+            mcp_url=mcp_url,
+            session_name=session_name,
+        )
+        pane_id = await self.live_operator_root_pane_id(agent_id)
+        if pane_id:
+            self.tmux_agent_targets[agent_id] = pane_id
+            self.tmux_detached_agent_ids.discard(agent_id)
+            self.tmux_direct_agent_modes[agent_id] = True
+            metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+            if metadata.get("tmux_pane_id") != pane_id:
+                agent = await self.register_operator_root(
+                    agent_id,
+                    cwd=cwd,
+                    codex_command=codex_command,
+                    mcp_url=mcp_url,
+                    session_name=session_name,
+                    tmux_pane_id=pane_id,
+                )
+            return agent, pane_id, False
+
+        pane_id = await asyncio.to_thread(
+            tmux_support.launch_pane,
+            session_name=session_name,
+            window_name=agent_id,
+            command=codex_command,
+            cwd=cwd,
+            env=self.operator_launch_env(
+                agent_id=agent_id,
+                cwd=cwd,
+                mcp_url=mcp_url,
+            ),
+        )
+        self.tmux_agent_targets[agent_id] = pane_id
+        self.tmux_manual_override_agent_ids.add(agent_id)
+        self.tmux_detached_agent_ids.discard(agent_id)
+        self.tmux_direct_agent_modes[agent_id] = True
+        agent = await self.register_operator_root(
+            agent_id,
+            cwd=cwd,
+            codex_command=codex_command,
+            mcp_url=mcp_url,
+            session_name=session_name,
+            tmux_pane_id=pane_id,
+        )
+        await asyncio.sleep(1.0)
+        sent = await self.send_text_to_tmux_pane(
+            pane_id,
+            self.operator_bootstrap_prompt(agent_id, cwd),
+        )
+        if not sent:
+            self.notify(f"Started {agent_id}, but bootstrap paste failed.", severity="warning")
+        return agent, pane_id, True
 
     async def record_operator_fork(
         self,
@@ -8880,6 +9349,10 @@ class AgentPBXTUI(App[None]):
                 agent_id=fork_agent_id,
                 cwd=caller_cwd,
                 mcp_url=mcp_url,
+                operator_role=OPERATOR_ROLE_FORK,
+                logical_operator_id=logical_operator_id,
+                source_caller_agent_id=source_caller_agent_id,
+                source_codex_session_id=source_session_id,
             ),
         )
         self.tmux_agent_targets[fork_agent_id] = pane_id
@@ -8935,15 +9408,19 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             self.notify(f"Unable to configure Codex MCP: {exc}", severity="error")
             return
+        try:
+            root_agent, root_pane_id, root_launched = await self.ensure_operator_root_from_tui(
+                agent_id=agent_id,
+                cwd=cwd,
+                codex_command=codex_command,
+                mcp_url=mcp_url,
+                session_name=session_name,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to start operator root: {exc}", severity="error")
+            return
         if source_caller_agent_id:
             try:
-                await self.register_logical_operator(
-                    agent_id,
-                    cwd=cwd,
-                    codex_command=codex_command,
-                    mcp_url=mcp_url,
-                    session_name=session_name,
-                )
                 fork = await self.ensure_operator_fork_from_tui(
                     logical_operator_id=agent_id,
                     source_caller_agent_id=source_caller_agent_id,
@@ -8955,70 +9432,175 @@ class AgentPBXTUI(App[None]):
                 return
             self.save_settings()
             await self.refresh_agents()
-            await self.open_latest_for_agent(str(fork["fork_agent_id"]))
+            await self.open_latest_for_agent(agent_id)
+            if root_launched:
+                self.notify(
+                    f"Started operator {agent_id} with fork {fork['fork_agent_id']}."
+                )
+            else:
+                self.notify(
+                    f"Reused operator {agent_id} and started fork {fork['fork_agent_id']}."
+                )
             return
-        try:
-            response = await self.api_client().post(
-                "/v1/agents/register",
-                json={
-                    "agent_id": agent_id,
-                    "project": "agent-pbx-operator",
-                    "name": agent_id,
-                    "agent_type": OPERATOR_AGENT_TYPE,
-                    "metadata": {
-                        "agent_type": OPERATOR_AGENT_TYPE,
-                        "operator_role": OPERATOR_ROLE_ROOT,
-                        "pbx_mode": PBX_REPORT_MODE,
-                        "cwd": cwd,
-                        "launched_by": "agent-pbx-tui",
-                        "server_url": self.server,
-                        "mcp_url": mcp_url,
-                        "token_env": AGENT_PBX_TOKEN_ENV,
-                        "tmux_session": session_name,
-                        "codex_command": codex_command,
-                    },
-                },
-                headers=auth_headers(self.token),
-            )
-            response.raise_for_status()
-            agent = response.json()
-            pane_id = await asyncio.to_thread(
-                tmux_support.launch_pane,
-                session_name=session_name,
-                window_name=agent_id,
-                command=codex_command,
-                cwd=cwd,
-                env=self.operator_launch_env(
-                    agent_id=agent_id,
-                    cwd=cwd,
-                    mcp_url=mcp_url,
-                ),
-            )
-        except Exception as exc:
-            self.notify(f"Unable to start operator: {exc}", severity="error")
-            return
-        if isinstance(agent, dict):
-            self.agents[agent_id] = agent
-        self.tmux_agent_targets[agent_id] = pane_id
-        self.tmux_manual_override_agent_ids.add(agent_id)
-        self.tmux_detached_agent_ids.discard(agent_id)
-        self.tmux_direct_agent_modes[agent_id] = True
         self.save_settings()
-        await asyncio.sleep(1.0)
-        sent = await self.send_text_to_tmux_pane(
-            pane_id,
-            self.operator_bootstrap_prompt(agent_id, cwd),
-        )
-        if not sent:
-            self.notify(f"Started {agent_id}, but bootstrap paste failed.", severity="warning")
-        else:
+        if root_launched:
             self.notify(f"Started operator {agent_id}.")
+        else:
+            self.notify(f"Reused operator {agent_id}.")
         await self.refresh_agents()
         await self.open_latest_for_agent(agent_id)
+        _ = root_agent, root_pane_id
 
     def is_operator_agent_id(self, agent_id: str) -> bool:
         agent = self.agents.get(agent_id)
         return agent is not None and self.agent_type(agent) == OPERATOR_AGENT_TYPE
+
+    def operator_fork_pane_targets(
+        self,
+        logical_operator_id: str,
+        panes: list[tmux_support.TmuxPane],
+    ) -> list[tuple[dict[str, Any], tmux_support.TmuxPane]]:
+        targets: list[tuple[dict[str, Any], tmux_support.TmuxPane]] = []
+        seen: set[tuple[str, str]] = set()
+        operator_session_name = self.operator_tmux_session_name()
+
+        def add_target(fork: dict[str, Any], pane: tmux_support.TmuxPane) -> None:
+            fork_agent_id = str(fork.get("agent_id") or "").strip()
+            if not fork_agent_id:
+                return
+            key = (fork_agent_id, pane.pane_id)
+            if key in seen:
+                return
+            seen.add(key)
+            targets.append((fork, pane))
+
+        for fork in self.operator_forks_for_logical_operator(logical_operator_id):
+            fork_agent_id = str(fork.get("agent_id") or "").strip()
+            if not fork_agent_id:
+                continue
+            metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+            explicit_targets = {
+                str(self.tmux_agent_targets.get(fork_agent_id) or "").strip(),
+                str(metadata.get("tmux_pane_id") or "").strip(),
+            }
+            explicit_targets.discard("")
+            for pane in panes:
+                if pane.pane_id in explicit_targets or pane.target_label in explicit_targets:
+                    add_target(fork, pane)
+
+            has_match_hint = bool(
+                str(metadata.get("cwd") or "").strip()
+                or str(fork.get("project") or "").strip()
+            )
+            if not has_match_hint:
+                continue
+            for pane in tmux_support.ranked_panes_for_agent(panes, fork):
+                if pane.session_name != operator_session_name:
+                    continue
+                if not tmux_support.pane_matches_agent(pane, fork):
+                    continue
+                add_target(fork, pane)
+
+        return targets
+
+    def current_operator_fork_target_key(self, logical_operator_id: str) -> str | None:
+        selected_agent_id = self.selected_agent_id
+        if selected_agent_id and selected_agent_id in self.agents:
+            selected_agent = self.agents[selected_agent_id]
+            if (
+                self.operator_role(selected_agent) == OPERATOR_ROLE_FORK
+                and self.logical_operator_id_for_agent(selected_agent) == logical_operator_id
+            ):
+                pane_id = (
+                    self.tmux_visible_pane_id_for_agent(selected_agent_id)
+                    or self.tmux_agent_targets.get(selected_agent_id)
+                )
+                if pane_id:
+                    return f"{selected_agent_id}:{pane_id}"
+        return self.selected_operator_fork_target_by_operator.get(logical_operator_id)
+
+    async def view_operator_fork_pane(
+        self,
+        *,
+        logical_operator_id: str,
+        fork: dict[str, Any],
+        pane: tmux_support.TmuxPane,
+        index: int,
+        total: int,
+    ) -> None:
+        fork_agent_id = str(fork.get("agent_id") or "").strip()
+        if not fork_agent_id:
+            return
+        self.tmux_agent_targets[fork_agent_id] = pane.pane_id
+        self.tmux_manual_override_agent_ids.add(fork_agent_id)
+        self.tmux_detached_agent_ids.discard(fork_agent_id)
+        self.tmux_direct_agent_modes[fork_agent_id] = True
+        self.selected_operator_fork_target_by_operator[logical_operator_id] = (
+            f"{fork_agent_id}:{pane.pane_id}"
+        )
+        self.active_agent_tab_by_agent[fork_agent_id] = "latest-tab"
+        self.save_settings()
+        await self.select_agent(fork_agent_id)
+        self.move_operator_cursor(fork_agent_id, focus=True)
+        source_caller = ""
+        metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+        if metadata:
+            source_caller = str(metadata.get("source_caller_agent_id") or "").strip()
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = (
+                f"Viewing fork pane {index + 1}/{total} for {logical_operator_id}.\n"
+                f"Fork: {fork_agent_id}\n"
+                f"Pane: {pane.pane_id} ({pane.target_label})\n"
+                f"Source caller: {source_caller or '-'}"
+            )
+        self.notify(
+            f"Viewing fork {index + 1}/{total}: {fork_agent_id} {pane.pane_id}."
+        )
+
+    async def cycle_selected_operator_fork(self, direction: int) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes)
+        except Exception as exc:
+            self.notify(f"Unable to list tmux panes: {exc}", severity="error")
+            return
+        self.tmux_panes = panes
+        targets = self.operator_fork_pane_targets(logical_operator_id, panes)
+        if not targets:
+            self.notify(
+                f"No live fork panes found for {logical_operator_id}.",
+                severity="warning",
+            )
+            return
+        current_key = self.current_operator_fork_target_key(logical_operator_id)
+        current_index = next(
+            (
+                index
+                for index, (fork, pane) in enumerate(targets)
+                if f"{fork.get('agent_id')}:{pane.pane_id}" == current_key
+            ),
+            -1,
+        )
+        if current_index < 0:
+            next_index = 0 if direction >= 0 else len(targets) - 1
+        else:
+            next_index = (current_index + direction) % len(targets)
+        fork, pane = targets[next_index]
+        await self.view_operator_fork_pane(
+            logical_operator_id=logical_operator_id,
+            fork=fork,
+            pane=pane,
+            index=next_index,
+            total=len(targets),
+        )
 
     def selected_operator_agent_id(self) -> str | None:
         focused_agent_id = self.focused_agent_table_id()
@@ -9735,6 +10317,9 @@ class AgentPBXTUI(App[None]):
         self,
         token: str,
         agent: dict[str, Any],
+        *,
+        logical_operator_id: str | None = None,
+        active_fork: dict[str, Any] | None = None,
     ) -> CallerAgentReference:
         agent_id = str(agent.get("agent_id") or "")
         metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
@@ -9745,6 +10330,37 @@ class AgentPBXTUI(App[None]):
                 if isinstance(value, str) and value.strip():
                     tmux_pane = value.strip()
                     break
+        active_fork = active_fork or self.active_operator_fork_for_caller(
+            agent,
+            logical_operator_id=logical_operator_id,
+        )
+        active_operator_fork_id = None
+        active_fork_agent_id = None
+        active_fork_source_session_id = None
+        active_fork_tmux_pane = None
+        if active_fork is not None:
+            fork_metadata = (
+                active_fork.get("metadata")
+                if isinstance(active_fork.get("metadata"), dict)
+                else {}
+            )
+            active_operator_fork_id = str(active_fork.get("operator_fork_id") or "").strip() or None
+            active_fork_agent_id = (
+                str(active_fork.get("fork_agent_id") or active_fork.get("agent_id") or "").strip()
+                or None
+            )
+            active_fork_source_session_id = (
+                str(
+                    active_fork.get("source_codex_session_id")
+                    or fork_metadata.get("source_codex_session_id")
+                    or ""
+                ).strip()
+                or None
+            )
+            active_fork_tmux_pane = (
+                str(active_fork.get("tmux_pane_id") or fork_metadata.get("tmux_pane_id") or "").strip()
+                or None
+            )
         return CallerAgentReference(
             token=token,
             agent_id=agent_id,
@@ -9755,6 +10371,10 @@ class AgentPBXTUI(App[None]):
             pbx_active=bool(agent.get("pbx_active", True)),
             active_campaign_count=int_value(agent.get("active_campaign_count")) or 0,
             tmux_pane=tmux_pane,
+            active_operator_fork_id=active_operator_fork_id,
+            active_fork_agent_id=active_fork_agent_id,
+            active_fork_source_session_id=active_fork_source_session_id,
+            active_fork_tmux_pane=active_fork_tmux_pane,
         )
 
     async def fetch_joplin_note_for_reference(
@@ -9825,9 +10445,21 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return None
+        operator_agent = self.agents.get(agent_id)
+        logical_operator_id = (
+            self.logical_operator_id_for_agent(operator_agent)
+            if operator_agent is not None
+            else agent_id
+        )
+        ensure_forks = (
+            operator_agent is not None
+            and self.agent_type(operator_agent) == OPERATOR_AGENT_TYPE
+            and self.operator_role(operator_agent) == OPERATOR_ROLE_ROOT
+        )
         try:
             references: list[CallerAgentReference] = []
             seen_agent_ids: set[str] = set()
+            ensured_forks_by_caller: dict[str, dict[str, Any]] = {}
             for token in tokens:
                 target_agent_id = self.resolve_caller_agent_ref_token(token)
                 if target_agent_id is None:
@@ -9840,8 +10472,32 @@ class AgentPBXTUI(App[None]):
                 target_agent = self.agents.get(target_agent_id)
                 if target_agent is None:
                     raise ValueError(f"Caller agent {target_agent_id} is not loaded")
+                active_fork: dict[str, Any] | None = None
+                if ensure_forks:
+                    active_fork = ensured_forks_by_caller.get(target_agent_id)
+                    if active_fork is None:
+                        active_fork = await self.ensure_operator_fork_from_tui(
+                            logical_operator_id=logical_operator_id,
+                            source_caller_agent_id=target_agent_id,
+                        )
+                        if active_fork is not None:
+                            ensured_forks_by_caller[target_agent_id] = active_fork
+                        else:
+                            self.notify(
+                                (
+                                    "Operator fork unavailable for "
+                                    f"{target_agent_id}; sending caller reference "
+                                    f"to {agent_id}."
+                                ),
+                                severity="warning",
+                            )
                 references.append(
-                    self.caller_agent_reference_from_agent(token, target_agent)
+                    self.caller_agent_reference_from_agent(
+                        token,
+                        target_agent,
+                        logical_operator_id=logical_operator_id,
+                        active_fork=active_fork,
+                    )
                 )
                 seen_agent_ids.add(target_agent_id)
         except Exception as exc:
@@ -9867,25 +10523,8 @@ class AgentPBXTUI(App[None]):
         agent = self.agents.get(agent_id)
         if agent is None or self.agent_type(agent) != OPERATOR_AGENT_TYPE:
             return agent_id
-        if self.operator_role(agent) == OPERATOR_ROLE_FORK:
-            return agent_id
-        tokens = caller_agent_ref_tokens_in_message(message)
-        if not tokens:
-            return agent_id
-        if len(tokens) > 1:
-            return agent_id
-        source_caller_agent_id = self.resolve_caller_agent_ref_token(tokens[0])
-        if source_caller_agent_id is None:
-            self.notify(f"No caller agent matches {tokens[0]}.", severity="error")
-            return None
-        fork = await self.ensure_operator_fork_from_tui(
-            logical_operator_id=agent_id,
-            source_caller_agent_id=source_caller_agent_id,
-        )
-        if fork is None:
-            return None
-        fork_agent_id = str(fork.get("fork_agent_id") or "")
-        return fork_agent_id or None
+        _ = message
+        return agent_id
 
     async def load_joplin_notes(self, agent_id: str) -> None:
         await self.refresh_joplin_status()
@@ -11420,14 +12059,18 @@ class AgentPBXTUI(App[None]):
             )
         elif event.checkbox.id == "tmux-direct":
             self.set_tmux_direct_enabled(event.value)
-            if self.selected_agent_id:
-                worker = (
-                    self.load_tmux_capture(self.selected_agent_id)
-                    if self.is_tmux_direct_enabled(self.selected_agent_id)
-                    else self.load_latest_report(self.selected_agent_id)
-                )
-                self.run_worker(
-                    worker,
+            agent_id = self.selected_agent_id
+            if agent_id:
+                if self.is_tmux_direct_enabled(agent_id):
+                    work_factory = (
+                        lambda agent_id=agent_id: self.load_tmux_capture(agent_id)
+                    )
+                else:
+                    work_factory = (
+                        lambda agent_id=agent_id: self.load_latest_report(agent_id)
+                    )
+                self.run_async_worker(
+                    work_factory,
                     name="tmux-toggle",
                     exclusive=True,
                 )
@@ -11536,7 +12179,7 @@ class AgentPBXTUI(App[None]):
         assert events is not None
         assert agent_actions is not None
         tiny_home = self.is_tiny_layout() and self.compact_view == "home"
-        operators_available = bool(self.operator_agents())
+        operators_available = bool(self.operator_table_agents())
         if self.tiny_home_panel == TINY_HOME_OPERATORS and not operators_available:
             self.set_tiny_home_panel(TINY_HOME_AGENTS, apply=False)
         show_events = tiny_home and self.tiny_home_panel == TINY_HOME_EVENTS
@@ -11640,7 +12283,7 @@ class AgentPBXTUI(App[None]):
     def set_tiny_home_panel(self, panel: str, *, apply: bool = True) -> None:
         if panel not in {TINY_HOME_AGENTS, TINY_HOME_OPERATORS, TINY_HOME_EVENTS}:
             panel = TINY_HOME_AGENTS
-        if panel == TINY_HOME_OPERATORS and not self.operator_agents():
+        if panel == TINY_HOME_OPERATORS and not self.operator_table_agents():
             panel = TINY_HOME_AGENTS
         self.tiny_home_panel = panel
         self.tiny_show_events = panel == TINY_HOME_EVENTS

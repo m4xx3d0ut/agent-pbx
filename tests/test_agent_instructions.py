@@ -38,6 +38,10 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "Keep routine check-ins and pong reports concise" in instructions
     assert "pbx_active=true" in instructions
     assert "pbx_mode=\"report\"" in instructions
+    assert "AGENT_PBX_AGENT_ID" in instructions
+    assert "codex-k1s-workerbee-private" in instructions
+    assert "not a generic id shared" in instructions
+    assert "metadata.codex_session_id" in instructions
     assert "use agent pbx for planning" in instructions
     assert "/plan:1" in instructions
     assert "show the choices in Latest and Thread" in instructions
@@ -67,6 +71,9 @@ def test_runbook_payload_includes_command_guidance() -> None:
     assert payload["title"] == "Agent PBX Runbook"
     assert any("report mode" in item for item in payload["pbx_modes"])
     assert any("pbx_agent_runbook" in item for item in payload["session_start"])
+    assert any("AGENT_PBX_AGENT_ID" in item for item in payload["session_start"])
+    assert any("codex-k1s-workerbee-private" in item for item in payload["session_start"])
+    assert any("not a shared generic id" in item for item in payload["session_start"])
     assert any("pbx_queue_command" in item for item in payload["tool_roles"])
     assert any("pbx_report_turn" in item for item in payload["tool_roles"])
     assert any("pbx_pr_context" in item for item in payload["tool_roles"])
@@ -129,6 +136,25 @@ def test_install_agent_instructions_creates_and_is_idempotent(tmp_path: Path) ->
     assert created["changed"] is True
     assert checked["installed"] is True
     assert unchanged["changed"] is False
+    assert text.count(AGENT_INSTRUCTIONS_START) == 1
+
+
+def test_install_agent_instructions_refreshes_stale_block(tmp_path: Path) -> None:
+    target = tmp_path / "AGENTS.md"
+    target.write_text(
+        "# Repository Guidelines\n\n"
+        f"{AGENT_INSTRUCTIONS_START}\n"
+        "## Agent PBX\n\nOld instructions.\n"
+        f"{AGENT_INSTRUCTIONS_END}\n",
+        encoding="utf-8",
+    )
+
+    result = install_agent_instructions(target, append=True)
+    text = target.read_text(encoding="utf-8")
+
+    assert result["changed"] is True
+    assert "AGENT_PBX_AGENT_ID" in text
+    assert "Old instructions" not in text
     assert text.count(AGENT_INSTRUCTIONS_START) == 1
 
 

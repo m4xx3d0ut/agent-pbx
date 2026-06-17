@@ -26,6 +26,7 @@ from starlette.responses import Response
 from . import __version__
 from .auth import get_store, require_token
 from .config import ServerConfig
+from .codex_sessions import enrich_codex_session_metadata
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
 from .joplin import (
@@ -245,6 +246,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     async def register_agent(
         request: AgentRegisterRequest, store: Store = Depends(get_store)
     ) -> dict[str, object]:
+        if request.agent_type == "caller":
+            request = request.model_copy(
+                update={"metadata": enrich_codex_session_metadata(request.metadata)}
+            )
         agent = store.register_agent(request)
         store.append_event(
             "agent_registered",

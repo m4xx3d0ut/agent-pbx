@@ -1609,6 +1609,32 @@ def test_tui_keeps_reported_status_for_idle_or_nonterminal_tmux(monkeypatch) -> 
     )
 
 
+def test_tui_shows_fork_ready_hint_for_stale_blocked_caller() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "caller-1": {
+            "agent_id": "caller-1",
+            "agent_type": "caller",
+            "status": "blocked",
+            "metadata": {"codex_session_id": "session-1"},
+        },
+        "operator-0-fork-caller-1": {
+            "agent_id": "operator-0-fork-caller-1",
+            "agent_type": "operator",
+            "status": "ready",
+            "pbx_active": True,
+            "metadata": {
+                "operator_role": "fork",
+                "source_caller_agent_id": "caller-1",
+                "source_codex_session_id": "session-1",
+                "operator_fork_pending": False,
+            },
+        },
+    }
+
+    assert app.format_agent_status(app.agents["caller-1"]) == "blocked/fork-ready"
+
+
 def test_tui_styles_tmux_idle_rows(monkeypatch) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
@@ -1821,9 +1847,11 @@ def test_tui_tmux_resolve_uses_manual_override_and_detach() -> None:
 
     app.tmux_agent_targets = {"agent-1": "%2"}
     pane, mode = app.resolve_tmux_pane("agent-1", [auto_pane, manual_pane])
-    assert pane is None
-    assert mode == "stale"
+    assert pane == auto_pane
+    assert mode == "auto"
+    assert "agent-1" not in app.tmux_agent_targets
 
+    app.tmux_agent_targets = {"agent-1": "%2"}
     app.tmux_manual_override_agent_ids.add("agent-1")
     pane, mode = app.resolve_tmux_pane("agent-1", [auto_pane, manual_pane])
     assert pane == manual_pane
@@ -1833,6 +1861,102 @@ def test_tui_tmux_resolve_uses_manual_override_and_detach() -> None:
     pane, mode = app.resolve_tmux_pane("agent-1", [auto_pane, manual_pane])
     assert pane is None
     assert mode == "detached"
+
+
+def test_tui_tmux_resolve_repairs_caller_target_bound_to_operator_pane() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.agents = {
+        "caller-1": {
+            "agent_id": "caller-1",
+            "agent_type": "caller",
+            "project": "workerbee",
+            "metadata": {"cwd": "/home/me/workerbee"},
+        }
+    }
+    caller_pane = tmux_support.TmuxPane(
+        "k1s",
+        "0",
+        "1",
+        "%1",
+        True,
+        "node",
+        "workerbee",
+        "/home/me/workerbee",
+        80,
+        24,
+        100,
+        window_name="node",
+    )
+    fork_pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "1",
+        "0",
+        "%2",
+        True,
+        "node",
+        "workerbee",
+        "/home/me/workerbee",
+        80,
+        24,
+        100,
+        window_name="operator-0-fork-caller-1",
+    )
+    app.tmux_agent_targets = {"caller-1": "%2"}
+
+    pane, mode = app.resolve_tmux_pane("caller-1", [fork_pane, caller_pane])
+
+    assert pane == caller_pane
+    assert mode == "auto"
+    assert "caller-1" not in app.tmux_agent_targets
+
+
+def test_tui_tmux_resolve_recovers_root_operator_pane() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "cwd": "/home/me/agent-pbx",
+            },
+        }
+    }
+    root_pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "0",
+        "0",
+        "%1",
+        True,
+        "node",
+        "agent-pbx",
+        "/home/me/agent-pbx",
+        80,
+        24,
+        100,
+        window_name="operator-0",
+    )
+    fork_pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "1",
+        "0",
+        "%2",
+        True,
+        "node",
+        "workerbee",
+        "/home/me/workerbee",
+        80,
+        24,
+        100,
+        window_name="operator-0-fork-caller-1",
+    )
+
+    pane, mode = app.resolve_tmux_pane("operator-0", [fork_pane, root_pane])
+
+    assert pane == root_pane
+    assert mode == "auto"
 
 
 async def test_tui_compact_layout_opens_agent_view_and_back(monkeypatch) -> None:
@@ -2052,6 +2176,143 @@ async def test_tui_operator_split_filters_callers_and_operators() -> None:
     assert operators.styles.display == "block"
     assert operator_actions.styles.display == "block"
     assert operators.get_row("operator-0")[2].plain == "operator-0"
+
+
+async def test_tui_operator_split_shows_operator_forks() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "status": "working",
+                "project": "agent-pbx-operator",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                },
+                "last_seen_at": 124.0,
+            },
+            "operator-0-fork-agent-1": {
+                "agent_id": "operator-0-fork-agent-1",
+                "agent_type": "operator",
+                "status": "ready",
+                "project": "agent-pbx",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "fork",
+                    "logical_operator_id": "operator-0",
+                    "source_caller_agent_id": "agent-1",
+                    "source_codex_session_id": "session-1",
+                    "cwd": "/home/me/agent-pbx",
+                },
+                "last_seen_at": 123.0,
+            },
+        }
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+
+    assert [str(row.key.value) for row in operators.ordered_rows] == [
+        "operator-0",
+        "operator-0-fork-agent-1",
+    ]
+
+
+async def test_tui_cycles_operator_fork_panes(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    fork_agent_id = "operator-0-fork-agent-1"
+    panes = [
+        tmux_support.TmuxPane(
+            "agent-pbx-operators",
+            "1",
+            "0",
+            "%1",
+            True,
+            "node",
+            "agent-pbx",
+            "/home/me/agent-pbx",
+            120,
+            32,
+            100,
+        ),
+        tmux_support.TmuxPane(
+            "agent-pbx-operators",
+            "2",
+            "0",
+            "%2",
+            True,
+            "node",
+            "agent-pbx",
+            "/home/me/agent-pbx",
+            120,
+            32,
+            100,
+        ),
+    ]
+    refreshed: list[str] = []
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return panes
+
+    async def fake_refresh_selected_agent(agent_id: str) -> None:
+        refreshed.append(agent_id)
+
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    app.refresh_selected_agent = fake_refresh_selected_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "status": "working",
+                "project": "agent-pbx-operator",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                },
+                "last_seen_at": 124.0,
+            },
+            fork_agent_id: {
+                "agent_id": fork_agent_id,
+                "agent_type": "operator",
+                "status": "ready",
+                "project": "agent-pbx",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "fork",
+                    "logical_operator_id": "operator-0",
+                    "source_caller_agent_id": "agent-1",
+                    "source_codex_session_id": "session-1",
+                    "cwd": "/home/me/agent-pbx",
+                },
+                "last_seen_at": 123.0,
+            },
+        }
+        app.selected_agent_id = "operator-0"
+        app.render_agents()
+
+        await app.cycle_selected_operator_fork(1)
+        first_target = app.tmux_agent_targets[fork_agent_id]
+        await app.cycle_selected_operator_fork(1)
+        second_target = app.tmux_agent_targets[fork_agent_id]
+        detail = app.query_one("#detail", TextArea).text
+
+    assert first_target == "%1"
+    assert second_target == "%2"
+    assert refreshed == [fork_agent_id, fork_agent_id]
+    assert app.selected_agent_id == fork_agent_id
+    assert app.tmux_direct_agent_modes[fork_agent_id] is True
+    assert fork_agent_id in app.tmux_manual_override_agent_ids
+    assert app.selected_operator_fork_target_by_operator["operator-0"] == (
+        f"{fork_agent_id}:%2"
+    )
+    assert "Viewing fork pane 2/2 for operator-0." in detail
 
 
 async def test_tui_operator_split_hidden_without_operators() -> None:
@@ -3435,11 +3696,19 @@ async def test_tui_send_input_expands_caller_agent_references() -> None:
                 "operator_role": "fork",
                 "logical_operator_id": "operator-0",
                 "source_caller_agent_id": "project-1",
+                "source_codex_session_id": "session-project-1",
+                "tmux_pane_id": "%42",
             },
         }
         return {
             "operator_fork_id": "fork-1",
             "fork_agent_id": "operator-0-fork-project-1",
+            "source_codex_session_id": "session-project-1",
+            "tmux_pane_id": "%42",
+            "metadata": {
+                "source_codex_session_id": "session-project-1",
+                "tmux_pane_id": "%42",
+            },
         }
 
     app.queue_command = fake_queue_command  # type: ignore[method-assign]
@@ -3480,7 +3749,7 @@ async def test_tui_send_input_expands_caller_agent_references() -> None:
         await pilot.pause()
 
     assert len(queued) == 1
-    assert queued[0][0] == "operator-0-fork-project-1"
+    assert queued[0][0] == "operator-0"
     assert queued[0][1] == "send_input"
     sent_message = queued[0][2]["message"]
     assert "Coordinate @caller:Project-One on the release task." in sent_message
@@ -3493,9 +3762,74 @@ async def test_tui_send_input_expands_caller_agent_references() -> None:
     assert "- PBX Mode: `nohup`" in sent_message
     assert "- Active Campaigns: `2`" in sent_message
     assert "- Tmux Pane: `%7`" in sent_message
-    assert app.sent_message_history_by_agent["operator-0-fork-project-1"] == [
+    assert "- Active Operator Fork ID: `fork-1`" in sent_message
+    assert "- Active Fork Agent ID: `operator-0-fork-project-1`" in sent_message
+    assert "- Active Fork Source Session: `session-project-1`" in sent_message
+    assert "- Active Fork Tmux Pane: `%42`" in sent_message
+    assert app.sent_message_history_by_agent["operator-0"] == [
         "Coordinate @caller:Project-One on the release task."
     ]
+
+
+async def test_tui_send_input_keeps_caller_reference_when_fork_metadata_missing() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "operator-0"
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {},
+            },
+            "codex-k1s-workerbee-private": {
+                "agent_id": "codex-k1s-workerbee-private",
+                "agent_type": "caller",
+                "name": "Codex k1s-workerbee-private",
+                "project": "k1s-workerbee-private",
+                "effective_status": "online",
+                "pbx_active": True,
+                "metadata": {
+                    "pbx_mode": "report",
+                    "cwd": "/home/m4xx3d0ut/git/k1s-wt/k1s-workerbee-private",
+                },
+            },
+        }
+        app.query_one("#agent-id", Input).value = "operator-0"
+        message = app.query_one("#message", TextArea)
+        message.text = "Coordinate @caller:codex-k1s-workerbee-private now."
+        await app.send_input()
+        await pilot.pause()
+
+    assert len(queued) == 1
+    assert queued[0][0] == "operator-0"
+    assert queued[0][1] == "send_input"
+    sent_message = queued[0][2]["message"]
+    assert "Coordinate @caller:codex-k1s-workerbee-private now." in sent_message
+    assert "## Caller Agent References" in sent_message
+    assert "- Ref: `@caller:codex-k1s-workerbee-private`" in sent_message
+    assert "- Agent ID: `codex-k1s-workerbee-private`" in sent_message
+    assert "- Project: `k1s-workerbee-private`" in sent_message
+    assert "- Status: `online`" in sent_message
 
 
 async def test_tui_tmux_input_expands_joplin_note_references() -> None:
@@ -3700,6 +4034,8 @@ async def test_tui_palette_includes_operator_commands() -> None:
 
     assert "/detail" in titles
     assert "/ping" in titles
+    assert "/unblock" in titles
+    assert "/working" in titles
     assert "/esc" in titles
     assert "/ctrlc" in titles
     assert "/tmux" in titles
@@ -3711,6 +4047,8 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/plan" in titles
     assert "/plan latest" in titles
     assert "/plan thread" in titles
+    assert "/operator fork next" in titles
+    assert "/operator fork prev" in titles
     assert "/theme minimal" in titles
     assert "/layout compact" in titles
     assert "/gitstatus" not in titles
@@ -3771,6 +4109,10 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
 
     assert {
         "/campaigns",
+        "/unblock",
+        "/working",
+        "/operator fork next",
+        "/operator fork prev",
         "/joplin",
         "/joplin refresh",
         "/joplin new",
@@ -5749,11 +6091,20 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
     assert metadata["mcp_url"] == "http://127.0.0.1:8765/mcp"
     assert metadata["token_env"] == "AGENT_PBX_TOKEN"
     assert "secret" not in json.dumps(metadata)
+    assert posts[1]["path"] == "/v1/agents/register"
+    assert posts[1]["json"]["metadata"]["tmux_pane_id"] == "%42"  # type: ignore[index]
     assert launches[0]["env"] == {
         "AGENT_PBX_SERVER_URL": "http://127.0.0.1:8765",
         "AGENT_PBX_MCP_URL": "http://127.0.0.1:8765/mcp",
+        "AGENT_PBX_AGENT_ID": "operator-0",
+        "AGENT_PBX_AGENT_TYPE": "operator",
+        "AGENT_PBX_AGENT_PROJECT": "agent-pbx-operator",
+        "AGENT_PBX_PBX_MODE": "report",
         "AGENT_PBX_OPERATOR_ID": "operator-0",
+        "AGENT_PBX_OPERATOR_ROLE": "root",
+        "AGENT_PBX_LOGICAL_OPERATOR_ID": "operator-0",
         "AGENT_PBX_OPERATOR_CWD": str(Path.cwd()),
+        "AGENT_PBX_CWD": str(Path.cwd()),
         "AGENT_PBX_TOKEN": "secret",
     }
     assert app.tmux_agent_targets["operator-0"] == "%42"
@@ -5849,7 +6200,17 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
 
     def fake_launch_pane(**kwargs: object) -> str:
         launches.append(kwargs)
-        return "%43"
+        return "%42" if len(launches) == 1 else "%43"
+
+    async def fake_send_text_to_tmux_pane(
+        pane_id: str,
+        message: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        assert pane_id == "%42"
+        assert "agent_id: operator-0" in message
+        return True
 
     async def fake_refresh_agents() -> None:
         return None
@@ -5859,6 +6220,7 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
     app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
@@ -5883,11 +6245,21 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     assert configured
     assert posts[0]["path"] == "/v1/agents/register"
     assert posts[0]["json"]["metadata"]["operator_role"] == "root"  # type: ignore[index]
-    assert posts[1]["json"]["metadata"]["operator_role"] == "fork"  # type: ignore[index]
-    assert posts[2]["path"] == "/v1/operator/forks/ensure"
-    assert launches[0]["cwd"] == str(Path.cwd())
-    assert "codex fork session-caller-1" in launches[0]["command"]  # type: ignore[operator]
-    assert launches[0]["env"]["AGENT_PBX_OPERATOR_ID"] == posts[1]["json"]["agent_id"]  # type: ignore[index]
+    assert posts[1]["json"]["metadata"]["operator_role"] == "root"  # type: ignore[index]
+    assert posts[1]["json"]["metadata"]["tmux_pane_id"] == "%42"  # type: ignore[index]
+    assert posts[2]["json"]["metadata"]["operator_role"] == "fork"  # type: ignore[index]
+    assert posts[3]["path"] == "/v1/operator/forks/ensure"
+    assert launches[0]["window_name"] == "operator-0"
+    assert launches[0]["command"] == "codex"
+    assert launches[0]["env"]["AGENT_PBX_OPERATOR_ROLE"] == "root"
+    assert launches[1]["cwd"] == str(Path.cwd())
+    assert "codex fork session-caller-1" in launches[1]["command"]  # type: ignore[operator]
+    assert launches[1]["env"]["AGENT_PBX_OPERATOR_ID"] == posts[2]["json"]["agent_id"]  # type: ignore[index]
+    assert launches[1]["env"]["AGENT_PBX_AGENT_ID"] == posts[2]["json"]["agent_id"]  # type: ignore[index]
+    assert launches[1]["env"]["AGENT_PBX_OPERATOR_ROLE"] == "fork"
+    assert launches[1]["env"]["AGENT_PBX_LOGICAL_OPERATOR_ID"] == "operator-0"
+    assert launches[1]["env"]["AGENT_PBX_SOURCE_CALLER_AGENT_ID"] == "caller-1"
+    assert launches[1]["env"]["AGENT_PBX_SOURCE_CODEX_SESSION_ID"] == "session-caller-1"
 
 
 async def test_tui_start_operator_refuses_missing_required_token() -> None:
@@ -6294,7 +6666,7 @@ def test_tui_mark_latest_seen_persists_watermark(tmp_path: Path) -> None:
 
 async def test_tui_mark_latest_seen_syncs_when_server_seen_is_missing() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
-    worker_coros = []
+    worker_work: list[object] = []
 
     async with app.run_test():
         app.agents = {
@@ -6310,15 +6682,14 @@ async def test_tui_mark_latest_seen_syncs_when_server_seen_is_missing() -> None:
         app.latest_viewed_at_by_agent = {"agent-1": 123.0}
 
         def fake_run_worker(work, *_args, **_kwargs):  # type: ignore[no-untyped-def]
-            worker_coros.append(work)
+            worker_work.append(work)
             return None
 
         app.run_worker = fake_run_worker  # type: ignore[method-assign]
         app.mark_latest_seen("agent-1")
-        for coro in worker_coros:
-            coro.close()
 
-    assert len(worker_coros) == 1
+    assert len(worker_work) == 1
+    assert inspect.iscoroutinefunction(worker_work[0])
 
 
 async def test_tui_latest_seen_event_clears_remote_unseen_marker() -> None:
@@ -7133,6 +7504,91 @@ async def test_tui_mark_agent_canceled_creates_report() -> None:
     assert refreshed_events == 1
     assert threads == ["agent-1"]
     assert "Marked agent-1 canceled." in detail
+    assert "Report: report-1" in detail
+
+
+async def test_tui_mark_agent_working_creates_audited_report() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    reports: list[tuple[str, dict[str, object]]] = []
+    refreshed_agents = 0
+    refreshed_events = 0
+    threads: list[str] = []
+
+    async def fake_create_agent_report(
+        agent_id: str, payload: dict[str, object]
+    ) -> dict[str, object]:
+        reports.append((agent_id, payload))
+        return {"report_id": "report-1"}
+
+    async def fake_refresh_agents() -> None:
+        nonlocal refreshed_agents
+        refreshed_agents += 1
+
+    async def fake_refresh_events() -> None:
+        nonlocal refreshed_events
+        refreshed_events += 1
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.create_agent_report = fake_create_agent_report  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "status": "blocked",
+                "effective_status": "blocked",
+                "latest_report_id": "blocked-report",
+                "metadata": {"codex_session_id": "session-1"},
+            },
+            "operator-0-fork-caller-1": {
+                "agent_id": "operator-0-fork-caller-1",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "ready",
+                "pbx_active": True,
+                "metadata": {
+                    "operator_role": "fork",
+                    "source_caller_agent_id": "caller-1",
+                    "source_codex_session_id": "session-1",
+                    "operator_fork_pending": False,
+                    "tmux_pane_id": "%42",
+                },
+            },
+        }
+        app.query_one("#agent-id", Input).value = "caller-1"
+        refreshed_agents = 0
+        refreshed_events = 0
+        await app.mark_agent_working()
+        detail = app.query_one("#detail", TextArea).text
+
+    assert len(reports) == 1
+    agent_id, payload = reports[0]
+    assert agent_id == "caller-1"
+    assert payload["project"] == "demo"
+    assert payload["status"] == "working"
+    assert payload["summary"] == "Agent marked working by operator"
+    assert payload["needs_input"] is False
+    assert payload["plan_options"] == []
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["manual_unblock"] is True
+    assert metadata["resolved_report_id"] == "blocked-report"
+    assert metadata["active_fork_agent_id"] == "operator-0-fork-caller-1"
+    assert metadata["active_source_codex_session_id"] == "session-1"
+    assert metadata["active_fork_tmux_pane_id"] == "%42"
+    assert "Previous status: blocked" in str(payload["detail"])
+    assert "Active fork agent: operator-0-fork-caller-1" in str(payload["detail"])
+    assert refreshed_agents == 1
+    assert refreshed_events == 1
+    assert threads == ["caller-1"]
+    assert "Marked caller-1 working." in detail
     assert "Report: report-1" in detail
 
 

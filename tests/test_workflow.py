@@ -1,10 +1,12 @@
 import base64
+import json
 import sqlite3
 import struct
 import time
 from pathlib import Path
 import zlib
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agent_pbx.api import create_app
@@ -39,6 +41,32 @@ def tiny_png_bytes() -> bytes:
         + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0))
         + chunk(b"IDAT", zlib.compress(raw))
         + chunk(b"IEND", b"")
+    )
+
+
+def write_codex_session(codex_home: Path, cwd: Path, session_id: str) -> None:
+    session_path = (
+        codex_home
+        / "sessions"
+        / "2026"
+        / "06"
+        / "17"
+        / f"rollout-2026-06-17T18-52-25-{session_id}.jsonl"
+    )
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "cwd": str(cwd),
+                    "timestamp": "2026-06-17T18:52:25.014Z",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 
@@ -115,6 +143,63 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
     assert events.json()[1]["payload"]["created_at"] == report.json()["created_at"]
 
 
+def test_register_agent_infers_codex_session_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    cwd = tmp_path / "repo"
+    session_id = "019ed6ed-6e25-7d82-bf2f-0b3c377bd3c9"
+    cwd.mkdir()
+    write_codex_session(codex_home, cwd, session_id)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    registered = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "codex-k1s-workerbee-private-20260617",
+            "project": "k1s-workerbee-private",
+            "metadata": {"cwd": str(cwd), "pbx_mode": "report"},
+        },
+    )
+
+    assert registered.status_code == 200
+    assert registered.json()["metadata"]["codex_session_id"] == session_id
+    assert registered.json()["metadata"]["codex_thread_id"] == session_id
+
+
+def test_register_operator_does_not_infer_codex_session_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    cwd = tmp_path / "repo"
+    session_id = "019ed6ed-6e25-7d82-bf2f-0b3c377bd3c9"
+    cwd.mkdir()
+    write_codex_session(codex_home, cwd, session_id)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    registered = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "operator-0-fork-caller-1",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {
+                "cwd": str(cwd),
+                "operator_role": "fork",
+                "source_codex_session_id": session_id,
+            },
+        },
+    )
+
+    assert registered.status_code == 200
+    assert "codex_session_id" not in registered.json()["metadata"]
+    assert registered.json()["metadata"]["source_codex_session_id"] == session_id
+
+
 def test_set_agent_pbx_active_endpoint_updates_agent_and_events(tmp_path: Path) -> None:
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
 
@@ -168,6 +253,50 @@ def test_mark_latest_report_seen_is_shared_state(tmp_path: Path) -> None:
     assert events[-1]["type"] == "latest_seen"
     assert events[-1]["payload"]["agent_id"] == "agent-1"
     assert events[-1]["payload"]["latest_report_seen_at"] == report["created_at"]
+
+
+def test_audited_working_report_clears_stale_blocked_status(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {"cwd": str(tmp_path)},
+        },
+    )
+    blocked = client.post(
+        "/v1/agents/caller-1/reports",
+        json={
+            "project": "demo",
+            "status": "blocked",
+            "summary": "Fork unavailable",
+            "detail": "Diagnostic report posted before fork was available.",
+        },
+    ).json()
+    unblocked = client.post(
+        "/v1/agents/caller-1/reports",
+        json={
+            "project": "demo",
+            "status": "working",
+            "summary": "Caller unblocked; active operator fork is ready.",
+            "detail": "Audited unblock after fork became ready.",
+            "metadata": {
+                "manual_unblock": True,
+                "resolved_report_id": blocked["report_id"],
+            },
+        },
+    ).json()
+
+    agent = client.get("/v1/agents").json()[0]
+    report = client.get(f"/v1/reports/{unblocked['report_id']}").json()
+
+    assert agent["status"] == "working"
+    assert agent["latest_report_id"] == unblocked["report_id"]
+    assert agent["latest_report_status"] == "working"
+    assert report["metadata"]["manual_unblock"] is True
+    assert report["metadata"]["resolved_report_id"] == blocked["report_id"]
 
 
 def test_star_agent_is_shared_state(tmp_path: Path) -> None:

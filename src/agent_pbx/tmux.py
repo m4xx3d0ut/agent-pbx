@@ -22,6 +22,7 @@ TMUX_PANE_FORMAT = "\t".join(
         "#{pane_width}",
         "#{pane_height}",
         "#{history_size}",
+        "#{window_name}",
     ]
 )
 DEFAULT_SUBMIT_DELAY_SECONDS = 0.08
@@ -42,6 +43,7 @@ class TmuxPane:
     width: int
     height: int
     history_size: int
+    window_name: str = ""
 
     @property
     def target_label(self) -> str:
@@ -57,7 +59,7 @@ def int_or_zero(value: str) -> int:
 
 def parse_pane_line(line: str) -> TmuxPane | None:
     parts = line.rstrip("\n").split("\t")
-    if len(parts) != 11:
+    if len(parts) not in {11, 12}:
         return None
     return TmuxPane(
         session_name=parts[0],
@@ -71,6 +73,7 @@ def parse_pane_line(line: str) -> TmuxPane | None:
         width=int_or_zero(parts[8]),
         height=int_or_zero(parts[9]),
         history_size=int_or_zero(parts[10]),
+        window_name=parts[11] if len(parts) == 12 else "",
     )
 
 
