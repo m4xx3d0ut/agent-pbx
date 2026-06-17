@@ -216,6 +216,8 @@ MOUSE_FOCUS_CONTAINER_TARGETS = {
     "pull-request-actions": "#pull-request-detail",
     "issues-tab": "#issues",
     "issue-actions": "#issue-detail",
+    "campaigns-tab": "#campaigns",
+    "campaign-actions": "#campaign-detail",
     "joplin-tab": "#joplin-notes",
     "joplin-actions": "#joplin-body",
 }
@@ -268,6 +270,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/files",
     "/workerbee",
     "/campaigns",
+    "/campaign report",
     "/pr",
     "/pr refresh",
     "/pr review",
@@ -328,6 +331,9 @@ ISSUE_SLASH_ACTIONS = {
     "/issue mitigate": "mitigate",
     "/issue url": "url",
     "/issue clear": "clear",
+}
+CAMPAIGN_SLASH_ACTIONS = {
+    "/campaign report": "report",
 }
 JOPLIN_SLASH_ACTIONS = {
     "/joplin": "open",
@@ -2955,6 +2961,13 @@ class AgentPBXTUI(App[None]):
         Binding("shift+h", "unhide_agent", "Unhide Agent", key_display="H", priority=True),
         Binding("d", "hide_agent", "Hide Agent", priority=True),
         Binding(
+            "shift+r",
+            "view_campaign_report",
+            "Campaign Report",
+            key_display="R",
+            priority=True,
+        ),
+        Binding(
             "shift+d",
             "purge_agent",
             "Purge Agent",
@@ -3154,6 +3167,7 @@ class AgentPBXTUI(App[None]):
         self.campaigns_by_operator: dict[str, dict[str, dict[str, Any]]] = {}
         self.selected_campaign_id: str | None = None
         self.selected_campaign_id_by_operator: dict[str, str] = {}
+        self.selected_campaign_report_id_by_operator: dict[str, str] = {}
         self.joplin_configured = False
         self.joplin_available = False
         self.joplin_status: dict[str, Any] = {}
@@ -3421,6 +3435,7 @@ class AgentPBXTUI(App[None]):
                         yield NavigationTextArea(id="campaign-detail", read_only=True)
                         with Horizontal(id="campaign-actions"):
                             yield Button("Refresh", id="campaign-refresh")
+                            yield Button("View Report (R)", id="campaign-report")
                     with TabPane("Joplin", id="joplin-tab"):
                         yield Static("Joplin: checking...", id="joplin-status")
                         yield DataTable(
@@ -3555,6 +3570,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/files", "Open and refresh the Files tab", self.palette_files)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         yield SystemCommand("/campaigns", "Open and refresh operator campaigns", self.palette_campaigns)
+        yield SystemCommand("/campaign report", "View the selected campaign report", self.palette_campaign_report)
         yield SystemCommand("/pr", "Open and refresh pull requests", self.palette_pull_requests)
         yield SystemCommand("/pr refresh", "Refresh pull requests", self.palette_pull_requests_refresh)
         yield SystemCommand("/pr review", "Ask selected agent to review the selected PR", self.palette_pull_request_review)
@@ -3703,6 +3719,13 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.open_campaigns_for_agent(agent_id),
             name="palette-campaigns",
+            exclusive=True,
+        )
+
+    def palette_campaign_report(self) -> None:
+        self.run_worker(
+            self.view_selected_campaign_report(),
+            name="palette-campaign-report",
             exclusive=True,
         )
 
@@ -4385,6 +4408,34 @@ class AgentPBXTUI(App[None]):
         self.activate_agent_tab("campaigns-tab")
         await self.load_operator_campaigns(agent_id)
 
+    def activate_campaigns_tab(self) -> None:
+        self.activate_agent_tab("campaigns-tab")
+
+    async def campaign_action_for_agent(
+        self,
+        agent_id: str,
+        action: str,
+    ) -> None:
+        previous_agent_id = self.selected_agent_id
+        if previous_agent_id != agent_id:
+            self.save_current_agent_pane_state(previous_agent_id)
+        self.selected_agent_id = agent_id
+        agent_input = self.query_one_or_none("#agent-id", Input)
+        if agent_input is not None:
+            agent_input.value = agent_id
+        if previous_agent_id != agent_id:
+            self.restore_agent_drafts(agent_id)
+        self.activate_campaigns_tab()
+        self.update_agent_title()
+        if action == "report":
+            if agent_id not in self.campaigns_by_operator:
+                await self.load_operator_campaigns(agent_id)
+            await self.view_selected_campaign_report()
+        elif action in {"open", "refresh"}:
+            await self.load_operator_campaigns(agent_id)
+        else:
+            self.notify(f"Unknown campaign action: {action}", severity="warning")
+
     async def open_pull_requests_for_agent(self, agent_id: str) -> None:
         if agent_id in self.agents:
             await self.select_agent(agent_id)
@@ -4585,6 +4636,10 @@ class AgentPBXTUI(App[None]):
             target = self.query_one_or_none("#issue-detail", TextArea)
             if target is None:
                 target = self.query_one_or_none("#issues", DataTable)
+        elif self.active_agent_tab == "campaigns-tab":
+            target = self.query_one_or_none("#campaign-detail", TextArea)
+            if target is None:
+                target = self.query_one_or_none("#campaigns", DataTable)
         elif self.active_agent_tab == "joplin-tab":
             target = self.query_one_or_none("#joplin-body", TextArea)
             if target is None:
@@ -4640,6 +4695,19 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.cycle_selected_operator_fork(-1),
             name="prev-operator-fork",
+            exclusive=True,
+        )
+
+    def action_view_campaign_report(self) -> None:
+        if self.active_agent_tab != "campaigns-tab":
+            return
+        if isinstance(self.focused, (Input, TextArea)) and getattr(
+            self.focused, "id", None
+        ) != "campaign-detail":
+            return
+        self.run_worker(
+            self.view_selected_campaign_report(),
+            name="view-campaign-report",
             exclusive=True,
         )
 
@@ -6677,6 +6745,15 @@ class AgentPBXTUI(App[None]):
             self.record_sent_message(agent_id, message)
             self.set_agent_draft_text(agent_id, text_area, "")
             return True
+        campaign_action = CAMPAIGN_SLASH_ACTIONS.get(command.title.lower())
+        if campaign_action is not None:
+            if not agent_id:
+                self.notify("Select an agent first.", severity="warning")
+                return True
+            await self.campaign_action_for_agent(agent_id, campaign_action)
+            self.record_sent_message(agent_id, message)
+            self.set_agent_draft_text(agent_id, text_area, "")
+            return True
         original_text = text_area.text
         result = command.callback()
         if inspect.isawaitable(result):
@@ -7700,6 +7777,9 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "campaign-refresh":
             if self.selected_agent_id:
                 await self.load_operator_campaigns(self.selected_agent_id)
+            return
+        if event.button.id == "campaign-report":
+            await self.view_selected_campaign_report()
             return
         if event.button.id == "start-operator":
             await self.start_operator_agent()
@@ -8826,6 +8906,7 @@ class AgentPBXTUI(App[None]):
         self.selected_issue_number_by_agent.pop(agent_id, None)
         self.campaigns_by_operator.pop(agent_id, None)
         self.selected_campaign_id_by_operator.pop(agent_id, None)
+        self.selected_campaign_report_id_by_operator.pop(agent_id, None)
         self.joplin_notes_by_agent.pop(agent_id, None)
         self.file_directory_entries_by_agent.pop(agent_id, None)
         self.active_agent_tab_by_agent.pop(agent_id, None)
@@ -9735,6 +9816,7 @@ class AgentPBXTUI(App[None]):
             campaigns = payload.get("campaigns", []) if isinstance(payload, dict) else []
             if not isinstance(campaigns, list):
                 campaigns = []
+            await self.attach_campaign_reports(campaigns)
         except Exception as exc:
             self.render_campaigns(agent_id, [])
             if status_label is not None:
@@ -9757,6 +9839,70 @@ class AgentPBXTUI(App[None]):
             self.select_campaign(str(campaigns[0]["campaign_id"]))
         elif detail is not None:
             detail.text = f"No operator campaigns for {agent_id}."
+
+    def campaign_report_ids(self, campaign: dict[str, Any]) -> list[str]:
+        report_ids: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            report_id = str(value or "").strip()
+            if report_id and report_id not in seen:
+                seen.add(report_id)
+                report_ids.append(report_id)
+
+        assignments = campaign.get("assignments") or []
+        if isinstance(assignments, list):
+            for assignment in assignments:
+                if isinstance(assignment, dict):
+                    add(assignment.get("last_report_id"))
+        events = campaign.get("events") or []
+        if isinstance(events, list):
+            for event in events:
+                if isinstance(event, dict):
+                    add(event.get("report_id"))
+        return report_ids
+
+    async def fetch_report_by_id(self, report_id: str) -> dict[str, Any]:
+        response = await self.api_client().get(
+            f"/v1/reports/{report_id}",
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        report = response.json()
+        if not isinstance(report, dict):
+            raise RuntimeError(f"report {report_id} response was not an object")
+        return report
+
+    async def attach_campaign_reports(
+        self,
+        campaigns: list[dict[str, Any]],
+    ) -> None:
+        report_ids: list[str] = []
+        seen: set[str] = set()
+        for campaign in campaigns:
+            if not isinstance(campaign, dict):
+                continue
+            for report_id in self.campaign_report_ids(campaign):
+                if report_id not in seen:
+                    seen.add(report_id)
+                    report_ids.append(report_id)
+        reports_by_id: dict[str, dict[str, Any]] = {}
+        for report_id in report_ids:
+            try:
+                reports_by_id[report_id] = await self.fetch_report_by_id(report_id)
+            except Exception as exc:
+                reports_by_id[report_id] = {
+                    "report_id": report_id,
+                    "error": str(exc),
+                }
+        for campaign in campaigns:
+            if not isinstance(campaign, dict):
+                continue
+            campaign["_reports_by_id"] = {
+                report_id: reports_by_id[report_id]
+                for report_id in self.campaign_report_ids(campaign)
+                if report_id in reports_by_id
+            }
 
     def render_campaigns(
         self,
@@ -9810,9 +9956,41 @@ class AgentPBXTUI(App[None]):
             return
         self.selected_campaign_id = campaign_id
         self.selected_campaign_id_by_operator[operator_id] = campaign_id
+        report_ids = self.campaign_report_ids(campaign)
+        selected_report_id = self.selected_campaign_report_id_by_operator.get(operator_id)
+        if selected_report_id not in report_ids:
+            selected_report_id = report_ids[0] if report_ids else None
+        if selected_report_id:
+            self.selected_campaign_report_id_by_operator[operator_id] = selected_report_id
+        else:
+            self.selected_campaign_report_id_by_operator.pop(operator_id, None)
         detail = self.query_one_or_none("#campaign-detail", TextArea)
         if detail is not None:
             detail.text = self.format_campaign_detail(campaign)
+
+    def report_summary_line(self, report: dict[str, Any]) -> str:
+        if report.get("error"):
+            return f"unavailable: {report.get('error')}"
+        status = str(report.get("status") or "-")
+        summary = str(report.get("summary") or "").strip()
+        return f"{status} {summary}".strip()
+
+    def format_report_block(self, report: dict[str, Any]) -> list[str]:
+        report_id = str(report.get("report_id") or "-")
+        if report.get("error"):
+            return [
+                f"Report: {report_id}",
+                f"Error: {report.get('error')}",
+            ]
+        lines = [
+            f"Report: {report_id}",
+            f"Agent: {report.get('agent_id')}",
+            f"Status: {report.get('status')}",
+            f"Summary: {report.get('summary')}",
+            "",
+            str(report.get("detail") or ""),
+        ]
+        return lines
 
     def format_campaign_detail(self, campaign: dict[str, Any]) -> str:
         lines = [
@@ -9826,6 +10004,11 @@ class AgentPBXTUI(App[None]):
         criteria = campaign.get("criteria") or []
         if criteria:
             lines.extend(["", "Criteria:", *[f"- {item}" for item in criteria]])
+        reports_by_id = (
+            campaign.get("_reports_by_id")
+            if isinstance(campaign.get("_reports_by_id"), dict)
+            else {}
+        )
         assignments = campaign.get("assignments") or []
         if assignments:
             lines.extend(["", "Assignments:"])
@@ -9841,7 +10024,14 @@ class AgentPBXTUI(App[None]):
                 if assignment.get("last_command_id"):
                     lines.append(f"  command: {assignment.get('last_command_id')}")
                 if assignment.get("last_report_id"):
-                    lines.append(f"  report: {assignment.get('last_report_id')}")
+                    report_id = str(assignment.get("last_report_id"))
+                    report = reports_by_id.get(report_id)
+                    if isinstance(report, dict):
+                        lines.append(
+                            f"  report: {report_id} ({self.report_summary_line(report)})"
+                        )
+                    else:
+                        lines.append(f"  report: {report_id}")
         events = campaign.get("events") or []
         if events:
             lines.extend(["", "Recent Events:"])
@@ -9853,7 +10043,70 @@ class AgentPBXTUI(App[None]):
                     f"{event.get('event_type')} "
                     f"{event.get('summary')}"
                 )
+                if event.get("report_id"):
+                    lines.append(f"  report: {event.get('report_id')}")
+        report_ids = self.campaign_report_ids(campaign)
+        if report_ids:
+            lines.extend(["", "Reports:"])
+            for index, report_id in enumerate(report_ids, start=1):
+                report = reports_by_id.get(report_id)
+                if not isinstance(report, dict):
+                    lines.append(f"### {index}. {report_id}")
+                    lines.append("(not loaded)")
+                    continue
+                lines.append(f"### {index}. {report_id}")
+                block = self.format_report_block(report)
+                for block_line in block[1:]:
+                    lines.append(block_line)
+                lines.append("")
         return "\n".join(lines)
+
+    async def view_selected_campaign_report(self) -> None:
+        operator_id = self.selected_agent_id
+        detail = self.query_one_or_none("#campaign-detail", TextArea)
+        if not operator_id:
+            self.notify("Select an operator campaign first.", severity="warning")
+            return
+        campaign_id = self.selected_campaign_id_by_operator.get(operator_id)
+        campaign = (
+            self.campaigns_by_operator.get(operator_id, {}).get(campaign_id or "")
+            if campaign_id
+            else None
+        )
+        if campaign is None:
+            if detail is not None:
+                detail.text = "Select a campaign before viewing a report."
+            self.notify("Select a campaign before viewing a report.", severity="warning")
+            return
+        report_ids = self.campaign_report_ids(campaign)
+        if not report_ids:
+            if detail is not None:
+                detail.text = "Selected campaign has no generated reports yet."
+            self.notify("Selected campaign has no generated reports yet.", severity="warning")
+            return
+        report_id = self.selected_campaign_report_id_by_operator.get(operator_id)
+        if report_id not in report_ids:
+            report_id = report_ids[0]
+            self.selected_campaign_report_id_by_operator[operator_id] = report_id
+        reports_by_id = campaign.get("_reports_by_id")
+        if not isinstance(reports_by_id, dict):
+            reports_by_id = {}
+            campaign["_reports_by_id"] = reports_by_id
+        report = reports_by_id.get(report_id)
+        if not isinstance(report, dict):
+            try:
+                report = await self.fetch_report_by_id(report_id)
+            except Exception as exc:
+                report = {"report_id": report_id, "error": str(exc)}
+            reports_by_id[report_id] = report
+        if detail is not None:
+            lines = [
+                f"Campaign: {campaign.get('title')}",
+                f"Campaign ID: {campaign.get('campaign_id')}",
+                "",
+                *self.format_report_block(report),
+            ]
+            detail.text = "\n".join(lines)
 
     async def queue_command(
         self, agent_id: str, command_type: str, payload: dict[str, Any]

@@ -212,6 +212,11 @@ def test_tui_operator_bindings_and_mcp_command_helpers() -> None:
         and getattr(binding, "action", None) == "stop_operator"
         for binding in app.BINDINGS
     )
+    assert any(
+        getattr(binding, "key", None) == "shift+r"
+        and getattr(binding, "action", None) == "view_campaign_report"
+        for binding in app.BINDINGS
+    )
     assert agent_pbx_mcp_url("http://127.0.0.1:8765/") == "http://127.0.0.1:8765/mcp"
     assert codex_mcp_add_command("codex --profile ops", "http://pbx/mcp") == [
         "codex",
@@ -3832,6 +3837,151 @@ async def test_tui_send_input_keeps_caller_reference_when_fork_metadata_missing(
     assert "- Status: `online`" in sent_message
 
 
+async def test_tui_campaigns_loads_and_views_generated_reports() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+    calls: list[str] = []
+
+    campaign = {
+        "campaign_id": "campaign-1",
+        "operator_agent_id": "operator-0",
+        "title": "Release check",
+        "objective": "Verify release state.",
+        "criteria": ["All assignments reported"],
+        "status": "complete",
+        "summary": "Ready",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "completed_at": 3.0,
+        "assignments": [
+            {
+                "assignment_id": "assignment-1",
+                "campaign_id": "campaign-1",
+                "target_agent_id": "caller-1",
+                "operator_fork_id": "fork-1",
+                "title": "Caller release check",
+                "prompt": "Check release",
+                "criteria": [],
+                "state": "complete",
+                "last_report_id": "report-1",
+                "last_command_id": "cmd-1",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "completed_at": 3.0,
+            }
+        ],
+        "events": [
+            {
+                "event_id": 7,
+                "campaign_id": "campaign-1",
+                "assignment_id": "assignment-1",
+                "operator_agent_id": "operator-0",
+                "target_agent_id": "caller-1",
+                "event_type": "assignment_reported",
+                "summary": "Caller release check complete",
+                "detail": {"state": "complete"},
+                "report_id": "report-1",
+                "command_id": None,
+                "created_at": 2.0,
+            }
+        ],
+    }
+    report = {
+        "report_id": "report-1",
+        "agent_id": "operator-0",
+        "project": "agent-pbx-operator",
+        "status": "complete",
+        "summary": "Caller release check complete",
+        "detail": "Detailed campaign report body.",
+        "needs_input": False,
+        "plan_options": [],
+        "metadata": {
+            "source": "operator_campaign",
+            "campaign_id": "campaign-1",
+        },
+        "created_at": 2.0,
+    }
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            calls.append(path)
+            if path == "/v1/operator/campaigns":
+                return Response({"campaigns": [campaign]})
+            if path == "/v1/reports/report-1":
+                return Response(report)
+            raise AssertionError(path)
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        app.query_one("#agent-id", Input).value = "operator-0"
+        assert app.query_one("#campaign-report", Button) is not None
+        await app.load_operator_campaigns("operator-0")
+        await pilot.pause()
+        detail = app.query_one("#campaign-detail", TextArea).text
+
+        assert "Reports:" in detail
+        assert "Detailed campaign report body." in detail
+        assert "report: report-1 (complete Caller release check complete)" in detail
+        assert app.selected_campaign_report_id_by_operator["operator-0"] == "report-1"
+
+        await app.view_selected_campaign_report()
+        await pilot.pause()
+        report_detail = app.query_one("#campaign-detail", TextArea).text
+
+    relevant_calls = [
+        path
+        for path in calls
+        if path in {"/v1/operator/campaigns", "/v1/reports/report-1"}
+    ]
+    assert relevant_calls == ["/v1/operator/campaigns", "/v1/reports/report-1"]
+    assert "Campaign: Release check" in report_detail
+    assert "Report: report-1" in report_detail
+    assert "Agent: operator-0" in report_detail
+    assert "Detailed campaign report body." in report_detail
+
+
+async def test_tui_follow_up_exact_campaign_report_executes_locally() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_campaign_action_for_agent(agent_id: str, action: str) -> None:
+        calls.append((agent_id, action))
+
+    app.campaign_action_for_agent = fake_campaign_action_for_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "operator-0"
+        app.query_one("#agent-id", Input).value = "operator-0"
+        message = app.query_one("#message", TextArea)
+        message.text = "/campaign report"
+        await app.send_input()
+        await pilot.pause()
+
+    assert calls == [("operator-0", "report")]
+    assert message.text == ""
+
+
 async def test_tui_tmux_input_expands_joplin_note_references() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     sent: list[tuple[str, str]] = []
@@ -4044,6 +4194,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/files" in titles
     assert "/workerbee" in titles
     assert "/campaigns" in titles
+    assert "/campaign report" in titles
     assert "/plan" in titles
     assert "/plan latest" in titles
     assert "/plan thread" in titles
@@ -4109,6 +4260,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
 
     assert {
         "/campaigns",
+        "/campaign report",
         "/unblock",
         "/working",
         "/operator fork next",
