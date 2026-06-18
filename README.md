@@ -308,6 +308,12 @@ The operator loop is:
    complete, blocked, or needing follow-up.
 6. Finish the campaign when all assignments have explicit final states.
 
+The TUI `Campaigns` tab shows operator-owned campaigns and generated report
+detail. Use `View Report (R)` or `Shift+R` to inspect the selected campaign
+report. Use `Copy Note (C)`, `Shift+C`, or `/campaign copy` to write the
+selected campaign detail, including loaded generated reports, to a new Joplin
+note when Joplin is configured.
+
 ## Planned Local Validation
 
 WorkerBee is used to rebuild and run the containerized MCP/API service with simulated agents and clients. Repository-owned WorkerBee manifests live under `ops/workerbee/`.
@@ -441,13 +447,15 @@ loaded`, and Agent PBX will surface that as a sync failure.
 When first used, Agent PBX lazily creates one top-level Joplin notebook, then
 nests notes as `project > agent`. Note titles use
 `session-id-YYYYmmddTHHMMSSZ-COPY|LOG|DOC`. `Copy Latest` writes the selected
-agent's latest report to a new Markdown note. `Start LOG` creates a growing log
+agent's latest report to a new Markdown note. The `Campaigns` tab can also copy
+the selected campaign and its generated report detail to a new Markdown note
+with `Copy Note (C)` or `/campaign copy`. `Start LOG` creates a growing log
 note and appends queued operator prompts plus terminal agent responses until
 `Stop LOG` is pressed. In tmux direct mode, an active LOG appends prompts sent
-through Agent PBX, waits for the tmux pane to settle, then asks Codex for `/copy`
-and appends the copied response. The tab also lists scoped notes, previews
-Markdown, and supports quick create, rename, delete, and save controls inside
-the Agent PBX notebook scope only.
+through Agent PBX, waits for the tmux pane to settle, then asks Codex for
+`/copy` and appends the copied response. The tab also lists scoped notes,
+previews Markdown, and supports quick create, rename, delete, and save controls
+inside the Agent PBX notebook scope only.
 
 The Joplin tab status line shows queued, running, successful, and failed sync
 state. Press `Sync Now` or use `/joplin sync` to queue a manual sync. Sync
@@ -612,9 +620,10 @@ and very small terminals use a tiny mode that shows only Agents or Events on
 the home screen. Override with
 `AGENT_PBX_TUI_LAYOUT=adaptive|split|compact|tiny` or the `Layout` setting.
 Selecting an agent in compact or tiny mode opens a full-width view with
-`Latest`, `Thread`, `Files`, `WorkerBee`, `PRs`, `Issues`, and configured
-optional tabs such as `Joplin`; press `b` to return to the agent list. In tiny mode, press `e` on
-the home screen for Events and `a` to return to Agents.
+`Latest`, `Thread`, `Files`, `WorkerBee`, `PRs`, `Issues`, `Campaigns`, and
+configured optional tabs such as `Joplin`; press `b` to return to the agent
+list. In tiny mode, press `e` on the home screen for Events and `a` to return
+to Agents.
 
 For very low-power terminals where the TUI is mostly an alert board, enable
 low-power watch mode. It keeps server event alerts active, slows periodic
@@ -654,6 +663,7 @@ restore it without waiting for the agent to reconnect.
 
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/tmux`, `/workerbee`,
+`/campaigns`, `/campaign report`, `/campaign copy`,
 `/pr`, `/pr refresh`, `/pr review`, `/pr validate`, `/pr url`, `/pr merge`,
 `/issue`, `/issue refresh`, `/issue mitigate`, `/issue url`, `/issue clear`,
 configured `/joplin`, `/joplin new`, `/joplin rename`, `/joplin delete`,
