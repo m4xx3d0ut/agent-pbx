@@ -550,11 +550,15 @@ tokens are exact note slugs; use `Tab` completion when title wording is unclear.
 
 Operator prompts can reference caller agents with `@caller:`. Select an
 operator agent, type `@caller:project` or `@caller:Backend`, and press `Tab` to
-complete known caller agents from the Agents table. On send, a single
-`@caller:` reference creates or reuses that caller's fork and routes the prompt
-to the forked operator session. Agent PBX also appends a `Caller Agent
-References` Markdown section with the exact `agent_id`, project, PBX mode,
-status, active campaign count, and tmux pane when known.
+complete known caller agents from the Agents table. When an operator prompt
+uses `@caller:`, following `@joplin:` references resolve in that caller's
+project note scope until another `@caller:` appears. For example,
+`@caller:api @joplin:Runbook @caller:web @joplin:Runbook` can attach two
+different Runbook notes from two caller projects. On send, a single `@caller:`
+reference creates or reuses that caller's fork and routes the prompt to the
+forked operator session. Agent PBX also appends a `Caller Agent References`
+Markdown section with the exact `agent_id`, project, PBX mode, status, active
+campaign count, and tmux pane when known.
 
 The `Joplin` tab lists notes from the selected project folder and its
 descendants under the Agent PBX notebook. That means notes created directly in
@@ -680,8 +684,9 @@ nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete project paths. Type `@joplin:` and
 press `Tab` to complete project-scoped Joplin note titles from cache, with lazy
-loading on first use. Type `@caller:` while an operator is selected to complete
-caller agent references. Repeated `Tab` cycles matches; exact local
+loading on first use. In operator prompts, `@joplin:` completion uses the
+nearest preceding `@caller:` scope when one exists. Type `@caller:` while an
+operator is selected to complete caller agent references. Repeated `Tab` cycles matches; exact local
 commands such as `/esc` or `/theme minimal` execute locally on `Enter` instead
 of being sent to the agent.
 

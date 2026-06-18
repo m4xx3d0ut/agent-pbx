@@ -461,6 +461,9 @@ class JoplinNoteReference:
     title: str
     body: str
     updated_time: int | float | None = None
+    scope_agent_id: str | None = None
+    scope_project: str | None = None
+    caller_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1327,6 +1330,12 @@ def format_joplin_note_references_for_prompt(
                 f"- Note ID: `{reference.note_id}`",
             ]
         )
+        if reference.scope_agent_id:
+            lines.append(f"- Agent Scope: `{reference.scope_agent_id}`")
+        if reference.scope_project:
+            lines.append(f"- Project: `{reference.scope_project}`")
+        if reference.caller_token:
+            lines.append(f"- Caller Ref: `{reference.caller_token}`")
         if reference.updated_time is not None:
             lines.append(f"- Updated: `{reference.updated_time}`")
         lines.extend(["", f"{fence}markdown", body, fence, ""])
@@ -6389,6 +6398,44 @@ class AgentPBXTUI(App[None]):
             return base
         return f"{base}/{quote(note_id, safe='')}"
 
+    def text_before_completion_context(
+        self,
+        text_area: TextArea,
+        context: FileCompletionContext,
+    ) -> str:
+        lines = text_area.text.split("\n")
+        if context.line < 0 or context.line >= len(lines):
+            return ""
+        prefix_lines = lines[: context.line]
+        prefix_lines.append(lines[context.line][: context.start_col])
+        return "\n".join(prefix_lines)
+
+    def caller_scope_agent_id_before_context(
+        self,
+        text_area: TextArea,
+        context: FileCompletionContext,
+    ) -> str | None:
+        token = None
+        before = self.text_before_completion_context(text_area, context)
+        for match in CALLER_AGENT_REF_PATTERN.finditer(before):
+            token = match.group(1)
+        if token is None:
+            return None
+        return self.resolve_caller_agent_ref_token(token)
+
+    def joplin_completion_agent_id(
+        self,
+        text_area: TextArea,
+        context: FileCompletionContext,
+        default_agent_id: str,
+    ) -> str:
+        if not self.is_operator_agent_id(default_agent_id):
+            return default_agent_id
+        return (
+            self.caller_scope_agent_id_before_context(text_area, context)
+            or default_agent_id
+        )
+
     def file_completion_index(
         self,
         context: FileCompletionContext,
@@ -6452,6 +6499,11 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return True
+        joplin_agent_id = (
+            self.joplin_completion_agent_id(text_area, context, agent_id)
+            if is_joplin_ref
+            else agent_id
+        )
         state = self.file_completion_state.get(context.input_id)
         if (
             state is not None
@@ -6465,7 +6517,7 @@ class AgentPBXTUI(App[None]):
             if is_caller_ref:
                 matches = self.caller_agent_completion_matches(context, agent_id)
             elif is_joplin_ref:
-                matches = self.joplin_note_completion_matches(context, agent_id)
+                matches = self.joplin_note_completion_matches(context, joplin_agent_id)
             else:
                 matches = self.file_completion_matches(context, agent_id)
         if not matches:
@@ -6526,6 +6578,11 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return True
+        joplin_agent_id = (
+            self.joplin_completion_agent_id(text_area, context, agent_id)
+            if is_joplin_ref
+            else agent_id
+        )
 
         state = self.file_completion_state.get(context.input_id)
         if (
@@ -6540,7 +6597,7 @@ class AgentPBXTUI(App[None]):
             if is_caller_ref:
                 matches = self.caller_agent_completion_matches(context, agent_id)
             elif is_joplin_ref:
-                matches = self.joplin_note_completion_matches(context, agent_id)
+                matches = self.joplin_note_completion_matches(context, joplin_agent_id)
             else:
                 matches = self.file_completion_matches(context, agent_id)
             if not matches:
@@ -6548,7 +6605,7 @@ class AgentPBXTUI(App[None]):
                     if is_caller_ref:
                         await self.refresh_agents()
                     elif is_joplin_ref:
-                        await self.fetch_joplin_note_summaries(agent_id)
+                        await self.fetch_joplin_note_summaries(joplin_agent_id)
                     else:
                         payload = await self.fetch_agent_file_listing(
                             agent_id,
@@ -6571,7 +6628,7 @@ class AgentPBXTUI(App[None]):
                 if is_caller_ref:
                     matches = self.caller_agent_completion_matches(context, agent_id)
                 elif is_joplin_ref:
-                    matches = self.joplin_note_completion_matches(context, agent_id)
+                    matches = self.joplin_note_completion_matches(context, joplin_agent_id)
                 else:
                     matches = self.file_completion_matches(context, agent_id)
 
@@ -10659,7 +10716,13 @@ class AgentPBXTUI(App[None]):
     ) -> str | None:
         token_map = joplin_note_ref_tokens(notes.values())
         lower_map = {candidate.lower(): note_id for candidate, note_id in token_map.items()}
-        return lower_map.get(token.lower())
+        note_id = lower_map.get(token.lower())
+        if note_id is not None:
+            return note_id
+        stripped = token.rstrip(".")
+        if stripped != token:
+            return lower_map.get(stripped.lower())
+        return None
 
     def resolve_caller_agent_ref_token(self, token: str) -> str | None:
         token_map = caller_agent_ref_tokens(self.caller_agents())
@@ -10667,7 +10730,13 @@ class AgentPBXTUI(App[None]):
             candidate.lower(): agent_id
             for candidate, agent_id in token_map.items()
         }
-        return lower_map.get(token.lower())
+        agent_id = lower_map.get(token.lower())
+        if agent_id is not None:
+            return agent_id
+        stripped = token.rstrip(".")
+        if stripped != token:
+            return lower_map.get(stripped.lower())
+        return None
 
     def caller_agent_reference_from_agent(
         self,
@@ -10751,28 +10820,88 @@ class AgentPBXTUI(App[None]):
         self.joplin_notes_by_agent.setdefault(agent_id, {})[note_id] = note
         return note
 
-    async def expand_joplin_note_references(
+    async def joplin_note_reference_scopes(
         self,
         agent_id: str,
         message: str,
-    ) -> str | None:
-        tokens = joplin_note_ref_tokens_in_message(message)
-        if not tokens:
-            return message
+    ) -> list[tuple[str, str, str | None]] | None:
+        events: list[tuple[int, int, str, str]] = []
+        for match in CALLER_AGENT_REF_PATTERN.finditer(message):
+            events.append((match.start(1), 0, "caller", match.group(1)))
+        for match in JOPLIN_NOTE_REF_PATTERN.finditer(message):
+            events.append((match.start(1), 1, "joplin", match.group(1)))
+        if not any(kind == "joplin" for _start, _order, kind, _token in events):
+            return []
         if not agent_id:
             self.notify(
                 "Select an agent before sending @joplin note references.",
                 severity="warning",
             )
             return None
+        if any(kind == "caller" for _start, _order, kind, _token in events) and not (
+            self.is_operator_agent_id(agent_id)
+        ):
+            self.notify(
+                "Select an operator before sending caller-scoped @joplin references.",
+                severity="warning",
+            )
+            return None
+
+        events.sort(key=lambda event: (event[0], event[1]))
+        current_scope_agent_id = agent_id
+        current_caller_token: str | None = None
+        refreshed_agents = False
+        seen: set[tuple[str, str]] = set()
+        scopes: list[tuple[str, str, str | None]] = []
+        for _start, _order, kind, token in events:
+            if kind == "caller":
+                target_agent_id = self.resolve_caller_agent_ref_token(token)
+                if target_agent_id is None and not refreshed_agents:
+                    await self.refresh_agents()
+                    refreshed_agents = True
+                    target_agent_id = self.resolve_caller_agent_ref_token(token)
+                if target_agent_id is None:
+                    raise ValueError(f"No caller agent matches {token}")
+                current_scope_agent_id = target_agent_id
+                current_caller_token = token
+                continue
+            key = (current_scope_agent_id, token.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            scopes.append((token, current_scope_agent_id, current_caller_token))
+        return scopes
+
+    async def expand_joplin_note_references(
+        self,
+        agent_id: str,
+        message: str,
+    ) -> str | None:
         try:
-            notes = await self.fetch_joplin_note_summaries(agent_id)
+            scopes = await self.joplin_note_reference_scopes(agent_id, message)
+        except Exception as exc:
+            self.notify(f"Joplin note reference failed: {exc}", severity="error")
+            return None
+        if scopes is None:
+            return None
+        if not scopes:
+            return message
+        try:
+            notes_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
             references: list[JoplinNoteReference] = []
-            for token in tokens:
+            for token, scope_agent_id, caller_token in scopes:
+                notes = notes_by_agent.get(scope_agent_id)
+                if notes is None:
+                    notes = await self.fetch_joplin_note_summaries(scope_agent_id)
+                    notes_by_agent[scope_agent_id] = notes
                 note_id = self.resolve_joplin_note_ref_token(token, notes)
                 if note_id is None:
-                    raise ValueError(f"No scoped Joplin note matches {token}")
-                note = await self.fetch_joplin_note_for_reference(agent_id, note_id)
+                    project = self.project_for_agent(scope_agent_id)
+                    raise ValueError(
+                        f"No scoped Joplin note matches {token} in {project}"
+                    )
+                note = await self.fetch_joplin_note_for_reference(scope_agent_id, note_id)
+                scoped_by_caller = caller_token is not None
                 references.append(
                     JoplinNoteReference(
                         token=token,
@@ -10780,6 +10909,13 @@ class AgentPBXTUI(App[None]):
                         title=str(note.get("title") or note_id),
                         body=str(note.get("body") or ""),
                         updated_time=note.get("updated_time"),
+                        scope_agent_id=scope_agent_id if scoped_by_caller else None,
+                        scope_project=(
+                            self.project_for_agent(scope_agent_id)
+                            if scoped_by_caller
+                            else None
+                        ),
+                        caller_token=caller_token,
                     )
                 )
         except Exception as exc:

@@ -3419,6 +3419,54 @@ async def test_tui_joplin_note_completion_uses_cached_notes() -> None:
         assert message.text == "review @joplin:Design-Note"
 
 
+async def test_tui_joplin_note_completion_uses_preceding_caller_scope() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.selected_agent_id = "operator-0"
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "operator-project",
+                "metadata": {},
+            },
+            "caller-a": {
+                "agent_id": "caller-a",
+                "agent_type": "caller",
+                "name": "Project A",
+                "project": "alpha",
+                "metadata": {},
+            },
+            "caller-b": {
+                "agent_id": "caller-b",
+                "agent_type": "caller",
+                "name": "Project B",
+                "project": "beta",
+                "metadata": {},
+            },
+        }
+        app.query_one("#agent-id", Input).value = "operator-0"
+        app.joplin_notes_by_agent = {
+            "operator-0": {
+                "operator-note": {"id": "operator-note", "title": "Operator Runbook"}
+            },
+            "caller-a": {
+                "alpha-note": {"id": "alpha-note", "title": "Alpha Runbook"}
+            },
+            "caller-b": {
+                "beta-note": {"id": "beta-note", "title": "Beta Runbook"}
+            },
+        }
+        message = app.query_one("#message", TextArea)
+
+        message.text = "review @caller:Project-B @joplin:Beta"
+        message.move_cursor((0, len(message.text)))
+        assert app.complete_file_reference(message, direction=1) is True
+
+    assert message.text == "review @caller:Project-B @joplin:Beta-Runbook"
+
+
 async def test_tui_joplin_note_completion_disambiguates_duplicate_titles() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -3779,6 +3827,154 @@ async def test_tui_send_input_expands_caller_agent_references() -> None:
     assert app.sent_message_history_by_agent["operator-0"] == [
         "Coordinate @caller:Project-One on the release task."
     ]
+
+
+async def test_tui_send_input_expands_caller_scoped_joplin_references() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    queued: list[tuple[str, str, dict[str, str]]] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            if path == "/v1/joplin/status":
+                return Response(
+                    {
+                        "configured": True,
+                        "available": True,
+                        "notebook": "Agent PBX",
+                    }
+                )
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path == "/v1/projects/alpha/joplin/notes":
+                return Response(
+                    [
+                        {"id": "alpha-runbook", "title": "Runbook"},
+                        {"id": "alpha-checklist", "title": "Checklist"},
+                    ]
+                )
+            if path == "/v1/projects/alpha/joplin/notes/alpha-runbook":
+                return Response(
+                    {
+                        "id": "alpha-runbook",
+                        "title": "Runbook",
+                        "body": "Alpha runbook body.",
+                        "updated_time": 101.0,
+                    }
+                )
+            if path == "/v1/projects/alpha/joplin/notes/alpha-checklist":
+                return Response(
+                    {
+                        "id": "alpha-checklist",
+                        "title": "Checklist",
+                        "body": "Alpha checklist body.",
+                        "updated_time": 102.0,
+                    }
+                )
+            if path == "/v1/projects/beta/joplin/notes":
+                return Response([{"id": "beta-runbook", "title": "Runbook"}])
+            if path == "/v1/projects/beta/joplin/notes/beta-runbook":
+                return Response(
+                    {
+                        "id": "beta-runbook",
+                        "title": "Runbook",
+                        "body": "Beta runbook body.",
+                        "updated_time": 201.0,
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    async def fake_queue_command(
+        agent_id: str, command_type: str, payload: dict[str, str]
+    ) -> dict[str, str]:
+        queued.append((agent_id, command_type, payload))
+        return {"command_id": "cmd-1"}
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_thread(agent_id: str) -> None:
+        return None
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.queue_command = fake_queue_command  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "operator-0"
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"operator_role": "fork"},
+            },
+            "caller-a": {
+                "agent_id": "caller-a",
+                "agent_type": "caller",
+                "name": "Project A",
+                "project": "alpha",
+                "effective_status": "online",
+                "pbx_active": True,
+                "metadata": {"pbx_mode": "report"},
+            },
+            "caller-b": {
+                "agent_id": "caller-b",
+                "agent_type": "caller",
+                "name": "Project B",
+                "project": "beta",
+                "effective_status": "working",
+                "pbx_active": True,
+                "metadata": {"pbx_mode": "nohup"},
+            },
+        }
+        app.query_one("#agent-id", Input).value = "operator-0"
+        message = app.query_one("#message", TextArea)
+        prompt = (
+            "Review @caller:Project-A @joplin:Runbook and @joplin:Checklist. "
+            "Then compare @caller:Project-B @joplin:Runbook."
+        )
+        message.text = prompt
+        await app.send_input()
+        await pilot.pause()
+
+    assert len(queued) == 1
+    assert queued[0][0] == "operator-0"
+    assert queued[0][1] == "send_input"
+    sent_message = queued[0][2]["message"]
+    assert "Review @caller:Project-A @joplin:Runbook" in sent_message
+    assert "Then compare @caller:Project-B @joplin:Runbook." in sent_message
+    assert "## Joplin Note References" in sent_message
+    assert "### 1. Runbook" in sent_message
+    assert "- Note ID: `alpha-runbook`" in sent_message
+    assert "- Agent Scope: `caller-a`" in sent_message
+    assert "- Project: `alpha`" in sent_message
+    assert "- Caller Ref: `@caller:Project-A`" in sent_message
+    assert "Alpha runbook body." in sent_message
+    assert "### 2. Checklist" in sent_message
+    assert "Alpha checklist body." in sent_message
+    assert "- Note ID: `beta-runbook`" in sent_message
+    assert "- Agent Scope: `caller-b`" in sent_message
+    assert "- Project: `beta`" in sent_message
+    assert "- Caller Ref: `@caller:Project-B`" in sent_message
+    assert "Beta runbook body." in sent_message
+    assert "## Caller Agent References" in sent_message
+    assert "- Agent ID: `caller-a`" in sent_message
+    assert "- Agent ID: `caller-b`" in sent_message
+    assert app.sent_message_history_by_agent["operator-0"] == [prompt]
 
 
 async def test_tui_send_input_keeps_caller_reference_when_fork_metadata_missing() -> None:

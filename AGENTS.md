@@ -146,6 +146,10 @@ then expands them before delivery by appending a `Joplin Note References`
 Markdown section with each referenced note body. Treat that section as
 operator-supplied context for the current prompt; do not call Joplin tools again
 unless the operator asks you to create, update, or inspect notes directly.
+When an operator prompt contains `@caller:<agent>` references, following
+`@joplin:<note>` references resolve in the nearest preceding caller's project
+note scope until another caller reference appears. This allows one prompt to
+attach notes from multiple caller projects.
 
 Built-in TUI pull request commands such as `/pr`, `/pr review`, `/pr validate`,
 `/pr url`, and `/pr merge` are operator actions. `/pr review` and
