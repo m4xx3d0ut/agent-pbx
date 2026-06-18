@@ -271,6 +271,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/workerbee",
     "/campaigns",
     "/campaign report",
+    "/campaign copy",
     "/pr",
     "/pr refresh",
     "/pr review",
@@ -334,6 +335,7 @@ ISSUE_SLASH_ACTIONS = {
 }
 CAMPAIGN_SLASH_ACTIONS = {
     "/campaign report": "report",
+    "/campaign copy": "copy",
 }
 JOPLIN_SLASH_ACTIONS = {
     "/joplin": "open",
@@ -2968,6 +2970,13 @@ class AgentPBXTUI(App[None]):
             priority=True,
         ),
         Binding(
+            "shift+c",
+            "copy_campaign_to_joplin",
+            "Campaign Note",
+            key_display="C",
+            priority=True,
+        ),
+        Binding(
             "shift+d",
             "purge_agent",
             "Purge Agent",
@@ -3436,6 +3445,7 @@ class AgentPBXTUI(App[None]):
                         with Horizontal(id="campaign-actions"):
                             yield Button("Refresh", id="campaign-refresh")
                             yield Button("View Report (R)", id="campaign-report")
+                            yield Button("Copy Note (C)", id="campaign-copy-joplin")
                     with TabPane("Joplin", id="joplin-tab"):
                         yield Static("Joplin: checking...", id="joplin-status")
                         yield DataTable(
@@ -3571,6 +3581,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         yield SystemCommand("/campaigns", "Open and refresh operator campaigns", self.palette_campaigns)
         yield SystemCommand("/campaign report", "View the selected campaign report", self.palette_campaign_report)
+        yield SystemCommand("/campaign copy", "Copy selected campaign to a new Joplin note", self.palette_campaign_copy)
         yield SystemCommand("/pr", "Open and refresh pull requests", self.palette_pull_requests)
         yield SystemCommand("/pr refresh", "Refresh pull requests", self.palette_pull_requests_refresh)
         yield SystemCommand("/pr review", "Ask selected agent to review the selected PR", self.palette_pull_request_review)
@@ -3726,6 +3737,13 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.view_selected_campaign_report(),
             name="palette-campaign-report",
+            exclusive=True,
+        )
+
+    def palette_campaign_copy(self) -> None:
+        self.run_worker(
+            self.copy_selected_campaign_to_joplin(),
+            name="palette-campaign-copy",
             exclusive=True,
         )
 
@@ -4431,6 +4449,10 @@ class AgentPBXTUI(App[None]):
             if agent_id not in self.campaigns_by_operator:
                 await self.load_operator_campaigns(agent_id)
             await self.view_selected_campaign_report()
+        elif action == "copy":
+            if agent_id not in self.campaigns_by_operator:
+                await self.load_operator_campaigns(agent_id)
+            await self.copy_selected_campaign_to_joplin()
         elif action in {"open", "refresh"}:
             await self.load_operator_campaigns(agent_id)
         else:
@@ -4708,6 +4730,19 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.view_selected_campaign_report(),
             name="view-campaign-report",
+            exclusive=True,
+        )
+
+    def action_copy_campaign_to_joplin(self) -> None:
+        if self.active_agent_tab != "campaigns-tab":
+            return
+        if isinstance(self.focused, (Input, TextArea)) and getattr(
+            self.focused, "id", None
+        ) != "campaign-detail":
+            return
+        self.run_worker(
+            self.copy_selected_campaign_to_joplin(),
+            name="copy-campaign-to-joplin",
             exclusive=True,
         )
 
@@ -7781,6 +7816,9 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "campaign-report":
             await self.view_selected_campaign_report()
             return
+        if event.button.id == "campaign-copy-joplin":
+            await self.copy_selected_campaign_to_joplin()
+            return
         if event.button.id == "start-operator":
             await self.start_operator_agent()
             return
@@ -9992,6 +10030,17 @@ class AgentPBXTUI(App[None]):
         ]
         return lines
 
+    def selected_campaign_for_operator(
+        self,
+        operator_id: str | None,
+    ) -> dict[str, Any] | None:
+        if not operator_id:
+            return None
+        campaign_id = self.selected_campaign_id_by_operator.get(operator_id)
+        if not campaign_id:
+            return None
+        return self.campaigns_by_operator.get(operator_id, {}).get(campaign_id)
+
     def format_campaign_detail(self, campaign: dict[str, Any]) -> str:
         lines = [
             f"Campaign: {campaign.get('title')}",
@@ -10061,18 +10110,72 @@ class AgentPBXTUI(App[None]):
                 lines.append("")
         return "\n".join(lines)
 
+    def campaign_joplin_copy_title(self, campaign: dict[str, Any]) -> str:
+        title = str(campaign.get("title") or campaign.get("campaign_id") or "").strip()
+        if not title:
+            title = "Campaign"
+        return f"Campaign - {title}"
+
+    def format_campaign_joplin_copy_body(
+        self,
+        operator_id: str,
+        campaign: dict[str, Any],
+    ) -> str:
+        title = str(campaign.get("title") or campaign.get("campaign_id") or "Campaign")
+        campaign_id = str(campaign.get("campaign_id") or "")
+        status = str(campaign.get("status") or "")
+        copied_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return "\n".join(
+            [
+                f"# Campaign - {title}",
+                "",
+                f"- Campaign ID: `{campaign_id}`",
+                f"- Operator Agent: `{operator_id}`",
+                f"- Status: `{status}`",
+                f"- Copied: `{copied_at}`",
+                "",
+                "## Campaign Detail",
+                "",
+                "```text",
+                self.format_campaign_detail(campaign).strip(),
+                "```",
+            ]
+        )
+
+    async def copy_selected_campaign_to_joplin(self) -> None:
+        operator_id = self.selected_agent_id
+        detail = self.query_one_or_none("#campaign-detail", TextArea)
+        if not operator_id:
+            self.notify("Select an operator campaign first.", severity="warning")
+            return
+        campaign = self.selected_campaign_for_operator(operator_id)
+        if campaign is None:
+            if detail is not None:
+                detail.text = "Select a campaign before copying to Joplin."
+            self.notify("Select a campaign before copying to Joplin.", severity="warning")
+            return
+        report_ids = self.campaign_report_ids(campaign)
+        reports_by_id = (
+            campaign.get("_reports_by_id")
+            if isinstance(campaign.get("_reports_by_id"), dict)
+            else {}
+        )
+        if any(report_id not in reports_by_id for report_id in report_ids):
+            await self.attach_campaign_reports([campaign])
+        await self.create_manual_joplin_copy(
+            operator_id,
+            title=self.campaign_joplin_copy_title(campaign),
+            body=self.format_campaign_joplin_copy_body(operator_id, campaign),
+            success_message="Copied campaign to a new Joplin note.",
+        )
+
     async def view_selected_campaign_report(self) -> None:
         operator_id = self.selected_agent_id
         detail = self.query_one_or_none("#campaign-detail", TextArea)
         if not operator_id:
             self.notify("Select an operator campaign first.", severity="warning")
             return
-        campaign_id = self.selected_campaign_id_by_operator.get(operator_id)
-        campaign = (
-            self.campaigns_by_operator.get(operator_id, {}).get(campaign_id or "")
-            if campaign_id
-            else None
-        )
+        campaign = self.selected_campaign_for_operator(operator_id)
         if campaign is None:
             if detail is not None:
                 detail.text = "Select a campaign before viewing a report."

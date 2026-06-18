@@ -217,6 +217,11 @@ def test_tui_operator_bindings_and_mcp_command_helpers() -> None:
         and getattr(binding, "action", None) == "view_campaign_report"
         for binding in app.BINDINGS
     )
+    assert any(
+        getattr(binding, "key", None) == "shift+c"
+        and getattr(binding, "action", None) == "copy_campaign_to_joplin"
+        for binding in app.BINDINGS
+    )
     assert agent_pbx_mcp_url("http://127.0.0.1:8765/") == "http://127.0.0.1:8765/mcp"
     assert codex_mcp_add_command("codex --profile ops", "http://pbx/mcp") == [
         "codex",
@@ -3935,6 +3940,7 @@ async def test_tui_campaigns_loads_and_views_generated_reports() -> None:
         app.selected_agent_id = "operator-0"
         app.query_one("#agent-id", Input).value = "operator-0"
         assert app.query_one("#campaign-report", Button) is not None
+        assert app.query_one("#campaign-copy-joplin", Button) is not None
         await app.load_operator_campaigns("operator-0")
         await pilot.pause()
         detail = app.query_one("#campaign-detail", TextArea).text
@@ -3960,6 +3966,88 @@ async def test_tui_campaigns_loads_and_views_generated_reports() -> None:
     assert "Detailed campaign report body." in report_detail
 
 
+async def test_tui_campaign_copy_creates_joplin_note_from_selected_campaign() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+    copied: list[dict[str, str]] = []
+    campaign = {
+        "campaign_id": "campaign-1",
+        "operator_agent_id": "operator-0",
+        "title": "Release check",
+        "objective": "Verify release state.",
+        "criteria": ["All assignments reported"],
+        "status": "complete",
+        "assignments": [
+            {
+                "target_agent_id": "caller-1",
+                "title": "Caller release check",
+                "state": "complete",
+                "last_report_id": "report-1",
+            }
+        ],
+        "events": [
+            {
+                "event_type": "assignment_reported",
+                "summary": "Caller release check complete",
+                "report_id": "report-1",
+            }
+        ],
+        "_reports_by_id": {
+            "report-1": {
+                "report_id": "report-1",
+                "agent_id": "operator-0",
+                "status": "complete",
+                "summary": "Caller release check complete",
+                "detail": "Detailed campaign report body.",
+            }
+        },
+    }
+
+    async def fake_create_manual_joplin_copy(
+        agent_id: str,
+        *,
+        title: str,
+        body: str,
+        success_message: str,
+    ) -> None:
+        copied.append(
+            {
+                "agent_id": agent_id,
+                "title": title,
+                "body": body,
+                "success_message": success_message,
+            }
+        )
+
+    app.create_manual_joplin_copy = fake_create_manual_joplin_copy  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        app.campaigns_by_operator = {"operator-0": {"campaign-1": campaign}}
+        app.selected_campaign_id_by_operator = {"operator-0": "campaign-1"}
+        await app.copy_selected_campaign_to_joplin()
+        await pilot.pause()
+
+    assert len(copied) == 1
+    assert copied[0]["agent_id"] == "operator-0"
+    assert copied[0]["title"] == "Campaign - Release check"
+    assert copied[0]["success_message"] == "Copied campaign to a new Joplin note."
+    assert "# Campaign - Release check" in copied[0]["body"]
+    assert "- Campaign ID: `campaign-1`" in copied[0]["body"]
+    assert "- Operator Agent: `operator-0`" in copied[0]["body"]
+    assert "Reports:" in copied[0]["body"]
+    assert "### 1. report-1" in copied[0]["body"]
+    assert "Detailed campaign report body." in copied[0]["body"]
+
+
 async def test_tui_follow_up_exact_campaign_report_executes_locally() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     calls: list[tuple[str, str]] = []
@@ -3979,6 +4067,28 @@ async def test_tui_follow_up_exact_campaign_report_executes_locally() -> None:
         await pilot.pause()
 
     assert calls == [("operator-0", "report")]
+    assert message.text == ""
+
+
+async def test_tui_follow_up_exact_campaign_copy_executes_locally() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_campaign_action_for_agent(agent_id: str, action: str) -> None:
+        calls.append((agent_id, action))
+
+    app.campaign_action_for_agent = fake_campaign_action_for_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "operator-0"
+        app.query_one("#agent-id", Input).value = "operator-0"
+        message = app.query_one("#message", TextArea)
+        message.text = "/campaign copy"
+        await app.send_input()
+        await pilot.pause()
+
+    assert calls == [("operator-0", "copy")]
     assert message.text == ""
 
 
@@ -4195,6 +4305,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/workerbee" in titles
     assert "/campaigns" in titles
     assert "/campaign report" in titles
+    assert "/campaign copy" in titles
     assert "/plan" in titles
     assert "/plan latest" in titles
     assert "/plan thread" in titles
@@ -4261,6 +4372,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
     assert {
         "/campaigns",
         "/campaign report",
+        "/campaign copy",
         "/unblock",
         "/working",
         "/operator fork next",
