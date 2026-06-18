@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.10.0 - 2026-06-18
+
+### Highlights
+
+- Adds first-class operator agents with TUI lifecycle controls, a dedicated
+  Operators split, tmux-backed operator launch paths, and fork-pane cycling for
+  monitoring operator-owned caller forks.
+- Adds operator campaign persistence with dedicated SQLite tables for campaigns,
+  assignments, events, forks, and fork DAG links so campaign queries do not rely
+  on report metadata scans.
+- Adds operator campaign routing through caller forks, including `@caller:`
+  reference expansion, fork regeneration after caller restarts, stale tmux
+  target repair, and safer campaign dispatch checks.
+- Adds the TUI `Campaigns` tab for viewing operator campaign state and generated
+  campaign reports, plus `View Report (R)` / `/campaign report`.
+- Adds campaign-to-Joplin capture with `Copy Note (C)`, `Shift+C`, and
+  `/campaign copy`, creating a new scoped Joplin note with campaign detail and
+  loaded generated reports.
+- Improves tmux plan-selection routing for native Codex plan selectors and
+  pre-plan choice handling.
+- Refreshes the README TUI demo GIF for the new operator, campaign, and Joplin
+  workflows while reducing the release asset size.
+- Adds configurable GitHub remote/SSH settings for PR and issue workflows.
+
+### Verification
+
+- `python -m pytest`
+- `git diff --check`
+- Release wheelhouse build with `scripts/build_wheelhouse.sh`
+- Local no-index wheelhouse install smoke test
+
 ## v0.8.1 - 2026-06-09
 
 ### Highlights
