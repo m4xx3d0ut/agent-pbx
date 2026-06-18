@@ -313,6 +313,56 @@ def test_operator_campaign_blocks_when_caller_has_no_codex_session(tmp_path: Pat
     assert assignment["state"] == "blocked"
     assert forks[0]["status"] == "blocked"
     assert "metadata.codex_session_id" in forks[0]["summary"]
+    placeholder_agent = store.get_agent(forks[0]["fork_agent_id"])
+    assert placeholder_agent is not None
+    assert placeholder_agent["pbx_active"] is False
+    assert placeholder_agent["dismissed_at"] is not None
+
+
+def test_operator_missing_session_refuses_running_external_fork(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"pbx_mode": "report", "cwd": str(tmp_path)},
+        )
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={"pbx_mode": "report", "cwd": str(tmp_path / "caller-1")},
+        )
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="external-worker",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"operator_role": "root", "reason": "caller has no session"},
+            pbx_active=True,
+        )
+    )
+    service = OperatorService(store)
+
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="external-worker",
+        status="running",
+        summary="External worker launched after dispatch failed.",
+    )
+    external_worker = store.get_agent("external-worker")
+
+    assert fork["status"] == "blocked"
+    assert "metadata.codex_session_id" in fork["summary"]
+    assert fork["metadata"]["operator_fork_launchable"] is False
+    assert external_worker is not None
+    assert external_worker["pbx_active"] is False
+    assert external_worker["dismissed_at"] is not None
 
 
 def test_operator_pending_fork_can_be_activated_after_tui_launch(tmp_path: Path) -> None:

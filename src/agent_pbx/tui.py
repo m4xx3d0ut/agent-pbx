@@ -5045,11 +5045,14 @@ class AgentPBXTUI(App[None]):
         return [values[column] for column in selected_columns]
 
     def on_resize(self, event: Resize) -> None:
+        restore_tmux_tail = self.should_restore_tmux_stream_tail_after_resize()
         if self.update_effective_layout(event.size.width, event.size.height):
             self.apply_layout_class()
             self.render_agents()
         else:
             self.apply_layout_dimensions()
+        if restore_tmux_tail:
+            self.call_after_refresh(self.snap_tmux_stream_to_bottom)
 
     def set_layout_mode(self, layout_name: str) -> None:
         self.layout_mode = resolve_layout(layout_name)
@@ -7533,6 +7536,14 @@ class AgentPBXTUI(App[None]):
         scroll_target_y = float(getattr(stream, "scroll_target_y", scroll_y) or 0)
         return max(scroll_y, scroll_target_y) >= max_scroll_y - 1
 
+    def should_restore_tmux_stream_tail_after_resize(self) -> bool:
+        if self.active_agent_tab != "latest-tab" or not self.tmux_visible_capture_key:
+            return False
+        stream = self.query_one_or_none("#tmux-stream", TextArea)
+        if stream is None or not stream.text:
+            return False
+        return self.tmux_stream_is_at_bottom(stream)
+
     def snap_tmux_stream_to_bottom(self, stream: TextArea | None = None) -> None:
         if stream is None:
             stream = self.query_one_or_none("#tmux-stream", TextArea)
@@ -9083,6 +9094,21 @@ class AgentPBXTUI(App[None]):
                 return self.selected_agent_id
         return None
 
+    def operator_fork_start_blocker(self, source_caller_agent_id: str) -> str | None:
+        caller = self.agents.get(source_caller_agent_id)
+        if caller is None:
+            return f"Caller {source_caller_agent_id} is not loaded."
+        caller_metadata = (
+            caller.get("metadata") if isinstance(caller.get("metadata"), dict) else {}
+        )
+        source_session_id = str(caller_metadata.get("codex_session_id") or "").strip()
+        caller_cwd = str(caller_metadata.get("cwd") or "").strip()
+        if not source_session_id:
+            return f"{source_caller_agent_id} is missing metadata.codex_session_id."
+        if not caller_cwd:
+            return f"{source_caller_agent_id} is missing metadata.cwd."
+        return None
+
     def operator_bootstrap_prompt(
         self,
         agent_id: str,
@@ -9411,24 +9437,15 @@ class AgentPBXTUI(App[None]):
         source_caller_agent_id: str,
     ) -> dict[str, Any] | None:
         caller = self.agents.get(source_caller_agent_id)
+        blocker = self.operator_fork_start_blocker(source_caller_agent_id)
+        if blocker:
+            self.notify(blocker, severity="error")
+            return None
         if caller is None:
-            self.notify(f"Caller {source_caller_agent_id} is not loaded.", severity="error")
             return None
         caller_metadata = caller.get("metadata") if isinstance(caller.get("metadata"), dict) else {}
         source_session_id = str(caller_metadata.get("codex_session_id") or "").strip()
         caller_cwd = str(caller_metadata.get("cwd") or "").strip()
-        if not source_session_id:
-            self.notify(
-                f"{source_caller_agent_id} is missing metadata.codex_session_id.",
-                severity="error",
-            )
-            return None
-        if not caller_cwd:
-            self.notify(
-                f"{source_caller_agent_id} is missing metadata.cwd.",
-                severity="error",
-            )
-            return None
         existing_response = await self.api_client().get(
             "/v1/operator/forks",
             params={
@@ -9566,11 +9583,16 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return
-        if not await self.ensure_operator_auth_ready():
-            return
         source_caller_agent_id = source_caller_agent_id or (
             self.selected_caller_agent_id_for_fork() if agent_id is None else None
         )
+        if source_caller_agent_id:
+            blocker = self.operator_fork_start_blocker(source_caller_agent_id)
+            if blocker:
+                self.notify(blocker, severity="error")
+                return
+        if not await self.ensure_operator_auth_ready():
+            return
         agent_id = agent_id or self.next_operator_agent_id()
         cwd = self.operator_cwd()
         codex_command = self.operator_codex_command()

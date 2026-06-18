@@ -2,6 +2,7 @@ import inspect
 import json
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 from rich.text import Text
@@ -1364,6 +1365,59 @@ async def test_tui_tmux_update_preserves_manual_scroll_when_not_at_bottom() -> N
     assert stream.scroll_y == scroll_y
     assert stream.scroll_target_y == scroll_target_y
     assert stream.cursor_location == (0, 0)
+
+
+async def test_tui_resize_restores_tmux_stream_tail_when_at_bottom() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    callbacks: list[object] = []
+
+    def fake_call_after_refresh(callback: object) -> None:
+        callbacks.append(callback)
+
+    app.call_after_refresh = fake_call_after_refresh  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(100, 20)
+        await pilot.pause()
+        stream = app.query_one("#tmux-stream", TextArea)
+        app.active_agent_tab = "latest-tab"
+        app.tmux_visible_capture_key = "agent-1:%76"
+        stream.text = "\n".join(f"line {index}" for index in range(80))
+        app.snap_tmux_stream_to_bottom(stream)
+
+        app.on_resize(SimpleNamespace(size=SimpleNamespace(width=120, height=32)))
+        stream.scroll_home(animate=False)
+        callbacks[0]()
+
+    assert stream.is_vertical_scroll_end
+    assert stream.cursor_location == (79, len("line 79"))
+
+
+async def test_tui_resize_preserves_manual_tmux_scrollback() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    callbacks: list[object] = []
+
+    def fake_call_after_refresh(callback: object) -> None:
+        callbacks.append(callback)
+
+    app.call_after_refresh = fake_call_after_refresh  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(100, 20)
+        await pilot.pause()
+        stream = app.query_one("#tmux-stream", TextArea)
+        app.active_agent_tab = "latest-tab"
+        app.tmux_visible_capture_key = "agent-1:%76"
+        stream.text = "\n".join(f"line {index}" for index in range(80))
+        app.snap_tmux_stream_to_bottom(stream)
+        stream.move_cursor((0, 0))
+        stream.scroll_home(animate=False)
+        scroll_y = stream.scroll_y
+
+        app.on_resize(SimpleNamespace(size=SimpleNamespace(width=120, height=32)))
+
+    assert callbacks == []
+    assert stream.scroll_y == scroll_y
 
 
 async def test_tui_mouse_down_focuses_tapped_sections() -> None:
@@ -6720,6 +6774,54 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     assert launches[1]["env"]["AGENT_PBX_LOGICAL_OPERATOR_ID"] == "operator-0"
     assert launches[1]["env"]["AGENT_PBX_SOURCE_CALLER_AGENT_ID"] == "caller-1"
     assert launches[1]["env"]["AGENT_PBX_SOURCE_CODEX_SESSION_ID"] == "session-caller-1"
+
+
+async def test_tui_start_operator_from_caller_missing_session_does_not_launch(
+    monkeypatch,
+) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+
+    class Client:
+        async def get(self, path: str, **_: object) -> object:
+            raise AssertionError(f"unexpected API request: {path}")
+
+        async def post(self, path: str, **_: object) -> object:
+            raise AssertionError(f"unexpected API request: {path}")
+
+    async def fake_configure_operator_codex_mcp(**_: object) -> None:
+        raise AssertionError("Codex MCP should not be configured")
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%42"
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+
+    async with app.run_test():
+        app.agents = {
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "status": "working",
+                "metadata": {
+                    "cwd": str(Path.cwd()),
+                },
+            }
+        }
+        app.selected_agent_id = "caller-1"
+        await app.start_operator_agent()
+
+    assert launches == []
+    assert app.tmux_agent_targets == {}
 
 
 async def test_tui_start_operator_refuses_missing_required_token() -> None:

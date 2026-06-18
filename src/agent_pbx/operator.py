@@ -23,6 +23,9 @@ TERMINAL_CAMPAIGN_STATUSES = {"complete", "completed", "blocked", "failed", "can
 NOHUP_MODE = "nohup"
 FORK_READY_STATUSES = {"starting", "running", "ready"}
 ID_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+FORK_LAUNCH_REQUIRED_REASON = (
+    "operator fork has not been launched; use the TUI to create the first fork for this caller"
+)
 
 
 def operator_runbook_payload() -> dict[str, Any]:
@@ -190,10 +193,10 @@ class OperatorService:
                     )
                 return updated
         if not blocked_reason and not tmux_pane_id and fork_agent_id is None:
-            blocked_reason = (
-                "operator fork has not been launched; use the TUI to create the "
-                "first fork for this caller"
-            )
+            blocked_reason = FORK_LAUNCH_REQUIRED_REASON
+        unlaunchable_block = (
+            bool(blocked_reason) and blocked_reason != FORK_LAUNCH_REQUIRED_REASON
+        )
         resolved_session_id = source_session_id or "missing"
         resolved_fork_agent_id = fork_agent_id or self.default_fork_agent_id(
             logical_operator_id,
@@ -208,6 +211,10 @@ class OperatorService:
             "source_codex_session_id": source_session_id,
             "operator_fork_pending": bool(blocked_reason),
         }
+        if blocked_reason:
+            fork_metadata["operator_fork_blocked_reason"] = blocked_reason
+        if unlaunchable_block:
+            fork_metadata["operator_fork_launchable"] = False
         fork_metadata.update(metadata or {})
         self.store.register_agent(
             AgentRegisterRequest(
@@ -219,8 +226,14 @@ class OperatorService:
                 pbx_active=not bool(blocked_reason),
             )
         )
-        resolved_status = status or ("blocked" if blocked_reason else "starting")
-        resolved_summary = summary or blocked_reason
+        if unlaunchable_block:
+            self.store.dismiss_agent(resolved_fork_agent_id)
+        resolved_status = (
+            "blocked"
+            if unlaunchable_block
+            else status or ("blocked" if blocked_reason else "starting")
+        )
+        resolved_summary = blocked_reason if unlaunchable_block else summary or blocked_reason
         fork = self.store.create_operator_fork(
             logical_operator_agent_id=logical_operator_id,
             fork_agent_id=resolved_fork_agent_id,
