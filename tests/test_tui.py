@@ -11,6 +11,8 @@ from agent_pbx import tmux as tmux_support
 from agent_pbx.tui import (
     AgentPBXTUI,
     CustomSlashCommand,
+    OperatorHistoryScreen,
+    OperatorSessionCandidate,
     PLAN_PBX_CONTEXT_PROMPT,
     PlanSelection,
     TMUX_LIVENESS_IDLE_SECONDS,
@@ -205,6 +207,16 @@ def test_tui_operator_bindings_and_mcp_command_helpers() -> None:
     )
     assert any(
         getattr(binding, "key", None) == "u"
+        and getattr(binding, "action", None) == "resume_operator"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "y"
+        and getattr(binding, "action", None) == "operator_history"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "shift+u"
         and getattr(binding, "action", None) == "restart_operator"
         for binding in app.BINDINGS
     )
@@ -812,6 +824,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         operators = app.query_one("#operators", DataTable)
         thread = app.query_one("#thread", DataTable)
         operator_start = app.query_one("#operator-start", Button)
+        operator_history = app.query_one("#operator-history", Button)
+        operator_resume = app.query_one("#operator-resume", Button)
         operator_restart = app.query_one("#operator-restart", Button)
         operator_stop = app.query_one("#operator-stop", Button)
         star_agent = app.query_one("#star-agent", Button)
@@ -863,7 +877,9 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert files.cursor_type == "row"
         assert files.show_row_labels is False
         assert operator_start.label.plain == "Start (O)"
-        assert operator_restart.label.plain == "Restart (u)"
+        assert operator_history.label.plain == "History (y)"
+        assert operator_resume.label.plain == "Resume (u)"
+        assert operator_restart.label.plain == "Restart (U)"
         assert operator_stop.label.plain == "Stop (x)"
         assert star_agent.label.plain == "Star/Unstar (p)"
         assert toggle_hidden.label.plain == "Show Hidden (h)"
@@ -4559,6 +4575,9 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/plan" in titles
     assert "/plan latest" in titles
     assert "/plan thread" in titles
+    assert "/operator history" in titles
+    assert "/operator resume" in titles
+    assert "/operator restart" in titles
     assert "/operator fork next" in titles
     assert "/operator fork prev" in titles
     assert "/theme minimal" in titles
@@ -6624,6 +6643,367 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
     assert app.tmux_agent_targets["operator-0"] == "%42"
     assert sent[0][0] == "%42"
     assert "operator-0" in sent[0][1]
+
+
+async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
+    monkeypatch,
+) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    killed: list[str] = []
+    sent: list[tuple[str, str]] = []
+    posts: list[dict[str, object]] = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            body = kwargs["json"]  # type: ignore[index]
+            return Response(
+                {
+                    "agent_id": body["agent_id"],  # type: ignore[index]
+                    "agent_type": "operator",
+                    "project": body["project"],  # type: ignore[index]
+                    "name": body.get("name"),  # type: ignore[union-attr]
+                    "status": "online",
+                    "effective_status": "online",
+                    "pbx_active": body.get("pbx_active", True),  # type: ignore[union-attr]
+                    "metadata": body["metadata"],  # type: ignore[index]
+                    "created_at": 1.0,
+                    "last_seen_at": 1.0,
+                }
+            )
+
+    async def fake_auth_ready() -> bool:
+        return True
+
+    async def fake_configure_operator_codex_mcp(**_: object) -> None:
+        return None
+
+    async def fake_send_text_to_tmux_pane(
+        pane_id: str,
+        message: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent.append((pane_id, message))
+        return True
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_open_latest_for_agent(agent_id: str) -> bool:
+        return True
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%153"
+
+    def fake_kill_pane(pane_id: str) -> None:
+        killed.append(pane_id)
+
+    def fake_operator_session_candidates(agent_id: str) -> list[OperatorSessionCandidate]:
+        assert agent_id == "operator-0"
+        return [
+            OperatorSessionCandidate(
+                session_id="new-session",
+                timestamp=20.0,
+                source="codex.sessions",
+            ),
+            OperatorSessionCandidate(
+                session_id="old-session",
+                timestamp=10.0,
+                source="codex.sessions",
+            ),
+        ]
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.ensure_operator_auth_ready = fake_auth_ready  # type: ignore[method-assign]
+    app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    app.operator_session_candidates = fake_operator_session_candidates  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "kill_pane", fake_kill_pane)
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "name": "operator-0",
+                "pbx_active": True,
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                    "launched_by": "agent-pbx-tui",
+                    "cwd": str(Path.cwd()),
+                },
+            }
+        }
+        app.tmux_agent_targets["operator-0"] = "%152"
+        app.selected_agent_id = "operator-0"
+        await app.resume_selected_operator()
+
+    assert killed == ["%152"]
+    assert launches[0]["command"] == "codex resume old-session"
+    assert launches[0]["window_name"] == "operator-0"
+    launch_env = launches[0]["env"]
+    assert isinstance(launch_env, dict)
+    assert launch_env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "old-session"
+    assert sent[0][0] == "%153"
+    assert "agent_id: operator-0" in sent[0][1]
+    register_body = posts[-1]["json"]
+    assert isinstance(register_body, dict)
+    register_metadata = register_body["metadata"]
+    assert isinstance(register_metadata, dict)
+    assert register_metadata["last_resume_codex_session_id"] == "old-session"
+
+
+async def test_tui_operator_history_opens_selectable_modal() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    def fake_operator_session_candidates(agent_id: str) -> list[OperatorSessionCandidate]:
+        assert agent_id == "operator-0"
+        return [
+            OperatorSessionCandidate(
+                session_id="new-session",
+                timestamp=20.0,
+                source="codex.sessions",
+                summary="new prompt",
+            ),
+            OperatorSessionCandidate(
+                session_id="old-session",
+                timestamp=10.0,
+                source="metadata.operator_session_history",
+                summary="old prompt",
+            ),
+        ]
+
+    app.operator_session_candidates = fake_operator_session_candidates  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+            }
+        }
+        app.tmux_agent_targets["operator-0"] = "%152"
+        app.selected_agent_id = "operator-0"
+        await app.show_selected_operator_history()
+        await pilot.pause()
+
+        assert isinstance(app.screen, OperatorHistoryScreen)
+        table = app.screen.query_one("#operator-history-table", DataTable)
+        summary = app.screen.query_one("#operator-history-summary", Static)
+
+    assert table.row_count == 2
+    assert table.get_row("old-session")[3] == "old-session"
+    assert "Default resume target: old-session" in str(summary.renderable)
+
+
+async def test_tui_operator_history_modal_resumes_highlighted_candidate() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    resumed: list[tuple[str | None, str | None]] = []
+    candidates = [
+        OperatorSessionCandidate(
+            session_id="new-session",
+            timestamp=20.0,
+            source="codex.sessions",
+        ),
+        OperatorSessionCandidate(
+            session_id="old-session",
+            timestamp=10.0,
+            source="codex.sessions",
+        ),
+    ]
+
+    async def fake_resume_selected_operator(
+        *,
+        agent_id: str | None = None,
+        resume_candidate: OperatorSessionCandidate | None = None,
+    ) -> None:
+        resumed.append(
+            (
+                agent_id,
+                resume_candidate.session_id if resume_candidate is not None else None,
+            )
+        )
+
+    app.resume_selected_operator = fake_resume_selected_operator  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await app.push_screen(
+            OperatorHistoryScreen(
+                agent_id="operator-0",
+                candidates=candidates,
+                resume_target=candidates[1],
+            )
+        )
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, OperatorHistoryScreen)
+        table = screen.query_one("#operator-history-table", DataTable)
+        table.move_cursor(row=1, animate=False)
+        screen.resume_candidate()
+        await pilot.pause()
+
+    assert resumed == [("operator-0", "old-session")]
+
+
+def test_tui_operator_resume_target_prefers_known_current_session() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "last_resume_codex_session_id": "current-session",
+            },
+        }
+    }
+    app.tmux_agent_targets["operator-0"] = "%153"
+    candidates = [
+        OperatorSessionCandidate(
+            session_id="current-session",
+            timestamp=20.0,
+            source="codex.sessions",
+        ),
+        OperatorSessionCandidate(
+            session_id="reset-session",
+            timestamp=10.0,
+            source="codex.sessions",
+        ),
+    ]
+
+    target = app.operator_resume_target("operator-0", candidates)
+
+    assert target == candidates[0]
+
+
+def test_tui_operator_session_candidates_scan_codex_session_files(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex"
+    session_dir = codex_home / "sessions" / "2026" / "06" / "22"
+    session_dir.mkdir(parents=True)
+    session_file = session_dir / "rollout-2026-06-22T15-00-00-session-old.jsonl"
+    session_file.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "session-old",
+                            "cwd": str(tmp_path),
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "\n".join(
+                                [
+                                    "Use Agent PBX as an operator agent.",
+                                    "Register this session with:",
+                                    "- agent_id: operator-0",
+                                    "- agent_type: operator",
+                                ]
+                            ),
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    false_positive_file = session_dir / "rollout-2026-06-22T16-00-00-session-dev.jsonl"
+    false_positive_file.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "session-dev",
+                            "cwd": str(tmp_path),
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "output": (
+                                '"name":"pbx_register_agent" '
+                                '"agent_id":"operator-0" '
+                                '"project":"agent-pbx-operator"'
+                            ),
+                        },
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (codex_home / "history.jsonl").write_text(
+        json.dumps(
+            {
+                "session_id": "session-old",
+                "ts": 123.0,
+                "text": "continue prior operator work",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "cwd": str(tmp_path),
+            },
+        }
+    }
+
+    candidates = app.operator_session_candidates("operator-0")
+
+    assert [candidate.session_id for candidate in candidates] == ["session-old"]
+    assert candidates[0].summary == "continue prior operator work"
 
 
 async def test_tui_start_operator_from_caller_launches_codex_fork(

@@ -300,6 +300,14 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/plan select 1",
     "/plan select 2",
     "/plan select 3",
+    "/operator start",
+    "/operator focus",
+    "/operator history",
+    "/operator resume",
+    "/operator restart",
+    "/operator stop",
+    "/operator hide",
+    "/operator purge",
     "/operator fork next",
     "/operator fork prev",
     "/gitstatus",
@@ -412,6 +420,15 @@ class PlanChoice:
         if self.raw is not None:
             data["option"] = self.raw
         return data
+
+
+@dataclass(frozen=True)
+class OperatorSessionCandidate:
+    session_id: str
+    timestamp: float
+    source: str
+    path: str = ""
+    summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -1890,6 +1907,150 @@ class OperatorKillConfirmScreen(ModalScreen[None]):
             self.dismiss()
 
 
+class OperatorHistoryScreen(ModalScreen[None]):
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("enter", "resume_selected", "Resume"),
+        ("r", "refresh", "Refresh"),
+    ]
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        candidates: list[OperatorSessionCandidate],
+        resume_target: OperatorSessionCandidate | None = None,
+    ) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.candidates = candidates
+        self.resume_target = resume_target
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="operator-history-panel"):
+            yield Static(f"Operator History: {self.agent_id}", id="operator-history-title")
+            yield Static(self.summary_text(), id="operator-history-summary")
+            yield DataTable(
+                id="operator-history-table",
+                cursor_type="row",
+                show_row_labels=False,
+            )
+            with Horizontal(id="operator-history-actions"):
+                yield Button("Resume", id="operator-history-resume", variant="primary")
+                yield Button("Refresh", id="operator-history-refresh")
+                yield Button("Close", id="operator-history-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#operator-history-table", DataTable)
+        table.add_columns("Pick", "Updated", "Source", "Session", "Latest Prompt")
+        self.render_candidates()
+
+    def summary_text(self) -> str:
+        if not self.candidates:
+            return "No local Codex sessions found for this operator."
+        if self.resume_target is None:
+            return f"{len(self.candidates)} session candidate(s)."
+        return f"Default resume target: {self.resume_target.session_id}"
+
+    def candidate_key(self, candidate: OperatorSessionCandidate) -> str:
+        return candidate.session_id
+
+    def format_timestamp(self, value: float) -> str:
+        if not value:
+            return "-"
+        return datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+    def render_candidates(self) -> None:
+        summary = self.query_one("#operator-history-summary", Static)
+        summary.update(self.summary_text())
+        table = self.query_one("#operator-history-table", DataTable)
+        table.clear()
+        for index, candidate in enumerate(self.candidates, start=1):
+            marker = "*" if candidate == self.resume_target else str(index)
+            table.add_row(
+                marker,
+                self.format_timestamp(candidate.timestamp),
+                candidate.source,
+                candidate.session_id,
+                candidate.summary,
+                key=self.candidate_key(candidate),
+            )
+        if table.row_count:
+            row = 0
+            if self.resume_target is not None:
+                try:
+                    row = table.get_row_index(self.candidate_key(self.resume_target))
+                except Exception:
+                    row = 0
+            table.move_cursor(row=row, animate=False, scroll=False)
+
+    def selected_candidate(self) -> OperatorSessionCandidate | None:
+        table = self.query_one("#operator-history-table", DataTable)
+        if table.row_count == 0 or not table.is_valid_row_index(table.cursor_row):
+            return None
+        row_key = str(table.ordered_rows[table.cursor_row].key.value)
+        for candidate in self.candidates:
+            if self.candidate_key(candidate) == row_key:
+                return candidate
+        return None
+
+    def resume_candidate(self) -> None:
+        candidate = self.selected_candidate()
+        if candidate is None:
+            self.notify("Select an operator session first.", severity="warning")
+            return
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.resume_selected_operator(  # type: ignore[attr-defined]
+                agent_id=self.agent_id,
+                resume_candidate=candidate,
+            ),
+            name=f"operator-resume-{slugify(self.agent_id)}",
+            exclusive=True,
+        )
+        self.dismiss()
+
+    def refresh_candidates(self) -> None:
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.refresh_operator_history_screen(self),  # type: ignore[attr-defined]
+            name=f"operator-history-refresh-{slugify(self.agent_id)}",
+            exclusive=True,
+        )
+
+    def update_candidates(
+        self,
+        candidates: list[OperatorSessionCandidate],
+        resume_target: OperatorSessionCandidate | None,
+    ) -> None:
+        self.candidates = candidates
+        self.resume_target = resume_target
+        self.render_candidates()
+
+    def action_resume_selected(self) -> None:
+        self.resume_candidate()
+
+    def action_refresh(self) -> None:
+        self.refresh_candidates()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "operator-history-table":
+            return
+        event.stop()
+        self.resume_candidate()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "operator-history-close":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "operator-history-refresh":
+            event.stop()
+            self.refresh_candidates()
+            return
+        if event.button.id == "operator-history-resume":
+            event.stop()
+            self.resume_candidate()
+
+
 class PullRequestMergeConfirmScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Close")]
 
@@ -2376,6 +2537,7 @@ class AgentPBXTUI(App[None]):
     JoplinNoteTitleScreen,
     JoplinDeleteConfirmScreen,
     OperatorKillConfirmScreen,
+    OperatorHistoryScreen,
     PullRequestMergeConfirmScreen,
     IssueClearConfirmScreen {
         align: center middle;
@@ -2384,6 +2546,7 @@ class AgentPBXTUI(App[None]):
     #joplin-title-panel,
     #joplin-delete-panel,
     #operator-kill-panel,
+    #operator-history-panel,
     #pr-merge-panel,
     #issue-clear-panel {
         width: 64;
@@ -2394,15 +2557,34 @@ class AgentPBXTUI(App[None]):
         padding: 1 2;
     }
 
+    #operator-history-panel {
+        width: 128;
+        max-width: 96%;
+        height: 26;
+        max-height: 90%;
+    }
+
     #joplin-title-modal-title,
     #joplin-delete-title,
     #operator-kill-title,
+    #operator-history-title,
     #pr-merge-title,
     #issue-clear-title {
         height: 1;
         text-style: bold;
         color: $primary;
         content-align: center middle;
+    }
+
+    #operator-history-summary {
+        height: 1;
+        color: $secondary;
+        content-align: center middle;
+    }
+
+    #operator-history-table {
+        height: 1fr;
+        margin-top: 1;
     }
 
     #joplin-title-input,
@@ -2443,6 +2625,7 @@ class AgentPBXTUI(App[None]):
     #joplin-title-actions,
     #joplin-delete-actions,
     #operator-kill-actions,
+    #operator-history-actions,
     #pr-merge-actions,
     #issue-clear-actions {
         height: 3;
@@ -2452,6 +2635,7 @@ class AgentPBXTUI(App[None]):
     #joplin-title-actions Button,
     #joplin-delete-actions Button,
     #operator-kill-actions Button,
+    #operator-history-actions Button,
     #pr-merge-actions Button,
     #issue-clear-actions Button {
         width: 1fr;
@@ -2962,7 +3146,9 @@ class AgentPBXTUI(App[None]):
         Binding("f6", "prev_operator_fork", "Prev Fork", key_display="F6", priority=True),
         Binding("f7", "next_operator_fork", "Next Fork", key_display="F7", priority=True),
         Binding("shift+o", "start_operator", "Start Operator", key_display="O"),
-        Binding("u", "restart_operator", "Restart Operator", priority=True),
+        Binding("y", "operator_history", "Operator History", priority=True),
+        Binding("u", "resume_operator", "Resume Operator", priority=True),
+        Binding("shift+u", "restart_operator", "Restart Operator", key_display="U"),
         Binding("x", "stop_operator", "Stop Operator", priority=True),
         ("ctrl+t", "toggle_tmux_direct", "Tmux"),
         Binding("f8", "toggle_tmux_direct", "Tmux", key_display="F8"),
@@ -3303,7 +3489,9 @@ class AgentPBXTUI(App[None]):
                 )
                 with Horizontal(id="operator-actions"):
                     yield Button("Start (O)", id="operator-start")
-                    yield Button("Restart (u)", id="operator-restart")
+                    yield Button("History (y)", id="operator-history")
+                    yield Button("Resume (u)", id="operator-resume")
+                    yield Button("Restart (U)", id="operator-restart")
                     yield Button("Stop (x)", id="operator-stop")
                     yield Button("Prev Fork (F6)", id="operator-fork-prev")
                     yield Button("Next Fork (F7)", id="operator-fork-next")
@@ -3619,6 +3807,16 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/plan thread", "Show selected thread plan options", self.palette_plan_thread)
         yield SystemCommand("/operator start", "Start a new operator agent", self.palette_operator_start)
         yield SystemCommand("/operator focus", "Focus the Operators table", self.palette_operator_focus)
+        yield SystemCommand(
+            "/operator history",
+            "Show selected operator session history",
+            self.palette_operator_history,
+        )
+        yield SystemCommand(
+            "/operator resume",
+            "Resume the selected operator from local Codex history",
+            self.palette_operator_resume,
+        )
         yield SystemCommand("/operator restart", "Restart the selected operator", self.palette_operator_restart)
         yield SystemCommand("/operator stop", "Stop the selected operator", self.palette_operator_stop)
         yield SystemCommand("/operator hide", "Hide the selected operator", self.palette_operator_hide)
@@ -3875,6 +4073,20 @@ class AgentPBXTUI(App[None]):
 
     def palette_operator_focus(self) -> None:
         self.action_focus_operators()
+
+    def palette_operator_history(self) -> None:
+        self.run_worker(
+            self.show_selected_operator_history(),
+            name="palette-operator-history",
+            exclusive=True,
+        )
+
+    def palette_operator_resume(self) -> None:
+        self.run_worker(
+            self.resume_selected_operator(),
+            name="palette-operator-resume",
+            exclusive=True,
+        )
 
     def palette_operator_restart(self) -> None:
         self.run_worker(
@@ -4684,8 +4896,13 @@ class AgentPBXTUI(App[None]):
         if self.is_compact_layout() and self.compact_view == "agent":
             self.show_compact_home()
 
+    def focused_editable_text_input(self) -> bool:
+        return isinstance(self.focused, (Input, TextArea)) and not bool(
+            getattr(self.focused, "read_only", False)
+        )
+
     def action_start_operator(self) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self.focused_editable_text_input():
             return
         self.run_worker(
             self.start_operator_agent(),
@@ -4694,7 +4911,7 @@ class AgentPBXTUI(App[None]):
         )
 
     def action_restart_operator(self) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self.focused_editable_text_input():
             return
         self.run_worker(
             self.restart_selected_operator(),
@@ -4702,8 +4919,26 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def action_operator_history(self) -> None:
+        if self.focused_editable_text_input():
+            return
+        self.run_worker(
+            self.show_selected_operator_history(),
+            name="operator-history",
+            exclusive=True,
+        )
+
+    def action_resume_operator(self) -> None:
+        if self.focused_editable_text_input():
+            return
+        self.run_worker(
+            self.resume_selected_operator(),
+            name="resume-operator",
+            exclusive=True,
+        )
+
     def action_stop_operator(self) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self.focused_editable_text_input():
             return
         self.run_worker(
             self.stop_selected_operator(),
@@ -4712,7 +4947,7 @@ class AgentPBXTUI(App[None]):
         )
 
     def action_next_operator_fork(self) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self.focused_editable_text_input():
             return
         self.run_worker(
             self.cycle_selected_operator_fork(1),
@@ -4721,7 +4956,7 @@ class AgentPBXTUI(App[None]):
         )
 
     def action_prev_operator_fork(self) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self.focused_editable_text_input():
             return
         self.run_worker(
             self.cycle_selected_operator_fork(-1),
@@ -7893,6 +8128,12 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "operator-start":
             await self.start_operator_agent()
             return
+        if event.button.id == "operator-history":
+            await self.show_selected_operator_history()
+            return
+        if event.button.id == "operator-resume":
+            await self.resume_selected_operator()
+            return
         if event.button.id == "operator-restart":
             await self.restart_selected_operator()
             return
@@ -9250,6 +9491,16 @@ class AgentPBXTUI(App[None]):
     ) -> None:
         await asyncio.to_thread(configure_codex_mcp, codex_command, mcp_url)
 
+    def codex_home_dir(self) -> Path:
+        configured = os.getenv("CODEX_HOME", "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        return Path.home() / ".codex"
+
+    def operator_resume_command(self, codex_command: str, session_id: str) -> str:
+        command_parts = shlex.split(codex_command) if codex_command.strip() else ["codex"]
+        return shlex.join([*command_parts, "resume", session_id])
+
     def operator_fork_command(
         self,
         codex_command: str,
@@ -9268,6 +9519,8 @@ class AgentPBXTUI(App[None]):
         mcp_url: str,
         session_name: str,
         tmux_pane_id: str | None = None,
+        resumed_codex_session_id: str | None = None,
+        operator_session_history: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         metadata = {
             "agent_type": OPERATOR_AGENT_TYPE,
@@ -9284,6 +9537,10 @@ class AgentPBXTUI(App[None]):
         }
         if tmux_pane_id:
             metadata["tmux_pane_id"] = tmux_pane_id
+        if resumed_codex_session_id:
+            metadata["last_resume_codex_session_id"] = resumed_codex_session_id
+        if operator_session_history is not None:
+            metadata["operator_session_history"] = operator_session_history
         return metadata
 
     async def register_operator_root(
@@ -9295,6 +9552,8 @@ class AgentPBXTUI(App[None]):
         mcp_url: str,
         session_name: str,
         tmux_pane_id: str | None = None,
+        resumed_codex_session_id: str | None = None,
+        operator_session_history: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         response = await self.api_client().post(
             "/v1/agents/register",
@@ -9311,6 +9570,8 @@ class AgentPBXTUI(App[None]):
                     mcp_url=mcp_url,
                     session_name=session_name,
                     tmux_pane_id=tmux_pane_id,
+                    resumed_codex_session_id=resumed_codex_session_id,
+                    operator_session_history=operator_session_history,
                 ),
             },
             headers=auth_headers(self.token),
@@ -9321,6 +9582,432 @@ class AgentPBXTUI(App[None]):
             self.agents[agent_id] = agent
             return agent
         raise RuntimeError("operator root registration returned a non-object")
+
+    def operator_metadata_for(self, agent_id: str) -> dict[str, Any]:
+        agent = self.agents.get(agent_id) or {}
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        return dict(metadata)
+
+    def operator_session_history_entries(self, agent_id: str) -> list[dict[str, Any]]:
+        metadata = self.operator_metadata_for(agent_id)
+        entries: list[dict[str, Any]] = []
+        for key in (
+            "codex_session_id",
+            "codex_thread_id",
+            "last_resume_codex_session_id",
+        ):
+            session_id = str(metadata.get(key) or "").strip()
+            if session_id:
+                entries.append(
+                    {
+                        "session_id": session_id,
+                        "timestamp": float_value(metadata.get("last_seen_at")) or 0.0,
+                        "source": f"metadata.{key}",
+                    }
+                )
+        raw_history = metadata.get("operator_session_history")
+        if isinstance(raw_history, list):
+            for item in raw_history:
+                if isinstance(item, str):
+                    session_id = item.strip()
+                    if session_id:
+                        entries.append(
+                            {
+                                "session_id": session_id,
+                                "timestamp": 0.0,
+                                "source": "metadata.operator_session_history",
+                            }
+                        )
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                session_id = str(item.get("session_id") or "").strip()
+                if not session_id:
+                    continue
+                entries.append(
+                    {
+                        "session_id": session_id,
+                        "timestamp": float_value(item.get("timestamp")) or 0.0,
+                        "source": str(item.get("source") or "metadata.operator_session_history"),
+                        "path": str(item.get("path") or ""),
+                        "summary": str(item.get("summary") or ""),
+                    }
+                )
+        return self.dedupe_operator_session_entries(entries)
+
+    def dedupe_operator_session_entries(
+        self,
+        entries: Iterable[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        by_session: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            session_id = str(entry.get("session_id") or "").strip()
+            if not session_id:
+                continue
+            timestamp = float_value(entry.get("timestamp")) or 0.0
+            existing = by_session.get(session_id)
+            if existing is None or timestamp >= (float_value(existing.get("timestamp")) or 0.0):
+                by_session[session_id] = {**entry, "session_id": session_id, "timestamp": timestamp}
+        return sorted(
+            by_session.values(),
+            key=lambda item: (
+                float_value(item.get("timestamp")) or 0.0,
+                str(item.get("session_id") or ""),
+            ),
+            reverse=True,
+        )
+
+    def current_operator_session_ids(self, agent_id: str) -> set[str]:
+        metadata = self.operator_metadata_for(agent_id)
+        session_ids: set[str] = set()
+        for key in (
+            "codex_session_id",
+            "codex_thread_id",
+            "last_resume_codex_session_id",
+        ):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                session_ids.add(value)
+        return session_ids
+
+    def codex_history_summaries(self, codex_home: Path) -> dict[str, tuple[float, str]]:
+        path = codex_home / "history.jsonl"
+        if not path.is_file():
+            return {}
+        summaries: dict[str, tuple[float, str]] = {}
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    session_id = str(payload.get("session_id") or "").strip()
+                    if not session_id:
+                        continue
+                    timestamp = float_value(payload.get("ts")) or 0.0
+                    text = str(payload.get("text") or "").strip()
+                    summary = text.splitlines()[0][:180] if text else ""
+                    existing = summaries.get(session_id)
+                    if existing is None or timestamp >= existing[0]:
+                        summaries[session_id] = (timestamp, summary)
+        except OSError:
+            return summaries
+        return summaries
+
+    def codex_session_file_id(self, path: Path) -> str:
+        match = re.search(r"([0-9a-f]{8}-[0-9a-f-]{27})", path.name)
+        return match.group(1) if match else ""
+
+    def read_codex_session_meta(self, path: Path) -> dict[str, Any]:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                line = handle.readline()
+        except OSError:
+            return {}
+        if not line:
+            return {}
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(payload, dict) or payload.get("type") != "session_meta":
+            return {}
+        session = payload.get("payload")
+        return session if isinstance(session, dict) else {}
+
+    def operator_session_file_matches(self, path: Path, agent_id: str) -> bool:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    payload = item.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    if self.codex_record_registers_operator(payload, agent_id):
+                        return True
+                    if self.codex_record_contains_operator_bootstrap(payload, agent_id):
+                        return True
+        except OSError:
+            return False
+        return False
+
+    def codex_record_registers_operator(
+        self,
+        payload: dict[str, Any],
+        agent_id: str,
+    ) -> bool:
+        tool_name = str(payload.get("name") or "").strip()
+        arguments: Any = payload.get("arguments")
+        if payload.get("type") == "mcp_tool_call_end":
+            invocation = payload.get("invocation")
+            if not isinstance(invocation, dict):
+                return False
+            tool_name = str(invocation.get("tool") or "").strip()
+            arguments = invocation.get("arguments")
+        if tool_name != "pbx_register_agent":
+            return False
+        if isinstance(arguments, str):
+            try:
+                decoded = json.loads(arguments)
+            except json.JSONDecodeError:
+                decoded = {}
+            arguments = decoded
+        if not isinstance(arguments, dict):
+            return False
+        return (
+            str(arguments.get("agent_id") or "").strip() == agent_id
+            and str(arguments.get("project") or "").strip() == "agent-pbx-operator"
+            and str(arguments.get("agent_type") or "").strip() == OPERATOR_AGENT_TYPE
+        )
+
+    def codex_record_contains_operator_bootstrap(
+        self,
+        payload: dict[str, Any],
+        agent_id: str,
+    ) -> bool:
+        messages: list[str] = []
+        if payload.get("type") == "user_message":
+            messages.append(str(payload.get("message") or ""))
+        elif payload.get("type") == "message" and payload.get("role") == "user":
+            content = payload.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict):
+                        messages.append(str(item.get("text") or item.get("input_text") or ""))
+        for message in messages:
+            if (
+                "Use Agent PBX as an operator agent." in message
+                and "Register this session with:" in message
+                and f"- agent_id: {agent_id}" in message
+                and "- agent_type: operator" in message
+            ):
+                return True
+        return False
+
+    def local_operator_codex_session_entries(
+        self,
+        agent_id: str,
+        *,
+        max_files: int = 500,
+    ) -> list[dict[str, Any]]:
+        codex_home = self.codex_home_dir()
+        sessions_dir = codex_home / "sessions"
+        if not sessions_dir.is_dir():
+            return []
+        metadata = self.operator_metadata_for(agent_id)
+        operator_cwd = str(metadata.get("cwd") or self.operator_cwd()).strip()
+        normalized_operator_cwd = (
+            str(Path(operator_cwd).expanduser().resolve(strict=False))
+            if operator_cwd
+            else ""
+        )
+        summaries = self.codex_history_summaries(codex_home)
+        candidates: list[tuple[float, Path]] = []
+        for path in sessions_dir.rglob("*.jsonl"):
+            try:
+                candidates.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        entries: list[dict[str, Any]] = []
+        for mtime, path in sorted(candidates, key=lambda item: item[0], reverse=True)[:max_files]:
+            session_meta = self.read_codex_session_meta(path)
+            session_id = str(session_meta.get("id") or self.codex_session_file_id(path)).strip()
+            if not session_id:
+                continue
+            session_cwd = str(session_meta.get("cwd") or "").strip()
+            if normalized_operator_cwd and session_cwd:
+                normalized_session_cwd = str(
+                    Path(session_cwd).expanduser().resolve(strict=False)
+                )
+                if normalized_session_cwd != normalized_operator_cwd:
+                    continue
+            if not self.operator_session_file_matches(path, agent_id):
+                continue
+            history_timestamp, summary = summaries.get(session_id, (0.0, ""))
+            entries.append(
+                {
+                    "session_id": session_id,
+                    "timestamp": history_timestamp or mtime,
+                    "source": "codex.sessions",
+                    "path": str(path),
+                    "summary": summary,
+                }
+            )
+        return self.dedupe_operator_session_entries(entries)
+
+    def operator_session_candidates(self, agent_id: str) -> list[OperatorSessionCandidate]:
+        raw_entries = [
+            *self.operator_session_history_entries(agent_id),
+            *self.local_operator_codex_session_entries(agent_id),
+        ]
+        return [
+            OperatorSessionCandidate(
+                session_id=str(entry.get("session_id") or ""),
+                timestamp=float_value(entry.get("timestamp")) or 0.0,
+                source=str(entry.get("source") or "unknown"),
+                path=str(entry.get("path") or ""),
+                summary=str(entry.get("summary") or ""),
+            )
+            for entry in self.dedupe_operator_session_entries(raw_entries)
+        ]
+
+    def operator_resume_target(
+        self,
+        agent_id: str,
+        candidates: list[OperatorSessionCandidate],
+    ) -> OperatorSessionCandidate | None:
+        if not candidates:
+            return None
+        current_session_ids = self.current_operator_session_ids(agent_id)
+        for candidate in candidates:
+            if candidate.session_id in current_session_ids:
+                return candidate
+        if (
+            not current_session_ids
+            and self.tmux_agent_targets.get(agent_id)
+            and len(candidates) > 1
+        ):
+            return candidates[1]
+        for candidate in candidates:
+            if candidate.session_id not in current_session_ids:
+                return candidate
+        if self.tmux_agent_targets.get(agent_id) and len(candidates) > 1:
+            return candidates[1]
+        return candidates[0]
+
+    def operator_session_history_metadata(
+        self,
+        agent_id: str,
+        *,
+        include: Iterable[OperatorSessionCandidate | dict[str, Any]] = (),
+    ) -> list[dict[str, Any]]:
+        entries = self.operator_session_history_entries(agent_id)
+        for item in include:
+            if isinstance(item, OperatorSessionCandidate):
+                entries.append(
+                    {
+                        "session_id": item.session_id,
+                        "timestamp": item.timestamp,
+                        "source": item.source,
+                        "path": item.path,
+                        "summary": item.summary,
+                    }
+                )
+            elif isinstance(item, dict):
+                entries.append(dict(item))
+        trimmed = self.dedupe_operator_session_entries(entries)[:20]
+        return [
+            {
+                key: value
+                for key, value in entry.items()
+                if key in {"session_id", "timestamp", "source", "path", "summary"} and value
+            }
+            for entry in trimmed
+        ]
+
+    def format_operator_session_history(
+        self,
+        agent_id: str,
+        candidates: list[OperatorSessionCandidate],
+    ) -> str:
+        resume_target = self.operator_resume_target(agent_id, candidates)
+        current_session_ids = self.current_operator_session_ids(agent_id)
+        lines = [
+            f"Operator Session History: {agent_id}",
+            "",
+        ]
+        if not candidates:
+            lines.append("No local Codex sessions were found for this operator.")
+            return "\n".join(lines)
+        if resume_target is not None:
+            lines.extend(
+                [
+                    f"Resume target: `{resume_target.session_id}`",
+                    "",
+                ]
+            )
+        for index, candidate in enumerate(candidates, start=1):
+            marker = " current" if candidate.session_id in current_session_ids else ""
+            created = (
+                datetime.fromtimestamp(candidate.timestamp, timezone.utc).isoformat()
+                if candidate.timestamp
+                else "unknown time"
+            )
+            lines.append(f"{index}. `{candidate.session_id}`{marker}")
+            lines.append(f"   source: {candidate.source}; updated: {created}")
+            if candidate.summary:
+                lines.append(f"   latest prompt: {candidate.summary}")
+            if candidate.path:
+                lines.append(f"   file: {candidate.path}")
+        return "\n".join(lines)
+
+    async def show_selected_operator_history(self) -> None:
+        agent_id = self.selected_operator_agent_id()
+        if not agent_id:
+            return
+        candidates = await asyncio.to_thread(self.operator_session_candidates, agent_id)
+        resume_target = self.operator_resume_target(agent_id, candidates)
+        self.push_screen(
+            OperatorHistoryScreen(
+                agent_id=agent_id,
+                candidates=candidates,
+                resume_target=resume_target,
+            )
+        )
+        self.notify(f"Found {len(candidates)} operator session candidate(s) for {agent_id}.")
+
+    async def refresh_operator_history_screen(
+        self,
+        screen: OperatorHistoryScreen,
+    ) -> None:
+        candidates = await asyncio.to_thread(
+            self.operator_session_candidates,
+            screen.agent_id,
+        )
+        screen.update_candidates(
+            candidates,
+            self.operator_resume_target(screen.agent_id, candidates),
+        )
+        self.notify(
+            f"Refreshed {len(candidates)} operator session candidate(s) for "
+            f"{screen.agent_id}."
+        )
+
+    async def record_operator_session_history(
+        self,
+        agent_id: str,
+        *,
+        include: Iterable[OperatorSessionCandidate | dict[str, Any]] = (),
+    ) -> list[dict[str, Any]]:
+        history = self.operator_session_history_metadata(agent_id, include=include)
+        agent = self.agents.get(agent_id) or {"agent_id": agent_id}
+        metadata = self.operator_metadata_for(agent_id)
+        payload_metadata = {**metadata, "operator_session_history": history}
+        response = await self.api_client().post(
+            "/v1/agents/register",
+            json={
+                "agent_id": agent_id,
+                "project": str(agent.get("project") or "agent-pbx-operator"),
+                "name": str(agent.get("name") or agent_id),
+                "agent_type": OPERATOR_AGENT_TYPE,
+                "pbx_active": bool(agent.get("pbx_active", True)),
+                "metadata": payload_metadata,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        updated = response.json()
+        if isinstance(updated, dict):
+            self.agents[agent_id] = updated
+        return history
 
     async def live_operator_root_pane_id(self, agent_id: str) -> str | None:
         try:
@@ -9860,9 +10547,137 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return
+        try:
+            candidates = await asyncio.to_thread(self.operator_session_candidates, agent_id)
+            await self.record_operator_session_history(agent_id, include=candidates[:1])
+        except Exception as exc:
+            self.notify(
+                f"Unable to record operator session history before restart: {exc}",
+                severity="warning",
+            )
         if not await self.kill_tui_owned_operator_pane(agent_id):
             return
         await self.start_operator_agent(agent_id=agent_id)
+
+    async def resume_selected_operator(
+        self,
+        *,
+        agent_id: str | None = None,
+        resume_candidate: OperatorSessionCandidate | None = None,
+    ) -> None:
+        agent_id = agent_id or self.selected_operator_agent_id()
+        if not agent_id:
+            return
+        if not self.is_operator_agent_id(agent_id):
+            self.notify(f"{agent_id} is not an operator.", severity="warning")
+            return
+        if not self.tmux_features_available:
+            self.notify(
+                "Tmux is required to resume an operator from the TUI.",
+                severity="warning",
+            )
+            return
+        candidates = (
+            [resume_candidate]
+            if resume_candidate is not None
+            else await asyncio.to_thread(self.operator_session_candidates, agent_id)
+        )
+        target = resume_candidate or self.operator_resume_target(agent_id, candidates)
+        if target is None:
+            self.notify(f"No resumable Codex session found for {agent_id}.", severity="warning")
+            await self.show_selected_operator_history()
+            return
+        pane_id = self.tmux_agent_targets.get(agent_id)
+        if pane_id and self.tui_owned_operator_pane_id(agent_id) != pane_id:
+            self.notify(
+                f"{agent_id} has a non-TUI-owned tmux pane; detach it before resume.",
+                severity="warning",
+            )
+            return
+        if not await self.ensure_operator_auth_ready():
+            return
+        cwd = self.operator_cwd()
+        codex_command = self.operator_codex_command()
+        session_name = self.operator_tmux_session_name()
+        mcp_url = agent_pbx_mcp_url(self.server)
+        try:
+            await self.configure_operator_codex_mcp(
+                codex_command=codex_command,
+                mcp_url=mcp_url,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to configure Codex MCP: {exc}", severity="error")
+            return
+        try:
+            history = await self.record_operator_session_history(
+                agent_id,
+                include=[*candidates[:3], target],
+            )
+        except Exception as exc:
+            self.notify(
+                f"Unable to record operator session history before resume: {exc}",
+                severity="warning",
+            )
+            history = self.operator_session_history_metadata(
+                agent_id,
+                include=[*candidates[:3], target],
+            )
+        if not await self.kill_tui_owned_operator_pane(agent_id):
+            return
+        command = self.operator_resume_command(codex_command, target.session_id)
+        env = self.operator_launch_env(
+            agent_id=agent_id,
+            cwd=cwd,
+            mcp_url=mcp_url,
+        )
+        env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
+        try:
+            resumed_pane_id = await asyncio.to_thread(
+                tmux_support.launch_pane,
+                session_name=session_name,
+                window_name=agent_id,
+                command=command,
+                cwd=cwd,
+                env=env,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to launch resumed operator pane: {exc}", severity="error")
+            return
+        self.tmux_agent_targets[agent_id] = resumed_pane_id
+        self.tmux_manual_override_agent_ids.add(agent_id)
+        self.tmux_detached_agent_ids.discard(agent_id)
+        self.tmux_direct_agent_modes[agent_id] = True
+        try:
+            await self.register_operator_root(
+                agent_id,
+                cwd=cwd,
+                codex_command=codex_command,
+                mcp_url=mcp_url,
+                session_name=session_name,
+                tmux_pane_id=resumed_pane_id,
+                resumed_codex_session_id=target.session_id,
+                operator_session_history=history,
+            )
+        except Exception as exc:
+            self.notify(
+                f"Resumed pane launched, but PBX registration failed: {exc}",
+                severity="warning",
+            )
+        await asyncio.sleep(1.0)
+        sent = await self.send_text_to_tmux_pane(
+            resumed_pane_id,
+            self.operator_bootstrap_prompt(agent_id, cwd),
+        )
+        if not sent:
+            self.notify(
+                f"Resumed {agent_id}, but bootstrap paste failed.",
+                severity="warning",
+            )
+        else:
+            self.notify(f"Resumed {agent_id} from {target.session_id}.")
+        self.save_settings()
+        await self.refresh_agents()
+        await self.open_latest_for_agent(agent_id)
 
     async def stop_selected_operator(self) -> None:
         agent_id = self.selected_operator_agent_id()
