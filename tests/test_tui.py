@@ -4214,6 +4214,7 @@ async def test_tui_campaigns_loads_and_views_generated_reports() -> None:
         assert "Reports:" in detail
         assert "Detailed campaign report body." in detail
         assert "report: report-1 (complete Caller release check complete)" in detail
+        assert "fork: fork-1" in detail
         assert app.selected_campaign_report_id_by_operator["operator-0"] == "report-1"
 
         await app.view_selected_campaign_report()

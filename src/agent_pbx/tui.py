@@ -10966,6 +10966,8 @@ class AgentPBXTUI(App[None]):
                 )
                 if assignment.get("last_command_id"):
                     lines.append(f"  command: {assignment.get('last_command_id')}")
+                if assignment.get("operator_fork_id"):
+                    lines.append(f"  fork: {assignment.get('operator_fork_id')}")
                 if assignment.get("last_report_id"):
                     report_id = str(assignment.get("last_report_id"))
                     report = reports_by_id.get(report_id)

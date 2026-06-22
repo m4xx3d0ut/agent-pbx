@@ -147,6 +147,7 @@ def test_operator_campaign_tmux_delivery_records_sent_command(
         width=100,
         height=30,
         history_size=10,
+        window_name="operator-0-fork-caller-1",
     )
     monkeypatch.setattr(
         "agent_pbx.operator.tmux_support.list_panes",
@@ -407,3 +408,207 @@ def test_operator_pending_fork_can_be_activated_after_tui_launch(tmp_path: Path)
     assert activated_agent["pbx_active"] is True
     assert activated_agent["metadata"]["operator_fork_pending"] is False
     assert activated_agent["metadata"]["tmux_pane_id"] == "%42"
+
+
+def test_operator_campaign_tmux_delivery_prefers_repaired_fork_pane(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"pbx_mode": "report", "cwd": str(tmp_path)},
+        )
+    )
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        )
+    )
+    service = OperatorService(store)
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        tmux_pane_id="%1",
+        status="running",
+        metadata={"pbx_mode": "report", "tmux_pane_id": "%1", "cwd": str(caller_cwd)},
+    )
+    repaired = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id=fork["fork_agent_id"],
+        tmux_pane_id="%2",
+        status="running",
+        summary="Fork pane repaired after operator restore.",
+        metadata={"active_tmux_pane_id": "%2"},
+    )
+    fork_agent = store.get_agent(fork["fork_agent_id"])
+
+    assert repaired["operator_fork_id"] == fork["operator_fork_id"]
+    assert repaired["tmux_pane_id"] == "%2"
+    assert fork_agent is not None
+    assert fork_agent["metadata"]["tmux_pane_id"] == "%2"
+    assert fork_agent["metadata"]["active_tmux_pane_id"] == "%2"
+
+    stale_pane = tmux_support.TmuxPane(
+        session_name="s",
+        window_index="0",
+        pane_index="1",
+        pane_id="%1",
+        active=False,
+        current_command="codex",
+        title="old-fork",
+        cwd=str(caller_cwd),
+        width=100,
+        height=30,
+        history_size=10,
+        window_name="old-fork",
+    )
+    repaired_pane = tmux_support.TmuxPane(
+        session_name="s",
+        window_index="0",
+        pane_index="2",
+        pane_id="%2",
+        active=True,
+        current_command="codex",
+        title="new-fork",
+        cwd=str(caller_cwd),
+        width=100,
+        height=30,
+        history_size=10,
+        window_name="operator-0-fork-caller-1",
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.list_panes",
+        lambda tmux_bin="tmux": [stale_pane, repaired_pane],
+    )
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.send_text",
+        lambda target, text, **kwargs: sent.append((target, text)),
+    )
+
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Repaired fork route",
+        objective="Use the active fork pane after restore.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Continue."}],
+        delivery="tmux",
+    )
+    assignment = campaign["assignments"][0]
+    command = store.get_command(assignment["last_command_id"])
+
+    assert sent and sent[0][0] == "%2"
+    assert command is not None
+    assert command["agent_id"] == "operator-0-fork-caller-1"
+    assert command["payload"]["target_agent_id"] == "caller-1"
+    assert command["payload"]["fork_agent_id"] == "operator-0-fork-caller-1"
+    assert command["payload"]["tmux_pane_id"] == "%2"
+
+
+def test_operator_campaign_tmux_delivery_prefers_fork_window_over_caller_pane(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"pbx_mode": "report", "cwd": str(tmp_path)},
+        )
+    )
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        )
+    )
+    service = OperatorService(store)
+    service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        tmux_pane_id="%1",
+        status="running",
+        metadata={"pbx_mode": "report", "tmux_pane_id": "%1", "cwd": str(caller_cwd)},
+    )
+
+    caller_pane = tmux_support.TmuxPane(
+        session_name="caller-session",
+        window_index="0",
+        pane_index="1",
+        pane_id="%1",
+        active=False,
+        current_command="codex",
+        title="caller-1",
+        cwd=str(caller_cwd),
+        width=100,
+        height=30,
+        history_size=10,
+        window_name="zsh",
+    )
+    fork_pane = tmux_support.TmuxPane(
+        session_name="operator-session",
+        window_index="0",
+        pane_index="2",
+        pane_id="%2",
+        active=True,
+        current_command="codex",
+        title="agent-pbx",
+        cwd=str(tmp_path / "agent-pbx"),
+        width=100,
+        height=30,
+        history_size=10,
+        window_name="operator-0-fork-caller-1",
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.list_panes",
+        lambda tmux_bin="tmux": [caller_pane, fork_pane],
+    )
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.send_text",
+        lambda target, text, **kwargs: sent.append((target, text)),
+    )
+
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Fork window route",
+        objective="Route to the fork window, not a same-cwd caller pane.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Continue."}],
+        delivery="tmux",
+    )
+    assignment = campaign["assignments"][0]
+    command = store.get_command(assignment["last_command_id"])
+
+    assert sent and sent[0][0] == "%2"
+    assert command is not None
+    assert command["agent_id"] == "operator-0-fork-caller-1"
+    assert command["payload"]["tmux_pane_id"] == "%2"

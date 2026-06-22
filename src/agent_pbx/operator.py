@@ -148,8 +148,18 @@ class OperatorService:
                     "source_caller_agent_id": source_caller_agent_id,
                     "source_codex_session_id": source_session_id,
                 }
+                if tmux_pane_id:
+                    fork_metadata["tmux_pane_id"] = tmux_pane_id
+                if fork_codex_session_id:
+                    fork_metadata["fork_codex_session_id"] = fork_codex_session_id
+                merged_metadata = {**fork_metadata, **(metadata or {})}
+                if tmux_pane_id:
+                    merged_metadata["tmux_pane_id"] = tmux_pane_id
+                if fork_codex_session_id:
+                    merged_metadata["fork_codex_session_id"] = fork_codex_session_id
                 if launching and not blocked_reason:
                     fork_metadata["operator_fork_pending"] = False
+                    merged_metadata["operator_fork_pending"] = False
                     fork_agent = self.store.get_agent(resolved_fork_agent_id) or {}
                     self.store.register_agent(
                         AgentRegisterRequest(
@@ -165,7 +175,7 @@ class OperatorService:
                                 else resolved_fork_agent_id
                             ),
                             agent_type=OPERATOR_AGENT_TYPE,
-                            metadata={**fork_metadata, **(metadata or {})},
+                            metadata=merged_metadata,
                             pbx_active=True,
                         )
                     )
@@ -177,7 +187,7 @@ class OperatorService:
                     fork_codex_session_id=fork_codex_session_id,
                     status=status,
                     summary=summary,
-                    metadata={**fork_metadata, **(metadata or {})},
+                    metadata=merged_metadata,
                     touch=True,
                 ) or existing
                 if launching and not blocked_reason:
@@ -211,11 +221,19 @@ class OperatorService:
             "source_codex_session_id": source_session_id,
             "operator_fork_pending": bool(blocked_reason),
         }
+        if tmux_pane_id:
+            fork_metadata["tmux_pane_id"] = tmux_pane_id
+        if fork_codex_session_id:
+            fork_metadata["fork_codex_session_id"] = fork_codex_session_id
         if blocked_reason:
             fork_metadata["operator_fork_blocked_reason"] = blocked_reason
         if unlaunchable_block:
             fork_metadata["operator_fork_launchable"] = False
         fork_metadata.update(metadata or {})
+        if tmux_pane_id:
+            fork_metadata["tmux_pane_id"] = tmux_pane_id
+        if fork_codex_session_id:
+            fork_metadata["fork_codex_session_id"] = fork_codex_session_id
         self.store.register_agent(
             AgentRegisterRequest(
                 agent_id=resolved_fork_agent_id,
@@ -367,18 +385,24 @@ class OperatorService:
                 last_command_id=command["command_id"],
                 operator_fork_id=command["payload"].get("operator_fork_id"),
             )
+            fork_agent_id = command["payload"].get("fork_agent_id")
+            dispatch_target = (
+                f"{assignment['target_agent_id']} via {fork_agent_id}"
+                if fork_agent_id
+                else str(assignment["target_agent_id"])
+            )
             self.store.add_operator_campaign_event(
                 campaign_id=campaign["campaign_id"],
                 assignment_id=assignment["assignment_id"],
                 operator_agent_id=operator_agent_id,
                 target_agent_id=assignment["target_agent_id"],
                 event_type="assignment_dispatched",
-                summary=f"Assignment dispatched to {assignment['target_agent_id']}",
+                summary=f"Assignment dispatched to {dispatch_target}",
                 detail={
                     "delivery_status": command["status"],
                     "delivery": delivery,
                     "operator_fork_id": command["payload"].get("operator_fork_id"),
-                    "fork_agent_id": command["payload"].get("fork_agent_id"),
+                    "fork_agent_id": fork_agent_id,
                 },
                 command_id=command["command_id"],
             )
@@ -432,18 +456,22 @@ class OperatorService:
             last_command_id=command["command_id"],
             operator_fork_id=command["payload"].get("operator_fork_id"),
         )
+        fork_agent_id = command["payload"].get("fork_agent_id")
+        dispatch_target = (
+            f"{target_agent_id} via {fork_agent_id}" if fork_agent_id else target_agent_id
+        )
         self.store.add_operator_campaign_event(
             campaign_id=campaign_id,
             assignment_id=assignment["assignment_id"],
             operator_agent_id=operator_agent_id,
             target_agent_id=target_agent_id,
             event_type="followup_sent",
-            summary=f"Follow-up sent to {target_agent_id}",
+            summary=f"Follow-up sent to {dispatch_target}",
             detail={
                 "delivery_status": command["status"],
                 "delivery": delivery,
                 "operator_fork_id": command["payload"].get("operator_fork_id"),
-                "fork_agent_id": command["payload"].get("fork_agent_id"),
+                "fork_agent_id": fork_agent_id,
             },
             command_id=command["command_id"],
         )
@@ -601,7 +629,10 @@ class OperatorService:
         )
         if str(fork.get("status") or "").lower() not in FORK_READY_STATUSES:
             raise ValueError(f"operator fork unavailable: {fork.get('summary') or fork.get('status')}")
-        target = self._require_agent(str(fork["fork_agent_id"]))
+        target = self._agent_with_fork_delivery_metadata(
+            self._require_agent(str(fork["fork_agent_id"])),
+            fork,
+        )
         mode = str((target.get("metadata") or {}).get("pbx_mode") or "report").lower()
         resolved = str(delivery or "auto").strip().lower()
         if resolved == "auto":
@@ -639,6 +670,40 @@ class OperatorService:
             status="sent",
         )
 
+    def _agent_with_fork_delivery_metadata(
+        self,
+        agent: dict[str, Any],
+        fork: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        fork_metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+        merged_metadata = dict(metadata)
+        for key in (
+            "source_caller_agent_id",
+            "source_codex_session_id",
+            "fork_codex_session_id",
+            "cwd",
+            "codex_home",
+            "codex_host_id",
+            "tmux_pane_id",
+        ):
+            value = fork_metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                merged_metadata[key] = value.strip()
+        for key in (
+            "source_caller_agent_id",
+            "source_codex_session_id",
+            "fork_codex_session_id",
+            "cwd",
+            "codex_home",
+            "codex_host_id",
+            "tmux_pane_id",
+        ):
+            value = fork.get(key)
+            if isinstance(value, str) and value.strip():
+                merged_metadata[key] = value.strip()
+        return {**agent, "metadata": merged_metadata}
+
     def _append_command_delivery_event(
         self,
         command: dict[str, Any],
@@ -673,7 +738,26 @@ class OperatorService:
                 if pane.pane_id == tmux_pane_id or pane.target_label == tmux_pane_id
             ]
             if len(matches) == 1:
-                return matches[0]
+                pane = matches[0]
+                if self._explicit_tmux_pane_matches_agent(pane, agent):
+                    return pane
+        if self._is_operator_fork_agent(agent):
+            fork_panes = [
+                pane
+                for pane in panes
+                if self._pane_matches_operator_fork_agent(pane, agent)
+            ]
+            if len(fork_panes) == 1:
+                return fork_panes[0]
+            if not fork_panes:
+                raise ValueError(
+                    f"no local tmux pane/window matched operator fork {agent['agent_id']}; "
+                    "use the TUI to view or relaunch the fork before dispatch"
+                )
+            raise ValueError(
+                f"multiple local tmux panes matched operator fork {agent['agent_id']}; "
+                "select the intended fork pane in the TUI before dispatch"
+            )
         pane = tmux_support.choose_pane_for_agent(panes, agent)
         if pane is None:
             raise ValueError(
@@ -681,6 +765,36 @@ class OperatorService:
                 "enable tmux direct mode or use delivery='queue' with nohup polling"
             )
         return pane
+
+    def _explicit_tmux_pane_matches_agent(
+        self,
+        pane: tmux_support.TmuxPane,
+        agent: dict[str, Any],
+    ) -> bool:
+        if self._is_operator_fork_agent(agent):
+            return self._pane_matches_operator_fork_agent(pane, agent)
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        has_match_hint = bool(
+            str(metadata.get("cwd") or "").strip()
+            or str(agent.get("project") or "").strip()
+        )
+        if not has_match_hint:
+            return True
+        return tmux_support.pane_matches_agent(pane, agent)
+
+    def _is_operator_fork_agent(self, agent: dict[str, Any]) -> bool:
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        return str(metadata.get("operator_role") or "").strip().lower() == "fork"
+
+    def _pane_matches_operator_fork_agent(
+        self,
+        pane: tmux_support.TmuxPane,
+        agent: dict[str, Any],
+    ) -> bool:
+        agent_id = str(agent.get("agent_id") or "").strip()
+        if not agent_id:
+            return False
+        return pane.window_name == agent_id or pane.title == agent_id
 
     def _initial_assignment_message(
         self,
