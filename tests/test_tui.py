@@ -231,6 +231,11 @@ def test_tui_operator_bindings_and_mcp_command_helpers() -> None:
         for binding in app.BINDINGS
     )
     assert any(
+        getattr(binding, "key", None) == "shift+m"
+        and getattr(binding, "action", None) == "monitor_campaign"
+        for binding in app.BINDINGS
+    )
+    assert any(
         getattr(binding, "key", None) == "shift+c"
         and getattr(binding, "action", None) == "copy_campaign_to_joplin"
         for binding in app.BINDINGS
@@ -723,6 +728,7 @@ def test_tui_alerts_only_for_attention_events() -> None:
     assert app.should_alert({"type": "report_created"}) is True
     assert app.should_alert({"type": "agent_registered"}) is True
     assert app.should_alert({"type": "command_acked"}) is True
+    assert app.should_alert({"type": "operator_campaign_event"}) is True
     assert app.should_alert({"type": "command_queued"}) is False
     assert app.should_alert({"type": "command_delivered"}) is False
 
@@ -4205,6 +4211,7 @@ async def test_tui_campaigns_loads_and_views_generated_reports() -> None:
         }
         app.selected_agent_id = "operator-0"
         app.query_one("#agent-id", Input).value = "operator-0"
+        assert app.query_one("#campaign-monitor", Button) is not None
         assert app.query_one("#campaign-report", Button) is not None
         assert app.query_one("#campaign-copy-joplin", Button) is not None
         await app.load_operator_campaigns("operator-0")
@@ -4313,6 +4320,113 @@ async def test_tui_campaign_copy_creates_joplin_note_from_selected_campaign() ->
     assert "Reports:" in copied[0]["body"]
     assert "### 1. report-1" in copied[0]["body"]
     assert "Detailed campaign report body." in copied[0]["body"]
+
+
+async def test_tui_campaign_monitor_sends_prompt_to_operator_tmux(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+    sent: list[tuple[str, str]] = []
+    pane = tmux_support.TmuxPane(
+        session_name="agent-pbx-operators",
+        window_index="1",
+        pane_index="0",
+        pane_id="%9",
+        active=True,
+        current_command="codex",
+        title="operator-0",
+        cwd="/home/me/agent-pbx",
+        width=120,
+        height=32,
+        history_size=100,
+        window_name="operator-0",
+    )
+    campaign = {
+        "campaign_id": "campaign-1",
+        "operator_agent_id": "operator-0",
+        "title": "WorkerBee private check",
+        "objective": "Verify the private repo.",
+        "criteria": ["Fork reports complete"],
+        "status": "running",
+        "assignments": [
+            {
+                "assignment_id": "assign-1",
+                "target_agent_id": "codex-k1s-workerbee-private",
+                "title": "Run validation",
+                "state": "sent",
+                "operator_fork_id": "operator-0-fork-codex-k1s-workerbee-private",
+                "last_command_id": "cmd-1",
+            }
+        ],
+    }
+
+    def fake_send_text(target: str, text: str) -> None:
+        sent.append((target, text))
+
+    monkeypatch.setattr(tmux_support, "list_panes", lambda: [pane])
+    monkeypatch.setattr(tmux_support, "send_text", fake_send_text)
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                    "tmux_pane_id": "%9",
+                    "cwd": "/home/me/agent-pbx",
+                },
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        app.campaigns_by_operator = {"operator-0": {"campaign-1": campaign}}
+        app.selected_campaign_id_by_operator = {"operator-0": "campaign-1"}
+
+        await app.monitor_selected_campaign()
+        await pilot.pause()
+        detail = app.query_one("#campaign-detail", TextArea).text
+
+    assert sent
+    assert sent[0][0] == "%9"
+    assert "Monitor operator campaign `campaign-1`" in sent[0][1]
+    assert "assignment_id=assign-1" in sent[0][1]
+    assert "pbx_operator_campaign_status" in sent[0][1]
+    assert "pbx_operator_send_followup" in sent[0][1]
+    assert "Do not dispatch to regular caller tmux panes" in sent[0][1]
+    assert app.tmux_agent_targets["operator-0"] == "%9"
+    assert app.tmux_direct_agent_modes["operator-0"] is True
+    assert "Monitor prompt sent to operator-0" in detail
+
+
+async def test_tui_follow_up_exact_campaign_monitor_executes_locally() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_campaign_action_for_agent(agent_id: str, action: str) -> None:
+        calls.append((agent_id, action))
+
+    app.campaign_action_for_agent = fake_campaign_action_for_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "operator-0"
+        app.query_one("#agent-id", Input).value = "operator-0"
+        message = app.query_one("#message", TextArea)
+        message.text = "/campaign monitor"
+        await app.send_input()
+        await pilot.pause()
+
+    assert calls == [("operator-0", "monitor")]
+    assert message.text == ""
 
 
 async def test_tui_follow_up_exact_campaign_report_executes_locally() -> None:
@@ -4532,6 +4646,39 @@ def test_tui_extracts_event_agent_id() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
     assert app.event_agent_id({"payload": {"agent_id": "agent-1"}}) == "agent-1"
+    assert (
+        app.event_agent_id(
+            {
+                "type": "operator_campaign_event",
+                "payload": {
+                    "operator_agent_id": "operator-0",
+                    "fork_agent_id": "operator-0-fork-caller-1",
+                },
+            }
+        )
+        == "operator-0-fork-caller-1"
+    )
+    assert (
+        app.event_agent_id(
+            {
+                "type": "operator_campaign_event",
+                "payload": {"operator_agent_id": "operator-0"},
+            }
+        )
+        == "operator-0"
+    )
+    assert (
+        app.operator_campaign_event_operator_id(
+            {
+                "type": "operator_campaign_event",
+                "payload": {
+                    "operator_agent_id": "operator-0",
+                    "fork_agent_id": "operator-0-fork-caller-1",
+                },
+            }
+        )
+        == "operator-0"
+    )
     assert app.event_agent_id({"payload": {}}) is None
     assert app.event_agent_id({"payload": None}) is None
 
@@ -4571,6 +4718,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/files" in titles
     assert "/workerbee" in titles
     assert "/campaigns" in titles
+    assert "/campaign monitor" in titles
     assert "/campaign report" in titles
     assert "/campaign copy" in titles
     assert "/plan" in titles
@@ -4641,6 +4789,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
 
     assert {
         "/campaigns",
+        "/campaign monitor",
         "/campaign report",
         "/campaign copy",
         "/unblock",
@@ -6644,6 +6793,7 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
     assert app.tmux_agent_targets["operator-0"] == "%42"
     assert sent[0][0] == "%42"
     assert "operator-0" in sent[0][1]
+    assert "Keep the root turn active while campaign assignments are running" in sent[0][1]
 
 
 async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
@@ -7155,6 +7305,42 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     assert launches[1]["env"]["AGENT_PBX_LOGICAL_OPERATOR_ID"] == "operator-0"
     assert launches[1]["env"]["AGENT_PBX_SOURCE_CALLER_AGENT_ID"] == "caller-1"
     assert launches[1]["env"]["AGENT_PBX_SOURCE_CODEX_SESSION_ID"] == "session-caller-1"
+
+
+def test_tui_operator_prompts_require_visible_pbx_forks() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    root_prompt = app.operator_bootstrap_prompt("operator-0", str(Path.cwd()))
+    fork_prompt = app.operator_bootstrap_prompt(
+        "operator-0-fork-caller-1",
+        str(Path.cwd()),
+        logical_operator_id="operator-0",
+        source_caller_agent_id="caller-1",
+        source_codex_session_id="session-caller-1",
+    )
+    monitor_prompt = app.campaign_monitor_prompt(
+        "operator-0",
+        {
+            "campaign_id": "campaign-1",
+            "title": "Campaign",
+            "status": "running",
+            "objective": "Do the work.",
+            "criteria": ["tests pass"],
+            "assignments": [
+                {
+                    "assignment_id": "assignment-1",
+                    "target_agent_id": "caller-1",
+                    "state": "waiting",
+                    "operator_fork_id": "fork-1",
+                }
+            ],
+        },
+    )
+
+    for prompt in (root_prompt, fork_prompt, monitor_prompt):
+        assert "Agent PBX" in prompt
+        assert "multi_agent_v1" in prompt
+        assert "spawn or use Codex internal subagents" in prompt
 
 
 async def test_tui_start_operator_from_caller_missing_session_does_not_launch(
@@ -7920,6 +8106,84 @@ async def test_tui_clicking_flash_alert_opens_event_agent_latest_from_thread() -
     assert click._stop_propagation is True
 
 
+async def test_tui_operator_campaign_flash_targets_fork_agent() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", visual_flash=True)
+    loaded: list[str] = []
+    threads: list[str] = []
+    fork_agent_id = "operator-0-fork-caller-1"
+
+    async def fake_load_latest_report(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    async def fake_load_thread(agent_id: str) -> None:
+        threads.append(agent_id)
+
+    app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "status": "working",
+                "project": "agent-pbx-operator",
+                "last_seen_at": 123.0,
+                "metadata": {"operator_role": "root"},
+            },
+            fork_agent_id: {
+                "agent_id": fork_agent_id,
+                "agent_type": "operator",
+                "status": "working",
+                "project": "agent-pbx-operator",
+                "last_seen_at": 124.0,
+                "metadata": {
+                    "operator_role": "fork",
+                    "logical_operator_id": "operator-0",
+                    "source_caller_agent_id": "caller-1",
+                },
+            },
+        }
+        app.render_agents()
+        tabs = app.query_one("#agent-tabs")
+        tabs.active = "thread-tab"
+        app.active_agent_tab = "thread-tab"
+        app.selected_agent_id = "operator-0"
+        app.query_one("#agent-id", Input).value = "operator-0"
+        app.flash_for_event(
+            {
+                "type": "operator_campaign_event",
+                "subject_id": "campaign-1",
+                "payload": {
+                    "operator_agent_id": "operator-0",
+                    "fork_agent_id": fork_agent_id,
+                    "event_type": "assignment_reported",
+                },
+            }
+        )
+        click = Click(
+            app.query_one("#attention"),
+            0,
+            0,
+            0,
+            0,
+            1,
+            False,
+            False,
+            False,
+        )
+
+        await app.on_click(click)
+
+    assert app.attention_agent_id == fork_agent_id
+    assert app.selected_agent_id == fork_agent_id
+    assert app.active_agent_tab == "latest-tab"
+    assert tabs.active == "latest-tab"
+    assert loaded == [fork_agent_id]
+    assert threads == [fork_agent_id]
+    assert click._stop_propagation is True
+
+
 async def test_tui_selected_report_event_opens_latest_from_thread() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     refreshed_agents = 0
@@ -8012,6 +8276,52 @@ async def test_tui_command_events_refresh_agent_queue_state() -> None:
             await coro
 
     assert refreshed_agents == 1
+
+
+async def test_tui_operator_campaign_event_refreshes_selected_campaigns() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    refreshed_agents = 0
+    refreshed_campaigns: list[str] = []
+    worker_coros = []
+
+    async def fake_refresh_agents() -> None:
+        nonlocal refreshed_agents
+        refreshed_agents += 1
+
+    async def fake_load_operator_campaigns(agent_id: str) -> None:
+        refreshed_campaigns.append(agent_id)
+
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.load_operator_campaigns = fake_load_operator_campaigns  # type: ignore[method-assign]
+
+    async with app.run_test():
+        def fake_run_worker(work, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            worker_coros.append(work() if callable(work) else work)
+            return None
+
+        app.run_worker = fake_run_worker  # type: ignore[method-assign]
+        refreshed_agents = 0
+        worker_coros.clear()
+        app.selected_agent_id = "operator-0"
+        app.active_agent_tab = "campaigns-tab"
+        app.handle_event(
+            {
+                "event_id": 1,
+                "type": "operator_campaign_event",
+                "subject_id": "campaign-1",
+                "payload": {
+                    "operator_agent_id": "operator-0",
+                    "fork_agent_id": "operator-0-fork-caller-1",
+                    "campaign_id": "campaign-1",
+                    "event_type": "assignment_reported",
+                },
+            }
+        )
+        for coro in worker_coros:
+            await coro
+
+    assert refreshed_agents == 1
+    assert refreshed_campaigns == ["operator-0"]
 
 
 async def test_tui_report_event_patches_visible_agent_status() -> None:

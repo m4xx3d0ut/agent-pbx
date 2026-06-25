@@ -546,26 +546,70 @@ class Store:
 
     def register_agent(self, request: AgentRegisterRequest) -> dict[str, Any]:
         current = now_ts()
-        agent_type = self._normalized_agent_type(request.agent_type)
         with self.connect() as conn:
             existing = conn.execute(
                 """
-                SELECT name, metadata_json
+                SELECT name, agent_type, project, metadata_json
                 FROM agents
                 WHERE agent_id = ?
                 """,
                 (request.agent_id,),
             ).fetchone()
             request_metadata = dict(request.metadata)
-            if agent_type == "operator" or "agent_type" in request_metadata:
+            existing_type = (
+                self._normalized_agent_type(existing["agent_type"])
+                if existing
+                else "caller"
+            )
+            requested_type = self._normalized_agent_type(request.agent_type)
+            has_metadata_agent_type = "agent_type" in request_metadata
+            metadata_type = (
+                self._normalized_agent_type(request_metadata.get("agent_type"))
+                if has_metadata_agent_type
+                else ""
+            )
+            preserve_existing_operator_identity = (
+                existing_type == "operator"
+                and requested_type == "caller"
+                and not has_metadata_agent_type
+            )
+            if requested_type == "operator" or metadata_type == "operator":
+                agent_type = "operator"
+            elif existing_type == "operator" and metadata_type != "caller":
+                agent_type = "operator"
+            else:
+                agent_type = "caller"
+            if agent_type == "operator" or has_metadata_agent_type:
                 request_metadata["agent_type"] = agent_type
+            if preserve_existing_operator_identity:
+                for key in (
+                    "agent_type",
+                    "operator_role",
+                    "logical_operator_id",
+                    "source_caller_agent_id",
+                    "source_codex_session_id",
+                    "cwd",
+                    "tmux_pane_id",
+                    "tmux_session",
+                    "launched_by",
+                    "mcp_url",
+                    "token_env",
+                    "codex_command",
+                    "operator_session_history",
+                    "last_resume_codex_session_id",
+                ):
+                    request_metadata.pop(key, None)
             metadata = self._merged_agent_metadata(
                 existing["metadata_json"] if existing else None,
                 request_metadata,
             )
             metadata_json = json.dumps(metadata)
             name = request.name
-            if name is None and existing:
+            project = request.project
+            if preserve_existing_operator_identity and existing:
+                name = existing["name"]
+                project = existing["project"]
+            elif name is None and existing:
                 name = existing["name"]
             conn.execute(
                 """
@@ -586,7 +630,7 @@ class Store:
                 (
                     request.agent_id,
                     agent_type,
-                    request.project,
+                    project,
                     name,
                     int(request.pbx_active),
                     metadata_json,
@@ -1454,6 +1498,39 @@ class Store:
         event = self.get_operator_campaign_event(event_id)
         if event is None:
             raise RuntimeError("operator campaign event insert failed")
+        operator_fork_id = None
+        fork_agent_id = None
+        if assignment_id:
+            assignment = self.get_operator_campaign_assignment(assignment_id)
+            if assignment is not None:
+                operator_fork_id = str(assignment.get("operator_fork_id") or "").strip() or None
+        if detail:
+            operator_fork_id = (
+                operator_fork_id
+                or str(detail.get("operator_fork_id") or "").strip()
+                or None
+            )
+            fork_agent_id = str(detail.get("fork_agent_id") or "").strip() or None
+        if operator_fork_id and not fork_agent_id:
+            fork = self.get_operator_fork(operator_fork_id)
+            if fork is not None:
+                fork_agent_id = str(fork.get("fork_agent_id") or "").strip() or None
+        self.append_event(
+            "operator_campaign_event",
+            {
+                "campaign_id": campaign_id,
+                "assignment_id": assignment_id,
+                "operator_agent_id": operator_agent_id,
+                "target_agent_id": target_agent_id,
+                "operator_fork_id": operator_fork_id,
+                "fork_agent_id": fork_agent_id,
+                "event_type": event_type,
+                "summary": summary,
+                "report_id": report_id,
+                "command_id": command_id,
+            },
+            campaign_id,
+        )
         return event
 
     def get_operator_campaign_event(self, event_id: int) -> dict[str, Any] | None:

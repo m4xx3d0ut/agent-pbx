@@ -70,3 +70,68 @@ def test_register_agent_backfills_cwd_from_absolute_repo_path(tmp_path: Path) ->
     )
 
     assert agent["metadata"]["cwd"] == str(repo)
+
+
+def test_register_agent_preserves_operator_identity_on_default_refresh(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            name="operator-0",
+            agent_type="operator",
+            metadata={
+                "agent_type": "operator",
+                "operator_role": "root",
+                "cwd": str(tmp_path / "agent-pbx"),
+            },
+        )
+    )
+    agent = store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="k1s",
+            name="Codex k1s Stage 1 fork",
+            metadata={"pbx_mode": "report", "cwd": str(tmp_path / "k1s")},
+        )
+    )
+
+    assert agent["agent_type"] == "operator"
+    assert agent["project"] == "agent-pbx-operator"
+    assert agent["name"] == "operator-0"
+    assert agent["metadata"]["agent_type"] == "operator"
+    assert agent["metadata"]["operator_role"] == "root"
+    assert agent["metadata"]["cwd"] == str(tmp_path / "agent-pbx")
+    assert agent["metadata"]["pbx_mode"] == "report"
+
+
+def test_register_agent_allows_explicit_operator_demote(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            name="operator-0",
+            agent_type="operator",
+            metadata={"agent_type": "operator", "operator_role": "root"},
+        )
+    )
+    agent = store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="k1s",
+            name="Codex k1s Stage 1 fork",
+            metadata={"agent_type": "caller", "cwd": str(tmp_path / "k1s")},
+        )
+    )
+
+    assert agent["agent_type"] == "caller"
+    assert agent["project"] == "k1s"
+    assert agent["name"] == "Codex k1s Stage 1 fork"
+    assert agent["metadata"]["agent_type"] == "caller"

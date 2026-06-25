@@ -50,7 +50,12 @@ from . import tmux as tmux_support
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
-ATTENTION_EVENT_TYPES = {"agent_registered", "report_created", "command_acked"}
+ATTENTION_EVENT_TYPES = {
+    "agent_registered",
+    "report_created",
+    "command_acked",
+    "operator_campaign_event",
+}
 STARRED_AGENT_COLUMN = "*"
 DEFAULT_TUI_THEME = "cyberpunk"
 MINIMAL_TUI_THEME = "minimal"
@@ -270,6 +275,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/files",
     "/workerbee",
     "/campaigns",
+    "/campaign monitor",
     "/campaign report",
     "/campaign copy",
     "/pr",
@@ -342,6 +348,7 @@ ISSUE_SLASH_ACTIONS = {
     "/issue clear": "clear",
 }
 CAMPAIGN_SLASH_ACTIONS = {
+    "/campaign monitor": "monitor",
     "/campaign report": "report",
     "/campaign copy": "copy",
 }
@@ -3158,6 +3165,13 @@ class AgentPBXTUI(App[None]):
         Binding("shift+h", "unhide_agent", "Unhide Agent", key_display="H", priority=True),
         Binding("d", "hide_agent", "Hide Agent", priority=True),
         Binding(
+            "shift+m",
+            "monitor_campaign",
+            "Campaign Monitor",
+            key_display="M",
+            priority=True,
+        ),
+        Binding(
             "shift+r",
             "view_campaign_report",
             "Campaign Report",
@@ -3641,6 +3655,7 @@ class AgentPBXTUI(App[None]):
                         yield NavigationTextArea(id="campaign-detail", read_only=True)
                         with Horizontal(id="campaign-actions"):
                             yield Button("Refresh", id="campaign-refresh")
+                            yield Button("Monitor (M)", id="campaign-monitor")
                             yield Button("View Report (R)", id="campaign-report")
                             yield Button("Copy Note (C)", id="campaign-copy-joplin")
                     with TabPane("Joplin", id="joplin-tab"):
@@ -3777,6 +3792,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/files", "Open and refresh the Files tab", self.palette_files)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         yield SystemCommand("/campaigns", "Open and refresh operator campaigns", self.palette_campaigns)
+        yield SystemCommand("/campaign monitor", "Ask the root operator to monitor selected campaign", self.palette_campaign_monitor)
         yield SystemCommand("/campaign report", "View the selected campaign report", self.palette_campaign_report)
         yield SystemCommand("/campaign copy", "Copy selected campaign to a new Joplin note", self.palette_campaign_copy)
         yield SystemCommand("/pr", "Open and refresh pull requests", self.palette_pull_requests)
@@ -3944,6 +3960,13 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.view_selected_campaign_report(),
             name="palette-campaign-report",
+            exclusive=True,
+        )
+
+    def palette_campaign_monitor(self) -> None:
+        self.run_worker(
+            self.monitor_selected_campaign(),
+            name="palette-campaign-monitor",
             exclusive=True,
         )
 
@@ -4670,6 +4693,10 @@ class AgentPBXTUI(App[None]):
             if agent_id not in self.campaigns_by_operator:
                 await self.load_operator_campaigns(agent_id)
             await self.view_selected_campaign_report()
+        elif action == "monitor":
+            if agent_id not in self.campaigns_by_operator:
+                await self.load_operator_campaigns(agent_id)
+            await self.monitor_selected_campaign()
         elif action == "copy":
             if agent_id not in self.campaigns_by_operator:
                 await self.load_operator_campaigns(agent_id)
@@ -4961,6 +4988,19 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.cycle_selected_operator_fork(-1),
             name="prev-operator-fork",
+            exclusive=True,
+        )
+
+    def action_monitor_campaign(self) -> None:
+        if self.active_agent_tab != "campaigns-tab":
+            return
+        if isinstance(self.focused, (Input, TextArea)) and getattr(
+            self.focused, "id", None
+        ) != "campaign-detail":
+            return
+        self.run_worker(
+            self.monitor_selected_campaign(),
+            name="monitor-campaign",
             exclusive=True,
         )
 
@@ -8116,6 +8156,9 @@ class AgentPBXTUI(App[None]):
             if self.selected_agent_id:
                 await self.load_operator_campaigns(self.selected_agent_id)
             return
+        if event.button.id == "campaign-monitor":
+            await self.monitor_selected_campaign()
+            return
         if event.button.id == "campaign-report":
             await self.view_selected_campaign_report()
             return
@@ -9372,7 +9415,10 @@ class AgentPBXTUI(App[None]):
                     "",
                     "This session is a fork of the caller's Codex session. "
                     "Keep work for this caller isolated in this fork and report "
-                    "through Agent PBX for the logical operator to review.",
+                    "through Agent PBX for the logical operator to review. "
+                    "This visible Agent PBX tmux pane is the fork; do not spawn "
+                    "or use Codex internal subagents such as multi_agent_v1 for "
+                    "caller work.",
                 ]
             )
         else:
@@ -9383,9 +9429,14 @@ class AgentPBXTUI(App[None]):
                     "This root operator session is the persistent coordination "
                     "pane for the logical operator. Keep campaign state, planning, "
                     "and human follow-up handling here. Caller-specific execution "
-                    "runs in fork sessions under this operator; use @caller "
-                    "references and operator campaign tools to target one or more "
-                    "forks without abandoning this root session.",
+                    "runs only in visible Agent PBX fork sessions under this "
+                    "operator; use @caller references and operator campaign tools "
+                    "to target one or more forks without abandoning this root "
+                    "session. Do not spawn or use Codex internal subagents such as "
+                    "multi_agent_v1 for caller work; if PBX fork delivery is "
+                    "unavailable, mark the assignment blocked instead. Keep the root "
+                    "turn active while campaign assignments are running and "
+                    "periodically recheck campaign state until terminal.",
                 ]
             )
         return "\n".join(
@@ -11064,6 +11115,158 @@ class AgentPBXTUI(App[None]):
             body=self.format_campaign_joplin_copy_body(operator_id, campaign),
             success_message="Copied campaign to a new Joplin note.",
         )
+
+    def campaign_monitor_prompt(
+        self,
+        operator_id: str,
+        campaign: dict[str, Any],
+    ) -> str:
+        campaign_id = str(campaign.get("campaign_id") or "").strip()
+        title = str(campaign.get("title") or campaign_id or "Campaign").strip()
+        status = str(campaign.get("status") or "unknown").strip()
+        objective = str(campaign.get("objective") or "").strip()
+        criteria = campaign.get("criteria") or []
+        criteria_lines = [
+            f"- {str(item).strip()}"
+            for item in criteria
+            if str(item).strip()
+        ]
+        if not criteria_lines:
+            criteria_lines = ["- Use the campaign criteria already stored in PBX."]
+
+        assignment_lines: list[str] = []
+        assignments = campaign.get("assignments") or []
+        if isinstance(assignments, list):
+            for assignment in assignments:
+                if not isinstance(assignment, dict):
+                    continue
+                assignment_id = str(assignment.get("assignment_id") or "-")
+                target_agent_id = str(assignment.get("target_agent_id") or "-")
+                state = str(assignment.get("state") or "-")
+                fork_agent_id = str(
+                    assignment.get("operator_fork_id")
+                    or assignment.get("fork_agent_id")
+                    or "-"
+                )
+                last_command_id = str(assignment.get("last_command_id") or "-")
+                last_report_id = str(assignment.get("last_report_id") or "-")
+                assignment_title = str(assignment.get("title") or "").strip()
+                line = (
+                    f"- assignment_id={assignment_id} "
+                    f"target={target_agent_id} "
+                    f"state={state} "
+                    f"fork={fork_agent_id} "
+                    f"last_command={last_command_id} "
+                    f"last_report={last_report_id}"
+                )
+                if assignment_title:
+                    line = f"{line} title={assignment_title}"
+                assignment_lines.append(line)
+        if not assignment_lines:
+            assignment_lines = ["- no assignments loaded"]
+
+        return "\n".join(
+            [
+                f"Monitor operator campaign `{campaign_id}` for `{operator_id}`.",
+                "",
+                f"Title: {title}",
+                f"Current status: {status}",
+                "",
+                "Objective:",
+                objective or "-",
+                "",
+                "Completion criteria:",
+                *criteria_lines,
+                "",
+                "Assignments:",
+                *assignment_lines,
+                "",
+                "Instructions:",
+                "- Keep this root operator turn active until every campaign assignment is complete, blocked, failed, or canceled.",
+                "- Do not return to idle after the initial dispatch/status check unless the campaign is terminal or human input is required.",
+                "- Recheck with `pbx_operator_campaign_status` at natural milestones and about every 60 seconds while work is active.",
+                "- Inspect assignment reports/thread state before deciding whether follow-up is needed.",
+                "- Use `pbx_operator_send_followup` only for the campaign/fork targets in this campaign. Do not dispatch to regular caller tmux panes.",
+                "- Do not spawn or use Codex internal subagents such as `multi_agent_v1`; caller work must stay in visible Agent PBX fork panes.",
+                "- Report assignment state changes with `pbx_operator_report_assignment`.",
+                "- When all assignments are terminal, use `pbx_operator_finish_campaign` and report the final campaign result.",
+            ]
+        )
+
+    async def send_operator_monitor_prompt(
+        self,
+        operator_id: str,
+        prompt: str,
+    ) -> bool:
+        status = self.query_one_or_none("#tmux-status", Static)
+        agent = self.agents.get(operator_id)
+        metadata = agent.get("metadata") if isinstance(agent, dict) else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        tmux_pane_id = str(metadata.get("tmux_pane_id") or "").strip()
+        if tmux_pane_id:
+            try:
+                panes = await asyncio.to_thread(tmux_support.list_panes)
+            except Exception as exc:
+                if status is not None:
+                    status.update(f"Tmux: unavailable ({exc})")
+            else:
+                self.tmux_panes = panes
+                for pane in panes:
+                    if pane.pane_id != tmux_pane_id and pane.target_label != tmux_pane_id:
+                        continue
+                    if isinstance(agent, dict) and not self.tmux_pane_allowed_for_agent(
+                        agent,
+                        pane,
+                    ):
+                        break
+                    self.tmux_agent_targets[operator_id] = pane.pane_id
+                    self.tmux_direct_agent_modes[operator_id] = True
+                    self.tmux_detached_agent_ids.discard(operator_id)
+                    self.save_settings()
+                    return await self.send_text_to_tmux_pane(
+                        pane.pane_id,
+                        prompt,
+                        status=status,
+                    )
+        return await self.send_text_to_tmux(operator_id, prompt)
+
+    async def monitor_selected_campaign(self) -> None:
+        operator_id = self.selected_agent_id
+        detail = self.query_one_or_none("#campaign-detail", TextArea)
+        if not operator_id:
+            self.notify("Select an operator campaign first.", severity="warning")
+            return
+        agent = self.agents.get(operator_id)
+        if agent is None or self.agent_type(agent) != OPERATOR_AGENT_TYPE:
+            if detail is not None:
+                detail.text = "Campaign monitoring is available for operator agents only."
+            self.notify("Select an operator agent before monitoring a campaign.", severity="warning")
+            return
+        campaign = self.selected_campaign_for_operator(operator_id)
+        if campaign is None:
+            if detail is not None:
+                detail.text = "Select a campaign before asking the operator to monitor it."
+            self.notify("Select a campaign before monitoring.", severity="warning")
+            return
+        prompt = self.campaign_monitor_prompt(operator_id, campaign)
+        sent = await self.send_operator_monitor_prompt(operator_id, prompt)
+        campaign_id = str(campaign.get("campaign_id") or "")
+        if not sent:
+            if detail is not None:
+                detail.text = (
+                    f"Unable to send monitor prompt for campaign {campaign_id}.\n\n"
+                    f"{self.format_campaign_detail(campaign)}"
+                )
+            self.notify("Unable to send monitor prompt to the operator pane.", severity="error")
+            return
+        if detail is not None:
+            detail.text = (
+                f"Monitor prompt sent to {operator_id} for campaign {campaign_id}.\n\n"
+                f"{self.format_campaign_detail(campaign)}"
+            )
+        self.notify(f"Monitor prompt sent to {operator_id}.")
+        await self.refresh_events()
 
     async def view_selected_campaign_report(self) -> None:
         operator_id = self.selected_agent_id
@@ -13736,6 +13939,7 @@ class AgentPBXTUI(App[None]):
         self.render_events()
         event_type = str(event.get("type"))
         agent_id = self.event_agent_id(event)
+        campaign_operator_id = self.operator_campaign_event_operator_id(event)
         selected_agent_id = self.selected_agent_id
         selected_detail_visible = (
             agent_id == selected_agent_id and self.selected_agent_detail_visible()
@@ -13758,6 +13962,7 @@ class AgentPBXTUI(App[None]):
             "agent_unhidden",
             "latest_seen",
             "agent_starred_changed",
+            "operator_campaign_event",
         }:
             self.run_worker(
                 self.refresh_agents,
@@ -13769,6 +13974,8 @@ class AgentPBXTUI(App[None]):
             self.mark_latest_unseen(agent_id)
         if event_type == "latest_seen" and agent_id:
             self.apply_latest_seen_event(agent_id, event)
+        if event_type == "operator_campaign_event" and campaign_operator_id:
+            self.handle_operator_campaign_event(campaign_operator_id)
         if selected_agent_id and selected_detail_visible:
             if event_type == "report_created":
                 self.run_worker(
@@ -13791,6 +13998,19 @@ class AgentPBXTUI(App[None]):
                 )
         if self.should_alert(event):
             self.alert_for_event(event)
+
+    def handle_operator_campaign_event(self, operator_id: str) -> None:
+        if (
+            self.active_agent_tab != "campaigns-tab"
+            or self.selected_agent_id != operator_id
+        ):
+            return
+        self.run_worker(
+            self.load_operator_campaigns(operator_id),
+            name="campaigns-refresh",
+            group="campaigns-refresh",
+            exclusive=True,
+        )
 
     def apply_agent_starred_event(self, agent_id: str, event: dict[str, Any]) -> None:
         payload = event.get("payload")
@@ -14196,7 +14416,26 @@ class AgentPBXTUI(App[None]):
         payload = event.get("payload")
         if not isinstance(payload, dict):
             return None
+        if str(event.get("type")) == "operator_campaign_event":
+            agent_id = (
+                payload.get("fork_agent_id")
+                or payload.get("agent_id")
+                or payload.get("operator_agent_id")
+            )
+            return str(agent_id) if agent_id else None
         agent_id = payload.get("agent_id")
+        return str(agent_id) if agent_id else None
+
+    def operator_campaign_event_operator_id(
+        self,
+        event: dict[str, Any],
+    ) -> str | None:
+        if str(event.get("type")) != "operator_campaign_event":
+            return None
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        agent_id = payload.get("operator_agent_id")
         return str(agent_id) if agent_id else None
 
     def alert_for_event(self, event: dict[str, Any]) -> None:

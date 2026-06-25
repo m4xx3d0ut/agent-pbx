@@ -4,7 +4,7 @@ import pytest
 
 from agent_pbx import tmux as tmux_support
 from agent_pbx.mcp_tools import build_mcp_server
-from agent_pbx.operator import OperatorService
+from agent_pbx.operator import OperatorService, operator_runbook_payload
 from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import Store
 
@@ -43,6 +43,16 @@ def register_operator_and_caller(store: Store, tmp_path: Path) -> None:
             },
         )
     )
+
+
+def test_operator_runbook_requires_visible_pbx_forks() -> None:
+    runbook = operator_runbook_payload()
+    delivery = "\n".join(runbook["delivery"])
+
+    assert "Agent PBX forked operator session" in delivery
+    assert "visible tmux/Codex pane" in delivery
+    assert "Do not spawn or use Codex internal subagents" in delivery
+    assert "multi_agent_v1" in delivery
 
 
 def test_operator_campaign_queue_delivery_and_state(tmp_path: Path) -> None:
@@ -88,6 +98,16 @@ def test_operator_campaign_queue_delivery_and_state(tmp_path: Path) -> None:
     assert command["payload"]["fork_agent_id"] == "operator-0-fork-caller-1"
     agents = {agent["agent_id"]: agent for agent in store.list_agents()}
     assert agents["caller-1"]["active_campaign_count"] == 1
+    campaign_events = [
+        event
+        for event in store.list_events(limit=50)
+        if event["type"] == "operator_campaign_event"
+        and event["payload"].get("campaign_id") == campaign["campaign_id"]
+    ]
+    assert campaign_events
+    assert campaign_events[-1]["payload"]["operator_agent_id"] == "operator-0"
+    assert campaign_events[-1]["payload"]["operator_fork_id"] == fork["operator_fork_id"]
+    assert campaign_events[-1]["payload"]["fork_agent_id"] == "operator-0-fork-caller-1"
 
     updated = service.report_assignment(
         operator_agent_id="operator-0",

@@ -39,12 +39,15 @@ def operator_runbook_payload() -> dict[str, Any]:
         "loop": [
             "Start a campaign with title, objective, shared criteria, and one assignment per caller.",
             "Dispatch or follow up through pbx_operator_start_campaign and pbx_operator_send_followup.",
+            "Keep the root operator turn active while assignments are running; periodically recheck campaign state.",
             "Inspect caller reports and threads with pbx_operator_get_thread.",
             "Mark each assignment complete, blocked, or needing follow-up with pbx_operator_report_assignment.",
             "Finish the campaign only after every assignment is complete or explicitly blocked.",
         ],
         "delivery": [
-            "Operator work is routed to the per-caller forked operator session.",
+            "Operator work is routed only to the per-caller Agent PBX forked operator session.",
+            "A PBX fork is the visible tmux/Codex pane registered as operator-<n>-fork-<caller>-<hash>.",
+            "Do not spawn or use Codex internal subagents for caller work; do not call multi_agent_v1.",
             "delivery='queue' creates normal PBX send_input commands for nohup fork sessions.",
             "delivery='tmux' sends directly to a uniquely matched local tmux Codex pane for the fork.",
             "delivery='auto' queues nohup forks and uses tmux for report-mode forks.",
