@@ -122,10 +122,21 @@ then expands them before delivery by appending a `Joplin Note References`
 Markdown section with each referenced note body. Treat that section as
 operator-supplied context for the current prompt; do not call Joplin tools again
 unless the operator asks you to create, update, or inspect notes directly.
+
 When an operator prompt contains `@caller:<agent>` references, following
 `@joplin:<note>` references resolve in the nearest preceding caller's project
 note scope until another caller reference appears. This allows one prompt to
 attach notes from multiple caller projects.
+
+Operator prompts may contain GitHub references from the TUI with `@pr:<number>`,
+`@issue:<number>`, or natural text such as `PR #7` and `issue #12`. Agent PBX
+resolves those references against the nearest preceding `@caller:` scope. If an
+operator was started from a caller, that caller is implied when no explicit
+caller appears, so prompts like `Review PR #7 and assess issue #12.` are scoped
+to the source caller. If an unscoped operator prompt contains exactly one
+`@caller:`, PR or issue references before that tag also use that caller. Agent
+PBX appends a `GitHub PR and Issue References` Markdown section with read-only
+PR and issue detail before delivery; treat it as operator-supplied context.
 
 Built-in TUI pull request commands such as `/pr`, `/pr review`, `/pr validate`,
 `/pr url`, and `/pr merge` are operator actions. `/pr review` and
@@ -506,6 +517,8 @@ def runbook_payload() -> dict[str, Any]:
             "pbx_queue_command is the MCP queueing equivalent for operator/control-plane actions, not normal agent-side behavior.",
         ],
         "pull_request_reviews": [
+            "Operator-delivered prompts may already include a GitHub PR and Issue References section expanded from @pr:<number>, PR #<number>, @issue:<number>, or issue #<number>.",
+            "When present, treat expanded GitHub references as operator-supplied read-only context; call pbx_pr_context only when the operator asks you to refresh or fetch more context.",
             "Use pbx_pr_context(agent_id, pr_number) when the operator asks for PR review context.",
             "Report PR findings through pbx_report_turn, ordered by severity, with tests and validation evidence.",
             "If asked for WorkerBee validation, run appropriate local validation and report commands, results, and artifacts.",
@@ -513,6 +526,8 @@ def runbook_payload() -> dict[str, Any]:
             "TUI commands such as /pr review and /pr validate are operator actions that may queue normal send_input prompts to agents.",
         ],
         "issue_mitigation": [
+            "Operator-delivered prompts may already include a GitHub PR and Issue References section expanded from @issue:<number>, issue #<number>, @pr:<number>, or PR #<number>.",
+            "When present, treat expanded GitHub references as operator-supplied read-only context; call pbx_issue_context only when the operator asks you to refresh or fetch more context.",
             "Use pbx_issue_context(agent_id, issue_number) when the operator asks for GitHub issue context.",
             "Report mitigation findings through pbx_report_turn with validation evidence.",
             "Do not comment on, edit, or close issues; clear is operator-only through the Agent PBX API/TUI and is not exposed as an agent MCP tool.",

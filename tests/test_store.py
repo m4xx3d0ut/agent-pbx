@@ -135,3 +135,78 @@ def test_register_agent_allows_explicit_operator_demote(tmp_path: Path) -> None:
     assert agent["project"] == "k1s"
     assert agent["name"] == "Codex k1s Stage 1 fork"
     assert agent["metadata"]["agent_type"] == "caller"
+
+
+def test_register_agent_preserves_operator_fork_identity_on_bad_refresh(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"agent_type": "operator", "operator_role": "root"},
+        )
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={"cwd": str(tmp_path / "demo"), "codex_session_id": "session-1"},
+        )
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0-fork-caller-1",
+            project="demo",
+            agent_type="operator",
+            metadata={
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "logical_operator_id": "operator-0",
+                "source_caller_agent_id": "caller-1",
+                "source_codex_session_id": "session-1",
+                "cwd": str(tmp_path / "demo"),
+                "tmux_pane_id": "%42",
+            },
+        )
+    )
+    store.create_operator_fork(
+        logical_operator_agent_id="operator-0",
+        fork_agent_id="operator-0-fork-caller-1",
+        source_caller_agent_id="caller-1",
+        source_codex_session_id="session-1",
+        cwd=str(tmp_path / "demo"),
+        tmux_pane_id="%42",
+        status="running",
+        metadata={"operator_fork_pending": False},
+    )
+
+    agent = store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0-fork-caller-1",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={
+                "agent_type": "operator",
+                "operator_role": "root",
+                "cwd": str(tmp_path / "agent-pbx"),
+                "tmux_pane_id": "%1",
+                "pbx_mode": "report",
+            },
+        )
+    )
+
+    assert agent["agent_type"] == "operator"
+    assert agent["project"] == "demo"
+    assert agent["metadata"]["agent_type"] == "operator"
+    assert agent["metadata"]["operator_role"] == "fork"
+    assert agent["metadata"]["logical_operator_id"] == "operator-0"
+    assert agent["metadata"]["source_caller_agent_id"] == "caller-1"
+    assert agent["metadata"]["source_codex_session_id"] == "session-1"
+    assert agent["metadata"]["cwd"] == str(tmp_path / "demo")
+    assert agent["metadata"]["tmux_pane_id"] == "%42"
+    assert agent["metadata"]["pbx_mode"] == "report"

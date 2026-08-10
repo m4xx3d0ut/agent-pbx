@@ -259,6 +259,24 @@ CALLER_AGENT_REF_PREFIX = "@caller:"
 CALLER_AGENT_REF_PATTERN = re.compile(
     r"(?:^|(?<=[\s(\[{'\"`]))(@caller:[A-Za-z0-9_.~-]+)"
 )
+PULL_REQUEST_REF_PREFIX = "@pr:"
+PULL_REQUEST_REF_PATTERN = re.compile(
+    r"(?:^|(?<=[\s(\[{'\"`]))(@pr:(\d+))\b",
+    re.IGNORECASE,
+)
+ISSUE_REF_PREFIX = "@issue:"
+ISSUE_REF_PATTERN = re.compile(
+    r"(?:^|(?<=[\s(\[{'\"`]))(@issue:(\d+))\b",
+    re.IGNORECASE,
+)
+PULL_REQUEST_NATURAL_REF_PATTERN = re.compile(
+    r"\b((?:PR|pull request)\s*#?\s*(\d+))\b",
+    re.IGNORECASE,
+)
+ISSUE_NATURAL_REF_PATTERN = re.compile(
+    r"\b((?:issues?)\s*#?\s*(\d+))\b",
+    re.IGNORECASE,
+)
 CALLER_AGENT_REF_SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.-]+$")
 BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/refresh",
@@ -487,6 +505,26 @@ class JoplinNoteReference:
     updated_time: int | float | None = None
     scope_agent_id: str | None = None
     scope_project: str | None = None
+    caller_token: str | None = None
+
+
+@dataclass(frozen=True)
+class GitHubReferenceScope:
+    kind: str
+    token: str
+    number: int
+    scope_agent_id: str
+    caller_token: str | None = None
+
+
+@dataclass(frozen=True)
+class GitHubPromptReference:
+    kind: str
+    token: str
+    number: int
+    scope_agent_id: str
+    scope_project: str
+    payload: dict[str, Any]
     caller_token: str | None = None
 
 
@@ -1320,6 +1358,36 @@ def caller_agent_ref_tokens_in_message(message: str) -> tuple[str, ...]:
             seen.add(key)
             tokens.append(token)
     return tuple(tokens)
+
+
+def github_ref_number(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def pull_request_ref_completion_tokens(
+    pulls: Iterable[dict[str, Any]],
+) -> tuple[str, ...]:
+    numbers = {
+        number
+        for item in pulls
+        if (number := github_ref_number(item.get("number"))) is not None
+    }
+    return tuple(f"{PULL_REQUEST_REF_PREFIX}{number}" for number in sorted(numbers))
+
+
+def issue_ref_completion_tokens(
+    issues: Iterable[dict[str, Any]],
+) -> tuple[str, ...]:
+    numbers = {
+        number
+        for item in issues
+        if (number := github_ref_number(item.get("number"))) is not None
+    }
+    return tuple(f"{ISSUE_REF_PREFIX}{number}" for number in sorted(numbers))
 
 
 def markdown_fence_for(body: str) -> str:
@@ -5632,6 +5700,35 @@ class AgentPBXTUI(App[None]):
                 return fork
         return None
 
+    def single_active_operator_fork_source_agent_id(
+        self,
+        logical_operator_id: str,
+    ) -> str | None:
+        ready_statuses = {"active", "online", "ready", "running", "starting", "working"}
+        source_agent_ids: set[str] = set()
+        for fork in self.operator_forks_for_logical_operator(logical_operator_id):
+            metadata = (
+                fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+            )
+            pending = str(metadata.get("operator_fork_pending") or "").strip().lower()
+            if pending in {"1", "true", "yes"}:
+                continue
+            if not bool(fork.get("pbx_active", True)):
+                continue
+            status = (
+                str(fork.get("effective_status") or fork.get("status") or "")
+                .strip()
+                .lower()
+            )
+            if status not in ready_statuses:
+                continue
+            source_agent_id = str(metadata.get("source_caller_agent_id") or "").strip()
+            if source_agent_id and source_agent_id in self.agents:
+                source_agent_ids.add(source_agent_id)
+        if len(source_agent_ids) == 1:
+            return next(iter(source_agent_ids))
+        return None
+
     def agents_render_signature(self) -> tuple[Any, ...]:
         return (
             self.desired_agent_columns(),
@@ -5867,6 +5964,16 @@ class AgentPBXTUI(App[None]):
         metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
         role = str(metadata.get("operator_role") or "").strip().lower()
         if role == OPERATOR_ROLE_FORK:
+            return OPERATOR_ROLE_FORK
+        agent_id = str(agent.get("agent_id") or "").strip()
+        has_fork_identity = bool(
+            str(metadata.get("logical_operator_id") or "").strip()
+            and str(metadata.get("source_caller_agent_id") or "").strip()
+            and str(metadata.get("source_codex_session_id") or "").strip()
+        )
+        if self.agent_type(agent) == OPERATOR_AGENT_TYPE and (
+            has_fork_identity or "-fork-" in agent_id
+        ):
             return OPERATOR_ROLE_FORK
         return OPERATOR_ROLE_ROOT
 
@@ -6640,7 +6747,8 @@ class AgentPBXTUI(App[None]):
         context: FileCompletionContext,
         agent_id: str,
     ) -> tuple[str, ...]:
-        notes = self.joplin_notes_by_agent.get(agent_id, {})
+        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        notes = self.joplin_notes_by_agent.get(cache_agent_id, {})
         if not notes:
             return ()
         prefix_key = context.prefix.lower()
@@ -6664,11 +6772,100 @@ class AgentPBXTUI(App[None]):
             if token.lower().startswith(prefix_key)
         )
 
+    def pull_request_completion_matches(
+        self,
+        context: FileCompletionContext,
+        agent_id: str,
+    ) -> tuple[str, ...]:
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
+        pulls = self.pull_requests_by_agent.get(repo_agent_id) or self.pull_requests_by_agent.get(
+            agent_id,
+            {},
+        )
+        if not pulls:
+            return ()
+        prefix_key = context.prefix.lower()
+        return tuple(
+            token
+            for token in pull_request_ref_completion_tokens(pulls.values())
+            if token.lower().startswith(prefix_key)
+        )
+
+    def issue_completion_matches(
+        self,
+        context: FileCompletionContext,
+        agent_id: str,
+    ) -> tuple[str, ...]:
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
+        issues = self.issues_by_agent.get(repo_agent_id) or self.issues_by_agent.get(
+            agent_id,
+            {},
+        )
+        if not issues:
+            return ()
+        prefix_key = context.prefix.lower()
+        return tuple(
+            token
+            for token in issue_ref_completion_tokens(issues.values())
+            if token.lower().startswith(prefix_key)
+        )
+
     def project_for_agent(self, agent_id: str) -> str:
         agent = self.agents.get(agent_id)
         if isinstance(agent, dict) and agent.get("project"):
             return str(agent["project"])
         return agent_id
+
+    def joplin_scope_agent_id(self, agent_id: str) -> str:
+        agent = self.agents.get(agent_id)
+        if (
+            isinstance(agent, dict)
+            and self.agent_type(agent) == OPERATOR_AGENT_TYPE
+            and self.operator_role(agent) == OPERATOR_ROLE_FORK
+        ):
+            metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+            source_agent_id = str(metadata.get("source_caller_agent_id") or "").strip()
+            if source_agent_id:
+                return source_agent_id
+        return agent_id
+
+    def joplin_note_cache_agent_id(self, agent_id: str) -> str:
+        return self.joplin_scope_agent_id(agent_id)
+
+    def joplin_project_for_agent(self, agent_id: str) -> str:
+        return self.project_for_agent(self.joplin_scope_agent_id(agent_id))
+
+    def repo_scope_agent_id(self, agent_id: str) -> str:
+        agent = self.agents.get(agent_id)
+        if not isinstance(agent, dict) or self.agent_type(agent) != OPERATOR_AGENT_TYPE:
+            return agent_id
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        if self.operator_role(agent) == OPERATOR_ROLE_FORK:
+            source_agent_id = str(metadata.get("source_caller_agent_id") or "").strip()
+            if source_agent_id:
+                return source_agent_id
+        source_agent_id = str(
+            metadata.get("default_source_caller_agent_id")
+            or metadata.get("source_caller_agent_id")
+            or ""
+        ).strip()
+        if source_agent_id:
+            return source_agent_id
+        inferred_source_agent_id = self.single_active_operator_fork_source_agent_id(
+            self.logical_operator_id_for_agent(agent)
+        )
+        if inferred_source_agent_id:
+            return inferred_source_agent_id
+        return agent_id
+
+    def default_github_reference_scope_agent_id(self, agent_id: str) -> str | None:
+        agent = self.agents.get(agent_id)
+        if not isinstance(agent, dict) or self.agent_type(agent) != OPERATOR_AGENT_TYPE:
+            return agent_id
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
+        if repo_agent_id and repo_agent_id != agent_id:
+            return repo_agent_id
+        return None
 
     def project_joplin_notes_url(self, project: str, note_id: str | None = None) -> str:
         base = f"/v1/projects/{quote(project, safe='')}/joplin/notes"
@@ -6711,6 +6908,20 @@ class AgentPBXTUI(App[None]):
             return default_agent_id
         return (
             self.caller_scope_agent_id_before_context(text_area, context)
+            or default_agent_id
+        )
+
+    def github_completion_agent_id(
+        self,
+        text_area: TextArea,
+        context: FileCompletionContext,
+        default_agent_id: str,
+    ) -> str:
+        if not self.is_operator_agent_id(default_agent_id):
+            return default_agent_id
+        return (
+            self.caller_scope_agent_id_before_context(text_area, context)
+            or self.default_github_reference_scope_agent_id(default_agent_id)
             or default_agent_id
         )
 
@@ -6771,6 +6982,8 @@ class AgentPBXTUI(App[None]):
             return True
         is_joplin_ref = context.prefix.lower().startswith(JOPLIN_NOTE_REF_PREFIX)
         is_caller_ref = context.prefix.lower().startswith(CALLER_AGENT_REF_PREFIX)
+        is_pull_request_ref = context.prefix.lower().startswith(PULL_REQUEST_REF_PREFIX)
+        is_issue_ref = context.prefix.lower().startswith(ISSUE_REF_PREFIX)
         if is_caller_ref and not self.is_operator_agent_id(agent_id):
             self.notify(
                 "Select an operator before completing @caller references.",
@@ -6780,6 +6993,11 @@ class AgentPBXTUI(App[None]):
         joplin_agent_id = (
             self.joplin_completion_agent_id(text_area, context, agent_id)
             if is_joplin_ref
+            else agent_id
+        )
+        github_agent_id = (
+            self.github_completion_agent_id(text_area, context, agent_id)
+            if is_pull_request_ref or is_issue_ref
             else agent_id
         )
         state = self.file_completion_state.get(context.input_id)
@@ -6796,6 +7014,10 @@ class AgentPBXTUI(App[None]):
                 matches = self.caller_agent_completion_matches(context, agent_id)
             elif is_joplin_ref:
                 matches = self.joplin_note_completion_matches(context, joplin_agent_id)
+            elif is_pull_request_ref:
+                matches = self.pull_request_completion_matches(context, github_agent_id)
+            elif is_issue_ref:
+                matches = self.issue_completion_matches(context, github_agent_id)
             else:
                 matches = self.file_completion_matches(context, agent_id)
         if not matches:
@@ -6808,6 +7030,16 @@ class AgentPBXTUI(App[None]):
             elif is_joplin_ref:
                 self.notify(
                     f"No cached Joplin note matches {context.prefix!r}; open or refresh the Joplin tab.",
+                    severity="warning",
+                )
+            elif is_pull_request_ref:
+                self.notify(
+                    f"No cached pull request matches {context.prefix!r}; open or refresh the PRs tab.",
+                    severity="warning",
+                )
+            elif is_issue_ref:
+                self.notify(
+                    f"No cached issue matches {context.prefix!r}; open or refresh the Issues tab.",
                     severity="warning",
                 )
             else:
@@ -6841,11 +7073,17 @@ class AgentPBXTUI(App[None]):
         agent_id = self.sent_history_agent_id(text_area)
         is_joplin_ref = context.prefix.lower().startswith(JOPLIN_NOTE_REF_PREFIX)
         is_caller_ref = context.prefix.lower().startswith(CALLER_AGENT_REF_PREFIX)
+        is_pull_request_ref = context.prefix.lower().startswith(PULL_REQUEST_REF_PREFIX)
+        is_issue_ref = context.prefix.lower().startswith(ISSUE_REF_PREFIX)
         if not agent_id:
             if is_caller_ref:
                 target = "@caller"
             elif is_joplin_ref:
                 target = "@joplin note"
+            elif is_pull_request_ref:
+                target = "@pr reference"
+            elif is_issue_ref:
+                target = "@issue reference"
             else:
                 target = "@file"
             self.notify(f"Select an agent before completing {target} references.", severity="warning")
@@ -6859,6 +7097,11 @@ class AgentPBXTUI(App[None]):
         joplin_agent_id = (
             self.joplin_completion_agent_id(text_area, context, agent_id)
             if is_joplin_ref
+            else agent_id
+        )
+        github_agent_id = (
+            self.github_completion_agent_id(text_area, context, agent_id)
+            if is_pull_request_ref or is_issue_ref
             else agent_id
         )
 
@@ -6876,6 +7119,10 @@ class AgentPBXTUI(App[None]):
                 matches = self.caller_agent_completion_matches(context, agent_id)
             elif is_joplin_ref:
                 matches = self.joplin_note_completion_matches(context, joplin_agent_id)
+            elif is_pull_request_ref:
+                matches = self.pull_request_completion_matches(context, github_agent_id)
+            elif is_issue_ref:
+                matches = self.issue_completion_matches(context, github_agent_id)
             else:
                 matches = self.file_completion_matches(context, agent_id)
             if not matches:
@@ -6884,6 +7131,10 @@ class AgentPBXTUI(App[None]):
                         await self.refresh_agents()
                     elif is_joplin_ref:
                         await self.fetch_joplin_note_summaries(joplin_agent_id)
+                    elif is_pull_request_ref:
+                        await self.fetch_pull_request_summaries(github_agent_id)
+                    elif is_issue_ref:
+                        await self.fetch_issue_summaries(github_agent_id)
                     else:
                         payload = await self.fetch_agent_file_listing(
                             agent_id,
@@ -6896,6 +7147,10 @@ class AgentPBXTUI(App[None]):
                         label = "Caller"
                     elif is_joplin_ref:
                         label = "Joplin note"
+                    elif is_pull_request_ref:
+                        label = "Pull request"
+                    elif is_issue_ref:
+                        label = "Issue"
                     else:
                         label = "File"
                     self.notify(
@@ -6907,6 +7162,10 @@ class AgentPBXTUI(App[None]):
                     matches = self.caller_agent_completion_matches(context, agent_id)
                 elif is_joplin_ref:
                     matches = self.joplin_note_completion_matches(context, joplin_agent_id)
+                elif is_pull_request_ref:
+                    matches = self.pull_request_completion_matches(context, github_agent_id)
+                elif is_issue_ref:
+                    matches = self.issue_completion_matches(context, github_agent_id)
                 else:
                     matches = self.file_completion_matches(context, agent_id)
 
@@ -6916,6 +7175,10 @@ class AgentPBXTUI(App[None]):
                 label = "caller agent"
             elif is_joplin_ref:
                 label = "scoped Joplin note"
+            elif is_pull_request_ref:
+                label = "pull request"
+            elif is_issue_ref:
+                label = "issue"
             else:
                 label = "project file"
             self.notify(
@@ -7905,6 +8168,8 @@ class AgentPBXTUI(App[None]):
                 self.clear_saved_tmux_target(agent_id)
                 self.save_settings()
         candidate_panes = self.tmux_candidate_panes_for_agent(agent, panes)
+        if self.agent_type(agent) == OPERATOR_AGENT_TYPE and len(candidate_panes) == 1:
+            return candidate_panes[0], "auto"
         pane = tmux_support.choose_pane_for_agent(candidate_panes, agent)
         if pane is None:
             return None, "auto"
@@ -8116,41 +8381,22 @@ class AgentPBXTUI(App[None]):
             if self.selected_agent_id:
                 self.confirm_clear_issue(self.selected_agent_id)
             return
-        if event.button.id == "joplin-new":
-            if self.selected_agent_id:
-                self.open_joplin_title_modal(self.selected_agent_id, action="new")
-            return
-        if event.button.id == "joplin-rename":
-            if self.selected_agent_id:
-                self.open_joplin_title_modal(self.selected_agent_id, action="rename")
-            return
-        if event.button.id == "joplin-delete":
-            if self.selected_agent_id:
-                self.confirm_delete_joplin_note(self.selected_agent_id)
-            return
-        if event.button.id == "joplin-refresh":
-            if self.selected_agent_id:
-                await self.load_joplin_notes(self.selected_agent_id)
-            return
-        if event.button.id == "joplin-copy-latest":
-            if self.selected_agent_id:
-                await self.copy_latest_to_joplin(self.selected_agent_id)
-            return
-        if event.button.id == "joplin-log-start":
-            if self.selected_agent_id:
-                await self.start_joplin_log(self.selected_agent_id)
-            return
-        if event.button.id == "joplin-log-stop":
-            if self.selected_agent_id:
-                await self.stop_joplin_log(self.selected_agent_id)
-            return
-        if event.button.id == "joplin-sync":
-            if self.selected_agent_id:
-                await self.sync_joplin_now(self.selected_agent_id)
-            return
-        if event.button.id == "joplin-save":
-            if self.selected_agent_id:
-                await self.save_joplin_note(self.selected_agent_id)
+        joplin_button_actions = {
+            "joplin-new": "new",
+            "joplin-rename": "rename",
+            "joplin-delete": "delete",
+            "joplin-refresh": "refresh",
+            "joplin-copy-latest": "copy",
+            "joplin-log-start": "log-start",
+            "joplin-log-stop": "log-stop",
+            "joplin-sync": "sync",
+            "joplin-save": "save",
+        }
+        joplin_action = joplin_button_actions.get(str(event.button.id or ""))
+        if joplin_action is not None:
+            agent_id = self.selected_or_cursor_agent_id()
+            if agent_id:
+                await self.joplin_action_for_agent(agent_id, joplin_action)
             return
         if event.button.id == "campaign-refresh":
             if self.selected_agent_id:
@@ -8579,6 +8825,60 @@ class AgentPBXTUI(App[None]):
             return False
         return True
 
+    async def send_escape_to_operator_scope(self, agent_id: str) -> bool:
+        agent = self.agents.get(agent_id)
+        if (
+            agent is None
+            or self.agent_type(agent) != OPERATOR_AGENT_TYPE
+            or self.operator_role(agent) != OPERATOR_ROLE_ROOT
+        ):
+            return False
+        status = self.query_one_or_none("#tmux-status", Static)
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes)
+        except Exception as exc:
+            if status is not None:
+                status.update(f"Tmux: unavailable ({exc})")
+            return False
+        self.tmux_panes = panes
+        logical_operator_id = self.logical_operator_id_for_agent(agent)
+        targets: list[tuple[str, tmux_support.TmuxPane]] = []
+        root_pane, _mode = self.resolve_tmux_pane(agent_id, panes)
+        if root_pane is not None:
+            targets.append((agent_id, root_pane))
+        for fork, pane in self.operator_fork_pane_targets(logical_operator_id, panes):
+            if not self.operator_fork_is_running(fork):
+                continue
+            fork_agent_id = str(fork.get("agent_id") or "").strip()
+            if fork_agent_id:
+                targets.append((fork_agent_id, pane))
+        deduped: list[tuple[str, tmux_support.TmuxPane]] = []
+        seen_panes: set[str] = set()
+        for target_agent_id, pane in targets:
+            if pane.pane_id in seen_panes:
+                continue
+            seen_panes.add(pane.pane_id)
+            deduped.append((target_agent_id, pane))
+        if not deduped:
+            if status is not None:
+                status.update(f"Tmux: no operator panes for {agent_id}")
+            return False
+        sent: list[str] = []
+        failed: list[str] = []
+        for _target_agent_id, pane in deduped:
+            if await self.send_key_to_tmux_pane(pane.pane_id, "Escape", status=status):
+                sent.append(pane.pane_id)
+            else:
+                failed.append(pane.pane_id)
+        if sent:
+            suffix = f"; failed {', '.join(failed)}" if failed else ""
+            self.notify(
+                f"Sent Escape to {len(sent)} operator pane(s) for {agent_id}{suffix}."
+            )
+            await self.load_tmux_capture(agent_id)
+            return True
+        return False
+
     async def send_text_to_tmux_pane(
         self,
         pane_id: str,
@@ -8966,6 +9266,9 @@ class AgentPBXTUI(App[None]):
         if not agent_id:
             return
         if self.is_tmux_direct_enabled(agent_id):
+            sent_scope = await self.send_escape_to_operator_scope(agent_id)
+            if sent_scope:
+                return
             sent = await self.send_key_to_tmux(agent_id, "Escape")
             if not sent:
                 return
@@ -9572,6 +9875,9 @@ class AgentPBXTUI(App[None]):
         tmux_pane_id: str | None = None,
         resumed_codex_session_id: str | None = None,
         operator_session_history: list[dict[str, Any]] | None = None,
+        default_source_caller_agent_id: str | None = None,
+        default_source_caller_project: str | None = None,
+        default_source_codex_session_id: str | None = None,
     ) -> dict[str, Any]:
         metadata = {
             "agent_type": OPERATOR_AGENT_TYPE,
@@ -9585,6 +9891,9 @@ class AgentPBXTUI(App[None]):
             "token_env": AGENT_PBX_TOKEN_ENV,
             "tmux_session": session_name,
             "codex_command": codex_command,
+            "default_source_caller_agent_id": default_source_caller_agent_id or "",
+            "default_source_caller_project": default_source_caller_project or "",
+            "default_source_codex_session_id": default_source_codex_session_id or "",
         }
         if tmux_pane_id:
             metadata["tmux_pane_id"] = tmux_pane_id
@@ -9605,6 +9914,9 @@ class AgentPBXTUI(App[None]):
         tmux_pane_id: str | None = None,
         resumed_codex_session_id: str | None = None,
         operator_session_history: list[dict[str, Any]] | None = None,
+        default_source_caller_agent_id: str | None = None,
+        default_source_caller_project: str | None = None,
+        default_source_codex_session_id: str | None = None,
     ) -> dict[str, Any]:
         response = await self.api_client().post(
             "/v1/agents/register",
@@ -9623,6 +9935,9 @@ class AgentPBXTUI(App[None]):
                     tmux_pane_id=tmux_pane_id,
                     resumed_codex_session_id=resumed_codex_session_id,
                     operator_session_history=operator_session_history,
+                    default_source_caller_agent_id=default_source_caller_agent_id,
+                    default_source_caller_project=default_source_caller_project,
+                    default_source_codex_session_id=default_source_codex_session_id,
                 ),
             },
             headers=auth_headers(self.token),
@@ -10082,13 +10397,30 @@ class AgentPBXTUI(App[None]):
         codex_command: str,
         mcp_url: str,
         session_name: str,
+        source_caller_agent_id: str | None = None,
     ) -> tuple[dict[str, Any], str, bool]:
+        source_caller = self.agents.get(source_caller_agent_id or "")
+        source_metadata = (
+            source_caller.get("metadata")
+            if isinstance(source_caller, dict)
+            and isinstance(source_caller.get("metadata"), dict)
+            else {}
+        )
         agent = await self.register_operator_root(
             agent_id,
             cwd=cwd,
             codex_command=codex_command,
             mcp_url=mcp_url,
             session_name=session_name,
+            default_source_caller_agent_id=source_caller_agent_id,
+            default_source_caller_project=(
+                str(source_caller.get("project") or "")
+                if isinstance(source_caller, dict)
+                else None
+            ),
+            default_source_codex_session_id=str(
+                source_metadata.get("codex_session_id") or ""
+            ),
         )
         pane_id = await self.live_operator_root_pane_id(agent_id)
         if pane_id:
@@ -10104,6 +10436,15 @@ class AgentPBXTUI(App[None]):
                     mcp_url=mcp_url,
                     session_name=session_name,
                     tmux_pane_id=pane_id,
+                    default_source_caller_agent_id=source_caller_agent_id,
+                    default_source_caller_project=(
+                        str(source_caller.get("project") or "")
+                        if isinstance(source_caller, dict)
+                        else None
+                    ),
+                    default_source_codex_session_id=str(
+                        source_metadata.get("codex_session_id") or ""
+                    ),
                 )
             return agent, pane_id, False
 
@@ -10130,6 +10471,15 @@ class AgentPBXTUI(App[None]):
             mcp_url=mcp_url,
             session_name=session_name,
             tmux_pane_id=pane_id,
+            default_source_caller_agent_id=source_caller_agent_id,
+            default_source_caller_project=(
+                str(source_caller.get("project") or "")
+                if isinstance(source_caller, dict)
+                else None
+            ),
+            default_source_codex_session_id=str(
+                source_metadata.get("codex_session_id") or ""
+            ),
         )
         await asyncio.sleep(1.0)
         sent = await self.send_text_to_tmux_pane(
@@ -10184,6 +10534,11 @@ class AgentPBXTUI(App[None]):
         caller_metadata = caller.get("metadata") if isinstance(caller.get("metadata"), dict) else {}
         source_session_id = str(caller_metadata.get("codex_session_id") or "").strip()
         caller_cwd = str(caller_metadata.get("cwd") or "").strip()
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes)
+        except Exception:
+            panes = []
+        self.tmux_panes = panes
         existing_response = await self.api_client().get(
             "/v1/operator/forks",
             params={
@@ -10208,17 +10563,60 @@ class AgentPBXTUI(App[None]):
             if str(fork.get("status") or "").lower() in {"starting", "running", "ready"}:
                 fork_agent_id = str(fork.get("fork_agent_id") or "")
                 tmux_pane_id = str(fork.get("tmux_pane_id") or "").strip()
-                if fork_agent_id and tmux_pane_id:
-                    self.tmux_agent_targets[fork_agent_id] = tmux_pane_id
-                    self.tmux_direct_agent_modes[fork_agent_id] = True
-                    local_agent = self.agents.get(fork_agent_id)
-                    if local_agent is not None:
-                        metadata = (
-                            local_agent.get("metadata")
-                            if isinstance(local_agent.get("metadata"), dict)
-                            else {}
-                        )
-                        local_agent["metadata"] = {**metadata, "tmux_pane_id": tmux_pane_id}
+                if not fork_agent_id:
+                    continue
+                fork_agent = self.operator_fork_record_agent(fork)
+                self.agents[fork_agent_id] = fork_agent
+                pane = self.validated_operator_fork_pane(
+                    fork_agent_id,
+                    panes,
+                    tmux_pane_id=tmux_pane_id,
+                )
+                if pane is None:
+                    pane = self.validated_operator_fork_pane(fork_agent_id, panes)
+                if pane is None:
+                    self.clear_saved_tmux_target(fork_agent_id)
+                    continue
+                if pane.pane_id != tmux_pane_id:
+                    metadata = (
+                        fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+                    )
+                    repaired = await self.record_operator_fork(
+                        logical_operator_id=logical_operator_id,
+                        source_caller_agent_id=source_caller_agent_id,
+                        fork_agent_id=fork_agent_id,
+                        tmux_pane_id=pane.pane_id,
+                        metadata={
+                            **metadata,
+                            "agent_type": OPERATOR_AGENT_TYPE,
+                            "operator_role": OPERATOR_ROLE_FORK,
+                            "logical_operator_id": logical_operator_id,
+                            "source_caller_agent_id": source_caller_agent_id,
+                            "source_codex_session_id": source_session_id,
+                            "tmux_pane_id": pane.pane_id,
+                            "operator_fork_pending": False,
+                        },
+                    )
+                    if isinstance(repaired, dict):
+                        fork = repaired
+                self.tmux_agent_targets[fork_agent_id] = pane.pane_id
+                self.tmux_direct_agent_modes[fork_agent_id] = True
+                local_agent = self.agents.get(fork_agent_id)
+                if local_agent is not None:
+                    metadata = (
+                        local_agent.get("metadata")
+                        if isinstance(local_agent.get("metadata"), dict)
+                        else {}
+                    )
+                    local_agent["metadata"] = {
+                        **metadata,
+                        "agent_type": OPERATOR_AGENT_TYPE,
+                        "operator_role": OPERATOR_ROLE_FORK,
+                        "logical_operator_id": logical_operator_id,
+                        "source_caller_agent_id": source_caller_agent_id,
+                        "source_codex_session_id": source_session_id,
+                        "tmux_pane_id": pane.pane_id,
+                    }
                 return fork
 
         codex_command = self.operator_codex_command()
@@ -10351,6 +10749,7 @@ class AgentPBXTUI(App[None]):
                 codex_command=codex_command,
                 mcp_url=mcp_url,
                 session_name=session_name,
+                source_caller_agent_id=source_caller_agent_id,
             )
         except Exception as exc:
             self.notify(f"Unable to start operator root: {exc}", severity="error")
@@ -10391,6 +10790,97 @@ class AgentPBXTUI(App[None]):
         agent = self.agents.get(agent_id)
         return agent is not None and self.agent_type(agent) == OPERATOR_AGENT_TYPE
 
+    def operator_fork_record_agent(self, fork: dict[str, Any]) -> dict[str, Any]:
+        fork_agent_id = str(fork.get("fork_agent_id") or fork.get("agent_id") or "").strip()
+        metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+        hydrated_metadata = dict(metadata)
+        identity = {
+            "agent_type": OPERATOR_AGENT_TYPE,
+            "operator_role": OPERATOR_ROLE_FORK,
+            "operator_fork_id": str(fork.get("operator_fork_id") or ""),
+            "logical_operator_id": str(fork.get("logical_operator_agent_id") or ""),
+            "source_caller_agent_id": str(fork.get("source_caller_agent_id") or ""),
+            "source_codex_session_id": str(fork.get("source_codex_session_id") or ""),
+        }
+        hydrated_metadata.update({key: value for key, value in identity.items() if value})
+        for key in ("cwd", "fork_codex_session_id", "tmux_pane_id"):
+            value = str(fork.get(key) or "").strip()
+            if value:
+                hydrated_metadata[key] = value
+        local_agent = self.agents.get(fork_agent_id)
+        if isinstance(local_agent, dict):
+            agent = dict(local_agent)
+            agent_metadata = (
+                agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+            )
+            agent["metadata"] = {**agent_metadata, **hydrated_metadata}
+            agent["agent_type"] = OPERATOR_AGENT_TYPE
+            source_project = str(
+                hydrated_metadata.get("source_caller_project") or ""
+            ).strip()
+            if source_project:
+                agent["project"] = source_project
+            return agent
+        source_project = str(hydrated_metadata.get("source_caller_project") or "").strip()
+        return {
+            "agent_id": fork_agent_id,
+            "agent_type": OPERATOR_AGENT_TYPE,
+            "project": source_project or str(fork.get("cwd") or "agent-pbx-operator"),
+            "status": str(fork.get("status") or "unknown"),
+            "metadata": hydrated_metadata,
+        }
+
+    def validated_operator_fork_pane(
+        self,
+        fork_agent_id: str,
+        panes: list[tmux_support.TmuxPane],
+        *,
+        tmux_pane_id: str | None = None,
+    ) -> tmux_support.TmuxPane | None:
+        fork_agent = self.agents.get(fork_agent_id) or {
+            "agent_id": fork_agent_id,
+            "agent_type": OPERATOR_AGENT_TYPE,
+            "metadata": {"operator_role": OPERATOR_ROLE_FORK},
+        }
+        candidates = panes
+        target = str(tmux_pane_id or "").strip()
+        if target:
+            candidates = [
+                pane
+                for pane in panes
+                if pane.pane_id == target or pane.target_label == target
+            ]
+        matches = [
+            pane
+            for pane in candidates
+            if self.tmux_pane_allowed_for_agent(fork_agent, pane)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def operator_fork_is_running(self, fork: dict[str, Any]) -> bool:
+        metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+        pending = str(metadata.get("operator_fork_pending") or "").strip().lower()
+        if pending in {"1", "true", "yes", "on"}:
+            return False
+        if not bool(fork.get("pbx_active", True)):
+            return False
+        status = (
+            str(fork.get("effective_status") or fork.get("status") or "")
+            .strip()
+            .lower()
+        )
+        return status in {
+            "active",
+            "online",
+            "ready",
+            "running",
+            "starting",
+            "working",
+            "in_progress",
+        }
+
     def operator_fork_pane_targets(
         self,
         logical_operator_id: str,
@@ -10422,18 +10912,18 @@ class AgentPBXTUI(App[None]):
             explicit_targets.discard("")
             for pane in panes:
                 if pane.pane_id in explicit_targets or pane.target_label in explicit_targets:
-                    add_target(fork, pane)
+                    if self.tmux_pane_allowed_for_agent(fork, pane):
+                        add_target(fork, pane)
+                    elif self.tmux_agent_targets.get(fork_agent_id) in {
+                        pane.pane_id,
+                        pane.target_label,
+                    }:
+                        self.clear_saved_tmux_target(fork_agent_id)
 
-            has_match_hint = bool(
-                str(metadata.get("cwd") or "").strip()
-                or str(fork.get("project") or "").strip()
-            )
-            if not has_match_hint:
-                continue
-            for pane in tmux_support.ranked_panes_for_agent(panes, fork):
+            for pane in panes:
                 if pane.session_name != operator_session_name:
                     continue
-                if not tmux_support.pane_matches_agent(pane, fork):
+                if not self.tmux_pane_allowed_for_agent(fork, pane):
                     continue
                 add_target(fork, pane)
 
@@ -11727,7 +12217,8 @@ class AgentPBXTUI(App[None]):
         await self.refresh_joplin_status()
         if not (self.joplin_configured and self.joplin_available):
             raise RuntimeError(self.format_joplin_unavailable_summary(self.joplin_status))
-        project = self.project_for_agent(agent_id)
+        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        project = self.joplin_project_for_agent(agent_id)
         response = await self.api_client().get(
             self.project_joplin_notes_url(project),
             headers=auth_headers(self.token),
@@ -11737,7 +12228,7 @@ class AgentPBXTUI(App[None]):
         notes = response.json()
         if not isinstance(notes, list):
             raise ValueError("Joplin notes response was not a list")
-        existing = self.joplin_notes_by_agent.get(agent_id, {})
+        existing = self.joplin_notes_by_agent.get(cache_agent_id, {})
         note_map: dict[str, dict[str, Any]] = {}
         for note in notes:
             if not isinstance(note, dict):
@@ -11748,7 +12239,9 @@ class AgentPBXTUI(App[None]):
             merged = dict(existing.get(note_id, {}))
             merged.update(note)
             note_map[note_id] = merged
-        self.joplin_notes_by_agent[agent_id] = note_map
+        self.joplin_notes_by_agent[cache_agent_id] = note_map
+        if cache_agent_id != agent_id:
+            self.joplin_notes_by_agent[agent_id] = note_map
         return note_map
 
     def resolve_joplin_note_ref_token(
@@ -11849,7 +12342,8 @@ class AgentPBXTUI(App[None]):
         agent_id: str,
         note_id: str,
     ) -> dict[str, Any]:
-        project = self.project_for_agent(agent_id)
+        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        project = self.joplin_project_for_agent(agent_id)
         response = await self.api_client().get(
             self.project_joplin_notes_url(project, note_id),
             headers=auth_headers(self.token),
@@ -11859,7 +12353,9 @@ class AgentPBXTUI(App[None]):
         note = response.json()
         if not isinstance(note, dict):
             raise ValueError(f"Joplin note {note_id} response was not an object")
-        self.joplin_notes_by_agent.setdefault(agent_id, {})[note_id] = note
+        self.joplin_notes_by_agent.setdefault(cache_agent_id, {})[note_id] = note
+        if cache_agent_id != agent_id:
+            self.joplin_notes_by_agent.setdefault(agent_id, {})[note_id] = note
         return note
 
     async def joplin_note_reference_scopes(
@@ -11914,13 +12410,250 @@ class AgentPBXTUI(App[None]):
             scopes.append((token, current_scope_agent_id, current_caller_token))
         return scopes
 
+    def github_reference_events(
+        self,
+        message: str,
+    ) -> list[tuple[int, int, str, str, int | None]]:
+        events: list[tuple[int, int, str, str, int | None]] = []
+        for match in CALLER_AGENT_REF_PATTERN.finditer(message):
+            events.append((match.start(1), 0, "caller", match.group(1), None))
+        for match in PULL_REQUEST_REF_PATTERN.finditer(message):
+            events.append(
+                (
+                    match.start(1),
+                    1,
+                    "pull_request",
+                    match.group(1),
+                    github_ref_number(match.group(2)),
+                )
+            )
+        for match in ISSUE_REF_PATTERN.finditer(message):
+            events.append(
+                (
+                    match.start(1),
+                    1,
+                    "issue",
+                    match.group(1),
+                    github_ref_number(match.group(2)),
+                )
+            )
+        for match in PULL_REQUEST_NATURAL_REF_PATTERN.finditer(message):
+            events.append(
+                (
+                    match.start(1),
+                    2,
+                    "pull_request",
+                    match.group(1),
+                    github_ref_number(match.group(2)),
+                )
+            )
+        for match in ISSUE_NATURAL_REF_PATTERN.finditer(message):
+            events.append(
+                (
+                    match.start(1),
+                    2,
+                    "issue",
+                    match.group(1),
+                    github_ref_number(match.group(2)),
+                )
+            )
+        events.sort(key=lambda event: (event[0], event[1]))
+        return events
+
+    async def github_reference_scopes(
+        self,
+        agent_id: str,
+        message: str,
+    ) -> list[GitHubReferenceScope] | None:
+        events = self.github_reference_events(message)
+        if not any(kind in {"pull_request", "issue"} for _s, _o, kind, _t, _n in events):
+            return []
+        if not agent_id:
+            self.notify(
+                "Select an agent before sending GitHub PR or issue references.",
+                severity="warning",
+            )
+            return None
+        if any(kind == "caller" for _s, _o, kind, _t, _n in events) and not (
+            self.is_operator_agent_id(agent_id)
+        ):
+            self.notify(
+                "Select an operator before sending caller-scoped GitHub references.",
+                severity="warning",
+            )
+            return None
+
+        default_scope_agent_id = self.default_github_reference_scope_agent_id(agent_id)
+        current_scope_agent_id = default_scope_agent_id or agent_id
+        current_caller_token: str | None = None
+        operator_without_default_scope = (
+            self.is_operator_agent_id(agent_id) and default_scope_agent_id is None
+        )
+        refreshed_agents = False
+        caller_tokens = [
+            token
+            for _start, _order, kind, token, _number in events
+            if kind == "caller"
+        ]
+        unique_caller_tokens = list(dict.fromkeys(caller_tokens))
+        if operator_without_default_scope and len(unique_caller_tokens) == 1:
+            only_caller_token = unique_caller_tokens[0]
+            target_agent_id = self.resolve_caller_agent_ref_token(only_caller_token)
+            if target_agent_id is None:
+                await self.refresh_agents()
+                refreshed_agents = True
+                target_agent_id = self.resolve_caller_agent_ref_token(only_caller_token)
+            if target_agent_id is not None:
+                current_scope_agent_id = target_agent_id
+                current_caller_token = only_caller_token
+                operator_without_default_scope = False
+        seen: set[tuple[str, str, int]] = set()
+        scopes: list[GitHubReferenceScope] = []
+        for _start, _order, kind, token, number in events:
+            if kind == "caller":
+                target_agent_id = self.resolve_caller_agent_ref_token(token)
+                if target_agent_id is None and not refreshed_agents:
+                    await self.refresh_agents()
+                    refreshed_agents = True
+                    target_agent_id = self.resolve_caller_agent_ref_token(token)
+                if target_agent_id is None:
+                    raise ValueError(f"No caller agent matches {token}")
+                current_scope_agent_id = target_agent_id
+                current_caller_token = token
+                continue
+            if number is None:
+                continue
+            if operator_without_default_scope and current_caller_token is None:
+                raise ValueError(
+                    f"{token} needs a caller scope; add @caller:<agent> "
+                    "or start the operator from a caller."
+                )
+            key = (kind, current_scope_agent_id, number)
+            if key in seen:
+                continue
+            seen.add(key)
+            scopes.append(
+                GitHubReferenceScope(
+                    kind=kind,
+                    token=token,
+                    number=number,
+                    scope_agent_id=current_scope_agent_id,
+                    caller_token=current_caller_token,
+                )
+            )
+        return scopes
+
+    async def expand_github_references(
+        self,
+        agent_id: str,
+        message: str,
+        *,
+        reference_text: str | None = None,
+    ) -> str | None:
+        try:
+            scopes = await self.github_reference_scopes(
+                agent_id,
+                reference_text or message,
+            )
+        except Exception as exc:
+            self.notify(f"GitHub reference failed: {exc}", severity="error")
+            return None
+        if scopes is None:
+            return None
+        if not scopes:
+            return message
+        try:
+            references: list[GitHubPromptReference] = []
+            for scope in scopes:
+                if scope.kind == "pull_request":
+                    payload = await self.fetch_pull_request_for_reference(
+                        scope.scope_agent_id,
+                        scope.number,
+                    )
+                elif scope.kind == "issue":
+                    payload = await self.fetch_issue_for_reference(
+                        scope.scope_agent_id,
+                        scope.number,
+                    )
+                else:
+                    continue
+                references.append(
+                    GitHubPromptReference(
+                        kind=scope.kind,
+                        token=scope.token,
+                        number=scope.number,
+                        scope_agent_id=scope.scope_agent_id,
+                        scope_project=self.project_for_agent(scope.scope_agent_id),
+                        payload=payload,
+                        caller_token=scope.caller_token,
+                    )
+                )
+        except Exception as exc:
+            self.notify(f"GitHub reference failed: {exc}", severity="error")
+            return None
+        return self.format_github_references_for_prompt(message, references)
+
+    def format_github_references_for_prompt(
+        self,
+        message: str,
+        references: list[GitHubPromptReference],
+    ) -> str:
+        if not references:
+            return message
+        lines = [
+            message.rstrip(),
+            "",
+            "---",
+            "",
+            "## GitHub PR and Issue References",
+            "",
+        ]
+        for index, reference in enumerate(references, start=1):
+            if reference.kind == "pull_request":
+                label = "Pull Request"
+                title = str(reference.payload.get("title") or "")
+                heading = f"PR #{reference.number}"
+                detail = self.format_pull_request_detail(reference.payload)
+            else:
+                label = "Issue"
+                title = str(reference.payload.get("title") or "")
+                heading = f"Issue #{reference.number}"
+                detail = self.format_issue_detail(reference.payload)
+            if title:
+                heading = f"{heading} - {title}"
+            fence = markdown_fence_for(detail)
+            lines.extend(
+                [
+                    f"### {index}. {heading}",
+                    "",
+                    f"- Ref: `{reference.token}`",
+                    f"- Type: `{label}`",
+                    f"- Number: `{reference.number}`",
+                    f"- Agent Scope: `{reference.scope_agent_id}`",
+                    f"- Project: `{reference.scope_project}`",
+                ]
+            )
+            if reference.caller_token:
+                lines.append(f"- Caller Ref: `{reference.caller_token}`")
+            if reference.payload.get("repo"):
+                lines.append(f"- Repo: `{reference.payload.get('repo')}`")
+            if reference.payload.get("url"):
+                lines.append(f"- URL: `{reference.payload.get('url')}`")
+            lines.extend(["", f"{fence}text", detail, fence, ""])
+        return "\n".join(lines).rstrip() + "\n"
+
     async def expand_joplin_note_references(
         self,
         agent_id: str,
         message: str,
+        *,
+        reference_text: str | None = None,
     ) -> str | None:
         try:
-            scopes = await self.joplin_note_reference_scopes(agent_id, message)
+            scopes = await self.joplin_note_reference_scopes(
+                agent_id,
+                reference_text or message,
+            )
         except Exception as exc:
             self.notify(f"Joplin note reference failed: {exc}", severity="error")
             return None
@@ -11938,7 +12671,7 @@ class AgentPBXTUI(App[None]):
                     notes_by_agent[scope_agent_id] = notes
                 note_id = self.resolve_joplin_note_ref_token(token, notes)
                 if note_id is None:
-                    project = self.project_for_agent(scope_agent_id)
+                    project = self.joplin_project_for_agent(scope_agent_id)
                     raise ValueError(
                         f"No scoped Joplin note matches {token} in {project}"
                     )
@@ -11953,7 +12686,7 @@ class AgentPBXTUI(App[None]):
                         updated_time=note.get("updated_time"),
                         scope_agent_id=scope_agent_id if scoped_by_caller else None,
                         scope_project=(
-                            self.project_for_agent(scope_agent_id)
+                            self.joplin_project_for_agent(scope_agent_id)
                             if scoped_by_caller
                             else None
                         ),
@@ -11969,8 +12702,10 @@ class AgentPBXTUI(App[None]):
         self,
         agent_id: str,
         message: str,
+        *,
+        reference_text: str | None = None,
     ) -> str | None:
-        tokens = caller_agent_ref_tokens_in_message(message)
+        tokens = caller_agent_ref_tokens_in_message(reference_text or message)
         if not tokens:
             return message
         if not agent_id or not self.is_operator_agent_id(agent_id):
@@ -12044,10 +12779,26 @@ class AgentPBXTUI(App[None]):
         agent_id: str,
         message: str,
     ) -> str | None:
-        expanded_message = await self.expand_joplin_note_references(agent_id, message)
+        reference_text = message
+        expanded_message = await self.expand_github_references(
+            agent_id,
+            message,
+            reference_text=reference_text,
+        )
         if expanded_message is None:
             return None
-        return await self.expand_caller_agent_references(agent_id, expanded_message)
+        expanded_message = await self.expand_joplin_note_references(
+            agent_id,
+            expanded_message,
+            reference_text=reference_text,
+        )
+        if expanded_message is None:
+            return None
+        return await self.expand_caller_agent_references(
+            agent_id,
+            expanded_message,
+            reference_text=reference_text,
+        )
 
     async def route_operator_prompt_to_fork(
         self,
@@ -12066,7 +12817,8 @@ class AgentPBXTUI(App[None]):
         body = self.query_one_or_none("#joplin-body", TextArea)
         if table is None or body is None:
             return
-        project = self.project_for_agent(agent_id)
+        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        project = self.joplin_project_for_agent(agent_id)
         if not self.joplin_configured:
             table.clear()
             body.text = self.format_joplin_unavailable(self.joplin_status)
@@ -12092,7 +12844,8 @@ class AgentPBXTUI(App[None]):
         if notes:
             note_id = (
                 self.selected_joplin_note_id
-                if self.selected_joplin_note_id in self.joplin_notes_by_agent.get(agent_id, {})
+                if self.selected_joplin_note_id
+                in self.joplin_notes_by_agent.get(cache_agent_id, {})
                 else str(notes[0]["id"])
             )
             await self.select_joplin_note(note_id)
@@ -12118,13 +12871,17 @@ class AgentPBXTUI(App[None]):
                 str(note.get("title") or note_id),
                 key=note_id,
             )
-        self.joplin_notes_by_agent[agent_id] = note_map
+        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        self.joplin_notes_by_agent[cache_agent_id] = note_map
+        if cache_agent_id != agent_id:
+            self.joplin_notes_by_agent[agent_id] = note_map
 
     async def select_joplin_note(self, note_id: str) -> None:
         agent_id = self.selected_agent_id
         if not agent_id:
             return
-        project = self.project_for_agent(agent_id)
+        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        project = self.joplin_project_for_agent(agent_id)
         body = self.query_one("#joplin-body", TextArea)
         body.text = f"Loading Joplin note {note_id}..."
         try:
@@ -12139,10 +12896,12 @@ class AgentPBXTUI(App[None]):
             body.text = f"Unable to load Joplin note {note_id}: {exc}"
             return
         self.selected_joplin_note_id = note_id
-        self.joplin_notes_by_agent.setdefault(agent_id, {})[note_id] = note
+        self.joplin_notes_by_agent.setdefault(cache_agent_id, {})[note_id] = note
+        if cache_agent_id != agent_id:
+            self.joplin_notes_by_agent.setdefault(agent_id, {})[note_id] = note
         body.text = str(note.get("body") or "")
         table = self.query_one_or_none("#joplin-notes", DataTable)
-        if table is not None and note_id in self.joplin_notes_by_agent.get(agent_id, {}):
+        if table is not None and note_id in self.joplin_notes_by_agent.get(cache_agent_id, {}):
             try:
                 table.move_cursor(
                     row=table.get_row_index(note_id),
@@ -12155,7 +12914,8 @@ class AgentPBXTUI(App[None]):
     def current_joplin_note_title(self, agent_id: str, note_id: str | None) -> str:
         if not note_id:
             return ""
-        note = self.joplin_notes_by_agent.get(agent_id, {}).get(note_id, {})
+        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        note = self.joplin_notes_by_agent.get(cache_agent_id, {}).get(note_id, {})
         return str(note.get("title") or note_id)
 
     def open_joplin_title_modal(self, agent_id: str, *, action: str) -> None:
@@ -12192,7 +12952,7 @@ class AgentPBXTUI(App[None]):
     async def create_joplin_note(self, agent_id: str, *, title: str) -> None:
         if not await self.ensure_joplin_available():
             return
-        project = self.project_for_agent(agent_id)
+        project = self.joplin_project_for_agent(agent_id)
         body = f"# {title.strip()}\n\n"
         try:
             response = await self.api_client().post(
@@ -12217,7 +12977,7 @@ class AgentPBXTUI(App[None]):
         if not note_id:
             self.notify("Select a Joplin note before renaming.", severity="warning")
             return
-        project = self.project_for_agent(agent_id)
+        project = self.joplin_project_for_agent(agent_id)
         try:
             response = await self.api_client().put(
                 self.project_joplin_notes_url(project, note_id),
@@ -12248,7 +13008,7 @@ class AgentPBXTUI(App[None]):
     async def delete_joplin_note(self, agent_id: str, note_id: str) -> None:
         if not await self.ensure_joplin_available():
             return
-        project = self.project_for_agent(agent_id)
+        project = self.joplin_project_for_agent(agent_id)
         try:
             response = await self.api_client().delete(
                 self.project_joplin_notes_url(project, note_id),
@@ -12271,7 +13031,7 @@ class AgentPBXTUI(App[None]):
         if not note_id:
             self.notify("Select a Joplin note before saving.", severity="warning")
             return
-        project = self.project_for_agent(agent_id)
+        project = self.joplin_project_for_agent(agent_id)
         body = self.query_one("#joplin-body", TextArea)
         try:
             response = await self.api_client().put(
@@ -12621,6 +13381,61 @@ class AgentPBXTUI(App[None]):
     def activate_pull_requests_tab(self) -> None:
         self.activate_agent_tab("pull-requests-tab")
 
+    async def fetch_pull_request_summaries(
+        self,
+        agent_id: str,
+    ) -> dict[int, dict[str, Any]]:
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
+        response = await self.api_client().get(
+            f"/v1/agents/{repo_agent_id}/pull-requests",
+            headers=auth_headers(self.token),
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("pull request list response was not an object")
+        self.pull_request_status_by_agent[agent_id] = {
+            key: value for key, value in payload.items() if key != "pull_requests"
+        }
+        if repo_agent_id != agent_id:
+            self.pull_request_status_by_agent[repo_agent_id] = self.pull_request_status_by_agent[
+                agent_id
+            ]
+        pulls = payload.get("pull_requests") if isinstance(payload.get("pull_requests"), list) else []
+        pull_map: dict[int, dict[str, Any]] = {}
+        for item in pulls:
+            if not isinstance(item, dict):
+                continue
+            number = github_ref_number(item.get("number"))
+            if number is None:
+                continue
+            pull_map[number] = item
+        self.pull_requests_by_agent[agent_id] = pull_map
+        if repo_agent_id != agent_id:
+            self.pull_requests_by_agent[repo_agent_id] = pull_map
+        return pull_map
+
+    async def fetch_pull_request_for_reference(
+        self,
+        agent_id: str,
+        number: int,
+    ) -> dict[str, Any]:
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
+        response = await self.api_client().get(
+            f"/v1/agents/{repo_agent_id}/pull-requests/{number}",
+            headers=auth_headers(self.token),
+            timeout=20,
+        )
+        response.raise_for_status()
+        pull = response.json()
+        if not isinstance(pull, dict):
+            raise ValueError(f"pull request #{number} response was not an object")
+        self.pull_requests_by_agent.setdefault(agent_id, {})[number] = pull
+        if repo_agent_id != agent_id:
+            self.pull_requests_by_agent.setdefault(repo_agent_id, {})[number] = pull
+        return pull
+
     async def pull_request_action_for_agent(
         self,
         agent_id: str,
@@ -12656,17 +13471,21 @@ class AgentPBXTUI(App[None]):
         status_label = self.query_one_or_none("#pull-request-status", Static)
         if table is None or detail is None:
             return
-        detail.text = f"Loading pull requests for {agent_id}..."
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
+        scope_note = (
+            f" via repo context {repo_agent_id}" if repo_agent_id != agent_id else ""
+        )
+        detail.text = f"Loading pull requests for {agent_id}{scope_note}..."
         try:
             response = await self.api_client().get(
-                f"/v1/agents/{agent_id}/pull-requests",
+                f"/v1/agents/{repo_agent_id}/pull-requests",
                 headers=auth_headers(self.token),
                 timeout=20,
             )
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
-            detail.text = f"Unable to load pull requests for {agent_id}: {exc}"
+            detail.text = f"Unable to load pull requests for {agent_id}{scope_note}: {exc}"
             if status_label is not None:
                 status_label.update("Pull Requests: unavailable")
             return
@@ -12675,6 +13494,10 @@ class AgentPBXTUI(App[None]):
         self.pull_request_status_by_agent[agent_id] = {
             key: value for key, value in payload.items() if key != "pull_requests"
         }
+        if repo_agent_id != agent_id:
+            self.pull_request_status_by_agent[repo_agent_id] = self.pull_request_status_by_agent[
+                agent_id
+            ]
         pulls = payload.get("pull_requests") if isinstance(payload, dict) else []
         if not isinstance(pulls, list):
             pulls = []
@@ -12724,6 +13547,7 @@ class AgentPBXTUI(App[None]):
         agent_id = self.selected_agent_id
         if not agent_id:
             return
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
         try:
             number = int(number_text)
         except ValueError:
@@ -12734,7 +13558,7 @@ class AgentPBXTUI(App[None]):
         detail.text = f"Loading PR #{number}..."
         try:
             response = await self.api_client().get(
-                f"/v1/agents/{agent_id}/pull-requests/{number}",
+                f"/v1/agents/{repo_agent_id}/pull-requests/{number}",
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -12746,6 +13570,9 @@ class AgentPBXTUI(App[None]):
         self.selected_pull_request_number = number
         self.selected_pull_request_number_by_agent[agent_id] = number
         self.pull_requests_by_agent.setdefault(agent_id, {})[number] = pull
+        if repo_agent_id != agent_id:
+            self.selected_pull_request_number_by_agent[repo_agent_id] = number
+            self.pull_requests_by_agent.setdefault(repo_agent_id, {})[number] = pull
         detail.text = self.format_pull_request_detail(pull)
         table = self.query_one_or_none("#pull-requests", DataTable)
         if table is not None:
@@ -12791,11 +13618,13 @@ class AgentPBXTUI(App[None]):
         if number is None:
             self.notify("Select a pull request first.", severity="warning")
             return
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
         use_tmux = self.is_tmux_direct_enabled(agent_id)
+        generate_only = use_tmux or repo_agent_id != agent_id
         try:
             response = await self.api_client().post(
-                f"/v1/agents/{agent_id}/pull-requests/{number}/review-request",
-                json={"queue": not use_tmux},
+                f"/v1/agents/{repo_agent_id}/pull-requests/{number}/review-request",
+                json={"queue": not generate_only},
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -12803,6 +13632,31 @@ class AgentPBXTUI(App[None]):
             payload = response.json()
         except Exception as exc:
             self.notify(f"PR review request failed: {exc}", severity="error")
+            return
+        if repo_agent_id != agent_id and not use_tmux:
+            prompt = str(payload.get("prompt") or "").strip()
+            if not prompt:
+                self.notify("PR review prompt was empty.", severity="error")
+                return
+            command = await self.queue_command(
+                agent_id,
+                "send_input",
+                {
+                    "message": prompt,
+                    "source": "pull_request_review",
+                    "pr_number": number,
+                    "repo": payload.get("repo"),
+                    "repo_source_agent_id": repo_agent_id,
+                },
+            )
+            self.update_pull_request_action_detail(
+                f"Queued PR #{number} review for {agent_id} using repo context "
+                f"{repo_agent_id}.\nCommand: {command['command_id']}\n\n"
+                f"{self.command_delivery_note(agent_id)}"
+            )
+            self.notify(f"Queued PR #{number} review for {agent_id}.")
+            await self.refresh_events()
+            await self.load_thread(agent_id)
             return
         if use_tmux:
             prompt = str(payload.get("prompt") or "").strip()
@@ -12815,8 +13669,14 @@ class AgentPBXTUI(App[None]):
             self.record_sent_message(agent_id, f"/pr review #{number}")
             await self.record_tmux_joplin_interaction(agent_id, prompt)
             await self.load_tmux_capture(agent_id)
+            scope_line = (
+                f" using repo context {repo_agent_id}"
+                if repo_agent_id != agent_id
+                else ""
+            )
             self.update_pull_request_action_detail(
-                f"Sent PR #{number} review prompt to tmux for {agent_id}.\n\n"
+                f"Sent PR #{number} review prompt to tmux for {agent_id}"
+                f"{scope_line}.\n\n"
                 "Watch the tmux stream for Codex output.",
             )
             self.notify(f"Sent PR #{number} review to tmux for {agent_id}.")
@@ -12839,11 +13699,13 @@ class AgentPBXTUI(App[None]):
         if number is None:
             self.notify("Select a pull request first.", severity="warning")
             return
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
         use_tmux = self.is_tmux_direct_enabled(agent_id)
+        generate_only = use_tmux or repo_agent_id != agent_id
         try:
             response = await self.api_client().post(
-                f"/v1/agents/{agent_id}/pull-requests/{number}/workerbee-validation-request",
-                json={"queue": not use_tmux},
+                f"/v1/agents/{repo_agent_id}/pull-requests/{number}/workerbee-validation-request",
+                json={"queue": not generate_only},
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -12854,6 +13716,31 @@ class AgentPBXTUI(App[None]):
                 f"PR WorkerBee validation request failed: {exc}",
                 severity="error",
             )
+            return
+        if repo_agent_id != agent_id and not use_tmux:
+            prompt = str(payload.get("prompt") or "").strip()
+            if not prompt:
+                self.notify("PR WorkerBee validation prompt was empty.", severity="error")
+                return
+            command = await self.queue_command(
+                agent_id,
+                "send_input",
+                {
+                    "message": prompt,
+                    "source": "pull_request_workerbee_validation",
+                    "pr_number": number,
+                    "repo": payload.get("repo"),
+                    "repo_source_agent_id": repo_agent_id,
+                },
+            )
+            self.update_pull_request_action_detail(
+                f"Queued PR #{number} WorkerBee validation for {agent_id} using "
+                f"repo context {repo_agent_id}.\nCommand: {command['command_id']}\n\n"
+                f"{self.command_delivery_note(agent_id)}"
+            )
+            self.notify(f"Queued PR #{number} validation for {agent_id}.")
+            await self.refresh_events()
+            await self.load_thread(agent_id)
             return
         if use_tmux:
             prompt = str(payload.get("prompt") or "").strip()
@@ -12866,9 +13753,14 @@ class AgentPBXTUI(App[None]):
             self.record_sent_message(agent_id, f"/pr validate #{number}")
             await self.record_tmux_joplin_interaction(agent_id, prompt)
             await self.load_tmux_capture(agent_id)
+            scope_line = (
+                f" using repo context {repo_agent_id}"
+                if repo_agent_id != agent_id
+                else ""
+            )
             self.update_pull_request_action_detail(
                 f"Sent PR #{number} WorkerBee validation prompt to tmux for "
-                f"{agent_id}.\n\nWatch the tmux stream for Codex output."
+                f"{agent_id}{scope_line}.\n\nWatch the tmux stream for Codex output."
             )
             self.notify(f"Sent PR #{number} validation to tmux for {agent_id}.")
             return
@@ -12892,6 +13784,62 @@ class AgentPBXTUI(App[None]):
 
     def activate_issues_tab(self) -> None:
         self.activate_agent_tab("issues-tab")
+
+    async def fetch_issue_summaries(
+        self,
+        agent_id: str,
+    ) -> dict[int, dict[str, Any]]:
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
+        response = await self.api_client().get(
+            f"/v1/agents/{repo_agent_id}/issues",
+            params={"state": "open", "limit": 30},
+            headers=auth_headers(self.token),
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("issue list response was not an object")
+        self.issue_status_by_agent[agent_id] = {
+            key: value for key, value in payload.items() if key != "issues"
+        }
+        if repo_agent_id != agent_id:
+            self.issue_status_by_agent[repo_agent_id] = self.issue_status_by_agent[
+                agent_id
+            ]
+        issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+        issue_map: dict[int, dict[str, Any]] = {}
+        for item in issues:
+            if not isinstance(item, dict):
+                continue
+            number = github_ref_number(item.get("number"))
+            if number is None:
+                continue
+            issue_map[number] = item
+        self.issues_by_agent[agent_id] = issue_map
+        if repo_agent_id != agent_id:
+            self.issues_by_agent[repo_agent_id] = issue_map
+        return issue_map
+
+    async def fetch_issue_for_reference(
+        self,
+        agent_id: str,
+        number: int,
+    ) -> dict[str, Any]:
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
+        response = await self.api_client().get(
+            f"/v1/agents/{repo_agent_id}/issues/{number}",
+            headers=auth_headers(self.token),
+            timeout=20,
+        )
+        response.raise_for_status()
+        issue = response.json()
+        if not isinstance(issue, dict):
+            raise ValueError(f"issue #{number} response was not an object")
+        self.issues_by_agent.setdefault(agent_id, {})[number] = issue
+        if repo_agent_id != agent_id:
+            self.issues_by_agent.setdefault(repo_agent_id, {})[number] = issue
+        return issue
 
     async def issue_action_for_agent(
         self,
@@ -12926,10 +13874,14 @@ class AgentPBXTUI(App[None]):
         status_label = self.query_one_or_none("#issue-status", Static)
         if table is None or detail is None:
             return
-        detail.text = f"Loading GitHub issues for {agent_id}..."
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
+        scope_note = (
+            f" via repo context {repo_agent_id}" if repo_agent_id != agent_id else ""
+        )
+        detail.text = f"Loading GitHub issues for {agent_id}{scope_note}..."
         try:
             response = await self.api_client().get(
-                f"/v1/agents/{agent_id}/issues",
+                f"/v1/agents/{repo_agent_id}/issues",
                 params={"state": "open", "limit": 30},
                 headers=auth_headers(self.token),
                 timeout=20,
@@ -12937,7 +13889,7 @@ class AgentPBXTUI(App[None]):
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
-            detail.text = f"Unable to load GitHub issues for {agent_id}: {exc}"
+            detail.text = f"Unable to load GitHub issues for {agent_id}{scope_note}: {exc}"
             if status_label is not None:
                 status_label.update("Issues: unavailable")
             return
@@ -12946,6 +13898,10 @@ class AgentPBXTUI(App[None]):
         self.issue_status_by_agent[agent_id] = {
             key: value for key, value in payload.items() if key != "issues"
         }
+        if repo_agent_id != agent_id:
+            self.issue_status_by_agent[repo_agent_id] = self.issue_status_by_agent[
+                agent_id
+            ]
         issues = payload.get("issues") if isinstance(payload, dict) else []
         if not isinstance(issues, list):
             issues = []
@@ -12997,6 +13953,7 @@ class AgentPBXTUI(App[None]):
         agent_id = self.selected_agent_id
         if not agent_id:
             return
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
         try:
             number = int(number_text)
         except ValueError:
@@ -13007,7 +13964,7 @@ class AgentPBXTUI(App[None]):
         detail.text = f"Loading issue #{number}..."
         try:
             response = await self.api_client().get(
-                f"/v1/agents/{agent_id}/issues/{number}",
+                f"/v1/agents/{repo_agent_id}/issues/{number}",
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -13019,6 +13976,9 @@ class AgentPBXTUI(App[None]):
         self.selected_issue_number = number
         self.selected_issue_number_by_agent[agent_id] = number
         self.issues_by_agent.setdefault(agent_id, {})[number] = issue
+        if repo_agent_id != agent_id:
+            self.selected_issue_number_by_agent[repo_agent_id] = number
+            self.issues_by_agent.setdefault(repo_agent_id, {})[number] = issue
         detail.text = self.format_issue_detail(issue)
         table = self.query_one_or_none("#issues", DataTable)
         if table is not None:
@@ -13064,11 +14024,13 @@ class AgentPBXTUI(App[None]):
         if number is None:
             self.notify("Select an issue first.", severity="warning")
             return
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
         use_tmux = self.is_tmux_direct_enabled(agent_id)
+        generate_only = use_tmux or repo_agent_id != agent_id
         try:
             response = await self.api_client().post(
-                f"/v1/agents/{agent_id}/issues/{number}/mitigation-request",
-                json={"queue": not use_tmux},
+                f"/v1/agents/{repo_agent_id}/issues/{number}/mitigation-request",
+                json={"queue": not generate_only},
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -13076,6 +14038,31 @@ class AgentPBXTUI(App[None]):
             payload = response.json()
         except Exception as exc:
             self.notify(f"Issue mitigation request failed: {exc}", severity="error")
+            return
+        if repo_agent_id != agent_id and not use_tmux:
+            prompt = str(payload.get("prompt") or "").strip()
+            if not prompt:
+                self.notify("Issue mitigation prompt was empty.", severity="error")
+                return
+            command = await self.queue_command(
+                agent_id,
+                "send_input",
+                {
+                    "message": prompt,
+                    "source": "issue_mitigation",
+                    "issue_number": number,
+                    "repo": payload.get("repo"),
+                    "repo_source_agent_id": repo_agent_id,
+                },
+            )
+            self.update_issue_action_detail(
+                f"Queued issue #{number} mitigation for {agent_id} using repo "
+                f"context {repo_agent_id}.\nCommand: {command['command_id']}\n\n"
+                f"{self.command_delivery_note(agent_id)}"
+            )
+            self.notify(f"Queued issue #{number} mitigation for {agent_id}.")
+            await self.refresh_events()
+            await self.load_thread(agent_id)
             return
         if use_tmux:
             prompt = str(payload.get("prompt") or "").strip()
@@ -13088,8 +14075,14 @@ class AgentPBXTUI(App[None]):
             self.record_sent_message(agent_id, f"/issue mitigate #{number}")
             await self.record_tmux_joplin_interaction(agent_id, prompt)
             await self.load_tmux_capture(agent_id)
+            scope_line = (
+                f" using repo context {repo_agent_id}"
+                if repo_agent_id != agent_id
+                else ""
+            )
             self.update_issue_action_detail(
-                f"Sent issue #{number} mitigation prompt to tmux for {agent_id}.\n\n"
+                f"Sent issue #{number} mitigation prompt to tmux for {agent_id}"
+                f"{scope_line}.\n\n"
                 "Watch the tmux stream for Codex output."
             )
             self.notify(f"Sent issue #{number} mitigation to tmux for {agent_id}.")
@@ -13151,9 +14144,10 @@ class AgentPBXTUI(App[None]):
         comment: str,
         confirm: str,
     ) -> None:
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
         try:
             response = await self.api_client().post(
-                f"/v1/agents/{agent_id}/issues/{number}/clear",
+                f"/v1/agents/{repo_agent_id}/issues/{number}/clear",
                 json={"comment": comment, "confirm": confirm},
                 headers=auth_headers(self.token),
                 timeout=30,
@@ -13269,9 +14263,10 @@ class AgentPBXTUI(App[None]):
         method: str,
         confirm: str,
     ) -> None:
+        repo_agent_id = self.repo_scope_agent_id(agent_id)
         try:
             response = await self.api_client().post(
-                f"/v1/agents/{agent_id}/pull-requests/{number}/merge",
+                f"/v1/agents/{repo_agent_id}/pull-requests/{number}/merge",
                 json={"method": method, "confirm": confirm},
                 headers=auth_headers(self.token),
                 timeout=30,

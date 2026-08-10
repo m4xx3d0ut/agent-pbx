@@ -146,10 +146,21 @@ then expands them before delivery by appending a `Joplin Note References`
 Markdown section with each referenced note body. Treat that section as
 operator-supplied context for the current prompt; do not call Joplin tools again
 unless the operator asks you to create, update, or inspect notes directly.
+
 When an operator prompt contains `@caller:<agent>` references, following
 `@joplin:<note>` references resolve in the nearest preceding caller's project
 note scope until another caller reference appears. This allows one prompt to
 attach notes from multiple caller projects.
+
+Operator prompts may contain GitHub references from the TUI with `@pr:<number>`,
+`@issue:<number>`, or natural text such as `PR #7` and `issue #12`. Agent PBX
+resolves those references against the nearest preceding `@caller:` scope. If an
+operator was started from a caller, that caller is implied when no explicit
+caller appears, so prompts like `Review PR #7 and assess issue #12.` are scoped
+to the source caller. If an unscoped operator prompt contains exactly one
+`@caller:`, PR or issue references before that tag also use that caller. Agent
+PBX appends a `GitHub PR and Issue References` Markdown section with read-only
+PR and issue detail before delivery; treat it as operator-supplied context.
 
 Built-in TUI pull request commands such as `/pr`, `/pr review`, `/pr validate`,
 `/pr url`, and `/pr merge` are operator actions. `/pr review` and

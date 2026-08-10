@@ -554,11 +554,23 @@ complete known caller agents from the Agents table. When an operator prompt
 uses `@caller:`, following `@joplin:` references resolve in that caller's
 project note scope until another `@caller:` appears. For example,
 `@caller:api @joplin:Runbook @caller:web @joplin:Runbook` can attach two
-different Runbook notes from two caller projects. On send, a single `@caller:`
-reference creates or reuses that caller's fork and routes the prompt to the
-forked operator session. Agent PBX also appends a `Caller Agent References`
-Markdown section with the exact `agent_id`, project, PBX mode, status, active
-campaign count, and tmux pane when known.
+different Runbook notes from two caller projects. On send, a `@caller:`
+reference creates or reuses that caller's fork, keeps the prompt on the root
+operator session, and appends a `Caller Agent References` Markdown section with
+the exact `agent_id`, project, PBX mode, status, active campaign count, active
+fork identity, and tmux pane when known.
+
+Operator prompts can also reference GitHub pull requests and issues with
+`@pr:<number>` and `@issue:<number>`, or natural references such as `PR #7`,
+`pull request #7`, and `issue #12`. These references scope to the nearest
+preceding `@caller:` token. If the operator was started from a caller, that
+caller is implied, so `Review PR #7 and assess issue #12.` loads context from
+the source caller's repository without an explicit caller tag. If an operator
+has no implied source and a prompt contains exactly one `@caller:`, PR or issue
+references before that tag also use that caller, so `Review PR #7 for
+@caller:api and assess issue #12` works as expected. Prompts may mix multiple
+caller scopes; Agent PBX fetches read-only PR and issue detail before send and
+appends a `GitHub PR and Issue References` Markdown section.
 
 The `Joplin` tab lists notes from the selected project folder and its
 descendants under the Agent PBX notebook. That means notes created directly in
@@ -685,10 +697,13 @@ In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete project paths. Type `@joplin:` and
 press `Tab` to complete project-scoped Joplin note titles from cache, with lazy
 loading on first use. In operator prompts, `@joplin:` completion uses the
-nearest preceding `@caller:` scope when one exists. Type `@caller:` while an
-operator is selected to complete caller agent references. Repeated `Tab` cycles matches; exact local
-commands such as `/esc` or `/theme minimal` execute locally on `Enter` instead
-of being sent to the agent.
+nearest preceding `@caller:` scope when one exists. Type `@pr:` or `@issue:`
+and press `Tab` to complete cached or lazily loaded source-repository pull
+request and issue numbers; operator completion uses the nearest preceding
+`@caller:` or the operator's implied source caller. Type `@caller:` while an
+operator is selected to complete caller agent references. Repeated `Tab` cycles
+matches; exact local commands such as `/esc` or `/theme minimal` execute
+locally on `Enter` instead of being sent to the agent.
 
 Use `/plan` to toggle Codex plan mode for the selected agent. In tmux direct
 mode, Agent PBX types `/plan` with tmux key events so Codex handles it as an

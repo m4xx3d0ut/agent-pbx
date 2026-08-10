@@ -24,6 +24,8 @@ USAGE_WARN_TOKENS_PER_HOUR = 10_000
 POLL_WARN_PER_HOUR = 24
 STALE_WORKING_SECONDS = 600
 STALE_WORKING_STATUSES = {"running", "working"}
+OPERATOR_AGENT_TYPE = "operator"
+OPERATOR_ROLE_FORK = "fork"
 
 
 def _non_empty_string(value: Any) -> bool:
@@ -555,6 +557,12 @@ class Store:
                 """,
                 (request.agent_id,),
             ).fetchone()
+            existing_fork = self._operator_fork_row_for_agent(conn, request.agent_id)
+            existing_fork_identity = (
+                self._operator_fork_agent_identity(existing_fork)
+                if existing_fork is not None
+                else None
+            )
             request_metadata = dict(request.metadata)
             existing_type = (
                 self._normalized_agent_type(existing["agent_type"])
@@ -568,12 +576,17 @@ class Store:
                 if has_metadata_agent_type
                 else ""
             )
+            requested_operator_role = (
+                str(request_metadata.get("operator_role") or "").strip().lower()
+            )
             preserve_existing_operator_identity = (
                 existing_type == "operator"
                 and requested_type == "caller"
                 and not has_metadata_agent_type
             )
-            if requested_type == "operator" or metadata_type == "operator":
+            if existing_fork_identity is not None:
+                agent_type = OPERATOR_AGENT_TYPE
+            elif requested_type == "operator" or metadata_type == "operator":
                 agent_type = "operator"
             elif existing_type == "operator" and metadata_type != "caller":
                 agent_type = "operator"
@@ -599,14 +612,34 @@ class Store:
                     "last_resume_codex_session_id",
                 ):
                     request_metadata.pop(key, None)
+            if existing_fork_identity is not None and requested_operator_role != OPERATOR_ROLE_FORK:
+                for key in (
+                    "agent_type",
+                    "operator_role",
+                    "logical_operator_id",
+                    "source_caller_agent_id",
+                    "source_codex_session_id",
+                    "fork_codex_session_id",
+                    "cwd",
+                    "tmux_pane_id",
+                    "tmux_target",
+                    "tmux_session",
+                    "active_tmux_pane_id",
+                ):
+                    request_metadata.pop(key, None)
             metadata = self._merged_agent_metadata(
                 existing["metadata_json"] if existing else None,
                 request_metadata,
             )
+            if existing_fork_identity is not None:
+                metadata.update(existing_fork_identity)
             metadata_json = json.dumps(metadata)
             name = request.name
             project = request.project
-            if preserve_existing_operator_identity and existing:
+            if existing_fork_identity is not None and existing:
+                name = name or existing["name"]
+                project = existing["project"]
+            elif preserve_existing_operator_identity and existing:
                 name = existing["name"]
                 project = existing["project"]
             elif name is None and existing:
@@ -698,7 +731,13 @@ class Store:
                 """,
                 (agent_id,),
             ).fetchone()
-        return self._agent_from_row(row) if row else None
+            fork_row = self._operator_fork_row_for_agent(conn, agent_id) if row else None
+        if not row:
+            return None
+        agent = self._agent_from_row(row)
+        if fork_row is not None:
+            self._hydrate_operator_fork_agent(agent, fork_row)
+        return agent
 
     def list_agents(self, *, include_hidden: bool = False) -> list[dict[str, Any]]:
         where_clause = "" if include_hidden else "WHERE dismissed_at IS NULL"
@@ -714,7 +753,14 @@ class Store:
                 """
             ).fetchall()
             agents = [self._agent_from_row(row) for row in rows]
+            fork_rows = self._operator_fork_rows_for_agents(
+                conn,
+                [str(agent["agent_id"]) for agent in agents],
+            )
             for agent in agents:
+                fork_row = fork_rows.get(str(agent["agent_id"]))
+                if fork_row is not None:
+                    self._hydrate_operator_fork_agent(agent, fork_row)
                 self._add_latest_report_summary(conn, agent)
                 self._add_queue_summary(conn, agent)
                 self._add_campaign_summary(conn, agent)
@@ -2083,6 +2129,107 @@ class Store:
         if not cursor.rowcount:
             return None
         return self.get_command(command_id)
+
+    @staticmethod
+    def _operator_fork_select_sql() -> str:
+        return """
+            SELECT operator_fork_id, logical_operator_agent_id, fork_agent_id,
+                   source_caller_agent_id, source_codex_session_id,
+                   fork_codex_session_id, campaign_id, cwd, codex_home,
+                   codex_host_id, tmux_pane_id, status, summary,
+                   metadata_json, created_at, updated_at, last_used_at,
+                   completed_at
+            FROM operator_forks
+        """
+
+    @classmethod
+    def _operator_fork_row_for_agent(
+        cls,
+        conn: sqlite3.Connection,
+        agent_id: str,
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            f"""
+            {cls._operator_fork_select_sql()}
+            WHERE fork_agent_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (agent_id,),
+        ).fetchone()
+
+    @classmethod
+    def _operator_fork_rows_for_agents(
+        cls,
+        conn: sqlite3.Connection,
+        agent_ids: list[str],
+    ) -> dict[str, sqlite3.Row]:
+        if not agent_ids:
+            return {}
+        placeholders = ",".join("?" for _ in agent_ids)
+        rows = conn.execute(
+            f"""
+            {cls._operator_fork_select_sql()}
+            WHERE fork_agent_id IN ({placeholders})
+            ORDER BY updated_at DESC
+            """,
+            tuple(agent_ids),
+        ).fetchall()
+        latest: dict[str, sqlite3.Row] = {}
+        for row in rows:
+            fork_agent_id = str(row["fork_agent_id"])
+            latest.setdefault(fork_agent_id, row)
+        return latest
+
+    @staticmethod
+    def _operator_fork_metadata_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            decoded = json.loads(row["metadata_json"] or "{}")
+        except json.JSONDecodeError:
+            decoded = {}
+        return decoded if isinstance(decoded, dict) else {}
+
+    @classmethod
+    def _operator_fork_agent_identity(cls, row: sqlite3.Row) -> dict[str, Any]:
+        metadata = cls._operator_fork_metadata_from_row(row)
+        identity: dict[str, Any] = dict(metadata)
+        identity.update(
+            {
+                "agent_type": OPERATOR_AGENT_TYPE,
+                "operator_role": OPERATOR_ROLE_FORK,
+                "operator_fork_id": str(row["operator_fork_id"]),
+                "logical_operator_id": str(row["logical_operator_agent_id"]),
+                "source_caller_agent_id": str(row["source_caller_agent_id"]),
+                "source_codex_session_id": str(row["source_codex_session_id"]),
+                "cwd": str(row["cwd"]),
+            }
+        )
+        optional_keys = (
+            "fork_codex_session_id",
+            "codex_home",
+            "codex_host_id",
+            "tmux_pane_id",
+        )
+        for key in optional_keys:
+            value = row[key]
+            if isinstance(value, str) and value.strip():
+                identity[key] = value.strip()
+        return identity
+
+    @classmethod
+    def _hydrate_operator_fork_agent(
+        cls,
+        agent: dict[str, Any],
+        fork_row: sqlite3.Row,
+    ) -> None:
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        hydrated = dict(metadata)
+        hydrated.update(cls._operator_fork_agent_identity(fork_row))
+        agent["agent_type"] = OPERATOR_AGENT_TYPE
+        source_project = str(hydrated.get("source_caller_project") or "").strip()
+        if source_project:
+            agent["project"] = source_project
+        agent["metadata"] = hydrated
 
     @staticmethod
     def _agent_from_row(row: sqlite3.Row) -> dict[str, Any]:

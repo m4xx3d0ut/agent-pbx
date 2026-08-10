@@ -2318,11 +2318,12 @@ async def test_tui_cycles_operator_fork_panes(monkeypatch) -> None:
             "%1",
             True,
             "node",
-            "agent-pbx",
+            fork_agent_id,
             "/home/me/agent-pbx",
             120,
             32,
             100,
+            window_name=fork_agent_id,
         ),
         tmux_support.TmuxPane(
             "agent-pbx-operators",
@@ -2331,11 +2332,12 @@ async def test_tui_cycles_operator_fork_panes(monkeypatch) -> None:
             "%2",
             True,
             "node",
-            "agent-pbx",
+            fork_agent_id,
             "/home/me/agent-pbx",
             120,
             32,
             100,
+            window_name=fork_agent_id,
         ),
     ]
     refreshed: list[str] = []
@@ -2399,6 +2401,159 @@ async def test_tui_cycles_operator_fork_panes(monkeypatch) -> None:
         f"{fork_agent_id}:%2"
     )
     assert "Viewing fork pane 2/2 for operator-0." in detail
+
+
+def test_tui_operator_fork_targets_ignore_stale_caller_pane() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    fork_agent_id = "operator-0-fork-caller-1"
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {"operator_role": "root"},
+        },
+        fork_agent_id: {
+            "agent_id": fork_agent_id,
+            "agent_type": "operator",
+            "project": "demo",
+            "status": "running",
+            "pbx_active": True,
+            "metadata": {
+                "operator_role": "root",
+                "logical_operator_id": "operator-0",
+                "source_caller_agent_id": "caller-1",
+                "source_codex_session_id": "session-1",
+                "tmux_pane_id": "%1",
+            },
+        },
+    }
+    caller_pane = tmux_support.TmuxPane(
+        "k1s",
+        "0",
+        "1",
+        "%1",
+        True,
+        "node",
+        "caller-1",
+        "/home/me/demo",
+        100,
+        30,
+        100,
+        window_name="zsh",
+    )
+    fork_pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "1",
+        "0",
+        "%2",
+        True,
+        "node",
+        fork_agent_id,
+        "/home/me/agent-pbx",
+        100,
+        30,
+        100,
+        window_name=fork_agent_id,
+    )
+    app.tmux_agent_targets[fork_agent_id] = "%1"
+
+    targets = app.operator_fork_pane_targets("operator-0", [caller_pane, fork_pane])
+
+    assert [(fork["agent_id"], pane.pane_id) for fork, pane in targets] == [
+        (fork_agent_id, "%2")
+    ]
+    assert app.operator_role(app.agents[fork_agent_id]) == "fork"
+    assert fork_agent_id not in app.tmux_agent_targets
+
+
+async def test_tui_escape_fans_out_to_operator_root_and_running_forks(
+    monkeypatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_features_available = True
+    fork_agent_id = "operator-0-fork-caller-1"
+    panes = [
+        tmux_support.TmuxPane(
+            "agent-pbx-operators",
+            "0",
+            "0",
+            "%10",
+            True,
+            "node",
+            "operator-0",
+            "/home/me/agent-pbx",
+            100,
+            30,
+            100,
+            window_name="operator-0",
+        ),
+        tmux_support.TmuxPane(
+            "agent-pbx-operators",
+            "1",
+            "0",
+            "%11",
+            True,
+            "node",
+            fork_agent_id,
+            "/home/me/demo",
+            100,
+            30,
+            100,
+            window_name=fork_agent_id,
+        ),
+    ]
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return panes
+
+    async def fake_send_key_to_tmux_pane(
+        pane_id: str,
+        key: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent.append((pane_id, key))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "working",
+                "metadata": {"operator_role": "root"},
+            },
+            fork_agent_id: {
+                "agent_id": fork_agent_id,
+                "agent_type": "operator",
+                "project": "demo",
+                "status": "running",
+                "pbx_active": True,
+                "metadata": {
+                    "operator_role": "fork",
+                    "logical_operator_id": "operator-0",
+                    "source_caller_agent_id": "caller-1",
+                    "source_codex_session_id": "session-1",
+                    "operator_fork_pending": False,
+                },
+            },
+        }
+        app.query_one("#agent-id", Input).value = "operator-0"
+        await app.send_escape_key()
+
+    assert sent == [("%10", "Escape"), ("%11", "Escape")]
+    assert captures == ["operator-0"]
 
 
 async def test_tui_operator_split_hidden_without_operators() -> None:
@@ -2869,6 +3024,128 @@ def test_tui_formats_issue_detail() -> None:
     assert "Confirmed." in text
 
 
+def test_tui_operator_source_scopes_joplin_and_repo_context() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fork_agent_id = "operator-0-fork-caller-1"
+    legacy_fork_agent_id = "operator-legacy-fork-caller-1"
+    app.agents = {
+        "caller-1": {
+            "agent_id": "caller-1",
+            "agent_type": "caller",
+            "project": "k1s-workerbee-private",
+            "metadata": {"cwd": "/home/me/k1s-workerbee-private"},
+        },
+        "caller-2": {
+            "agent_id": "caller-2",
+            "agent_type": "caller",
+            "project": "k1s-private",
+            "metadata": {"cwd": "/home/me/k1s-private"},
+        },
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "default_source_caller_agent_id": "caller-1",
+                "default_source_caller_project": "k1s-workerbee-private",
+                "default_source_codex_session_id": "session-1",
+            },
+        },
+        fork_agent_id: {
+            "agent_id": fork_agent_id,
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "logical_operator_id": "operator-0",
+                "source_caller_agent_id": "caller-1",
+                "source_caller_project": "k1s-workerbee-private",
+                "source_codex_session_id": "session-1",
+            },
+        },
+        "operator-legacy": {
+            "agent_id": "operator-legacy",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+            },
+        },
+        legacy_fork_agent_id: {
+            "agent_id": legacy_fork_agent_id,
+            "agent_type": "operator",
+            "project": "k1s-workerbee-private",
+            "status": "running",
+            "pbx_active": True,
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "logical_operator_id": "operator-legacy",
+                "source_caller_agent_id": "caller-1",
+                "source_caller_project": "k1s-workerbee-private",
+                "source_codex_session_id": "session-1",
+                "operator_fork_pending": False,
+            },
+        },
+        "operator-multi": {
+            "agent_id": "operator-multi",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+            },
+        },
+        "operator-multi-fork-caller-1": {
+            "agent_id": "operator-multi-fork-caller-1",
+            "agent_type": "operator",
+            "project": "k1s-workerbee-private",
+            "status": "running",
+            "pbx_active": True,
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "logical_operator_id": "operator-multi",
+                "source_caller_agent_id": "caller-1",
+                "source_codex_session_id": "session-1",
+                "operator_fork_pending": False,
+            },
+        },
+        "operator-multi-fork-caller-2": {
+            "agent_id": "operator-multi-fork-caller-2",
+            "agent_type": "operator",
+            "project": "k1s-private",
+            "status": "running",
+            "pbx_active": True,
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "logical_operator_id": "operator-multi",
+                "source_caller_agent_id": "caller-2",
+                "source_codex_session_id": "session-2",
+                "operator_fork_pending": False,
+            },
+        },
+    }
+    app.joplin_notes_by_agent = {
+        "caller-1": {"note-1": {"id": "note-1", "title": "Deploy Plan"}}
+    }
+
+    assert app.operator_role(app.agents[fork_agent_id]) == "fork"
+    assert app.joplin_scope_agent_id(fork_agent_id) == "caller-1"
+    assert app.joplin_project_for_agent(fork_agent_id) == "k1s-workerbee-private"
+    assert app.current_joplin_note_title(fork_agent_id, "note-1") == "Deploy Plan"
+    assert app.repo_scope_agent_id("operator-0") == "caller-1"
+    assert app.repo_scope_agent_id(fork_agent_id) == "caller-1"
+    assert app.repo_scope_agent_id("caller-1") == "caller-1"
+    assert app.repo_scope_agent_id("operator-legacy") == "caller-1"
+    assert app.repo_scope_agent_id("operator-multi") == "operator-multi"
+
+
 async def test_tui_pull_request_review_queues_with_delivery_note() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     posts: list[tuple[str, dict[str, object]]] = []
@@ -2919,6 +3196,84 @@ async def test_tui_pull_request_review_queues_with_delivery_note() -> None:
     assert "requires Agent PBX nohup mode" in detail
 
 
+async def test_tui_operator_pr_review_uses_source_repo_and_operator_tmux() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    posts: list[tuple[str, dict[str, object]]] = []
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+    logged: list[tuple[str, str]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "prompt": "Review source repo PR #7.",
+                "repo": "the-cm-collective/k1s-workerbee-private",
+                "command": None,
+            }
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append((path, dict(kwargs.get("json") or {})))
+            return Response()
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    async def fake_record_tmux_joplin_interaction(agent_id: str, message: str) -> None:
+        logged.append((agent_id, message))
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.record_tmux_joplin_interaction = fake_record_tmux_joplin_interaction  # type: ignore[method-assign]
+    app.tmux_features_available = True
+    app.tmux_direct_enabled = True
+
+    async with app.run_test():
+        app.tmux_features_available = True
+        app.tmux_direct_enabled = True
+        app.selected_agent_id = "operator-0"
+        app.query_one("#agent-id", Input).value = "operator-0"
+        app.agents = {
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "k1s-workerbee-private",
+            },
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                    "default_source_caller_agent_id": "caller-1",
+                    "default_source_caller_project": "k1s-workerbee-private",
+                    "default_source_codex_session_id": "session-1",
+                },
+            },
+        }
+        app.pull_requests_by_agent = {"operator-0": {7: {"number": 7}}}
+        app.selected_pull_request_number = 7
+        await app.request_pull_request_review("operator-0")
+        detail = app.query_one("#pull-request-detail", TextArea).text
+
+    assert posts == [
+        ("/v1/agents/caller-1/pull-requests/7/review-request", {"queue": False})
+    ]
+    assert sent == [("operator-0", "Review source repo PR #7.")]
+    assert logged == sent
+    assert captures == ["operator-0"]
+    assert "using repo context caller-1" in detail
+
+
 async def test_tui_issue_mitigation_queues_with_delivery_note() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     posts: list[tuple[str, dict[str, object]]] = []
@@ -2967,6 +3322,84 @@ async def test_tui_issue_mitigation_queues_with_delivery_note() -> None:
     assert "Queued issue #9 mitigation for agent-1." in detail
     assert "Command: cmd-1" in detail
     assert "requires Agent PBX nohup mode" in detail
+
+
+async def test_tui_operator_issue_mitigation_uses_source_repo_and_operator_tmux() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    posts: list[tuple[str, dict[str, object]]] = []
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+    logged: list[tuple[str, str]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "prompt": "Mitigate source repo issue #9.",
+                "repo": "the-cm-collective/k1s-workerbee-private",
+                "command": None,
+            }
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append((path, dict(kwargs.get("json") or {})))
+            return Response()
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    async def fake_record_tmux_joplin_interaction(agent_id: str, message: str) -> None:
+        logged.append((agent_id, message))
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.record_tmux_joplin_interaction = fake_record_tmux_joplin_interaction  # type: ignore[method-assign]
+    app.tmux_features_available = True
+    app.tmux_direct_enabled = True
+
+    async with app.run_test():
+        app.tmux_features_available = True
+        app.tmux_direct_enabled = True
+        app.selected_agent_id = "operator-0"
+        app.query_one("#agent-id", Input).value = "operator-0"
+        app.agents = {
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "k1s-workerbee-private",
+            },
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                    "default_source_caller_agent_id": "caller-1",
+                    "default_source_caller_project": "k1s-workerbee-private",
+                    "default_source_codex_session_id": "session-1",
+                },
+            },
+        }
+        app.issues_by_agent = {"operator-0": {9: {"number": 9}}}
+        app.selected_issue_number = 9
+        await app.request_issue_mitigation("operator-0")
+        detail = app.query_one("#issue-detail", TextArea).text
+
+    assert posts == [
+        ("/v1/agents/caller-1/issues/9/mitigation-request", {"queue": False})
+    ]
+    assert sent == [("operator-0", "Mitigate source repo issue #9.")]
+    assert logged == sent
+    assert captures == ["operator-0"]
+    assert "using repo context caller-1" in detail
 
 
 async def test_tui_pull_request_validation_uses_tmux_direct_prompt() -> None:
@@ -3660,6 +4093,89 @@ async def test_tui_joplin_note_completion_lazy_loads_in_tmux_input() -> None:
     assert message.text == "apply @joplin:Runbook"
 
 
+async def test_tui_github_reference_completion_lazy_loads_implied_source() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **kwargs: object) -> Response:
+            calls.append((path, dict(kwargs.get("params") or {})))
+            if path == "/v1/joplin/status":
+                return Response({"configured": False, "available": False})
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path == "/v1/agents/caller-1/pull-requests":
+                return Response(
+                    {
+                        "available": True,
+                        "repo": "owner/private",
+                        "pull_requests": [
+                            {"number": 7, "title": "Add private flow"},
+                            {"number": 9, "title": "Follow-up"},
+                        ],
+                    }
+                )
+            if path == "/v1/agents/caller-1/issues":
+                assert kwargs.get("params") == {"state": "open", "limit": 30}
+                return Response(
+                    {
+                        "available": True,
+                        "repo": "owner/private",
+                        "issues": [{"number": 12, "title": "Fix quota"}],
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test():
+        app.selected_agent_id = "operator-0"
+        app.agents = {
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "k1s-workerbee-private",
+            },
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                    "default_source_caller_agent_id": "caller-1",
+                },
+            },
+        }
+        app.query_one("#agent-id", Input).value = "operator-0"
+        message = app.query_one("#message", TextArea)
+
+        message.text = "review @pr:"
+        message.move_cursor((0, len(message.text)))
+        assert await app.complete_file_reference_async(message, direction=1) is True
+        assert message.text == "review @pr:7"
+
+        message.text = "mitigate @issue:"
+        message.move_cursor((0, len(message.text)))
+        assert await app.complete_file_reference_async(message, direction=1) is True
+        assert message.text == "mitigate @issue:12"
+
+    assert ("/v1/agents/caller-1/pull-requests", {}) in calls
+    assert ("/v1/agents/caller-1/issues", {"state": "open", "limit": 30}) in calls
+
+
 async def test_tui_caller_agent_completion_uses_cached_callers() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -4051,6 +4567,302 @@ async def test_tui_send_input_expands_caller_scoped_joplin_references() -> None:
     assert "- Agent ID: `caller-a`" in sent_message
     assert "- Agent ID: `caller-b`" in sent_message
     assert app.sent_message_history_by_agent["operator-0"] == [prompt]
+
+
+async def test_tui_expands_github_references_with_implied_operator_source() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    paths: list[str] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            paths.append(path)
+            if path == "/v1/agents/caller-1/pull-requests/7":
+                return Response(
+                    {
+                        "number": 7,
+                        "title": "Add private flow",
+                        "repo": "owner/private",
+                        "url": "https://github.example/owner/private/pull/7",
+                        "state": "OPEN",
+                        "author": "dev",
+                        "head_ref": "feature/private-flow",
+                        "base_ref": "dev",
+                        "checks": {"total": 1, "success": 1},
+                        "files": [{"path": "src/app.py", "additions": 3}],
+                        "commits": [{"oid": "abc123"}],
+                        "body": "PR body.",
+                    }
+                )
+            if path == "/v1/agents/caller-1/issues/12":
+                return Response(
+                    {
+                        "number": 12,
+                        "title": "Fix quota",
+                        "repo": "owner/private",
+                        "url": "https://github.example/owner/private/issues/12",
+                        "state": "OPEN",
+                        "author": "ops",
+                        "labels": ["bug"],
+                        "body": "Issue body.",
+                        "comments": [{"author": "dev", "body": "Reproduced."}],
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.agents = {
+        "caller-1": {
+            "agent_id": "caller-1",
+            "agent_type": "caller",
+            "project": "k1s-workerbee-private",
+        },
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "default_source_caller_agent_id": "caller-1",
+                "default_source_caller_project": "k1s-workerbee-private",
+            },
+        },
+    }
+
+    expanded = await app.expand_prompt_references(
+        "operator-0",
+        "Review PR #7 and assess issue #12.",
+    )
+
+    assert paths == [
+        "/v1/agents/caller-1/pull-requests/7",
+        "/v1/agents/caller-1/issues/12",
+    ]
+    assert expanded is not None
+    assert "Review PR #7 and assess issue #12." in expanded
+    assert "## GitHub PR and Issue References" in expanded
+    assert "### 1. PR #7 - Add private flow" in expanded
+    assert "- Agent Scope: `caller-1`" in expanded
+    assert "- Project: `k1s-workerbee-private`" in expanded
+    assert "src/app.py" in expanded
+    assert "### 2. Issue #12 - Fix quota" in expanded
+    assert "Reproduced." in expanded
+
+
+async def test_tui_expands_github_reference_before_single_caller_ref() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    paths: list[str] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            paths.append(path)
+            if path == "/v1/agents/caller-1/pull-requests/7":
+                return Response(
+                    {
+                        "number": 7,
+                        "title": "Add private flow",
+                        "repo": "owner/private",
+                        "url": "https://github.example/owner/private/pull/7",
+                        "state": "OPEN",
+                        "author": "dev",
+                        "body": "PR body.",
+                    }
+                )
+            if path == "/v1/agents/caller-1/issues/12":
+                return Response(
+                    {
+                        "number": 12,
+                        "title": "Fix quota",
+                        "repo": "owner/private",
+                        "url": "https://github.example/owner/private/issues/12",
+                        "state": "OPEN",
+                        "author": "ops",
+                        "body": "Issue body.",
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    async def fake_ensure_operator_fork_from_tui(
+        *,
+        logical_operator_id: str,
+        source_caller_agent_id: str,
+    ) -> dict[str, object]:
+        assert logical_operator_id == "operator-0"
+        assert source_caller_agent_id == "caller-1"
+        return {
+            "operator_fork_id": "fork-1",
+            "fork_agent_id": "operator-0-fork-caller-1",
+            "source_codex_session_id": "session-1",
+            "tmux_pane_id": "%151",
+            "metadata": {
+                "source_codex_session_id": "session-1",
+                "tmux_pane_id": "%151",
+            },
+        }
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.ensure_operator_fork_from_tui = fake_ensure_operator_fork_from_tui  # type: ignore[method-assign]
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {"agent_type": "operator", "operator_role": "root"},
+        },
+        "caller-1": {
+            "agent_id": "caller-1",
+            "agent_type": "caller",
+            "name": "Private Repo",
+            "project": "k1s-workerbee-private",
+            "effective_status": "online",
+            "pbx_active": True,
+            "metadata": {"pbx_mode": "report", "codex_session_id": "session-1"},
+        },
+    }
+
+    expanded = await app.expand_prompt_references(
+        "operator-0",
+        "Review PR #7 for @caller:Private-Repo and assess issue #12.",
+    )
+
+    assert paths == [
+        "/v1/agents/caller-1/pull-requests/7",
+        "/v1/agents/caller-1/issues/12",
+    ]
+    assert expanded is not None
+    assert "- Caller Ref: `@caller:Private-Repo`" in expanded
+    assert "## GitHub PR and Issue References" in expanded
+    assert "## Caller Agent References" in expanded
+    assert "- Active Operator Fork ID: `fork-1`" in expanded
+
+
+async def test_tui_expands_multi_caller_github_references() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    paths: list[str] = []
+    ensured: list[str] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            paths.append(path)
+            if "/pull-requests/" in path:
+                number = int(path.rsplit("/", 1)[1])
+                repo = "api/repo" if "api-caller" in path else "web/repo"
+                return Response(
+                    {
+                        "number": number,
+                        "title": f"PR {number}",
+                        "repo": repo,
+                        "url": f"https://github.example/{repo}/pull/{number}",
+                        "state": "OPEN",
+                        "author": "dev",
+                        "body": f"PR {number} body.",
+                    }
+                )
+            if "/issues/" in path:
+                number = int(path.rsplit("/", 1)[1])
+                repo = "api/repo" if "api-caller" in path else "web/repo"
+                return Response(
+                    {
+                        "number": number,
+                        "title": f"Issue {number}",
+                        "repo": repo,
+                        "url": f"https://github.example/{repo}/issues/{number}",
+                        "state": "OPEN",
+                        "author": "ops",
+                        "body": f"Issue {number} body.",
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    async def fake_ensure_operator_fork_from_tui(
+        *,
+        logical_operator_id: str,
+        source_caller_agent_id: str,
+    ) -> dict[str, object]:
+        ensured.append(source_caller_agent_id)
+        return {
+            "operator_fork_id": f"fork-{source_caller_agent_id}",
+            "fork_agent_id": f"operator-0-fork-{source_caller_agent_id}",
+            "source_codex_session_id": f"session-{source_caller_agent_id}",
+            "metadata": {"source_codex_session_id": f"session-{source_caller_agent_id}"},
+        }
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.ensure_operator_fork_from_tui = fake_ensure_operator_fork_from_tui  # type: ignore[method-assign]
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {"agent_type": "operator", "operator_role": "root"},
+        },
+        "api-caller": {
+            "agent_id": "api-caller",
+            "agent_type": "caller",
+            "name": "API",
+            "project": "api",
+            "effective_status": "online",
+            "pbx_active": True,
+            "metadata": {"pbx_mode": "report"},
+        },
+        "web-caller": {
+            "agent_id": "web-caller",
+            "agent_type": "caller",
+            "name": "Web",
+            "project": "web",
+            "effective_status": "online",
+            "pbx_active": True,
+            "metadata": {"pbx_mode": "report"},
+        },
+    }
+
+    expanded = await app.expand_prompt_references(
+        "operator-0",
+        "@caller:API @pr:7 @issue:8 then @caller:Web review PR #3 and issue #4.",
+    )
+
+    assert paths == [
+        "/v1/agents/api-caller/pull-requests/7",
+        "/v1/agents/api-caller/issues/8",
+        "/v1/agents/web-caller/pull-requests/3",
+        "/v1/agents/web-caller/issues/4",
+    ]
+    assert ensured == ["api-caller", "web-caller"]
+    assert expanded is not None
+    assert "- Caller Ref: `@caller:API`" in expanded
+    assert "- Caller Ref: `@caller:Web`" in expanded
+    assert "- Repo: `api/repo`" in expanded
+    assert "- Repo: `web/repo`" in expanded
 
 
 async def test_tui_send_input_keeps_caller_reference_when_fork_metadata_missing() -> None:
@@ -7290,8 +8102,14 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     assert configured
     assert posts[0]["path"] == "/v1/agents/register"
     assert posts[0]["json"]["metadata"]["operator_role"] == "root"  # type: ignore[index]
+    assert posts[0]["json"]["metadata"]["default_source_caller_agent_id"] == "caller-1"  # type: ignore[index]
+    assert posts[0]["json"]["metadata"]["default_source_caller_project"] == "demo"  # type: ignore[index]
+    assert posts[0]["json"]["metadata"]["default_source_codex_session_id"] == "session-caller-1"  # type: ignore[index]
     assert posts[1]["json"]["metadata"]["operator_role"] == "root"  # type: ignore[index]
     assert posts[1]["json"]["metadata"]["tmux_pane_id"] == "%42"  # type: ignore[index]
+    assert posts[1]["json"]["metadata"]["default_source_caller_agent_id"] == "caller-1"  # type: ignore[index]
+    assert posts[1]["json"]["metadata"]["default_source_caller_project"] == "demo"  # type: ignore[index]
+    assert posts[1]["json"]["metadata"]["default_source_codex_session_id"] == "session-caller-1"  # type: ignore[index]
     assert posts[2]["json"]["metadata"]["operator_role"] == "fork"  # type: ignore[index]
     assert posts[3]["path"] == "/v1/operator/forks/ensure"
     assert launches[0]["window_name"] == "operator-0"

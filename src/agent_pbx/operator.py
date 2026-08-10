@@ -22,6 +22,8 @@ TERMINAL_ASSIGNMENT_STATES = {"complete", "completed", "blocked", "failed", "can
 TERMINAL_CAMPAIGN_STATUSES = {"complete", "completed", "blocked", "failed", "canceled"}
 NOHUP_MODE = "nohup"
 FORK_READY_STATUSES = {"starting", "running", "ready"}
+DEFAULT_OPERATOR_TMUX_SESSION = "agent-pbx-operators"
+OPERATOR_TMUX_SESSION_ENV = "AGENT_PBX_TUI_OPERATOR_TMUX_SESSION"
 ID_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 FORK_LAUNCH_REQUIRED_REASON = (
     "operator fork has not been launched; use the TUI to create the first fork for this caller"
@@ -156,6 +158,15 @@ class OperatorService:
                 if fork_codex_session_id:
                     fork_metadata["fork_codex_session_id"] = fork_codex_session_id
                 merged_metadata = {**fork_metadata, **(metadata or {})}
+                merged_metadata.update(
+                    {
+                        "agent_type": OPERATOR_AGENT_TYPE,
+                        "operator_role": "fork",
+                        "logical_operator_id": logical_operator_id,
+                        "source_caller_agent_id": source_caller_agent_id,
+                        "source_codex_session_id": source_session_id,
+                    }
+                )
                 if tmux_pane_id:
                     merged_metadata["tmux_pane_id"] = tmux_pane_id
                 if fork_codex_session_id:
@@ -233,6 +244,15 @@ class OperatorService:
         if unlaunchable_block:
             fork_metadata["operator_fork_launchable"] = False
         fork_metadata.update(metadata or {})
+        fork_metadata.update(
+            {
+                "agent_type": OPERATOR_AGENT_TYPE,
+                "operator_role": "fork",
+                "logical_operator_id": logical_operator_id,
+                "source_caller_agent_id": source_caller_agent_id,
+                "source_codex_session_id": source_session_id,
+            }
+        )
         if tmux_pane_id:
             fork_metadata["tmux_pane_id"] = tmux_pane_id
         if fork_codex_session_id:
@@ -681,6 +701,22 @@ class OperatorService:
         metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
         fork_metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
         merged_metadata = dict(metadata)
+        merged_metadata.update(
+            {
+                "agent_type": OPERATOR_AGENT_TYPE,
+                "operator_role": "fork",
+                "operator_fork_id": str(fork.get("operator_fork_id") or ""),
+                "logical_operator_id": str(
+                    fork.get("logical_operator_agent_id") or ""
+                ),
+                "source_caller_agent_id": str(
+                    fork.get("source_caller_agent_id") or ""
+                ),
+                "source_codex_session_id": str(
+                    fork.get("source_codex_session_id") or ""
+                ),
+            }
+        )
         for key in (
             "source_caller_agent_id",
             "source_codex_session_id",
@@ -787,7 +823,10 @@ class OperatorService:
 
     def _is_operator_fork_agent(self, agent: dict[str, Any]) -> bool:
         metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
-        return str(metadata.get("operator_role") or "").strip().lower() == "fork"
+        if str(metadata.get("operator_role") or "").strip().lower() == "fork":
+            return True
+        agent_id = str(agent.get("agent_id") or "").strip()
+        return bool(agent_id and self.store.get_operator_fork_for_agent(agent_id))
 
     def _pane_matches_operator_fork_agent(
         self,
@@ -796,6 +835,8 @@ class OperatorService:
     ) -> bool:
         agent_id = str(agent.get("agent_id") or "").strip()
         if not agent_id:
+            return False
+        if pane.session_name != self.operator_tmux_session_name():
             return False
         return pane.window_name == agent_id or pane.title == agent_id
 
@@ -880,10 +921,21 @@ class OperatorService:
             logical = str(metadata.get("logical_operator_id") or "").strip()
             if logical:
                 return logical
+        fork = self.store.get_operator_fork_for_agent(str(operator.get("agent_id") or ""))
+        if fork is not None:
+            logical = str(fork.get("logical_operator_agent_id") or "").strip()
+            if logical:
+                return logical
         return str(operator["agent_id"])
 
     def local_codex_host_id(self) -> str:
         return os.getenv("AGENT_PBX_CODEX_HOST_ID", "").strip() or socket.gethostname()
+
+    def operator_tmux_session_name(self) -> str:
+        return (
+            os.getenv(OPERATOR_TMUX_SESSION_ENV, DEFAULT_OPERATOR_TMUX_SESSION).strip()
+            or DEFAULT_OPERATOR_TMUX_SESSION
+        )
 
     def _fork_blocked_reason(
         self,
