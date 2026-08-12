@@ -9238,7 +9238,10 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%43")
 
     async with app.run_test():
         app.agents = {
@@ -9247,6 +9250,7 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
                 "agent_type": "caller",
                 "project": "demo",
                 "status": "working",
+                "last_seen_at": 1.0,
                 "metadata": {
                     "cwd": str(Path.cwd()),
                     "codex_session_id": "session-caller-1",
@@ -9268,15 +9272,15 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     assert posts[1]["json"]["metadata"]["default_source_caller_agent_id"] == "caller-1"  # type: ignore[index]
     assert posts[1]["json"]["metadata"]["default_source_caller_project"] == "demo"  # type: ignore[index]
     assert posts[1]["json"]["metadata"]["default_source_codex_session_id"] == "session-caller-1"  # type: ignore[index]
+    assert posts[2]["path"] == "/v1/operator/forks/ensure"
     assert posts[2]["json"]["metadata"]["operator_role"] == "fork"  # type: ignore[index]
-    assert posts[3]["path"] == "/v1/operator/forks/ensure"
     assert launches[0]["window_name"] == "operator-0"
     assert launches[0]["command"] == "codex"
     assert launches[0]["env"]["AGENT_PBX_OPERATOR_ROLE"] == "root"
     assert launches[1]["cwd"] == str(Path.cwd())
     assert "codex fork session-caller-1" in launches[1]["command"]  # type: ignore[operator]
-    assert launches[1]["env"]["AGENT_PBX_OPERATOR_ID"] == posts[2]["json"]["agent_id"]  # type: ignore[index]
-    assert launches[1]["env"]["AGENT_PBX_AGENT_ID"] == posts[2]["json"]["agent_id"]  # type: ignore[index]
+    assert launches[1]["env"]["AGENT_PBX_OPERATOR_ID"] == posts[2]["json"]["fork_agent_id"]  # type: ignore[index]
+    assert launches[1]["env"]["AGENT_PBX_AGENT_ID"] == posts[2]["json"]["fork_agent_id"]  # type: ignore[index]
     assert launches[1]["env"]["AGENT_PBX_OPERATOR_ROLE"] == "fork"
     assert launches[1]["env"]["AGENT_PBX_LOGICAL_OPERATOR_ID"] == "operator-0"
     assert launches[1]["env"]["AGENT_PBX_SOURCE_CALLER_AGENT_ID"] == "caller-1"
@@ -12258,15 +12262,18 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
 
     def fake_launch_pane(**kwargs: object) -> str:
         launches.append(kwargs)
-        return "%77"
+        return "%dead" if len(launches) == 1 else "%77"
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
     app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
     app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", lambda *args, **kwargs: [])
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%77")
 
     async with app.run_test():
         app.agents = {
@@ -12294,8 +12301,8 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
         app.selected_agent_id = "operator-0"
         await app.start_review_operator_fork()
 
-    assert launches
-    launch = launches[0]
+    assert len(launches) == 2
+    launch = launches[-1]
     work_root = Path(str(launch["cwd"]))
     assert work_root.name == "operator-0-caller-1-review-1"
     assert not work_root.is_relative_to(source_cwd)
@@ -12324,6 +12331,7 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
     assert env["AGENT_PBX_OPERATOR_ACCESS_MODE"] == "review_readonly"
     assert env["AGENT_PBX_SOURCE_CWD"] == str(source_cwd)
     assert env["AGENT_PBX_OPERATOR_WORK_ROOT"] == str(work_root)
+    assert [post["path"] for post in posts] == ["/v1/operator/forks/ensure"]
     ensure_body = posts[-1]["json"]
     assert ensure_body["fork_track_id"] == "review-1"  # type: ignore[index]
     assert ensure_body["fork_purpose"] == "review"  # type: ignore[index]

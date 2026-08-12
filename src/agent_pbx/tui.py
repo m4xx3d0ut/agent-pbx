@@ -11767,21 +11767,6 @@ class AgentPBXTUI(App[None]):
             fork_metadata["review_mcp_approval_servers"] = list(
                 review_mcp_approval_servers
             )
-        register_response = await self.api_client().post(
-            "/v1/agents/register",
-            json={
-                "agent_id": fork_agent_id,
-                "project": str(caller.get("project") or "agent-pbx-operator"),
-                "name": fork_agent_id,
-                "agent_type": OPERATOR_AGENT_TYPE,
-                "metadata": fork_metadata,
-            },
-            headers=auth_headers(self.token),
-        )
-        register_response.raise_for_status()
-        fork_agent = register_response.json()
-        if isinstance(fork_agent, dict):
-            self.agents[fork_agent_id] = fork_agent
         bootstrap = self.operator_bootstrap_prompt(
             fork_agent_id,
             launch_cwd,
@@ -11810,11 +11795,11 @@ class AgentPBXTUI(App[None]):
                 else ()
             ),
         )
-        pane_id = await asyncio.to_thread(
-            tmux_support.launch_pane,
+        pane_id = await self.launch_restart_pane(
             session_name=session_name,
             window_name=fork_agent_id,
             command=command,
+            label=fork_agent_id,
             cwd=launch_cwd,
             env=self.operator_launch_env(
                 agent_id=fork_agent_id,
@@ -11836,14 +11821,6 @@ class AgentPBXTUI(App[None]):
         self.tmux_detached_agent_ids.discard(fork_agent_id)
         self.tmux_direct_agent_modes[fork_agent_id] = True
         fork_metadata["tmux_pane_id"] = pane_id
-        local_agent = self.agents.get(fork_agent_id)
-        if local_agent is not None:
-            metadata = (
-                local_agent.get("metadata")
-                if isinstance(local_agent.get("metadata"), dict)
-                else {}
-            )
-            local_agent["metadata"] = {**metadata, "tmux_pane_id": pane_id}
         fork = await self.record_operator_fork(
             logical_operator_id=logical_operator_id,
             source_caller_agent_id=source_caller_agent_id,
@@ -11856,6 +11833,8 @@ class AgentPBXTUI(App[None]):
             source_cwd=caller_cwd,
             work_root=launch_cwd,
         )
+        if isinstance(fork, dict):
+            self.agents[fork_agent_id] = self.operator_fork_record_agent(fork)
         self.notify(
             f"Started {resolved_purpose} fork {fork_agent_id} for {source_caller_agent_id}."
         )
