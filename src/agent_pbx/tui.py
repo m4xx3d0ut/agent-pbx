@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -93,6 +93,9 @@ REVIEW_OPERATOR_FORK_PURPOSE = "review"
 REVIEW_OPERATOR_FORK_ACCESS_MODE = "review_readonly"
 DEFAULT_OPERATOR_TMUX_SESSION = "agent-pbx-operators"
 CODEX_RESTART_WAIT_SECONDS = 5.0
+CODEX_RESTART_LAUNCH_ATTEMPTS = 3
+CODEX_RESTART_STABILIZE_SECONDS = 2.0
+CODEX_RESTART_RETRY_SECONDS = 1.0
 REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV = (
     "AGENT_PBX_TUI_REVIEW_MCP_APPROVAL_SERVERS"
 )
@@ -9335,6 +9338,46 @@ class AgentPBXTUI(App[None]):
             return False
         return True
 
+    async def launch_restart_pane(
+        self,
+        *,
+        session_name: str,
+        window_name: str,
+        command: str,
+        label: str,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> str:
+        failures: list[str] = []
+        attempts = max(1, CODEX_RESTART_LAUNCH_ATTEMPTS)
+        for attempt in range(1, attempts + 1):
+            try:
+                pane_id = await asyncio.to_thread(
+                    tmux_support.launch_pane,
+                    session_name=session_name,
+                    window_name=window_name,
+                    command=command,
+                    cwd=cwd,
+                    env=env,
+                )
+            except Exception as exc:
+                failures.append(str(exc))
+            else:
+                if CODEX_RESTART_STABILIZE_SECONDS > 0:
+                    await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
+                try:
+                    pane_alive = await asyncio.to_thread(tmux_support.pane_exists, pane_id)
+                except Exception as exc:
+                    failures.append(f"{pane_id} liveness check failed: {exc}")
+                else:
+                    if pane_alive:
+                        return pane_id
+                    failures.append(f"{pane_id} exited before Codex restart stabilized")
+            if attempt < attempts and CODEX_RESTART_RETRY_SECONDS > 0:
+                await asyncio.sleep(CODEX_RESTART_RETRY_SECONDS)
+        detail = "; ".join(failures[-3:]) or "replacement pane did not stay running"
+        raise RuntimeError(f"{label} relaunch failed after {attempts} attempt(s): {detail}")
+
     async def register_tmux_relaunched_caller(
         self,
         agent_id: str,
@@ -9417,11 +9460,11 @@ class AgentPBXTUI(App[None]):
         env = self.operator_launch_env(agent_id=agent_id, cwd=cwd, mcp_url=mcp_url)
         env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
         try:
-            new_pane_id = await asyncio.to_thread(
-                tmux_support.launch_pane,
+            new_pane_id = await self.launch_restart_pane(
                 session_name=session_name,
                 window_name=agent_id,
                 command=self.operator_resume_command(codex_command, target.session_id),
+                label=agent_id,
                 cwd=cwd,
                 env=env,
             )
@@ -9579,11 +9622,11 @@ class AgentPBXTUI(App[None]):
         if target is not None:
             env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
         try:
-            new_pane_id = await asyncio.to_thread(
-                tmux_support.launch_pane,
+            new_pane_id = await self.launch_restart_pane(
                 session_name=session_name,
                 window_name=agent_id,
                 command=command,
+                label=agent_id,
                 cwd=work_root,
                 env=env,
             )
@@ -9665,11 +9708,11 @@ class AgentPBXTUI(App[None]):
         if not await self.quit_or_kill_tmux_pane(pane.pane_id, label=agent_id):
             return False
         try:
-            new_pane_id = await asyncio.to_thread(
-                tmux_support.launch_pane,
+            new_pane_id = await self.launch_restart_pane(
                 session_name=pane.session_name,
                 window_name=pane.window_name or agent_id,
                 command=command,
+                label=agent_id,
                 cwd=cwd,
             )
         except Exception as exc:
