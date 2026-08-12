@@ -8,6 +8,11 @@ from pydantic import BaseModel, Field
 AgentType = Literal["caller", "operator"]
 CampaignDelivery = Literal["auto", "queue", "tmux"]
 CampaignStatus = Literal["running", "complete", "completed", "blocked", "failed", "canceled"]
+OperatorReviewEscalationRoute = Literal[
+    "primary_idle_edit_fork",
+    "root_operator",
+    "new_write_operator",
+]
 AssignmentState = Literal[
     "pending",
     "sent",
@@ -124,6 +129,8 @@ class ReportResponse(BaseModel):
 
 class OperatorAssignmentCreate(BaseModel):
     target_agent_id: str = Field(min_length=1, max_length=120)
+    operator_fork_id: str | None = Field(default=None, max_length=120)
+    fork_track_id: str | None = Field(default=None, max_length=80)
     title: str | None = Field(default=None, max_length=400)
     prompt: str = Field(min_length=1)
     criteria: list[str] = Field(default_factory=list)
@@ -142,6 +149,8 @@ class OperatorFollowupRequest(BaseModel):
     operator_agent_id: str = Field(min_length=1, max_length=120)
     target_agent_id: str = Field(min_length=1, max_length=120)
     message: str = Field(min_length=1)
+    operator_fork_id: str | None = Field(default=None, max_length=120)
+    fork_track_id: str | None = Field(default=None, max_length=80)
     assignment_id: str | None = Field(default=None, max_length=120)
     delivery: CampaignDelivery = "auto"
 
@@ -164,12 +173,27 @@ class OperatorForkEnsureRequest(BaseModel):
     operator_agent_id: str = Field(min_length=1, max_length=120)
     source_caller_agent_id: str = Field(min_length=1, max_length=120)
     fork_agent_id: str | None = Field(default=None, max_length=120)
+    fork_track_id: str | None = Field(default=None, max_length=80)
+    fork_purpose: str | None = Field(default=None, max_length=80)
+    access_mode: str | None = Field(default=None, max_length=80)
+    source_cwd: str | None = Field(default=None, max_length=1000)
+    work_root: str | None = Field(default=None, max_length=1000)
     campaign_id: str | None = Field(default=None, max_length=120)
     tmux_pane_id: str | None = Field(default=None, max_length=120)
     fork_codex_session_id: str | None = Field(default=None, max_length=120)
     status: str | None = Field(default=None, max_length=40)
     summary: str | None = Field(default=None, max_length=4000)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorReviewEscalationRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    review_fork_id: str = Field(min_length=1, max_length=120)
+    message: str = Field(min_length=1)
+    route: OperatorReviewEscalationRoute = "primary_idle_edit_fork"
+    campaign_id: str | None = Field(default=None, max_length=120)
+    assignment_id: str | None = Field(default=None, max_length=120)
+    delivery: CampaignDelivery = "auto"
 
 
 class OperatorForkEdgeCreateRequest(BaseModel):
@@ -196,6 +220,11 @@ class OperatorForkResponse(BaseModel):
     fork_agent_id: str
     source_caller_agent_id: str
     source_codex_session_id: str
+    fork_track_id: str = "default"
+    fork_purpose: str = "edit"
+    access_mode: str = "edit"
+    source_cwd: str | None = None
+    work_root: str | None = None
     fork_codex_session_id: str | None = None
     campaign_id: str | None = None
     cwd: str
@@ -235,6 +264,7 @@ class OperatorCampaignAssignmentResponse(BaseModel):
     campaign_id: str
     target_agent_id: str
     operator_fork_id: str | None = None
+    fork_track_id: str | None = None
     title: str
     prompt: str
     criteria: list[str]

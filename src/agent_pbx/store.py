@@ -16,7 +16,7 @@ from .schemas import (
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -26,6 +26,29 @@ STALE_WORKING_SECONDS = 600
 STALE_WORKING_STATUSES = {"running", "working"}
 OPERATOR_AGENT_TYPE = "operator"
 OPERATOR_ROLE_FORK = "fork"
+OPERATOR_TERMINAL_BASE_STATES = (
+    "complete",
+    "completed",
+    "blocked",
+    "failed",
+    "canceled",
+    "cancelled",
+    "superseded",
+)
+
+
+def _operator_active_state_sql(status_column: str, completed_column: str) -> str:
+    quoted_states = ", ".join(f"'{state}'" for state in OPERATOR_TERMINAL_BASE_STATES)
+    return f"""
+        {completed_column} IS NULL
+        AND lower({status_column}) NOT IN ({quoted_states})
+        AND lower({status_column}) NOT GLOB 'complete[_-]*'
+        AND lower({status_column}) NOT GLOB 'completed[_-]*'
+        AND lower({status_column}) NOT GLOB 'blocked[_-]*'
+        AND lower({status_column}) NOT GLOB 'failed[_-]*'
+        AND lower({status_column}) NOT GLOB 'canceled[_-]*'
+        AND lower({status_column}) NOT GLOB 'cancelled[_-]*'
+    """
 
 
 def _non_empty_string(value: Any) -> bool:
@@ -185,6 +208,7 @@ class Store:
                     campaign_id TEXT NOT NULL,
                     target_agent_id TEXT NOT NULL,
                     operator_fork_id TEXT,
+                    fork_track_id TEXT,
                     title TEXT NOT NULL,
                     prompt TEXT NOT NULL,
                     criteria_json TEXT NOT NULL DEFAULT '[]',
@@ -221,6 +245,11 @@ class Store:
                     fork_agent_id TEXT NOT NULL UNIQUE,
                     source_caller_agent_id TEXT NOT NULL,
                     source_codex_session_id TEXT NOT NULL,
+                    fork_track_id TEXT NOT NULL DEFAULT 'default',
+                    fork_purpose TEXT NOT NULL DEFAULT 'edit',
+                    access_mode TEXT NOT NULL DEFAULT 'edit',
+                    source_cwd TEXT,
+                    work_root TEXT,
                     fork_codex_session_id TEXT,
                     campaign_id TEXT,
                     cwd TEXT NOT NULL,
@@ -268,12 +297,6 @@ class Store:
                     ON operator_campaign_events(campaign_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_operator_events_assignment_created
                     ON operator_campaign_events(assignment_id, created_at DESC);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_forks_source_session
-                    ON operator_forks(
-                        logical_operator_agent_id,
-                        source_caller_agent_id,
-                        source_codex_session_id
-                    );
                 CREATE INDEX IF NOT EXISTS idx_operator_forks_logical_updated
                     ON operator_forks(logical_operator_agent_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_operator_forks_source_updated
@@ -321,6 +344,64 @@ class Store:
                 "operator_campaign_assignments",
                 "operator_fork_id",
                 "TEXT",
+            )
+            self._ensure_column(
+                conn,
+                "operator_campaign_assignments",
+                "fork_track_id",
+                "TEXT",
+            )
+            self._ensure_column(
+                conn,
+                "operator_forks",
+                "fork_track_id",
+                "TEXT NOT NULL DEFAULT 'default'",
+            )
+            self._ensure_column(
+                conn,
+                "operator_forks",
+                "fork_purpose",
+                "TEXT NOT NULL DEFAULT 'edit'",
+            )
+            self._ensure_column(
+                conn,
+                "operator_forks",
+                "access_mode",
+                "TEXT NOT NULL DEFAULT 'edit'",
+            )
+            self._ensure_column(conn, "operator_forks", "source_cwd", "TEXT")
+            self._ensure_column(conn, "operator_forks", "work_root", "TEXT")
+            conn.execute(
+                """
+                UPDATE operator_forks
+                SET fork_track_id = COALESCE(NULLIF(fork_track_id, ''), 'default'),
+                    fork_purpose = COALESCE(NULLIF(fork_purpose, ''), 'edit'),
+                    access_mode = COALESCE(NULLIF(access_mode, ''), 'edit'),
+                    source_cwd = COALESCE(NULLIF(source_cwd, ''), cwd),
+                    work_root = COALESCE(NULLIF(work_root, ''), cwd)
+                """
+            )
+            conn.execute("DROP INDEX IF EXISTS idx_operator_forks_source_session")
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_forks_source_session
+                    ON operator_forks(
+                        logical_operator_agent_id,
+                        source_caller_agent_id,
+                        source_codex_session_id,
+                        fork_track_id
+                    )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_operator_forks_track_updated
+                    ON operator_forks(
+                        logical_operator_agent_id,
+                        fork_track_id,
+                        updated_at DESC
+                    )
+                """
             )
             self._backfill_agent_type(conn)
             if previous_schema_version < 7:
@@ -1270,15 +1351,17 @@ class Store:
                 conn.execute(
                     """
                     INSERT INTO operator_campaign_assignments
-                        (assignment_id, campaign_id, target_agent_id, operator_fork_id, title,
-                         prompt, criteria_json, state, last_report_id,
+                        (assignment_id, campaign_id, target_agent_id, operator_fork_id,
+                         fork_track_id, title, prompt, criteria_json, state, last_report_id,
                          last_command_id, created_at, updated_at, completed_at)
-                    VALUES (?, ?, ?, NULL, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
                     """,
                     (
                         assignment_id,
                         campaign_id,
                         target_agent_id,
+                        assignment.get("operator_fork_id"),
+                        assignment.get("fork_track_id"),
                         assignment_title,
                         str(assignment["prompt"]),
                         json.dumps(assignment.get("criteria") or []),
@@ -1379,7 +1462,7 @@ class Store:
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         query = f"""
             SELECT assignment_id, campaign_id, target_agent_id, operator_fork_id,
-                   title, prompt,
+                   fork_track_id, title, prompt,
                    criteria_json, state, last_report_id, last_command_id,
                    created_at, updated_at, completed_at
             FROM operator_campaign_assignments
@@ -1400,7 +1483,7 @@ class Store:
             row = conn.execute(
                 """
                 SELECT assignment_id, campaign_id, target_agent_id, operator_fork_id,
-                       title, prompt,
+                       fork_track_id, title, prompt,
                        criteria_json, state, last_report_id, last_command_id,
                        created_at, updated_at, completed_at
                 FROM operator_campaign_assignments
@@ -1418,6 +1501,7 @@ class Store:
         last_report_id: str | None = None,
         last_command_id: str | None = None,
         operator_fork_id: str | None = None,
+        fork_track_id: str | None = None,
         complete: bool | None = None,
     ) -> dict[str, Any] | None:
         assignment = self.get_operator_campaign_assignment(assignment_id)
@@ -1439,6 +1523,7 @@ class Store:
                     last_report_id = COALESCE(?, last_report_id),
                     last_command_id = COALESCE(?, last_command_id),
                     operator_fork_id = COALESCE(?, operator_fork_id),
+                    fork_track_id = COALESCE(?, fork_track_id),
                     updated_at = ?,
                     completed_at = ?
                 WHERE assignment_id = ?
@@ -1448,6 +1533,7 @@ class Store:
                     last_report_id,
                     last_command_id,
                     operator_fork_id,
+                    fork_track_id,
                     current,
                     completed_at,
                     assignment_id,
@@ -1632,6 +1718,11 @@ class Store:
         source_caller_agent_id: str,
         source_codex_session_id: str,
         cwd: str,
+        fork_track_id: str = "default",
+        fork_purpose: str = "edit",
+        access_mode: str = "edit",
+        source_cwd: str | None = None,
+        work_root: str | None = None,
         fork_codex_session_id: str | None = None,
         campaign_id: str | None = None,
         codex_home: str | None = None,
@@ -1645,6 +1736,7 @@ class Store:
             logical_operator_agent_id=logical_operator_agent_id,
             source_caller_agent_id=source_caller_agent_id,
             source_codex_session_id=source_codex_session_id,
+            fork_track_id=fork_track_id,
         )
         if existing is not None:
             updated = self.update_operator_fork(
@@ -1653,6 +1745,10 @@ class Store:
                 fork_codex_session_id=fork_codex_session_id,
                 campaign_id=campaign_id,
                 cwd=cwd,
+                fork_purpose=fork_purpose,
+                access_mode=access_mode,
+                source_cwd=source_cwd,
+                work_root=work_root,
                 codex_home=codex_home,
                 codex_host_id=codex_host_id,
                 tmux_pane_id=tmux_pane_id,
@@ -1673,11 +1769,12 @@ class Store:
                 INSERT INTO operator_forks
                     (operator_fork_id, logical_operator_agent_id, fork_agent_id,
                      source_caller_agent_id, source_codex_session_id,
-                     fork_codex_session_id, campaign_id, cwd, codex_home,
+                     fork_track_id, fork_purpose, access_mode, source_cwd,
+                     work_root, fork_codex_session_id, campaign_id, cwd, codex_home,
                      codex_host_id, tmux_pane_id, status, summary,
                      metadata_json, created_at, updated_at, last_used_at,
                      completed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     operator_fork_id,
@@ -1685,6 +1782,11 @@ class Store:
                     fork_agent_id,
                     source_caller_agent_id,
                     source_codex_session_id,
+                    fork_track_id,
+                    fork_purpose,
+                    access_mode,
+                    source_cwd,
+                    work_root,
                     fork_codex_session_id,
                     campaign_id,
                     cwd,
@@ -1710,7 +1812,8 @@ class Store:
                 """
                 SELECT operator_fork_id, logical_operator_agent_id, fork_agent_id,
                        source_caller_agent_id, source_codex_session_id,
-                       fork_codex_session_id, campaign_id, cwd, codex_home,
+                       fork_track_id, fork_purpose, access_mode, source_cwd,
+                       work_root, fork_codex_session_id, campaign_id, cwd, codex_home,
                        codex_host_id, tmux_pane_id, status, summary,
                        metadata_json, created_at, updated_at, last_used_at,
                        completed_at
@@ -1727,13 +1830,15 @@ class Store:
         logical_operator_agent_id: str,
         source_caller_agent_id: str,
         source_codex_session_id: str,
+        fork_track_id: str = "default",
     ) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
                 """
                 SELECT operator_fork_id, logical_operator_agent_id, fork_agent_id,
                        source_caller_agent_id, source_codex_session_id,
-                       fork_codex_session_id, campaign_id, cwd, codex_home,
+                       fork_track_id, fork_purpose, access_mode, source_cwd,
+                       work_root, fork_codex_session_id, campaign_id, cwd, codex_home,
                        codex_host_id, tmux_pane_id, status, summary,
                        metadata_json, created_at, updated_at, last_used_at,
                        completed_at
@@ -1741,6 +1846,7 @@ class Store:
                 WHERE logical_operator_agent_id = ?
                   AND source_caller_agent_id = ?
                   AND source_codex_session_id = ?
+                  AND fork_track_id = ?
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
@@ -1748,6 +1854,7 @@ class Store:
                     logical_operator_agent_id,
                     source_caller_agent_id,
                     source_codex_session_id,
+                    fork_track_id,
                 ),
             ).fetchone()
         return self._operator_fork_from_row(row) if row else None
@@ -1758,7 +1865,8 @@ class Store:
                 """
                 SELECT operator_fork_id, logical_operator_agent_id, fork_agent_id,
                        source_caller_agent_id, source_codex_session_id,
-                       fork_codex_session_id, campaign_id, cwd, codex_home,
+                       fork_track_id, fork_purpose, access_mode, source_cwd,
+                       work_root, fork_codex_session_id, campaign_id, cwd, codex_home,
                        codex_host_id, tmux_pane_id, status, summary,
                        metadata_json, created_at, updated_at, last_used_at,
                        completed_at
@@ -1776,6 +1884,7 @@ class Store:
         *,
         logical_operator_agent_id: str | None = None,
         source_caller_agent_id: str | None = None,
+        fork_track_id: str | None = None,
         campaign_id: str | None = None,
         status: str | None = None,
         limit: int = 100,
@@ -1790,6 +1899,9 @@ class Store:
         if source_caller_agent_id:
             where.append("source_caller_agent_id = ?")
             params.append(source_caller_agent_id)
+        if fork_track_id:
+            where.append("fork_track_id = ?")
+            params.append(fork_track_id)
         if campaign_id:
             where.append("campaign_id = ?")
             params.append(campaign_id)
@@ -1800,7 +1912,8 @@ class Store:
         query = f"""
             SELECT operator_fork_id, logical_operator_agent_id, fork_agent_id,
                    source_caller_agent_id, source_codex_session_id,
-                   fork_codex_session_id, campaign_id, cwd, codex_home,
+                   fork_track_id, fork_purpose, access_mode, source_cwd,
+                   work_root, fork_codex_session_id, campaign_id, cwd, codex_home,
                    codex_host_id, tmux_pane_id, status, summary,
                    metadata_json, created_at, updated_at, last_used_at,
                    completed_at
@@ -1828,6 +1941,10 @@ class Store:
         fork_codex_session_id: str | None = None,
         campaign_id: str | None = None,
         cwd: str | None = None,
+        fork_purpose: str | None = None,
+        access_mode: str | None = None,
+        source_cwd: str | None = None,
+        work_root: str | None = None,
         codex_home: str | None = None,
         codex_host_id: str | None = None,
         tmux_pane_id: str | None = None,
@@ -1859,6 +1976,10 @@ class Store:
                     fork_codex_session_id = COALESCE(?, fork_codex_session_id),
                     campaign_id = COALESCE(?, campaign_id),
                     cwd = COALESCE(?, cwd),
+                    fork_purpose = COALESCE(?, fork_purpose),
+                    access_mode = COALESCE(?, access_mode),
+                    source_cwd = COALESCE(?, source_cwd),
+                    work_root = COALESCE(?, work_root),
                     codex_home = COALESCE(?, codex_home),
                     codex_host_id = COALESCE(?, codex_host_id),
                     tmux_pane_id = COALESCE(?, tmux_pane_id),
@@ -1875,6 +1996,10 @@ class Store:
                     fork_codex_session_id,
                     campaign_id,
                     cwd,
+                    fork_purpose,
+                    access_mode,
+                    source_cwd,
+                    work_root,
                     codex_home,
                     codex_host_id,
                     tmux_pane_id,
@@ -2135,7 +2260,8 @@ class Store:
         return """
             SELECT operator_fork_id, logical_operator_agent_id, fork_agent_id,
                    source_caller_agent_id, source_codex_session_id,
-                   fork_codex_session_id, campaign_id, cwd, codex_home,
+                   fork_track_id, fork_purpose, access_mode, source_cwd,
+                   work_root, fork_codex_session_id, campaign_id, cwd, codex_home,
                    codex_host_id, tmux_pane_id, status, summary,
                    metadata_json, created_at, updated_at, last_used_at,
                    completed_at
@@ -2201,10 +2327,15 @@ class Store:
                 "logical_operator_id": str(row["logical_operator_agent_id"]),
                 "source_caller_agent_id": str(row["source_caller_agent_id"]),
                 "source_codex_session_id": str(row["source_codex_session_id"]),
+                "fork_track_id": str(row["fork_track_id"] or "default"),
+                "fork_purpose": str(row["fork_purpose"] or "edit"),
+                "access_mode": str(row["access_mode"] or "edit"),
                 "cwd": str(row["cwd"]),
             }
         )
         optional_keys = (
+            "source_cwd",
+            "work_root",
             "fork_codex_session_id",
             "codex_home",
             "codex_host_id",
@@ -2330,24 +2461,30 @@ class Store:
     ) -> None:
         agent_id = agent["agent_id"]
         if agent.get("agent_type") == "operator":
+            active_status_filter = _operator_active_state_sql(
+                "status",
+                "completed_at",
+            )
             row = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS active_count
                 FROM operator_campaigns
                 WHERE operator_agent_id = ?
-                  AND status NOT IN ('complete', 'completed', 'blocked',
-                                     'failed', 'canceled')
+                  AND {active_status_filter}
                 """,
                 (agent_id,),
             ).fetchone()
         else:
+            active_state_filter = _operator_active_state_sql(
+                "state",
+                "completed_at",
+            )
             row = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS active_count
                 FROM operator_campaign_assignments
                 WHERE target_agent_id = ?
-                  AND state NOT IN ('complete', 'completed', 'blocked',
-                                    'failed', 'canceled')
+                  AND {active_state_filter}
                 """,
                 (agent_id,),
             ).fetchone()

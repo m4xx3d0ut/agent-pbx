@@ -52,6 +52,7 @@ def test_operator_runbook_requires_visible_pbx_forks() -> None:
 
     assert "Agent PBX forked operator session" in delivery
     assert "visible tmux/Codex pane" in delivery
+    assert "must not implement caller repo changes directly" in delivery
     assert "Do not spawn or use Codex internal subagents" in delivery
     assert "multi_agent_v1" in delivery
 
@@ -125,6 +126,51 @@ def test_operator_campaign_queue_delivery_and_state(tmp_path: Path) -> None:
     assert report is not None
     assert report["metadata"]["campaign_id"] == campaign["campaign_id"]
     assert report["metadata"]["completion_state"] == "complete"
+
+
+def test_operator_custom_terminal_states_do_not_count_active(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        status="running",
+        metadata={"pbx_mode": "nohup"},
+    )
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Custom terminal state",
+        objective="Finish with a caveated status.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Continue."}],
+        delivery="queue",
+    )
+    assignment = campaign["assignments"][0]
+
+    updated_assignment = service.report_assignment(
+        operator_agent_id="operator-0",
+        campaign_id=campaign["campaign_id"],
+        assignment_id=assignment["assignment_id"],
+        state="complete_with_caveats",
+        summary="Done with caveats",
+        detail="Validation passed with a documented caveat.",
+    )
+    updated_campaign = service.finish_campaign(
+        operator_agent_id="operator-0",
+        campaign_id=campaign["campaign_id"],
+        status="complete_readiness_partial",
+        summary="Campaign complete with partial readiness.",
+        detail="All known action items are terminal.",
+    )
+
+    agents = {agent["agent_id"]: agent for agent in store.list_agents()}
+    assert updated_assignment["completed_at"] is not None
+    assert updated_campaign["completed_at"] is not None
+    assert agents["caller-1"]["active_campaign_count"] == 0
+    assert agents["operator-0"]["active_campaign_count"] == 0
 
 
 def test_operator_campaign_tmux_delivery_records_sent_command(
@@ -633,6 +679,159 @@ def test_operator_campaign_tmux_delivery_prefers_fork_window_over_caller_pane(
     assert command is not None
     assert command["agent_id"] == "operator-0-fork-caller-1"
     assert command["payload"]["tmux_pane_id"] == "%2"
+
+
+def test_operator_allows_default_and_review_forks_for_same_source_session(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+
+    default = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        status="running",
+        metadata={"pbx_mode": "nohup"},
+    )
+    review = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1-review-1",
+        fork_track_id="review-1",
+        fork_purpose="review",
+        access_mode="review_readonly",
+        work_root=str(tmp_path / "review"),
+        status="running",
+        metadata={"pbx_mode": "nohup"},
+    )
+
+    assert default["operator_fork_id"] != review["operator_fork_id"]
+    assert default["fork_track_id"] == "default"
+    assert default["fork_purpose"] == "edit"
+    assert review["fork_track_id"] == "review-1"
+    assert review["fork_purpose"] == "review"
+    assert review["access_mode"] == "review_readonly"
+    assert review["work_root"] == str(tmp_path / "review")
+    assert (
+        service.default_fork_agent_id("operator-0", "caller-1", "session-caller-1")
+        == "operator-0-fork-caller-1-86e61603"
+    )
+    review_forks = service.list_forks(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_track_id="review-1",
+    )
+    assert [fork["operator_fork_id"] for fork in review_forks] == [
+        review["operator_fork_id"]
+    ]
+
+
+def test_operator_campaign_can_dispatch_to_explicit_review_fork(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        status="running",
+        metadata={"pbx_mode": "nohup"},
+    )
+    review = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1-review-1",
+        fork_track_id="review-1",
+        fork_purpose="review",
+        access_mode="review_readonly",
+        work_root=str(tmp_path / "review"),
+        status="running",
+        metadata={"pbx_mode": "nohup"},
+    )
+
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Parallel review",
+        objective="Review without touching source.",
+        criteria=["Findings reported"],
+        assignments=[
+            {
+                "target_agent_id": "caller-1",
+                "operator_fork_id": review["operator_fork_id"],
+                "fork_track_id": "review-1",
+                "prompt": "Review the diff.",
+            }
+        ],
+        delivery="queue",
+    )
+
+    assignment = campaign["assignments"][0]
+    command = store.get_command(assignment["last_command_id"])
+
+    assert assignment["operator_fork_id"] == review["operator_fork_id"]
+    assert assignment["fork_track_id"] == "review-1"
+    assert command is not None
+    assert command["agent_id"] == "operator-0-fork-caller-1-review-1"
+    assert command["payload"]["operator_fork_id"] == review["operator_fork_id"]
+    assert command["payload"]["fork_track_id"] == "review-1"
+    assert command["payload"]["fork_purpose"] == "review"
+    assert command["payload"]["access_mode"] == "review_readonly"
+
+
+def test_operator_review_escalation_routes_to_idle_default_edit_fork(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    default = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        status="running",
+        metadata={"pbx_mode": "nohup"},
+    )
+    review = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1-review-1",
+        fork_track_id="review-1",
+        fork_purpose="review",
+        access_mode="review_readonly",
+        work_root=str(tmp_path / "review"),
+        status="running",
+        metadata={"pbx_mode": "nohup"},
+    )
+
+    command = service.route_review_escalation(
+        operator_agent_id="operator-0",
+        review_fork_id=review["operator_fork_id"],
+        message="Apply this small fix in the source tree.",
+        delivery="queue",
+    )
+
+    assert command["agent_id"] == "operator-0-fork-caller-1"
+    assert command["payload"]["operator_fork_id"] == default["operator_fork_id"]
+    assert command["payload"]["fork_track_id"] == "default"
+    assert command["payload"]["source"] == "operator_review_escalation"
+    assert (
+        "Review fork: operator-0-fork-caller-1-review-1"
+        in command["payload"]["message"]
+    )
+    events = [
+        event
+        for event in store.list_events(limit=20)
+        if event["type"] == "operator_review_escalation"
+    ]
+    assert events
+    assert events[-1]["payload"]["route"] == "primary_idle_edit_fork"
 
 
 def test_operator_campaign_tmux_delivery_survives_drifted_fork_metadata(

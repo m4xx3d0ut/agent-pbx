@@ -314,6 +314,12 @@ report. Use `Copy Note (C)`, `Shift+C`, or `/campaign copy` to write the
 selected campaign detail, including loaded generated reports, to a new Joplin
 note when Joplin is configured.
 
+The Operators pane keeps root operators and their fork sessions together. Use
+`Review W`, press `W`, or run `/operator fork review` with a root operator or
+its caller-scoped fork selected to create a read-only review fork in the
+configured scratch work root. Use `Prev F6` and `Next F7` to cycle the visible
+fork pane for the selected logical operator.
+
 ## Planned Local Validation
 
 WorkerBee is used to rebuild and run the containerized MCP/API service with simulated agents and clients. Repository-owned WorkerBee manifests live under `ops/workerbee/`.
@@ -358,7 +364,7 @@ Agent PBX API results.
 ```bash
 export AGENT_PBX_PR_ENABLED=1
 export AGENT_PBX_GH_BIN=gh
-export AGENT_PBX_PR_ALLOWED_REPOS=m4xx3d0ut/agent-pbx,m4xx3d0ut/content-tools-studio
+export AGENT_PBX_PR_ALLOWED_REPOS=m4xx3d0ut/agent-pbx,the-cm-collective/k1s-private,the-cm-collective/k1s-workerbee-private
 # Optional, only when gh cannot infer the intended GitHub repository.
 export AGENT_PBX_GITHUB_REMOTE=upstream
 # Optional, only when GitHub access needs a specific SSH identity.
@@ -680,6 +686,7 @@ restore it without waiting for the agent to reconnect.
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/tmux`, `/workerbee`,
 `/campaigns`, `/campaign report`, `/campaign copy`,
+`/operator fork prev`, `/operator fork next`, `/operator fork review`,
 `/pr`, `/pr refresh`, `/pr review`, `/pr validate`, `/pr url`, `/pr merge`,
 `/issue`, `/issue refresh`, `/issue mitigate`, `/issue url`, `/issue clear`,
 configured `/joplin`, `/joplin new`, `/joplin rename`, `/joplin delete`,

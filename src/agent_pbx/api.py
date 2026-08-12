@@ -85,6 +85,7 @@ from .schemas import (
     OperatorForkListResponse,
     OperatorForkResponse,
     OperatorFollowupRequest,
+    OperatorReviewEscalationRequest,
     OperatorAssignmentReportRequest,
     IssueActionRequest,
     IssueActionResponse,
@@ -1285,6 +1286,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         request: Request,
         operator_agent_id: str | None = None,
         source_caller_agent_id: str | None = None,
+        fork_track_id: str | None = None,
         campaign_id: str | None = None,
         status: str | None = None,
         limit: int = 100,
@@ -1294,6 +1296,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             operator_service.list_forks,
             operator_agent_id=operator_agent_id,
             source_caller_agent_id=source_caller_agent_id,
+            fork_track_id=fork_track_id,
             campaign_id=campaign_id,
             status=status,
             limit=limit,
@@ -1315,6 +1318,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             operator_agent_id=payload.operator_agent_id,
             source_caller_agent_id=payload.source_caller_agent_id,
             fork_agent_id=payload.fork_agent_id,
+            fork_track_id=payload.fork_track_id,
+            fork_purpose=payload.fork_purpose,
+            access_mode=payload.access_mode,
+            source_cwd=payload.source_cwd,
+            work_root=payload.work_root,
             campaign_id=payload.campaign_id,
             tmux_pane_id=payload.tmux_pane_id,
             fork_codex_session_id=payload.fork_codex_session_id,
@@ -1401,6 +1409,29 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             campaign_id=campaign_id,
             target_agent_id=payload.target_agent_id,
             message=payload.message,
+            assignment_id=payload.assignment_id,
+            operator_fork_id=payload.operator_fork_id,
+            fork_track_id=payload.fork_track_id,
+            delivery=payload.delivery,
+        )
+
+    @app.post(
+        "/v1/operator/review/escalations",
+        response_model=CommandResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def route_operator_review_escalation(
+        payload: OperatorReviewEscalationRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.route_review_escalation,
+            operator_agent_id=payload.operator_agent_id,
+            review_fork_id=payload.review_fork_id,
+            message=payload.message,
+            route=payload.route,
+            campaign_id=payload.campaign_id,
             assignment_id=payload.assignment_id,
             delivery=payload.delivery,
         )

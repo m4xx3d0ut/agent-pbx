@@ -71,6 +71,7 @@ def build_mcp_server(
     def pbx_operator_list_forks(
         operator_agent_id: str | None = None,
         source_caller_agent_id: str | None = None,
+        fork_track_id: str | None = None,
         campaign_id: str | None = None,
         status: str | None = None,
         limit: int = 100,
@@ -79,6 +80,7 @@ def build_mcp_server(
         return operator_service.list_forks(
             operator_agent_id=operator_agent_id,
             source_caller_agent_id=source_caller_agent_id,
+            fork_track_id=fork_track_id,
             campaign_id=campaign_id,
             status=status,
             limit=limit,
@@ -89,6 +91,11 @@ def build_mcp_server(
         operator_agent_id: str,
         source_caller_agent_id: str,
         fork_agent_id: str | None = None,
+        fork_track_id: str | None = None,
+        fork_purpose: str | None = None,
+        access_mode: str | None = None,
+        source_cwd: str | None = None,
+        work_root: str | None = None,
         campaign_id: str | None = None,
         tmux_pane_id: str | None = None,
         fork_codex_session_id: str | None = None,
@@ -101,6 +108,11 @@ def build_mcp_server(
             operator_agent_id=operator_agent_id,
             source_caller_agent_id=source_caller_agent_id,
             fork_agent_id=fork_agent_id,
+            fork_track_id=fork_track_id,
+            fork_purpose=fork_purpose,
+            access_mode=access_mode,
+            source_cwd=source_cwd,
+            work_root=work_root,
             campaign_id=campaign_id,
             tmux_pane_id=tmux_pane_id,
             fork_codex_session_id=fork_codex_session_id,
@@ -263,6 +275,8 @@ def build_mcp_server(
         target_agent_id: str,
         message: str,
         assignment_id: str | None = None,
+        operator_fork_id: str | None = None,
+        fork_track_id: str | None = None,
         delivery: str = "auto",
     ) -> dict[str, Any]:
         """Send a tracked campaign follow-up to a caller agent."""
@@ -271,6 +285,29 @@ def build_mcp_server(
             campaign_id=campaign_id,
             target_agent_id=target_agent_id,
             message=message,
+            assignment_id=assignment_id,
+            operator_fork_id=operator_fork_id,
+            fork_track_id=fork_track_id,
+            delivery=delivery,
+        )
+
+    @mcp.tool()
+    def pbx_operator_route_review_escalation(
+        operator_agent_id: str,
+        review_fork_id: str,
+        message: str,
+        route: str = "primary_idle_edit_fork",
+        campaign_id: str | None = None,
+        assignment_id: str | None = None,
+        delivery: str = "auto",
+    ) -> dict[str, Any]:
+        """Route a review-fork edit escalation through the root operator or edit fork."""
+        return operator_service.route_review_escalation(
+            operator_agent_id=operator_agent_id,
+            review_fork_id=review_fork_id,
+            message=message,
+            route=route,
+            campaign_id=campaign_id,
             assignment_id=assignment_id,
             delivery=delivery,
         )
