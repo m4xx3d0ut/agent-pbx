@@ -22,6 +22,7 @@ from agent_pbx.tui import (
     agent_pbx_mcp_url,
     built_in_palette_command_names,
     codex_mcp_add_command,
+    review_operator_config_overrides,
     review_operator_mcp_config_overrides,
     configure_codex_mcp,
     codex_native_plan_selector_indices,
@@ -35,6 +36,7 @@ from agent_pbx.tui import (
     git_push_passthrough_command,
     is_local_server_url,
     is_follow_up_newline_key,
+    load_codex_mcp_server_configs,
     load_custom_slash_commands,
     operator_panel_height,
     parse_git_push_slash_command,
@@ -8976,12 +8978,24 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
         for index, item in enumerate(argv)
         if item == "-c"
     ]
-    assert (
-        'mcp_servers."agent-pbx".default_tools_approval_mode="approve"'
-        in config_overrides
+    agent_pbx_override = next(
+        item
+        for item in config_overrides
+        if item.startswith("mcp_servers.agent-pbx=")
     )
+    workerbee_override = next(
+        item
+        for item in config_overrides
+        if item.startswith("mcp_servers.workerbee=")
+    )
+    assert 'url = "http://127.0.0.1:8765/mcp"' in agent_pbx_override
+    assert 'bearer_token_env_var = "AGENT_PBX_TOKEN"' in agent_pbx_override
+    assert 'default_tools_approval_mode = "approve"' in agent_pbx_override
+    assert "url = " in workerbee_override
+    assert 'default_tools_approval_mode = "approve"' in workerbee_override
     assert (
-        'mcp_servers."workerbee".default_tools_approval_mode="approve"'
+        f"projects={{{json.dumps(str(work_root.resolve()))} = "
+        '{trust_level = "trusted"}}'
         in config_overrides
     )
     assert argv[-1] == "fork-session"
@@ -9504,6 +9518,62 @@ async def test_tui_agent_jump_sequence_opens_latest_by_visible_row() -> None:
 
     assert loaded == ["agent-8", "agent-1"]
     assert threads == ["agent-8", "agent-1"]
+
+
+async def test_tui_operator_fork_record_agent_renders_before_agent_refresh() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    fork_agent = app.operator_fork_record_agent(
+        {
+            "operator_fork_id": "fork-1",
+            "logical_operator_agent_id": "operator-0",
+            "fork_agent_id": "operator-0-fork-caller-review-2",
+            "source_caller_agent_id": "caller-1",
+            "source_codex_session_id": "source-session",
+            "fork_track_id": "review-2",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+            "cwd": "/tmp/review",
+            "work_root": "/tmp/review",
+            "tmux_pane_id": "%77",
+            "status": "running",
+            "created_at": 100.0,
+            "updated_at": 101.0,
+            "last_used_at": 102.0,
+            "metadata": {
+                "operator_role": "fork",
+                "source_caller_project": "agent-pbx",
+            },
+        }
+    )
+
+    assert fork_agent["last_seen_at"] == 102.0
+    assert fork_agent["created_at"] == 100.0
+    assert fork_agent["pbx_active"] is True
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "online",
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+                "last_seen_at": 123.0,
+            },
+            "operator-0-fork-caller-review-2": fork_agent,
+        }
+        app.render_agents()
+        operator_table = app.query_one("#operators", DataTable)
+        rendered = [
+            cell.plain if isinstance(cell, Text) else str(cell)
+            for cell in operator_table.get_row("operator-0-fork-caller-review-2")
+        ]
+
+    assert "operator-0-fork-caller-review-2" in rendered
+    assert "102" in rendered
 
 
 async def test_tui_agent_jump_sequence_opens_compact_agent_view() -> None:
@@ -12081,7 +12151,7 @@ def test_tui_operator_fork_command_supports_config_overrides() -> None:
         "source-session",
         "review prompt",
         config_overrides=[
-            'mcp_servers."agent-pbx".default_tools_approval_mode="approve"',
+            'mcp_servers.agent-pbx.default_tools_approval_mode="approve"',
         ],
     )
 
@@ -12090,7 +12160,7 @@ def test_tui_operator_fork_command_supports_config_overrides() -> None:
     assert argv[-2:] == ["source-session", "review prompt"]
     assert "-c" in argv
     assert (
-        'mcp_servers."agent-pbx".default_tools_approval_mode="approve"'
+        'mcp_servers.agent-pbx.default_tools_approval_mode="approve"'
         in argv
     )
 
@@ -12104,7 +12174,7 @@ def test_tui_operator_resume_command_supports_restart_options() -> None:
         cd="/tmp/work",
         sandbox="workspace-write",
         config_overrides=[
-            'mcp_servers."agent-pbx".default_tools_approval_mode="approve"',
+            'mcp_servers.agent-pbx.default_tools_approval_mode="approve"',
         ],
     )
 
@@ -12136,30 +12206,77 @@ def test_tui_codex_command_from_start_command_preserves_flags() -> None:
 
 
 def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> None:
-    overrides = review_operator_mcp_config_overrides(("agent-pbx", "workerbee"))
+    overrides = review_operator_mcp_config_overrides(
+        ("agent-pbx", "workerbee"),
+        mcp_url="http://127.0.0.1:8767/mcp",
+        server_configs={"workerbee": {"url": "http://127.0.0.1:8765/mcp"}},
+    )
 
-    assert (
-        'mcp_servers."agent-pbx".default_tools_approval_mode="approve"'
-        in overrides
-    )
-    assert 'mcp_servers."workerbee".default_tools_approval_mode="approve"' in overrides
-    agent_pbx_tools = next(
+    agent_pbx_config = next(
         item
         for item in overrides
-        if item.startswith('mcp_servers."agent-pbx".enabled_tools=')
+        if item.startswith("mcp_servers.agent-pbx=")
     )
-    workerbee_tools = next(
+    workerbee_config = next(
         item
         for item in overrides
-        if item.startswith('mcp_servers."workerbee".enabled_tools=')
+        if item.startswith("mcp_servers.workerbee=")
     )
-    assert "pbx_register_agent" in agent_pbx_tools
-    assert "pbx_report_turn" in agent_pbx_tools
-    assert "pbx_queue_command" not in agent_pbx_tools
-    assert "workerbee_v1_project_status" in workerbee_tools
-    assert "workerbee_v1_logs" in workerbee_tools
-    assert "workerbee_v1_workload_restart" not in workerbee_tools
-    assert "workerbee_v1_exec" not in workerbee_tools
+    assert 'url = "http://127.0.0.1:8767/mcp"' in agent_pbx_config
+    assert 'bearer_token_env_var = "AGENT_PBX_TOKEN"' in agent_pbx_config
+    assert 'default_tools_approval_mode = "approve"' in agent_pbx_config
+    assert "pbx_register_agent" in agent_pbx_config
+    assert "pbx_report_turn" in agent_pbx_config
+    assert "pbx_queue_command" not in agent_pbx_config
+    assert 'url = "http://127.0.0.1:8765/mcp"' in workerbee_config
+    assert 'default_tools_approval_mode = "approve"' in workerbee_config
+    assert "workerbee_v1_project_status" in workerbee_config
+    assert "workerbee_v1_logs" in workerbee_config
+    assert "workerbee_v1_workload_restart" not in workerbee_config
+    assert "workerbee_v1_exec" not in workerbee_config
+    assert not any(".enabled_tools=" in item for item in overrides)
+
+
+def test_tui_review_operator_config_overrides_trusts_scratch_work_root() -> None:
+    overrides = review_operator_config_overrides(
+        ("agent-pbx",),
+        mcp_url="http://127.0.0.1:8767/mcp",
+        work_root="/tmp/review root",
+    )
+
+    assert 'projects={"/tmp/review root" = {trust_level = "trusted"}}' in overrides
+    assert any(item.startswith("mcp_servers.agent-pbx=") for item in overrides)
+
+
+def test_tui_loads_codex_mcp_server_transport_config(tmp_path: Path) -> None:
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        "\n".join(
+            [
+                "[mcp_servers.workerbee]",
+                'url = "http://127.0.0.1:18765/mcp"',
+                "",
+                '[mcp_servers."agent-pbx"]',
+                'url = "http://127.0.0.1:18767/mcp"',
+                'bearer_token_env_var = "AGENT_PBX_TOKEN"',
+                "",
+                "[other]",
+                'url = "http://127.0.0.1:9999/mcp"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    configs = load_codex_mcp_server_configs(codex_home, ("agent-pbx", "workerbee"))
+
+    assert configs == {
+        "agent-pbx": {
+            "url": "http://127.0.0.1:18767/mcp",
+            "bearer_token_env_var": "AGENT_PBX_TOKEN",
+        },
+        "workerbee": {"url": "http://127.0.0.1:18765/mcp"},
+    }
 
 
 async def test_tui_start_review_operator_fork_uses_scratch_work_root(
@@ -12316,12 +12433,24 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
         for index, item in enumerate(argv)
         if item == "-c"
     ]
-    assert (
-        'mcp_servers."agent-pbx".default_tools_approval_mode="approve"'
-        in config_overrides
+    agent_pbx_override = next(
+        item
+        for item in config_overrides
+        if item.startswith("mcp_servers.agent-pbx=")
     )
+    workerbee_override = next(
+        item
+        for item in config_overrides
+        if item.startswith("mcp_servers.workerbee=")
+    )
+    assert 'url = "http://127.0.0.1:8765/mcp"' in agent_pbx_override
+    assert 'bearer_token_env_var = "AGENT_PBX_TOKEN"' in agent_pbx_override
+    assert 'default_tools_approval_mode = "approve"' in agent_pbx_override
+    assert "url = " in workerbee_override
+    assert 'default_tools_approval_mode = "approve"' in workerbee_override
     assert (
-        'mcp_servers."workerbee".default_tools_approval_mode="approve"'
+        f"projects={{{json.dumps(str(work_root.resolve()))} = "
+        '{trust_level = "trusted"}}'
         in config_overrides
     )
     env = launch["env"]

@@ -100,6 +100,16 @@ REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV = (
     "AGENT_PBX_TUI_REVIEW_MCP_APPROVAL_SERVERS"
 )
 DEFAULT_REVIEW_OPERATOR_MCP_APPROVAL_SERVERS = ("agent-pbx",)
+DEFAULT_REVIEW_OPERATOR_MCP_SERVER_CONFIGS = {
+    "workerbee": {"url": "http://127.0.0.1:8765/mcp"},
+}
+CODEX_MCP_SERVER_TRANSPORT_KEYS = (
+    "url",
+    "bearer_token_env_var",
+    "command",
+    "args",
+    "env",
+)
 REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_register_agent",
     "pbx_report_turn",
@@ -831,12 +841,144 @@ def codex_mcp_remove_command(codex_command: str) -> list[str]:
     return [*codex_command_argv(codex_command), "mcp", "remove", "agent-pbx"]
 
 
+def toml_key(value: str) -> str:
+    if re.match(r"^[A-Za-z0-9_-]+$", value):
+        return value
+    return json.dumps(value)
+
+
 def codex_config_mcp_key(server_name: str, setting: str) -> str:
-    return f"mcp_servers.{json.dumps(server_name)}.{setting}"
+    return f"mcp_servers.{toml_key(server_name)}.{setting}"
+
+
+def toml_literal(value: object) -> str:
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+    if isinstance(value, Mapping):
+        return (
+            "{"
+            + ", ".join(
+                f"{toml_key(str(key))} = {toml_literal(item)}"
+                for key, item in value.items()
+            )
+            + "}"
+        )
+    if isinstance(value, Iterable):
+        return "[" + ", ".join(toml_literal(item) for item in value) + "]"
+    return json.dumps(value)
 
 
 def codex_config_override(key: str, value: object) -> str:
-    return f"{key}={json.dumps(value)}"
+    return f"{key}={toml_literal(value)}"
+
+
+def codex_project_trust_config_override(cwd: str | None) -> str | None:
+    path = str(cwd or "").strip()
+    if not path:
+        return None
+    try:
+        resolved = str(Path(path).expanduser().resolve())
+    except OSError:
+        resolved = str(Path(path).expanduser())
+    return codex_config_override(
+        "projects",
+        {resolved: {"trust_level": "trusted"}},
+    )
+
+
+def parse_codex_config_string_value(raw_value: str) -> str | None:
+    value = raw_value.strip()
+    if len(value) < 2:
+        return None
+    if value[0] == value[-1] == '"':
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value[1:-1]
+        return parsed if isinstance(parsed, str) else None
+    if value[0] == value[-1] == "'":
+        return value[1:-1]
+    return None
+
+
+def parse_codex_config_string_array(raw_value: str) -> list[str] | None:
+    value = raw_value.strip()
+    if not value.startswith("[") or not value.endswith("]"):
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    items = [item for item in parsed if isinstance(item, str)]
+    return items if len(items) == len(parsed) else None
+
+
+def parse_codex_config_simple_value(raw_value: str) -> object | None:
+    value = raw_value.strip()
+    parsed_string = parse_codex_config_string_value(value)
+    if parsed_string is not None:
+        return parsed_string
+    parsed_array = parse_codex_config_string_array(value)
+    if parsed_array is not None:
+        return parsed_array
+    return None
+
+
+def codex_mcp_server_header_name(line: str) -> str | None:
+    match = re.match(r"^\s*\[mcp_servers\.(?P<name>.+)]\s*(?:#.*)?$", line)
+    if not match:
+        return None
+    raw_name = match.group("name").strip()
+    if raw_name.startswith('"') and raw_name.endswith('"'):
+        try:
+            parsed = json.loads(raw_name)
+        except json.JSONDecodeError:
+            return raw_name[1:-1]
+        return parsed if isinstance(parsed, str) else None
+    return raw_name
+
+
+def load_codex_mcp_server_configs(
+    codex_home: Path | None,
+    server_names: Iterable[str],
+) -> dict[str, dict[str, object]]:
+    if codex_home is None:
+        return {}
+    config_path = codex_home / "config.toml"
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+
+    targets = set(server_names)
+    configs: dict[str, dict[str, object]] = {}
+    current: str | None = None
+    for line in lines:
+        header_name = codex_mcp_server_header_name(line)
+        if header_name is not None:
+            current = header_name if header_name in targets else None
+            if current is not None:
+                configs.setdefault(current, {})
+            continue
+        if line.strip().startswith("["):
+            current = None
+            continue
+        if current is None or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if key not in CODEX_MCP_SERVER_TRANSPORT_KEYS:
+            continue
+        value = parse_codex_config_simple_value(raw_value)
+        if value is not None:
+            configs[current][key] = value
+    return configs
 
 
 def review_operator_mcp_approval_server_names() -> tuple[str, ...]:
@@ -856,28 +998,74 @@ def review_operator_mcp_approval_server_names() -> tuple[str, ...]:
 
 def review_operator_mcp_config_overrides(
     server_names: Iterable[str] | None = None,
+    *,
+    mcp_url: str | None = None,
+    codex_home: Path | None = None,
+    server_configs: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[str]:
     overrides: list[str] = []
     names = server_names or review_operator_mcp_approval_server_names()
+    configured_servers: dict[str, dict[str, object]] = {
+        server_name: dict(config)
+        for server_name, config in DEFAULT_REVIEW_OPERATOR_MCP_SERVER_CONFIGS.items()
+    }
+    configured_servers.update(load_codex_mcp_server_configs(codex_home, names))
+    if server_configs:
+        configured_servers.update(
+            {
+                server_name: dict(config)
+                for server_name, config in server_configs.items()
+            }
+        )
     for server_name in names:
         approved_tools = REVIEW_OPERATOR_MCP_APPROVED_TOOLS.get(server_name)
         if not approved_tools:
             continue
-        overrides.extend(
-            [
-                codex_config_override(
-                    codex_config_mcp_key(server_name, "enabled_tools"),
-                    list(approved_tools),
-                ),
-                codex_config_override(
-                    codex_config_mcp_key(
-                        server_name,
-                        "default_tools_approval_mode",
-                    ),
-                    "approve",
-                ),
-            ]
+        transport_config = dict(configured_servers.get(server_name, {}))
+        if server_name == "agent-pbx":
+            transport_config["url"] = (
+                mcp_url
+                or str(transport_config.get("url") or "").strip()
+                or agent_pbx_mcp_url(
+                    os.getenv(AGENT_PBX_SERVER_URL_ENV, "http://127.0.0.1:8765")
+                )
+            )
+            transport_config["bearer_token_env_var"] = AGENT_PBX_TOKEN_ENV
+        if not transport_config.get("url") and not transport_config.get("command"):
+            continue
+        config = {
+            key: value
+            for key, value in transport_config.items()
+            if key in CODEX_MCP_SERVER_TRANSPORT_KEYS
+        }
+        config["enabled_tools"] = list(approved_tools)
+        config["default_tools_approval_mode"] = "approve"
+        overrides.append(
+            codex_config_override(
+                f"mcp_servers.{toml_key(server_name)}",
+                config,
+            )
         )
+    return overrides
+
+
+def review_operator_config_overrides(
+    server_names: Iterable[str] | None = None,
+    *,
+    mcp_url: str | None = None,
+    codex_home: Path | None = None,
+    work_root: str | None = None,
+    server_configs: Mapping[str, Mapping[str, object]] | None = None,
+) -> list[str]:
+    overrides = review_operator_mcp_config_overrides(
+        server_names,
+        mcp_url=mcp_url,
+        codex_home=codex_home,
+        server_configs=server_configs,
+    )
+    trust_override = codex_project_trust_config_override(work_root)
+    if trust_override:
+        overrides.append(trust_override)
     return overrides
 
 
@@ -9566,7 +9754,12 @@ class AgentPBXTUI(App[None]):
         if not review_servers and fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
             review_servers = review_operator_mcp_approval_server_names()
         review_config_overrides = (
-            review_operator_mcp_config_overrides(review_servers)
+            review_operator_config_overrides(
+                review_servers,
+                mcp_url=mcp_url,
+                codex_home=self.codex_home_dir(),
+                work_root=work_root,
+            )
             if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
             else ()
         )
@@ -11790,7 +11983,12 @@ class AgentPBXTUI(App[None]):
                 else None
             ),
             config_overrides=(
-                review_operator_mcp_config_overrides(review_mcp_approval_servers)
+                review_operator_config_overrides(
+                    review_mcp_approval_servers,
+                    mcp_url=mcp_url,
+                    codex_home=self.codex_home_dir(),
+                    work_root=launch_cwd,
+                )
                 if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
                 else ()
             ),
@@ -12143,6 +12341,13 @@ class AgentPBXTUI(App[None]):
             value = str(fork.get(key) or "").strip()
             if value:
                 hydrated_metadata[key] = value
+        timestamp = (
+            float_value(fork.get("last_used_at"))
+            or float_value(fork.get("updated_at"))
+            or float_value(fork.get("created_at"))
+            or time.time()
+        )
+        created_at = float_value(fork.get("created_at")) or timestamp
         local_agent = self.agents.get(fork_agent_id)
         if isinstance(local_agent, dict):
             agent = dict(local_agent)
@@ -12151,6 +12356,8 @@ class AgentPBXTUI(App[None]):
             )
             agent["metadata"] = {**agent_metadata, **hydrated_metadata}
             agent["agent_type"] = OPERATOR_AGENT_TYPE
+            agent.setdefault("created_at", created_at)
+            agent.setdefault("last_seen_at", timestamp)
             source_project = str(
                 hydrated_metadata.get("source_caller_project") or ""
             ).strip()
@@ -12164,6 +12371,9 @@ class AgentPBXTUI(App[None]):
             "project": source_project or str(fork.get("cwd") or "agent-pbx-operator"),
             "status": str(fork.get("status") or "unknown"),
             "metadata": hydrated_metadata,
+            "created_at": created_at,
+            "last_seen_at": timestamp,
+            "pbx_active": True,
         }
 
     def validated_operator_fork_pane(
