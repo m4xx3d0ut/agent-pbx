@@ -684,8 +684,8 @@ rows show a `Hidden` marker. Select a hidden row and press `H` or `Unhide` to
 restore it without waiting for the agent to reconnect.
 
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
-commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/tmux`, `/workerbee`,
-`/campaigns`, `/campaign report`, `/campaign copy`,
+commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
+`/workerbee`, `/campaigns`, `/campaign report`, `/campaign copy`,
 `/operator fork prev`, `/operator fork next`, `/operator fork review`,
 `/pr`, `/pr refresh`, `/pr review`, `/pr validate`, `/pr url`, `/pr merge`,
 `/issue`, `/issue refresh`, `/issue mitigate`, `/issue url`, `/issue clear`,
@@ -698,7 +698,11 @@ mode, `/esc` sends `tmux send-keys Escape` to the selected Codex pane. Outside
 tmux direct mode, it queues a `send_key` command with `key="escape"` for
 nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
 `tmux send-keys C-c` to the selected Codex pane, for example to back out of a
-`/side` chat.
+`/side` chat. Use `/restart` or `/codex restart` in tmux direct mode to send
+Codex `/q`, wait briefly for the pane to exit, then relaunch Codex with the
+known session when Agent PBX can recover the launch metadata. TUI-owned
+operators and forks can be relaunched automatically; caller panes require a
+known Codex session and recoverable Codex launch command.
 
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete project paths. Type `@joplin:` and
@@ -814,7 +818,8 @@ Agent PBX still records normal reports in `Thread`, but follow-up input for a
 tmux-enabled agent is pasted directly into the selected tmux pane, so slash
 commands such as `/status` are sent unchanged. The TUI auto-matches panes by
 agent cwd/project/title and provides `Auto`, `Select Pane`, and `Detach`
-controls for manual correction. Tmux controls are disabled when `tmux` is not
+controls for manual correction plus `Restart` for relaunching recoverable Codex
+panes after CLI updates. Tmux controls are disabled when `tmux` is not
 available; set `AGENT_PBX_TUI_TMUX_SHOW=1` to show them on a tmux-capable host
 outside an attached tmux client. `F8` is the preferred Android Termux/SSH
 shortcut because Termux can emit it with `Volume Up+8`; `Alt+T` is kept as a

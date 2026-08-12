@@ -5891,6 +5891,8 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/working" in titles
     assert "/esc" in titles
     assert "/ctrlc" in titles
+    assert "/restart" in titles
+    assert "/codex restart" in titles
     assert "/tmux" in titles
     assert "/latest" in titles
     assert "/thread" in titles
@@ -8403,6 +8405,560 @@ async def test_tui_operator_history_modal_resumes_highlighted_candidate() -> Non
         await pilot.pause()
 
     assert resumed == [("operator-0", "old-session")]
+
+
+async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    quit_calls: list[str] = []
+    posts: list[dict[str, object]] = []
+    captures: list[str] = []
+
+    class Response:
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            body = kwargs["json"]  # type: ignore[index]
+            return Response(
+                {
+                    "agent_id": body["agent_id"],  # type: ignore[index]
+                    "agent_type": body["agent_type"],  # type: ignore[index]
+                    "project": body["project"],  # type: ignore[index]
+                    "name": body["name"],  # type: ignore[index]
+                    "pbx_active": body["pbx_active"],  # type: ignore[index]
+                    "metadata": body["metadata"],  # type: ignore[index]
+                }
+            )
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return [
+            tmux_support.TmuxPane(
+                "agent-pbx",
+                "0",
+                "0",
+                "%10",
+                True,
+                "node",
+                "agent-pbx",
+                str(Path.cwd()),
+                100,
+                30,
+                200,
+                window_name="agent-1",
+            )
+        ]
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%11"
+
+    def fake_quit_pane(target: str, **_: object) -> bool:
+        quit_calls.append(target)
+        return True
+
+    async def fake_tmux_pane_start_command(pane_id: str) -> str:
+        assert pane_id == "%10"
+        return "codex --search resume session-1"
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.tmux_pane_start_command = fake_tmux_pane_start_command  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "name": "Agent 1",
+                "pbx_active": True,
+                "metadata": {
+                    "cwd": str(Path.cwd()),
+                    "codex_session_id": "session-1",
+                },
+            }
+        }
+        app.tmux_agent_targets["agent-1"] = "%10"
+        app.tmux_manual_override_agent_ids.add("agent-1")
+        app.tmux_direct_agent_modes["agent-1"] = True
+        await app.restart_tmux_codex_session("agent-1")
+
+    assert quit_calls == ["%10"]
+    assert launches[0]["session_name"] == "agent-pbx"
+    assert launches[0]["window_name"] == "agent-1"
+    assert launches[0]["command"] == "codex --search resume session-1"
+    assert app.tmux_agent_targets["agent-1"] == "%11"
+    assert posts[0]["path"] == "/v1/agents/register"
+    metadata = posts[0]["json"]["metadata"]  # type: ignore[index]
+    assert metadata["tmux_pane_id"] == "%11"
+    assert metadata["codex_command"] == "codex --search"
+    assert captures == ["agent-1"]
+
+
+async def test_tui_restart_tmux_caller_refuses_unknown_launch_command(
+    monkeypatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    quit_calls: list[str] = []
+    captures: list[str] = []
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return [
+            tmux_support.TmuxPane(
+                "agent-pbx",
+                "0",
+                "0",
+                "%10",
+                True,
+                "zsh",
+                "agent-pbx",
+                str(Path.cwd()),
+                100,
+                30,
+                200,
+                window_name="agent-1",
+            )
+        ]
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%11"
+
+    def fake_quit_pane(target: str, **_: object) -> bool:
+        quit_calls.append(target)
+        return True
+
+    async def fake_tmux_pane_start_command(pane_id: str) -> str:
+        assert pane_id == "%10"
+        return "zsh"
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.tmux_pane_start_command = fake_tmux_pane_start_command  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(Path.cwd()),
+                    "codex_session_id": "session-1",
+                },
+            }
+        }
+        app.tmux_agent_targets["agent-1"] = "%10"
+        app.tmux_manual_override_agent_ids.add("agent-1")
+        app.tmux_direct_agent_modes["agent-1"] = True
+        await app.restart_tmux_codex_session("agent-1")
+
+    assert quit_calls == []
+    assert launches == []
+    assert captures == []
+
+
+async def test_tui_restart_tmux_requires_tmux_direct(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=False)
+    app.tmux_features_available = True
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        raise AssertionError("restart should not inspect panes when tmux is disabled")
+
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(Path.cwd()),
+                    "codex_session_id": "session-1",
+                },
+            }
+        }
+        await app.restart_tmux_codex_session("agent-1")
+
+    assert "agent-1" not in app.tmux_agent_targets
+
+
+async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    quit_calls: list[str] = []
+    posts: list[dict[str, object]] = []
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            assert path == "/v1/auth/check"
+            return Response({"ok": True})
+
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            body = kwargs["json"]  # type: ignore[index]
+            return Response(
+                {
+                    "agent_id": body["agent_id"],  # type: ignore[index]
+                    "agent_type": "operator",
+                    "project": body["project"],  # type: ignore[index]
+                    "name": body.get("name"),  # type: ignore[union-attr]
+                    "pbx_active": body.get("pbx_active", True),  # type: ignore[union-attr]
+                    "metadata": body["metadata"],  # type: ignore[index]
+                }
+            )
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return [
+            tmux_support.TmuxPane(
+                "agent-pbx-operators",
+                "0",
+                "0",
+                "%30",
+                True,
+                "node",
+                "operator-0",
+                str(Path.cwd()),
+                100,
+                30,
+                200,
+                window_name="operator-0",
+            )
+        ]
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%31"
+
+    def fake_quit_pane(target: str, **_: object) -> bool:
+        quit_calls.append(target)
+        return True
+
+    def fake_operator_session_candidates(agent_id: str) -> list[OperatorSessionCandidate]:
+        assert agent_id == "operator-0"
+        return [
+            OperatorSessionCandidate(
+                session_id="current-session",
+                timestamp=20.0,
+                source="metadata.codex_session_id",
+            ),
+            OperatorSessionCandidate(
+                session_id="old-session",
+                timestamp=10.0,
+                source="codex.sessions",
+            ),
+        ]
+
+    async def fake_configure_operator_codex_mcp(**_: object) -> None:
+        return None
+
+    async def fake_send_text_to_tmux_pane(
+        pane_id: str,
+        message: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent.append((pane_id, message))
+        return True
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.operator_session_candidates = fake_operator_session_candidates  # type: ignore[method-assign]
+    app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "name": "operator-0",
+                "pbx_active": True,
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                    "cwd": str(Path.cwd()),
+                    "codex_session_id": "current-session",
+                    "launched_by": "agent-pbx-tui",
+                },
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        await app.restart_tmux_codex_session("operator-0")
+
+    assert quit_calls == ["%30"]
+    assert launches[0]["session_name"] == "agent-pbx-operators"
+    assert launches[0]["window_name"] == "operator-0"
+    assert launches[0]["command"] == "codex resume current-session"
+    assert launches[0]["env"]["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "current-session"
+    assert posts[-1]["path"] == "/v1/agents/register"
+    metadata = posts[-1]["json"]["metadata"]  # type: ignore[index]
+    assert metadata["last_resume_codex_session_id"] == "current-session"
+    assert sent[0][0] == "%31"
+    assert "agent_id: operator-0" in sent[0][1]
+    assert app.tmux_agent_targets["operator-0"] == "%31"
+    assert captures == ["operator-0"]
+
+
+async def test_tui_restart_review_fork_resumes_with_approval_overrides(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    work_root = tmp_path / "review"
+    source_cwd = tmp_path / "caller"
+    work_root.mkdir()
+    source_cwd.mkdir()
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    quit_calls: list[str] = []
+    posts: list[dict[str, object]] = []
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            assert path == "/v1/auth/check"
+            return Response({"ok": True})
+
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            if path == "/v1/operator/forks/ensure":
+                body = kwargs["json"]  # type: ignore[index]
+                return Response(
+                    {
+                        "operator_fork_id": "fork-1",
+                        "logical_operator_agent_id": body["operator_agent_id"],  # type: ignore[index]
+                        "fork_agent_id": body["fork_agent_id"],  # type: ignore[index]
+                        "source_caller_agent_id": body["source_caller_agent_id"],  # type: ignore[index]
+                        "source_codex_session_id": "source-session",
+                        "fork_track_id": body["fork_track_id"],  # type: ignore[index]
+                        "fork_purpose": body["fork_purpose"],  # type: ignore[index]
+                        "access_mode": body["access_mode"],  # type: ignore[index]
+                        "work_root": body["work_root"],  # type: ignore[index]
+                        "tmux_pane_id": body["tmux_pane_id"],  # type: ignore[index]
+                        "status": "running",
+                        "summary": "Fork relaunched.",
+                        "metadata": body["metadata"],  # type: ignore[index]
+                    }
+                )
+            raise AssertionError(path)
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return [
+            tmux_support.TmuxPane(
+                "agent-pbx-operators",
+                "1",
+                "0",
+                "%20",
+                True,
+                "node",
+                "operator-0-fork-caller-review-1",
+                str(work_root),
+                100,
+                30,
+                200,
+                window_name="operator-0-fork-caller-review-1",
+            )
+        ]
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%21"
+
+    def fake_quit_pane(target: str, **_: object) -> bool:
+        quit_calls.append(target)
+        return True
+
+    async def fake_configure_operator_codex_mcp(**_: object) -> None:
+        return None
+
+    async def fake_send_text_to_tmux_pane(
+        pane_id: str,
+        message: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent.append((pane_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
+    app.operator_session_candidates = lambda agent_id: [  # type: ignore[assignment,method-assign]
+        OperatorSessionCandidate(
+            session_id="fork-session",
+            timestamp=10.0,
+            source="metadata.fork_codex_session_id",
+        )
+    ]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0-fork-caller-review-1": {
+                "agent_id": "operator-0-fork-caller-review-1",
+                "agent_type": "operator",
+                "project": "demo",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "fork",
+                    "logical_operator_id": "operator-0",
+                    "source_caller_agent_id": "caller-1",
+                    "source_codex_session_id": "source-session",
+                    "fork_codex_session_id": "fork-session",
+                    "fork_track_id": "review-1",
+                    "fork_purpose": "review",
+                    "access_mode": "review_readonly",
+                    "source_cwd": str(source_cwd),
+                    "work_root": str(work_root),
+                    "cwd": str(work_root),
+                    "tmux_pane_id": "%20",
+                    "launched_by": "agent-pbx-tui",
+                    "review_mcp_approval_servers": ["agent-pbx", "workerbee"],
+                },
+            }
+        }
+        app.tmux_agent_targets["operator-0-fork-caller-review-1"] = "%20"
+        app.tmux_manual_override_agent_ids.add("operator-0-fork-caller-review-1")
+        app.tmux_direct_agent_modes["operator-0-fork-caller-review-1"] = True
+        await app.restart_tmux_codex_session("operator-0-fork-caller-review-1")
+
+    assert quit_calls == ["%20"]
+    argv = shlex.split(str(launches[0]["command"]))
+    assert argv[:2] == ["codex", "resume"]
+    assert "--sandbox" in argv
+    assert "workspace-write" in argv
+    assert "--cd" in argv
+    assert str(work_root) in argv
+    config_overrides = [
+        argv[index + 1]
+        for index, item in enumerate(argv)
+        if item == "-c"
+    ]
+    assert (
+        'mcp_servers."agent-pbx".default_tools_approval_mode="approve"'
+        in config_overrides
+    )
+    assert (
+        'mcp_servers."workerbee".default_tools_approval_mode="approve"'
+        in config_overrides
+    )
+    assert argv[-1] == "fork-session"
+    assert launches[0]["env"]["AGENT_PBX_OPERATOR_ROLE"] == "fork"
+    assert launches[0]["env"]["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "fork-session"
+    assert posts[0]["path"] == "/v1/operator/forks/ensure"
+    assert posts[0]["json"]["fork_codex_session_id"] == "fork-session"  # type: ignore[index]
+    assert sent[0][0] == "%21"
+    assert "agent_id: operator-0-fork-caller-review-1" in sent[0][1]
+    assert captures == ["operator-0-fork-caller-review-1"]
 
 
 def test_tui_operator_resume_target_prefers_known_current_session() -> None:
@@ -11500,6 +12056,46 @@ def test_tui_operator_fork_command_supports_config_overrides() -> None:
         'mcp_servers."agent-pbx".default_tools_approval_mode="approve"'
         in argv
     )
+
+
+def test_tui_operator_resume_command_supports_restart_options() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    command = app.operator_resume_command(
+        "codex --search",
+        "session-1",
+        cd="/tmp/work",
+        sandbox="workspace-write",
+        config_overrides=[
+            'mcp_servers."agent-pbx".default_tools_approval_mode="approve"',
+        ],
+    )
+
+    argv = shlex.split(command)
+    assert argv[:2] == ["codex", "--search"]
+    assert argv[2:5] == ["resume", "--cd", "/tmp/work"]
+    assert "--sandbox" in argv
+    assert "workspace-write" in argv
+    assert "-c" in argv
+    assert argv[-1] == "session-1"
+
+
+def test_tui_codex_command_from_start_command_preserves_flags() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert (
+        app.codex_command_from_start_command(
+            '"codex --search --yolo resume session-1"'
+        )
+        == "codex --search --yolo"
+    )
+    assert (
+        app.codex_command_from_start_command(
+            "codex --search fork session-1 prompt"
+        )
+        == "codex --search"
+    )
+    assert app.codex_command_from_start_command("python app.py") == ""
 
 
 def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> None:

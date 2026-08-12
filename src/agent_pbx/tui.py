@@ -92,6 +92,7 @@ DEFAULT_OPERATOR_FORK_ACCESS_MODE = "edit"
 REVIEW_OPERATOR_FORK_PURPOSE = "review"
 REVIEW_OPERATOR_FORK_ACCESS_MODE = "review_readonly"
 DEFAULT_OPERATOR_TMUX_SESSION = "agent-pbx-operators"
+CODEX_RESTART_WAIT_SECONDS = 5.0
 REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV = (
     "AGENT_PBX_TUI_REVIEW_MCP_APPROVAL_SERVERS"
 )
@@ -321,6 +322,8 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/cancel",
     "/esc",
     "/ctrlc",
+    "/restart",
+    "/codex restart",
     "/tmux",
     "/latest",
     "/thread",
@@ -3752,6 +3755,7 @@ class AgentPBXTUI(App[None]):
                                 yield Button("Auto", id="tmux-auto")
                                 yield Button("Select Pane", id="tmux-select")
                                 yield Button("Detach", id="tmux-detach")
+                                yield Button("Restart", id="tmux-restart")
                                 yield Button("Send", id="tmux-send", variant="primary")
                             yield FollowUpTextArea(id="tmux-message", soft_wrap=True)
                             yield Static(
@@ -3995,6 +3999,8 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/cancel", "Mark the selected agent canceled", self.palette_mark_canceled)
         yield SystemCommand("/esc", "Send Escape to the selected agent", self.palette_escape)
         yield SystemCommand("/ctrlc", "Send Ctrl+C to the selected tmux pane", self.palette_ctrl_c)
+        yield SystemCommand("/restart", "Restart the selected tmux Codex pane", self.palette_tmux_restart)
+        yield SystemCommand("/codex restart", "Restart the selected tmux Codex pane", self.palette_tmux_restart)
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/latest", "Open the Latest tab", self.palette_latest)
         yield SystemCommand("/thread", "Open the Thread tab", self.palette_thread)
@@ -4112,6 +4118,16 @@ class AgentPBXTUI(App[None]):
         if self.palette_agent_id() is None:
             return
         self.run_worker(self.send_ctrl_c_key(), name="palette-ctrlc", exclusive=True)
+
+    def palette_tmux_restart(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.restart_tmux_codex_session(agent_id),
+            name=f"tmux-restart-{slugify(agent_id)}",
+            exclusive=True,
+        )
 
     def palette_toggle_tmux(self) -> None:
         self.run_worker(self.action_toggle_tmux_direct(), name="palette-tmux", exclusive=True)
@@ -8637,6 +8653,9 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "tmux-detach":
             await self.detach_tmux_pane()
             return
+        if event.button.id == "tmux-restart":
+            await self.restart_tmux_codex_session()
+            return
         if event.button.id == "request-detail":
             await self.request_detail()
             return
@@ -9227,6 +9246,490 @@ class AgentPBXTUI(App[None]):
                 status.update(f"Tmux: send failed ({exc})")
             return False
         return True
+
+    def agent_metadata(self, agent: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(agent, dict):
+            return {}
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        return dict(metadata)
+
+    def codex_command_from_start_command(self, start_command: str) -> str:
+        clean = start_command.strip()
+        if not clean:
+            return ""
+        try:
+            argv = shlex.split(clean)
+        except ValueError:
+            return ""
+        if len(argv) == 1 and " " in argv[0]:
+            try:
+                nested = shlex.split(argv[0])
+            except ValueError:
+                nested = []
+            if nested:
+                argv = nested
+        if not argv:
+            return ""
+        executable = Path(argv[0]).name.lower()
+        if executable != "codex" and "codex" not in executable:
+            return ""
+        stop_index = len(argv)
+        for index, item in enumerate(argv[1:], start=1):
+            if item in {"resume", "fork"}:
+                stop_index = index
+                break
+        return shlex.join(argv[:stop_index])
+
+    async def tmux_pane_start_command(self, pane_id: str) -> str:
+        try:
+            return await asyncio.to_thread(tmux_support.pane_start_command, pane_id)
+        except Exception:
+            return ""
+
+    async def codex_command_for_agent_restart(
+        self,
+        agent: dict[str, Any],
+        pane: tmux_support.TmuxPane,
+        *,
+        allow_default: bool = True,
+    ) -> str:
+        metadata = self.agent_metadata(agent)
+        configured = str(metadata.get("codex_command") or "").strip()
+        if configured:
+            return configured
+        start_command = await self.tmux_pane_start_command(pane.pane_id)
+        from_start = self.codex_command_from_start_command(start_command)
+        if from_start:
+            return from_start
+        if not allow_default:
+            return ""
+        return self.operator_codex_command()
+
+    def operator_restart_target(
+        self,
+        agent_id: str,
+        candidates: list[OperatorSessionCandidate],
+    ) -> OperatorSessionCandidate | None:
+        current_session_ids = self.current_operator_session_ids(agent_id)
+        for candidate in candidates:
+            if candidate.session_id in current_session_ids:
+                return candidate
+        return candidates[0] if candidates else None
+
+    async def quit_or_kill_tmux_pane(self, pane_id: str, *, label: str) -> bool:
+        try:
+            exited = await asyncio.to_thread(
+                tmux_support.quit_pane,
+                pane_id,
+                timeout_seconds=CODEX_RESTART_WAIT_SECONDS,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to send /q to {label}: {exc}", severity="warning")
+            exited = False
+        if exited:
+            return True
+        try:
+            await asyncio.to_thread(tmux_support.kill_pane, pane_id)
+        except Exception as exc:
+            self.notify(f"Unable to kill {label} after /q: {exc}", severity="error")
+            return False
+        return True
+
+    async def register_tmux_relaunched_caller(
+        self,
+        agent_id: str,
+        *,
+        pane_id: str,
+        cwd: str,
+        codex_command: str,
+    ) -> dict[str, Any] | None:
+        agent = self.agents.get(agent_id)
+        if not isinstance(agent, dict):
+            return None
+        metadata = self.agent_metadata(agent)
+        updated_metadata = {
+            **metadata,
+            "cwd": cwd,
+            "tmux_pane_id": pane_id,
+            "codex_command": codex_command,
+            "last_tmux_restart_at": time.time(),
+        }
+        response = await self.api_client().post(
+            "/v1/agents/register",
+            json={
+                "agent_id": agent_id,
+                "project": str(agent.get("project") or "agent-pbx"),
+                "name": str(agent.get("name") or agent_id),
+                "agent_type": CALLER_AGENT_TYPE,
+                "pbx_active": bool(agent.get("pbx_active", True)),
+                "metadata": updated_metadata,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        updated = response.json()
+        if isinstance(updated, dict):
+            self.agents[agent_id] = updated
+            return updated
+        return None
+
+    async def relaunch_operator_root_codex(
+        self,
+        agent_id: str,
+        pane: tmux_support.TmuxPane,
+    ) -> bool:
+        pane_id = pane.pane_id
+        agent = self.agents.get(agent_id)
+        metadata = self.agent_metadata(agent)
+        if metadata.get("launched_by") != "agent-pbx-tui":
+            self.notify(
+                f"{agent_id} has a non-TUI-owned tmux pane; detach it before restart.",
+                severity="warning",
+            )
+            return False
+        self.tmux_agent_targets[agent_id] = pane_id
+        candidates = await asyncio.to_thread(self.operator_session_candidates, agent_id)
+        target = self.operator_restart_target(agent_id, candidates)
+        if target is None:
+            self.notify(f"No resumable Codex session found for {agent_id}.", severity="warning")
+            await self.show_selected_operator_history()
+            return False
+        if not await self.ensure_operator_auth_ready():
+            return False
+        cwd = str(metadata.get("cwd") or self.operator_cwd()).strip() or os.getcwd()
+        codex_command = self.operator_codex_command()
+        session_name = self.operator_tmux_session_name()
+        mcp_url = agent_pbx_mcp_url(self.server)
+        try:
+            await self.configure_operator_codex_mcp(
+                codex_command=codex_command,
+                mcp_url=mcp_url,
+            )
+            history = await self.record_operator_session_history(
+                agent_id,
+                include=[*candidates[:3], target],
+            )
+        except Exception as exc:
+            self.notify(f"Unable to prepare {agent_id} for restart: {exc}", severity="error")
+            return False
+        if not await self.quit_or_kill_tmux_pane(pane_id, label=agent_id):
+            return False
+        env = self.operator_launch_env(agent_id=agent_id, cwd=cwd, mcp_url=mcp_url)
+        env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
+        try:
+            new_pane_id = await asyncio.to_thread(
+                tmux_support.launch_pane,
+                session_name=session_name,
+                window_name=agent_id,
+                command=self.operator_resume_command(codex_command, target.session_id),
+                cwd=cwd,
+                env=env,
+            )
+            await self.register_operator_root(
+                agent_id,
+                cwd=cwd,
+                codex_command=codex_command,
+                mcp_url=mcp_url,
+                session_name=session_name,
+                tmux_pane_id=new_pane_id,
+                resumed_codex_session_id=target.session_id,
+                operator_session_history=history,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to relaunch {agent_id}: {exc}", severity="error")
+            return False
+        self.tmux_agent_targets[agent_id] = new_pane_id
+        self.tmux_manual_override_agent_ids.add(agent_id)
+        self.tmux_detached_agent_ids.discard(agent_id)
+        self.tmux_direct_agent_modes[agent_id] = True
+        await asyncio.sleep(1.0)
+        await self.send_text_to_tmux_pane(
+            new_pane_id,
+            self.operator_bootstrap_prompt(agent_id, cwd),
+        )
+        self.save_settings()
+        self.notify(f"Restarted {agent_id} on Codex session {target.session_id}.")
+        return True
+
+    async def relaunch_operator_fork_codex(
+        self,
+        agent_id: str,
+        pane: tmux_support.TmuxPane,
+    ) -> bool:
+        agent = self.agents.get(agent_id)
+        metadata = self.agent_metadata(agent)
+        if metadata.get("launched_by") != "agent-pbx-tui":
+            self.notify(
+                f"{agent_id} has a non-TUI-owned tmux pane; detach it before restart.",
+                severity="warning",
+            )
+            return False
+        logical_operator_id = str(metadata.get("logical_operator_id") or "").strip()
+        source_caller_agent_id = str(metadata.get("source_caller_agent_id") or "").strip()
+        source_session_id = str(metadata.get("source_codex_session_id") or "").strip()
+        if not logical_operator_id or not source_caller_agent_id or not source_session_id:
+            self.notify(f"{agent_id} is missing operator fork metadata.", severity="error")
+            return False
+        if not await self.ensure_operator_auth_ready():
+            return False
+        codex_command = self.operator_codex_command()
+        mcp_url = agent_pbx_mcp_url(self.server)
+        session_name = self.operator_tmux_session_name()
+        fork_track_id = self.normalize_operator_fork_track_id(
+            str(metadata.get("fork_track_id") or DEFAULT_OPERATOR_FORK_TRACK_ID)
+        )
+        fork_purpose = self.normalize_operator_fork_label(
+            str(metadata.get("fork_purpose") or ""),
+            default=(
+                DEFAULT_OPERATOR_FORK_PURPOSE
+                if fork_track_id == DEFAULT_OPERATOR_FORK_TRACK_ID
+                else REVIEW_OPERATOR_FORK_PURPOSE
+            ),
+        )
+        access_mode = self.normalize_operator_fork_label(
+            str(metadata.get("access_mode") or ""),
+            default=(
+                DEFAULT_OPERATOR_FORK_ACCESS_MODE
+                if fork_purpose == DEFAULT_OPERATOR_FORK_PURPOSE
+                else REVIEW_OPERATOR_FORK_ACCESS_MODE
+            ),
+        )
+        source_cwd = str(metadata.get("source_cwd") or "").strip()
+        work_root = str(metadata.get("work_root") or metadata.get("cwd") or pane.cwd).strip()
+        candidates = await asyncio.to_thread(self.operator_session_candidates, agent_id)
+        target = self.operator_restart_target(agent_id, candidates)
+        bootstrap = self.operator_bootstrap_prompt(
+            agent_id,
+            work_root,
+            logical_operator_id=logical_operator_id,
+            source_caller_agent_id=source_caller_agent_id,
+            source_codex_session_id=source_session_id,
+            fork_track_id=fork_track_id,
+            fork_purpose=fork_purpose,
+            access_mode=access_mode,
+            source_cwd=source_cwd or work_root,
+            work_root=work_root,
+        )
+        raw_review_servers = metadata.get("review_mcp_approval_servers", [])
+        review_servers = (
+            tuple(
+                str(item)
+                for item in raw_review_servers
+                if str(item).strip()
+            )
+            if isinstance(raw_review_servers, (list, tuple))
+            else ()
+        )
+        if not review_servers and fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
+            review_servers = review_operator_mcp_approval_server_names()
+        review_config_overrides = (
+            review_operator_mcp_config_overrides(review_servers)
+            if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            else ()
+        )
+        if target is not None:
+            command = self.operator_resume_command(
+                codex_command,
+                target.session_id,
+                cd=work_root if work_root and work_root != source_cwd else None,
+                sandbox=(
+                    "workspace-write"
+                    if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+                    else None
+                ),
+                config_overrides=review_config_overrides,
+            )
+        else:
+            command = self.operator_fork_command(
+                codex_command,
+                source_session_id,
+                bootstrap,
+                cd=work_root if work_root and work_root != source_cwd else None,
+                sandbox=(
+                    "workspace-write"
+                    if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+                    else None
+                ),
+                config_overrides=review_config_overrides,
+            )
+        try:
+            await self.configure_operator_codex_mcp(
+                codex_command=codex_command,
+                mcp_url=mcp_url,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to configure Codex MCP: {exc}", severity="error")
+            return False
+        if not await self.quit_or_kill_tmux_pane(pane.pane_id, label=agent_id):
+            return False
+        env = self.operator_launch_env(
+            agent_id=agent_id,
+            cwd=work_root,
+            mcp_url=mcp_url,
+            operator_role=OPERATOR_ROLE_FORK,
+            logical_operator_id=logical_operator_id,
+            source_caller_agent_id=source_caller_agent_id,
+            source_codex_session_id=source_session_id,
+            fork_track_id=fork_track_id,
+            fork_purpose=fork_purpose,
+            access_mode=access_mode,
+            source_cwd=source_cwd or work_root,
+            work_root=work_root,
+        )
+        if target is not None:
+            env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
+        try:
+            new_pane_id = await asyncio.to_thread(
+                tmux_support.launch_pane,
+                session_name=session_name,
+                window_name=agent_id,
+                command=command,
+                cwd=work_root,
+                env=env,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to relaunch {agent_id}: {exc}", severity="error")
+            return False
+        fork_metadata = {
+            **metadata,
+            "tmux_pane_id": new_pane_id,
+            "last_tmux_restart_at": time.time(),
+        }
+        if target is not None:
+            fork_metadata["fork_codex_session_id"] = target.session_id
+        try:
+            fork = await self.record_operator_fork(
+                logical_operator_id=logical_operator_id,
+                source_caller_agent_id=source_caller_agent_id,
+                fork_agent_id=agent_id,
+                tmux_pane_id=new_pane_id,
+                metadata=fork_metadata,
+                fork_track_id=fork_track_id,
+                fork_purpose=fork_purpose,
+                access_mode=access_mode,
+                source_cwd=source_cwd or work_root,
+                work_root=work_root,
+                fork_codex_session_id=target.session_id if target is not None else None,
+            )
+            if isinstance(fork, dict):
+                self.agents[agent_id] = self.operator_fork_record_agent(fork)
+        except Exception as exc:
+            self.notify(
+                f"Relaunched {agent_id}, but PBX fork registration failed: {exc}",
+                severity="warning",
+            )
+        self.tmux_agent_targets[agent_id] = new_pane_id
+        self.tmux_manual_override_agent_ids.add(agent_id)
+        self.tmux_detached_agent_ids.discard(agent_id)
+        self.tmux_direct_agent_modes[agent_id] = True
+        if target is not None:
+            await asyncio.sleep(1.0)
+            await self.send_text_to_tmux_pane(new_pane_id, bootstrap)
+        self.save_settings()
+        suffix = f" on Codex session {target.session_id}" if target else ""
+        self.notify(f"Restarted {agent_id}{suffix}.")
+        return True
+
+    async def relaunch_caller_codex(
+        self,
+        agent_id: str,
+        pane: tmux_support.TmuxPane,
+    ) -> bool:
+        agent = self.agents.get(agent_id)
+        if not isinstance(agent, dict):
+            self.notify(f"{agent_id} is not loaded.", severity="warning")
+            return False
+        metadata = self.agent_metadata(agent)
+        session_id = str(
+            metadata.get("codex_session_id") or metadata.get("codex_thread_id") or ""
+        ).strip()
+        if not session_id:
+            self.notify(
+                f"{agent_id} is missing metadata.codex_session_id; send /q manually.",
+                severity="warning",
+            )
+            return False
+        cwd = str(metadata.get("cwd") or pane.cwd or os.getcwd()).strip()
+        codex_command = await self.codex_command_for_agent_restart(
+            agent,
+            pane,
+            allow_default=False,
+        )
+        if not codex_command:
+            self.notify(
+                f"{agent_id} has no recoverable Codex launch command; send /q manually.",
+                severity="warning",
+            )
+            return False
+        command = self.operator_resume_command(codex_command, session_id)
+        if not await self.quit_or_kill_tmux_pane(pane.pane_id, label=agent_id):
+            return False
+        try:
+            new_pane_id = await asyncio.to_thread(
+                tmux_support.launch_pane,
+                session_name=pane.session_name,
+                window_name=pane.window_name or agent_id,
+                command=command,
+                cwd=cwd,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to relaunch {agent_id}: {exc}", severity="error")
+            return False
+        self.tmux_agent_targets[agent_id] = new_pane_id
+        self.tmux_manual_override_agent_ids.add(agent_id)
+        self.tmux_detached_agent_ids.discard(agent_id)
+        self.tmux_direct_agent_modes[agent_id] = True
+        try:
+            await self.register_tmux_relaunched_caller(
+                agent_id,
+                pane_id=new_pane_id,
+                cwd=cwd,
+                codex_command=codex_command,
+            )
+        except Exception as exc:
+            self.notify(
+                f"Relaunched {agent_id}, but PBX registration failed: {exc}",
+                severity="warning",
+            )
+        self.save_settings()
+        self.notify(f"Restarted {agent_id} on Codex session {session_id}.")
+        return True
+
+    async def restart_tmux_codex_session(self, agent_id: str | None = None) -> None:
+        agent_id = agent_id or self.query_one("#agent-id", Input).value.strip()
+        if not agent_id:
+            self.notify("Select an agent before restarting Codex.", severity="warning")
+            return
+        if not self.tmux_features_available:
+            self.notify("Tmux is required to restart a Codex pane.", severity="warning")
+            return
+        if not self.is_tmux_direct_enabled(agent_id):
+            self.notify(
+                f"Enable tmux direct mode for {agent_id} before restarting Codex.",
+                severity="warning",
+            )
+            return
+        status = self.query_one_or_none("#tmux-status", Static)
+        pane = await self.resolve_tmux_send_pane(agent_id, status=status)
+        if pane is None:
+            self.notify(f"No tmux pane found for {agent_id}.", severity="warning")
+            return
+        agent = self.agents.get(agent_id)
+        if not isinstance(agent, dict):
+            self.notify(f"{agent_id} is not loaded.", severity="warning")
+            return
+        if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
+            if self.operator_role(agent) == OPERATOR_ROLE_FORK:
+                restarted = await self.relaunch_operator_fork_codex(agent_id, pane)
+            else:
+                restarted = await self.relaunch_operator_root_codex(agent_id, pane)
+        else:
+            restarted = await self.relaunch_caller_codex(agent_id, pane)
+        if not restarted:
+            return
+        await self.refresh_agents()
+        await self.refresh_events()
+        await self.load_tmux_capture(agent_id)
 
     async def resolve_tmux_send_pane(
         self,
@@ -10311,9 +10814,25 @@ class AgentPBXTUI(App[None]):
             return Path(configured).expanduser()
         return Path.home() / ".codex"
 
-    def operator_resume_command(self, codex_command: str, session_id: str) -> str:
+    def operator_resume_command(
+        self,
+        codex_command: str,
+        session_id: str,
+        *,
+        cd: str | None = None,
+        sandbox: str | None = None,
+        config_overrides: Iterable[str] = (),
+    ) -> str:
         command_parts = shlex.split(codex_command) if codex_command.strip() else ["codex"]
-        return shlex.join([*command_parts, "resume", session_id])
+        resume_parts = [*command_parts, "resume"]
+        if cd:
+            resume_parts.extend(["--cd", cd])
+        if sandbox:
+            resume_parts.extend(["--sandbox", sandbox])
+        for override in config_overrides:
+            resume_parts.extend(["-c", override])
+        resume_parts.append(session_id)
+        return shlex.join(resume_parts)
 
     def operator_fork_command(
         self,
@@ -10432,6 +10951,7 @@ class AgentPBXTUI(App[None]):
         for key in (
             "codex_session_id",
             "codex_thread_id",
+            "fork_codex_session_id",
             "last_resume_codex_session_id",
         ):
             session_id = str(metadata.get(key) or "").strip()
@@ -10501,6 +11021,7 @@ class AgentPBXTUI(App[None]):
         for key in (
             "codex_session_id",
             "codex_thread_id",
+            "fork_codex_session_id",
             "last_resume_codex_session_id",
         ):
             value = str(metadata.get(key) or "").strip()
@@ -10990,6 +11511,7 @@ class AgentPBXTUI(App[None]):
         access_mode: str | None = None,
         source_cwd: str | None = None,
         work_root: str | None = None,
+        fork_codex_session_id: str | None = None,
     ) -> dict[str, Any]:
         response = await self.api_client().post(
             "/v1/operator/forks/ensure",
@@ -11002,6 +11524,7 @@ class AgentPBXTUI(App[None]):
                 "access_mode": access_mode,
                 "source_cwd": source_cwd,
                 "work_root": work_root,
+                "fork_codex_session_id": fork_codex_session_id,
                 "tmux_pane_id": tmux_pane_id,
                 "status": "running",
                 "summary": "Fork launched from Agent PBX TUI.",
@@ -11883,24 +12406,7 @@ class AgentPBXTUI(App[None]):
         agent_id = self.selected_operator_agent_id()
         if not agent_id:
             return
-        pane_id = self.tmux_agent_targets.get(agent_id)
-        if pane_id and self.tui_owned_operator_pane_id(agent_id) != pane_id:
-            self.notify(
-                f"{agent_id} has a non-TUI-owned tmux pane; detach it before restart.",
-                severity="warning",
-            )
-            return
-        try:
-            candidates = await asyncio.to_thread(self.operator_session_candidates, agent_id)
-            await self.record_operator_session_history(agent_id, include=candidates[:1])
-        except Exception as exc:
-            self.notify(
-                f"Unable to record operator session history before restart: {exc}",
-                severity="warning",
-            )
-        if not await self.kill_tui_owned_operator_pane(agent_id):
-            return
-        await self.start_operator_agent(agent_id=agent_id)
+        await self.restart_tmux_codex_session(agent_id)
 
     async def resume_selected_operator(
         self,

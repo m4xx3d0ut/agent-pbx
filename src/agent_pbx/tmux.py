@@ -26,6 +26,8 @@ TMUX_PANE_FORMAT = "\t".join(
     ]
 )
 DEFAULT_SUBMIT_DELAY_SECONDS = 0.08
+DEFAULT_QUIT_WAIT_SECONDS = 5.0
+PANE_EXIT_POLL_SECONDS = 0.1
 FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -168,6 +170,59 @@ def kill_pane(target: str, *, tmux_bin: str = "tmux") -> None:
     if result.returncode != 0:
         message = (result.stderr or result.stdout or "tmux kill-pane failed").strip()
         raise RuntimeError(message)
+
+
+def pane_exists(target: str, *, tmux_bin: str = "tmux") -> bool:
+    result = subprocess.run(
+        [tmux_bin, "display-message", "-p", "-t", target, "#{pane_id}"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def pane_start_command(target: str, *, tmux_bin: str = "tmux") -> str:
+    result = subprocess.run(
+        [tmux_bin, "display-message", "-p", "-t", target, "#{pane_start_command}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (
+            result.stderr or result.stdout or "tmux pane_start_command lookup failed"
+        ).strip()
+        raise RuntimeError(message)
+    return result.stdout.strip()
+
+
+def wait_for_pane_exit(
+    target: str,
+    *,
+    timeout_seconds: float = DEFAULT_QUIT_WAIT_SECONDS,
+    interval_seconds: float = PANE_EXIT_POLL_SECONDS,
+    tmux_bin: str = "tmux",
+) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        if not pane_exists(target, tmux_bin=tmux_bin):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.01, interval_seconds))
+
+
+def quit_pane(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+    timeout_seconds: float = DEFAULT_QUIT_WAIT_SECONDS,
+) -> bool:
+    send_literal_keys(target, "/q", tmux_bin=tmux_bin)
+    return wait_for_pane_exit(
+        target,
+        timeout_seconds=timeout_seconds,
+        tmux_bin=tmux_bin,
+    )
 
 
 def capture_start_arg(lines: int) -> str:

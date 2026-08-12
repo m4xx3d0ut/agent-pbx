@@ -204,6 +204,64 @@ def test_tmux_kill_pane_uses_target(monkeypatch) -> None:
     assert calls == [["tmux", "kill-pane", "-t", "%42"]]
 
 
+def test_tmux_pane_exists_checks_display_message(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "%42\n", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.pane_exists("%42") is True
+    assert calls == [
+        ["tmux", "display-message", "-p", "-t", "%42", "#{pane_id}"]
+    ]
+
+
+def test_tmux_pane_start_command_reads_format(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, '"codex resume session-1"\n', "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.pane_start_command("%42") == '"codex resume session-1"'
+    assert calls == [
+        ["tmux", "display-message", "-p", "-t", "%42", "#{pane_start_command}"]
+    ]
+
+
+def test_tmux_quit_pane_sends_q_and_waits(monkeypatch) -> None:
+    sent: list[tuple[str, str]] = []
+    waited: list[tuple[str, float]] = []
+
+    def fake_send_literal_keys(
+        target: str,
+        text: str,
+        **kwargs: object,
+    ) -> None:
+        sent.append((target, text))
+
+    def fake_wait_for_pane_exit(
+        target: str,
+        *,
+        timeout_seconds: float = 0,
+        **kwargs: object,
+    ) -> bool:
+        waited.append((target, timeout_seconds))
+        return True
+
+    monkeypatch.setattr(tmux, "send_literal_keys", fake_send_literal_keys)
+    monkeypatch.setattr(tmux, "wait_for_pane_exit", fake_wait_for_pane_exit)
+
+    assert tmux.quit_pane("%42", timeout_seconds=1.5) is True
+    assert sent == [("%42", "/q")]
+    assert waited == [("%42", 1.5)]
+
+
 def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:
     calls: list[list[str]] = []
     loaded_text: list[str] = []
