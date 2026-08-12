@@ -1,6 +1,7 @@
 import inspect
 import json
 from pathlib import Path
+import shlex
 import subprocess
 from types import SimpleNamespace
 
@@ -15,11 +16,13 @@ from agent_pbx.tui import (
     OperatorSessionCandidate,
     PLAN_PBX_CONTEXT_PROMPT,
     PlanSelection,
+    REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     TMUX_LIVENESS_IDLE_SECONDS,
     DEFAULT_SPLIT_PERCENT,
     agent_pbx_mcp_url,
     built_in_palette_command_names,
     codex_mcp_add_command,
+    review_operator_mcp_config_overrides,
     configure_codex_mcp,
     codex_native_plan_selector_indices,
     contains_codex_native_plan_selector,
@@ -11477,12 +11480,65 @@ def test_tui_operator_fork_command_supports_cd_and_sandbox() -> None:
     )
 
 
+def test_tui_operator_fork_command_supports_config_overrides() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    command = app.operator_fork_command(
+        "codex",
+        "source-session",
+        "review prompt",
+        config_overrides=[
+            'mcp_servers."agent-pbx".default_tools_approval_mode="approve"',
+        ],
+    )
+
+    argv = shlex.split(command)
+    assert argv[:2] == ["codex", "fork"]
+    assert argv[-2:] == ["source-session", "review prompt"]
+    assert "-c" in argv
+    assert (
+        'mcp_servers."agent-pbx".default_tools_approval_mode="approve"'
+        in argv
+    )
+
+
+def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> None:
+    overrides = review_operator_mcp_config_overrides(("agent-pbx", "workerbee"))
+
+    assert (
+        'mcp_servers."agent-pbx".default_tools_approval_mode="approve"'
+        in overrides
+    )
+    assert 'mcp_servers."workerbee".default_tools_approval_mode="approve"' in overrides
+    agent_pbx_tools = next(
+        item
+        for item in overrides
+        if item.startswith('mcp_servers."agent-pbx".enabled_tools=')
+    )
+    workerbee_tools = next(
+        item
+        for item in overrides
+        if item.startswith('mcp_servers."workerbee".enabled_tools=')
+    )
+    assert "pbx_register_agent" in agent_pbx_tools
+    assert "pbx_report_turn" in agent_pbx_tools
+    assert "pbx_queue_command" not in agent_pbx_tools
+    assert "workerbee_v1_project_status" in workerbee_tools
+    assert "workerbee_v1_logs" in workerbee_tools
+    assert "workerbee_v1_workload_restart" not in workerbee_tools
+    assert "workerbee_v1_exec" not in workerbee_tools
+
+
 async def test_tui_start_review_operator_fork_uses_scratch_work_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     source_cwd = tmp_path / "caller"
     source_cwd.mkdir()
+    monkeypatch.setenv(
+        REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,
+        "agent-pbx,workerbee",
+    )
     app = AgentPBXTUI(
         server="http://127.0.0.1:8765",
         token="secret",
@@ -11614,9 +11670,24 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
     work_root = Path(str(launch["cwd"]))
     assert work_root.name == "operator-0-caller-1-review-1"
     assert not work_root.is_relative_to(source_cwd)
-    assert "--cd" in str(launch["command"])
-    assert "--sandbox workspace-write" in str(launch["command"])
-    assert "source-session" in str(launch["command"])
+    argv = shlex.split(str(launch["command"]))
+    assert "--cd" in argv
+    assert "--sandbox" in argv
+    assert "workspace-write" in argv
+    assert "source-session" in argv
+    config_overrides = [
+        argv[index + 1]
+        for index, item in enumerate(argv)
+        if item == "-c"
+    ]
+    assert (
+        'mcp_servers."agent-pbx".default_tools_approval_mode="approve"'
+        in config_overrides
+    )
+    assert (
+        'mcp_servers."workerbee".default_tools_approval_mode="approve"'
+        in config_overrides
+    )
     env = launch["env"]
     assert isinstance(env, dict)
     assert env["AGENT_PBX_OPERATOR_FORK_TRACK_ID"] == "review-1"
@@ -11629,4 +11700,8 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
     assert ensure_body["fork_purpose"] == "review"  # type: ignore[index]
     assert ensure_body["access_mode"] == "review_readonly"  # type: ignore[index]
     assert ensure_body["work_root"] == str(work_root)  # type: ignore[index]
+    assert ensure_body["metadata"]["review_mcp_approval_servers"] == [  # type: ignore[index]
+        "agent-pbx",
+        "workerbee",
+    ]
     assert opened and "review-1" in opened[0]

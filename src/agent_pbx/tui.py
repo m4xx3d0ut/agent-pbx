@@ -92,6 +92,35 @@ DEFAULT_OPERATOR_FORK_ACCESS_MODE = "edit"
 REVIEW_OPERATOR_FORK_PURPOSE = "review"
 REVIEW_OPERATOR_FORK_ACCESS_MODE = "review_readonly"
 DEFAULT_OPERATOR_TMUX_SESSION = "agent-pbx-operators"
+REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV = (
+    "AGENT_PBX_TUI_REVIEW_MCP_APPROVAL_SERVERS"
+)
+DEFAULT_REVIEW_OPERATOR_MCP_APPROVAL_SERVERS = ("agent-pbx",)
+REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
+    "pbx_register_agent",
+    "pbx_report_turn",
+    "pbx_operator_runbook",
+    "pbx_operator_get_thread",
+    "pbx_operator_campaign_status",
+    "pbx_operator_report_assignment",
+    "pbx_operator_route_review_escalation",
+    "pbx_pr_context",
+    "pbx_issue_context",
+    "pbx_joplin_status",
+    "pbx_joplin_create_document",
+)
+REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS = (
+    "workerbee_v1_project_runbook_status",
+    "workerbee_v1_project_status",
+    "workerbee_v1_secret_policy_status",
+    "workerbee_v1_profile_workload_status",
+    "workerbee_v1_edge_link_status",
+    "workerbee_v1_logs",
+)
+REVIEW_OPERATOR_MCP_APPROVED_TOOLS = {
+    "agent-pbx": REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS,
+    "workerbee": REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS,
+}
 AGENT_PBX_TOKEN_ENV = "AGENT_PBX_TOKEN"
 AGENT_PBX_SERVER_URL_ENV = "AGENT_PBX_SERVER_URL"
 AGENT_PBX_MCP_URL_ENV = "AGENT_PBX_MCP_URL"
@@ -794,6 +823,56 @@ def codex_mcp_add_command(codex_command: str, mcp_url: str) -> list[str]:
 
 def codex_mcp_remove_command(codex_command: str) -> list[str]:
     return [*codex_command_argv(codex_command), "mcp", "remove", "agent-pbx"]
+
+
+def codex_config_mcp_key(server_name: str, setting: str) -> str:
+    return f"mcp_servers.{json.dumps(server_name)}.{setting}"
+
+
+def codex_config_override(key: str, value: object) -> str:
+    return f"{key}={json.dumps(value)}"
+
+
+def review_operator_mcp_approval_server_names() -> tuple[str, ...]:
+    configured = os.getenv(REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV, "").strip()
+    if configured:
+        names = tuple(
+            name.strip()
+            for name in configured.split(",")
+            if name.strip()
+        )
+    else:
+        names = DEFAULT_REVIEW_OPERATOR_MCP_APPROVAL_SERVERS
+    if "agent-pbx" in names:
+        return names
+    return ("agent-pbx", *names)
+
+
+def review_operator_mcp_config_overrides(
+    server_names: Iterable[str] | None = None,
+) -> list[str]:
+    overrides: list[str] = []
+    names = server_names or review_operator_mcp_approval_server_names()
+    for server_name in names:
+        approved_tools = REVIEW_OPERATOR_MCP_APPROVED_TOOLS.get(server_name)
+        if not approved_tools:
+            continue
+        overrides.extend(
+            [
+                codex_config_override(
+                    codex_config_mcp_key(server_name, "enabled_tools"),
+                    list(approved_tools),
+                ),
+                codex_config_override(
+                    codex_config_mcp_key(
+                        server_name,
+                        "default_tools_approval_mode",
+                    ),
+                    "approve",
+                ),
+            ]
+        )
+    return overrides
 
 
 def process_error_summary(result: subprocess.CompletedProcess[str]) -> str:
@@ -10244,6 +10323,7 @@ class AgentPBXTUI(App[None]):
         *,
         cd: str | None = None,
         sandbox: str | None = None,
+        config_overrides: Iterable[str] = (),
     ) -> str:
         command_parts = shlex.split(codex_command) if codex_command.strip() else ["codex"]
         fork_parts = [*command_parts, "fork"]
@@ -10251,6 +10331,8 @@ class AgentPBXTUI(App[None]):
             fork_parts.extend(["--cd", cd])
         if sandbox:
             fork_parts.extend(["--sandbox", sandbox])
+        for override in config_overrides:
+            fork_parts.extend(["-c", override])
         fork_parts.extend([source_codex_session_id, prompt])
         return shlex.join(fork_parts)
 
@@ -11113,6 +11195,12 @@ class AgentPBXTUI(App[None]):
             "token_env": AGENT_PBX_TOKEN_ENV,
             "codex_command": codex_command,
         }
+        review_mcp_approval_servers: tuple[str, ...] = ()
+        if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
+            review_mcp_approval_servers = review_operator_mcp_approval_server_names()
+            fork_metadata["review_mcp_approval_servers"] = list(
+                review_mcp_approval_servers
+            )
         register_response = await self.api_client().post(
             "/v1/agents/register",
             json={
@@ -11149,6 +11237,11 @@ class AgentPBXTUI(App[None]):
                 "workspace-write"
                 if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
                 else None
+            ),
+            config_overrides=(
+                review_operator_mcp_config_overrides(review_mcp_approval_servers)
+                if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+                else ()
             ),
         )
         pane_id = await asyncio.to_thread(
