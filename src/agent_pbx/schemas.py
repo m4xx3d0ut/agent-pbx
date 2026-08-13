@@ -13,6 +13,15 @@ OperatorReviewEscalationRoute = Literal[
     "root_operator",
     "new_write_operator",
 ]
+OperatorProjectSpawnMode = Literal["empty", "clone_source"]
+OperatorProjectSpawnStatus = Literal[
+    "pending",
+    "launching",
+    "launched",
+    "failed",
+    "canceled",
+    "cancelled",
+]
 AssignmentState = Literal[
     "pending",
     "sent",
@@ -186,6 +195,18 @@ class OperatorForkEnsureRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class OperatorForkRebindSourceSessionRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    operator_fork_id: str = Field(min_length=1, max_length=120)
+    source_caller_agent_id: str = Field(min_length=1, max_length=120)
+    old_source_codex_session_id: str = Field(min_length=1, max_length=120)
+    new_source_codex_session_id: str = Field(min_length=1, max_length=120)
+    source_cwd: str | None = Field(default=None, max_length=1000)
+    codex_host_id: str | None = Field(default=None, max_length=120)
+    reason: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class OperatorReviewEscalationRequest(BaseModel):
     operator_agent_id: str = Field(min_length=1, max_length=120)
     review_fork_id: str = Field(min_length=1, max_length=120)
@@ -194,6 +215,26 @@ class OperatorReviewEscalationRequest(BaseModel):
     campaign_id: str | None = Field(default=None, max_length=120)
     assignment_id: str | None = Field(default=None, max_length=120)
     delivery: CampaignDelivery = "auto"
+
+
+class OperatorProjectSpawnRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    review_fork_id: str = Field(min_length=1, max_length=120)
+    project_name: str = Field(min_length=1, max_length=240)
+    instructions: str = Field(min_length=1)
+    mode: OperatorProjectSpawnMode = "empty"
+    target_slug: str | None = Field(default=None, max_length=160)
+    campaign_id: str | None = Field(default=None, max_length=120)
+    assignment_id: str | None = Field(default=None, max_length=120)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorProjectSpawnUpdateRequest(BaseModel):
+    status: OperatorProjectSpawnStatus
+    launched_agent_id: str | None = Field(default=None, max_length=120)
+    tmux_pane_id: str | None = Field(default=None, max_length=120)
+    error: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class OperatorForkEdgeCreateRequest(BaseModel):
@@ -243,6 +284,36 @@ class OperatorForkResponse(BaseModel):
 
 class OperatorForkListResponse(BaseModel):
     forks: list[OperatorForkResponse] = Field(default_factory=list)
+
+
+class OperatorProjectSpawnResponse(BaseModel):
+    spawn_request_id: str
+    logical_operator_agent_id: str
+    operator_agent_id: str
+    review_fork_id: str
+    review_fork_agent_id: str
+    source_caller_agent_id: str
+    source_cwd: str
+    target_parent: str
+    target_slug: str
+    target_path: str
+    project_name: str
+    mode: OperatorProjectSpawnMode
+    instructions: str
+    status: str
+    launched_agent_id: str | None = None
+    tmux_pane_id: str | None = None
+    error: str | None = None
+    campaign_id: str | None = None
+    assignment_id: str | None = None
+    metadata: dict[str, Any]
+    created_at: float
+    updated_at: float
+    completed_at: float | None = None
+
+
+class OperatorProjectSpawnListResponse(BaseModel):
+    project_spawns: list[OperatorProjectSpawnResponse] = Field(default_factory=list)
 
 
 class OperatorCampaignEventResponse(BaseModel):

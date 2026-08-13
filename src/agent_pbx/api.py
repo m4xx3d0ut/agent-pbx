@@ -83,8 +83,13 @@ from .schemas import (
     OperatorForkEdgeResponse,
     OperatorForkEnsureRequest,
     OperatorForkListResponse,
+    OperatorForkRebindSourceSessionRequest,
     OperatorForkResponse,
     OperatorFollowupRequest,
+    OperatorProjectSpawnListResponse,
+    OperatorProjectSpawnRequest,
+    OperatorProjectSpawnResponse,
+    OperatorProjectSpawnUpdateRequest,
     OperatorReviewEscalationRequest,
     OperatorAssignmentReportRequest,
     IssueActionRequest,
@@ -1332,6 +1337,29 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         )
 
     @app.post(
+        "/v1/operator/forks/rebind-source-session",
+        response_model=OperatorForkResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def rebind_operator_fork_source_session(
+        payload: OperatorForkRebindSourceSessionRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.rebind_fork_source_session,
+            operator_agent_id=payload.operator_agent_id,
+            operator_fork_id=payload.operator_fork_id,
+            source_caller_agent_id=payload.source_caller_agent_id,
+            old_source_codex_session_id=payload.old_source_codex_session_id,
+            new_source_codex_session_id=payload.new_source_codex_session_id,
+            source_cwd=payload.source_cwd,
+            codex_host_id=payload.codex_host_id,
+            reason=payload.reason,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
         "/v1/operator/fork-edges",
         response_model=OperatorForkEdgeResponse,
         dependencies=[Depends(require_token)],
@@ -1434,6 +1462,72 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             campaign_id=payload.campaign_id,
             assignment_id=payload.assignment_id,
             delivery=payload.delivery,
+        )
+
+    @app.get(
+        "/v1/operator/project-spawns",
+        response_model=OperatorProjectSpawnListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_project_spawns(
+        request: Request,
+        operator_agent_id: str | None = None,
+        review_fork_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        project_spawns = await asyncio.to_thread(
+            operator_service.list_project_spawn_requests,
+            operator_agent_id=operator_agent_id,
+            review_fork_id=review_fork_id,
+            status=status,
+            limit=limit,
+        )
+        return {"project_spawns": project_spawns}
+
+    @app.post(
+        "/v1/operator/project-spawns",
+        response_model=OperatorProjectSpawnResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def request_operator_project_spawn(
+        payload: OperatorProjectSpawnRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.request_project_spawn,
+            operator_agent_id=payload.operator_agent_id,
+            review_fork_id=payload.review_fork_id,
+            project_name=payload.project_name,
+            instructions=payload.instructions,
+            mode=payload.mode,
+            target_slug=payload.target_slug,
+            campaign_id=payload.campaign_id,
+            assignment_id=payload.assignment_id,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/project-spawns/{spawn_request_id}/status",
+        response_model=OperatorProjectSpawnResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def update_operator_project_spawn(
+        spawn_request_id: str,
+        payload: OperatorProjectSpawnUpdateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.update_project_spawn_request,
+            spawn_request_id=spawn_request_id,
+            status=payload.status,
+            launched_agent_id=payload.launched_agent_id,
+            tmux_pane_id=payload.tmux_pane_id,
+            error=payload.error,
+            metadata=payload.metadata,
         )
 
     @app.post(

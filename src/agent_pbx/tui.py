@@ -46,6 +46,11 @@ from textual.widgets import (
 
 from .client import auth_headers
 from . import tmux as tmux_support
+from .project_spawn import (
+    PROJECT_SPAWN_MODES,
+    normalize_project_slug,
+    validate_sibling_project_target,
+)
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
@@ -55,6 +60,9 @@ ATTENTION_EVENT_TYPES = {
     "report_created",
     "command_acked",
     "operator_campaign_event",
+    "operator_project_spawn_requested",
+    "operator_project_spawn_failed",
+    "operator_project_spawn_launched",
 }
 STARRED_AGENT_COLUMN = "*"
 DEFAULT_TUI_THEME = "cyberpunk"
@@ -103,6 +111,22 @@ DEFAULT_REVIEW_OPERATOR_MCP_APPROVAL_SERVERS = ("agent-pbx",)
 DEFAULT_REVIEW_OPERATOR_MCP_SERVER_CONFIGS = {
     "workerbee": {"url": "http://127.0.0.1:8765/mcp"},
 }
+PROJECT_SPAWN_COPY_EXCLUDES = (
+    ".agent-pbx-review",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "artifacts",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "runs",
+    "state",
+)
 CODEX_MCP_SERVER_TRANSPORT_KEYS = (
     "url",
     "bearer_token_env_var",
@@ -118,6 +142,17 @@ REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_operator_campaign_status",
     "pbx_operator_report_assignment",
     "pbx_operator_route_review_escalation",
+    "pbx_operator_request_project_spawn",
+    "pbx_pr_context",
+    "pbx_issue_context",
+    "pbx_joplin_status",
+    "pbx_joplin_create_document",
+)
+CALLER_AGENT_PBX_APPROVED_TOOLS = (
+    "pbx_agent_runbook",
+    "pbx_register_agent",
+    "pbx_report_turn",
+    "pbx_set_active",
     "pbx_pr_context",
     "pbx_issue_context",
     "pbx_joplin_status",
@@ -385,6 +420,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/operator fork next",
     "/operator fork prev",
     "/operator fork review",
+    "/operator project spawn",
     "/gitstatus",
     "/gitdiff",
     "/gitpush",
@@ -1046,6 +1082,43 @@ def review_operator_mcp_config_overrides(
                 config,
             )
         )
+    return overrides
+
+
+def agent_pbx_mcp_config_override(
+    approved_tools: Iterable[str],
+    *,
+    mcp_url: str | None = None,
+) -> str:
+    transport_config = {
+        "url": mcp_url
+        or agent_pbx_mcp_url(
+            os.getenv(AGENT_PBX_SERVER_URL_ENV, "http://127.0.0.1:8765")
+        ),
+        "bearer_token_env_var": AGENT_PBX_TOKEN_ENV,
+        "enabled_tools": list(approved_tools),
+        "default_tools_approval_mode": "approve",
+    }
+    return codex_config_override(
+        "mcp_servers.agent-pbx",
+        transport_config,
+    )
+
+
+def caller_agent_config_overrides(
+    *,
+    mcp_url: str | None = None,
+    work_root: str | None = None,
+) -> list[str]:
+    overrides = [
+        agent_pbx_mcp_config_override(
+            CALLER_AGENT_PBX_APPROVED_TOOLS,
+            mcp_url=mcp_url,
+        )
+    ]
+    trust_override = codex_project_trust_config_override(work_root)
+    if trust_override:
+        overrides.append(trust_override)
     return overrides
 
 
@@ -3544,6 +3617,13 @@ class AgentPBXTUI(App[None]):
             show=False,
             priority=True,
         ),
+        Binding(
+            "shift+p",
+            "launch_project_spawn",
+            "Launch Spawn",
+            key_display="P",
+            priority=True,
+        ),
         ("ctrl+t", "toggle_tmux_direct", "Tmux"),
         Binding("f8", "toggle_tmux_direct", "Tmux", key_display="F8"),
         Binding("alt+t", "toggle_tmux_direct", "Tmux", key_display="Alt+T", show=False),
@@ -3910,6 +3990,7 @@ class AgentPBXTUI(App[None]):
                     yield Button("Restart U", id="operator-restart")
                     yield Button("Stop x", id="operator-stop")
                     yield Button("Review W", id="operator-fork-review")
+                    yield Button("Spawn P", id="operator-project-spawn")
                     yield Button("Prev F6", id="operator-fork-prev")
                     yield Button("Next F7", id="operator-fork-next")
                     yield Button("Hide d", id="operator-hide")
@@ -4246,6 +4327,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator fork next", "View the next fork pane for the selected operator", self.palette_operator_fork_next)
         yield SystemCommand("/operator fork prev", "View the previous fork pane for the selected operator", self.palette_operator_fork_prev)
         yield SystemCommand("/operator fork review", "Start a read-only review fork for the selected operator/caller", self.palette_operator_fork_review)
+        yield SystemCommand("/operator project spawn", "Launch the oldest pending review project spawn", self.palette_operator_project_spawn)
         yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
         yield from self.palette_native_plan_selector_commands()
         yield from self.palette_dynamic_plan_commands()
@@ -4580,6 +4662,13 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.start_review_operator_fork(),
             name="palette-operator-fork-review",
+            exclusive=True,
+        )
+
+    def palette_operator_project_spawn(self) -> None:
+        self.run_worker(
+            self.launch_pending_project_spawn_request(),
+            name="palette-operator-project-spawn",
             exclusive=True,
         )
 
@@ -5421,6 +5510,15 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.start_review_operator_fork(),
             name="start-review-operator-fork",
+            exclusive=True,
+        )
+
+    def action_launch_project_spawn(self) -> None:
+        if self.focused_editable_text_input():
+            return
+        self.run_worker(
+            self.launch_pending_project_spawn_request(),
+            name="launch-project-spawn",
             exclusive=True,
         )
 
@@ -8979,6 +9077,9 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "operator-fork-review":
             await self.start_review_operator_fork()
             return
+        if event.button.id == "operator-project-spawn":
+            await self.launch_pending_project_spawn_request()
+            return
         if event.button.id == "operator-hide":
             agent_id = self.selected_operator_agent_id()
             if agent_id:
@@ -10948,6 +11049,13 @@ class AgentPBXTUI(App[None]):
             or DEFAULT_OPERATOR_TMUX_SESSION
         )
 
+    def caller_tmux_session_name(self) -> str:
+        return (
+            os.getenv("AGENT_PBX_TUI_CALLER_TMUX_SESSION", self.operator_tmux_session_name())
+            .strip()
+            or self.operator_tmux_session_name()
+        )
+
     def operator_launch_env(
         self,
         *,
@@ -11090,6 +11198,199 @@ class AgentPBXTUI(App[None]):
             fork_parts.extend(["-c", override])
         fork_parts.extend([source_codex_session_id, prompt])
         return shlex.join(fork_parts)
+
+    def codex_start_command(
+        self,
+        codex_command: str,
+        prompt: str,
+        *,
+        cd: str | None = None,
+        sandbox: str | None = None,
+        config_overrides: Iterable[str] = (),
+    ) -> str:
+        command_parts = shlex.split(codex_command) if codex_command.strip() else ["codex"]
+        start_parts = [*command_parts]
+        if cd:
+            start_parts.extend(["--cd", cd])
+        if sandbox:
+            start_parts.extend(["--sandbox", sandbox])
+        for override in config_overrides:
+            start_parts.extend(["-c", override])
+        start_parts.append(prompt)
+        return shlex.join(start_parts)
+
+    def spawned_project_agent_id(self, project_slug: str) -> str:
+        base = f"codex-{normalize_project_slug(project_slug, default='project')}"[:96]
+        if base not in self.agents:
+            return base
+        index = 2
+        while f"{base}-{index}" in self.agents:
+            index += 1
+        return f"{base}-{index}"
+
+    def project_spawn_copy_ignore(self, _: str, names: list[str]) -> set[str]:
+        ignored = set(PROJECT_SPAWN_COPY_EXCLUDES).intersection(names)
+        ignored.update(name for name in names if name.endswith((".pyc", ".pyo")))
+        return ignored
+
+    def create_project_spawn_repo(self, request: dict[str, Any]) -> Path:
+        source = Path(str(request.get("source_cwd") or "")).expanduser().resolve(strict=True)
+        target_parent = Path(str(request.get("target_parent") or "")).expanduser().resolve(
+            strict=False
+        )
+        target = Path(str(request.get("target_path") or "")).expanduser().resolve(strict=False)
+        validate_sibling_project_target(source, target, expected_parent=target_parent)
+        mode = str(request.get("mode") or "empty").strip().lower()
+        if mode not in PROJECT_SPAWN_MODES:
+            raise RuntimeError("project spawn mode must be empty or clone_source")
+        if target.exists():
+            if not target.is_dir():
+                raise RuntimeError(f"target path exists and is not a directory: {target}")
+            if any(target.iterdir()):
+                raise RuntimeError(f"target project directory is not empty: {target}")
+        if mode == "clone_source" and (source / ".git").exists():
+            result = subprocess.run(
+                ["git", "clone", "--no-hardlinks", str(source), str(target)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"git clone failed: {process_error_summary(result)}")
+            return target
+        if mode == "clone_source":
+            shutil.copytree(
+                source,
+                target,
+                ignore=self.project_spawn_copy_ignore,
+                symlinks=True,
+                dirs_exist_ok=True,
+            )
+        else:
+            target.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["git", "init"],
+            cwd=target,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git init failed: {process_error_summary(result)}")
+        return target
+
+    def spawned_project_bootstrap_prompt(
+        self,
+        *,
+        agent_id: str,
+        project: str,
+        cwd: str,
+        request: dict[str, Any],
+    ) -> str:
+        source_cwd = str(request.get("source_cwd") or "")
+        return "\n".join(
+            [
+                "Use Agent PBX as a caller agent.",
+                "The Agent PBX TUI created this project from an operator-mediated review request.",
+                "Register this session with:",
+                f"- agent_id: {agent_id}",
+                f"- project: {project}",
+                "- agent_type: caller",
+                f"- metadata.cwd: {cwd}",
+                '- metadata.pbx_mode: "report"',
+                '- metadata.launched_by: "agent-pbx-tui"',
+                "",
+                f"Source project: {source_cwd}",
+                f"Spawn request ID: {request.get('spawn_request_id')}",
+                f"Review fork: {request.get('review_fork_agent_id')}",
+                f"Mode: {request.get('mode')}",
+                "",
+                "Treat the source project as context unless the operator explicitly asks you to modify it.",
+                "Work in the current project directory and report progress through Agent PBX.",
+                "",
+                "Initial instructions:",
+                str(request.get("instructions") or "").strip(),
+            ]
+        )
+
+    def caller_launch_env(
+        self,
+        *,
+        agent_id: str,
+        project: str,
+        cwd: str,
+        mcp_url: str,
+        request: dict[str, Any],
+    ) -> dict[str, str]:
+        env = {
+            AGENT_PBX_SERVER_URL_ENV: self.server,
+            AGENT_PBX_MCP_URL_ENV: mcp_url,
+            "AGENT_PBX_AGENT_ID": agent_id,
+            "AGENT_PBX_AGENT_TYPE": CALLER_AGENT_TYPE,
+            "AGENT_PBX_AGENT_PROJECT": project,
+            "AGENT_PBX_PBX_MODE": PBX_REPORT_MODE,
+            "AGENT_PBX_CWD": cwd,
+            "AGENT_PBX_PROJECT_SPAWN_REQUEST_ID": str(
+                request.get("spawn_request_id") or ""
+            ),
+        }
+        source_caller = str(request.get("source_caller_agent_id") or "").strip()
+        if source_caller:
+            env["AGENT_PBX_SOURCE_CALLER_AGENT_ID"] = source_caller
+        source_cwd = str(request.get("source_cwd") or "").strip()
+        if source_cwd:
+            env["AGENT_PBX_SOURCE_CWD"] = source_cwd
+        if self.token:
+            env[AGENT_PBX_TOKEN_ENV] = self.token
+        return env
+
+    async def register_spawned_project_caller(
+        self,
+        *,
+        agent_id: str,
+        project: str,
+        cwd: str,
+        pane_id: str,
+        codex_command: str,
+        mcp_url: str,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = {
+            "agent_type": CALLER_AGENT_TYPE,
+            "pbx_mode": PBX_REPORT_MODE,
+            "cwd": cwd,
+            "launched_by": "agent-pbx-tui",
+            "server_url": self.server,
+            "mcp_url": mcp_url,
+            "token_env": AGENT_PBX_TOKEN_ENV,
+            "tmux_session": self.caller_tmux_session_name(),
+            "tmux_pane_id": pane_id,
+            "codex_command": codex_command,
+            "project_spawn_request_id": request.get("spawn_request_id"),
+            "source_review_fork_id": request.get("review_fork_id"),
+            "source_review_fork_agent_id": request.get("review_fork_agent_id"),
+            "source_caller_agent_id": request.get("source_caller_agent_id"),
+            "source_cwd": request.get("source_cwd"),
+            "spawn_mode": request.get("mode"),
+        }
+        response = await self.api_client().post(
+            "/v1/agents/register",
+            json={
+                "agent_id": agent_id,
+                "project": project,
+                "name": agent_id,
+                "agent_type": CALLER_AGENT_TYPE,
+                "pbx_active": True,
+                "metadata": metadata,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        agent = response.json()
+        if isinstance(agent, dict):
+            self.agents[agent_id] = agent
+            return agent
+        raise RuntimeError("spawned caller registration returned a non-object")
 
     def operator_root_metadata(
         self,
@@ -11794,6 +12095,7 @@ class AgentPBXTUI(App[None]):
         caller_metadata = caller.get("metadata") if isinstance(caller.get("metadata"), dict) else {}
         source_session_id = str(caller_metadata.get("codex_session_id") or "").strip()
         caller_cwd = str(caller_metadata.get("cwd") or "").strip()
+        caller_host_id = str(caller_metadata.get("codex_host_id") or "").strip()
         resolved_track_id = self.normalize_operator_fork_track_id(fork_track_id)
         resolved_purpose = self.normalize_operator_fork_label(
             fork_purpose,
@@ -11822,7 +12124,7 @@ class AgentPBXTUI(App[None]):
             params={
                 "operator_agent_id": logical_operator_id,
                 "source_caller_agent_id": source_caller_agent_id,
-                "limit": 20,
+                "limit": 100,
             },
             headers=auth_headers(self.token),
         )
@@ -11833,10 +12135,9 @@ class AgentPBXTUI(App[None]):
             if isinstance(existing_payload, dict)
             else []
         )
+        stale_rebind_candidates: list[dict[str, Any]] = []
         for fork in existing_forks:
             if not isinstance(fork, dict):
-                continue
-            if fork.get("source_codex_session_id") != source_session_id:
                 continue
             fork_metadata = (
                 fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
@@ -11847,6 +12148,31 @@ class AgentPBXTUI(App[None]):
                 or DEFAULT_OPERATOR_FORK_TRACK_ID
             ).strip()
             if fork_track != resolved_track_id:
+                continue
+            fork_source_session_id = str(
+                fork.get("source_codex_session_id")
+                or fork_metadata.get("source_codex_session_id")
+                or ""
+            ).strip()
+            if fork_source_session_id != source_session_id:
+                stale_source_cwd = str(
+                    fork.get("source_cwd") or fork_metadata.get("source_cwd") or ""
+                ).strip()
+                stale_work_root = str(
+                    fork.get("work_root") or fork_metadata.get("work_root") or ""
+                ).strip()
+                stale_host_id = str(
+                    fork.get("codex_host_id") or fork_metadata.get("codex_host_id") or ""
+                ).strip()
+                if (
+                    fork_source_session_id
+                    and stale_source_cwd == caller_cwd
+                    and (not stale_work_root or stale_work_root == launch_cwd)
+                    and (not stale_host_id or not caller_host_id or stale_host_id == caller_host_id)
+                    and str(fork.get("status") or "").lower()
+                    in {"starting", "running", "ready"}
+                ):
+                    stale_rebind_candidates.append(fork)
                 continue
             if str(fork.get("status") or "").lower() in {"starting", "running", "ready"}:
                 fork_agent_id = str(fork.get("fork_agent_id") or "")
@@ -11921,6 +12247,21 @@ class AgentPBXTUI(App[None]):
                         "tmux_pane_id": pane.pane_id,
                     }
                 return fork
+        rebound_fork = await self.rebind_stale_operator_fork_from_tui(
+            stale_rebind_candidates,
+            logical_operator_id=logical_operator_id,
+            source_caller_agent_id=source_caller_agent_id,
+            source_codex_session_id=source_session_id,
+            source_cwd=caller_cwd,
+            codex_host_id=caller_host_id,
+            fork_track_id=resolved_track_id,
+            fork_purpose=resolved_purpose,
+            access_mode=resolved_access_mode,
+            work_root=launch_cwd,
+            panes=panes,
+        )
+        if rebound_fork is not None:
+            return rebound_fork
 
         codex_command = self.operator_codex_command()
         mcp_url = agent_pbx_mcp_url(self.server)
@@ -12037,6 +12378,317 @@ class AgentPBXTUI(App[None]):
             f"Started {resolved_purpose} fork {fork_agent_id} for {source_caller_agent_id}."
         )
         return fork
+
+    async def rebind_stale_operator_fork_from_tui(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        logical_operator_id: str,
+        source_caller_agent_id: str,
+        source_codex_session_id: str,
+        source_cwd: str,
+        codex_host_id: str,
+        fork_track_id: str,
+        fork_purpose: str,
+        access_mode: str,
+        work_root: str,
+        panes: list[tmux_support.TmuxPane],
+    ) -> dict[str, Any] | None:
+        live_candidates: list[tuple[dict[str, Any], tmux_support.TmuxPane]] = []
+        for fork in candidates:
+            fork_agent_id = str(fork.get("fork_agent_id") or "").strip()
+            tmux_pane_id = str(fork.get("tmux_pane_id") or "").strip()
+            if not fork_agent_id:
+                continue
+            pane = self.validated_operator_fork_pane(
+                fork_agent_id,
+                panes,
+                tmux_pane_id=tmux_pane_id,
+            )
+            if pane is None:
+                pane = self.validated_operator_fork_pane(fork_agent_id, panes)
+            if pane is not None:
+                live_candidates.append((fork, pane))
+        if not live_candidates:
+            return None
+        if len(live_candidates) > 1:
+            raise RuntimeError(
+                f"multiple stale {fork_track_id} forks have live panes; "
+                "select one before rebinding"
+            )
+
+        fork, pane = live_candidates[0]
+        fork_agent_id = str(fork.get("fork_agent_id") or "").strip()
+        old_source_session_id = str(fork.get("source_codex_session_id") or "").strip()
+        operator_fork_id = str(fork.get("operator_fork_id") or "").strip()
+        if not old_source_session_id or not operator_fork_id:
+            return None
+        try:
+            response = await self.api_client().post(
+                "/v1/operator/forks/rebind-source-session",
+                json={
+                    "operator_agent_id": logical_operator_id,
+                    "operator_fork_id": operator_fork_id,
+                    "source_caller_agent_id": source_caller_agent_id,
+                    "old_source_codex_session_id": old_source_session_id,
+                    "new_source_codex_session_id": source_codex_session_id,
+                    "source_cwd": source_cwd,
+                    "codex_host_id": codex_host_id or None,
+                    "reason": "TUI matched stale live fork for restarted source caller.",
+                    "metadata": {
+                        "agent_type": OPERATOR_AGENT_TYPE,
+                        "operator_role": OPERATOR_ROLE_FORK,
+                        "logical_operator_id": logical_operator_id,
+                        "source_caller_agent_id": source_caller_agent_id,
+                        "source_codex_session_id": source_codex_session_id,
+                        "fork_track_id": fork_track_id,
+                        "fork_purpose": fork_purpose,
+                        "access_mode": access_mode,
+                        "source_cwd": source_cwd,
+                        "work_root": work_root,
+                        "cwd": work_root,
+                        "tmux_pane_id": pane.pane_id,
+                        "operator_fork_pending": False,
+                    },
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError(f"unable to rebind stale operator fork: {exc}") from exc
+        if not isinstance(payload, dict):
+            return None
+        rebound_metadata = (
+            payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        )
+        rebound_metadata = {
+            **rebound_metadata,
+            "agent_type": OPERATOR_AGENT_TYPE,
+            "operator_role": OPERATOR_ROLE_FORK,
+            "logical_operator_id": logical_operator_id,
+            "source_caller_agent_id": source_caller_agent_id,
+            "source_codex_session_id": source_codex_session_id,
+            "fork_track_id": fork_track_id,
+            "fork_purpose": fork_purpose,
+            "access_mode": access_mode,
+            "source_cwd": source_cwd,
+            "work_root": work_root,
+            "cwd": work_root,
+            "tmux_pane_id": pane.pane_id,
+        }
+        payload["metadata"] = rebound_metadata
+        payload["source_codex_session_id"] = source_codex_session_id
+        payload["tmux_pane_id"] = pane.pane_id
+        self.agents[fork_agent_id] = self.operator_fork_record_agent(payload)
+        local_agent = self.agents.get(fork_agent_id)
+        if local_agent is not None:
+            local_agent["metadata"] = rebound_metadata
+        self.tmux_agent_targets[fork_agent_id] = pane.pane_id
+        self.tmux_direct_agent_modes[fork_agent_id] = True
+        self.notify(
+            f"Rebound {fork_track_id} fork {fork_agent_id} to current source session."
+        )
+        return payload
+
+    async def fetch_pending_project_spawn_requests(
+        self,
+        logical_operator_id: str,
+    ) -> list[dict[str, Any]]:
+        response = await self.api_client().get(
+            "/v1/operator/project-spawns",
+            params={
+                "operator_agent_id": logical_operator_id,
+                "status": "pending",
+                "limit": 20,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return []
+        requests = payload.get("project_spawns")
+        if not isinstance(requests, list):
+            return []
+        return [item for item in requests if isinstance(item, dict)]
+
+    async def update_project_spawn_request_status(
+        self,
+        spawn_request_id: str,
+        *,
+        status: str,
+        launched_agent_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/project-spawns/{spawn_request_id}/status",
+            json={
+                "status": status,
+                "launched_agent_id": launched_agent_id,
+                "tmux_pane_id": tmux_pane_id,
+                "error": error,
+                "metadata": metadata or {},
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("project spawn status response was not an object")
+
+    async def fail_project_spawn_request(
+        self,
+        request: dict[str, Any],
+        error: str,
+    ) -> None:
+        spawn_request_id = str(request.get("spawn_request_id") or "").strip()
+        if not spawn_request_id:
+            return
+        try:
+            await self.update_project_spawn_request_status(
+                spawn_request_id,
+                status="failed",
+                error=error[:4000],
+            )
+        except Exception as exc:
+            self.notify(
+                f"Unable to record project spawn failure: {exc}",
+                severity="warning",
+            )
+
+    async def launch_pending_project_spawn_request(self) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        if not self.tmux_features_available:
+            self.notify("Tmux is required to launch project spawn requests.", severity="warning")
+            return
+        if not await self.ensure_operator_auth_ready():
+            return
+        try:
+            pending = await self.fetch_pending_project_spawn_requests(logical_operator_id)
+        except Exception as exc:
+            self.notify(f"Unable to fetch project spawn requests: {exc}", severity="error")
+            return
+        if not pending:
+            self.notify(f"No pending project spawn requests for {logical_operator_id}.")
+            return
+        request = pending[0]
+        launched = await self.launch_project_spawn_request(request)
+        if launched and len(pending) > 1:
+            self.notify(
+                f"Launched oldest project spawn; {len(pending) - 1} pending request(s) remain."
+            )
+
+    async def launch_project_spawn_request(self, request: dict[str, Any]) -> bool:
+        spawn_request_id = str(request.get("spawn_request_id") or "").strip()
+        if not spawn_request_id:
+            self.notify("Project spawn request is missing an id.", severity="error")
+            return False
+        try:
+            request = await self.update_project_spawn_request_status(
+                spawn_request_id,
+                status="launching",
+            )
+            target_path = await asyncio.to_thread(self.create_project_spawn_repo, request)
+            codex_command = self.operator_codex_command()
+            mcp_url = agent_pbx_mcp_url(self.server)
+            await self.configure_operator_codex_mcp(
+                codex_command=codex_command,
+                mcp_url=mcp_url,
+            )
+            project = target_path.name
+            agent_id = self.spawned_project_agent_id(project)
+            bootstrap = self.spawned_project_bootstrap_prompt(
+                agent_id=agent_id,
+                project=project,
+                cwd=str(target_path),
+                request=request,
+            )
+            command = self.codex_start_command(
+                codex_command,
+                bootstrap,
+                cd=str(target_path),
+                sandbox="workspace-write",
+                config_overrides=caller_agent_config_overrides(
+                    mcp_url=mcp_url,
+                    work_root=str(target_path),
+                ),
+            )
+            pane_id = await self.launch_restart_pane(
+                session_name=self.caller_tmux_session_name(),
+                window_name=agent_id,
+                command=command,
+                label=agent_id,
+                cwd=str(target_path),
+                env=self.caller_launch_env(
+                    agent_id=agent_id,
+                    project=project,
+                    cwd=str(target_path),
+                    mcp_url=mcp_url,
+                    request=request,
+                ),
+            )
+            await self.register_spawned_project_caller(
+                agent_id=agent_id,
+                project=project,
+                cwd=str(target_path),
+                pane_id=pane_id,
+                codex_command=codex_command,
+                mcp_url=mcp_url,
+                request=request,
+            )
+            await self.update_project_spawn_request_status(
+                spawn_request_id,
+                status="launched",
+                launched_agent_id=agent_id,
+                tmux_pane_id=pane_id,
+                metadata={"target_path": str(target_path)},
+            )
+        except Exception as exc:
+            error = str(exc)
+            await self.fail_project_spawn_request(request, error)
+            detail = self.query_one_or_none("#detail", TextArea)
+            if detail is not None:
+                detail.text = (
+                    f"Project spawn failed.\n\n"
+                    f"Request: {spawn_request_id}\n"
+                    f"Target: {request.get('target_path') or '-'}\n"
+                    f"Error: {error}"
+                )
+            self.notify(f"Unable to launch project spawn: {error}", severity="error")
+            await self.refresh_events()
+            return False
+
+        self.tmux_agent_targets[agent_id] = pane_id
+        self.tmux_manual_override_agent_ids.add(agent_id)
+        self.tmux_detached_agent_ids.discard(agent_id)
+        self.tmux_direct_agent_modes[agent_id] = True
+        self.save_settings()
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = (
+                f"Launched project spawn.\n\n"
+                f"Request: {spawn_request_id}\n"
+                f"Agent: {agent_id}\n"
+                f"Project: {project}\n"
+                f"Path: {target_path}\n"
+                f"Pane: {pane_id}"
+            )
+        self.notify(f"Launched {agent_id} for {target_path.name}.")
+        await self.refresh_agents()
+        await self.refresh_events()
+        await self.open_latest_for_agent(agent_id)
+        return True
 
     def source_caller_agent_id_for_review_fork(
         self,

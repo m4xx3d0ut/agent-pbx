@@ -21,6 +21,7 @@ from agent_pbx.tui import (
     DEFAULT_SPLIT_PERCENT,
     agent_pbx_mcp_url,
     built_in_palette_command_names,
+    caller_agent_config_overrides,
     codex_mcp_add_command,
     review_operator_config_overrides,
     review_operator_mcp_config_overrides,
@@ -5913,6 +5914,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/operator fork next" in titles
     assert "/operator fork prev" in titles
     assert "/operator fork review" in titles
+    assert "/operator project spawn" in titles
     assert "/theme minimal" in titles
     assert "/layout compact" in titles
     assert "/gitstatus" not in titles
@@ -5981,6 +5983,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/operator fork next",
         "/operator fork prev",
         "/operator fork review",
+        "/operator project spawn",
         "/joplin",
         "/joplin refresh",
         "/joplin new",
@@ -12165,6 +12168,27 @@ def test_tui_operator_fork_command_supports_config_overrides() -> None:
     )
 
 
+def test_tui_codex_start_command_supports_project_spawn_options() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    command = app.codex_start_command(
+        "codex --search",
+        "bootstrap prompt",
+        cd="/tmp/new project",
+        sandbox="workspace-write",
+        config_overrides=[
+            'projects={"/tmp/new project" = {trust_level = "trusted"}}',
+        ],
+    )
+
+    argv = shlex.split(command)
+    assert argv[:2] == ["codex", "--search"]
+    assert argv[2:5] == ["--cd", "/tmp/new project", "--sandbox"]
+    assert "workspace-write" in argv
+    assert "-c" in argv
+    assert argv[-1] == "bootstrap prompt"
+
+
 def test_tui_operator_resume_command_supports_restart_options() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -12227,6 +12251,7 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert 'default_tools_approval_mode = "approve"' in agent_pbx_config
     assert "pbx_register_agent" in agent_pbx_config
     assert "pbx_report_turn" in agent_pbx_config
+    assert "pbx_operator_request_project_spawn" in agent_pbx_config
     assert "pbx_queue_command" not in agent_pbx_config
     assert 'url = "http://127.0.0.1:8765/mcp"' in workerbee_config
     assert 'default_tools_approval_mode = "approve"' in workerbee_config
@@ -12246,6 +12271,25 @@ def test_tui_review_operator_config_overrides_trusts_scratch_work_root() -> None
 
     assert 'projects={"/tmp/review root" = {trust_level = "trusted"}}' in overrides
     assert any(item.startswith("mcp_servers.agent-pbx=") for item in overrides)
+
+
+def test_tui_caller_agent_config_overrides_allowlist_report_tools() -> None:
+    overrides = caller_agent_config_overrides(
+        mcp_url="http://127.0.0.1:8767/mcp",
+        work_root="/tmp/new project",
+    )
+
+    agent_pbx_config = next(
+        item
+        for item in overrides
+        if item.startswith("mcp_servers.agent-pbx=")
+    )
+    assert 'url = "http://127.0.0.1:8767/mcp"' in agent_pbx_config
+    assert 'default_tools_approval_mode = "approve"' in agent_pbx_config
+    assert "pbx_register_agent" in agent_pbx_config
+    assert "pbx_report_turn" in agent_pbx_config
+    assert "pbx_operator_request_project_spawn" not in agent_pbx_config
+    assert 'projects={"/tmp/new project" = {trust_level = "trusted"}}' in overrides
 
 
 def test_tui_loads_codex_mcp_server_transport_config(tmp_path: Path) -> None:
@@ -12471,3 +12515,419 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
         "workerbee",
     ]
     assert opened and "review-1" in opened[0]
+
+
+@pytest.mark.asyncio
+async def test_tui_rebinds_stale_live_operator_fork_without_launching(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller-1"
+    source_cwd.mkdir()
+    work_root = tmp_path / ".agent-pbx-review" / "operator-0-caller-1-review-1"
+    work_root.mkdir(parents=True)
+    posts: list[dict[str, object]] = []
+    fork_agent_id = "operator-0-fork-caller-1-review-1-oldhash"
+    stale_fork = {
+        "operator_fork_id": "fork-review-1",
+        "logical_operator_agent_id": "operator-0",
+        "fork_agent_id": fork_agent_id,
+        "source_caller_agent_id": "caller-1",
+        "source_codex_session_id": "session-caller-1",
+        "fork_track_id": "review-1",
+        "fork_purpose": "review",
+        "access_mode": "review_readonly",
+        "source_cwd": str(source_cwd),
+        "work_root": str(work_root),
+        "cwd": str(work_root),
+        "codex_home": None,
+        "codex_host_id": "local",
+        "tmux_pane_id": "%42",
+        "status": "running",
+        "summary": None,
+        "metadata": {
+            "source_caller_agent_id": "caller-1",
+            "source_codex_session_id": "session-caller-1",
+            "fork_track_id": "review-1",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+            "source_cwd": str(source_cwd),
+            "work_root": str(work_root),
+            "tmux_pane_id": "%42",
+        },
+        "created_at": 1.0,
+        "updated_at": 1.0,
+        "last_used_at": 1.0,
+        "completed_at": None,
+        "edges": [],
+    }
+
+    class Response:
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            if path == "/v1/operator/forks":
+                return Response({"forks": [stale_fork]})
+            raise AssertionError(path)
+
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            if path != "/v1/operator/forks/rebind-source-session":
+                raise AssertionError(path)
+            body = kwargs["json"]  # type: ignore[index]
+            metadata = dict(stale_fork["metadata"])  # type: ignore[arg-type]
+            metadata.update(body["metadata"])  # type: ignore[index]
+            metadata["previous_source_codex_session_ids"] = ["session-caller-1"]
+            rebound = {
+                **stale_fork,
+                "source_codex_session_id": body["new_source_codex_session_id"],  # type: ignore[index]
+                "metadata": metadata,
+            }
+            return Response(rebound)
+
+    async def fail_configure_operator_codex_mcp(**_: object) -> None:
+        raise AssertionError("new fork launch should not configure MCP")
+
+    async def fail_launch_restart_pane(**_: object) -> str:
+        raise AssertionError("new fork launch should not create a pane")
+
+    pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "1",
+        "0",
+        "%42",
+        True,
+        "node",
+        fork_agent_id,
+        str(work_root),
+        120,
+        30,
+        120,
+        window_name=fork_agent_id,
+    )
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.configure_operator_codex_mcp = fail_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.launch_restart_pane = fail_launch_restart_pane  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", lambda *args, **kwargs: [pane])
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+            },
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(source_cwd),
+                    "codex_session_id": "session-caller-2",
+                    "codex_host_id": "local",
+                },
+            },
+        }
+        fork = await app.ensure_operator_fork_from_tui(
+            logical_operator_id="operator-0",
+            source_caller_agent_id="caller-1",
+            fork_track_id="review-1",
+            fork_purpose="review",
+            access_mode="review_readonly",
+            work_root=str(work_root),
+        )
+
+    assert fork is not None
+    assert fork["operator_fork_id"] == "fork-review-1"
+    assert fork["fork_agent_id"] == fork_agent_id
+    assert fork["source_codex_session_id"] == "session-caller-2"
+    assert app.tmux_agent_targets[fork_agent_id] == "%42"
+    assert app.tmux_direct_agent_modes[fork_agent_id] is True
+    assert app.agents[fork_agent_id]["metadata"]["source_codex_session_id"] == (
+        "session-caller-2"
+    )
+    assert [post["path"] for post in posts] == [
+        "/v1/operator/forks/rebind-source-session"
+    ]
+    body = posts[0]["json"]
+    assert body["old_source_codex_session_id"] == "session-caller-1"  # type: ignore[index]
+    assert body["new_source_codex_session_id"] == "session-caller-2"  # type: ignore[index]
+    assert body["operator_fork_id"] == "fork-review-1"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_tui_blocks_ambiguous_stale_operator_fork_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller-1"
+    source_cwd.mkdir()
+    work_root = tmp_path / ".agent-pbx-review" / "operator-0-caller-1-review-1"
+    work_root.mkdir(parents=True)
+    fork_agent_ids = [
+        "operator-0-fork-caller-1-review-1-oldhash-a",
+        "operator-0-fork-caller-1-review-1-oldhash-b",
+    ]
+    stale_forks = [
+        {
+            "operator_fork_id": f"fork-review-{index}",
+            "logical_operator_agent_id": "operator-0",
+            "fork_agent_id": fork_agent_id,
+            "source_caller_agent_id": "caller-1",
+            "source_codex_session_id": f"session-caller-old-{index}",
+            "fork_track_id": "review-1",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+            "source_cwd": str(source_cwd),
+            "work_root": str(work_root),
+            "cwd": str(work_root),
+            "codex_home": None,
+            "codex_host_id": "local",
+            "tmux_pane_id": f"%4{index}",
+            "status": "running",
+            "summary": None,
+            "metadata": {
+                "source_caller_agent_id": "caller-1",
+                "source_codex_session_id": f"session-caller-old-{index}",
+                "fork_track_id": "review-1",
+                "source_cwd": str(source_cwd),
+                "work_root": str(work_root),
+                "tmux_pane_id": f"%4{index}",
+            },
+            "created_at": 1.0,
+            "updated_at": 1.0,
+            "last_used_at": 1.0,
+            "completed_at": None,
+            "edges": [],
+        }
+        for index, fork_agent_id in enumerate(fork_agent_ids, start=1)
+    ]
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"forks": stale_forks}
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            if path == "/v1/operator/forks":
+                return Response()
+            raise AssertionError(path)
+
+        async def post(self, path: str, **_: object) -> Response:
+            raise AssertionError(path)
+
+    async def fail_configure_operator_codex_mcp(**_: object) -> None:
+        raise AssertionError("ambiguous stale forks should block before launch")
+
+    async def fail_launch_restart_pane(**_: object) -> str:
+        raise AssertionError("ambiguous stale forks should block before launch")
+
+    panes = [
+        tmux_support.TmuxPane(
+            "agent-pbx-operators",
+            "1",
+            str(index),
+            f"%4{index}",
+            index == 1,
+            "node",
+            fork_agent_id,
+            str(work_root),
+            120,
+            30,
+            120,
+            window_name=fork_agent_id,
+        )
+        for index, fork_agent_id in enumerate(fork_agent_ids, start=1)
+    ]
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.configure_operator_codex_mcp = fail_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.launch_restart_pane = fail_launch_restart_pane  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", lambda *args, **kwargs: panes)
+
+    async with app.run_test():
+        app.agents = {
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(source_cwd),
+                    "codex_session_id": "session-caller-2",
+                    "codex_host_id": "local",
+                },
+            },
+        }
+        with pytest.raises(RuntimeError, match="multiple stale review-1 forks"):
+            await app.ensure_operator_fork_from_tui(
+                logical_operator_id="operator-0",
+                source_caller_agent_id="caller-1",
+                fork_track_id="review-1",
+                fork_purpose="review",
+                access_mode="review_readonly",
+                work_root=str(work_root),
+            )
+
+
+async def test_tui_launch_pending_project_spawn_starts_registered_caller(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller-1"
+    source_cwd.mkdir()
+    target_path = tmp_path / "next-demo"
+    request = {
+        "spawn_request_id": "spawn-1",
+        "logical_operator_agent_id": "operator-0",
+        "operator_agent_id": "operator-0",
+        "review_fork_id": "fork-review-1",
+        "review_fork_agent_id": "operator-0-fork-caller-1-review-1",
+        "source_caller_agent_id": "caller-1",
+        "source_cwd": str(source_cwd),
+        "target_parent": str(tmp_path),
+        "target_slug": "next-demo",
+        "target_path": str(target_path),
+        "project_name": "Next Demo",
+        "mode": "empty",
+        "instructions": "Build a small sibling project.",
+        "status": "pending",
+        "metadata": {},
+        "created_at": 1.0,
+        "updated_at": 1.0,
+        "completed_at": None,
+    }
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    posts: list[dict[str, object]] = []
+    opened: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, data: object) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.data
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            if path == "/v1/auth/check":
+                return Response({"ok": True})
+            if path == "/v1/operator/project-spawns":
+                return Response({"project_spawns": [dict(request)]})
+            raise AssertionError(path)
+
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            body = kwargs["json"]  # type: ignore[index]
+            if path == "/v1/agents/register":
+                return Response(
+                    {
+                        "agent_id": body["agent_id"],  # type: ignore[index]
+                        "agent_type": "caller",
+                        "project": body["project"],  # type: ignore[index]
+                        "name": body.get("name"),  # type: ignore[union-attr]
+                        "status": "online",
+                        "effective_status": "online",
+                        "pbx_active": True,
+                        "metadata": body["metadata"],  # type: ignore[index]
+                        "created_at": 1.0,
+                        "last_seen_at": 1.0,
+                    }
+                )
+            if path == "/v1/operator/project-spawns/spawn-1/status":
+                updated = dict(request)
+                updated.update(body)  # type: ignore[arg-type]
+                if body["status"] == "launched":  # type: ignore[index]
+                    updated["completed_at"] = 2.0
+                return Response(updated)
+            raise AssertionError(path)
+
+    async def fake_configure_operator_codex_mcp(**_: object) -> None:
+        return None
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    async def fake_open_latest_for_agent(agent_id: str) -> None:
+        opened.append(agent_id)
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%77"
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%77")
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        await app.launch_pending_project_spawn_request()
+
+    assert (target_path / ".git").is_dir()
+    assert len(launches) == 1
+    launch = launches[0]
+    assert launch["session_name"] == app.caller_tmux_session_name()
+    assert launch["window_name"] == "codex-next-demo"
+    assert launch["cwd"] == str(target_path)
+    argv = shlex.split(str(launch["command"]))
+    assert argv[0] == "codex"
+    assert "--cd" in argv
+    assert str(target_path) in argv
+    assert "-c" in argv
+    assert "Build a small sibling project." in argv[-1]
+    env = launch["env"]
+    assert isinstance(env, dict)
+    assert env["AGENT_PBX_AGENT_ID"] == "codex-next-demo"
+    assert env["AGENT_PBX_AGENT_TYPE"] == "caller"
+    assert env["AGENT_PBX_AGENT_PROJECT"] == "next-demo"
+    assert app.tmux_agent_targets["codex-next-demo"] == "%77"
+    assert app.tmux_direct_agent_modes["codex-next-demo"] is True
+    assert opened == ["codex-next-demo"]
+    assert [post["path"] for post in posts] == [
+        "/v1/operator/project-spawns/spawn-1/status",
+        "/v1/agents/register",
+        "/v1/operator/project-spawns/spawn-1/status",
+    ]
+    assert posts[0]["json"]["status"] == "launching"  # type: ignore[index]
+    assert posts[-1]["json"]["status"] == "launched"  # type: ignore[index]
+    assert posts[-1]["json"]["launched_agent_id"] == "codex-next-demo"  # type: ignore[index]

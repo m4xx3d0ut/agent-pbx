@@ -13,10 +13,11 @@ from .schemas import (
     ReportCreateRequest,
     plan_options_to_jsonable,
 )
+from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -270,6 +271,40 @@ class Store:
                         ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS operator_project_spawn_requests (
+                    spawn_request_id TEXT PRIMARY KEY,
+                    logical_operator_agent_id TEXT NOT NULL,
+                    operator_agent_id TEXT NOT NULL,
+                    review_fork_id TEXT NOT NULL,
+                    review_fork_agent_id TEXT NOT NULL,
+                    source_caller_agent_id TEXT NOT NULL,
+                    source_cwd TEXT NOT NULL,
+                    target_parent TEXT NOT NULL,
+                    target_slug TEXT NOT NULL,
+                    target_path TEXT NOT NULL,
+                    project_name TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    instructions TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    launched_agent_id TEXT,
+                    tmux_pane_id TEXT,
+                    error TEXT,
+                    campaign_id TEXT,
+                    assignment_id TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    completed_at REAL,
+                    FOREIGN KEY(logical_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(review_fork_id) REFERENCES operator_forks(operator_fork_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(review_fork_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(source_caller_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(launched_agent_id) REFERENCES agents(agent_id)
+                        ON DELETE SET NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS operator_fork_edges (
                     edge_id TEXT PRIMARY KEY,
                     from_fork_id TEXT NOT NULL,
@@ -303,6 +338,16 @@ class Store:
                     ON operator_forks(source_caller_agent_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_operator_forks_fork_agent
                     ON operator_forks(fork_agent_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_project_spawns_logical_status
+                    ON operator_project_spawn_requests(
+                        logical_operator_agent_id,
+                        status,
+                        created_at ASC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_operator_project_spawns_review_status
+                    ON operator_project_spawn_requests(review_fork_id, status, created_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_operator_project_spawns_launched_agent
+                    ON operator_project_spawn_requests(launched_agent_id);
                 CREATE INDEX IF NOT EXISTS idx_operator_fork_edges_from
                     ON operator_fork_edges(from_fork_id);
                 CREATE INDEX IF NOT EXISTS idx_operator_fork_edges_to
@@ -2015,6 +2060,216 @@ class Store:
             )
         return self.get_operator_fork(operator_fork_id) if cursor.rowcount else None
 
+    def update_operator_fork_source_session(
+        self,
+        operator_fork_id: str,
+        *,
+        old_source_codex_session_id: str,
+        new_source_codex_session_id: str,
+        source_cwd: str | None = None,
+        codex_host_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        touch: bool = True,
+    ) -> dict[str, Any] | None:
+        fork = self.get_operator_fork(operator_fork_id)
+        if fork is None:
+            return None
+        if fork["source_codex_session_id"] != old_source_codex_session_id:
+            return None
+        current = now_ts()
+        merged_metadata = dict(fork.get("metadata") or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        merged_metadata["source_codex_session_id"] = new_source_codex_session_id
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_forks
+                SET source_codex_session_id = ?,
+                    source_cwd = COALESCE(?, source_cwd),
+                    codex_host_id = COALESCE(?, codex_host_id),
+                    metadata_json = ?,
+                    updated_at = ?,
+                    last_used_at = CASE WHEN ? THEN ? ELSE last_used_at END
+                WHERE operator_fork_id = ?
+                  AND source_codex_session_id = ?
+                """,
+                (
+                    new_source_codex_session_id,
+                    source_cwd,
+                    codex_host_id,
+                    json.dumps(merged_metadata),
+                    current,
+                    int(touch),
+                    current,
+                    operator_fork_id,
+                    old_source_codex_session_id,
+                ),
+            )
+        return self.get_operator_fork(operator_fork_id) if cursor.rowcount else None
+
+    def create_operator_project_spawn_request(
+        self,
+        *,
+        logical_operator_agent_id: str,
+        operator_agent_id: str,
+        review_fork_id: str,
+        review_fork_agent_id: str,
+        source_caller_agent_id: str,
+        source_cwd: str,
+        target_parent: str,
+        target_slug: str,
+        target_path: str,
+        project_name: str,
+        mode: str,
+        instructions: str,
+        campaign_id: str | None = None,
+        assignment_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        spawn_request_id = str(uuid.uuid4())
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_project_spawn_requests
+                    (spawn_request_id, logical_operator_agent_id, operator_agent_id,
+                     review_fork_id, review_fork_agent_id, source_caller_agent_id,
+                     source_cwd, target_parent, target_slug, target_path,
+                     project_name, mode, instructions, status, launched_agent_id,
+                     tmux_pane_id, error, campaign_id, assignment_id, metadata_json,
+                     created_at, updated_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
+                        NULL, NULL, NULL, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    spawn_request_id,
+                    logical_operator_agent_id,
+                    operator_agent_id,
+                    review_fork_id,
+                    review_fork_agent_id,
+                    source_caller_agent_id,
+                    source_cwd,
+                    target_parent,
+                    target_slug,
+                    target_path,
+                    project_name,
+                    mode,
+                    instructions,
+                    campaign_id,
+                    assignment_id,
+                    json.dumps(metadata or {}),
+                    current,
+                    current,
+                ),
+            )
+        request = self.get_operator_project_spawn_request(spawn_request_id)
+        if request is None:
+            raise RuntimeError("operator project spawn request insert failed")
+        return request
+
+    def get_operator_project_spawn_request(
+        self,
+        spawn_request_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                {self._operator_project_spawn_select_sql()}
+                WHERE spawn_request_id = ?
+                """,
+                (spawn_request_id,),
+            ).fetchone()
+        return self._operator_project_spawn_from_row(row) if row else None
+
+    def list_operator_project_spawn_requests(
+        self,
+        *,
+        logical_operator_agent_id: str | None = None,
+        review_fork_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        where: list[str] = []
+        params: list[Any] = []
+        if logical_operator_agent_id:
+            where.append("logical_operator_agent_id = ?")
+            params.append(logical_operator_agent_id)
+        if review_fork_id:
+            where.append("review_fork_id = ?")
+            params.append(review_fork_id)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        query = f"""
+            {self._operator_project_spawn_select_sql()}
+            {clause}
+            ORDER BY
+                CASE WHEN status = 'pending' THEN 0 ELSE 1 END ASC,
+                created_at ASC,
+                updated_at DESC
+            LIMIT ?
+        """
+        params.append(safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._operator_project_spawn_from_row(row) for row in rows]
+
+    def update_operator_project_spawn_request(
+        self,
+        spawn_request_id: str,
+        *,
+        status: str,
+        launched_agent_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        request = self.get_operator_project_spawn_request(spawn_request_id)
+        if request is None:
+            return None
+        current = now_ts()
+        normalized_status = str(status or "").strip().lower()
+        completed_at = (
+            current
+            if normalized_status in PROJECT_SPAWN_TERMINAL_STATUSES
+            else None
+        )
+        merged_metadata = dict(request.get("metadata") or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_project_spawn_requests
+                SET status = ?,
+                    launched_agent_id = COALESCE(?, launched_agent_id),
+                    tmux_pane_id = COALESCE(?, tmux_pane_id),
+                    error = COALESCE(?, error),
+                    metadata_json = ?,
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE spawn_request_id = ?
+                """,
+                (
+                    normalized_status,
+                    launched_agent_id,
+                    tmux_pane_id,
+                    error,
+                    json.dumps(merged_metadata),
+                    current,
+                    completed_at,
+                    spawn_request_id,
+                ),
+            )
+        return (
+            self.get_operator_project_spawn_request(spawn_request_id)
+            if cursor.rowcount
+            else None
+        )
+
     def create_operator_fork_edge(
         self,
         *,
@@ -2266,6 +2521,18 @@ class Store:
                    metadata_json, created_at, updated_at, last_used_at,
                    completed_at
             FROM operator_forks
+        """
+
+    @staticmethod
+    def _operator_project_spawn_select_sql() -> str:
+        return """
+            SELECT spawn_request_id, logical_operator_agent_id, operator_agent_id,
+                   review_fork_id, review_fork_agent_id, source_caller_agent_id,
+                   source_cwd, target_parent, target_slug, target_path,
+                   project_name, mode, instructions, status, launched_agent_id,
+                   tmux_pane_id, error, campaign_id, assignment_id,
+                   metadata_json, created_at, updated_at, completed_at
+            FROM operator_project_spawn_requests
         """
 
     @classmethod
@@ -2623,6 +2890,17 @@ class Store:
             metadata = {}
         data["metadata"] = metadata if isinstance(metadata, dict) else {}
         data["edges"] = []
+        return data
+
+    @staticmethod
+    def _operator_project_spawn_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        metadata_json = data.pop("metadata_json")
+        try:
+            metadata = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
         return data
 
     @staticmethod

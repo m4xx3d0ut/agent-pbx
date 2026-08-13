@@ -313,6 +313,31 @@ def build_mcp_server(
         )
 
     @mcp.tool()
+    def pbx_operator_request_project_spawn(
+        operator_agent_id: str,
+        review_fork_id: str,
+        project_name: str,
+        instructions: str,
+        mode: str = "empty",
+        target_slug: str | None = None,
+        campaign_id: str | None = None,
+        assignment_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Request operator approval to create a sibling project and launch a caller."""
+        return operator_service.request_project_spawn(
+            operator_agent_id=operator_agent_id,
+            review_fork_id=review_fork_id,
+            project_name=project_name,
+            instructions=instructions,
+            mode=mode,
+            target_slug=target_slug,
+            campaign_id=campaign_id,
+            assignment_id=assignment_id,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
     def pbx_operator_campaign_status(
         operator_agent_id: str | None = None,
         campaign_id: str | None = None,

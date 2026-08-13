@@ -990,6 +990,168 @@ def test_agent_files_list_and_preview_are_scoped_to_agent_cwd(tmp_path: Path) ->
     assert traversal.json()["error"]["code"] == "PATH_OUTSIDE_CWD"
 
 
+def test_operator_project_spawn_api_request_list_and_status(tmp_path: Path) -> None:
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+    )
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        },
+    )
+    fork = client.post(
+        "/v1/operator/forks/ensure",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_caller_agent_id": "caller-1",
+            "fork_agent_id": "operator-0-fork-caller-1-review-1",
+            "fork_track_id": "review-1",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+            "source_cwd": str(caller_cwd),
+            "work_root": str(tmp_path / ".agent-pbx-review" / "review"),
+            "status": "running",
+            "metadata": {"pbx_mode": "report"},
+        },
+    ).json()
+
+    created = client.post(
+        "/v1/operator/project-spawns",
+        json={
+            "operator_agent_id": "operator-0",
+            "review_fork_id": fork["operator_fork_id"],
+            "project_name": "Next Demo",
+            "instructions": "Build the sibling project.",
+            "mode": "empty",
+        },
+    )
+
+    assert created.status_code == 200
+    spawn = created.json()
+    listed = client.get(
+        "/v1/operator/project-spawns",
+        params={"operator_agent_id": "operator-0", "status": "pending"},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["project_spawns"][0]["spawn_request_id"] == spawn["spawn_request_id"]
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "codex-Next-Demo",
+            "project": "Next-Demo",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path / "Next-Demo")},
+        },
+    )
+    updated = client.post(
+        f"/v1/operator/project-spawns/{spawn['spawn_request_id']}/status",
+        json={
+            "status": "launched",
+            "launched_agent_id": "codex-Next-Demo",
+            "tmux_pane_id": "%42",
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "launched"
+    assert updated.json()["launched_agent_id"] == "codex-Next-Demo"
+
+
+def test_operator_fork_rebind_source_session_api(tmp_path: Path) -> None:
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+    )
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        },
+    )
+    fork = client.post(
+        "/v1/operator/forks/ensure",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_caller_agent_id": "caller-1",
+            "fork_agent_id": "operator-0-fork-caller-1-review-1",
+            "fork_track_id": "review-1",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+            "source_cwd": str(caller_cwd),
+            "work_root": str(tmp_path / ".agent-pbx-review" / "review"),
+            "tmux_pane_id": "%42",
+            "status": "running",
+            "metadata": {"pbx_mode": "report"},
+        },
+    ).json()
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-2",
+                "codex_host_id": "local",
+            },
+        },
+    )
+
+    rebound = client.post(
+        "/v1/operator/forks/rebind-source-session",
+        json={
+            "operator_agent_id": "operator-0",
+            "operator_fork_id": fork["operator_fork_id"],
+            "source_caller_agent_id": "caller-1",
+            "old_source_codex_session_id": "session-caller-1",
+            "new_source_codex_session_id": "session-caller-2",
+            "source_cwd": str(caller_cwd),
+            "codex_host_id": "local",
+            "reason": "caller restarted",
+        },
+    )
+
+    assert rebound.status_code == 200
+    payload = rebound.json()
+    assert payload["operator_fork_id"] == fork["operator_fork_id"]
+    assert payload["fork_agent_id"] == fork["fork_agent_id"]
+    assert payload["source_codex_session_id"] == "session-caller-2"
+    assert payload["metadata"]["previous_source_codex_session_ids"] == [
+        "session-caller-1"
+    ]
+
+
 def test_agent_files_reports_missing_cwd_as_structured_error(tmp_path: Path) -> None:
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
     client.post(

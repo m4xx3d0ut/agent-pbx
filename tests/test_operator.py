@@ -346,6 +346,72 @@ async def test_mcp_operator_campaign_tools_queue_delivery(tmp_path: Path) -> Non
     assert reported["state"] == "complete"
 
 
+@pytest.mark.asyncio
+async def test_mcp_operator_project_spawn_request_tool(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    mcp = build_mcp_server(store)
+
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+    )
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        },
+    )
+    review = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_ensure_fork",
+            {
+                "operator_agent_id": "operator-0",
+                "source_caller_agent_id": "caller-1",
+                "fork_agent_id": "operator-0-fork-caller-1-review-1",
+                "fork_track_id": "review-1",
+                "fork_purpose": "review",
+                "access_mode": "review_readonly",
+                "source_cwd": str(caller_cwd),
+                "work_root": str(tmp_path / ".agent-pbx-review" / "review"),
+                "status": "running",
+                "metadata": {"pbx_mode": "report"},
+            },
+        )
+    )
+
+    request = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_request_project_spawn",
+            {
+                "operator_agent_id": "operator-0",
+                "review_fork_id": review["operator_fork_id"],
+                "project_name": "Next Demo",
+                "instructions": "Build the extracted app.",
+                "mode": "empty",
+            },
+        )
+    )
+
+    assert request["status"] == "pending"
+    assert request["target_path"] == str(tmp_path / "Next-Demo")
+    assert request["instructions"] == "Build the extracted app."
+
+
 def test_operator_campaign_blocks_when_caller_has_no_codex_session(tmp_path: Path) -> None:
     store = Store(tmp_path / "pbx.sqlite")
     store.init()
@@ -385,6 +451,131 @@ def test_operator_campaign_blocks_when_caller_has_no_codex_session(tmp_path: Pat
     assert placeholder_agent is not None
     assert placeholder_agent["pbx_active"] is False
     assert placeholder_agent["dismissed_at"] is not None
+
+
+def test_operator_rebind_fork_source_session_preserves_identity(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    source_cwd = tmp_path / "caller-1"
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1-review-1-oldhash",
+        fork_track_id="review-1",
+        fork_purpose="review",
+        access_mode="review_readonly",
+        source_cwd=str(source_cwd),
+        work_root=str(tmp_path / ".agent-pbx-review" / "review-1"),
+        tmux_pane_id="%42",
+        status="running",
+        metadata={"pbx_mode": "report"},
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={
+                "pbx_mode": "nohup",
+                "cwd": str(source_cwd),
+                "codex_session_id": "session-caller-2",
+                "codex_host_id": "local",
+            },
+        )
+    )
+
+    updated = service.rebind_fork_source_session(
+        operator_agent_id="operator-0",
+        operator_fork_id=fork["operator_fork_id"],
+        source_caller_agent_id="caller-1",
+        old_source_codex_session_id="session-caller-1",
+        new_source_codex_session_id="session-caller-2",
+        source_cwd=str(source_cwd),
+        codex_host_id="local",
+        reason="caller restarted",
+    )
+
+    assert updated["operator_fork_id"] == fork["operator_fork_id"]
+    assert updated["fork_agent_id"] == fork["fork_agent_id"]
+    assert updated["source_codex_session_id"] == "session-caller-2"
+    assert updated["tmux_pane_id"] == "%42"
+    assert updated["metadata"]["source_codex_session_id"] == "session-caller-2"
+    assert (
+        updated["metadata"]["rebound_from_source_codex_session_id"]
+        == "session-caller-1"
+    )
+    assert updated["metadata"]["previous_source_codex_session_ids"] == [
+        "session-caller-1"
+    ]
+    agent = store.get_agent(fork["fork_agent_id"])
+    assert agent is not None
+    assert agent["metadata"]["source_codex_session_id"] == "session-caller-2"
+    events = [
+        event
+        for event in store.list_events()
+        if event["type"] == "operator_fork_source_session_rebound"
+    ]
+    assert events
+    assert events[0]["payload"]["old_source_codex_session_id"] == "session-caller-1"
+    assert events[0]["payload"]["new_source_codex_session_id"] == "session-caller-2"
+
+
+def test_operator_rebind_fork_source_session_rejects_track_collision(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    source_cwd = tmp_path / "caller-1"
+    stale = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1-review-1-oldhash",
+        fork_track_id="review-1",
+        fork_purpose="review",
+        access_mode="review_readonly",
+        source_cwd=str(source_cwd),
+        work_root=str(tmp_path / ".agent-pbx-review" / "review-1"),
+        tmux_pane_id="%42",
+        status="running",
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={
+                "pbx_mode": "nohup",
+                "cwd": str(source_cwd),
+                "codex_session_id": "session-caller-2",
+                "codex_host_id": "local",
+            },
+        )
+    )
+    service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1-review-1-newhash",
+        fork_track_id="review-1",
+        fork_purpose="review",
+        access_mode="review_readonly",
+        source_cwd=str(source_cwd),
+        work_root=str(tmp_path / ".agent-pbx-review" / "review-1"),
+        tmux_pane_id="%43",
+        status="running",
+    )
+
+    with pytest.raises(ValueError, match="current source session already has this fork track"):
+        service.rebind_fork_source_session(
+            operator_agent_id="operator-0",
+            operator_fork_id=stale["operator_fork_id"],
+            source_caller_agent_id="caller-1",
+            old_source_codex_session_id="session-caller-1",
+            new_source_codex_session_id="session-caller-2",
+            source_cwd=str(source_cwd),
+            codex_host_id="local",
+        )
 
 
 def test_operator_missing_session_refuses_running_external_fork(tmp_path: Path) -> None:
@@ -832,6 +1023,117 @@ def test_operator_review_escalation_routes_to_idle_default_edit_fork(
     ]
     assert events
     assert events[-1]["payload"]["route"] == "primary_idle_edit_fork"
+
+
+def test_operator_review_fork_can_request_sibling_project_spawn(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        )
+    )
+    service = OperatorService(store)
+    review = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1-review-1",
+        fork_track_id="review-1",
+        fork_purpose="review",
+        access_mode="review_readonly",
+        source_cwd=str(caller_cwd),
+        work_root=str(tmp_path / ".agent-pbx-review" / "review"),
+        status="running",
+        metadata={"pbx_mode": "report"},
+    )
+
+    request = service.request_project_spawn(
+        operator_agent_id="operator-0",
+        review_fork_id=review["operator_fork_id"],
+        project_name="Next Demo",
+        instructions="Create a focused extraction.",
+        mode="clone_source",
+    )
+
+    assert request["status"] == "pending"
+    assert request["mode"] == "clone_source"
+    assert request["target_slug"] == "Next-Demo"
+    assert request["target_parent"] == str(tmp_path)
+    assert request["target_path"] == str(tmp_path / "Next-Demo")
+    assert request["source_cwd"] == str(caller_cwd)
+    assert request["review_fork_agent_id"] == "operator-0-fork-caller-1-review-1"
+    listed = service.list_project_spawn_requests(
+        operator_agent_id="operator-0",
+        status="pending",
+    )
+    assert [item["spawn_request_id"] for item in listed] == [
+        request["spawn_request_id"]
+    ]
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="codex-Next-Demo",
+            project="Next-Demo",
+            metadata={"pbx_mode": "report", "cwd": str(tmp_path / "Next-Demo")},
+        )
+    )
+    updated = service.update_project_spawn_request(
+        spawn_request_id=request["spawn_request_id"],
+        status="launched",
+        launched_agent_id="codex-Next-Demo",
+        tmux_pane_id="%42",
+    )
+    assert updated["status"] == "launched"
+    assert updated["launched_agent_id"] == "codex-Next-Demo"
+    assert updated["completed_at"] is not None
+    events = [
+        event
+        for event in store.list_events(limit=20)
+        if event["type"].startswith("operator_project_spawn_")
+    ]
+    assert [event["type"] for event in events] == [
+        "operator_project_spawn_requested",
+        "operator_project_spawn_launched",
+    ]
+
+
+def test_operator_project_spawn_requires_review_readonly_fork(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    edit_fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        fork_track_id="default",
+        fork_purpose="edit",
+        access_mode="edit",
+        source_cwd=str(tmp_path / "caller-1"),
+        status="running",
+        metadata={"pbx_mode": "report"},
+    )
+
+    with pytest.raises(ValueError, match="review fork"):
+        service.request_project_spawn(
+            operator_agent_id="operator-0",
+            review_fork_id=edit_fork["operator_fork_id"],
+            project_name="Next Demo",
+            instructions="Create a sibling project.",
+        )
 
 
 def test_operator_campaign_tmux_delivery_survives_drifted_fork_metadata(

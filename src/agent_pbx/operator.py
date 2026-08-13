@@ -3,16 +3,19 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import sqlite3
 import socket
 from typing import Any
 
 from . import tmux as tmux_support
+from .project_spawn import PROJECT_SPAWN_MODES, resolve_sibling_project_paths
 from .schemas import (
     AgentRegisterRequest,
     CommandCreateRequest,
     OperatorAssignmentCreate,
     ReportCreateRequest,
 )
+from .security import now_ts
 from .store import Store
 
 
@@ -94,6 +97,7 @@ def operator_runbook_payload() -> dict[str, Any]:
             "Each caller session has a default/edit fork; review forks use separate fork_track_id values such as review-1.",
             "Read-only review work should use review forks and write only to the configured work_root outside the caller project directory.",
             "When review work finds an edit task, escalate it to the root operator or to the idle default/edit fork; do not let review forks edit the source project.",
+            "When review work needs a new sibling project, request it with pbx_operator_request_project_spawn; the TUI must approve and launch the new caller agent.",
             "The root operator coordinates campaigns and reviews evidence; it must not implement caller repo changes directly.",
             "Do not spawn or use Codex internal subagents for caller work; do not call multi_agent_v1.",
             "delivery='queue' creates normal PBX send_input commands for nohup fork sessions.",
@@ -155,6 +159,172 @@ class OperatorService:
             status=status,
             limit=limit,
         )
+
+    def rebind_fork_source_session(
+        self,
+        *,
+        operator_agent_id: str,
+        operator_fork_id: str,
+        source_caller_agent_id: str,
+        old_source_codex_session_id: str,
+        new_source_codex_session_id: str,
+        source_cwd: str | None = None,
+        codex_host_id: str | None = None,
+        reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        caller = self._require_caller(source_caller_agent_id)
+        caller_metadata = (
+            caller.get("metadata") if isinstance(caller.get("metadata"), dict) else {}
+        )
+        caller_session_id = str(caller_metadata.get("codex_session_id") or "").strip()
+        caller_cwd = str(caller_metadata.get("cwd") or "").strip()
+        caller_host_id = str(caller_metadata.get("codex_host_id") or "").strip()
+        old_session_id = str(old_source_codex_session_id or "").strip()
+        new_session_id = str(new_source_codex_session_id or "").strip()
+        if not old_session_id or not new_session_id:
+            raise ValueError("old and new source Codex session ids are required")
+        if old_session_id == new_session_id:
+            raise ValueError("old and new source Codex session ids must differ")
+        if not caller_session_id:
+            raise ValueError("source caller metadata.codex_session_id is required")
+        if caller_session_id != new_session_id:
+            raise ValueError("new source Codex session id does not match caller metadata")
+
+        fork = self.store.get_operator_fork(operator_fork_id)
+        if fork is None:
+            raise ValueError("operator_fork_id not found")
+        if str(fork.get("logical_operator_agent_id") or "") != logical_operator_id:
+            raise ValueError("operator fork belongs to a different operator")
+        if str(fork.get("source_caller_agent_id") or "") != source_caller_agent_id:
+            raise ValueError("operator fork belongs to a different source caller")
+        if str(fork.get("source_codex_session_id") or "") != old_session_id:
+            raise ValueError("operator fork is not associated with the old source session")
+
+        fork_metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+        fork_source_cwd = str(
+            fork.get("source_cwd") or fork_metadata.get("source_cwd") or ""
+        ).strip()
+        requested_source_cwd = str(source_cwd or caller_cwd or "").strip()
+        if (
+            requested_source_cwd
+            and fork_source_cwd
+            and requested_source_cwd != fork_source_cwd
+        ):
+            raise ValueError("source cwd does not match operator fork association")
+        resolved_source_cwd = requested_source_cwd or fork_source_cwd or None
+
+        fork_host_id = str(
+            fork.get("codex_host_id") or fork_metadata.get("codex_host_id") or ""
+        ).strip()
+        requested_host_id = str(codex_host_id or caller_host_id or "").strip()
+        if (
+            requested_host_id
+            and fork_host_id
+            and requested_host_id != fork_host_id
+        ):
+            raise ValueError("Codex host id does not match operator fork association")
+        resolved_host_id = requested_host_id or fork_host_id or None
+
+        fork_track_id = self.normalize_fork_track_id(
+            str(fork.get("fork_track_id") or DEFAULT_FORK_TRACK_ID)
+        )
+        collision = self.store.get_operator_fork_for_source(
+            logical_operator_agent_id=logical_operator_id,
+            source_caller_agent_id=source_caller_agent_id,
+            source_codex_session_id=new_session_id,
+            fork_track_id=fork_track_id,
+        )
+        if (
+            collision is not None
+            and collision["operator_fork_id"] != operator_fork_id
+        ):
+            raise ValueError("current source session already has this fork track")
+
+        previous_sessions = fork_metadata.get("previous_source_codex_session_ids")
+        if not isinstance(previous_sessions, list):
+            previous_sessions = []
+        previous_session_values = [
+            str(item)
+            for item in previous_sessions
+            if isinstance(item, str) and item.strip()
+        ]
+        if old_session_id not in previous_session_values:
+            previous_session_values.append(old_session_id)
+        rebind_metadata: dict[str, Any] = {
+            **(metadata or {}),
+            "agent_type": OPERATOR_AGENT_TYPE,
+            "operator_role": "fork",
+            "logical_operator_id": logical_operator_id,
+            "source_caller_agent_id": source_caller_agent_id,
+            "source_codex_session_id": new_session_id,
+            "fork_track_id": fork_track_id,
+            "fork_purpose": str(fork.get("fork_purpose") or DEFAULT_FORK_PURPOSE),
+            "access_mode": str(fork.get("access_mode") or DEFAULT_FORK_ACCESS_MODE),
+            "source_cwd": resolved_source_cwd or "",
+            "previous_source_codex_session_ids": previous_session_values,
+            "rebound_from_source_codex_session_id": old_session_id,
+            "source_session_rebound_at": now_ts(),
+        }
+        if resolved_host_id:
+            rebind_metadata["codex_host_id"] = resolved_host_id
+        try:
+            updated = self.store.update_operator_fork_source_session(
+                operator_fork_id,
+                old_source_codex_session_id=old_session_id,
+                new_source_codex_session_id=new_session_id,
+                source_cwd=resolved_source_cwd,
+                codex_host_id=resolved_host_id,
+                metadata=rebind_metadata,
+                touch=True,
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(
+                "current source session already has this fork track"
+            ) from exc
+        if updated is None:
+            raise RuntimeError("operator fork source session rebind failed")
+
+        fork_agent_id = str(updated.get("fork_agent_id") or "")
+        existing_agent = self.store.get_agent(fork_agent_id)
+        if existing_agent is not None:
+            existing_metadata = (
+                existing_agent.get("metadata")
+                if isinstance(existing_agent.get("metadata"), dict)
+                else {}
+            )
+            self.store.register_agent(
+                AgentRegisterRequest(
+                    agent_id=fork_agent_id,
+                    project=str(
+                        existing_agent.get("project")
+                        or operator.get("project")
+                        or "agent-pbx-operator"
+                    ),
+                    name=str(existing_agent.get("name") or fork_agent_id),
+                    agent_type=OPERATOR_AGENT_TYPE,
+                    metadata={**existing_metadata, **rebind_metadata},
+                    pbx_active=bool(existing_agent.get("pbx_active", True)),
+                )
+            )
+
+        self.store.append_event(
+            "operator_fork_source_session_rebound",
+            {
+                "operator_fork_id": operator_fork_id,
+                "logical_operator_agent_id": logical_operator_id,
+                "source_caller_agent_id": source_caller_agent_id,
+                "fork_agent_id": fork_agent_id,
+                "fork_track_id": fork_track_id,
+                "old_source_codex_session_id": old_session_id,
+                "new_source_codex_session_id": new_session_id,
+                "reason": str(reason or "").strip(),
+            },
+            operator_fork_id,
+        )
+        return updated
 
     def ensure_fork(
         self,
@@ -723,6 +893,139 @@ class OperatorService:
         )
         return command
 
+    def request_project_spawn(
+        self,
+        *,
+        operator_agent_id: str,
+        review_fork_id: str,
+        project_name: str,
+        instructions: str,
+        mode: str = "empty",
+        target_slug: str | None = None,
+        campaign_id: str | None = None,
+        assignment_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        review_fork = (
+            self.store.get_operator_fork(review_fork_id)
+            or self.store.get_operator_fork_for_agent(review_fork_id)
+        )
+        if review_fork is None:
+            raise ValueError("review_fork_id not found")
+        if str(review_fork.get("logical_operator_agent_id") or "") != logical_operator_id:
+            raise ValueError("review_fork_id belongs to a different operator")
+        if str(review_fork.get("fork_purpose") or "").strip().lower() != REVIEW_FORK_PURPOSE:
+            raise ValueError("project spawn requests must come from a review fork")
+        if str(review_fork.get("access_mode") or "").strip().lower() != REVIEW_FORK_ACCESS_MODE:
+            raise ValueError("project spawn requests require review_readonly access")
+        source_caller_agent_id = str(review_fork.get("source_caller_agent_id") or "").strip()
+        source_cwd = str(
+            review_fork.get("source_cwd")
+            or (review_fork.get("metadata") or {}).get("source_cwd")
+            or ""
+        ).strip()
+        if not source_caller_agent_id or not source_cwd:
+            raise ValueError("review fork is missing source caller/cwd metadata")
+        resolved_mode = str(mode or "empty").strip().lower()
+        if resolved_mode not in PROJECT_SPAWN_MODES:
+            raise ValueError("mode must be empty or clone_source")
+        if campaign_id:
+            self._require_campaign(campaign_id)
+        source_path, target_parent, target_path, resolved_slug = resolve_sibling_project_paths(
+            source_cwd,
+            project_name,
+            target_slug=target_slug,
+        )
+        request = self.store.create_operator_project_spawn_request(
+            logical_operator_agent_id=logical_operator_id,
+            operator_agent_id=operator_agent_id,
+            review_fork_id=str(review_fork["operator_fork_id"]),
+            review_fork_agent_id=str(review_fork["fork_agent_id"]),
+            source_caller_agent_id=source_caller_agent_id,
+            source_cwd=str(source_path),
+            target_parent=str(target_parent),
+            target_slug=resolved_slug,
+            target_path=str(target_path),
+            project_name=project_name,
+            mode=resolved_mode,
+            instructions=instructions,
+            campaign_id=campaign_id,
+            assignment_id=assignment_id,
+            metadata={
+                **(metadata or {}),
+                "requested_by": str(review_fork["fork_agent_id"]),
+                "review_fork_id": str(review_fork["operator_fork_id"]),
+            },
+        )
+        self._record_project_spawn_event(
+            "operator_project_spawn_requested",
+            request,
+            summary=(
+                f"Review fork requested {resolved_mode} project "
+                f"{resolved_slug}."
+            ),
+        )
+        return request
+
+    def list_project_spawn_requests(
+        self,
+        *,
+        operator_agent_id: str | None = None,
+        review_fork_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        logical_operator_id = None
+        if operator_agent_id:
+            logical_operator_id = self._logical_operator_agent_id(
+                self._require_operator(operator_agent_id)
+            )
+        return self.store.list_operator_project_spawn_requests(
+            logical_operator_agent_id=logical_operator_id,
+            review_fork_id=review_fork_id,
+            status=str(status).strip().lower() if status else None,
+            limit=limit,
+        )
+
+    def update_project_spawn_request(
+        self,
+        *,
+        spawn_request_id: str,
+        status: str,
+        launched_agent_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in {
+            "pending",
+            "launching",
+            "launched",
+            "failed",
+            "canceled",
+            "cancelled",
+        }:
+            raise ValueError("status must be pending, launching, launched, failed, or canceled")
+        request = self.store.update_operator_project_spawn_request(
+            spawn_request_id,
+            status=normalized_status,
+            launched_agent_id=launched_agent_id,
+            tmux_pane_id=tmux_pane_id,
+            error=error,
+            metadata=metadata,
+        )
+        if request is None:
+            raise ValueError("project spawn request not found")
+        self._record_project_spawn_event(
+            f"operator_project_spawn_{normalized_status}",
+            request,
+            summary=f"Project spawn request {normalized_status}.",
+        )
+        return request
+
     def report_assignment(
         self,
         *,
@@ -1090,6 +1393,49 @@ class OperatorService:
                 summary=f"Review escalation routed via {route}",
                 detail=payload,
                 command_id=str(command.get("command_id") or "") or None,
+            )
+
+    def _record_project_spawn_event(
+        self,
+        event_type: str,
+        request: dict[str, Any],
+        *,
+        summary: str,
+    ) -> None:
+        payload = {
+            "spawn_request_id": request.get("spawn_request_id"),
+            "operator_agent_id": request.get("operator_agent_id"),
+            "logical_operator_agent_id": request.get("logical_operator_agent_id"),
+            "review_fork_id": request.get("review_fork_id"),
+            "review_fork_agent_id": request.get("review_fork_agent_id"),
+            "source_caller_agent_id": request.get("source_caller_agent_id"),
+            "source_cwd": request.get("source_cwd"),
+            "target_path": request.get("target_path"),
+            "target_slug": request.get("target_slug"),
+            "project_name": request.get("project_name"),
+            "mode": request.get("mode"),
+            "status": request.get("status"),
+            "launched_agent_id": request.get("launched_agent_id"),
+            "tmux_pane_id": request.get("tmux_pane_id"),
+            "error": request.get("error"),
+            "campaign_id": request.get("campaign_id"),
+            "assignment_id": request.get("assignment_id"),
+        }
+        self.store.append_event(
+            event_type,
+            payload,
+            str(request.get("spawn_request_id") or ""),
+        )
+        campaign_id = str(request.get("campaign_id") or "").strip()
+        if campaign_id:
+            self.store.add_operator_campaign_event(
+                campaign_id=campaign_id,
+                assignment_id=str(request.get("assignment_id") or "").strip() or None,
+                operator_agent_id=str(request.get("operator_agent_id") or ""),
+                target_agent_id=str(request.get("source_caller_agent_id") or "") or None,
+                event_type=event_type,
+                summary=summary,
+                detail=payload,
             )
 
     def _agent_with_fork_delivery_metadata(
