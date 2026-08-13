@@ -115,6 +115,11 @@ tokens, Joplin credentials, and absolute executable paths. Common values include
 `AGENT_PBX_HOST`, `AGENT_PBX_PORT`, `AGENT_PBX_TOKEN`,
 `AGENT_PBX_SERVER_URL`, `AGENT_PBX_DEBUG`, `AGENT_PBX_WORKERBEE_BIN`, and the
 optional Pull Request, Issues, GitHub remote/SSH, and Joplin settings.
+TUI operator and tmux launch defaults are configured with
+`AGENT_PBX_TUI_OPERATOR_CWD`, `AGENT_PBX_TUI_CODEX_BIN`,
+`AGENT_PBX_TUI_OPERATOR_TMUX_SESSION`, `AGENT_PBX_TUI_CALLER_TMUX_SESSION`,
+`AGENT_PBX_TUI_OPERATOR_REVIEW_ROOT`, and
+`AGENT_PBX_TUI_REVIEW_MCP_APPROVAL_SERVERS`.
 
 For the common local workflow:
 
@@ -278,14 +283,20 @@ Codex billing, but they identify noisy agents and verbose check-ins.
 Agent PBX supports two agent types. Existing sessions default to
 `agent_type="caller"`. The TUI can also start an `agent_type="operator"` from a
 caller by forking that caller's current Codex session with `codex fork`. A
-logical operator can own one forked operator session per caller session, letting
-it track each caller independently while preserving the caller's transcript
-context.
+logical operator can own a default/edit fork plus multiple read-only review
+forks for the same caller. Review forks use `fork_track_id` values such as
+`review-1`, `fork_purpose="review"`, `access_mode="review_readonly"`, and a
+scratch `work_root` outside the caller's source checkout.
 
 Caller sessions must register `metadata.cwd` and `metadata.codex_session_id`
 before Agent PBX can create a fork. V1 fork creation is local-only: if a caller
 session is on another host, Agent PBX records a blocked fork state instead of
 guessing or using `codex fork --last`.
+
+When a caller restarts its Codex session, Agent PBX can rebind one stale live
+fork to the new `metadata.codex_session_id` if the logical operator, caller,
+source cwd, host, and fork track match. If multiple candidates match, the fork
+is left blocked so the operator can resolve the association explicitly.
 
 Campaign state is stored in dedicated SQLite tables for fast TUI/API queries:
 `operator_campaigns`, `operator_campaign_assignments`, and
@@ -300,8 +311,9 @@ The operator loop is:
 1. Call `pbx_operator_runbook`.
 2. Start a campaign with title, objective, criteria, and one assignment per
    caller.
-3. On first interaction with each caller, create or reuse the caller's forked
-   operator session.
+3. On first interaction with each caller, create or reuse the caller's default
+   forked operator session, or create a dedicated review fork for read-only
+   review work.
 4. Dispatch and follow up through the fork session. `delivery="auto"` queues
    nohup forks and uses tmux for report-mode forks.
 5. Review caller and fork threads, send follow-ups, and report each assignment as
@@ -319,6 +331,24 @@ The Operators pane keeps root operators and their fork sessions together. Use
 its caller-scoped fork selected to create a read-only review fork in the
 configured scratch work root. Use `Prev F6` and `Next F7` to cycle the visible
 fork pane for the selected logical operator.
+
+Review forks should treat the source checkout as read-only and write only under
+their configured `work_root`. If a finding requires edits in the source repo,
+route it with `pbx_operator_route_review_escalation` so the root operator or an
+idle default/edit fork can handle it. If review work needs a new sibling
+project, call `pbx_operator_request_project_spawn` with the project name,
+instructions, and `mode` of `empty` or `clone_source`. The TUI/root operator
+approves the oldest pending request with `Spawn P` or `/operator project spawn`;
+Agent PBX then creates the sibling project at the same parent depth as the
+source repo, starts a normal tmux caller Codex session there, and attaches it to
+the Agents pane when it registers.
+
+First use from a running tmux-mode TUI is: select the source caller, use
+`Start O` or press `O` to ensure the logical operator exists, use `Review W` or
+press `W` to create a read-only review fork, then prompt that review fork. When
+the review fork requests a sibling project, select the operator and use
+`Spawn P` or `/operator project spawn`; the spawned project should then appear
+as a normal caller in the Agents pane after its Codex session registers.
 
 ## Planned Local Validation
 
@@ -687,10 +717,11 @@ Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
 `/workerbee`, `/campaigns`, `/campaign report`, `/campaign copy`,
 `/operator fork prev`, `/operator fork next`, `/operator fork review`,
-`/pr`, `/pr refresh`, `/pr review`, `/pr validate`, `/pr url`, `/pr merge`,
-`/issue`, `/issue refresh`, `/issue mitigate`, `/issue url`, `/issue clear`,
-configured `/joplin`, `/joplin new`, `/joplin rename`, `/joplin delete`,
-`/joplin copy`, `/joplin copy report`, `/show hidden agents`, `/unhide agent`,
+`/operator project spawn`, `/pr`, `/pr refresh`, `/pr review`, `/pr validate`,
+`/pr url`, `/pr merge`, `/issue`, `/issue refresh`, `/issue mitigate`,
+`/issue url`, `/issue clear`, configured `/joplin`, `/joplin new`,
+`/joplin rename`, `/joplin delete`, `/joplin copy`,
+`/joplin copy report`, `/show hidden agents`, `/unhide agent`,
 `/theme minimal`, and `/layout compact`.
 `/cancel` marks a stale or abandoned session canceled in PBX; it does not send
 an Escape key. Use `/esc` when you need a real Escape key event. In tmux direct
@@ -700,9 +731,11 @@ nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
 `tmux send-keys C-c` to the selected Codex pane, for example to back out of a
 `/side` chat. Use `/restart` or `/codex restart` in tmux direct mode to send
 Codex `/q`, wait briefly for the pane to exit, then relaunch Codex with the
-known session when Agent PBX can recover the launch metadata. TUI-owned
-operators and forks can be relaunched automatically; caller panes require a
-known Codex session and recoverable Codex launch command.
+known session when Agent PBX can recover the launch metadata. Use this after a
+global Codex CLI package update to move long-lived caller, root-operator, and
+fork panes onto the updated executable. TUI-owned operators and forks can be
+relaunched automatically; caller panes require a known Codex session and
+recoverable Codex launch command.
 
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete project paths. Type `@joplin:` and

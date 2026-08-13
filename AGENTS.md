@@ -189,6 +189,16 @@ call `pbx_operator_runbook`, create campaigns with one assignment per caller,
 inspect caller threads, send follow-ups, report assignment state, and finish the
 campaign. Operator agents must not poll or ack commands for caller agent IDs.
 
+Operator forks have roles. The default/edit fork may coordinate caller-directed
+edits. Review forks use `fork_purpose="review"` and
+`access_mode="review_readonly"`; treat the caller source checkout as read-only
+and write only under `metadata.work_root`. If review findings require source
+edits, route them with `pbx_operator_route_review_escalation`. If review work
+needs a new sibling project, request it with
+`pbx_operator_request_project_spawn`; the TUI/root operator must approve and
+launch that project as a normal caller agent. Do not directly create or attach
+project repositories from a review fork outside that operator-mediated path.
+
 If the operator asks for a Joplin note or document, call `pbx_joplin_status`
 first. If Joplin is available, use `pbx_joplin_create_document` to create
 Markdown scoped under the Agent PBX notebook. Mermaid content should be fenced

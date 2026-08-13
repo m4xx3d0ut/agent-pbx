@@ -165,6 +165,16 @@ call `pbx_operator_runbook`, create campaigns with one assignment per caller,
 inspect caller threads, send follow-ups, report assignment state, and finish the
 campaign. Operator agents must not poll or ack commands for caller agent IDs.
 
+Operator forks have roles. The default/edit fork may coordinate caller-directed
+edits. Review forks use `fork_purpose="review"` and
+`access_mode="review_readonly"`; treat the caller source checkout as read-only
+and write only under `metadata.work_root`. If review findings require source
+edits, route them with `pbx_operator_route_review_escalation`. If review work
+needs a new sibling project, request it with
+`pbx_operator_request_project_spawn`; the TUI/root operator must approve and
+launch that project as a normal caller agent. Do not directly create or attach
+project repositories from a review fork outside that operator-mediated path.
+
 If the operator asks for a Joplin note or document, call `pbx_joplin_status`
 first. If Joplin is available, use `pbx_joplin_create_document` to create
 Markdown scoped under the Agent PBX notebook. Mermaid content should be fenced
@@ -252,9 +262,9 @@ operator follow-up queues, detailed report history, and TUI visibility.
   project. Use it when the operator asks you to investigate or mitigate an
   issue.
 - `pbx_operator_runbook`: fetch campaign guidance for operator agents.
-- `pbx_operator_*`: operator-only campaign tools for dispatching caller
-  assignments, reviewing caller threads, reporting assignment state, and
-  finishing campaigns.
+- `pbx_operator_*`: operator-only tools for campaigns, review escalations,
+  read-only review forks, sibling project-spawn requests, caller thread review,
+  assignment state updates, and campaign completion.
 
 ## PBX Modes
 
@@ -302,6 +312,16 @@ campaign tools rather than polling or acking caller commands. Use
 campaign, dispatch one assignment per caller, inspect caller threads, send
 follow-ups until each assignment satisfies its criteria or is blocked, report
 each assignment state, and finish the campaign.
+
+Operator forks have roles. The default/edit fork may coordinate caller-directed
+edits. Review forks use `fork_purpose="review"` and
+`access_mode="review_readonly"`; treat the caller source checkout as read-only
+and write only under `metadata.work_root`. If review findings require source
+edits, route them with `pbx_operator_route_review_escalation`. If review work
+needs a new sibling project, request it with
+`pbx_operator_request_project_spawn`; the TUI/root operator must approve and
+launch that project as a normal caller agent. Do not directly create or attach
+project repositories from a review fork outside that operator-mediated path.
 
 Caller agents are the default `agent_type="caller"` and keep the normal report
 or nohup behavior described above.
@@ -485,13 +505,17 @@ def runbook_payload() -> dict[str, Any]:
             "pbx_joplin_create_document creates a Markdown note under the scoped Agent PBX Joplin notebook when the operator requests a note or document.",
             "pbx_pr_context returns read-only GitHub pull request context for this agent project; agents use it for PR review only.",
             "pbx_issue_context returns read-only GitHub issue context for this agent project; agents use it for issue mitigation only.",
-            "pbx_operator_runbook returns operator-agent campaign guidance.",
-            "pbx_operator_* tools are for operator agents to create tracked campaigns, dispatch caller assignments, inspect caller threads, update assignment state, and finish campaigns.",
+            "pbx_operator_runbook returns operator-agent campaign, review, and project-spawn guidance.",
+            "pbx_operator_* tools are for operator agents to create tracked campaigns, dispatch caller assignments, inspect caller threads, call pbx_operator_route_review_escalation, call pbx_operator_request_project_spawn for sibling project spawns, update assignment state, and finish campaigns.",
         ],
         "agent_types": [
             "caller is the default agent_type and keeps existing report/nohup behavior.",
             "operator agents register with agent_type='operator' and metadata.agent_type='operator'.",
             "Operators coordinate callers through campaign tools and do not poll or ack commands for caller agent_ids.",
+            "Default/edit operator forks can coordinate source edits; review forks use fork_purpose='review' and access_mode='review_readonly'.",
+            "Review forks treat the caller source checkout as read-only and write only under metadata.work_root.",
+            "Review forks route source-edit needs through pbx_operator_route_review_escalation.",
+            "Review forks request sibling projects through pbx_operator_request_project_spawn; the TUI/root operator approves and launches the new project as a normal caller agent.",
             "Campaign tables are the source of truth for campaign state; reports and commands are linked audit artifacts.",
         ],
         "pbx_modes": [

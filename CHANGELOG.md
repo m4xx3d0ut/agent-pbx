@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.11.0 - 2026-08-13
+
+### Highlights
+
+- Adds tmux-backed Codex restart controls for caller agents, root operators,
+  and operator forks, including `/restart`, `/codex restart`, session resume,
+  and retry handling when a replacement pane exits before stabilizing.
+- Expands operator review workflows with multiple read-only review forks per
+  logical operator/caller session, review-specific scratch work roots, fork
+  cycling, safer pane validation, and preapproved Agent PBX/optional WorkerBee
+  MCP access for happy-path review prompts.
+- Adds operator-mediated project spawn requests: read-only review forks can
+  request a new sibling project, and the TUI can approve, create, clone or
+  initialize it, launch a normal tmux caller agent, and attach it to the Agents
+  pane.
+- Adds guarded operator fork source-session rebinding so one stale live fork can
+  be associated with a restarted caller session when operator, caller, cwd,
+  host, and fork track all match.
+- Improves operator-scoped prompts with caller-scoped Joplin, PR, and issue
+  references, plus stronger routing recovery for forked operator panes.
+- Advances the SQLite schema to version 14 for project-spawn persistence and
+  fork relationship state.
+
+### Upgrade Notes
+
+- Restart the Agent PBX daemon after installing this release so the API, MCP
+  tools, and schema migration are loaded.
+- Restart the TUI after installing this release, especially when using the
+  repo-local venv launcher, so operator project-spawn and fork-rebind controls
+  are available.
+- Restart long-lived tmux Codex caller/operator sessions with `/restart` or
+  `/codex restart` after updating the global Codex CLI package.
+
+### Verification
+
+- `python -m pytest`
+- `git diff --check`
+- Release wheelhouse build with `scripts/build_wheelhouse.sh`
+- Local no-index wheelhouse install smoke test
+- Daemon restart and `/healthz` check
+
 ## v0.10.0 - 2026-06-18
 
 ### Highlights
