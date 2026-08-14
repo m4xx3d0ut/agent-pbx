@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Highlights
+
+- Adds operator knowledge links for bounded domain handoffs between operators
+  and review forks without changing fork edges, campaign assignments, or
+  source-session ownership.
+- Adds executable operator handoffs with approval, required-fork launch state,
+  delivery evidence, receiver acknowledgement, running/terminal updates,
+  TTL expiry, and redacted artifact summaries.
+- Allows read-only review forks to propose knowledge handoffs and inspect
+  scoped knowledge-link context, while delivery approval remains with the root
+  operator/TUI.
+- Adds TUI commands `/operator handoffs`, `/operator handoff approve`, and
+  `/operator handoff launch` to inspect pending handoffs, approve/retry
+  delivery, and launch the required target fork when a handoff is blocked on
+  fork activation.
+- Adds a PBX-managed SQLite operator KB with proposed/active/retired lifecycle,
+  provenance back to knowledge links, handoffs, and turns, root-only promotion
+  and import of active records, root-only update/reject/retire management,
+  read/propose MCP tools for review forks, and JSON-compatible export/import
+  hooks for portability.
+- Adds a right-pane `KB` tab for operator KB browsing, status filters, row
+  detail review, selected-row promote/reject/retire actions, and live refresh on
+  KB events, alongside `/operator kb` command variants.
+- Adds batch Agent-pane pruning with preview/apply/undo, hide-only semantics,
+  starred/queued/campaign/operator relationship guards, stale/operator-fork
+  presets, and cursor fallback after single-row hide.
+- Advances the SQLite schema to version 18 for knowledge-link, knowledge-turn,
+  operator-handoff, operator-KB, and agent-prune batch persistence.
+
+### Verification
+
+- `python -m compileall src tests`
+- `python -m pytest`
+- `git diff --check`
+
 ## v0.11.0 - 2026-08-13
 
 ### Highlights

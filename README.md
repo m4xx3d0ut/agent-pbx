@@ -301,10 +301,17 @@ is left blocked so the operator can resolve the association explicitly.
 Campaign state is stored in dedicated SQLite tables for fast TUI/API queries:
 `operator_campaigns`, `operator_campaign_assignments`, and
 `operator_campaign_events`. Fork state and optional planning DAG links are
-stored in `operator_forks` and `operator_fork_edges`. Reports and commands still
-provide the audit trail and link back to campaigns with report metadata and
-command payload fields such as `campaign_id`, `assignment_id`,
-`operator_agent_id`, and `operator_fork_id`.
+stored in `operator_forks` and `operator_fork_edges`. Knowledge-link context is
+stored in `operator_knowledge_links` and `operator_knowledge_turns`; executable
+operator-to-operator handoffs are stored in `operator_handoffs`. Handoffs track
+approval, required target fork launch, delivery evidence, receiver
+acknowledgement, started/running state, TTL expiry, artifact summaries, and
+terminal status without creating fork edges or changing source-session
+ownership. Durable operator knowledge is stored in `operator_kb_entries`,
+`operator_kb_sources`, and `operator_kb_events` after root-operator review.
+Reports and commands still provide the audit trail and link back to
+campaigns with report metadata and command payload fields such as
+`campaign_id`, `assignment_id`, `operator_agent_id`, and `operator_fork_id`.
 
 The operator loop is:
 
@@ -343,12 +350,65 @@ Agent PBX then creates the sibling project at the same parent depth as the
 source repo, starts a normal tmux caller Codex session there, and attaches it to
 the Agents pane when it registers.
 
+If review work needs to transfer domain context to another operator, the review
+fork can call `pbx_operator_propose_knowledge_handoff` with the source review
+fork agent, target operator agent, and handoff message. Metadata may include a
+`target_caller_agent_id`, `allowed_mutation_scope`, `required_artifacts`,
+redacted `artifact_bundle`, `expires_at`, and `needs_ack`. Review forks can list
+and inspect knowledge-link and handoff context, but they cannot approve delivery
+or send unmediated knowledge turns. The root operator/TUI uses
+`/operator handoffs` to inspect pending handoffs and
+`/operator handoff approve` to approve the oldest pending handoff. If the target
+operator needs a caller fork that has not been launched, the handoff moves to
+`pending_launch`; use `/operator handoff launch` to launch the required fork and
+retry delivery. Agent PBX then sends a normal `send_input` command or tmux
+direct message to the target operator without creating a fork edge, campaign
+assignment, or source-session association.
+
+Receiving operators should acknowledge handoffs with
+`pbx_operator_ack_handoff`. Use `status="acknowledged"` after reading the linked
+context and `status="running"` only after the target workflow actually starts.
+Use `pbx_operator_update_handoff` for `blocked`, `failed`, `complete`, or other
+terminal states. Delivery evidence distinguishes tmux/queue delivery from
+receiver acknowledgement and start, so a pane paste is not treated as workflow
+success by itself.
+
+When a knowledge link or handoff produces reusable operating guidance, review
+forks and operators can propose KB entries with `pbx_operator_kb_propose` or
+`pbx_operator_kb_propose_from_link`. Proposed entries stay scoped to the
+creating logical operator until the root operator reviews and promotes them with
+`pbx_operator_kb_promote`, `/operator kb promote`, or the `Promote` button in
+the right-pane `KB` tab. Use `/operator kb proposed` or the `Proposed` filter to
+inspect pending entries and select a row to review its body. Root operators can
+edit entries with `pbx_operator_kb_update`, reject bad proposals with
+`pbx_operator_kb_reject`, `/operator kb reject`, or `Reject`, and retire active
+records with `pbx_operator_kb_retire`, `/operator kb retire`, or `Retire`.
+Active KB entries are readable by other operators through
+`pbx_operator_kb_search`, `pbx_operator_kb_get`, and `/operator kb`. Root
+operators can export portable JSON-compatible KB bundles
+with `pbx_operator_kb_export` and import them with `pbx_operator_kb_import`;
+active import and promotion require clean redaction state or an explicit manual
+override in metadata.
+
+KB bodies and export bundles may contain private, proprietary, or personally
+identifying context from operator handoffs. Keep exports under ignored local
+paths such as `artifacts/`, `runs/`, or `state/`; repo ignore rules also exclude
+root-level `*operator-kb*.json`, `*operator_kb*.json`, and
+`agent-pbx-operator-kb*.json` bundle files.
+
 First use from a running tmux-mode TUI is: select the source caller, use
 `Start O` or press `O` to ensure the logical operator exists, use `Review W` or
 press `W` to create a read-only review fork, then prompt that review fork. When
 the review fork requests a sibling project, select the operator and use
 `Spawn P` or `/operator project spawn`; the spawned project should then appear
-as a normal caller in the Agents pane after its Codex session registers.
+as a normal caller in the Agents pane after its Codex session registers. When a
+review fork proposes a knowledge handoff, select the logical operator and run
+`/operator handoffs` to inspect workflow state, `/operator handoff approve` to
+approve delivery, and `/operator handoff launch` if the target operator needs a
+caller fork before the handoff can run. When that exchange produces durable
+guidance, run `/operator kb proposed` to open the `KB` tab on proposed entries,
+select the proposal to review its body, then use `Promote` to publish the clean
+proposal or `Reject` to reject it.
 
 ## Planned Local Validation
 
@@ -713,16 +773,33 @@ Press `h` or `Show Hidden` to include hidden agents in the Agents table; hidden
 rows show a `Hidden` marker. Select a hidden row and press `H` or `Unhide` to
 restore it without waiting for the agent to reconnect.
 
+For high-volume cleanup, use `Prune` or `/agents prune` to preview a reversible
+batch hide of old unstarred terminal caller sessions. The default preset keeps
+starred agents, operators, operator forks, queued agents, active campaigns, and
+agents involved in active operator forks, handoffs, knowledge links, or project
+spawn requests. `/agents prune apply` applies the latest preview using fresh
+live state, and `/agents prune undo` restores the latest unapplied batch.
+`/agents prune stale` previews old stale nonterminal callers, and
+`/agents prune forks` previews old operator forks only when they have no
+recorded tmux pane and no active operator relationship. Bulk prune is hide-only;
+bulk thread purge is intentionally not supported.
+
 Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
 `/workerbee`, `/campaigns`, `/campaign report`, `/campaign copy`,
 `/operator fork prev`, `/operator fork next`, `/operator fork review`,
-`/operator project spawn`, `/pr`, `/pr refresh`, `/pr review`, `/pr validate`,
-`/pr url`, `/pr merge`, `/issue`, `/issue refresh`, `/issue mitigate`,
+`/operator handoffs`, `/operator handoff approve`,
+`/operator handoff launch`, `/operator knowledge links`, `/operator knowledge send`,
+`/operator kb`, `/operator kb detail`, `/operator kb proposed`,
+`/operator kb proposed detail`, `/operator kb promote`, `/operator kb reject`,
+`/operator kb retire`, `/operator project spawn`, `/pr`, `/pr refresh`,
+`/pr review`, `/pr validate`, `/pr url`, `/pr merge`, `/issue`, `/issue refresh`, `/issue mitigate`,
 `/issue url`, `/issue clear`, configured `/joplin`, `/joplin new`,
 `/joplin rename`, `/joplin delete`, `/joplin copy`,
-`/joplin copy report`, `/show hidden agents`, `/unhide agent`,
-`/theme minimal`, and `/layout compact`.
+`/joplin copy report`, `/agents prune`, `/agents prune apply`,
+`/agents prune stale`, `/agents prune forks`, `/agents prune undo`,
+`/show hidden agents`, `/unhide agent`, `/theme minimal`, and
+`/layout compact`.
 `/cancel` marks a stale or abandoned session canceled in PBX; it does not send
 an Escape key. Use `/esc` when you need a real Escape key event. In tmux direct
 mode, `/esc` sends `tmux send-keys Escape` to the selected Codex pane. Outside
@@ -927,6 +1004,13 @@ the view while keeping its thread history. Use `Purge Agent` or press `D` to
 hide the agent and delete its reports, queued commands, command history, and
 poll stats. Hidden agents reappear when they register again, or when you enable
 `Show Hidden` and use `Unhide`.
+
+`/agents prune` is the safer bulk path for crowded Agent panes. It previews the
+candidate list in the detail pane before making changes. `/agents prune apply`
+hides the currently previewed class of agents in one batch and records a prune
+batch; `/agents prune undo` unhides agents from the latest unapplied batch.
+Single-row hide also preserves cursor position by moving to the nearest
+remaining row after refresh.
 
 When a report includes `plan_options`, the Latest and Thread tabs show a
 plan-choice panel. Agents must set `needs_input=true` and

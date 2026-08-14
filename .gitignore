@@ -56,3 +56,8 @@ rosenpass-status.json
 artifacts/
 runs/
 scripts/dev/*.bak.*
+
+# Agent PBX operator KB exports can contain private or proprietary context.
+*operator-kb*.json
+*operator_kb*.json
+agent-pbx-operator-kb*.json
