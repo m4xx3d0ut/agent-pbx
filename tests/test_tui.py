@@ -876,6 +876,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         toggle_hidden = app.query_one("#toggle-hidden-agents", Button)
         unhide_agent = app.query_one("#unhide-agent", Button)
         hide_agent = app.query_one("#hide-agent", Button)
+        agents_prune = app.query_one("#agents-prune", Button)
         purge_agent = app.query_one("#purge-agent", Button)
         request_detail = app.query_one("#request-detail", Button)
         ping = app.query_one("#ping-agent", Button)
@@ -930,6 +931,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert toggle_hidden.label.plain == "Show Hidden (h)"
         assert unhide_agent.label.plain == "Unhide (H)"
         assert hide_agent.label.plain == "Hide Agent (d)"
+        assert agents_prune.label.plain == "Prune"
         assert purge_agent.label.plain == "Purge Agent (D)"
         assert request_detail.label.plain == "Request Detail"
         assert ping.label.plain == "Ping"
@@ -5914,6 +5916,18 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/operator fork next" in titles
     assert "/operator fork prev" in titles
     assert "/operator fork review" in titles
+    assert "/operator handoffs" in titles
+    assert "/operator handoff approve" in titles
+    assert "/operator handoff launch" in titles
+    assert "/operator knowledge links" in titles
+    assert "/operator knowledge send" in titles
+    assert "/operator kb" in titles
+    assert "/operator kb detail" in titles
+    assert "/operator kb proposed" in titles
+    assert "/operator kb proposed detail" in titles
+    assert "/operator kb promote" in titles
+    assert "/operator kb reject" in titles
+    assert "/operator kb retire" in titles
     assert "/operator project spawn" in titles
     assert "/theme minimal" in titles
     assert "/layout compact" in titles
@@ -5983,6 +5997,18 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/operator fork next",
         "/operator fork prev",
         "/operator fork review",
+        "/operator handoffs",
+        "/operator handoff approve",
+        "/operator handoff launch",
+        "/operator knowledge links",
+        "/operator knowledge send",
+        "/operator kb",
+        "/operator kb detail",
+        "/operator kb proposed",
+        "/operator kb proposed detail",
+        "/operator kb promote",
+        "/operator kb reject",
+        "/operator kb retire",
         "/operator project spawn",
         "/joplin",
         "/joplin refresh",
@@ -5995,6 +6021,13 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/joplin log stop",
         "/joplin save",
         "/joplin sync",
+    } <= names
+    assert {
+        "/agents prune",
+        "/agents prune apply",
+        "/agents prune stale",
+        "/agents prune forks",
+        "/agents prune undo",
     } <= names
     assert {"/show hidden agents", "/unhide agent"} <= names
 
@@ -7879,6 +7912,33 @@ async def test_tui_dismiss_selected_agent_hides_and_retains_thread() -> None:
     assert app.thread_items == {}
     assert "Hidden agent-1." in detail
     assert "Thread data was retained" in detail
+
+
+async def test_tui_hide_cursor_falls_back_to_nearest_remaining_row() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            f"agent-{index}": {
+                "agent_id": f"agent-{index}",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": float(100 - index),
+                "metadata": {},
+            }
+            for index in range(1, 4)
+        }
+        app.render_agents()
+        table = app.query_one("#agents", DataTable)
+        table.move_cursor(row=1, animate=False, scroll=False)
+
+        app.remember_cursor_after_agent_removal("agent-2")
+        app.agents.pop("agent-2")
+        app.render_agents()
+
+        assert app.agent_id_at_cursor() == "agent-3"
 
 
 async def test_tui_purge_selected_agent_uses_cursor_and_deletes_thread() -> None:
@@ -10379,6 +10439,227 @@ async def test_tui_operator_campaign_event_refreshes_selected_campaigns() -> Non
     assert refreshed_campaigns == ["operator-0"]
 
 
+async def test_tui_operator_kb_tab_loads_entries() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async def fake_fetch_operator_kb_entries(
+        logical_operator_id: str,
+        *,
+        status: str | None = "active",
+        query: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        assert logical_operator_id == "operator-0"
+        assert status == "proposed"
+        assert query is None
+        assert limit == 100
+        return [
+            {
+                "kb_id": "kb-1",
+                "status": "proposed",
+                "redaction_status": "clean",
+                "scope": "project",
+                "project": "agent-pbx",
+                "title": "Review handoff model",
+                "summary": "Operators can promote reviewed handoff context.",
+                "body": "Use the KB tab to inspect proposed durable knowledge.",
+                "tags": ["handoff", "kb"],
+                "created_at": 100.0,
+                "updated_at": 120.0,
+                "sources": [],
+                "metadata": {},
+            }
+        ]
+
+    app.fetch_operator_kb_entries = fake_fetch_operator_kb_entries  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "running",
+                "last_seen_at": 123.0,
+                "metadata": {"operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        app.activate_operator_kb_tab()
+
+        await app.load_operator_kb("operator-0", status="proposed")
+
+        table = app.query_one("#operator-kb", DataTable)
+        detail = app.query_one("#operator-kb-detail", TextArea)
+        status = app.query_one("#operator-kb-status", Static)
+
+    assert app.active_agent_tab == "operator-kb-tab"
+    assert table.row_count == 1
+    assert "KB ID: kb-1" in detail.text
+    assert "Use the KB tab to inspect proposed durable knowledge." in detail.text
+    assert "1 proposed entry for operator-0" in str(status.renderable)
+
+
+async def test_tui_operator_kb_promote_uses_selected_proposal() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    promoted: list[tuple[str, str]] = []
+    loaded: list[tuple[str, str | None]] = []
+    refreshed_events = 0
+
+    async def fake_promote_operator_kb_entry(
+        logical_operator_id: str,
+        kb_id: str,
+    ) -> dict[str, object]:
+        promoted.append((logical_operator_id, kb_id))
+        return {"kb_id": kb_id, "status": "active"}
+
+    async def fake_load_operator_kb(
+        agent_id: str,
+        *,
+        status: str | None = None,
+    ) -> None:
+        loaded.append((agent_id, status))
+
+    async def fake_refresh_events() -> None:
+        nonlocal refreshed_events
+        refreshed_events += 1
+
+    app.promote_operator_kb_entry = fake_promote_operator_kb_entry  # type: ignore[method-assign]
+    app.load_operator_kb = fake_load_operator_kb  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "running",
+                "last_seen_at": 123.0,
+                "metadata": {"operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        app.active_agent_tab = "operator-kb-tab"
+        app.operator_kb_entries_by_operator["operator-0"] = {
+            "kb-2": {
+                "kb_id": "kb-2",
+                "status": "proposed",
+                "redaction_status": "clean",
+            }
+        }
+        app.selected_operator_kb_id_by_operator["operator-0"] = "kb-2"
+        refreshed_events = 0
+
+        await app.promote_oldest_operator_kb_proposal()
+
+    assert promoted == [("operator-0", "kb-2")]
+    assert loaded == [("operator-0", "active")]
+    assert refreshed_events == 1
+
+
+async def test_tui_operator_kb_promote_requires_selected_proposal() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    promoted: list[tuple[str, str]] = []
+    loaded: list[tuple[str, str | None]] = []
+
+    async def fake_promote_operator_kb_entry(
+        logical_operator_id: str,
+        kb_id: str,
+    ) -> dict[str, object]:
+        promoted.append((logical_operator_id, kb_id))
+        return {"kb_id": kb_id, "status": "active"}
+
+    async def fake_load_operator_kb(
+        agent_id: str,
+        *,
+        status: str | None = None,
+    ) -> None:
+        loaded.append((agent_id, status))
+
+    app.promote_operator_kb_entry = fake_promote_operator_kb_entry  # type: ignore[method-assign]
+    app.load_operator_kb = fake_load_operator_kb  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "running",
+                "last_seen_at": 123.0,
+                "metadata": {"operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        app.active_agent_tab = "operator-kb-tab"
+        app.operator_kb_entries_by_operator["operator-0"] = {
+            "kb-2": {
+                "kb_id": "kb-2",
+                "status": "active",
+                "redaction_status": "clean",
+            }
+        }
+        app.selected_operator_kb_id_by_operator["operator-0"] = "kb-2"
+
+        await app.promote_oldest_operator_kb_proposal()
+
+    assert promoted == []
+    assert loaded == []
+
+
+async def test_tui_operator_kb_event_refreshes_selected_tab() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    refreshed_kb: list[str] = []
+    worker_coros = []
+
+    async def fake_load_operator_kb(agent_id: str, *, status: str | None = None) -> None:
+        assert status is None
+        refreshed_kb.append(agent_id)
+
+    app.load_operator_kb = fake_load_operator_kb  # type: ignore[method-assign]
+
+    async with app.run_test():
+        def fake_run_worker(work, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            worker_coros.append(work() if callable(work) else work)
+            return None
+
+        app.run_worker = fake_run_worker  # type: ignore[method-assign]
+        app.agents = {
+            "operator-0-fork-review": {
+                "agent_id": "operator-0-fork-review",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "running",
+                "last_seen_at": 123.0,
+                "metadata": {
+                    "operator_role": "fork",
+                    "logical_operator_id": "operator-0",
+                },
+            }
+        }
+        app.selected_agent_id = "operator-0-fork-review"
+        app.active_agent_tab = "operator-kb-tab"
+        app.handle_event(
+            {
+                "event_id": 1,
+                "type": "operator_kb_proposed",
+                "subject_id": "kb-1",
+                "payload": {
+                    "kb_id": "kb-1",
+                    "operator_agent_id": "operator-0-fork-review",
+                    "created_by_operator_agent_id": "operator-0",
+                    "status": "proposed",
+                },
+            }
+        )
+        for coro in worker_coros:
+            await coro
+
+    assert refreshed_kb == ["operator-0-fork-review"]
+
+
 async def test_tui_report_event_patches_visible_agent_status() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     worker_coros = []
@@ -12252,6 +12533,27 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert "pbx_register_agent" in agent_pbx_config
     assert "pbx_report_turn" in agent_pbx_config
     assert "pbx_operator_request_project_spawn" in agent_pbx_config
+    assert "pbx_operator_propose_knowledge_handoff" in agent_pbx_config
+    assert "pbx_operator_list_knowledge_links" in agent_pbx_config
+    assert "pbx_operator_get_knowledge_context" in agent_pbx_config
+    assert "pbx_operator_list_handoffs" in agent_pbx_config
+    assert "pbx_operator_get_handoff" in agent_pbx_config
+    assert "pbx_operator_kb_search" in agent_pbx_config
+    assert "pbx_operator_kb_get" in agent_pbx_config
+    assert "pbx_operator_kb_propose" in agent_pbx_config
+    assert "pbx_operator_kb_propose_from_link" in agent_pbx_config
+    assert "pbx_operator_approve_handoff" not in agent_pbx_config
+    assert "pbx_operator_update_handoff" not in agent_pbx_config
+    assert "pbx_operator_send_knowledge_turn" not in agent_pbx_config
+    assert "pbx_operator_approve_knowledge_turn" not in agent_pbx_config
+    assert "pbx_operator_create_knowledge_link" not in agent_pbx_config
+    assert "pbx_operator_close_knowledge_link" not in agent_pbx_config
+    assert "pbx_operator_kb_promote" not in agent_pbx_config
+    assert "pbx_operator_kb_update" not in agent_pbx_config
+    assert "pbx_operator_kb_reject" not in agent_pbx_config
+    assert "pbx_operator_kb_retire" not in agent_pbx_config
+    assert "pbx_operator_kb_import" not in agent_pbx_config
+    assert "pbx_operator_kb_export" not in agent_pbx_config
     assert "pbx_queue_command" not in agent_pbx_config
     assert 'url = "http://127.0.0.1:8765/mcp"' in workerbee_config
     assert 'default_tools_approval_mode = "approve"' in workerbee_config
@@ -12289,6 +12591,9 @@ def test_tui_caller_agent_config_overrides_allowlist_report_tools() -> None:
     assert "pbx_register_agent" in agent_pbx_config
     assert "pbx_report_turn" in agent_pbx_config
     assert "pbx_operator_request_project_spawn" not in agent_pbx_config
+    assert "pbx_operator_propose_knowledge_handoff" not in agent_pbx_config
+    assert "pbx_operator_list_handoffs" not in agent_pbx_config
+    assert "pbx_operator_send_knowledge_turn" not in agent_pbx_config
     assert 'projects={"/tmp/new project" = {trust_level = "trusted"}}' in overrides
 
 
@@ -12931,3 +13236,98 @@ async def test_tui_launch_pending_project_spawn_starts_registered_caller(
     assert posts[0]["json"]["status"] == "launching"  # type: ignore[index]
     assert posts[-1]["json"]["status"] == "launched"  # type: ignore[index]
     assert posts[-1]["json"]["launched_agent_id"] == "codex-next-demo"  # type: ignore[index]
+
+
+async def test_tui_launch_pending_operator_handoff_fork_retries_approval() -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    handoff = {
+        "handoff_id": "handoff-1",
+        "logical_operator_agent_id": "operator-0",
+        "target_operator_agent_id": "operator-B",
+        "target_caller_agent_id": "caller-1",
+        "status": "pending_launch",
+        "updated_at": 2.0,
+    }
+    launches: list[tuple[str, str]] = []
+    approvals: list[tuple[str, str]] = []
+
+    async def fake_fetch_operator_handoffs(
+        logical_operator_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        assert logical_operator_id == "operator-0"
+        assert status == "pending_launch"
+        assert limit == 50
+        return [handoff]
+
+    async def fake_ensure_operator_fork_from_tui(
+        *,
+        logical_operator_id: str,
+        source_caller_agent_id: str,
+        fork_track_id: str | None = None,
+        fork_purpose: str | None = None,
+        access_mode: str | None = None,
+        work_root: str | None = None,
+    ) -> dict[str, object]:
+        _ = (fork_track_id, fork_purpose, access_mode, work_root)
+        launches.append((logical_operator_id, source_caller_agent_id))
+        return {
+            "operator_fork_id": "fork-1",
+            "fork_agent_id": "operator-B-fork-caller-1",
+        }
+
+    async def fake_approve_operator_handoff(
+        logical_operator_id: str,
+        handoff_id: str,
+        *,
+        delivery: str = "auto",
+    ) -> dict[str, object]:
+        _ = delivery
+        approvals.append((logical_operator_id, handoff_id))
+        return {
+            "handoff": {
+                "handoff_id": handoff_id,
+                "status": "sent",
+                "command_id": "cmd-1",
+            },
+            "command": {"command_id": "cmd-1"},
+        }
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    app.fetch_operator_handoffs = fake_fetch_operator_handoffs  # type: ignore[method-assign]
+    app.ensure_operator_fork_from_tui = fake_ensure_operator_fork_from_tui  # type: ignore[method-assign]
+    app.approve_operator_handoff = fake_approve_operator_handoff  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+            },
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {"cwd": "/tmp/demo", "codex_session_id": "session-1"},
+            },
+        }
+        app.selected_agent_id = "operator-0"
+        await app.launch_pending_operator_handoff_fork()
+
+    assert launches == [("operator-B", "caller-1")]
+    assert approvals == [("operator-0", "handoff-1")]

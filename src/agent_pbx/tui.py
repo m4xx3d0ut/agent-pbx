@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -143,6 +143,15 @@ REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_operator_report_assignment",
     "pbx_operator_route_review_escalation",
     "pbx_operator_request_project_spawn",
+    "pbx_operator_propose_knowledge_handoff",
+    "pbx_operator_list_knowledge_links",
+    "pbx_operator_get_knowledge_context",
+    "pbx_operator_list_handoffs",
+    "pbx_operator_get_handoff",
+    "pbx_operator_kb_search",
+    "pbx_operator_kb_get",
+    "pbx_operator_kb_propose",
+    "pbx_operator_kb_propose_from_link",
     "pbx_pr_context",
     "pbx_issue_context",
     "pbx_joplin_status",
@@ -275,6 +284,8 @@ MOUSE_FOCUS_TARGET_IDS = {
     "pull-request-detail",
     "issues",
     "issue-detail",
+    "operator-kb",
+    "operator-kb-detail",
     "joplin-notes",
     "joplin-body",
     "campaigns",
@@ -306,6 +317,10 @@ MOUSE_FOCUS_CONTAINER_TARGETS = {
     "issue-actions": "#issue-detail",
     "campaigns-tab": "#campaigns",
     "campaign-actions": "#campaign-detail",
+    "operator-kb-tab": "#operator-kb",
+    "operator-kb-actions": "#operator-kb-detail",
+    "operator-kb-filter-actions": "#operator-kb-detail",
+    "operator-kb-entry-actions": "#operator-kb-detail",
     "joplin-tab": "#joplin-notes",
     "joplin-actions": "#joplin-body",
 }
@@ -420,12 +435,29 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/operator fork next",
     "/operator fork prev",
     "/operator fork review",
+    "/operator handoffs",
+    "/operator handoff approve",
+    "/operator handoff launch",
+    "/operator knowledge links",
+    "/operator knowledge send",
+    "/operator kb",
+    "/operator kb detail",
+    "/operator kb proposed",
+    "/operator kb proposed detail",
+    "/operator kb promote",
+    "/operator kb reject",
+    "/operator kb retire",
     "/operator project spawn",
     "/gitstatus",
     "/gitdiff",
     "/gitpush",
     "/gitstageandcommit",
     "/commands reload",
+    "/agents prune",
+    "/agents prune apply",
+    "/agents prune stale",
+    "/agents prune forks",
+    "/agents prune undo",
     "/hide agent",
     "/show hidden agents",
     "/unhide agent",
@@ -3354,7 +3386,8 @@ class AgentPBXTUI(App[None]):
     }
 
     #pull-request-status,
-    #issue-status {
+    #issue-status,
+    #operator-kb-status {
         height: 1;
         color: $secondary;
         content-align: left middle;
@@ -3362,14 +3395,16 @@ class AgentPBXTUI(App[None]):
 
     #pull-requests,
     #issues,
-    #campaigns {
+    #campaigns,
+    #operator-kb {
         height: 8;
         min-height: 4;
     }
 
     #pull-request-detail,
     #issue-detail,
-    #campaign-detail {
+    #campaign-detail,
+    #operator-kb-detail {
         height: 1fr;
         min-height: 12;
         border: tall $accent;
@@ -3382,15 +3417,23 @@ class AgentPBXTUI(App[None]):
 
     #pull-request-actions,
     #issue-actions,
-    #campaign-actions {
+    #campaign-actions,
+    #operator-kb-filter-actions,
+    #operator-kb-entry-actions {
         height: 3;
     }
 
     #pull-request-actions Button,
     #issue-actions Button,
-    #campaign-actions Button {
+    #campaign-actions Button,
+    #operator-kb-filter-actions Button,
+    #operator-kb-entry-actions Button {
         width: 1fr;
         min-width: 1;
+    }
+
+    #operator-kb-actions {
+        height: 6;
     }
 
     #joplin-status {
@@ -3518,6 +3561,7 @@ class AgentPBXTUI(App[None]):
     Screen.tiny-agent #workerbee-detail,
     Screen.tiny-agent #pull-request-detail,
     Screen.tiny-agent #issue-detail,
+    Screen.tiny-agent #operator-kb-detail,
     Screen.tiny-agent #joplin-body {
         min-height: 4;
     }
@@ -3526,6 +3570,7 @@ class AgentPBXTUI(App[None]):
     Screen.tiny-agent #files,
     Screen.tiny-agent #pull-requests,
     Screen.tiny-agent #issues,
+    Screen.tiny-agent #operator-kb,
     Screen.tiny-agent #joplin-notes {
         height: 5;
         min-height: 4;
@@ -3853,6 +3898,9 @@ class AgentPBXTUI(App[None]):
         self.selected_campaign_id: str | None = None
         self.selected_campaign_id_by_operator: dict[str, str] = {}
         self.selected_campaign_report_id_by_operator: dict[str, str] = {}
+        self.operator_kb_entries_by_operator: dict[str, dict[str, dict[str, Any]]] = {}
+        self.selected_operator_kb_id_by_operator: dict[str, str] = {}
+        self.operator_kb_status_filter_by_operator: dict[str, str] = {}
         self.joplin_configured = False
         self.joplin_available = False
         self.joplin_status: dict[str, Any] = {}
@@ -3902,6 +3950,11 @@ class AgentPBXTUI(App[None]):
         self.tmux_plan_selector_agent_ids: set[str] = set()
         self.sent_message_history_by_agent: dict[str, list[str]] = {}
         self.sent_message_history_cursor: dict[tuple[str, str], int] = {}
+        self.latest_agent_prune_request: dict[str, Any] | None = None
+        self.latest_agent_prune_preview: dict[str, Any] | None = None
+        self.last_agent_prune_batch_id: str | None = None
+        self.agent_cursor_fallback_row: int | None = None
+        self.operator_cursor_fallback_row: int | None = None
         self.slash_completion_state: dict[str, SlashCompletionState] = {}
         self.file_completion_state: dict[str, FileCompletionState] = {}
         self.event_stream_disconnected = False
@@ -3976,6 +4029,7 @@ class AgentPBXTUI(App[None]):
                     yield Button("Show Hidden (h)", id="toggle-hidden-agents")
                     yield Button("Unhide (H)", id="unhide-agent")
                     yield Button("Hide Agent (d)", id="hide-agent")
+                    yield Button("Prune", id="agents-prune")
                     yield Button("Purge Agent (D)", id="purge-agent")
                 yield Static("Operators (F5/o)", id="operators-title")
                 yield DataTable(
@@ -4143,6 +4197,25 @@ class AgentPBXTUI(App[None]):
                             yield Button("Monitor (M)", id="campaign-monitor")
                             yield Button("View Report (R)", id="campaign-report")
                             yield Button("Copy Note (C)", id="campaign-copy-joplin")
+                    with TabPane("KB", id="operator-kb-tab"):
+                        yield Static("KB: select an operator", id="operator-kb-status")
+                        yield DataTable(
+                            id="operator-kb",
+                            cursor_type="row",
+                            show_row_labels=False,
+                        )
+                        yield NavigationTextArea(id="operator-kb-detail", read_only=True)
+                        with Vertical(id="operator-kb-actions"):
+                            with Horizontal(id="operator-kb-filter-actions"):
+                                yield Button("Refresh", id="operator-kb-refresh")
+                                yield Button("Active", id="operator-kb-active")
+                                yield Button("Proposed", id="operator-kb-proposed")
+                                yield Button("Rejected", id="operator-kb-rejected")
+                                yield Button("Retired", id="operator-kb-retired")
+                            with Horizontal(id="operator-kb-entry-actions"):
+                                yield Button("Promote", id="operator-kb-promote")
+                                yield Button("Reject", id="operator-kb-reject")
+                                yield Button("Retire", id="operator-kb-retire")
                     with TabPane("Joplin", id="joplin-tab"):
                         yield Static("Joplin: checking...", id="joplin-status")
                         yield DataTable(
@@ -4188,6 +4261,16 @@ class AgentPBXTUI(App[None]):
         issues.add_columns("#", "State", "Labels", "Title", "Updated")
         campaigns = self.query_one("#campaigns", DataTable)
         campaigns.add_columns("Status", "Assignments", "Title", "Updated")
+        operator_kb = self.query_one("#operator-kb", DataTable)
+        operator_kb.add_columns(
+            "Status",
+            "Redact",
+            "Scope",
+            "Project",
+            "Title",
+            "Tags",
+            "Updated",
+        )
         joplin_notes = self.query_one("#joplin-notes", DataTable)
         joplin_notes.add_columns("Updated", "Title")
         latest_plan_options = self.query_one("#latest-plan-options", DataTable)
@@ -4327,8 +4410,25 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator fork next", "View the next fork pane for the selected operator", self.palette_operator_fork_next)
         yield SystemCommand("/operator fork prev", "View the previous fork pane for the selected operator", self.palette_operator_fork_prev)
         yield SystemCommand("/operator fork review", "Start a read-only review fork for the selected operator/caller", self.palette_operator_fork_review)
+        yield SystemCommand("/operator handoffs", "Show handoffs for the selected operator", self.palette_operator_handoffs)
+        yield SystemCommand("/operator handoff approve", "Approve or retry the oldest pending operator handoff", self.palette_operator_handoff_approve)
+        yield SystemCommand("/operator handoff launch", "Launch the required fork for a pending handoff", self.palette_operator_handoff_launch)
+        yield SystemCommand("/operator knowledge links", "Show knowledge links for the selected operator", self.palette_operator_knowledge_links)
+        yield SystemCommand("/operator knowledge send", "Approve and send the oldest pending knowledge handoff", self.palette_operator_knowledge_send)
+        yield SystemCommand("/operator kb", "Show active KB entries for the selected operator", self.palette_operator_kb)
+        yield SystemCommand("/operator kb detail", "Show the latest active KB entry body", self.palette_operator_kb_detail)
+        yield SystemCommand("/operator kb proposed", "Show proposed KB entries for the selected operator", self.palette_operator_kb_proposed)
+        yield SystemCommand("/operator kb proposed detail", "Show the oldest proposed KB entry body", self.palette_operator_kb_proposed_detail)
+        yield SystemCommand("/operator kb promote", "Promote the oldest clean proposed KB entry", self.palette_operator_kb_promote)
+        yield SystemCommand("/operator kb reject", "Reject the oldest proposed KB entry", self.palette_operator_kb_reject)
+        yield SystemCommand("/operator kb retire", "Retire the selected active KB entry", self.palette_operator_kb_retire)
         yield SystemCommand("/operator project spawn", "Launch the oldest pending review project spawn", self.palette_operator_project_spawn)
         yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
+        yield SystemCommand("/agents prune", "Preview safe pruning for old terminal caller agents", self.palette_agents_prune)
+        yield SystemCommand("/agents prune apply", "Apply the latest agent prune preview", self.palette_agents_prune_apply)
+        yield SystemCommand("/agents prune stale", "Preview stale nonterminal caller pruning", self.palette_agents_prune_stale)
+        yield SystemCommand("/agents prune forks", "Preview safe operator-fork pruning", self.palette_agents_prune_forks)
+        yield SystemCommand("/agents prune undo", "Undo the latest agent prune batch", self.palette_agents_prune_undo)
         yield from self.palette_native_plan_selector_commands()
         yield from self.palette_dynamic_plan_commands()
         if self.is_tmux_direct_enabled():
@@ -4662,6 +4762,90 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.start_review_operator_fork(),
             name="palette-operator-fork-review",
+            exclusive=True,
+        )
+
+    def palette_operator_handoffs(self) -> None:
+        self.run_worker(
+            self.show_selected_operator_handoffs(),
+            name="palette-operator-handoffs",
+            exclusive=True,
+        )
+
+    def palette_operator_handoff_approve(self) -> None:
+        self.run_worker(
+            self.approve_pending_operator_handoff(),
+            name="palette-operator-handoff-approve",
+            exclusive=True,
+        )
+
+    def palette_operator_handoff_launch(self) -> None:
+        self.run_worker(
+            self.launch_pending_operator_handoff_fork(),
+            name="palette-operator-handoff-launch",
+            exclusive=True,
+        )
+
+    def palette_operator_knowledge_links(self) -> None:
+        self.run_worker(
+            self.show_selected_operator_knowledge_links(),
+            name="palette-operator-knowledge-links",
+            exclusive=True,
+        )
+
+    def palette_operator_knowledge_send(self) -> None:
+        self.run_worker(
+            self.send_pending_operator_knowledge_handoff(),
+            name="palette-operator-knowledge-send",
+            exclusive=True,
+        )
+
+    def palette_operator_kb(self) -> None:
+        self.run_worker(
+            self.show_selected_operator_kb(status="active"),
+            name="palette-operator-kb",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_detail(self) -> None:
+        self.run_worker(
+            self.show_selected_operator_kb_detail(status="active"),
+            name="palette-operator-kb-detail",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_proposed(self) -> None:
+        self.run_worker(
+            self.show_selected_operator_kb(status="proposed"),
+            name="palette-operator-kb-proposed",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_proposed_detail(self) -> None:
+        self.run_worker(
+            self.show_selected_operator_kb_detail(status="proposed"),
+            name="palette-operator-kb-proposed-detail",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_promote(self) -> None:
+        self.run_worker(
+            self.promote_oldest_operator_kb_proposal(),
+            name="palette-operator-kb-promote",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_reject(self) -> None:
+        self.run_worker(
+            self.reject_oldest_operator_kb_proposal(),
+            name="palette-operator-kb-reject",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_retire(self) -> None:
+        self.run_worker(
+            self.retire_selected_operator_kb_entry(),
+            name="palette-operator-kb-retire",
             exclusive=True,
         )
 
@@ -5117,6 +5301,41 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_agents_prune(self) -> None:
+        self.run_worker(
+            self.preview_agent_prune("terminal-callers"),
+            name="agents-prune-preview",
+            exclusive=True,
+        )
+
+    def palette_agents_prune_stale(self) -> None:
+        self.run_worker(
+            self.preview_agent_prune("stale-callers"),
+            name="agents-prune-stale-preview",
+            exclusive=True,
+        )
+
+    def palette_agents_prune_forks(self) -> None:
+        self.run_worker(
+            self.preview_agent_prune("operator-forks"),
+            name="agents-prune-forks-preview",
+            exclusive=True,
+        )
+
+    def palette_agents_prune_apply(self) -> None:
+        self.run_worker(
+            self.apply_latest_agent_prune(),
+            name="agents-prune-apply",
+            exclusive=True,
+        )
+
+    def palette_agents_prune_undo(self) -> None:
+        self.run_worker(
+            self.undo_latest_agent_prune(),
+            name="agents-prune-undo",
+            exclusive=True,
+        )
+
     def palette_toggle_hidden_agents(self) -> None:
         self.action_toggle_hidden_agents()
 
@@ -5185,6 +5404,22 @@ class AgentPBXTUI(App[None]):
 
     def activate_campaigns_tab(self) -> None:
         self.activate_agent_tab("campaigns-tab")
+
+    async def open_operator_kb_for_agent(
+        self,
+        agent_id: str,
+        *,
+        status: str = "active",
+    ) -> None:
+        if agent_id in self.agents:
+            await self.select_agent(agent_id)
+        else:
+            self.selected_agent_id = agent_id
+        self.activate_operator_kb_tab()
+        await self.load_operator_kb(agent_id, status=status)
+
+    def activate_operator_kb_tab(self) -> None:
+        self.activate_agent_tab("operator-kb-tab")
 
     async def campaign_action_for_agent(
         self,
@@ -5299,6 +5534,8 @@ class AgentPBXTUI(App[None]):
                 await self.load_pull_requests(self.selected_agent_id)
             elif self.active_agent_tab == "issues-tab":
                 await self.load_issues(self.selected_agent_id)
+            elif self.active_agent_tab == "operator-kb-tab":
+                await self.load_operator_kb(self.selected_agent_id)
             elif self.active_agent_tab == "joplin-tab":
                 await self.load_joplin_notes(self.selected_agent_id)
 
@@ -5423,6 +5660,10 @@ class AgentPBXTUI(App[None]):
             target = self.query_one_or_none("#campaign-detail", TextArea)
             if target is None:
                 target = self.query_one_or_none("#campaigns", DataTable)
+        elif self.active_agent_tab == "operator-kb-tab":
+            target = self.query_one_or_none("#operator-kb-detail", TextArea)
+            if target is None:
+                target = self.query_one_or_none("#operator-kb", DataTable)
         elif self.active_agent_tab == "joplin-tab":
             target = self.query_one_or_none("#joplin-body", TextArea)
             if target is None:
@@ -6326,6 +6567,13 @@ class AgentPBXTUI(App[None]):
                 animate=False,
                 scroll=False,
             )
+        elif self.agent_cursor_fallback_row is not None and table.row_count:
+            table.move_cursor(
+                row=min(self.agent_cursor_fallback_row, table.row_count - 1),
+                animate=False,
+                scroll=False,
+            )
+        self.agent_cursor_fallback_row = None
         table.scroll_x = scroll_x
         table.scroll_target_x = scroll_target_x
         table.scroll_y = scroll_y
@@ -6350,6 +6598,13 @@ class AgentPBXTUI(App[None]):
                 animate=False,
                 scroll=False,
             )
+        elif self.operator_cursor_fallback_row is not None and operator_table.row_count:
+            operator_table.move_cursor(
+                row=min(self.operator_cursor_fallback_row, operator_table.row_count - 1),
+                animate=False,
+                scroll=False,
+            )
+        self.operator_cursor_fallback_row = None
         operator_table.scroll_x = operator_scroll_x
         operator_table.scroll_target_x = operator_scroll_target_x
         operator_table.scroll_y = operator_scroll_y
@@ -6506,6 +6761,13 @@ class AgentPBXTUI(App[None]):
         ):
             return OPERATOR_ROLE_FORK
         return OPERATOR_ROLE_ROOT
+
+    def format_short_time(self, value: float | int | None) -> str:
+        if not value:
+            return "-"
+        return datetime.fromtimestamp(float(value), timezone.utc).strftime(
+            "%Y-%m-%d %H:%M"
+        )
 
     def format_campaign_count(self, agent: dict[str, Any]) -> str:
         count = int_value(agent.get("active_campaign_count")) or 0
@@ -6877,6 +7139,9 @@ class AgentPBXTUI(App[None]):
         if event.data_table.id == "campaigns":
             self.select_campaign(str(event.row_key.value))
             return
+        if event.data_table.id == "operator-kb":
+            self.select_operator_kb_entry(str(event.row_key.value))
+            return
         if event.data_table.id == "joplin-notes":
             await self.select_joplin_note(str(event.row_key.value))
             return
@@ -6905,6 +7170,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.data_table.id == "campaigns":
             self.select_campaign(str(event.cell_key.row_key.value))
+            return
+        if event.data_table.id == "operator-kb":
+            self.select_operator_kb_entry(str(event.cell_key.row_key.value))
             return
         if event.data_table.id == "joplin-notes":
             await self.select_joplin_note(str(event.cell_key.row_key.value))
@@ -7974,6 +8242,12 @@ class AgentPBXTUI(App[None]):
                 name="agent-files",
                 exclusive=True,
             )
+        if self.active_agent_tab == "operator-kb-tab" and agent_id:
+            self.run_async_worker(
+                lambda agent_id=agent_id: self.load_operator_kb(agent_id),
+                name="operator-kb",
+                exclusive=True,
+            )
         if self.active_agent_tab == "joplin-tab" and agent_id:
             self.run_async_worker(
                 lambda agent_id=agent_id: self.load_joplin_notes(agent_id),
@@ -8128,6 +8402,8 @@ class AgentPBXTUI(App[None]):
             await self.load_issues(agent_id)
         elif self.active_agent_tab == "campaigns-tab":
             await self.load_operator_campaigns(agent_id)
+        elif self.active_agent_tab == "operator-kb-tab":
+            await self.load_operator_kb(agent_id)
         elif self.active_agent_tab == "joplin-tab":
             await self.load_joplin_notes(agent_id)
         elif self.is_tmux_direct_enabled(agent_id):
@@ -9050,6 +9326,33 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "campaign-copy-joplin":
             await self.copy_selected_campaign_to_joplin()
             return
+        if event.button.id == "operator-kb-refresh":
+            if self.selected_agent_id:
+                await self.load_operator_kb(self.selected_agent_id)
+            return
+        operator_kb_status_buttons = {
+            "operator-kb-active": "active",
+            "operator-kb-proposed": "proposed",
+            "operator-kb-rejected": "rejected",
+            "operator-kb-retired": "retired",
+        }
+        operator_kb_status = operator_kb_status_buttons.get(str(event.button.id or ""))
+        if operator_kb_status is not None:
+            if self.selected_agent_id:
+                await self.load_operator_kb(
+                    self.selected_agent_id,
+                    status=operator_kb_status,
+                )
+            return
+        if event.button.id == "operator-kb-promote":
+            await self.promote_oldest_operator_kb_proposal()
+            return
+        if event.button.id == "operator-kb-reject":
+            await self.reject_oldest_operator_kb_proposal()
+            return
+        if event.button.id == "operator-kb-retire":
+            await self.retire_selected_operator_kb_entry()
+            return
         if event.button.id == "start-operator":
             await self.start_operator_agent()
             return
@@ -9101,6 +9404,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "hide-agent":
             await self.dismiss_selected_agent(delete_thread=False)
+            return
+        if event.button.id == "agents-prune":
+            await self.preview_agent_prune("terminal-callers")
             return
         if event.button.id == "purge-agent":
             await self.dismiss_selected_agent(delete_thread=True)
@@ -10744,6 +11050,239 @@ class AgentPBXTUI(App[None]):
                 starred_at=float_value(agent.get("starred_at")),
             )
 
+    def agent_prune_request(self, preset: str) -> dict[str, Any]:
+        return {
+            "preset": preset,
+            "min_age_days": 30.0,
+            "include_hidden": False,
+            "include_starred": False,
+            "require_no_tmux_pane": True,
+            "limit": 500,
+            "metadata": {"source": "agent-pbx-tui"},
+        }
+
+    async def preview_agent_prune(self, preset: str = "terminal-callers") -> None:
+        payload = self.agent_prune_request(preset)
+        try:
+            response = await self.api_client().post(
+                "/v1/agents/prune/preview",
+                json=payload,
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            preview = response.json()
+        except Exception as exc:
+            self.notify(f"Unable to preview agent prune: {exc}", severity="error")
+            return
+        self.latest_agent_prune_request = payload
+        self.latest_agent_prune_preview = preview
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_agent_prune_preview(preview)
+        count = int(preview.get("candidate_count") or 0)
+        if count:
+            self.notify(f"Prune preview found {count} candidate(s); run /agents prune apply.")
+        else:
+            self.notify("Prune preview found no candidates.")
+
+    async def apply_latest_agent_prune(self) -> None:
+        if not self.latest_agent_prune_request or not self.latest_agent_prune_preview:
+            self.notify("Run /agents prune before applying.", severity="warning")
+            return
+        count = int(self.latest_agent_prune_preview.get("candidate_count") or 0)
+        if count <= 0:
+            self.notify("Latest prune preview has no candidates.", severity="warning")
+            return
+        payload = dict(self.latest_agent_prune_request)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        payload["metadata"] = {
+            **metadata,
+            "applied_from_tui_preview": True,
+            "preview_candidate_count": count,
+        }
+        try:
+            response = await self.api_client().post(
+                "/v1/agents/prune/apply",
+                json=payload,
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Unable to apply agent prune: {exc}", severity="error")
+            return
+        batch = result.get("batch") if isinstance(result, dict) else None
+        if isinstance(batch, dict):
+            self.last_agent_prune_batch_id = str(batch.get("batch_id") or "") or None
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_agent_prune_apply(result)
+        self.latest_agent_prune_request = None
+        self.latest_agent_prune_preview = None
+        await self.refresh_agents()
+        await self.refresh_events()
+        hidden = int(batch.get("hidden_count") or 0) if isinstance(batch, dict) else 0
+        self.notify(f"Prune hid {hidden} agent(s).")
+
+    async def latest_agent_prune_batch_id(self) -> str | None:
+        if self.last_agent_prune_batch_id:
+            return self.last_agent_prune_batch_id
+        try:
+            response = await self.api_client().get(
+                "/v1/agents/prune/batches",
+                params={"limit": "10"},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return None
+        batches = payload.get("batches") if isinstance(payload, dict) else None
+        if not isinstance(batches, list):
+            return None
+        for batch in batches:
+            if isinstance(batch, dict) and batch.get("undone_at") is None:
+                batch_id = str(batch.get("batch_id") or "").strip()
+                if batch_id:
+                    return batch_id
+        return None
+
+    async def undo_latest_agent_prune(self) -> None:
+        batch_id = await self.latest_agent_prune_batch_id()
+        if not batch_id:
+            self.notify("No unapplied prune batch found to undo.", severity="warning")
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/prune/batches/{batch_id}/undo",
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            batch = response.json()
+        except Exception as exc:
+            self.notify(f"Unable to undo agent prune: {exc}", severity="error")
+            return
+        self.last_agent_prune_batch_id = None
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_agent_prune_undo(batch)
+        await self.refresh_agents()
+        await self.refresh_events()
+        undo_results = batch.get("undo_results") if isinstance(batch, dict) else []
+        unhidden = sum(
+            1
+            for item in undo_results
+            if isinstance(item, dict) and item.get("result") == "unhidden"
+        )
+        self.notify(f"Undo restored {unhidden} agent(s).")
+
+    @staticmethod
+    def agent_prune_skip_summary(preview: dict[str, Any]) -> list[str]:
+        counts: dict[str, int] = {}
+        for item in preview.get("skipped") or []:
+            if not isinstance(item, dict):
+                continue
+            for reason in item.get("guard_reasons") or []:
+                reason_text = str(reason)
+                counts[reason_text] = counts.get(reason_text, 0) + 1
+        return [f"- {reason}: {count}" for reason, count in sorted(counts.items())]
+
+    def format_agent_prune_preview(self, preview: dict[str, Any]) -> str:
+        candidates = [
+            item for item in preview.get("candidates") or [] if isinstance(item, dict)
+        ]
+        lines = [
+            "Agent Prune Preview",
+            "",
+            f"Preset: {preview.get('preset')}",
+            f"Min age: {preview.get('min_age_days')} day(s)",
+            "Mode: hide only; thread history retained",
+            f"Candidates: {preview.get('candidate_count', 0)}",
+            f"Protected/skipped: {preview.get('skipped_count', 0)}",
+            "",
+            "Candidates:",
+        ]
+        if not candidates:
+            lines.append("- none")
+        for item in candidates[:80]:
+            age = float_value(item.get("age_days")) or 0.0
+            lines.append(
+                "- "
+                f"{item.get('agent_id')} "
+                f"[{item.get('project')}; {item.get('effective_status') or item.get('status')}; "
+                f"{age:.1f}d]"
+            )
+        if len(candidates) > 80:
+            lines.append(f"- ... {len(candidates) - 80} more")
+        skip_lines = self.agent_prune_skip_summary(preview)
+        if skip_lines:
+            lines.extend(["", "Protected Skip Reasons:", *skip_lines])
+        lines.extend(
+            [
+                "",
+                "Run /agents prune apply to hide this exact class of agents using fresh live state.",
+                "Run /agents prune undo after apply to restore the latest batch.",
+            ]
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_agent_prune_apply(result: dict[str, Any]) -> str:
+        batch = result.get("batch") if isinstance(result, dict) else {}
+        if not isinstance(batch, dict):
+            batch = {}
+        lines = [
+            "Agent Prune Applied",
+            "",
+            f"Batch: {batch.get('batch_id')}",
+            f"Preset: {batch.get('preset')}",
+            "Mode: hide only; thread history retained",
+            f"Hidden: {batch.get('hidden_count', 0)}",
+            f"Skipped: {batch.get('skipped_count', 0)}",
+            "",
+            "Hidden Agents:",
+        ]
+        hidden = [
+            item
+            for item in batch.get("results") or []
+            if isinstance(item, dict) and item.get("result") == "hidden"
+        ]
+        if not hidden:
+            lines.append("- none")
+        for item in hidden[:80]:
+            lines.append(f"- {item.get('agent_id')} [{item.get('project')}]")
+        if len(hidden) > 80:
+            lines.append(f"- ... {len(hidden) - 80} more")
+        lines.append("")
+        lines.append("Run /agents prune undo to restore this batch.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_agent_prune_undo(batch: dict[str, Any]) -> str:
+        undo_results = [
+            item
+            for item in batch.get("undo_results") or []
+            if isinstance(item, dict)
+        ]
+        unhidden = [item for item in undo_results if item.get("result") == "unhidden"]
+        skipped = [item for item in undo_results if item.get("result") == "skipped"]
+        lines = [
+            "Agent Prune Undo",
+            "",
+            f"Batch: {batch.get('batch_id')}",
+            f"Restored: {len(unhidden)}",
+            f"Skipped: {len(skipped)}",
+            "",
+            "Restored Agents:",
+        ]
+        if not unhidden:
+            lines.append("- none")
+        for item in unhidden[:80]:
+            lines.append(f"- {item.get('agent_id')}")
+        if len(unhidden) > 80:
+            lines.append(f"- ... {len(unhidden) - 80} more")
+        return "\n".join(lines)
+
     async def unhide_selected_agent(self) -> None:
         agent_id = self.selected_or_cursor_agent_id()
         if not agent_id:
@@ -10766,6 +11305,21 @@ class AgentPBXTUI(App[None]):
         self.notify(f"Unhid {agent_id}.")
         await self.refresh_agents()
         await self.refresh_events()
+
+    def remember_cursor_after_agent_removal(self, agent_id: str) -> None:
+        for table_id, attr in (
+            ("#agents", "agent_cursor_fallback_row"),
+            ("#operators", "operator_cursor_fallback_row"),
+        ):
+            table = self.query_one_or_none(table_id, DataTable)
+            if table is None:
+                continue
+            try:
+                row = table.get_row_index(agent_id)
+            except Exception:
+                continue
+            next_count = max(0, table.row_count - 1)
+            setattr(self, attr, min(row, max(0, next_count - 1)))
 
     async def dismiss_selected_agent(
         self,
@@ -10790,6 +11344,7 @@ class AgentPBXTUI(App[None]):
             return
         if pane_id and not await self.kill_tui_owned_operator_pane(agent_id):
             return
+        self.remember_cursor_after_agent_removal(agent_id)
         try:
             await self.delete_agent(agent_id, delete_thread=delete_thread)
         except Exception as exc:
@@ -10940,7 +11495,6 @@ class AgentPBXTUI(App[None]):
         source_cwd: str | None = None,
         work_root: str | None = None,
     ) -> str:
-        role = OPERATOR_ROLE_FORK if source_caller_agent_id else OPERATOR_ROLE_ROOT
         logical_id = logical_operator_id or agent_id
         resolved_track_id = self.normalize_operator_fork_track_id(fork_track_id)
         resolved_purpose = self.normalize_operator_fork_label(
@@ -12512,6 +13066,1105 @@ class AgentPBXTUI(App[None]):
         if not isinstance(requests, list):
             return []
         return [item for item in requests if isinstance(item, dict)]
+
+    async def fetch_operator_knowledge_links(
+        self,
+        logical_operator_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "operator_agent_id": logical_operator_id,
+            "limit": limit,
+        }
+        if status:
+            params["status"] = status
+        response = await self.api_client().get(
+            "/v1/operator/knowledge-links",
+            params=params,
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return []
+        links = payload.get("knowledge_links")
+        if not isinstance(links, list):
+            return []
+        return [item for item in links if isinstance(item, dict)]
+
+    async def fetch_operator_knowledge_context(
+        self,
+        logical_operator_id: str,
+        link_id: str,
+    ) -> dict[str, Any]:
+        response = await self.api_client().get(
+            f"/v1/operator/knowledge-links/{link_id}/context",
+            params={"operator_agent_id": logical_operator_id},
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("knowledge context response was not an object")
+
+    async def approve_operator_knowledge_turn(
+        self,
+        logical_operator_id: str,
+        link_id: str,
+        turn_id: str,
+        *,
+        delivery: str = "auto",
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/knowledge-links/{link_id}/turns/{turn_id}/approve",
+            json={
+                "operator_agent_id": logical_operator_id,
+                "delivery": delivery,
+                "metadata": {"approved_by": "agent-pbx-tui"},
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("knowledge approval response was not an object")
+
+    async def fetch_operator_handoffs(
+        self,
+        logical_operator_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        async def fetch(params: dict[str, Any]) -> list[dict[str, Any]]:
+            response = await self.api_client().get(
+                "/v1/operator/handoffs",
+                params=params,
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                return []
+            handoffs = payload.get("handoffs")
+            if not isinstance(handoffs, list):
+                return []
+            return [item for item in handoffs if isinstance(item, dict)]
+
+        base: dict[str, Any] = {"limit": limit}
+        if status:
+            base["status"] = status
+        source_params = {**base, "operator_agent_id": logical_operator_id}
+        target_params = {**base, "target_operator_agent_id": logical_operator_id}
+        combined: dict[str, dict[str, Any]] = {}
+        for item in await fetch(source_params):
+            handoff_id = str(item.get("handoff_id") or "").strip()
+            if handoff_id:
+                combined[handoff_id] = item
+        for item in await fetch(target_params):
+            handoff_id = str(item.get("handoff_id") or "").strip()
+            if handoff_id:
+                combined.setdefault(handoff_id, item)
+        return sorted(
+            combined.values(),
+            key=lambda item: float_value(item.get("updated_at")) or 0.0,
+            reverse=True,
+        )
+
+    async def approve_operator_handoff(
+        self,
+        logical_operator_id: str,
+        handoff_id: str,
+        *,
+        delivery: str = "auto",
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/handoffs/{handoff_id}/approve",
+            json={
+                "operator_agent_id": logical_operator_id,
+                "delivery": delivery,
+                "metadata": {"approved_by": "agent-pbx-tui"},
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("handoff approval response was not an object")
+
+    async def show_selected_operator_handoffs(self) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        try:
+            handoffs = await self.fetch_operator_handoffs(
+                logical_operator_id,
+                limit=50,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to fetch operator handoffs: {exc}", severity="error")
+            return
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_operator_handoffs(
+                logical_operator_id,
+                handoffs,
+            )
+        self.activate_latest_tab()
+
+    async def approve_pending_operator_handoff(self) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        try:
+            handoffs = await self.fetch_operator_handoffs(
+                logical_operator_id,
+                limit=50,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to fetch operator handoffs: {exc}", severity="error")
+            return
+        candidates = [
+            handoff
+            for handoff in handoffs
+            if str(handoff.get("status") or "") in {"proposed", "approved", "pending_launch"}
+        ]
+        if not candidates:
+            self.notify(f"No pending operator handoffs for {logical_operator_id}.")
+            return
+        handoff = candidates[0]
+        source_operator_id = str(
+            handoff.get("logical_operator_agent_id") or logical_operator_id
+        )
+        handoff_id = str(handoff.get("handoff_id") or "").strip()
+        if not handoff_id:
+            self.notify("Pending handoff is missing an id.", severity="error")
+            return
+        try:
+            result = await self.approve_operator_handoff(
+                source_operator_id,
+                handoff_id,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to approve operator handoff: {exc}", severity="error")
+            return
+        updated = result.get("handoff") if isinstance(result.get("handoff"), dict) else {}
+        command = result.get("command") if isinstance(result.get("command"), dict) else {}
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = (
+                "Operator handoff approval result.\n\n"
+                f"Handoff: {handoff_id}\n"
+                f"Status: {updated.get('status') or '-'}\n"
+                f"Target operator: {updated.get('target_operator_agent_id') or '-'}\n"
+                f"Target caller: {updated.get('target_caller_agent_id') or '-'}\n"
+                f"Target fork: {updated.get('target_operator_fork_id') or '-'}\n"
+                f"Delivery: {updated.get('delivery_status') or '-'}\n"
+                f"Command: {command.get('command_id') or '-'}"
+            )
+        await self.refresh_events()
+        target = str(updated.get("target_operator_agent_id") or "")
+        if target:
+            await self.load_thread(target)
+        status = str(updated.get("status") or "")
+        if status == "pending_launch":
+            self.notify("Handoff is pending required fork launch.", severity="warning")
+        else:
+            self.notify(f"Operator handoff {handoff_id} approved.")
+
+    async def launch_pending_operator_handoff_fork(self) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        try:
+            handoffs = await self.fetch_operator_handoffs(
+                logical_operator_id,
+                status="pending_launch",
+                limit=50,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to fetch pending handoffs: {exc}", severity="error")
+            return
+        handoff = next(
+            (
+                item
+                for item in handoffs
+                if str(item.get("target_operator_agent_id") or "").strip()
+                and str(item.get("target_caller_agent_id") or "").strip()
+            ),
+            None,
+        )
+        if handoff is None:
+            self.notify(f"No launchable pending handoffs for {logical_operator_id}.")
+            return
+        target_operator_id = str(handoff.get("target_operator_agent_id") or "").strip()
+        target_caller_id = str(handoff.get("target_caller_agent_id") or "").strip()
+        if target_caller_id not in self.agents:
+            await self.refresh_agents()
+        if target_caller_id not in self.agents:
+            self.notify(
+                f"Target caller {target_caller_id} is not loaded.",
+                severity="error",
+            )
+            return
+        try:
+            fork = await self.ensure_operator_fork_from_tui(
+                logical_operator_id=target_operator_id,
+                source_caller_agent_id=target_caller_id,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to launch handoff fork: {exc}", severity="error")
+            return
+        if fork is None:
+            return
+        handoff_id = str(handoff.get("handoff_id") or "").strip()
+        source_operator_id = str(handoff.get("logical_operator_agent_id") or "").strip()
+        try:
+            result = await self.approve_operator_handoff(
+                source_operator_id,
+                handoff_id,
+            )
+        except Exception as exc:
+            self.notify(
+                f"Launched fork, but handoff retry failed: {exc}",
+                severity="error",
+            )
+            return
+        updated = result.get("handoff") if isinstance(result.get("handoff"), dict) else {}
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = (
+                "Required handoff fork launched.\n\n"
+                f"Handoff: {handoff_id}\n"
+                f"Fork: {fork.get('fork_agent_id') or '-'}\n"
+                f"Fork ID: {fork.get('operator_fork_id') or '-'}\n"
+                f"Handoff status: {updated.get('status') or '-'}\n"
+                f"Command: {updated.get('command_id') or '-'}"
+            )
+        await self.refresh_agents()
+        await self.refresh_events()
+        self.notify(f"Launched required fork and retried handoff {handoff_id}.")
+
+    def format_operator_handoffs(
+        self,
+        logical_operator_id: str,
+        handoffs: list[dict[str, Any]],
+    ) -> str:
+        lines = [
+            f"Operator handoffs: {logical_operator_id}",
+            "",
+        ]
+        if not handoffs:
+            lines.append("No operator handoffs.")
+            return "\n".join(lines)
+        for handoff in handoffs:
+            remaining = handoff.get("time_remaining_seconds")
+            remaining_text = "-"
+            if isinstance(remaining, (int, float)):
+                remaining_text = f"{remaining:.0f}s"
+            evidence = (
+                handoff.get("delivery_evidence")
+                if isinstance(handoff.get("delivery_evidence"), dict)
+                else {}
+            )
+            artifacts = handoff.get("artifact_bundle")
+            artifact_count = len(artifacts) if isinstance(artifacts, list) else 0
+            lines.extend(
+                [
+                    f"- {handoff.get('handoff_id')}",
+                    f"  status: {handoff.get('status')}  safe_to_start: {handoff.get('safe_to_start')}",
+                    f"  source: {handoff.get('source_agent_id')}  target: {handoff.get('target_operator_agent_id')}",
+                    f"  target caller: {handoff.get('target_caller_agent_id') or '-'}",
+                    f"  target fork: {handoff.get('target_operator_fork_id') or '-'}",
+                    f"  expires in: {remaining_text}",
+                    f"  delivery: {handoff.get('delivery_status') or '-'}  command: {handoff.get('command_id') or '-'}",
+                    f"  ack: {evidence.get('agent_acknowledged')}  started: {evidence.get('agent_started')}",
+                    f"  artifacts: {artifact_count}",
+                    f"  summary: {handoff.get('summary') or '-'}",
+                ]
+            )
+        return "\n".join(lines)
+
+    async def show_selected_operator_knowledge_links(self) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        try:
+            links = await self.fetch_operator_knowledge_links(
+                logical_operator_id,
+                limit=50,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to fetch knowledge links: {exc}", severity="error")
+            return
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_operator_knowledge_links(
+                logical_operator_id,
+                links,
+            )
+        self.activate_latest_tab()
+
+    async def send_pending_operator_knowledge_handoff(self) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        try:
+            links = await self.fetch_operator_knowledge_links(
+                logical_operator_id,
+                status="proposed",
+                limit=20,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to fetch pending knowledge links: {exc}", severity="error")
+            return
+        pending_links = [
+            link for link in links if int_value(link.get("pending_turn_count")) or 0
+        ]
+        if not pending_links:
+            self.notify(f"No pending knowledge handoffs for {logical_operator_id}.")
+            return
+        link = pending_links[0]
+        link_id = str(link.get("link_id") or "").strip()
+        if not link_id:
+            self.notify("Pending knowledge link is missing an id.", severity="error")
+            return
+        try:
+            context = await self.fetch_operator_knowledge_context(
+                logical_operator_id,
+                link_id,
+            )
+            turns = context.get("turns") if isinstance(context.get("turns"), list) else []
+            pending_turn = next(
+                (
+                    turn
+                    for turn in turns
+                    if isinstance(turn, dict)
+                    and str(turn.get("delivery_status") or "") == "pending_approval"
+                ),
+                None,
+            )
+            if pending_turn is None:
+                raise RuntimeError("pending knowledge turn not found")
+            result = await self.approve_operator_knowledge_turn(
+                logical_operator_id,
+                link_id,
+                str(pending_turn.get("turn_id") or ""),
+            )
+        except Exception as exc:
+            self.notify(f"Unable to send knowledge handoff: {exc}", severity="error")
+            return
+        delivered_turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
+        command = result.get("command") if isinstance(result.get("command"), dict) else {}
+        recipient = str(delivered_turn.get("recipient_agent_id") or link.get("target_agent_id") or "")
+        status = str(delivered_turn.get("delivery_status") or "")
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = (
+                "Knowledge handoff sent.\n\n"
+                f"Link: {link_id}\n"
+                f"Turn: {delivered_turn.get('turn_id') or '-'}\n"
+                f"Recipient: {recipient or '-'}\n"
+                f"Delivery: {status or '-'}\n"
+                f"Command: {command.get('command_id') or '-'}"
+            )
+        self.notify(f"Knowledge handoff sent to {recipient or 'target'}.")
+        await self.refresh_events()
+        if recipient:
+            await self.load_thread(recipient)
+
+    def format_operator_knowledge_links(
+        self,
+        logical_operator_id: str,
+        links: list[dict[str, Any]],
+    ) -> str:
+        lines = [
+            f"Operator knowledge links: {logical_operator_id}",
+            "",
+        ]
+        if not links:
+            lines.append("No knowledge links.")
+            return "\n".join(lines)
+        for link in links:
+            pending = int_value(link.get("pending_turn_count")) or 0
+            latest = float_value(link.get("latest_turn_at"))
+            latest_text = self.format_short_time(latest) if latest is not None else "-"
+            lines.extend(
+                [
+                    f"- {link.get('link_id')}",
+                    f"  status: {link.get('status')}  type: {link.get('link_type')}",
+                    f"  source: {link.get('source_agent_id')}",
+                    f"  target: {link.get('target_agent_id')}",
+                    f"  pending turns: {pending}  latest turn: {latest_text}",
+                    f"  summary: {link.get('summary') or '-'}",
+                ]
+            )
+        return "\n".join(lines)
+
+    async def fetch_operator_kb_entries(
+        self,
+        logical_operator_id: str,
+        *,
+        status: str | None = "active",
+        query: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "operator_agent_id": logical_operator_id,
+            "limit": limit,
+        }
+        if status is not None:
+            params["status"] = status
+        if query:
+            params["query"] = query
+        response = await self.api_client().get(
+            "/v1/operator/kb",
+            params=params,
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return []
+        entries = payload.get("kb_entries")
+        if not isinstance(entries, list):
+            return []
+        return [item for item in entries if isinstance(item, dict)]
+
+    async def promote_operator_kb_entry(
+        self,
+        logical_operator_id: str,
+        kb_id: str,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/kb/{kb_id}/promote",
+            json={
+                "operator_agent_id": logical_operator_id,
+                "redaction_status": "clean",
+                "summary": "Promoted from the Agent PBX TUI.",
+                "metadata": {"promoted_by": "agent-pbx-tui"},
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("KB promotion response was not an object")
+
+    async def reject_operator_kb_entry(
+        self,
+        logical_operator_id: str,
+        kb_id: str,
+        *,
+        summary: str,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/kb/{kb_id}/reject",
+            json={
+                "operator_agent_id": logical_operator_id,
+                "summary": summary,
+                "metadata": {"rejected_by": "agent-pbx-tui"},
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("KB rejection response was not an object")
+
+    async def retire_operator_kb_entry(
+        self,
+        logical_operator_id: str,
+        kb_id: str,
+        *,
+        summary: str,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/kb/{kb_id}/retire",
+            json={
+                "operator_agent_id": logical_operator_id,
+                "summary": summary,
+                "metadata": {"retired_by": "agent-pbx-tui"},
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("KB retirement response was not an object")
+
+    def operator_kb_operator_id_for_agent(self, agent_id: str) -> str | None:
+        agent = self.agents.get(agent_id)
+        if agent is None or self.agent_type(agent) != OPERATOR_AGENT_TYPE:
+            return None
+        return self.logical_operator_id_for_agent(agent)
+
+    def selected_operator_kb_agent_id(self) -> str | None:
+        if (
+            self.active_agent_tab == "operator-kb-tab"
+            and self.selected_agent_id
+            and self.is_operator_agent_id(self.selected_agent_id)
+        ):
+            return self.selected_agent_id
+        return self.selected_operator_agent_id()
+
+    async def show_selected_operator_kb(self, *, status: str = "active") -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            return
+        await self.open_operator_kb_for_agent(operator_agent_id, status=status)
+
+    async def load_operator_kb(
+        self,
+        agent_id: str,
+        *,
+        status: str | None = None,
+    ) -> None:
+        status_label = self.query_one_or_none("#operator-kb-status", Static)
+        detail = self.query_one_or_none("#operator-kb-detail", TextArea)
+        logical_operator_id = self.operator_kb_operator_id_for_agent(agent_id)
+        resolved_status = status or (
+            self.operator_kb_status_filter_by_operator.get(agent_id) or "active"
+        )
+        if logical_operator_id is None:
+            self.render_operator_kb("", [], status=resolved_status)
+            if status_label is not None:
+                status_label.update("KB: select an operator agent")
+            if detail is not None:
+                detail.text = "Operator KB entries are shown for operator agents only."
+            return
+        resolved_status = status or (
+            self.operator_kb_status_filter_by_operator.get(logical_operator_id)
+            or "active"
+        )
+        self.operator_kb_status_filter_by_operator[logical_operator_id] = resolved_status
+        if status_label is not None:
+            status_label.update(
+                f"KB: loading {resolved_status} entries for "
+                f"{logical_operator_id}..."
+            )
+        try:
+            entries = await self.fetch_operator_kb_entries(
+                logical_operator_id,
+                status=resolved_status,
+                limit=100,
+            )
+        except Exception as exc:
+            self.render_operator_kb(logical_operator_id, [], status=resolved_status)
+            if status_label is not None:
+                status_label.update(f"KB: unable to load ({exc})")
+            if detail is not None:
+                detail.text = f"Unable to load operator KB for {logical_operator_id}: {exc}"
+            return
+        entries = self.order_operator_kb_entries(entries, status=resolved_status)
+        self.operator_kb_entries_by_operator[logical_operator_id] = {
+            str(entry.get("kb_id") or "").strip(): entry
+            for entry in entries
+            if str(entry.get("kb_id") or "").strip()
+        }
+        self.render_operator_kb(logical_operator_id, entries, status=resolved_status)
+        if status_label is not None:
+            status_label.update(
+                f"KB: {len(entries)} {resolved_status} entr"
+                f"{'y' if len(entries) == 1 else 'ies'} for {logical_operator_id}"
+            )
+        selected = self.selected_operator_kb_id_by_operator.get(logical_operator_id)
+        if selected not in self.operator_kb_entries_by_operator.get(
+            logical_operator_id,
+            {},
+        ):
+            entry = self.primary_operator_kb_entry(entries, status=resolved_status)
+            selected = str(entry.get("kb_id") or "") if entry else ""
+        if selected:
+            self.select_operator_kb_entry(
+                selected,
+                logical_operator_id=logical_operator_id,
+            )
+        elif detail is not None:
+            detail.text = (
+                f"No {resolved_status} operator KB entries for "
+                f"{logical_operator_id}."
+            )
+
+    @staticmethod
+    def order_operator_kb_entries(
+        entries: list[dict[str, Any]],
+        *,
+        status: str,
+    ) -> list[dict[str, Any]]:
+        if status == "proposed":
+            return sorted(
+                entries,
+                key=lambda item: (
+                    float_value(item.get("created_at")) or 0.0,
+                    str(item.get("kb_id") or ""),
+                ),
+            )
+        return sorted(
+            entries,
+            key=lambda item: (
+                float_value(item.get("updated_at")) or 0.0,
+                str(item.get("kb_id") or ""),
+            ),
+            reverse=True,
+        )
+
+    def render_operator_kb(
+        self,
+        logical_operator_id: str,
+        entries: list[dict[str, Any]],
+        *,
+        status: str,
+    ) -> None:
+        table = self.query_one_or_none("#operator-kb", DataTable)
+        if table is None:
+            return
+        table.clear()
+        for entry in entries:
+            kb_id = str(entry.get("kb_id") or "").strip()
+            if not kb_id:
+                continue
+            tags = entry.get("tags") if isinstance(entry.get("tags"), list) else []
+            tag_text = ", ".join(str(tag) for tag in tags[:3]) or "-"
+            if len(tags) > 3:
+                tag_text = f"{tag_text}, +{len(tags) - 3}"
+            updated_at = float_value(entry.get("updated_at"))
+            updated_text = (
+                self.format_short_time(updated_at)
+                if updated_at is not None
+                else "-"
+            )
+            table.add_row(
+                str(entry.get("status") or status or "-"),
+                str(entry.get("redaction_status") or "-"),
+                str(entry.get("scope") or "-"),
+                str(entry.get("project") or "-"),
+                str(entry.get("title") or kb_id),
+                tag_text,
+                updated_text,
+                key=kb_id,
+            )
+        selected = self.selected_operator_kb_id_by_operator.get(logical_operator_id)
+        if selected and selected in self.operator_kb_entries_by_operator.get(
+            logical_operator_id,
+            {},
+        ):
+            try:
+                table.move_cursor(
+                    row=table.get_row_index(selected),
+                    animate=False,
+                    scroll=True,
+                )
+            except Exception:
+                pass
+
+    def select_operator_kb_entry(
+        self,
+        kb_id: str,
+        *,
+        logical_operator_id: str | None = None,
+    ) -> None:
+        resolved_operator_id = logical_operator_id
+        if resolved_operator_id is None and self.selected_agent_id:
+            resolved_operator_id = self.operator_kb_operator_id_for_agent(
+                self.selected_agent_id
+            )
+        if not resolved_operator_id:
+            return
+        entry = self.operator_kb_entries_by_operator.get(
+            resolved_operator_id,
+            {},
+        ).get(kb_id)
+        if entry is None:
+            return
+        self.selected_operator_kb_id_by_operator[resolved_operator_id] = kb_id
+        table = self.query_one_or_none("#operator-kb", DataTable)
+        if table is not None:
+            try:
+                table.move_cursor(
+                    row=table.get_row_index(kb_id),
+                    animate=False,
+                    scroll=True,
+                )
+            except Exception:
+                pass
+        detail = self.query_one_or_none("#operator-kb-detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_operator_kb_entry_detail(
+                resolved_operator_id,
+                entry,
+            )
+
+    def selected_operator_kb_entry_for_operator(
+        self,
+        logical_operator_id: str,
+    ) -> dict[str, Any] | None:
+        kb_id = self.selected_operator_kb_id_by_operator.get(logical_operator_id)
+        if not kb_id:
+            return None
+        return self.operator_kb_entries_by_operator.get(
+            logical_operator_id,
+            {},
+        ).get(kb_id)
+
+    def selected_operator_kb_entry_for_action(
+        self,
+        logical_operator_id: str,
+        *,
+        status: str,
+    ) -> dict[str, Any] | None:
+        entry = self.selected_operator_kb_entry_for_operator(logical_operator_id)
+        if (
+            entry is not None
+            and self.active_agent_tab == "operator-kb-tab"
+            and str(entry.get("status") or "") == status
+        ):
+            return entry
+        return None
+
+    async def promote_oldest_operator_kb_proposal(self) -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        selected_entry = self.selected_operator_kb_entry_for_operator(logical_operator_id)
+        if self.active_agent_tab == "operator-kb-tab" and selected_entry is not None:
+            if str(selected_entry.get("status") or "") != "proposed":
+                self.notify(
+                    "Select a proposed KB entry before promoting.",
+                    severity="warning",
+                )
+                return
+            entry = selected_entry
+        else:
+            entry = None
+        if entry is None:
+            try:
+                entries = await self.fetch_operator_kb_entries(
+                    logical_operator_id,
+                    status="proposed",
+                    limit=100,
+                )
+            except Exception as exc:
+                self.notify(f"Unable to fetch KB proposals: {exc}", severity="error")
+                return
+            clean_entries = [
+                item
+                for item in entries
+                if str(item.get("redaction_status") or "") == "clean"
+            ]
+            if not clean_entries:
+                if entries:
+                    self.notify(
+                        "KB proposals exist but need redaction review before promotion.",
+                        severity="warning",
+                    )
+                else:
+                    self.notify(f"No proposed KB entries for {logical_operator_id}.")
+                return
+            entry = self.primary_operator_kb_entry(clean_entries, status="proposed")
+        elif str(entry.get("redaction_status") or "") != "clean":
+            self.notify(
+                "Selected KB proposal needs redaction review before promotion.",
+                severity="warning",
+            )
+            return
+        if entry is None:
+            self.notify(f"No proposed KB entries for {logical_operator_id}.")
+            return
+        kb_id = str(entry.get("kb_id") or "").strip()
+        if not kb_id:
+            self.notify("KB proposal is missing an id.", severity="error")
+            return
+        try:
+            promoted = await self.promote_operator_kb_entry(
+                logical_operator_id,
+                kb_id,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to promote KB entry: {exc}", severity="error")
+            return
+        promoted_id = str(promoted.get("kb_id") or kb_id)
+        self.selected_operator_kb_id_by_operator[logical_operator_id] = promoted_id
+        await self.load_operator_kb(operator_agent_id, status="active")
+        self.notify(f"Promoted operator KB entry {kb_id}.")
+        await self.refresh_events()
+
+    async def show_selected_operator_kb_detail(self, *, status: str = "active") -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        await self.open_operator_kb_for_agent(operator_agent_id, status=status)
+
+    async def reject_oldest_operator_kb_proposal(self) -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        selected_entry = self.selected_operator_kb_entry_for_operator(logical_operator_id)
+        if self.active_agent_tab == "operator-kb-tab" and selected_entry is not None:
+            if str(selected_entry.get("status") or "") != "proposed":
+                self.notify(
+                    "Select a proposed KB entry before rejecting.",
+                    severity="warning",
+                )
+                return
+            entry = selected_entry
+        else:
+            entry = None
+        if entry is None:
+            try:
+                entries = await self.fetch_operator_kb_entries(
+                    logical_operator_id,
+                    status="proposed",
+                    limit=100,
+                )
+            except Exception as exc:
+                self.notify(f"Unable to fetch KB proposals: {exc}", severity="error")
+                return
+            entry = self.primary_operator_kb_entry(entries, status="proposed")
+        if entry is None:
+            self.notify(f"No proposed KB entries for {logical_operator_id}.")
+            return
+        kb_id = str(entry.get("kb_id") or "").strip()
+        if not kb_id:
+            self.notify("KB proposal is missing an id.", severity="error")
+            return
+        try:
+            rejected = await self.reject_operator_kb_entry(
+                logical_operator_id,
+                kb_id,
+                summary="Rejected from the Agent PBX TUI.",
+            )
+        except Exception as exc:
+            self.notify(f"Unable to reject KB entry: {exc}", severity="error")
+            return
+        rejected_id = str(rejected.get("kb_id") or kb_id)
+        self.selected_operator_kb_id_by_operator[logical_operator_id] = rejected_id
+        await self.load_operator_kb(operator_agent_id, status="rejected")
+        self.notify(f"Rejected operator KB entry {kb_id}.")
+        await self.refresh_events()
+
+    async def retire_selected_operator_kb_entry(self) -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        entry = self.selected_operator_kb_entry_for_action(
+            logical_operator_id,
+            status="active",
+        )
+        if entry is None and self.active_agent_tab != "operator-kb-tab":
+            try:
+                entries = await self.fetch_operator_kb_entries(
+                    logical_operator_id,
+                    status="active",
+                    limit=100,
+                )
+            except Exception as exc:
+                self.notify(f"Unable to fetch active KB entries: {exc}", severity="error")
+                return
+            entry = self.primary_operator_kb_entry(entries, status="active")
+        if entry is None:
+            self.notify(
+                f"Select an active KB entry for {logical_operator_id} before retiring.",
+                severity="warning",
+            )
+            return
+        kb_id = str(entry.get("kb_id") or "").strip()
+        if not kb_id:
+            self.notify("KB entry is missing an id.", severity="error")
+            return
+        try:
+            retired = await self.retire_operator_kb_entry(
+                logical_operator_id,
+                kb_id,
+                summary="Retired from the Agent PBX TUI.",
+            )
+        except Exception as exc:
+            self.notify(f"Unable to retire KB entry: {exc}", severity="error")
+            return
+        retired_id = str(retired.get("kb_id") or kb_id)
+        self.selected_operator_kb_id_by_operator[logical_operator_id] = retired_id
+        await self.load_operator_kb(operator_agent_id, status="retired")
+        self.notify(f"Retired operator KB entry {kb_id}.")
+        await self.refresh_events()
+
+    @staticmethod
+    def primary_operator_kb_entry(
+        entries: list[dict[str, Any]],
+        *,
+        status: str,
+    ) -> dict[str, Any] | None:
+        if not entries:
+            return None
+        if status == "proposed":
+            return sorted(
+                entries,
+                key=lambda item: (
+                    float_value(item.get("created_at")) or 0.0,
+                    str(item.get("kb_id") or ""),
+                ),
+            )[0]
+        return sorted(
+            entries,
+            key=lambda item: (
+                float_value(item.get("updated_at")) or 0.0,
+                str(item.get("kb_id") or ""),
+            ),
+            reverse=True,
+        )[0]
+
+    def format_operator_kb_entries(
+        self,
+        logical_operator_id: str,
+        entries: list[dict[str, Any]],
+        *,
+        status: str | None,
+    ) -> str:
+        title_status = status or "all"
+        lines = [
+            f"Operator KB entries: {logical_operator_id} ({title_status})",
+            "",
+        ]
+        if not entries:
+            lines.append("No operator KB entries.")
+            return "\n".join(lines)
+        for entry in entries:
+            tags = entry.get("tags") if isinstance(entry.get("tags"), list) else []
+            sources = (
+                entry.get("sources")
+                if isinstance(entry.get("sources"), list)
+                else []
+            )
+            source_count = len(sources)
+            updated_at = float_value(entry.get("updated_at"))
+            updated_text = (
+                self.format_short_time(updated_at)
+                if updated_at is not None
+                else "-"
+            )
+            expires_at = float_value(entry.get("expires_at"))
+            expires_text = (
+                self.format_short_time(expires_at)
+                if expires_at is not None
+                else "-"
+            )
+            lines.extend(
+                [
+                    f"- {entry.get('kb_id')}",
+                    f"  title: {entry.get('title') or '-'}",
+                    f"  status: {entry.get('status')}  redaction: {entry.get('redaction_status')}",
+                    f"  scope: {entry.get('scope')}  project: {entry.get('project') or '-'}",
+                    f"  repo: {entry.get('repo_root') or '-'}",
+                    f"  tags: {', '.join(str(tag) for tag in tags) or '-'}",
+                    f"  sources: {source_count}  updated: {updated_text}  expires: {expires_text}",
+                    f"  summary: {entry.get('summary') or '-'}",
+                ]
+            )
+        return "\n".join(lines)
+
+    def format_operator_kb_entry_detail(
+        self,
+        logical_operator_id: str,
+        entry: dict[str, Any],
+    ) -> str:
+        tags = entry.get("tags") if isinstance(entry.get("tags"), list) else []
+        sources = entry.get("sources") if isinstance(entry.get("sources"), list) else []
+        metadata = (
+            entry.get("metadata")
+            if isinstance(entry.get("metadata"), dict)
+            else {}
+        )
+        lines = [
+            f"Operator KB entry: {logical_operator_id}",
+            "",
+            f"KB ID: {entry.get('kb_id')}",
+            f"Title: {entry.get('title') or '-'}",
+            f"Status: {entry.get('status')}",
+            f"Redaction: {entry.get('redaction_status')}",
+            f"Scope: {entry.get('scope')}",
+            f"Project: {entry.get('project') or '-'}",
+            f"Repo: {entry.get('repo_root') or '-'}",
+            f"Remote: {entry.get('git_remote') or '-'}",
+            f"Branch: {entry.get('branch') or '-'}",
+            f"Tags: {', '.join(str(tag) for tag in tags) or '-'}",
+            f"Source link: {entry.get('source_knowledge_link_id') or '-'}",
+            f"Source handoff: {entry.get('source_handoff_id') or '-'}",
+            "",
+            "Summary:",
+            str(entry.get("summary") or "-"),
+            "",
+            "Body:",
+            str(entry.get("body") or "-"),
+            "",
+            "Sources:",
+        ]
+        if not sources:
+            lines.append("- none")
+        else:
+            for source in sources:
+                if isinstance(source, dict):
+                    lines.append(
+                        f"- {source.get('source_type')}: {source.get('source_id')}"
+                    )
+        lines.extend(
+            [
+                "",
+                "Metadata:",
+                json.dumps(metadata, indent=2, sort_keys=True),
+            ]
+        )
+        return "\n".join(lines)
 
     async def update_project_spawn_request_status(
         self,
@@ -16856,13 +18509,11 @@ class AgentPBXTUI(App[None]):
             agent_id = self.selected_agent_id
             if agent_id:
                 if self.is_tmux_direct_enabled(agent_id):
-                    work_factory = (
-                        lambda agent_id=agent_id: self.load_tmux_capture(agent_id)
-                    )
+                    def work_factory(agent_id: str = agent_id) -> Awaitable[None]:
+                        return self.load_tmux_capture(agent_id)
                 else:
-                    work_factory = (
-                        lambda agent_id=agent_id: self.load_latest_report(agent_id)
-                    )
+                    def work_factory(agent_id: str = agent_id) -> Awaitable[None]:
+                        return self.load_latest_report(agent_id)
                 self.run_async_worker(
                     work_factory,
                     name="tmux-toggle",
@@ -17205,6 +18856,7 @@ class AgentPBXTUI(App[None]):
         event_type = str(event.get("type"))
         agent_id = self.event_agent_id(event)
         campaign_operator_id = self.operator_campaign_event_operator_id(event)
+        operator_kb_operator_id = self.operator_kb_event_operator_id(event)
         selected_agent_id = self.selected_agent_id
         selected_detail_visible = (
             agent_id == selected_agent_id and self.selected_agent_detail_visible()
@@ -17241,6 +18893,8 @@ class AgentPBXTUI(App[None]):
             self.apply_latest_seen_event(agent_id, event)
         if event_type == "operator_campaign_event" and campaign_operator_id:
             self.handle_operator_campaign_event(campaign_operator_id)
+        if event_type.startswith("operator_kb_") and operator_kb_operator_id:
+            self.handle_operator_kb_event(operator_kb_operator_id)
         if selected_agent_id and selected_detail_visible:
             if event_type == "report_created":
                 self.run_worker(
@@ -17274,6 +18928,21 @@ class AgentPBXTUI(App[None]):
             self.load_operator_campaigns(operator_id),
             name="campaigns-refresh",
             group="campaigns-refresh",
+            exclusive=True,
+        )
+
+    def handle_operator_kb_event(self, logical_operator_id: str) -> None:
+        if self.active_agent_tab != "operator-kb-tab" or not self.selected_agent_id:
+            return
+        selected_operator_id = self.operator_kb_operator_id_for_agent(
+            self.selected_agent_id
+        )
+        if selected_operator_id != logical_operator_id:
+            return
+        self.run_worker(
+            self.load_operator_kb(self.selected_agent_id),
+            name="operator-kb-refresh",
+            group="operator-kb-refresh",
             exclusive=True,
         )
 
@@ -17701,6 +19370,18 @@ class AgentPBXTUI(App[None]):
         if not isinstance(payload, dict):
             return None
         agent_id = payload.get("operator_agent_id")
+        return str(agent_id) if agent_id else None
+
+    def operator_kb_event_operator_id(self, event: dict[str, Any]) -> str | None:
+        if not str(event.get("type") or "").startswith("operator_kb_"):
+            return None
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        agent_id = (
+            payload.get("created_by_operator_agent_id")
+            or payload.get("operator_agent_id")
+        )
         return str(agent_id) if agent_id else None
 
     def alert_for_event(self, event: dict[str, Any]) -> None:
