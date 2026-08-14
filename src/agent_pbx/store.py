@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 18
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -36,6 +37,78 @@ OPERATOR_TERMINAL_BASE_STATES = (
     "cancelled",
     "superseded",
 )
+OPERATOR_KNOWLEDGE_LINK_STATUSES = {
+    "proposed",
+    "active",
+    "closed",
+    "canceled",
+    "cancelled",
+}
+OPERATOR_KNOWLEDGE_LINK_TERMINAL_STATUSES = {"closed", "canceled", "cancelled"}
+OPERATOR_KNOWLEDGE_TURN_DELIVERY_STATUSES = {
+    "pending_approval",
+    "recorded",
+    "queued",
+    "sent",
+    "failed",
+}
+OPERATOR_HANDOFF_STATUSES = {
+    "proposed",
+    "approved",
+    "pending_launch",
+    "sent",
+    "acknowledged",
+    "running",
+    "complete",
+    "completed",
+    "blocked",
+    "failed",
+    "expired",
+    "canceled",
+    "cancelled",
+}
+OPERATOR_HANDOFF_TERMINAL_STATUSES = {
+    "complete",
+    "completed",
+    "blocked",
+    "failed",
+    "expired",
+    "canceled",
+    "cancelled",
+}
+AGENT_PRUNE_PRESETS = {"terminal-callers", "stale-callers", "operator-forks"}
+AGENT_PRUNE_TERMINAL_STATUSES = {
+    "done",
+    "complete",
+    "completed",
+    "failed",
+    "blocked",
+    "ready",
+    "canceled",
+    "cancelled",
+    "planning-complete",
+    "planning-completed",
+}
+AGENT_PRUNE_NONTERMINAL_STALE_STATUSES = {
+    "running",
+    "working",
+    "stale-running",
+    "stale-working",
+    "planned",
+    "planning",
+    "in-progress",
+    "in_progress",
+}
+OPERATOR_KB_SCOPES = {"global", "project", "repo", "operator", "caller"}
+OPERATOR_KB_STATUSES = {"proposed", "active", "retired", "rejected"}
+OPERATOR_KB_TERMINAL_STATUSES = {"retired", "rejected"}
+OPERATOR_KB_REDACTION_STATUSES = {
+    "unreviewed",
+    "clean",
+    "needs_review",
+    "blocked",
+}
+OPERATOR_KB_EXPORT_FORMAT = "agent-pbx-operator-kb-v1"
 
 
 def _operator_active_state_sql(status_column: str, completed_column: str) -> str:
@@ -54,6 +127,37 @@ def _operator_active_state_sql(status_column: str, completed_column: str) -> str
 
 def _non_empty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _normalized_prune_status(value: Any) -> str:
+    return str(value or "").strip().lower().replace("_", "-")
+
+
+def _agent_prune_status_is_terminal(value: Any) -> bool:
+    status = _normalized_prune_status(value)
+    if not status:
+        return False
+    return (
+        status in AGENT_PRUNE_TERMINAL_STATUSES
+        or status.endswith("-complete")
+        or status.endswith("-completed")
+        or status.startswith("complete-")
+        or status.startswith("completed-")
+        or status.startswith("failed-")
+        or status.startswith("blocked-")
+        or status.startswith("canceled-")
+        or status.startswith("cancelled-")
+    )
+
+
+def _agent_prune_status_is_nonterminal_stale(value: Any) -> bool:
+    status = _normalized_prune_status(value)
+    if not status:
+        return False
+    return (
+        status in AGENT_PRUNE_NONTERMINAL_STALE_STATUSES
+        or status.startswith("stale-")
+    )
 
 
 @dataclass(frozen=True)
@@ -320,6 +424,172 @@ class Store:
                     UNIQUE(from_fork_id, to_fork_id, edge_type)
                 );
 
+                CREATE TABLE IF NOT EXISTS operator_knowledge_links (
+                    link_id TEXT PRIMARY KEY,
+                    logical_operator_agent_id TEXT NOT NULL,
+                    operator_agent_id TEXT NOT NULL,
+                    source_agent_id TEXT NOT NULL,
+                    target_agent_id TEXT NOT NULL,
+                    source_operator_fork_id TEXT,
+                    link_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    summary TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    closed_at REAL,
+                    FOREIGN KEY(logical_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(source_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(target_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(source_operator_fork_id) REFERENCES operator_forks(operator_fork_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_knowledge_turns (
+                    turn_id TEXT PRIMARY KEY,
+                    link_id TEXT NOT NULL,
+                    sender_agent_id TEXT NOT NULL,
+                    recipient_agent_id TEXT NOT NULL,
+                    turn_type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    delivery_status TEXT NOT NULL DEFAULT 'recorded',
+                    command_id TEXT,
+                    tmux_pane_id TEXT,
+                    error TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(link_id) REFERENCES operator_knowledge_links(link_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(sender_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(recipient_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(command_id) REFERENCES commands(command_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_handoffs (
+                    handoff_id TEXT PRIMARY KEY,
+                    logical_operator_agent_id TEXT NOT NULL,
+                    source_operator_agent_id TEXT NOT NULL,
+                    target_operator_agent_id TEXT NOT NULL,
+                    source_agent_id TEXT NOT NULL,
+                    source_operator_fork_id TEXT,
+                    target_caller_agent_id TEXT,
+                    target_operator_fork_id TEXT,
+                    knowledge_link_id TEXT,
+                    knowledge_turn_id TEXT,
+                    objective TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    allowed_mutation_scope TEXT,
+                    required_artifacts_json TEXT NOT NULL DEFAULT '[]',
+                    artifact_bundle_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'proposed',
+                    needs_ack INTEGER NOT NULL DEFAULT 1,
+                    expires_at REAL,
+                    acknowledged_at REAL,
+                    started_at REAL,
+                    completed_at REAL,
+                    command_id TEXT,
+                    tmux_pane_id TEXT,
+                    delivery_status TEXT,
+                    delivery_evidence_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT,
+                    summary TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(logical_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(source_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(target_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(source_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(source_operator_fork_id) REFERENCES operator_forks(operator_fork_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(target_caller_agent_id) REFERENCES agents(agent_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(target_operator_fork_id) REFERENCES operator_forks(operator_fork_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(knowledge_link_id) REFERENCES operator_knowledge_links(link_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(knowledge_turn_id) REFERENCES operator_knowledge_turns(turn_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(command_id) REFERENCES commands(command_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_prune_batches (
+                    batch_id TEXT PRIMARY KEY,
+                    preset TEXT NOT NULL,
+                    delete_thread INTEGER NOT NULL DEFAULT 0,
+                    criteria_json TEXT NOT NULL DEFAULT '{}',
+                    candidate_count INTEGER NOT NULL DEFAULT 0,
+                    hidden_count INTEGER NOT NULL DEFAULT 0,
+                    skipped_count INTEGER NOT NULL DEFAULT 0,
+                    results_json TEXT NOT NULL DEFAULT '[]',
+                    undo_results_json TEXT NOT NULL DEFAULT '[]',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    undone_at REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_kb_entries (
+                    kb_id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    project TEXT,
+                    repo_root TEXT,
+                    git_remote TEXT,
+                    branch TEXT,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'proposed',
+                    redaction_status TEXT NOT NULL DEFAULT 'unreviewed',
+                    created_by_operator_agent_id TEXT NOT NULL,
+                    created_by_agent_id TEXT NOT NULL,
+                    source_knowledge_link_id TEXT,
+                    source_handoff_id TEXT,
+                    source_turn_ids_json TEXT NOT NULL DEFAULT '[]',
+                    stale_after REAL,
+                    expires_at REAL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    promoted_at REAL,
+                    retired_at REAL,
+                    imported_at REAL,
+                    FOREIGN KEY(created_by_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(created_by_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(source_knowledge_link_id) REFERENCES operator_knowledge_links(link_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(source_handoff_id) REFERENCES operator_handoffs(handoff_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_kb_sources (
+                    source_row_id TEXT PRIMARY KEY,
+                    kb_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(kb_id) REFERENCES operator_kb_entries(kb_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_kb_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kb_id TEXT,
+                    event_type TEXT NOT NULL,
+                    operator_agent_id TEXT,
+                    summary TEXT NOT NULL,
+                    detail_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(kb_id) REFERENCES operator_kb_entries(kb_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(operator_agent_id) REFERENCES agents(agent_id)
+                        ON DELETE SET NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_operator_campaigns_operator_updated
                     ON operator_campaigns(operator_agent_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_operator_campaigns_status_updated
@@ -352,6 +622,56 @@ class Store:
                     ON operator_fork_edges(from_fork_id);
                 CREATE INDEX IF NOT EXISTS idx_operator_fork_edges_to
                     ON operator_fork_edges(to_fork_id);
+                CREATE INDEX IF NOT EXISTS idx_operator_knowledge_links_logical_status
+                    ON operator_knowledge_links(
+                        logical_operator_agent_id,
+                        status,
+                        updated_at DESC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_operator_knowledge_links_source
+                    ON operator_knowledge_links(source_agent_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_knowledge_links_target
+                    ON operator_knowledge_links(target_agent_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_knowledge_turns_link_created
+                    ON operator_knowledge_turns(link_id, created_at ASC);
+                CREATE INDEX IF NOT EXISTS idx_operator_knowledge_turns_recipient_status
+                    ON operator_knowledge_turns(
+                        recipient_agent_id,
+                        delivery_status,
+                        created_at DESC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_operator_handoffs_logical_status
+                    ON operator_handoffs(
+                        logical_operator_agent_id,
+                        status,
+                        updated_at DESC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_operator_handoffs_target_status
+                    ON operator_handoffs(
+                        target_operator_agent_id,
+                        status,
+                        updated_at DESC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_operator_handoffs_source_updated
+                    ON operator_handoffs(source_agent_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_handoffs_target_caller
+                    ON operator_handoffs(target_caller_agent_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_handoffs_expires
+                    ON operator_handoffs(expires_at, status);
+                CREATE INDEX IF NOT EXISTS idx_agent_prune_batches_created
+                    ON agent_prune_batches(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_scope_status
+                    ON operator_kb_entries(scope, status, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_project_status
+                    ON operator_kb_entries(project, status, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_source_link
+                    ON operator_kb_entries(source_knowledge_link_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_source_handoff
+                    ON operator_kb_entries(source_handoff_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_sources_kb
+                    ON operator_kb_sources(kb_id, source_type);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_events_kb_created
+                    ON operator_kb_events(kb_id, created_at DESC);
                 """
             )
             previous_schema_version = self._schema_version(conn)
@@ -931,6 +1251,312 @@ class Store:
                 (current, current, agent_id),
             )
         return self.get_agent(agent_id) if cursor.rowcount else None
+
+    def preview_agent_prune(
+        self,
+        *,
+        preset: str = "terminal-callers",
+        min_age_days: float = 30.0,
+        include_projects: list[str] | None = None,
+        exclude_projects: list[str] | None = None,
+        agent_ids: list[str] | None = None,
+        include_hidden: bool = False,
+        include_starred: bool = False,
+        require_no_tmux_pane: bool = True,
+        limit: int = 500,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_preset = str(preset or "terminal-callers").strip().lower()
+        if normalized_preset not in AGENT_PRUNE_PRESETS:
+            raise ValueError("prune preset is invalid")
+        safe_min_age_days = max(0.0, float(min_age_days))
+        safe_limit = min(max(int(limit), 1), 2000)
+        include_project_set = {
+            project.strip()
+            for project in include_projects or []
+            if isinstance(project, str) and project.strip()
+        }
+        exclude_project_set = {
+            project.strip()
+            for project in exclude_projects or []
+            if isinstance(project, str) and project.strip()
+        }
+        explicit_agent_ids = {
+            agent_id.strip()
+            for agent_id in agent_ids or []
+            if isinstance(agent_id, str) and agent_id.strip()
+        }
+        agents = self.list_agents(include_hidden=include_hidden)
+        protection_reasons = self.agent_prune_protection_reasons()
+        candidates: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        current = now_ts()
+        for agent in agents:
+            agent_id = str(agent.get("agent_id") or "").strip()
+            project = str(agent.get("project") or "").strip()
+            if not agent_id:
+                continue
+            if explicit_agent_ids and agent_id not in explicit_agent_ids:
+                continue
+            if include_project_set and project not in include_project_set:
+                continue
+            if exclude_project_set and project in exclude_project_set:
+                continue
+            reason = self._agent_prune_match_reason(
+                agent,
+                preset=normalized_preset,
+                min_age_days=safe_min_age_days,
+                now=current,
+            )
+            if reason is None:
+                continue
+            guard_reasons: list[str] = []
+            if bool(agent.get("starred")) and not include_starred:
+                guard_reasons.append("starred")
+            if agent.get("dismissed_at") is not None and not include_hidden:
+                guard_reasons.append("hidden")
+            if int(agent.get("queued_command_count") or 0) > 0:
+                guard_reasons.append("queued_commands")
+            if int(agent.get("active_campaign_count") or 0) > 0:
+                guard_reasons.append("active_campaign")
+            guard_reasons.extend(protection_reasons.get(agent_id, []))
+            if (
+                normalized_preset == "operator-forks"
+                and require_no_tmux_pane
+                and self._agent_has_recorded_tmux_pane(agent)
+            ):
+                guard_reasons.append("tmux_pane_recorded")
+            item = self._agent_prune_candidate_from_agent(
+                agent,
+                reason=reason,
+                guard_reasons=guard_reasons,
+                now=current,
+            )
+            if guard_reasons:
+                skipped.append(item)
+            elif len(candidates) < safe_limit:
+                candidates.append(item)
+            else:
+                skipped.append(
+                    {
+                        **item,
+                        "guard_reasons": [*item["guard_reasons"], "limit_exceeded"],
+                    }
+                )
+        def sort_key(item: dict[str, Any]) -> tuple[str, float, str]:
+            return (
+                str(item.get("project") or ""),
+                float(item.get("last_seen_at") or 0.0),
+                str(item.get("agent_id") or ""),
+            )
+
+        candidates.sort(key=sort_key)
+        skipped.sort(key=sort_key)
+        return {
+            "preset": normalized_preset,
+            "min_age_days": safe_min_age_days,
+            "include_hidden": include_hidden,
+            "include_starred": include_starred,
+            "require_no_tmux_pane": require_no_tmux_pane,
+            "delete_thread": False,
+            "candidate_count": len(candidates),
+            "skipped_count": len(skipped),
+            "candidates": candidates,
+            "skipped": skipped,
+            "metadata": metadata or {},
+        }
+
+    def apply_agent_prune(
+        self,
+        *,
+        preview: dict[str, Any],
+        criteria: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        batch_id = str(uuid.uuid4())
+        current = now_ts()
+        results: list[dict[str, Any]] = []
+        candidates = [
+            candidate
+            for candidate in preview.get("candidates", [])
+            if isinstance(candidate, dict)
+        ]
+        with self.connect() as conn:
+            for candidate in candidates:
+                agent_id = str(candidate.get("agent_id") or "").strip()
+                if not agent_id:
+                    continue
+                cursor = conn.execute(
+                    """
+                    UPDATE agents
+                    SET dismissed_at = ?, last_seen_at = ?
+                    WHERE agent_id = ? AND dismissed_at IS NULL
+                    """,
+                    (current, current, agent_id),
+                )
+                result = {
+                    "agent_id": agent_id,
+                    "project": candidate.get("project"),
+                    "status": candidate.get("status"),
+                    "reason": candidate.get("reason"),
+                    "result": "hidden" if cursor.rowcount else "skipped",
+                }
+                if not cursor.rowcount:
+                    result["skip_reason"] = "not_visible"
+                results.append(result)
+            hidden_count = sum(1 for item in results if item.get("result") == "hidden")
+            skipped_count = len(results) - hidden_count + int(
+                preview.get("skipped_count") or 0
+            )
+            conn.execute(
+                """
+                INSERT INTO agent_prune_batches
+                    (batch_id, preset, delete_thread, criteria_json,
+                     candidate_count, hidden_count, skipped_count, results_json,
+                     undo_results_json, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    batch_id,
+                    str(preview.get("preset") or "terminal-callers"),
+                    0,
+                    json.dumps(criteria),
+                    int(preview.get("candidate_count") or len(candidates)),
+                    hidden_count,
+                    skipped_count,
+                    json.dumps(results),
+                    json.dumps([]),
+                    json.dumps(metadata or {}),
+                    current,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO events(type, subject_id, payload_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    "agent_prune_applied",
+                    batch_id,
+                    json.dumps(
+                        {
+                            "batch_id": batch_id,
+                            "preset": str(preview.get("preset") or "terminal-callers"),
+                            "candidate_count": int(
+                                preview.get("candidate_count") or len(candidates)
+                            ),
+                            "hidden_count": hidden_count,
+                            "skipped_count": skipped_count,
+                            "delete_thread": False,
+                        }
+                    ),
+                    current,
+                ),
+            )
+        batch = self.get_agent_prune_batch(batch_id)
+        if batch is None:
+            raise RuntimeError("agent prune batch insert failed")
+        return batch
+
+    def get_agent_prune_batch(self, batch_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT batch_id, preset, delete_thread, criteria_json,
+                       candidate_count, hidden_count, skipped_count,
+                       results_json, undo_results_json, metadata_json,
+                       created_at, undone_at
+                FROM agent_prune_batches
+                WHERE batch_id = ?
+                """,
+                (batch_id,),
+            ).fetchone()
+        return self._agent_prune_batch_from_row(row) if row else None
+
+    def list_agent_prune_batches(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = min(max(int(limit), 1), 200)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT batch_id, preset, delete_thread, criteria_json,
+                       candidate_count, hidden_count, skipped_count,
+                       results_json, undo_results_json, metadata_json,
+                       created_at, undone_at
+                FROM agent_prune_batches
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [self._agent_prune_batch_from_row(row) for row in rows]
+
+    def undo_agent_prune_batch(self, batch_id: str) -> dict[str, Any] | None:
+        batch = self.get_agent_prune_batch(batch_id)
+        if batch is None:
+            return None
+        if batch.get("undone_at") is not None:
+            return batch
+        current = now_ts()
+        undo_results: list[dict[str, Any]] = []
+        hidden_agent_ids = [
+            str(item.get("agent_id") or "").strip()
+            for item in batch.get("results", [])
+            if isinstance(item, dict) and item.get("result") == "hidden"
+        ]
+        with self.connect() as conn:
+            for agent_id in hidden_agent_ids:
+                if not agent_id:
+                    continue
+                cursor = conn.execute(
+                    """
+                    UPDATE agents
+                    SET dismissed_at = NULL
+                    WHERE agent_id = ? AND dismissed_at IS NOT NULL
+                    """,
+                    (agent_id,),
+                )
+                undo_results.append(
+                    {
+                        "agent_id": agent_id,
+                        "result": "unhidden" if cursor.rowcount else "skipped",
+                        "skip_reason": None if cursor.rowcount else "already_visible",
+                    }
+                )
+            conn.execute(
+                """
+                UPDATE agent_prune_batches
+                SET undone_at = ?, undo_results_json = ?
+                WHERE batch_id = ?
+                """,
+                (current, json.dumps(undo_results), batch_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO events(type, subject_id, payload_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    "agent_prune_undone",
+                    batch_id,
+                    json.dumps(
+                        {
+                            "batch_id": batch_id,
+                            "unhidden_count": sum(
+                                1
+                                for item in undo_results
+                                if item.get("result") == "unhidden"
+                            ),
+                            "skipped_count": sum(
+                                1
+                                for item in undo_results
+                                if item.get("result") == "skipped"
+                            ),
+                        }
+                    ),
+                    current,
+                ),
+            )
+        return self.get_agent_prune_batch(batch_id)
 
     def set_agent_pbx_active(self, agent_id: str, active: bool) -> dict[str, Any] | None:
         current = now_ts()
@@ -2395,6 +3021,1038 @@ class Store:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [self._operator_fork_edge_from_row(row) for row in rows]
 
+    def create_operator_knowledge_link(
+        self,
+        *,
+        logical_operator_agent_id: str,
+        operator_agent_id: str,
+        source_agent_id: str,
+        target_agent_id: str,
+        link_type: str,
+        status: str = "active",
+        source_operator_fork_id: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_type = str(link_type or "").strip().lower()
+        if normalized_type not in {"handoff", "consult", "domain_context", "review_context"}:
+            raise ValueError("link_type must be handoff, consult, domain_context, or review_context")
+        normalized_status = str(status or "active").strip().lower()
+        if normalized_status not in OPERATOR_KNOWLEDGE_LINK_STATUSES:
+            raise ValueError("status must be proposed, active, closed, canceled, or cancelled")
+        current = now_ts()
+        closed_at = (
+            current
+            if normalized_status in OPERATOR_KNOWLEDGE_LINK_TERMINAL_STATUSES
+            else None
+        )
+        link_id = str(uuid.uuid4())
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_knowledge_links
+                    (link_id, logical_operator_agent_id, operator_agent_id,
+                     source_agent_id, target_agent_id, source_operator_fork_id,
+                     link_type, status, summary, metadata_json, created_at,
+                     updated_at, closed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    link_id,
+                    logical_operator_agent_id,
+                    operator_agent_id,
+                    source_agent_id,
+                    target_agent_id,
+                    source_operator_fork_id,
+                    normalized_type,
+                    normalized_status,
+                    summary,
+                    json.dumps(metadata or {}),
+                    current,
+                    current,
+                    closed_at,
+                ),
+            )
+        link = self.get_operator_knowledge_link(link_id)
+        if link is None:
+            raise RuntimeError("operator knowledge link insert failed")
+        return link
+
+    def get_operator_knowledge_link(self, link_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                {self._operator_knowledge_link_select_sql()}
+                WHERE l.link_id = ?
+                """,
+                (link_id,),
+            ).fetchone()
+        return self._operator_knowledge_link_from_row(row) if row else None
+
+    def list_operator_knowledge_links(
+        self,
+        *,
+        logical_operator_agent_id: str | None = None,
+        source_agent_id: str | None = None,
+        target_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        where: list[str] = []
+        params: list[Any] = []
+        if logical_operator_agent_id:
+            where.append("l.logical_operator_agent_id = ?")
+            params.append(logical_operator_agent_id)
+        if source_agent_id:
+            where.append("l.source_agent_id = ?")
+            params.append(source_agent_id)
+        if target_agent_id:
+            where.append("l.target_agent_id = ?")
+            params.append(target_agent_id)
+        if status:
+            where.append("l.status = ?")
+            params.append(str(status).strip().lower())
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        query = f"""
+            {self._operator_knowledge_link_select_sql()}
+            {clause}
+            ORDER BY
+                CASE WHEN l.status = 'proposed' THEN 0
+                     WHEN l.status = 'active' THEN 1
+                     ELSE 2 END ASC,
+                l.updated_at DESC,
+                l.created_at DESC
+            LIMIT ?
+        """
+        params.append(safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._operator_knowledge_link_from_row(row) for row in rows]
+
+    def update_operator_knowledge_link(
+        self,
+        link_id: str,
+        *,
+        status: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        link = self.get_operator_knowledge_link(link_id)
+        if link is None:
+            return None
+        normalized_status = (
+            str(status or link.get("status") or "active").strip().lower()
+        )
+        if normalized_status not in OPERATOR_KNOWLEDGE_LINK_STATUSES:
+            raise ValueError("status must be proposed, active, closed, canceled, or cancelled")
+        current = now_ts()
+        closed_at = link.get("closed_at")
+        if normalized_status in OPERATOR_KNOWLEDGE_LINK_TERMINAL_STATUSES:
+            closed_at = closed_at or current
+        elif status is not None:
+            closed_at = None
+        merged_metadata = dict(link.get("metadata") or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_knowledge_links
+                SET status = ?,
+                    summary = COALESCE(?, summary),
+                    metadata_json = ?,
+                    updated_at = ?,
+                    closed_at = ?
+                WHERE link_id = ?
+                """,
+                (
+                    normalized_status,
+                    summary,
+                    json.dumps(merged_metadata),
+                    current,
+                    closed_at,
+                    link_id,
+                ),
+            )
+        return self.get_operator_knowledge_link(link_id) if cursor.rowcount else None
+
+    def create_operator_knowledge_turn(
+        self,
+        *,
+        link_id: str,
+        sender_agent_id: str,
+        recipient_agent_id: str,
+        turn_type: str,
+        message: str,
+        delivery_status: str = "recorded",
+        command_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_type = str(turn_type or "note").strip().lower()
+        if normalized_type not in {"handoff", "question", "answer", "note"}:
+            raise ValueError("turn_type must be handoff, question, answer, or note")
+        normalized_delivery = str(delivery_status or "recorded").strip().lower()
+        if normalized_delivery not in OPERATOR_KNOWLEDGE_TURN_DELIVERY_STATUSES:
+            raise ValueError("delivery_status must be pending_approval, recorded, queued, sent, or failed")
+        turn_id = str(uuid.uuid4())
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_knowledge_turns
+                    (turn_id, link_id, sender_agent_id, recipient_agent_id,
+                     turn_type, message, delivery_status, command_id,
+                     tmux_pane_id, error, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    turn_id,
+                    link_id,
+                    sender_agent_id,
+                    recipient_agent_id,
+                    normalized_type,
+                    message,
+                    normalized_delivery,
+                    command_id,
+                    tmux_pane_id,
+                    error,
+                    json.dumps(metadata or {}),
+                    current,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE operator_knowledge_links
+                SET updated_at = ?
+                WHERE link_id = ?
+                """,
+                (current, link_id),
+            )
+        turn = self.get_operator_knowledge_turn(turn_id)
+        if turn is None:
+            raise RuntimeError("operator knowledge turn insert failed")
+        return turn
+
+    def get_operator_knowledge_turn(self, turn_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT turn_id, link_id, sender_agent_id, recipient_agent_id,
+                       turn_type, message, delivery_status, command_id,
+                       tmux_pane_id, error, metadata_json, created_at
+                FROM operator_knowledge_turns
+                WHERE turn_id = ?
+                """,
+                (turn_id,),
+            ).fetchone()
+        return self._operator_knowledge_turn_from_row(row) if row else None
+
+    def list_operator_knowledge_turns(
+        self,
+        *,
+        link_id: str,
+        delivery_status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        where = ["link_id = ?"]
+        params: list[Any] = [link_id]
+        if delivery_status:
+            where.append("delivery_status = ?")
+            params.append(str(delivery_status).strip().lower())
+        query = f"""
+            SELECT turn_id, link_id, sender_agent_id, recipient_agent_id,
+                   turn_type, message, delivery_status, command_id,
+                   tmux_pane_id, error, metadata_json, created_at
+            FROM operator_knowledge_turns
+            WHERE {' AND '.join(where)}
+            ORDER BY created_at ASC, turn_id ASC
+            LIMIT ?
+        """
+        params.append(safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._operator_knowledge_turn_from_row(row) for row in rows]
+
+    def update_operator_knowledge_turn_delivery(
+        self,
+        turn_id: str,
+        *,
+        delivery_status: str,
+        command_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        turn = self.get_operator_knowledge_turn(turn_id)
+        if turn is None:
+            return None
+        normalized_delivery = str(delivery_status or "").strip().lower()
+        if normalized_delivery not in OPERATOR_KNOWLEDGE_TURN_DELIVERY_STATUSES:
+            raise ValueError("delivery_status must be pending_approval, recorded, queued, sent, or failed")
+        merged_metadata = dict(turn.get("metadata") or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        current = now_ts()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_knowledge_turns
+                SET delivery_status = ?,
+                    command_id = COALESCE(?, command_id),
+                    tmux_pane_id = COALESCE(?, tmux_pane_id),
+                    error = COALESCE(?, error),
+                    metadata_json = ?
+                WHERE turn_id = ?
+                """,
+                (
+                    normalized_delivery,
+                    command_id,
+                    tmux_pane_id,
+                    error,
+                    json.dumps(merged_metadata),
+                    turn_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE operator_knowledge_links
+                SET updated_at = ?
+                WHERE link_id = ?
+                """,
+                (current, turn["link_id"]),
+            )
+        return self.get_operator_knowledge_turn(turn_id) if cursor.rowcount else None
+
+    def create_operator_kb_entry(
+        self,
+        *,
+        scope: str,
+        title: str,
+        summary: str,
+        body: str,
+        created_by_operator_agent_id: str,
+        created_by_agent_id: str,
+        project: str | None = None,
+        repo_root: str | None = None,
+        git_remote: str | None = None,
+        branch: str | None = None,
+        tags: list[str] | None = None,
+        status: str = "proposed",
+        redaction_status: str = "unreviewed",
+        source_knowledge_link_id: str | None = None,
+        source_handoff_id: str | None = None,
+        source_turn_ids: list[str] | None = None,
+        stale_after: float | None = None,
+        expires_at: float | None = None,
+        imported_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+        sources: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        normalized_scope = self._normalize_operator_kb_scope(scope)
+        normalized_status = self._normalize_operator_kb_status(status)
+        normalized_redaction = self._normalize_operator_kb_redaction_status(
+            redaction_status
+        )
+        normalized_title = str(title or "").strip()
+        normalized_summary = str(summary or "").strip()
+        normalized_body = str(body or "").strip()
+        if not normalized_title:
+            raise ValueError("KB title is required")
+        if not normalized_summary:
+            raise ValueError("KB summary is required")
+        if not normalized_body:
+            raise ValueError("KB body is required")
+        kb_id = str(uuid.uuid4())
+        current = now_ts()
+        promoted_at = current if normalized_status == "active" else None
+        retired_at = current if normalized_status in OPERATOR_KB_TERMINAL_STATUSES else None
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_kb_entries
+                    (kb_id, scope, project, repo_root, git_remote, branch,
+                     title, summary, body, tags_json, status, redaction_status,
+                     created_by_operator_agent_id, created_by_agent_id,
+                     source_knowledge_link_id, source_handoff_id,
+                     source_turn_ids_json, stale_after, expires_at, metadata_json,
+                     created_at, updated_at, promoted_at, retired_at, imported_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    kb_id,
+                    normalized_scope,
+                    self._none_if_blank(project),
+                    self._none_if_blank(repo_root),
+                    self._none_if_blank(git_remote),
+                    self._none_if_blank(branch),
+                    normalized_title,
+                    normalized_summary,
+                    normalized_body,
+                    json.dumps(self._normalize_tags(tags or [])),
+                    normalized_status,
+                    normalized_redaction,
+                    created_by_operator_agent_id,
+                    created_by_agent_id,
+                    self._none_if_blank(source_knowledge_link_id),
+                    self._none_if_blank(source_handoff_id),
+                    json.dumps(self._normalize_id_list(source_turn_ids or [])),
+                    stale_after,
+                    expires_at,
+                    json.dumps(metadata or {}),
+                    current,
+                    current,
+                    promoted_at,
+                    retired_at,
+                    imported_at,
+                ),
+            )
+            for source in self._operator_kb_sources_payload(
+                kb_id=kb_id,
+                source_knowledge_link_id=source_knowledge_link_id,
+                source_handoff_id=source_handoff_id,
+                source_turn_ids=source_turn_ids or [],
+                sources=sources or [],
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO operator_kb_sources
+                        (source_row_id, kb_id, source_type, source_id,
+                         metadata_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source["source_row_id"],
+                        kb_id,
+                        source["source_type"],
+                        source["source_id"],
+                        json.dumps(source.get("metadata") or {}),
+                        current,
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO operator_kb_events
+                    (kb_id, event_type, operator_agent_id, summary,
+                     detail_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    kb_id,
+                    "operator_kb_imported" if imported_at is not None else "operator_kb_created",
+                    created_by_operator_agent_id,
+                    normalized_summary,
+                    json.dumps({"status": normalized_status}),
+                    current,
+                ),
+            )
+        entry = self.get_operator_kb_entry(kb_id)
+        if entry is None:
+            raise RuntimeError("operator KB entry insert failed")
+        return entry
+
+    def get_operator_kb_entry(self, kb_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                {self._operator_kb_entry_select_sql()}
+                WHERE kb_id = ?
+                """,
+                (kb_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            entry = self._operator_kb_entry_from_row(row)
+            entry["sources"] = self._operator_kb_sources_for_entry(conn, kb_id)
+        return entry
+
+    def search_operator_kb_entries(
+        self,
+        *,
+        query: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        status: str | None = "active",
+        tags: list[str] | None = None,
+        include_expired: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(int(limit), 1), 500)
+        where: list[str] = []
+        params: list[Any] = []
+        if scope:
+            where.append("scope = ?")
+            params.append(self._normalize_operator_kb_scope(scope))
+        if project:
+            where.append("project = ?")
+            params.append(str(project).strip())
+        if repo_root:
+            where.append("repo_root = ?")
+            params.append(str(repo_root).strip())
+        if status:
+            where.append("status = ?")
+            params.append(self._normalize_operator_kb_status(status))
+        if not include_expired:
+            where.append("(expires_at IS NULL OR expires_at > ?)")
+            params.append(now_ts())
+        terms = [
+            term.strip().lower()
+            for term in str(query or "").split()
+            if term.strip()
+        ]
+        for term in terms:
+            where.append(
+                """
+                (
+                    lower(title) LIKE ?
+                    OR lower(summary) LIKE ?
+                    OR lower(body) LIKE ?
+                    OR lower(tags_json) LIKE ?
+                    OR lower(COALESCE(project, '')) LIKE ?
+                )
+                """
+            )
+            like = f"%{term}%"
+            params.extend([like, like, like, like, like])
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        query_sql = f"""
+            {self._operator_kb_entry_select_sql()}
+            {clause}
+            ORDER BY
+                CASE WHEN status = 'active' THEN 0
+                     WHEN status = 'proposed' THEN 1
+                     ELSE 2 END ASC,
+                updated_at DESC,
+                created_at DESC
+            LIMIT ?
+        """
+        params.append(safe_limit)
+        normalized_tags = set(self._normalize_tags(tags or []))
+        with self.connect() as conn:
+            rows = conn.execute(query_sql, tuple(params)).fetchall()
+            entries = [self._operator_kb_entry_from_row(row) for row in rows]
+            if normalized_tags:
+                entries = [
+                    entry
+                    for entry in entries
+                    if normalized_tags.issubset(set(entry.get("tags") or []))
+                ]
+            for entry in entries:
+                entry["sources"] = self._operator_kb_sources_for_entry(
+                    conn,
+                    str(entry["kb_id"]),
+                )
+        return entries
+
+    def update_operator_kb_entry(
+        self,
+        kb_id: str,
+        *,
+        updates: dict[str, Any] | None = None,
+        status: str | None = None,
+        redaction_status: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        event_type: str = "operator_kb_updated",
+        operator_agent_id: str | None = None,
+        event_summary: str | None = None,
+    ) -> dict[str, Any] | None:
+        entry = self.get_operator_kb_entry(kb_id)
+        if entry is None:
+            return None
+        requested_updates = dict(updates or {})
+        if summary is not None:
+            requested_updates["summary"] = summary
+        normalized_status = (
+            self._normalize_operator_kb_status(status)
+            if status is not None
+            else str(entry.get("status") or "proposed")
+        )
+        normalized_redaction = (
+            self._normalize_operator_kb_redaction_status(redaction_status)
+            if redaction_status is not None
+            else str(entry.get("redaction_status") or "unreviewed")
+        )
+        current = now_ts()
+        promoted_at = entry.get("promoted_at")
+        retired_at = entry.get("retired_at")
+        if normalized_status == "active":
+            promoted_at = promoted_at or current
+            retired_at = None
+        elif normalized_status in OPERATOR_KB_TERMINAL_STATUSES:
+            retired_at = retired_at or current
+        elif status is not None:
+            retired_at = None
+        merged_metadata = dict(entry.get("metadata") or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        column_updates: dict[str, Any] = {}
+        for key in (
+            "scope",
+            "project",
+            "repo_root",
+            "git_remote",
+            "branch",
+            "title",
+            "body",
+            "stale_after",
+            "expires_at",
+        ):
+            if key not in requested_updates:
+                continue
+            value = requested_updates[key]
+            if key == "scope":
+                column_updates[key] = self._normalize_operator_kb_scope(
+                    str(value or "project")
+                )
+            elif key in {"project", "repo_root", "git_remote", "branch"}:
+                column_updates[key] = self._none_if_blank(value)
+            elif key in {"title", "body"}:
+                text = str(value or "").strip()
+                if not text:
+                    raise ValueError(f"KB {key} is required")
+                column_updates[key] = text
+            else:
+                column_updates[key] = value
+        if "summary" in requested_updates:
+            summary_text = str(requested_updates.get("summary") or "").strip()
+            if not summary_text:
+                raise ValueError("KB summary is required")
+            column_updates["summary"] = summary_text
+        if "tags" in requested_updates:
+            raw_tags = requested_updates.get("tags")
+            column_updates["tags_json"] = json.dumps(
+                self._normalize_tags(raw_tags if isinstance(raw_tags, list) else [])
+            )
+        with self.connect() as conn:
+            assignments = [
+                "status = ?",
+                "redaction_status = ?",
+                "metadata_json = ?",
+                "updated_at = ?",
+                "promoted_at = ?",
+                "retired_at = ?",
+            ]
+            params: list[Any] = [
+                normalized_status,
+                normalized_redaction,
+                json.dumps(merged_metadata),
+                current,
+                promoted_at,
+                retired_at,
+            ]
+            for key, value in column_updates.items():
+                assignments.append(f"{key} = ?")
+                params.append(value)
+            params.append(kb_id)
+            cursor = conn.execute(
+                f"""
+                UPDATE operator_kb_entries
+                SET {', '.join(assignments)}
+                WHERE kb_id = ?
+                """,
+                tuple(params),
+            )
+            if cursor.rowcount:
+                conn.execute(
+                    """
+                    INSERT INTO operator_kb_events
+                        (kb_id, event_type, operator_agent_id, summary,
+                         detail_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        kb_id,
+                        event_type,
+                        operator_agent_id,
+                        event_summary
+                        or str(column_updates.get("summary") or "")
+                        or event_type,
+                        json.dumps(
+                            {
+                                "status": normalized_status,
+                                "redaction_status": normalized_redaction,
+                                "updated_fields": sorted(column_updates),
+                            }
+                        ),
+                        current,
+                    ),
+                )
+        return self.get_operator_kb_entry(kb_id) if cursor.rowcount else None
+
+    def export_operator_kb_entries(
+        self,
+        *,
+        query: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        status: str | None = "active",
+        tags: list[str] | None = None,
+        include_expired: bool = False,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        entries = self.search_operator_kb_entries(
+            query=query,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=status,
+            tags=tags,
+            include_expired=include_expired,
+            limit=limit,
+        )
+        return {
+            "format": OPERATOR_KB_EXPORT_FORMAT,
+            "version": 1,
+            "exported_at": now_ts(),
+            "criteria": {
+                "query": query,
+                "scope": scope,
+                "project": project,
+                "repo_root": repo_root,
+                "status": status,
+                "tags": tags or [],
+                "include_expired": include_expired,
+                "limit": limit,
+            },
+            "entries": entries,
+        }
+
+    def import_operator_kb_entries(
+        self,
+        *,
+        bundle: dict[str, Any],
+        operator_agent_id: str,
+        import_status: str = "proposed",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if str(bundle.get("format") or "") != OPERATOR_KB_EXPORT_FORMAT:
+            raise ValueError("unsupported KB export format")
+        normalized_status = self._normalize_operator_kb_status(import_status)
+        entries = bundle.get("entries")
+        if not isinstance(entries, list):
+            raise ValueError("KB import bundle entries must be a list")
+        imported: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        current = now_ts()
+        for index, item in enumerate(entries):
+            if not isinstance(item, dict):
+                skipped.append({"index": index, "reason": "entry is not an object"})
+                continue
+            try:
+                entry = self.create_operator_kb_entry(
+                    scope=str(item.get("scope") or "project"),
+                    project=item.get("project"),
+                    repo_root=item.get("repo_root"),
+                    git_remote=item.get("git_remote"),
+                    branch=item.get("branch"),
+                    title=str(item.get("title") or ""),
+                    summary=str(item.get("summary") or ""),
+                    body=str(item.get("body") or ""),
+                    tags=item.get("tags") if isinstance(item.get("tags"), list) else [],
+                    status=normalized_status,
+                    redaction_status=(
+                        str(item.get("redaction_status") or "unreviewed")
+                        if normalized_status != "active"
+                        else "clean"
+                    ),
+                    created_by_operator_agent_id=operator_agent_id,
+                    created_by_agent_id=operator_agent_id,
+                    source_knowledge_link_id=item.get("source_knowledge_link_id"),
+                    source_handoff_id=item.get("source_handoff_id"),
+                    source_turn_ids=(
+                        item.get("source_turn_ids")
+                        if isinstance(item.get("source_turn_ids"), list)
+                        else []
+                    ),
+                    stale_after=item.get("stale_after"),
+                    expires_at=item.get("expires_at"),
+                    imported_at=current,
+                    metadata={
+                        **(
+                            item.get("metadata")
+                            if isinstance(item.get("metadata"), dict)
+                            else {}
+                        ),
+                        **(metadata or {}),
+                        "imported_from_format": OPERATOR_KB_EXPORT_FORMAT,
+                    },
+                    sources=(
+                        item.get("sources")
+                        if isinstance(item.get("sources"), list)
+                        else []
+                    ),
+                )
+            except Exception as exc:
+                skipped.append({"index": index, "reason": str(exc)})
+                continue
+            imported.append(entry)
+        return {
+            "imported_count": len(imported),
+            "skipped_count": len(skipped),
+            "entries": imported,
+            "skipped": skipped,
+        }
+
+    def create_operator_handoff(
+        self,
+        *,
+        logical_operator_agent_id: str,
+        source_operator_agent_id: str,
+        target_operator_agent_id: str,
+        source_agent_id: str,
+        objective: str,
+        message: str,
+        source_operator_fork_id: str | None = None,
+        target_caller_agent_id: str | None = None,
+        target_operator_fork_id: str | None = None,
+        knowledge_link_id: str | None = None,
+        knowledge_turn_id: str | None = None,
+        allowed_mutation_scope: str | None = None,
+        required_artifacts: list[Any] | None = None,
+        artifact_bundle: list[Any] | None = None,
+        status: str = "proposed",
+        needs_ack: bool = True,
+        expires_at: float | None = None,
+        command_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        delivery_status: str | None = None,
+        delivery_evidence: dict[str, Any] | None = None,
+        error: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_status = str(status or "proposed").strip().lower()
+        if normalized_status not in OPERATOR_HANDOFF_STATUSES:
+            raise ValueError("handoff status is invalid")
+        handoff_id = str(uuid.uuid4())
+        current = now_ts()
+        acknowledged_at = current if normalized_status in {"acknowledged", "running"} else None
+        started_at = current if normalized_status == "running" else None
+        completed_at = (
+            current
+            if normalized_status in OPERATOR_HANDOFF_TERMINAL_STATUSES
+            else None
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_handoffs
+                    (handoff_id, logical_operator_agent_id,
+                     source_operator_agent_id, target_operator_agent_id,
+                     source_agent_id, source_operator_fork_id,
+                     target_caller_agent_id, target_operator_fork_id,
+                     knowledge_link_id, knowledge_turn_id, objective, message,
+                     allowed_mutation_scope, required_artifacts_json,
+                     artifact_bundle_json, status, needs_ack, expires_at,
+                     acknowledged_at, started_at, completed_at, command_id,
+                     tmux_pane_id, delivery_status, delivery_evidence_json,
+                     error, summary, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    handoff_id,
+                    logical_operator_agent_id,
+                    source_operator_agent_id,
+                    target_operator_agent_id,
+                    source_agent_id,
+                    source_operator_fork_id,
+                    target_caller_agent_id,
+                    target_operator_fork_id,
+                    knowledge_link_id,
+                    knowledge_turn_id,
+                    objective,
+                    message,
+                    allowed_mutation_scope,
+                    json.dumps(required_artifacts or []),
+                    json.dumps(artifact_bundle or []),
+                    normalized_status,
+                    1 if needs_ack else 0,
+                    expires_at,
+                    acknowledged_at,
+                    started_at,
+                    completed_at,
+                    command_id,
+                    tmux_pane_id,
+                    delivery_status,
+                    json.dumps(delivery_evidence or {}),
+                    error,
+                    summary,
+                    json.dumps(metadata or {}),
+                    current,
+                    current,
+                ),
+            )
+        handoff = self.get_operator_handoff(handoff_id)
+        if handoff is None:
+            raise RuntimeError("operator handoff insert failed")
+        return handoff
+
+    def get_operator_handoff(self, handoff_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                {self._operator_handoff_select_sql()}
+                WHERE h.handoff_id = ?
+                """,
+                (handoff_id,),
+            ).fetchone()
+        return self._operator_handoff_from_row(row) if row else None
+
+    def list_operator_handoffs(
+        self,
+        *,
+        logical_operator_agent_id: str | None = None,
+        source_agent_id: str | None = None,
+        target_operator_agent_id: str | None = None,
+        target_caller_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        where: list[str] = []
+        params: list[Any] = []
+        if logical_operator_agent_id:
+            where.append("h.logical_operator_agent_id = ?")
+            params.append(logical_operator_agent_id)
+        if source_agent_id:
+            where.append("h.source_agent_id = ?")
+            params.append(source_agent_id)
+        if target_operator_agent_id:
+            where.append("h.target_operator_agent_id = ?")
+            params.append(target_operator_agent_id)
+        if target_caller_agent_id:
+            where.append("h.target_caller_agent_id = ?")
+            params.append(target_caller_agent_id)
+        if status:
+            where.append("h.status = ?")
+            params.append(str(status).strip().lower())
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        query = f"""
+            {self._operator_handoff_select_sql()}
+            {clause}
+            ORDER BY
+                CASE
+                    WHEN h.status = 'proposed' THEN 0
+                    WHEN h.status = 'approved' THEN 1
+                    WHEN h.status = 'pending_launch' THEN 2
+                    WHEN h.status = 'sent' THEN 3
+                    WHEN h.status = 'acknowledged' THEN 4
+                    WHEN h.status = 'running' THEN 5
+                    ELSE 6
+                END ASC,
+                h.updated_at DESC,
+                h.created_at DESC
+            LIMIT ?
+        """
+        params.append(safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._operator_handoff_from_row(row) for row in rows]
+
+    def update_operator_handoff(
+        self,
+        handoff_id: str,
+        *,
+        status: str | None = None,
+        target_operator_fork_id: str | None = None,
+        command_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        delivery_status: str | None = None,
+        delivery_evidence: dict[str, Any] | None = None,
+        artifact_bundle: list[Any] | None = None,
+        required_artifacts: list[Any] | None = None,
+        error: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        acknowledge: bool = False,
+        start: bool = False,
+        complete: bool = False,
+    ) -> dict[str, Any] | None:
+        handoff = self.get_operator_handoff(handoff_id)
+        if handoff is None:
+            return None
+        normalized_status = (
+            str(status or handoff.get("status") or "proposed").strip().lower()
+        )
+        if normalized_status not in OPERATOR_HANDOFF_STATUSES:
+            raise ValueError("handoff status is invalid")
+        current = now_ts()
+        acknowledged_at = handoff.get("acknowledged_at")
+        started_at = handoff.get("started_at")
+        completed_at = handoff.get("completed_at")
+        if acknowledge or normalized_status in {"acknowledged", "running"}:
+            acknowledged_at = acknowledged_at or current
+        if start or normalized_status == "running":
+            started_at = started_at or current
+        terminal = normalized_status in OPERATOR_HANDOFF_TERMINAL_STATUSES
+        if complete or terminal:
+            completed_at = completed_at or current
+        elif status is not None:
+            completed_at = None
+        merged_metadata = dict(handoff.get("metadata") or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        merged_evidence = dict(handoff.get("delivery_evidence") or {})
+        if delivery_evidence:
+            merged_evidence.update(delivery_evidence)
+        next_artifacts = (
+            required_artifacts
+            if required_artifacts is not None
+            else handoff.get("required_artifacts") or []
+        )
+        next_bundle = (
+            artifact_bundle
+            if artifact_bundle is not None
+            else handoff.get("artifact_bundle") or []
+        )
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_handoffs
+                SET status = ?,
+                    target_operator_fork_id = COALESCE(?, target_operator_fork_id),
+                    command_id = COALESCE(?, command_id),
+                    tmux_pane_id = COALESCE(?, tmux_pane_id),
+                    delivery_status = COALESCE(?, delivery_status),
+                    delivery_evidence_json = ?,
+                    artifact_bundle_json = ?,
+                    required_artifacts_json = ?,
+                    error = COALESCE(?, error),
+                    summary = COALESCE(?, summary),
+                    metadata_json = ?,
+                    acknowledged_at = ?,
+                    started_at = ?,
+                    completed_at = ?,
+                    updated_at = ?
+                WHERE handoff_id = ?
+                """,
+                (
+                    normalized_status,
+                    target_operator_fork_id,
+                    command_id,
+                    tmux_pane_id,
+                    delivery_status,
+                    json.dumps(merged_evidence),
+                    json.dumps(next_bundle),
+                    json.dumps(next_artifacts),
+                    error,
+                    summary,
+                    json.dumps(merged_metadata),
+                    acknowledged_at,
+                    started_at,
+                    completed_at,
+                    current,
+                    handoff_id,
+                ),
+            )
+        return self.get_operator_handoff(handoff_id) if cursor.rowcount else None
+
     def create_command(
         self,
         request: CommandCreateRequest,
@@ -2535,6 +4193,57 @@ class Store:
             FROM operator_project_spawn_requests
         """
 
+    @staticmethod
+    def _operator_knowledge_link_select_sql() -> str:
+        return """
+            SELECT l.link_id, l.logical_operator_agent_id, l.operator_agent_id,
+                   l.source_agent_id, l.target_agent_id,
+                   l.source_operator_fork_id, l.link_type, l.status,
+                   l.summary, l.metadata_json, l.created_at, l.updated_at,
+                   l.closed_at,
+                   COALESCE((
+                       SELECT COUNT(*)
+                       FROM operator_knowledge_turns t
+                       WHERE t.link_id = l.link_id
+                         AND t.delivery_status = 'pending_approval'
+                   ), 0) AS pending_turn_count,
+                   (
+                       SELECT MAX(t.created_at)
+                       FROM operator_knowledge_turns t
+                       WHERE t.link_id = l.link_id
+                   ) AS latest_turn_at
+            FROM operator_knowledge_links l
+        """
+
+    @staticmethod
+    def _operator_handoff_select_sql() -> str:
+        return """
+            SELECT h.handoff_id, h.logical_operator_agent_id,
+                   h.source_operator_agent_id, h.target_operator_agent_id,
+                   h.source_agent_id, h.source_operator_fork_id,
+                   h.target_caller_agent_id, h.target_operator_fork_id,
+                   h.knowledge_link_id, h.knowledge_turn_id, h.objective,
+                   h.message, h.allowed_mutation_scope,
+                   h.required_artifacts_json, h.artifact_bundle_json,
+                   h.status, h.needs_ack, h.expires_at, h.acknowledged_at,
+                   h.started_at, h.completed_at, h.command_id, h.tmux_pane_id,
+                   h.delivery_status, h.delivery_evidence_json, h.error,
+                   h.summary, h.metadata_json, h.created_at, h.updated_at
+            FROM operator_handoffs h
+        """
+
+    @staticmethod
+    def _operator_kb_entry_select_sql() -> str:
+        return """
+            SELECT kb_id, scope, project, repo_root, git_remote, branch,
+                   title, summary, body, tags_json, status, redaction_status,
+                   created_by_operator_agent_id, created_by_agent_id,
+                   source_knowledge_link_id, source_handoff_id,
+                   source_turn_ids_json, stale_after, expires_at, metadata_json,
+                   created_at, updated_at, promoted_at, retired_at, imported_at
+            FROM operator_kb_entries
+        """
+
     @classmethod
     def _operator_fork_row_for_agent(
         cls,
@@ -2613,6 +4322,386 @@ class Store:
             if isinstance(value, str) and value.strip():
                 identity[key] = value.strip()
         return identity
+
+    @staticmethod
+    def _none_if_blank(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _normalize_id_list(values: list[Any]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+        return result
+
+    @staticmethod
+    def _normalize_tags(values: list[Any]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip().lower()
+            text = re.sub(r"[^a-z0-9_.:/+-]+", "-", text).strip("-")
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+        return result
+
+    @staticmethod
+    def _normalize_operator_kb_scope(scope: str) -> str:
+        normalized = str(scope or "project").strip().lower()
+        if normalized not in OPERATOR_KB_SCOPES:
+            raise ValueError("KB scope is invalid")
+        return normalized
+
+    @staticmethod
+    def _normalize_operator_kb_status(status: str | None) -> str:
+        normalized = str(status or "proposed").strip().lower()
+        if normalized not in OPERATOR_KB_STATUSES:
+            raise ValueError("KB status is invalid")
+        return normalized
+
+    @staticmethod
+    def _normalize_operator_kb_redaction_status(status: str | None) -> str:
+        normalized = str(status or "unreviewed").strip().lower()
+        if normalized not in OPERATOR_KB_REDACTION_STATUSES:
+            raise ValueError("KB redaction status is invalid")
+        return normalized
+
+    @staticmethod
+    def _operator_kb_sources_payload(
+        *,
+        kb_id: str,
+        source_knowledge_link_id: str | None,
+        source_handoff_id: str | None,
+        source_turn_ids: list[Any],
+        sources: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(
+            source_type: str,
+            source_id: Any,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            normalized_type = str(source_type or "").strip().lower()
+            normalized_id = str(source_id or "").strip()
+            if not normalized_type or not normalized_id:
+                return
+            key = (normalized_type, normalized_id)
+            if key in seen:
+                return
+            seen.add(key)
+            payloads.append(
+                {
+                    "source_row_id": str(uuid.uuid4()),
+                    "kb_id": kb_id,
+                    "source_type": normalized_type,
+                    "source_id": normalized_id,
+                    "metadata": metadata or {},
+                }
+            )
+
+        add("knowledge_link", source_knowledge_link_id)
+        add("handoff", source_handoff_id)
+        for turn_id in source_turn_ids:
+            add("knowledge_turn", turn_id)
+        for source in sources:
+            if isinstance(source, dict):
+                add(
+                    str(source.get("source_type") or ""),
+                    source.get("source_id"),
+                    source.get("metadata")
+                    if isinstance(source.get("metadata"), dict)
+                    else {},
+                )
+        return payloads
+
+    @staticmethod
+    def _operator_kb_source_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        metadata_json = data.pop("metadata_json")
+        try:
+            metadata = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return data
+
+    @staticmethod
+    def _operator_kb_entry_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        for key, default in (
+            ("tags_json", []),
+            ("source_turn_ids_json", []),
+            ("metadata_json", {}),
+        ):
+            raw = data.pop(key)
+            try:
+                decoded = json.loads(raw or json.dumps(default))
+            except json.JSONDecodeError:
+                decoded = default
+            data[key.removesuffix("_json")] = (
+                decoded if isinstance(decoded, type(default)) else default
+            )
+        data["sources"] = []
+        return data
+
+    @staticmethod
+    def _operator_kb_sources_for_entry(
+        conn: sqlite3.Connection,
+        kb_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT source_row_id, kb_id, source_type, source_id,
+                   metadata_json, created_at
+            FROM operator_kb_sources
+            WHERE kb_id = ?
+            ORDER BY created_at ASC, source_row_id ASC
+            """,
+            (kb_id,),
+        ).fetchall()
+        return [Store._operator_kb_source_from_row(row) for row in rows]
+
+    @staticmethod
+    def _agent_prune_candidate_from_agent(
+        agent: dict[str, Any],
+        *,
+        reason: str,
+        guard_reasons: list[str],
+        now: float,
+    ) -> dict[str, Any]:
+        last_seen_at = float(agent.get("last_seen_at") or 0.0)
+        age_days = max(0.0, (now - last_seen_at) / 86_400.0) if last_seen_at else 0.0
+        return {
+            "agent_id": str(agent.get("agent_id") or ""),
+            "agent_type": Store._normalized_agent_type(agent.get("agent_type")),
+            "project": str(agent.get("project") or ""),
+            "status": str(agent.get("status") or ""),
+            "effective_status": str(agent.get("effective_status") or ""),
+            "latest_report_status": agent.get("latest_report_status"),
+            "last_seen_at": last_seen_at,
+            "age_days": age_days,
+            "starred": bool(agent.get("starred")),
+            "queued_command_count": int(agent.get("queued_command_count") or 0),
+            "active_campaign_count": int(agent.get("active_campaign_count") or 0),
+            "reason": reason,
+            "guard_reasons": sorted(set(guard_reasons)),
+        }
+
+    @staticmethod
+    def _agent_has_recorded_tmux_pane(agent: dict[str, Any]) -> bool:
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        return bool(str(metadata.get("tmux_pane_id") or "").strip())
+
+    @staticmethod
+    def _agent_is_operator_fork(agent: dict[str, Any]) -> bool:
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        return (
+            Store._normalized_agent_type(agent.get("agent_type")) == OPERATOR_AGENT_TYPE
+            and str(metadata.get("operator_role") or "").strip().lower()
+            == OPERATOR_ROLE_FORK
+        )
+
+    @staticmethod
+    def _agent_prune_match_reason(
+        agent: dict[str, Any],
+        *,
+        preset: str,
+        min_age_days: float,
+        now: float,
+    ) -> str | None:
+        last_seen_at = float(agent.get("last_seen_at") or 0.0)
+        age_days = max(0.0, (now - last_seen_at) / 86_400.0) if last_seen_at else 0.0
+        if age_days < min_age_days:
+            return None
+        effective_status = _normalized_prune_status(agent.get("effective_status"))
+        status = _normalized_prune_status(agent.get("status"))
+        latest_status = _normalized_prune_status(agent.get("latest_report_status"))
+        terminal = (
+            _agent_prune_status_is_terminal(effective_status)
+            or _agent_prune_status_is_terminal(status)
+            or _agent_prune_status_is_terminal(latest_status)
+        )
+        agent_type = Store._normalized_agent_type(agent.get("agent_type"))
+        if preset == "terminal-callers":
+            if agent_type != "caller" or not terminal:
+                return None
+            return "terminal caller older than threshold"
+        if preset == "stale-callers":
+            if agent_type != "caller" or terminal:
+                return None
+            if not (
+                _agent_prune_status_is_nonterminal_stale(effective_status)
+                or _agent_prune_status_is_nonterminal_stale(status)
+                or _agent_prune_status_is_nonterminal_stale(latest_status)
+            ):
+                return None
+            return "stale nonterminal caller older than threshold"
+        if preset == "operator-forks":
+            if not Store._agent_is_operator_fork(agent):
+                return None
+            if not terminal and not (
+                _agent_prune_status_is_nonterminal_stale(effective_status)
+                or _agent_prune_status_is_nonterminal_stale(status)
+                or _agent_prune_status_is_nonterminal_stale(latest_status)
+            ):
+                return None
+            return "operator fork older than threshold"
+        return None
+
+    @staticmethod
+    def _agent_prune_batch_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        for key, target in (
+            ("criteria_json", "criteria"),
+            ("results_json", "results"),
+            ("undo_results_json", "undo_results"),
+            ("metadata_json", "metadata"),
+        ):
+            try:
+                decoded = json.loads(data.pop(key) or "{}")
+            except json.JSONDecodeError:
+                decoded = [] if key.endswith("results_json") else {}
+            data[target] = decoded
+        data["delete_thread"] = bool(data.get("delete_thread"))
+        return data
+
+    def agent_prune_protection_reasons(self) -> dict[str, list[str]]:
+        reasons: dict[str, set[str]] = {}
+
+        def add(agent_id: Any, reason: str) -> None:
+            value = str(agent_id or "").strip()
+            if not value:
+                return
+            reasons.setdefault(value, set()).add(reason)
+
+        with self.connect() as conn:
+            active_campaign_filter = _operator_active_state_sql(
+                "status",
+                "completed_at",
+            )
+            for row in conn.execute(
+                f"""
+                SELECT operator_agent_id
+                FROM operator_campaigns
+                WHERE {active_campaign_filter}
+                """
+            ):
+                add(row["operator_agent_id"], "active_operator_campaign")
+
+            active_assignment_filter = _operator_active_state_sql(
+                "state",
+                "completed_at",
+            )
+            for row in conn.execute(
+                f"""
+                SELECT target_agent_id
+                FROM operator_campaign_assignments
+                WHERE {active_assignment_filter}
+                """
+            ):
+                add(row["target_agent_id"], "active_campaign_assignment")
+
+            active_fork_filter = _operator_active_state_sql(
+                "status",
+                "completed_at",
+            )
+            for row in conn.execute(
+                f"""
+                SELECT logical_operator_agent_id, fork_agent_id, source_caller_agent_id
+                FROM operator_forks
+                WHERE {active_fork_filter}
+                """
+            ):
+                add(row["logical_operator_agent_id"], "active_operator_fork_owner")
+                add(row["fork_agent_id"], "active_operator_fork")
+                add(row["source_caller_agent_id"], "active_operator_fork_source")
+
+            for row in conn.execute(
+                """
+                SELECT l.logical_operator_agent_id, l.operator_agent_id,
+                       l.source_agent_id, l.target_agent_id,
+                       f.fork_agent_id AS source_fork_agent_id
+                FROM operator_knowledge_links l
+                LEFT JOIN operator_forks f
+                  ON f.operator_fork_id = l.source_operator_fork_id
+                WHERE l.status IN ('proposed', 'active')
+                """
+            ):
+                for key in (
+                    "logical_operator_agent_id",
+                    "operator_agent_id",
+                    "source_agent_id",
+                    "target_agent_id",
+                    "source_fork_agent_id",
+                ):
+                    add(row[key], "active_knowledge_link")
+
+            handoff_placeholders = ",".join(
+                "?" for _ in OPERATOR_HANDOFF_TERMINAL_STATUSES
+            )
+            for row in conn.execute(
+                f"""
+                SELECT h.logical_operator_agent_id, h.source_operator_agent_id,
+                       h.target_operator_agent_id, h.source_agent_id,
+                       h.target_caller_agent_id,
+                       sf.fork_agent_id AS source_fork_agent_id,
+                       tf.fork_agent_id AS target_fork_agent_id
+                FROM operator_handoffs h
+                LEFT JOIN operator_forks sf
+                  ON sf.operator_fork_id = h.source_operator_fork_id
+                LEFT JOIN operator_forks tf
+                  ON tf.operator_fork_id = h.target_operator_fork_id
+                WHERE lower(h.status) NOT IN ({handoff_placeholders})
+                """,
+                tuple(sorted(OPERATOR_HANDOFF_TERMINAL_STATUSES)),
+            ):
+                for key in (
+                    "logical_operator_agent_id",
+                    "source_operator_agent_id",
+                    "target_operator_agent_id",
+                    "source_agent_id",
+                    "target_caller_agent_id",
+                    "source_fork_agent_id",
+                    "target_fork_agent_id",
+                ):
+                    add(row[key], "active_operator_handoff")
+
+            spawn_placeholders = ",".join(
+                "?" for _ in PROJECT_SPAWN_TERMINAL_STATUSES
+            )
+            for row in conn.execute(
+                f"""
+                SELECT logical_operator_agent_id, operator_agent_id,
+                       review_fork_agent_id, source_caller_agent_id,
+                       launched_agent_id
+                FROM operator_project_spawn_requests
+                WHERE lower(status) NOT IN ({spawn_placeholders})
+                """,
+                tuple(sorted(PROJECT_SPAWN_TERMINAL_STATUSES)),
+            ):
+                for key in (
+                    "logical_operator_agent_id",
+                    "operator_agent_id",
+                    "review_fork_agent_id",
+                    "source_caller_agent_id",
+                    "launched_agent_id",
+                ):
+                    add(row[key], "active_project_spawn")
+
+        return {
+            agent_id: sorted(agent_reasons)
+            for agent_id, agent_reasons in reasons.items()
+        }
 
     @classmethod
     def _hydrate_operator_fork_agent(
@@ -2901,6 +4990,77 @@ class Store:
         except json.JSONDecodeError:
             metadata = {}
         data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return data
+
+    @staticmethod
+    def _operator_knowledge_link_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        metadata_json = data.pop("metadata_json")
+        try:
+            metadata = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        data["pending_turn_count"] = int(data.get("pending_turn_count") or 0)
+        latest_turn_at = data.get("latest_turn_at")
+        data["latest_turn_at"] = latest_turn_at if latest_turn_at is not None else None
+        return data
+
+    @staticmethod
+    def _operator_knowledge_turn_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        metadata_json = data.pop("metadata_json")
+        try:
+            metadata = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return data
+
+    @staticmethod
+    def _operator_handoff_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        for key, default in (
+            ("required_artifacts_json", []),
+            ("artifact_bundle_json", []),
+            ("delivery_evidence_json", {}),
+            ("metadata_json", {}),
+        ):
+            raw = data.pop(key)
+            try:
+                decoded = json.loads(raw or json.dumps(default))
+            except json.JSONDecodeError:
+                decoded = default
+            if key.endswith("_json"):
+                target_key = key.removesuffix("_json")
+            else:
+                target_key = key
+            data[target_key] = decoded if isinstance(decoded, type(default)) else default
+        data["needs_ack"] = bool(data["needs_ack"])
+        expires_at = data.get("expires_at")
+        status = str(data.get("status") or "").lower()
+        now = now_ts()
+        time_remaining: float | None = None
+        if expires_at is not None:
+            try:
+                time_remaining = float(expires_at) - now
+            except (TypeError, ValueError):
+                time_remaining = None
+        terminal = status in OPERATOR_HANDOFF_TERMINAL_STATUSES
+        expired = bool(
+            status == "expired"
+            or (
+                time_remaining is not None
+                and time_remaining <= 0
+                and data.get("started_at") is None
+                and not terminal
+            )
+        )
+        data["time_remaining_seconds"] = (
+            max(0.0, time_remaining) if time_remaining is not None else None
+        )
+        data["expired"] = expired
+        data["safe_to_start"] = not expired
         return data
 
     @staticmethod

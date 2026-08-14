@@ -56,6 +56,78 @@ REVIEW_ESCALATION_ROUTES = {
     "root_operator",
     "new_write_operator",
 }
+KNOWLEDGE_LINK_TYPES = {
+    "handoff",
+    "consult",
+    "domain_context",
+    "review_context",
+}
+KNOWLEDGE_LINK_STATUSES = {
+    "proposed",
+    "active",
+    "closed",
+    "canceled",
+    "cancelled",
+}
+KNOWLEDGE_TURN_TYPES = {
+    "handoff",
+    "question",
+    "answer",
+    "note",
+}
+KNOWLEDGE_TERMINAL_STATUSES = {"closed", "canceled", "cancelled"}
+HANDOFF_STATUSES = {
+    "proposed",
+    "approved",
+    "pending_launch",
+    "sent",
+    "acknowledged",
+    "running",
+    "complete",
+    "completed",
+    "blocked",
+    "failed",
+    "expired",
+    "canceled",
+    "cancelled",
+}
+HANDOFF_TERMINAL_STATUSES = {
+    "complete",
+    "completed",
+    "blocked",
+    "failed",
+    "expired",
+    "canceled",
+    "cancelled",
+}
+HANDOFF_PRESTART_STATUSES = {
+    "proposed",
+    "approved",
+    "pending_launch",
+    "sent",
+    "acknowledged",
+}
+OPERATOR_KB_STATUSES = {
+    "proposed",
+    "active",
+    "retired",
+    "rejected",
+}
+OPERATOR_KB_REDACTION_STATUSES = {
+    "unreviewed",
+    "clean",
+    "needs_review",
+    "blocked",
+}
+OPERATOR_KB_SECRET_PATTERNS = (
+    re.compile(
+        r"(?i)\b(api[_-]?key|token|password|secret|credential|private[_-]?key)"
+        r"\s*[:=]\s*['\"]?[^\s'\"`]+"
+    ),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+)
 DEFAULT_OPERATOR_TMUX_SESSION = "agent-pbx-operators"
 OPERATOR_TMUX_SESSION_ENV = "AGENT_PBX_TUI_OPERATOR_TMUX_SESSION"
 ID_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -86,6 +158,7 @@ def operator_runbook_payload() -> dict[str, Any]:
         "loop": [
             "Start a campaign with title, objective, shared criteria, and one assignment per caller.",
             "Dispatch or follow up through pbx_operator_start_campaign and pbx_operator_send_followup.",
+            "Use operator handoffs for executable domain transfers between operators or review forks without changing fork ownership.",
             "Keep the root operator turn active while assignments are running; periodically recheck campaign state.",
             "Inspect caller reports and threads with pbx_operator_get_thread.",
             "Mark each assignment complete, blocked, or needing follow-up with pbx_operator_report_assignment.",
@@ -98,6 +171,10 @@ def operator_runbook_payload() -> dict[str, Any]:
             "Read-only review work should use review forks and write only to the configured work_root outside the caller project directory.",
             "When review work finds an edit task, escalate it to the root operator or to the idle default/edit fork; do not let review forks edit the source project.",
             "When review work needs a new sibling project, request it with pbx_operator_request_project_spawn; the TUI must approve and launch the new caller agent.",
+            "When review work needs to transfer domain context to another operator, propose a knowledge handoff; the TUI/root operator approves the executable handoff delivery.",
+            "Operator handoffs track required target fork launch, delivery evidence, receiver acknowledgement, running state, TTL expiry, artifact summaries, and terminal state.",
+            "Promote durable operator knowledge into the PBX-managed KB only from the root operator; forks may propose entries and read active entries.",
+            "Knowledge links and handoffs do not create fork edges, campaign assignments, or source-session ownership.",
             "The root operator coordinates campaigns and reviews evidence; it must not implement caller repo changes directly.",
             "Do not spawn or use Codex internal subagents for caller work; do not call multi_agent_v1.",
             "delivery='queue' creates normal PBX send_input commands for nohup fork sessions.",
@@ -624,6 +701,1145 @@ class OperatorService:
             summary=summary,
             metadata=metadata or {},
         )
+
+    def create_knowledge_link(
+        self,
+        *,
+        operator_agent_id: str,
+        source_agent_id: str,
+        target_agent_id: str,
+        link_type: str = "domain_context",
+        status: str = "active",
+        source_operator_fork_id: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        self._require_agent(source_agent_id)
+        self._require_agent(target_agent_id)
+        normalized_type = self._normalize_knowledge_link_type(link_type)
+        normalized_status = self._normalize_knowledge_link_status(status)
+        fork_id = self._validated_knowledge_source_fork_id(
+            logical_operator_id=logical_operator_id,
+            source_agent_id=source_agent_id,
+            source_operator_fork_id=source_operator_fork_id,
+        )
+        link = self.store.create_operator_knowledge_link(
+            logical_operator_agent_id=logical_operator_id,
+            operator_agent_id=operator_agent_id,
+            source_agent_id=source_agent_id,
+            target_agent_id=target_agent_id,
+            source_operator_fork_id=fork_id,
+            link_type=normalized_type,
+            status=normalized_status,
+            summary=summary,
+            metadata=metadata or {},
+        )
+        self.store.append_event(
+            "operator_knowledge_link_created",
+            {
+                "link_id": link["link_id"],
+                "operator_agent_id": operator_agent_id,
+                "logical_operator_agent_id": logical_operator_id,
+                "source_agent_id": source_agent_id,
+                "target_agent_id": target_agent_id,
+                "source_operator_fork_id": fork_id,
+                "link_type": normalized_type,
+                "status": normalized_status,
+            },
+            link["link_id"],
+        )
+        return link
+
+    def propose_knowledge_handoff(
+        self,
+        *,
+        operator_agent_id: str,
+        source_agent_id: str,
+        target_agent_id: str,
+        message: str,
+        link_type: str = "domain_context",
+        source_operator_fork_id: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        link = self.create_knowledge_link(
+            operator_agent_id=operator_agent_id,
+            source_agent_id=source_agent_id,
+            target_agent_id=target_agent_id,
+            source_operator_fork_id=source_operator_fork_id,
+            link_type=link_type,
+            status="proposed",
+            summary=summary or "Knowledge handoff proposed",
+            metadata={**(metadata or {}), "requires_operator_delivery": True},
+        )
+        turn = self.store.create_operator_knowledge_turn(
+            link_id=link["link_id"],
+            sender_agent_id=source_agent_id,
+            recipient_agent_id=target_agent_id,
+            turn_type="handoff",
+            message=self._knowledge_turn_message(
+                link=link,
+                message=message,
+                turn_type="handoff",
+            ),
+            delivery_status="pending_approval",
+            metadata={
+                **(metadata or {}),
+                "proposed_by_operator_agent_id": operator_agent_id,
+                "requires_operator_delivery": True,
+            },
+        )
+        self.store.append_event(
+            "operator_knowledge_handoff_proposed",
+            {
+                "link_id": link["link_id"],
+                "turn_id": turn["turn_id"],
+                "operator_agent_id": operator_agent_id,
+                "source_agent_id": source_agent_id,
+                "target_agent_id": target_agent_id,
+                "source_operator_fork_id": link.get("source_operator_fork_id"),
+            },
+            link["link_id"],
+        )
+        handoff = self.create_handoff(
+            operator_agent_id=operator_agent_id,
+            source_agent_id=source_agent_id,
+            target_operator_agent_id=target_agent_id,
+            message=message,
+            objective=str((metadata or {}).get("objective") or summary or message).strip(),
+            source_operator_fork_id=link.get("source_operator_fork_id"),
+            target_caller_agent_id=str(
+                (metadata or {}).get("target_caller_agent_id") or ""
+            ).strip()
+            or None,
+            target_operator_fork_id=str(
+                (metadata or {}).get("target_operator_fork_id") or ""
+            ).strip()
+            or None,
+            knowledge_link_id=link["link_id"],
+            knowledge_turn_id=turn["turn_id"],
+            allowed_mutation_scope=(
+                str((metadata or {}).get("allowed_mutation_scope") or "").strip()
+                or None
+            ),
+            required_artifacts=(
+                (metadata or {}).get("required_artifacts")
+                if isinstance((metadata or {}).get("required_artifacts"), list)
+                else []
+            ),
+            artifact_bundle=(
+                (metadata or {}).get("artifact_bundle")
+                if isinstance((metadata or {}).get("artifact_bundle"), list)
+                else []
+            ),
+            expires_at=self._float_or_none((metadata or {}).get("expires_at")),
+            needs_ack=bool((metadata or {}).get("needs_ack", True)),
+            summary=summary or "Knowledge handoff proposed",
+            metadata={**(metadata or {}), "created_from_knowledge_proposal": True},
+        )
+        refreshed = self.store.get_operator_knowledge_link(link["link_id"]) or link
+        return {"link": refreshed, "turn": turn, "handoff": handoff}
+
+    def list_knowledge_links(
+        self,
+        *,
+        operator_agent_id: str | None = None,
+        source_agent_id: str | None = None,
+        target_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        logical_operator_id = None
+        if operator_agent_id:
+            logical_operator_id = self._logical_operator_agent_id(
+                self._require_operator(operator_agent_id)
+            )
+        return self.store.list_operator_knowledge_links(
+            logical_operator_agent_id=logical_operator_id,
+            source_agent_id=source_agent_id,
+            target_agent_id=target_agent_id,
+            status=status,
+            limit=limit,
+        )
+
+    def knowledge_context(
+        self,
+        *,
+        link_id: str,
+        operator_agent_id: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        link = self._require_knowledge_link(link_id)
+        if operator_agent_id:
+            operator = self._require_operator(operator_agent_id)
+            logical_operator_id = self._logical_operator_agent_id(operator)
+            if str(link.get("logical_operator_agent_id") or "") != logical_operator_id:
+                raise ValueError("knowledge link belongs to a different operator")
+        turns = self.store.list_operator_knowledge_turns(
+            link_id=link_id,
+            limit=limit,
+        )
+        return {"link": link, "turns": turns}
+
+    def send_knowledge_turn(
+        self,
+        *,
+        operator_agent_id: str,
+        link_id: str,
+        sender_agent_id: str,
+        recipient_agent_id: str,
+        message: str,
+        turn_type: str = "note",
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        link = self._require_knowledge_link_for_operator(link_id, logical_operator_id)
+        if str(link.get("status") or "") in KNOWLEDGE_TERMINAL_STATUSES:
+            raise ValueError("knowledge link is closed")
+        self._require_agent(sender_agent_id)
+        self._require_agent(recipient_agent_id)
+        self._validate_knowledge_participant(link, sender_agent_id)
+        self._validate_knowledge_participant(link, recipient_agent_id)
+        normalized_type = self._normalize_knowledge_turn_type(turn_type)
+        if str(link.get("status") or "") == "proposed":
+            link = self.store.update_operator_knowledge_link(link_id, status="active") or link
+        turn = self.store.create_operator_knowledge_turn(
+            link_id=link_id,
+            sender_agent_id=sender_agent_id,
+            recipient_agent_id=recipient_agent_id,
+            turn_type=normalized_type,
+            message=self._knowledge_turn_message(
+                link=link,
+                message=message,
+                turn_type=normalized_type,
+            ),
+            delivery_status="recorded",
+            metadata=metadata or {},
+        )
+        delivered = self._deliver_knowledge_turn(
+            turn,
+            operator_agent_id=operator_agent_id,
+            link=link,
+            delivery=delivery,
+            metadata=metadata or {},
+        )
+        refreshed_link = self.store.get_operator_knowledge_link(link_id) or link
+        return {
+            "link": refreshed_link,
+            "turn": delivered["turn"],
+            "command": delivered.get("command"),
+        }
+
+    def approve_knowledge_turn(
+        self,
+        *,
+        operator_agent_id: str,
+        link_id: str,
+        turn_id: str,
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        link = self._require_knowledge_link_for_operator(link_id, logical_operator_id)
+        if str(link.get("status") or "") in KNOWLEDGE_TERMINAL_STATUSES:
+            raise ValueError("knowledge link is closed")
+        turn = self.store.get_operator_knowledge_turn(turn_id)
+        if turn is None or str(turn.get("link_id") or "") != link_id:
+            raise ValueError("knowledge turn not found for link")
+        if str(turn.get("delivery_status") or "") != "pending_approval":
+            raise ValueError("knowledge turn is not pending approval")
+        link = self.store.update_operator_knowledge_link(link_id, status="active") or link
+        delivered = self._deliver_knowledge_turn(
+            turn,
+            operator_agent_id=operator_agent_id,
+            link=link,
+            delivery=delivery,
+            metadata={
+                **(metadata or {}),
+                "approved_by_operator_agent_id": operator_agent_id,
+            },
+        )
+        refreshed_link = self.store.get_operator_knowledge_link(link_id) or link
+        return {
+            "link": refreshed_link,
+            "turn": delivered["turn"],
+            "command": delivered.get("command"),
+        }
+
+    def close_knowledge_link(
+        self,
+        *,
+        operator_agent_id: str,
+        link_id: str,
+        status: str = "closed",
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        self._require_knowledge_link_for_operator(link_id, logical_operator_id)
+        normalized_status = self._normalize_knowledge_link_status(status)
+        if normalized_status not in KNOWLEDGE_TERMINAL_STATUSES:
+            raise ValueError("knowledge link close status must be closed, canceled, or cancelled")
+        link = self.store.update_operator_knowledge_link(
+            link_id,
+            status=normalized_status,
+            summary=summary,
+            metadata=metadata or {},
+        )
+        if link is None:
+            raise RuntimeError("knowledge link close failed")
+        self.store.append_event(
+            "operator_knowledge_link_closed",
+            {
+                "link_id": link_id,
+                "operator_agent_id": operator_agent_id,
+                "logical_operator_agent_id": logical_operator_id,
+                "status": normalized_status,
+                "summary": summary,
+            },
+            link_id,
+        )
+        return link
+
+    def propose_kb_entry(
+        self,
+        *,
+        operator_agent_id: str,
+        title: str,
+        summary: str,
+        body: str,
+        scope: str = "project",
+        project: str | None = None,
+        repo_root: str | None = None,
+        git_remote: str | None = None,
+        branch: str | None = None,
+        tags: list[str] | None = None,
+        source_knowledge_link_id: str | None = None,
+        source_handoff_id: str | None = None,
+        source_turn_ids: list[str] | None = None,
+        stale_after: float | None = None,
+        expires_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        normalized_turn_ids = self._require_operator_kb_source_context(
+            logical_operator_id=logical_operator_id,
+            source_knowledge_link_id=source_knowledge_link_id,
+            source_handoff_id=source_handoff_id,
+            source_turn_ids=source_turn_ids or [],
+        )
+        redaction_status = self._operator_kb_redaction_status(
+            title=title,
+            summary=summary,
+            body=body,
+            metadata=metadata or {},
+        )
+        entry = self.store.create_operator_kb_entry(
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            git_remote=git_remote,
+            branch=branch,
+            title=title,
+            summary=summary,
+            body=body,
+            tags=tags or [],
+            status="proposed",
+            redaction_status=redaction_status,
+            created_by_operator_agent_id=logical_operator_id,
+            created_by_agent_id=operator_agent_id,
+            source_knowledge_link_id=source_knowledge_link_id,
+            source_handoff_id=source_handoff_id,
+            source_turn_ids=normalized_turn_ids,
+            stale_after=stale_after,
+            expires_at=expires_at,
+            metadata={
+                **(metadata or {}),
+                "proposed_by_operator_agent_id": operator_agent_id,
+            },
+        )
+        self._record_kb_event(
+            "operator_kb_proposed",
+            entry,
+            operator_agent_id=operator_agent_id,
+            summary=summary,
+        )
+        return entry
+
+    def propose_kb_from_link(
+        self,
+        *,
+        operator_agent_id: str,
+        link_id: str,
+        title: str,
+        summary: str | None = None,
+        scope: str = "project",
+        project: str | None = None,
+        repo_root: str | None = None,
+        git_remote: str | None = None,
+        branch: str | None = None,
+        tags: list[str] | None = None,
+        include_turn_ids: list[str] | None = None,
+        stale_after: float | None = None,
+        expires_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        link = self._require_knowledge_link_visible_to_operator(
+            link_id,
+            logical_operator_id,
+        )
+        turns = self.store.list_operator_knowledge_turns(link_id=link_id, limit=500)
+        requested_turn_ids = {
+            str(turn_id or "").strip()
+            for turn_id in (include_turn_ids or [])
+            if str(turn_id or "").strip()
+        }
+        if requested_turn_ids:
+            available_turn_ids = {str(turn.get("turn_id") or "") for turn in turns}
+            missing_turn_ids = sorted(requested_turn_ids - available_turn_ids)
+            if missing_turn_ids:
+                raise ValueError(
+                    "knowledge turn not found for link: "
+                    + ", ".join(missing_turn_ids)
+                )
+            turns = [
+                turn
+                for turn in turns
+                if str(turn.get("turn_id") or "") in requested_turn_ids
+            ]
+        source_agent = self.store.get_agent(str(link.get("source_agent_id") or ""))
+        default_project = (
+            str(source_agent.get("project") or "").strip()
+            if source_agent is not None
+            else ""
+        )
+        return self.propose_kb_entry(
+            operator_agent_id=operator_agent_id,
+            scope=scope,
+            project=project or default_project or None,
+            repo_root=repo_root,
+            git_remote=git_remote,
+            branch=branch,
+            title=title,
+            summary=summary or str(link.get("summary") or title),
+            body=self._operator_kb_body_from_link(link, turns),
+            tags=tags or [],
+            source_knowledge_link_id=link_id,
+            source_turn_ids=[
+                str(turn.get("turn_id") or "")
+                for turn in turns
+                if str(turn.get("turn_id") or "").strip()
+            ],
+            stale_after=stale_after,
+            expires_at=expires_at,
+            metadata={
+                **(metadata or {}),
+                "created_from_knowledge_link": True,
+            },
+        )
+
+    def search_kb_entries(
+        self,
+        *,
+        operator_agent_id: str,
+        query: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        status: str | None = "active",
+        tags: list[str] | None = None,
+        include_expired: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        normalized_status = (
+            self._normalize_operator_kb_status(status)
+            if status is not None
+            else None
+        )
+        entries = self.store.search_operator_kb_entries(
+            query=query,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=normalized_status,
+            tags=tags or [],
+            include_expired=include_expired,
+            limit=limit,
+        )
+        return [
+            entry
+            for entry in entries
+            if self._operator_can_read_kb_entry(entry, logical_operator_id)
+        ]
+
+    def get_kb_entry(
+        self,
+        *,
+        operator_agent_id: str,
+        kb_id: str,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        entry = self._require_operator_kb_entry(kb_id)
+        if not self._operator_can_read_kb_entry(entry, logical_operator_id):
+            raise ValueError("KB entry belongs to a different operator")
+        return entry
+
+    def update_kb_entry(
+        self,
+        *,
+        operator_agent_id: str,
+        kb_id: str,
+        updates: dict[str, Any],
+        redaction_status: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_root_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        entry = self._require_operator_kb_entry(kb_id)
+        self._require_operator_kb_owner(entry, logical_operator_id)
+        allowed_update_keys = {
+            "scope",
+            "project",
+            "repo_root",
+            "git_remote",
+            "branch",
+            "title",
+            "summary",
+            "body",
+            "tags",
+            "stale_after",
+            "expires_at",
+        }
+        normalized_updates = {
+            key: value
+            for key, value in updates.items()
+            if key in allowed_update_keys
+        }
+        if not normalized_updates and redaction_status is None and not metadata:
+            raise ValueError("KB update has no fields to change")
+        merged_metadata = {
+            **(entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}),
+            **(metadata or {}),
+        }
+        scanned_redaction = self._operator_kb_redaction_status(
+            title=str(normalized_updates.get("title", entry.get("title") or "")),
+            summary=str(
+                normalized_updates.get("summary", entry.get("summary") or "")
+            ),
+            body=str(normalized_updates.get("body", entry.get("body") or "")),
+            metadata=merged_metadata,
+        )
+        requested_redaction = (
+            self._normalize_operator_kb_redaction_status(redaction_status)
+            if redaction_status is not None
+            else scanned_redaction
+        )
+        if scanned_redaction != "clean" and requested_redaction == "clean" and not bool(
+            (metadata or {}).get("redaction_override")
+        ):
+            requested_redaction = "needs_review"
+        if str(entry.get("status") or "") == "active" and requested_redaction != "clean":
+            raise ValueError(
+                "active KB updates must be clean or manually redacted before saving"
+            )
+        updated = self.store.update_operator_kb_entry(
+            kb_id,
+            updates=normalized_updates,
+            redaction_status=requested_redaction,
+            metadata={
+                **(metadata or {}),
+                "updated_by_operator_agent_id": operator_agent_id,
+            },
+            event_type="operator_kb_updated",
+            operator_agent_id=operator_agent_id,
+            event_summary="KB entry updated",
+        )
+        if updated is None:
+            raise RuntimeError("KB entry update failed")
+        self._record_kb_event(
+            "operator_kb_updated",
+            updated,
+            operator_agent_id=operator_agent_id,
+            summary="KB entry updated",
+        )
+        return updated
+
+    def promote_kb_entry(
+        self,
+        *,
+        operator_agent_id: str,
+        kb_id: str,
+        redaction_status: str = "clean",
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_root_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        entry = self._require_operator_kb_entry(kb_id)
+        self._require_operator_kb_owner(entry, logical_operator_id)
+        normalized_redaction = self._normalize_operator_kb_redaction_status(
+            redaction_status
+        )
+        if normalized_redaction != "clean":
+            raise ValueError("KB entry must have clean redaction status before promotion")
+        scanned_redaction = self._operator_kb_redaction_status(
+            title=str(entry.get("title") or ""),
+            summary=summary or str(entry.get("summary") or ""),
+            body=str(entry.get("body") or ""),
+            metadata={
+                **(entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}),
+                **(metadata or {}),
+            },
+        )
+        if scanned_redaction != "clean" and not bool(
+            (metadata or {}).get("redaction_override")
+        ):
+            raise ValueError(
+                "KB entry appears to contain secrets; review/redact before promotion "
+                "or set metadata.redaction_override after manual review"
+            )
+        updated = self.store.update_operator_kb_entry(
+            kb_id,
+            status="active",
+            redaction_status=normalized_redaction,
+            summary=summary,
+            metadata={
+                **(metadata or {}),
+                "promoted_by_operator_agent_id": operator_agent_id,
+            },
+            event_type="operator_kb_promoted",
+            operator_agent_id=operator_agent_id,
+            event_summary=summary or "KB entry promoted",
+        )
+        if updated is None:
+            raise RuntimeError("KB entry promotion failed")
+        self._record_kb_event(
+            "operator_kb_promoted",
+            updated,
+            operator_agent_id=operator_agent_id,
+            summary=summary or "KB entry promoted",
+        )
+        return updated
+
+    def reject_kb_entry(
+        self,
+        *,
+        operator_agent_id: str,
+        kb_id: str,
+        summary: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_root_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        entry = self._require_operator_kb_entry(kb_id)
+        self._require_operator_kb_owner(entry, logical_operator_id)
+        if str(entry.get("status") or "") == "active":
+            raise ValueError("active KB entries must be retired, not rejected")
+        updated = self.store.update_operator_kb_entry(
+            kb_id,
+            status="rejected",
+            summary=summary,
+            metadata={
+                **(metadata or {}),
+                "rejected_by_operator_agent_id": operator_agent_id,
+            },
+            event_type="operator_kb_rejected",
+            operator_agent_id=operator_agent_id,
+            event_summary=summary,
+        )
+        if updated is None:
+            raise RuntimeError("KB entry rejection failed")
+        self._record_kb_event(
+            "operator_kb_rejected",
+            updated,
+            operator_agent_id=operator_agent_id,
+            summary=summary,
+        )
+        return updated
+
+    def retire_kb_entry(
+        self,
+        *,
+        operator_agent_id: str,
+        kb_id: str,
+        summary: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_root_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        entry = self._require_operator_kb_entry(kb_id)
+        self._require_operator_kb_owner(entry, logical_operator_id)
+        updated = self.store.update_operator_kb_entry(
+            kb_id,
+            status="retired",
+            summary=summary,
+            metadata={
+                **(metadata or {}),
+                "retired_by_operator_agent_id": operator_agent_id,
+            },
+            event_type="operator_kb_retired",
+            operator_agent_id=operator_agent_id,
+            event_summary=summary,
+        )
+        if updated is None:
+            raise RuntimeError("KB entry retirement failed")
+        self._record_kb_event(
+            "operator_kb_retired",
+            updated,
+            operator_agent_id=operator_agent_id,
+            summary=summary,
+        )
+        return updated
+
+    def export_kb_entries(
+        self,
+        *,
+        operator_agent_id: str,
+        query: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        status: str | None = "active",
+        tags: list[str] | None = None,
+        include_expired: bool = False,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        operator = self._require_root_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        normalized_status = (
+            self._normalize_operator_kb_status(status)
+            if status is not None
+            else None
+        )
+        bundle = self.store.export_operator_kb_entries(
+            query=query,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=normalized_status,
+            tags=tags or [],
+            include_expired=include_expired,
+            limit=limit,
+        )
+        entries = [
+            entry
+            for entry in bundle.get("entries", [])
+            if isinstance(entry, dict)
+            and self._operator_can_read_kb_entry(entry, logical_operator_id)
+        ]
+        bundle["entries"] = entries
+        criteria = bundle.get("criteria") if isinstance(bundle.get("criteria"), dict) else {}
+        criteria["operator_agent_id"] = operator_agent_id
+        bundle["criteria"] = criteria
+        return bundle
+
+    def import_kb_entries(
+        self,
+        *,
+        operator_agent_id: str,
+        bundle: dict[str, Any],
+        import_status: str = "proposed",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_root_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        normalized_status = self._normalize_operator_kb_status(import_status)
+        prepared_bundle = dict(bundle)
+        security_skipped: list[dict[str, Any]] = []
+        entries = prepared_bundle.get("entries")
+        if isinstance(entries, list):
+            prepared_entries: list[Any] = []
+            for index, item in enumerate(entries):
+                if not isinstance(item, dict):
+                    prepared_entries.append(item)
+                    continue
+                item_redaction = self._operator_kb_redaction_status(
+                    title=str(item.get("title") or ""),
+                    summary=str(item.get("summary") or ""),
+                    body=str(item.get("body") or ""),
+                    metadata={
+                        **(
+                            item.get("metadata")
+                            if isinstance(item.get("metadata"), dict)
+                            else {}
+                        ),
+                        **(metadata or {}),
+                    },
+                )
+                if normalized_status == "active" and item_redaction != "clean" and not bool(
+                    (metadata or {}).get("redaction_override")
+                ):
+                    security_skipped.append(
+                        {
+                            "index": index,
+                            "reason": "entry appears to contain secrets",
+                        }
+                    )
+                    continue
+                prepared_item = dict(item)
+                prepared_item["redaction_status"] = (
+                    "clean" if normalized_status == "active" else item_redaction
+                )
+                prepared_entries.append(prepared_item)
+            prepared_bundle["entries"] = prepared_entries
+        result = self.store.import_operator_kb_entries(
+            bundle=prepared_bundle,
+            operator_agent_id=logical_operator_id,
+            import_status=normalized_status,
+            metadata={
+                **(metadata or {}),
+                "imported_by_operator_agent_id": operator_agent_id,
+            },
+        )
+        if security_skipped:
+            skipped = [*security_skipped, *(result.get("skipped") or [])]
+            result["skipped"] = skipped
+            result["skipped_count"] = len(skipped)
+        self.store.append_event(
+            "operator_kb_imported_bundle",
+            {
+                "operator_agent_id": operator_agent_id,
+                "logical_operator_agent_id": logical_operator_id,
+                "import_status": normalized_status,
+                "imported_count": result.get("imported_count"),
+                "skipped_count": result.get("skipped_count"),
+            },
+            operator_agent_id,
+        )
+        return result
+
+    def create_handoff(
+        self,
+        *,
+        operator_agent_id: str,
+        source_agent_id: str,
+        target_operator_agent_id: str,
+        message: str,
+        objective: str | None = None,
+        source_operator_fork_id: str | None = None,
+        target_caller_agent_id: str | None = None,
+        target_operator_fork_id: str | None = None,
+        knowledge_link_id: str | None = None,
+        knowledge_turn_id: str | None = None,
+        allowed_mutation_scope: str | None = None,
+        required_artifacts: list[Any] | None = None,
+        artifact_bundle: list[Any] | None = None,
+        expires_at: float | None = None,
+        needs_ack: bool = True,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        self._require_agent(source_agent_id)
+        target_operator = self._require_operator(target_operator_agent_id)
+        target_logical_operator_id = self._logical_operator_agent_id(target_operator)
+        target_caller = (
+            self._require_caller(target_caller_agent_id)
+            if target_caller_agent_id
+            else None
+        )
+        source_fork_id = self._validated_knowledge_source_fork_id(
+            logical_operator_id=logical_operator_id,
+            source_agent_id=source_agent_id,
+            source_operator_fork_id=source_operator_fork_id,
+        )
+        target_fork_id = self._validated_handoff_target_fork_id(
+            target_logical_operator_id=target_logical_operator_id,
+            target_caller_agent_id=target_caller_agent_id,
+            target_operator_fork_id=target_operator_fork_id,
+        )
+        if knowledge_link_id and self.store.get_operator_knowledge_link(knowledge_link_id) is None:
+            raise ValueError("knowledge_link_id not found")
+        if knowledge_turn_id and self.store.get_operator_knowledge_turn(knowledge_turn_id) is None:
+            raise ValueError("knowledge_turn_id not found")
+        normalized_message = str(message or "").strip()
+        if not normalized_message:
+            raise ValueError("handoff message is required")
+        normalized_objective = str(objective or summary or normalized_message).strip()
+        handoff = self.store.create_operator_handoff(
+            logical_operator_agent_id=logical_operator_id,
+            source_operator_agent_id=operator_agent_id,
+            target_operator_agent_id=target_logical_operator_id,
+            source_agent_id=source_agent_id,
+            source_operator_fork_id=source_fork_id,
+            target_caller_agent_id=(
+                str(target_caller["agent_id"]) if target_caller is not None else None
+            ),
+            target_operator_fork_id=target_fork_id,
+            knowledge_link_id=knowledge_link_id,
+            knowledge_turn_id=knowledge_turn_id,
+            objective=normalized_objective,
+            message=normalized_message,
+            allowed_mutation_scope=allowed_mutation_scope,
+            required_artifacts=required_artifacts or [],
+            artifact_bundle=artifact_bundle or [],
+            status="proposed",
+            needs_ack=needs_ack,
+            expires_at=expires_at,
+            summary=summary or normalized_objective,
+            metadata=metadata or {},
+        )
+        self._record_handoff_event(
+            "operator_handoff_created",
+            handoff,
+            summary=handoff.get("summary") or "Operator handoff created",
+        )
+        return handoff
+
+    def list_handoffs(
+        self,
+        *,
+        operator_agent_id: str | None = None,
+        source_agent_id: str | None = None,
+        target_operator_agent_id: str | None = None,
+        target_caller_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        logical_operator_id = None
+        if operator_agent_id:
+            logical_operator_id = self._logical_operator_agent_id(
+                self._require_operator(operator_agent_id)
+            )
+        target_logical_operator_id = None
+        if target_operator_agent_id:
+            target_logical_operator_id = self._logical_operator_agent_id(
+                self._require_operator(target_operator_agent_id)
+            )
+        handoffs = self.store.list_operator_handoffs(
+            logical_operator_agent_id=logical_operator_id,
+            source_agent_id=source_agent_id,
+            target_operator_agent_id=target_logical_operator_id,
+            target_caller_agent_id=target_caller_agent_id,
+            status=status,
+            limit=limit,
+        )
+        return [self._expire_handoff_if_due(handoff) for handoff in handoffs]
+
+    def get_handoff(
+        self,
+        *,
+        handoff_id: str,
+        operator_agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        handoff = self._require_handoff(handoff_id)
+        if operator_agent_id:
+            operator = self._require_operator(operator_agent_id)
+            logical_operator_id = self._logical_operator_agent_id(operator)
+            if logical_operator_id not in {
+                str(handoff.get("logical_operator_agent_id") or ""),
+                str(handoff.get("target_operator_agent_id") or ""),
+            }:
+                raise ValueError("handoff belongs to a different operator")
+        return self._expire_handoff_if_due(handoff)
+
+    def approve_handoff(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_id: str,
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        handoff = self._require_handoff_for_source_operator(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+        )
+        handoff = self._expire_handoff_if_due(handoff)
+        if str(handoff.get("status") or "") == "expired":
+            raise ValueError("handoff has expired")
+        if str(handoff.get("status") or "") in HANDOFF_TERMINAL_STATUSES:
+            raise ValueError("handoff is already terminal")
+        target_fork = self._handoff_required_target_fork(handoff)
+        if target_fork is not None and not self._handoff_target_fork_ready(target_fork):
+            updated = self.store.update_operator_handoff(
+                str(handoff["handoff_id"]),
+                status="pending_launch",
+                target_operator_fork_id=str(target_fork.get("operator_fork_id") or ""),
+                summary="Required target operator fork is not launched.",
+                metadata={
+                    **(metadata or {}),
+                    "pending_launch_reason": target_fork.get("summary")
+                    or target_fork.get("status"),
+                    "target_fork_agent_id": target_fork.get("fork_agent_id"),
+                },
+            )
+            if updated is None:
+                raise RuntimeError("handoff pending-launch update failed")
+            self._record_handoff_event(
+                "operator_handoff_pending_launch",
+                updated,
+                summary="Required target operator fork is not launched.",
+            )
+            return {"handoff": updated, "command": None}
+        resolved_delivery = str(delivery or "auto").strip().lower()
+        if resolved_delivery == "record_only":
+            updated = self.store.update_operator_handoff(
+                str(handoff["handoff_id"]),
+                status="approved",
+                delivery_status="recorded",
+                metadata=metadata or {},
+            )
+            if updated is None:
+                raise RuntimeError("handoff approval update failed")
+            self._mark_handoff_knowledge_turn_delivered(
+                updated,
+                delivery_status="recorded",
+                command=None,
+            )
+            self._record_handoff_event(
+                "operator_handoff_approved",
+                updated,
+                summary="Operator handoff approved without delivery.",
+            )
+            return {"handoff": updated, "command": None}
+        command = self._deliver_handoff(
+            handoff=handoff,
+            target_fork=target_fork,
+            operator_agent_id=operator_agent_id,
+            delivery=resolved_delivery,
+        )
+        evidence = self._handoff_delivery_evidence(command)
+        updated = self.store.update_operator_handoff(
+            str(handoff["handoff_id"]),
+            status="sent",
+            command_id=str(command.get("command_id") or ""),
+            tmux_pane_id=str(evidence.get("tmux_pane_id") or "") or None,
+            delivery_status=str(command.get("status") or ""),
+            delivery_evidence=evidence,
+            metadata={
+                **(metadata or {}),
+                "approved_by_operator_agent_id": operator_agent_id,
+            },
+        )
+        if updated is None:
+            raise RuntimeError("handoff delivery update failed")
+        self._mark_handoff_knowledge_turn_delivered(
+            updated,
+            delivery_status=str(command.get("status") or "sent"),
+            command=command,
+        )
+        self._record_handoff_event(
+            "operator_handoff_sent",
+            updated,
+            summary="Operator handoff sent to target operator.",
+            command=command,
+        )
+        return {"handoff": updated, "command": command}
+
+    def ack_handoff(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_id: str,
+        status: str = "acknowledged",
+        summary: str,
+        detail: str | None = None,
+        artifact_bundle: list[Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        handoff = self._require_handoff_for_participant(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+        )
+        normalized_status = self._normalize_handoff_status(status)
+        if normalized_status not in {
+            "acknowledged",
+            "running",
+            "blocked",
+            "failed",
+            "complete",
+            "completed",
+            "expired",
+            "canceled",
+            "cancelled",
+        }:
+            raise ValueError("ack status must be acknowledged, running, or terminal")
+        evidence = dict(handoff.get("delivery_evidence") or {})
+        evidence["agent_acknowledged"] = True
+        if normalized_status == "running":
+            evidence["agent_started"] = True
+        updated = self.store.update_operator_handoff(
+            str(handoff["handoff_id"]),
+            status=normalized_status,
+            summary=summary,
+            artifact_bundle=artifact_bundle if artifact_bundle is not None else None,
+            delivery_evidence=evidence,
+            metadata={
+                **(metadata or {}),
+                "acknowledged_by_operator_agent_id": operator_agent_id,
+                "ack_detail": detail or "",
+            },
+            acknowledge=True,
+            start=normalized_status == "running",
+            complete=normalized_status in HANDOFF_TERMINAL_STATUSES,
+        )
+        if updated is None:
+            raise RuntimeError("handoff ack update failed")
+        self._record_handoff_event(
+            "operator_handoff_acknowledged",
+            updated,
+            summary=summary,
+        )
+        return updated
+
+    def update_handoff(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_id: str,
+        status: str,
+        summary: str,
+        detail: str | None = None,
+        artifact_bundle: list[Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        handoff = self._require_handoff_for_participant(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+        )
+        normalized_status = self._normalize_handoff_status(status)
+        evidence = dict(handoff.get("delivery_evidence") or {})
+        if normalized_status in {"acknowledged", "running"}:
+            evidence["agent_acknowledged"] = True
+        if normalized_status == "running":
+            evidence["agent_started"] = True
+        updated = self.store.update_operator_handoff(
+            str(handoff["handoff_id"]),
+            status=normalized_status,
+            summary=summary,
+            artifact_bundle=artifact_bundle if artifact_bundle is not None else None,
+            delivery_evidence=evidence,
+            metadata={
+                **(metadata or {}),
+                "updated_by_operator_agent_id": operator_agent_id,
+                "update_detail": detail or "",
+            },
+            acknowledge=normalized_status in {"acknowledged", "running"},
+            start=normalized_status == "running",
+            complete=normalized_status in HANDOFF_TERMINAL_STATUSES,
+        )
+        if updated is None:
+            raise RuntimeError("handoff status update failed")
+        self._record_handoff_event(
+            f"operator_handoff_{normalized_status}",
+            updated,
+            summary=summary,
+        )
+        return updated
 
     def start_campaign(
         self,
@@ -1279,6 +2495,89 @@ class OperatorService:
             status="sent",
         )
 
+    def _deliver_knowledge_turn(
+        self,
+        turn: dict[str, Any],
+        *,
+        operator_agent_id: str,
+        link: dict[str, Any],
+        delivery: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        recipient_agent_id = str(turn.get("recipient_agent_id") or "").strip()
+        target = self._require_agent(recipient_agent_id)
+        resolved = str(delivery or "auto").strip().lower()
+        command: dict[str, Any] | None = None
+        tmux_pane_id: str | None = None
+        if resolved == "record_only":
+            updated_turn = self.store.update_operator_knowledge_turn_delivery(
+                str(turn["turn_id"]),
+                delivery_status="recorded",
+                metadata=metadata,
+            ) or turn
+            self._record_knowledge_turn_event(
+                link=link,
+                turn=updated_turn,
+                operator_agent_id=operator_agent_id,
+                command=None,
+            )
+            return {"turn": updated_turn, "command": None}
+        mode = str((target.get("metadata") or {}).get("pbx_mode") or "report").lower()
+        if resolved == "auto":
+            resolved = "queue" if mode == NOHUP_MODE else "tmux"
+        payload = {
+            "message": turn["message"],
+            "source": "operator_knowledge_turn",
+            "knowledge_link_id": link["link_id"],
+            "knowledge_turn_id": turn["turn_id"],
+            "operator_agent_id": operator_agent_id,
+            "logical_operator_agent_id": link["logical_operator_agent_id"],
+            "sender_agent_id": turn["sender_agent_id"],
+            "recipient_agent_id": recipient_agent_id,
+            "turn_type": turn["turn_type"],
+            "link_type": link["link_type"],
+        }
+        if resolved == "queue":
+            command = self.store.create_command(
+                CommandCreateRequest(
+                    agent_id=recipient_agent_id,
+                    type="send_input",
+                    payload=payload,
+                )
+            )
+            delivery_status = "queued"
+        elif resolved == "tmux":
+            pane = self._resolve_tmux_pane(target)
+            tmux_support.send_text(pane.pane_id, turn["message"], tmux_bin=self.tmux_bin)
+            tmux_pane_id = pane.pane_id
+            payload["tmux_pane_id"] = pane.pane_id
+            payload["tmux_target"] = pane.target_label
+            command = self.store.create_command(
+                CommandCreateRequest(
+                    agent_id=recipient_agent_id,
+                    type="send_input",
+                    payload=payload,
+                ),
+                status="sent",
+            )
+            delivery_status = "sent"
+        else:
+            raise ValueError("delivery must be auto, queue, tmux, or record_only")
+        updated_turn = self.store.update_operator_knowledge_turn_delivery(
+            str(turn["turn_id"]),
+            delivery_status=delivery_status,
+            command_id=str(command.get("command_id") or "") if command else None,
+            tmux_pane_id=tmux_pane_id,
+            metadata=metadata,
+        ) or turn
+        self._record_knowledge_turn_event(
+            link=link,
+            turn=updated_turn,
+            operator_agent_id=operator_agent_id,
+            command=command,
+        )
+        return {"turn": updated_turn, "command": command}
+
     def _resolve_delivery_fork(
         self,
         *,
@@ -1437,6 +2736,324 @@ class OperatorService:
                 summary=summary,
                 detail=payload,
             )
+
+    def _require_handoff(self, handoff_id: str) -> dict[str, Any]:
+        handoff = self.store.get_operator_handoff(handoff_id)
+        if handoff is None:
+            raise ValueError("handoff not found")
+        return handoff
+
+    def _require_handoff_for_source_operator(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        handoff = self._require_handoff(handoff_id)
+        if str(handoff.get("logical_operator_agent_id") or "") != logical_operator_id:
+            raise ValueError("handoff belongs to a different operator")
+        return handoff
+
+    def _require_handoff_for_participant(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        handoff = self._require_handoff(handoff_id)
+        allowed = {
+            str(handoff.get("logical_operator_agent_id") or ""),
+            str(handoff.get("target_operator_agent_id") or ""),
+        }
+        if logical_operator_id not in allowed:
+            raise ValueError("handoff belongs to different operators")
+        return handoff
+
+    def _expire_handoff_if_due(self, handoff: dict[str, Any]) -> dict[str, Any]:
+        if not bool(handoff.get("expired")):
+            return handoff
+        if str(handoff.get("status") or "") not in HANDOFF_PRESTART_STATUSES:
+            return handoff
+        updated = self.store.update_operator_handoff(
+            str(handoff["handoff_id"]),
+            status="expired",
+            summary="Handoff expired before the receiving operator started.",
+            error="expired before start",
+            complete=True,
+        )
+        if updated is None:
+            return handoff
+        self._record_handoff_event(
+            "operator_handoff_expired",
+            updated,
+            summary="Handoff expired before the receiving operator started.",
+        )
+        return updated
+
+    def _handoff_required_target_fork(
+        self,
+        handoff: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        target_caller_agent_id = str(handoff.get("target_caller_agent_id") or "").strip()
+        target_operator_fork_id = str(
+            handoff.get("target_operator_fork_id") or ""
+        ).strip()
+        if not target_caller_agent_id and not target_operator_fork_id:
+            return None
+        if target_operator_fork_id:
+            fork = (
+                self.store.get_operator_fork(target_operator_fork_id)
+                or self.store.get_operator_fork_for_agent(target_operator_fork_id)
+            )
+            if fork is None:
+                raise ValueError("target operator fork not found")
+            return fork
+        target_operator_agent_id = str(
+            handoff.get("target_operator_agent_id") or ""
+        ).strip()
+        if not target_operator_agent_id:
+            return None
+        return self.ensure_fork(
+            operator_agent_id=target_operator_agent_id,
+            source_caller_agent_id=target_caller_agent_id,
+            fork_track_id=DEFAULT_FORK_TRACK_ID,
+            metadata={
+                "created_for_handoff_id": handoff.get("handoff_id"),
+                "handoff_requires_launch": True,
+            },
+        )
+
+    @staticmethod
+    def _handoff_target_fork_ready(fork: dict[str, Any]) -> bool:
+        status = str(fork.get("status") or "").strip().lower()
+        pane_id = str(fork.get("tmux_pane_id") or "").strip()
+        metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+        pending = bool(metadata.get("operator_fork_pending"))
+        return status in FORK_READY_STATUSES and bool(pane_id) and not pending
+
+    def _deliver_handoff(
+        self,
+        *,
+        handoff: dict[str, Any],
+        target_fork: dict[str, Any] | None,
+        operator_agent_id: str,
+        delivery: str,
+    ) -> dict[str, Any]:
+        target_operator_agent_id = str(
+            handoff.get("target_operator_agent_id") or ""
+        ).strip()
+        message = self._handoff_message(handoff=handoff, target_fork=target_fork)
+        return self._deliver_root_operator_message(
+            operator_agent_id=operator_agent_id,
+            logical_operator_id=target_operator_agent_id,
+            message=message,
+            delivery=delivery,
+            payload={
+                "source": "operator_handoff",
+                "handoff_id": handoff.get("handoff_id"),
+                "source_operator_agent_id": handoff.get("source_operator_agent_id"),
+                "target_operator_agent_id": target_operator_agent_id,
+                "source_agent_id": handoff.get("source_agent_id"),
+                "source_operator_fork_id": handoff.get("source_operator_fork_id"),
+                "target_caller_agent_id": handoff.get("target_caller_agent_id"),
+                "target_operator_fork_id": (
+                    target_fork.get("operator_fork_id") if target_fork else None
+                ),
+                "knowledge_link_id": handoff.get("knowledge_link_id"),
+                "knowledge_turn_id": handoff.get("knowledge_turn_id"),
+            },
+        )
+
+    def _handoff_message(
+        self,
+        *,
+        handoff: dict[str, Any],
+        target_fork: dict[str, Any] | None,
+    ) -> str:
+        artifact_lines = self._handoff_artifact_lines(
+            "Required artifacts",
+            handoff.get("required_artifacts") or [],
+        )
+        bundle_lines = self._handoff_artifact_lines(
+            "Artifact bundle",
+            handoff.get("artifact_bundle") or [],
+        )
+        expires_at = handoff.get("expires_at")
+        time_remaining = handoff.get("time_remaining_seconds")
+        expiry_line = "Expires: -"
+        if expires_at is not None:
+            expiry_line = f"Expires: {expires_at}"
+            if time_remaining is not None:
+                expiry_line += f" ({time_remaining:.0f}s remaining)"
+        target_fork_lines = ["Target fork: -"]
+        if target_fork is not None:
+            target_fork_lines = [
+                f"Target fork: {target_fork.get('fork_agent_id')}",
+                f"Target fork ID: {target_fork.get('operator_fork_id')}",
+                f"Target fork status: {target_fork.get('status')}",
+                f"Target fork pane: {target_fork.get('tmux_pane_id') or '-'}",
+            ]
+        return "\n".join(
+            [
+                "Operator handoff",
+                "",
+                f"Handoff ID: {handoff.get('handoff_id')}",
+                f"Source operator: {handoff.get('logical_operator_agent_id')}",
+                f"Source agent: {handoff.get('source_agent_id')}",
+                f"Target operator: {handoff.get('target_operator_agent_id')}",
+                f"Target caller: {handoff.get('target_caller_agent_id') or '-'}",
+                *target_fork_lines,
+                f"Knowledge link: {handoff.get('knowledge_link_id') or '-'}",
+                f"Knowledge turn: {handoff.get('knowledge_turn_id') or '-'}",
+                expiry_line,
+                f"Allowed mutation scope: {handoff.get('allowed_mutation_scope') or '-'}",
+                "",
+                "Objective:",
+                str(handoff.get("objective") or ""),
+                "",
+                "Message:",
+                str(handoff.get("message") or ""),
+                "",
+                *artifact_lines,
+                "",
+                *bundle_lines,
+                "",
+                "Receiver actions:",
+                "- Reply with pbx_operator_ack_handoff after reading the handoff.",
+                "- Use status='acknowledged' when context is understood.",
+                "- Use status='running' only after the target workflow actually starts.",
+                "- Use pbx_operator_update_handoff for blocked, failed, or complete terminal states.",
+                "- Do not change fork ownership or source-session associations for this handoff.",
+            ]
+        )
+
+    @staticmethod
+    def _handoff_artifact_lines(title: str, artifacts: list[Any]) -> list[str]:
+        lines = [f"{title}:"]
+        if not artifacts:
+            lines.append("- none")
+            return lines
+        for item in artifacts:
+            if isinstance(item, dict):
+                visible = {
+                    key: value
+                    for key, value in item.items()
+                    if "secret" not in str(key).lower()
+                    and "token" not in str(key).lower()
+                    and "password" not in str(key).lower()
+                }
+                lines.append(f"- {visible}")
+            else:
+                lines.append(f"- {item}")
+        return lines
+
+    @staticmethod
+    def _handoff_delivery_evidence(command: dict[str, Any]) -> dict[str, Any]:
+        payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        return {
+            "command_id": command.get("command_id"),
+            "command_status": command.get("status"),
+            "delivery_status": command.get("status"),
+            "delivered_to_pane": bool(payload.get("tmux_pane_id")),
+            "pasted_to_input": bool(payload.get("tmux_pane_id")),
+            "submitted_to_codex": bool(payload.get("tmux_pane_id")),
+            "agent_acknowledged": False,
+            "agent_started": False,
+            "tmux_pane_id": payload.get("tmux_pane_id"),
+            "tmux_target": payload.get("tmux_target"),
+        }
+
+    def _mark_handoff_knowledge_turn_delivered(
+        self,
+        handoff: dict[str, Any],
+        *,
+        delivery_status: str,
+        command: dict[str, Any] | None,
+    ) -> None:
+        link_id = str(handoff.get("knowledge_link_id") or "").strip()
+        turn_id = str(handoff.get("knowledge_turn_id") or "").strip()
+        if link_id:
+            self.store.update_operator_knowledge_link(link_id, status="active")
+        if not turn_id:
+            return
+        command_payload = (
+            command.get("payload")
+            if command is not None and isinstance(command.get("payload"), dict)
+            else {}
+        )
+        tmux_pane_id = str(command_payload.get("tmux_pane_id") or "").strip() or None
+        self.store.update_operator_knowledge_turn_delivery(
+            turn_id,
+            delivery_status=delivery_status,
+            command_id=str(command.get("command_id") or "") if command else None,
+            tmux_pane_id=tmux_pane_id,
+            metadata={
+                "delivered_by_handoff_id": handoff.get("handoff_id"),
+                "handoff_delivery_status": delivery_status,
+            },
+        )
+
+    def _record_handoff_event(
+        self,
+        event_type: str,
+        handoff: dict[str, Any],
+        *,
+        summary: str,
+        command: dict[str, Any] | None = None,
+    ) -> None:
+        payload = {
+            "handoff_id": handoff.get("handoff_id"),
+            "logical_operator_agent_id": handoff.get("logical_operator_agent_id"),
+            "source_operator_agent_id": handoff.get("source_operator_agent_id"),
+            "target_operator_agent_id": handoff.get("target_operator_agent_id"),
+            "source_agent_id": handoff.get("source_agent_id"),
+            "source_operator_fork_id": handoff.get("source_operator_fork_id"),
+            "target_caller_agent_id": handoff.get("target_caller_agent_id"),
+            "target_operator_fork_id": handoff.get("target_operator_fork_id"),
+            "knowledge_link_id": handoff.get("knowledge_link_id"),
+            "knowledge_turn_id": handoff.get("knowledge_turn_id"),
+            "status": handoff.get("status"),
+            "expires_at": handoff.get("expires_at"),
+            "command_id": command.get("command_id") if command else handoff.get("command_id"),
+        }
+        self.store.append_event(
+            event_type,
+            payload,
+            str(handoff.get("handoff_id") or ""),
+        )
+
+    def _record_kb_event(
+        self,
+        event_type: str,
+        entry: dict[str, Any],
+        *,
+        operator_agent_id: str,
+        summary: str,
+    ) -> None:
+        self.store.append_event(
+            event_type,
+            {
+                "kb_id": entry.get("kb_id"),
+                "operator_agent_id": operator_agent_id,
+                "created_by_operator_agent_id": entry.get(
+                    "created_by_operator_agent_id"
+                ),
+                "created_by_agent_id": entry.get("created_by_agent_id"),
+                "scope": entry.get("scope"),
+                "project": entry.get("project"),
+                "repo_root": entry.get("repo_root"),
+                "status": entry.get("status"),
+                "redaction_status": entry.get("redaction_status"),
+                "summary": summary,
+                "source_knowledge_link_id": entry.get("source_knowledge_link_id"),
+                "source_handoff_id": entry.get("source_handoff_id"),
+            },
+            str(entry.get("kb_id") or ""),
+        )
 
     def _agent_with_fork_delivery_metadata(
         self,
@@ -1661,6 +3278,124 @@ class OperatorService:
             raise ValueError("campaign not found")
         return campaign
 
+    def _require_knowledge_link(self, link_id: str) -> dict[str, Any]:
+        link = self.store.get_operator_knowledge_link(link_id)
+        if link is None:
+            raise ValueError("knowledge link not found")
+        return link
+
+    def _require_knowledge_link_for_operator(
+        self,
+        link_id: str,
+        logical_operator_id: str,
+    ) -> dict[str, Any]:
+        link = self._require_knowledge_link(link_id)
+        if str(link.get("logical_operator_agent_id") or "") != logical_operator_id:
+            raise ValueError("knowledge link belongs to a different operator")
+        return link
+
+    def _require_knowledge_link_visible_to_operator(
+        self,
+        link_id: str,
+        logical_operator_id: str,
+    ) -> dict[str, Any]:
+        link = self._require_knowledge_link(link_id)
+        if not self._knowledge_link_visible_to_operator(link, logical_operator_id):
+            raise ValueError("knowledge link belongs to a different operator")
+        return link
+
+    def _knowledge_link_visible_to_operator(
+        self,
+        link: dict[str, Any],
+        logical_operator_id: str,
+    ) -> bool:
+        if str(link.get("logical_operator_agent_id") or "") == logical_operator_id:
+            return True
+        return any(
+            self._agent_resolves_to_logical_operator(
+                str(link.get(field) or ""),
+                logical_operator_id,
+            )
+            for field in ("source_agent_id", "target_agent_id", "operator_agent_id")
+        )
+
+    def _require_handoff_visible_to_operator(
+        self,
+        handoff_id: str,
+        logical_operator_id: str,
+    ) -> dict[str, Any]:
+        handoff = self._require_handoff(handoff_id)
+        allowed = {
+            str(handoff.get("logical_operator_agent_id") or ""),
+            str(handoff.get("target_operator_agent_id") or ""),
+        }
+        if logical_operator_id not in allowed:
+            raise ValueError("handoff belongs to different operators")
+        return handoff
+
+    def _require_operator_kb_source_context(
+        self,
+        *,
+        logical_operator_id: str,
+        source_knowledge_link_id: str | None,
+        source_handoff_id: str | None,
+        source_turn_ids: list[str],
+    ) -> list[str]:
+        link_id = str(source_knowledge_link_id or "").strip()
+        handoff_id = str(source_handoff_id or "").strip()
+        if link_id:
+            self._require_knowledge_link_visible_to_operator(
+                link_id,
+                logical_operator_id,
+            )
+        if handoff_id:
+            self._require_handoff_visible_to_operator(
+                handoff_id,
+                logical_operator_id,
+            )
+        normalized_turn_ids: list[str] = []
+        seen_turn_ids: set[str] = set()
+        for turn_id_value in source_turn_ids:
+            turn_id = str(turn_id_value or "").strip()
+            if not turn_id or turn_id in seen_turn_ids:
+                continue
+            turn = self.store.get_operator_knowledge_turn(turn_id)
+            if turn is None:
+                raise ValueError("knowledge turn not found")
+            turn_link_id = str(turn.get("link_id") or "").strip()
+            if link_id and turn_link_id != link_id:
+                raise ValueError("knowledge turn belongs to a different link")
+            self._require_knowledge_link_visible_to_operator(
+                turn_link_id,
+                logical_operator_id,
+            )
+            seen_turn_ids.add(turn_id)
+            normalized_turn_ids.append(turn_id)
+        return normalized_turn_ids
+
+    def _require_operator_kb_entry(self, kb_id: str) -> dict[str, Any]:
+        entry = self.store.get_operator_kb_entry(kb_id)
+        if entry is None:
+            raise ValueError("KB entry not found")
+        return entry
+
+    @staticmethod
+    def _operator_can_read_kb_entry(
+        entry: dict[str, Any],
+        logical_operator_id: str,
+    ) -> bool:
+        if str(entry.get("status") or "") == "active":
+            return True
+        return str(entry.get("created_by_operator_agent_id") or "") == logical_operator_id
+
+    @staticmethod
+    def _require_operator_kb_owner(
+        entry: dict[str, Any],
+        logical_operator_id: str,
+    ) -> None:
+        if str(entry.get("created_by_operator_agent_id") or "") != logical_operator_id:
+            raise ValueError("KB entry belongs to a different operator")
+
     def _require_agent(self, agent_id: str) -> dict[str, Any]:
         agent = self.store.get_agent(agent_id)
         if agent is None:
@@ -1672,6 +3407,13 @@ class OperatorService:
         if agent.get("agent_type") != OPERATOR_AGENT_TYPE:
             raise ValueError("agent is not an operator")
         return agent
+
+    def _require_root_operator(self, agent_id: str) -> dict[str, Any]:
+        operator = self._require_operator(agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        if logical_operator_id != agent_id or self._is_operator_fork_agent(operator):
+            raise ValueError("operation requires the root operator session")
+        return operator
 
     def _require_caller(self, agent_id: str) -> dict[str, Any]:
         agent = self._require_agent(agent_id)
@@ -1692,6 +3434,21 @@ class OperatorService:
                 return logical
         return str(operator["agent_id"])
 
+    def _agent_resolves_to_logical_operator(
+        self,
+        agent_id: str,
+        logical_operator_id: str,
+    ) -> bool:
+        normalized_agent_id = str(agent_id or "").strip()
+        if not normalized_agent_id:
+            return False
+        if normalized_agent_id == logical_operator_id:
+            return True
+        agent = self.store.get_agent(normalized_agent_id)
+        if agent is None or agent.get("agent_type") != OPERATOR_AGENT_TYPE:
+            return False
+        return self._logical_operator_agent_id(agent) == logical_operator_id
+
     def local_codex_host_id(self) -> str:
         return os.getenv("AGENT_PBX_CODEX_HOST_ID", "").strip() or socket.gethostname()
 
@@ -1699,6 +3456,228 @@ class OperatorService:
         return (
             os.getenv(OPERATOR_TMUX_SESSION_ENV, DEFAULT_OPERATOR_TMUX_SESSION).strip()
             or DEFAULT_OPERATOR_TMUX_SESSION
+        )
+
+    def _validated_knowledge_source_fork_id(
+        self,
+        *,
+        logical_operator_id: str,
+        source_agent_id: str,
+        source_operator_fork_id: str | None,
+    ) -> str | None:
+        fork_id = str(source_operator_fork_id or "").strip()
+        if not fork_id:
+            return None
+        fork = self.store.get_operator_fork(fork_id) or self.store.get_operator_fork_for_agent(fork_id)
+        if fork is None:
+            raise ValueError("source_operator_fork_id not found")
+        if str(fork.get("logical_operator_agent_id") or "") != logical_operator_id:
+            raise ValueError("source_operator_fork_id belongs to a different operator")
+        if str(fork.get("fork_agent_id") or "") != source_agent_id:
+            raise ValueError("source_operator_fork_id does not match source_agent_id")
+        return str(fork["operator_fork_id"])
+
+    def _validated_handoff_target_fork_id(
+        self,
+        *,
+        target_logical_operator_id: str,
+        target_caller_agent_id: str | None,
+        target_operator_fork_id: str | None,
+    ) -> str | None:
+        fork_id = str(target_operator_fork_id or "").strip()
+        if not fork_id:
+            return None
+        fork = self.store.get_operator_fork(fork_id) or self.store.get_operator_fork_for_agent(fork_id)
+        if fork is None:
+            raise ValueError("target_operator_fork_id not found")
+        if str(fork.get("logical_operator_agent_id") or "") != target_logical_operator_id:
+            raise ValueError("target_operator_fork_id belongs to a different operator")
+        if target_caller_agent_id and str(fork.get("source_caller_agent_id") or "") != target_caller_agent_id:
+            raise ValueError("target_operator_fork_id source caller does not match target_caller_agent_id")
+        return str(fork["operator_fork_id"])
+
+    def _validate_knowledge_participant(
+        self,
+        link: dict[str, Any],
+        agent_id: str,
+    ) -> None:
+        participants = {
+            str(link.get("source_agent_id") or ""),
+            str(link.get("target_agent_id") or ""),
+            str(link.get("logical_operator_agent_id") or ""),
+            str(link.get("operator_agent_id") or ""),
+        }
+        if agent_id not in participants:
+            raise ValueError("knowledge turn participant is not part of the link")
+
+    @staticmethod
+    def _normalize_knowledge_link_type(link_type: str) -> str:
+        normalized = str(link_type or "domain_context").strip().lower()
+        if normalized not in KNOWLEDGE_LINK_TYPES:
+            raise ValueError("link_type must be handoff, consult, domain_context, or review_context")
+        return normalized
+
+    @staticmethod
+    def _normalize_knowledge_link_status(status: str) -> str:
+        normalized = str(status or "active").strip().lower()
+        if normalized not in KNOWLEDGE_LINK_STATUSES:
+            raise ValueError("status must be proposed, active, closed, canceled, or cancelled")
+        return normalized
+
+    @staticmethod
+    def _normalize_knowledge_turn_type(turn_type: str) -> str:
+        normalized = str(turn_type or "note").strip().lower()
+        if normalized not in KNOWLEDGE_TURN_TYPES:
+            raise ValueError("turn_type must be handoff, question, answer, or note")
+        return normalized
+
+    @staticmethod
+    def _normalize_handoff_status(status: str) -> str:
+        normalized = str(status or "").strip().lower()
+        if normalized not in HANDOFF_STATUSES:
+            raise ValueError("handoff status is invalid")
+        return normalized
+
+    @staticmethod
+    def _normalize_operator_kb_status(status: str | None) -> str:
+        normalized = str(status or "proposed").strip().lower()
+        if normalized not in OPERATOR_KB_STATUSES:
+            raise ValueError("KB status is invalid")
+        return normalized
+
+    @staticmethod
+    def _normalize_operator_kb_redaction_status(status: str | None) -> str:
+        normalized = str(status or "unreviewed").strip().lower()
+        if normalized not in OPERATOR_KB_REDACTION_STATUSES:
+            raise ValueError("KB redaction status is invalid")
+        return normalized
+
+    @staticmethod
+    def _operator_kb_redaction_status(
+        *,
+        title: str,
+        summary: str,
+        body: str,
+        metadata: dict[str, Any],
+    ) -> str:
+        text = "\n".join(
+            [
+                str(title or ""),
+                str(summary or ""),
+                str(body or ""),
+                str(metadata or {}),
+            ]
+        )
+        for pattern in OPERATOR_KB_SECRET_PATTERNS:
+            if pattern.search(text):
+                return "needs_review"
+        return "clean"
+
+    @staticmethod
+    def _operator_kb_body_from_link(
+        link: dict[str, Any],
+        turns: list[dict[str, Any]],
+    ) -> str:
+        lines = [
+            "# Operator Knowledge Link Snapshot",
+            "",
+            f"Knowledge link: {link.get('link_id')}",
+            f"Link type: {link.get('link_type')}",
+            f"Source agent: {link.get('source_agent_id')}",
+            f"Target agent: {link.get('target_agent_id')}",
+            f"Status: {link.get('status')}",
+            "",
+            "## Summary",
+            "",
+            str(link.get("summary") or "No summary recorded."),
+            "",
+            "## Turns",
+            "",
+        ]
+        if not turns:
+            lines.append("No turns selected.")
+            return "\n".join(lines)
+        sorted_turns = sorted(
+            turns,
+            key=lambda turn: (
+                float(turn.get("created_at") or 0.0),
+                str(turn.get("turn_id") or ""),
+            ),
+        )
+        for turn in sorted_turns:
+            lines.extend(
+                [
+                    f"### {turn.get('turn_type') or 'turn'} {turn.get('turn_id')}",
+                    "",
+                    f"Sender: {turn.get('sender_agent_id')}",
+                    f"Recipient: {turn.get('recipient_agent_id')}",
+                    f"Delivery: {turn.get('delivery_status')}",
+                    "",
+                    str(turn.get("message") or ""),
+                    "",
+                ]
+            )
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _float_or_none(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _knowledge_turn_message(
+        *,
+        link: dict[str, Any],
+        message: str,
+        turn_type: str,
+    ) -> str:
+        return "\n".join(
+            [
+                "Operator knowledge transfer",
+                "",
+                f"Knowledge link: {link.get('link_id')}",
+                f"Link type: {link.get('link_type')}",
+                f"Turn type: {turn_type}",
+                f"Source agent: {link.get('source_agent_id')}",
+                f"Target agent: {link.get('target_agent_id')}",
+                "",
+                message,
+                "",
+                "Use Agent PBX reports for questions, answers, and completion evidence. "
+                "This knowledge link does not change operator fork ownership or source permissions.",
+            ]
+        )
+
+    def _record_knowledge_turn_event(
+        self,
+        *,
+        link: dict[str, Any],
+        turn: dict[str, Any],
+        operator_agent_id: str,
+        command: dict[str, Any] | None,
+    ) -> None:
+        payload = {
+            "link_id": link.get("link_id"),
+            "turn_id": turn.get("turn_id"),
+            "operator_agent_id": operator_agent_id,
+            "logical_operator_agent_id": link.get("logical_operator_agent_id"),
+            "source_agent_id": link.get("source_agent_id"),
+            "target_agent_id": link.get("target_agent_id"),
+            "sender_agent_id": turn.get("sender_agent_id"),
+            "recipient_agent_id": turn.get("recipient_agent_id"),
+            "turn_type": turn.get("turn_type"),
+            "delivery_status": turn.get("delivery_status"),
+            "command_id": command.get("command_id") if command else None,
+            "command_status": command.get("status") if command else None,
+        }
+        self.store.append_event(
+            "operator_knowledge_turn_delivered",
+            payload,
+            str(link.get("link_id") or ""),
         )
 
     def _fork_blocked_reason(

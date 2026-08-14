@@ -785,6 +785,142 @@ def test_hidden_agents_can_be_listed_and_unhidden(tmp_path: Path) -> None:
     ]
 
 
+def test_agent_prune_preview_apply_and_undo_respects_guards(tmp_path: Path) -> None:
+    db_path = tmp_path / "pbx.sqlite"
+    client = TestClient(create_app(ServerConfig(db_path=db_path)))
+    old = time.time() - (45 * 86_400)
+    for agent_id, status in {
+        "old-done": "done",
+        "old-starred": "done",
+        "old-queued": "done",
+        "old-linked": "done",
+        "old-stale": "working",
+        "recent-done": "done",
+    }.items():
+        client.post(
+            "/v1/agents/register",
+            json={"agent_id": agent_id, "project": "demo"},
+        )
+        client.post(
+            f"/v1/agents/{agent_id}/reports",
+            json={
+                "project": "demo",
+                "status": status,
+                "summary": status,
+                "detail": status,
+            },
+        )
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "operator-0", "project": "ops", "agent_type": "operator"},
+    )
+    client.post("/v1/agents/old-starred/star")
+    client.post(
+        "/v1/commands",
+        json={
+            "agent_id": "old-queued",
+            "type": "send_input",
+            "payload": {"message": "still pending"},
+        },
+    )
+    client.post(
+        "/v1/operator/knowledge-links",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_agent_id": "old-linked",
+            "target_agent_id": "operator-0",
+            "link_type": "domain_context",
+            "summary": "active link protects source",
+        },
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE agents SET last_seen_at = ? WHERE agent_id != 'recent-done'",
+            (old,),
+        )
+        conn.execute(
+            "UPDATE agents SET last_seen_at = ? WHERE agent_id = 'recent-done'",
+            (time.time(),),
+        )
+
+    preview = client.post(
+        "/v1/agents/prune/preview",
+        json={"preset": "terminal-callers", "min_age_days": 30},
+    )
+    applied = client.post(
+        "/v1/agents/prune/apply",
+        json={"preset": "terminal-callers", "min_age_days": 30},
+    )
+    visible_after_apply = {
+        agent["agent_id"] for agent in client.get("/v1/agents").json()
+    }
+    batch = applied.json()["batch"]
+    undo = client.post(f"/v1/agents/prune/batches/{batch['batch_id']}/undo")
+    visible_after_undo = {
+        agent["agent_id"] for agent in client.get("/v1/agents").json()
+    }
+
+    assert preview.status_code == 200
+    assert {item["agent_id"] for item in preview.json()["candidates"]} == {"old-done"}
+    skipped = {
+        item["agent_id"]: item["guard_reasons"]
+        for item in preview.json()["skipped"]
+    }
+    assert "starred" in skipped["old-starred"]
+    assert "queued_commands" in skipped["old-queued"]
+    assert "active_knowledge_link" in skipped["old-linked"]
+    assert applied.status_code == 200
+    assert batch["hidden_count"] == 1
+    assert "old-done" not in visible_after_apply
+    assert "old-starred" in visible_after_apply
+    assert undo.status_code == 200
+    assert undo.json()["undone_at"] is not None
+    assert "old-done" in visible_after_undo
+
+
+def test_agent_prune_operator_forks_requires_no_tmux_pane(tmp_path: Path) -> None:
+    db_path = tmp_path / "pbx.sqlite"
+    client = TestClient(create_app(ServerConfig(db_path=db_path)))
+    old = time.time() - (45 * 86_400)
+    for agent_id, metadata in {
+        "fork-no-pane": {"operator_role": "fork", "logical_operator_id": "operator-0"},
+        "fork-with-pane": {
+            "operator_role": "fork",
+            "logical_operator_id": "operator-0",
+            "tmux_pane_id": "%1",
+        },
+    }.items():
+        client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": agent_id,
+                "project": "demo",
+                "agent_type": "operator",
+                "metadata": metadata,
+            },
+        )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE agents SET status = 'completed', last_seen_at = ?",
+            (old,),
+        )
+
+    preview = client.post(
+        "/v1/agents/prune/preview",
+        json={"preset": "operator-forks", "min_age_days": 30},
+    )
+
+    assert preview.status_code == 200
+    assert {item["agent_id"] for item in preview.json()["candidates"]} == {
+        "fork-no-pane"
+    }
+    skipped = {
+        item["agent_id"]: item["guard_reasons"]
+        for item in preview.json()["skipped"]
+    }
+    assert "tmux_pane_recorded" in skipped["fork-with-pane"]
+
+
 def test_dismissed_agent_reappears_on_report_or_poll(tmp_path: Path) -> None:
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
     for agent_id in ("report-agent", "poll-agent"):
@@ -1070,6 +1206,406 @@ def test_operator_project_spawn_api_request_list_and_status(tmp_path: Path) -> N
     assert updated.status_code == 200
     assert updated.json()["status"] == "launched"
     assert updated.json()["launched_agent_id"] == "codex-Next-Demo"
+
+
+def test_operator_knowledge_link_api_propose_approve_and_close(
+    tmp_path: Path,
+) -> None:
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    for payload in [
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+        {
+            "agent_id": "operator-B",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "nohup", "cwd": str(tmp_path / "operator-B")},
+        },
+        {
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        },
+    ]:
+        client.post("/v1/agents/register", json=payload)
+    fork = client.post(
+        "/v1/operator/forks/ensure",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_caller_agent_id": "caller-1",
+            "fork_agent_id": "operator-0-fork-caller-1-review-1",
+            "fork_track_id": "review-1",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+            "source_cwd": str(caller_cwd),
+            "work_root": str(tmp_path / ".agent-pbx-review" / "review"),
+            "status": "running",
+            "metadata": {"pbx_mode": "report"},
+        },
+    ).json()
+
+    proposed = client.post(
+        "/v1/operator/knowledge-links/proposals",
+        json={
+            "operator_agent_id": fork["fork_agent_id"],
+            "source_agent_id": fork["fork_agent_id"],
+            "target_agent_id": "operator-B",
+            "source_operator_fork_id": fork["operator_fork_id"],
+            "message": "Share enough domain context for operator-B to continue.",
+            "summary": "Domain handoff",
+        },
+    )
+    assert proposed.status_code == 200
+    proposal = proposed.json()
+    link = proposal["link"]
+    turn = proposal["turn"]
+
+    listed = client.get(
+        "/v1/operator/knowledge-links",
+        params={"operator_agent_id": "operator-0", "status": "proposed"},
+    )
+    context = client.get(
+        f"/v1/operator/knowledge-links/{link['link_id']}/context",
+        params={"operator_agent_id": "operator-0"},
+    )
+    delivered = client.post(
+        f"/v1/operator/knowledge-links/{link['link_id']}/turns/{turn['turn_id']}/approve",
+        json={"operator_agent_id": "operator-0", "delivery": "queue"},
+    )
+
+    assert listed.status_code == 200
+    assert listed.json()["knowledge_links"][0]["link_id"] == link["link_id"]
+    assert context.status_code == 200
+    assert context.json()["turns"][0]["delivery_status"] == "pending_approval"
+    assert delivered.status_code == 200
+    delivered_payload = delivered.json()
+    assert delivered_payload["link"]["status"] == "active"
+    assert delivered_payload["turn"]["delivery_status"] == "queued"
+    assert delivered_payload["command"]["agent_id"] == "operator-B"
+    assert (
+        delivered_payload["command"]["payload"]["source"]
+        == "operator_knowledge_turn"
+    )
+    forks = client.get(
+        "/v1/operator/forks",
+        params={"operator_agent_id": "operator-0"},
+    ).json()["forks"]
+    assert [item["operator_fork_id"] for item in forks] == [fork["operator_fork_id"]]
+
+    closed = client.post(
+        f"/v1/operator/knowledge-links/{link['link_id']}/close",
+        json={
+            "operator_agent_id": "operator-0",
+            "summary": "Knowledge share complete",
+        },
+    )
+    assert closed.status_code == 200
+    assert closed.json()["status"] == "closed"
+
+
+def test_operator_kb_api_propose_promote_export_and_import(
+    tmp_path: Path,
+) -> None:
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    for payload in [
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+        {
+            "agent_id": "operator-B",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path / "operator-B")},
+        },
+        {
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        },
+    ]:
+        client.post("/v1/agents/register", json=payload)
+    fork = client.post(
+        "/v1/operator/forks/ensure",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_caller_agent_id": "caller-1",
+            "fork_agent_id": "operator-0-fork-caller-1-review-1",
+            "fork_track_id": "review-1",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+            "source_cwd": str(caller_cwd),
+            "work_root": str(tmp_path / ".agent-pbx-review" / "review"),
+            "status": "running",
+            "metadata": {"pbx_mode": "report"},
+        },
+    ).json()
+    proposal = client.post(
+        "/v1/operator/knowledge-links/proposals",
+        json={
+            "operator_agent_id": fork["fork_agent_id"],
+            "source_agent_id": fork["fork_agent_id"],
+            "target_agent_id": "operator-B",
+            "source_operator_fork_id": fork["operator_fork_id"],
+            "message": "Routing context: keep review forks read only.",
+            "summary": "Routing handoff",
+        },
+    ).json()
+
+    proposed = client.post(
+        "/v1/operator/kb/from-link",
+        json={
+            "operator_agent_id": fork["fork_agent_id"],
+            "link_id": proposal["link"]["link_id"],
+            "title": "Review fork routing model",
+            "summary": "Review forks escalate writes to the root operator.",
+            "tags": ["routing", "review"],
+        },
+    )
+    assert proposed.status_code == 200
+    kb_entry = proposed.json()
+    assert kb_entry["status"] == "proposed"
+    assert kb_entry["redaction_status"] == "clean"
+    assert kb_entry["created_by_operator_agent_id"] == "operator-0"
+    assert kb_entry["created_by_agent_id"] == fork["fork_agent_id"]
+    assert kb_entry["source_knowledge_link_id"] == proposal["link"]["link_id"]
+    assert kb_entry["source_turn_ids"] == [proposal["turn"]["turn_id"]]
+
+    updated = client.patch(
+        f"/v1/operator/kb/{kb_entry['kb_id']}",
+        json={
+            "operator_agent_id": "operator-0",
+            "summary": "Review forks escalate source writes to the root operator.",
+            "body": "Review forks may propose KB entries but must not promote them.",
+            "tags": ["routing", "review", "kb"],
+        },
+    )
+    assert updated.status_code == 200
+    kb_entry = updated.json()
+    assert kb_entry["summary"] == "Review forks escalate source writes to the root operator."
+    assert kb_entry["body"] == "Review forks may propose KB entries but must not promote them."
+    assert kb_entry["tags"] == ["routing", "review", "kb"]
+
+    active_for_target = client.get(
+        "/v1/operator/kb",
+        params={"operator_agent_id": "operator-B", "query": "routing"},
+    )
+    proposed_for_source = client.get(
+        "/v1/operator/kb",
+        params={"operator_agent_id": "operator-0", "status": "proposed"},
+    )
+    proposed_for_target = client.get(
+        "/v1/operator/kb",
+        params={"operator_agent_id": "operator-B", "status": "proposed"},
+    )
+    assert active_for_target.status_code == 200
+    assert active_for_target.json()["kb_entries"] == []
+    assert proposed_for_source.json()["kb_entries"][0]["kb_id"] == kb_entry["kb_id"]
+    assert proposed_for_target.json()["kb_entries"] == []
+
+    fork_promote = client.post(
+        f"/v1/operator/kb/{kb_entry['kb_id']}/promote",
+        json={"operator_agent_id": fork["fork_agent_id"]},
+    )
+    assert fork_promote.status_code == 400
+
+    promoted = client.post(
+        f"/v1/operator/kb/{kb_entry['kb_id']}/promote",
+        json={"operator_agent_id": "operator-0"},
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["status"] == "active"
+    assert promoted.json()["promoted_at"] is not None
+
+    active_for_target = client.get(
+        "/v1/operator/kb",
+        params={"operator_agent_id": "operator-B", "query": "routing"},
+    )
+    assert active_for_target.json()["kb_entries"][0]["kb_id"] == kb_entry["kb_id"]
+
+    exported = client.get(
+        "/v1/operator/kb/export",
+        params={"operator_agent_id": "operator-0", "query": "routing"},
+    )
+    assert exported.status_code == 200
+    bundle = exported.json()
+    assert bundle["format"] == "agent-pbx-operator-kb-v1"
+    assert [entry["kb_id"] for entry in bundle["entries"]] == [kb_entry["kb_id"]]
+
+    imported = client.post(
+        "/v1/operator/kb/import",
+        json={
+            "operator_agent_id": "operator-B",
+            "bundle": bundle,
+            "import_status": "proposed",
+        },
+    )
+    assert imported.status_code == 200
+    imported_payload = imported.json()
+    assert imported_payload["imported_count"] == 1
+    assert imported_payload["skipped_count"] == 0
+    assert imported_payload["entries"][0]["status"] == "proposed"
+    assert imported_payload["entries"][0]["created_by_operator_agent_id"] == "operator-B"
+
+    reject_candidate = client.post(
+        "/v1/operator/kb",
+        json={
+            "operator_agent_id": "operator-0",
+            "scope": "project",
+            "project": "demo",
+            "title": "Discarded KB proposal",
+            "summary": "This proposal should not be published.",
+            "body": "Superseded by the promoted routing entry.",
+        },
+    )
+    assert reject_candidate.status_code == 200
+    rejected = client.post(
+        f"/v1/operator/kb/{reject_candidate.json()['kb_id']}/reject",
+        json={
+            "operator_agent_id": "operator-0",
+            "summary": "Superseded by another KB entry.",
+        },
+    )
+    assert rejected.status_code == 200
+    assert rejected.json()["status"] == "rejected"
+
+
+def test_operator_handoff_api_create_approve_ack_and_complete(
+    tmp_path: Path,
+) -> None:
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    for payload in [
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+        {
+            "agent_id": "operator-B",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "nohup", "cwd": str(tmp_path / "operator-B")},
+        },
+        {
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        },
+    ]:
+        client.post("/v1/agents/register", json=payload)
+
+    handoff = client.post(
+        "/v1/operator/handoffs",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_agent_id": "operator-0",
+            "target_operator_agent_id": "operator-B",
+            "target_caller_agent_id": "caller-1",
+            "message": "Transfer enough context to validate the checkpoint.",
+            "objective": "Validate checkpoint",
+            "allowed_mutation_scope": "no live mutation",
+            "required_artifacts": ["contract.json"],
+            "artifact_bundle": [{"path": "helper.env", "redacted": True}],
+            "expires_at": 4_000_000_000.0,
+        },
+    )
+    assert handoff.status_code == 200
+    handoff_payload = handoff.json()
+    handoff_id = handoff_payload["handoff_id"]
+
+    listed = client.get(
+        "/v1/operator/handoffs",
+        params={"operator_agent_id": "operator-0"},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["handoffs"][0]["handoff_id"] == handoff_id
+
+    pending = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/approve",
+        json={"operator_agent_id": "operator-0", "delivery": "queue"},
+    )
+    assert pending.status_code == 200
+    pending_payload = pending.json()
+    assert pending_payload["command"] is None
+    assert pending_payload["handoff"]["status"] == "pending_launch"
+
+    fork = client.post(
+        "/v1/operator/forks/ensure",
+        json={
+            "operator_agent_id": "operator-B",
+            "source_caller_agent_id": "caller-1",
+            "fork_agent_id": "operator-B-fork-caller-1",
+            "tmux_pane_id": "%44",
+            "status": "running",
+            "metadata": {"pbx_mode": "nohup", "tmux_pane_id": "%44"},
+        },
+    )
+    assert fork.status_code == 200
+
+    delivered = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/approve",
+        json={"operator_agent_id": "operator-0", "delivery": "queue"},
+    )
+    assert delivered.status_code == 200
+    delivered_payload = delivered.json()
+    assert delivered_payload["handoff"]["status"] == "sent"
+    assert delivered_payload["command"]["agent_id"] == "operator-B"
+    assert delivered_payload["command"]["payload"]["source"] == "operator_handoff"
+
+    acked = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/ack",
+        json={
+            "operator_agent_id": "operator-B",
+            "status": "running",
+            "summary": "Received and started.",
+            "detail": "Inputs present.",
+        },
+    )
+    assert acked.status_code == 200
+    assert acked.json()["delivery_evidence"]["agent_started"] is True
+
+    completed = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/status",
+        json={
+            "operator_agent_id": "operator-B",
+            "status": "complete",
+            "summary": "Knowledge transfer complete.",
+            "artifact_bundle": [{"path": "result.md", "redacted": False}],
+        },
+    )
+    assert completed.status_code == 200
+    completed_payload = completed.json()
+    assert completed_payload["status"] == "complete"
+    assert completed_payload["completed_at"] is not None
+    assert completed_payload["artifact_bundle"][0]["path"] == "result.md"
 
 
 def test_operator_fork_rebind_source_session_api(tmp_path: Path) -> None:

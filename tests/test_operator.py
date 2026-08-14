@@ -128,6 +128,246 @@ def test_operator_campaign_queue_delivery_and_state(tmp_path: Path) -> None:
     assert report["metadata"]["completion_state"] == "complete"
 
 
+def test_operator_knowledge_link_proposal_approval_keeps_fork_graph(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-B",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"pbx_mode": "nohup", "cwd": str(tmp_path / "operator-B")},
+        )
+    )
+    service = OperatorService(store)
+    review = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1-review-1",
+        fork_track_id="review-1",
+        fork_purpose="review",
+        access_mode="review_readonly",
+        status="running",
+        metadata={"pbx_mode": "report"},
+    )
+
+    proposed = service.propose_knowledge_handoff(
+        operator_agent_id=review["fork_agent_id"],
+        source_agent_id=review["fork_agent_id"],
+        target_agent_id="operator-B",
+        source_operator_fork_id=review["operator_fork_id"],
+        message="Transfer the routing model and ask follow-up questions as needed.",
+        summary="Routing handoff",
+    )
+    link = proposed["link"]
+    turn = proposed["turn"]
+
+    assert link["logical_operator_agent_id"] == "operator-0"
+    assert link["operator_agent_id"] == review["fork_agent_id"]
+    assert link["source_operator_fork_id"] == review["operator_fork_id"]
+    assert link["status"] == "proposed"
+    assert link["pending_turn_count"] == 1
+    assert turn["delivery_status"] == "pending_approval"
+    assert "does not change operator fork ownership" in turn["message"]
+    assert store.list_operator_fork_edges() == []
+    assert len(store.list_operator_forks(logical_operator_agent_id="operator-0")) == 1
+    assert store.get_operator_fork_for_agent("operator-B") is None
+
+    delivered = service.approve_knowledge_turn(
+        operator_agent_id="operator-0",
+        link_id=link["link_id"],
+        turn_id=turn["turn_id"],
+        delivery="queue",
+        metadata={"approved_by": "test"},
+    )
+    command = store.get_command(delivered["command"]["command_id"])
+
+    assert delivered["link"]["status"] == "active"
+    assert delivered["turn"]["delivery_status"] == "queued"
+    assert delivered["turn"]["metadata"]["approved_by_operator_agent_id"] == "operator-0"
+    assert command is not None
+    assert command["agent_id"] == "operator-B"
+    assert command["payload"]["source"] == "operator_knowledge_turn"
+    assert command["payload"]["knowledge_link_id"] == link["link_id"]
+    assert command["payload"]["sender_agent_id"] == review["fork_agent_id"]
+    assert store.list_operator_fork_edges() == []
+    assert len(store.list_operator_forks(logical_operator_agent_id="operator-0")) == 1
+    assert store.get_operator_fork_for_agent("operator-B") is None
+
+    response = service.send_knowledge_turn(
+        operator_agent_id="operator-0",
+        link_id=link["link_id"],
+        sender_agent_id="operator-B",
+        recipient_agent_id=review["fork_agent_id"],
+        message="What constraints should I preserve?",
+        turn_type="question",
+        delivery="record_only",
+    )
+
+    assert response["turn"]["turn_type"] == "question"
+    assert response["turn"]["delivery_status"] == "recorded"
+    context = service.knowledge_context(
+        operator_agent_id="operator-0",
+        link_id=link["link_id"],
+    )
+    assert [item["turn_id"] for item in context["turns"]] == [
+        turn["turn_id"],
+        response["turn"]["turn_id"],
+    ]
+
+    closed = service.close_knowledge_link(
+        operator_agent_id="operator-0",
+        link_id=link["link_id"],
+        summary="Knowledge transfer complete",
+    )
+    assert closed["status"] == "closed"
+    assert closed["closed_at"] is not None
+
+
+def test_operator_handoff_blocks_until_required_target_fork_launch(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-B",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"pbx_mode": "nohup", "cwd": str(tmp_path / "operator-B")},
+        )
+    )
+    service = OperatorService(store)
+    review = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1-review-1",
+        fork_track_id="review-1",
+        fork_purpose="review",
+        access_mode="review_readonly",
+        status="running",
+        metadata={"pbx_mode": "report"},
+    )
+
+    proposed = service.propose_knowledge_handoff(
+        operator_agent_id=review["fork_agent_id"],
+        source_agent_id=review["fork_agent_id"],
+        target_agent_id="operator-B",
+        source_operator_fork_id=review["operator_fork_id"],
+        message="Teach operator-B the routing model and start the checkpoint.",
+        summary="Routing checkpoint handoff",
+        metadata={
+            "target_caller_agent_id": "caller-1",
+            "allowed_mutation_scope": "static/unit validation only",
+            "required_artifacts": [{"path": "artifacts/contract.json"}],
+            "artifact_bundle": [{"path": "secret.env", "redacted": True}],
+            "expires_at": 4_000_000_000.0,
+        },
+    )
+    handoff = proposed["handoff"]
+
+    assert handoff["status"] == "proposed"
+    assert handoff["target_caller_agent_id"] == "caller-1"
+    assert handoff["required_artifacts"][0]["path"] == "artifacts/contract.json"
+    assert store.list_operator_fork_edges() == []
+
+    pending = service.approve_handoff(
+        operator_agent_id="operator-0",
+        handoff_id=handoff["handoff_id"],
+        delivery="queue",
+    )
+    pending_handoff = pending["handoff"]
+    pending_fork = store.get_operator_fork(pending_handoff["target_operator_fork_id"])
+
+    assert pending["command"] is None
+    assert pending_handoff["status"] == "pending_launch"
+    assert pending_fork is not None
+    assert pending_fork["logical_operator_agent_id"] == "operator-B"
+    assert pending_fork["source_caller_agent_id"] == "caller-1"
+    assert pending_fork["metadata"]["operator_fork_pending"] is True
+    assert store.get_operator_knowledge_turn(proposed["turn"]["turn_id"])["delivery_status"] == "pending_approval"  # type: ignore[index]
+
+    launched = service.ensure_fork(
+        operator_agent_id="operator-B",
+        source_caller_agent_id="caller-1",
+        fork_agent_id=pending_fork["fork_agent_id"],
+        tmux_pane_id="%42",
+        status="running",
+        metadata={"pbx_mode": "nohup", "tmux_pane_id": "%42"},
+    )
+    assert launched["operator_fork_id"] == pending_fork["operator_fork_id"]
+    assert launched["metadata"]["operator_fork_pending"] is False
+
+    delivered = service.approve_handoff(
+        operator_agent_id="operator-0",
+        handoff_id=handoff["handoff_id"],
+        delivery="queue",
+    )
+    command = store.get_command(delivered["command"]["command_id"])
+    delivered_turn = store.get_operator_knowledge_turn(proposed["turn"]["turn_id"])
+
+    assert delivered["handoff"]["status"] == "sent"
+    assert delivered["handoff"]["delivery_evidence"]["agent_acknowledged"] is False
+    assert command is not None
+    assert command["agent_id"] == "operator-B"
+    assert command["payload"]["source"] == "operator_handoff"
+    assert command["payload"]["handoff_id"] == handoff["handoff_id"]
+    assert delivered_turn is not None
+    assert delivered_turn["delivery_status"] == "queued"
+    assert store.get_operator_knowledge_link(proposed["link"]["link_id"])["status"] == "active"  # type: ignore[index]
+
+    running = service.ack_handoff(
+        operator_agent_id="operator-B",
+        handoff_id=handoff["handoff_id"],
+        status="running",
+        summary="Received handoff and started.",
+        detail="Inputs present; target fork launched.",
+    )
+
+    assert running["status"] == "running"
+    assert running["acknowledged_at"] is not None
+    assert running["started_at"] is not None
+    assert running["delivery_evidence"]["agent_acknowledged"] is True
+    assert running["delivery_evidence"]["agent_started"] is True
+    assert store.list_operator_fork_edges() == []
+
+
+def test_operator_handoff_expires_before_start(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-B",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"pbx_mode": "nohup", "cwd": str(tmp_path / "operator-B")},
+        )
+    )
+    service = OperatorService(store)
+    handoff = service.create_handoff(
+        operator_agent_id="operator-0",
+        source_agent_id="operator-0",
+        target_operator_agent_id="operator-B",
+        message="Use the short-lived helper now.",
+        objective="TTL-sensitive handoff",
+        expires_at=1.0,
+    )
+
+    expired = service.get_handoff(
+        operator_agent_id="operator-0",
+        handoff_id=handoff["handoff_id"],
+    )
+
+    assert expired["status"] == "expired"
+    assert expired["completed_at"] is not None
+    assert expired["safe_to_start"] is False
+
+
 def test_operator_custom_terminal_states_do_not_count_active(tmp_path: Path) -> None:
     store = Store(tmp_path / "pbx.sqlite")
     store.init()
@@ -410,6 +650,340 @@ async def test_mcp_operator_project_spawn_request_tool(tmp_path: Path) -> None:
     assert request["status"] == "pending"
     assert request["target_path"] == str(tmp_path / "Next-Demo")
     assert request["instructions"] == "Build the extracted app."
+
+
+@pytest.mark.asyncio
+async def test_mcp_operator_handoff_tools_create_approve_and_ack(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    for payload in [
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+        {
+            "agent_id": "operator-B",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "nohup", "cwd": str(tmp_path / "operator-B")},
+        },
+    ]:
+        await mcp.call_tool("pbx_register_agent", payload)
+
+    handoff = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_create_handoff",
+            {
+                "operator_agent_id": "operator-0",
+                "source_agent_id": "operator-0",
+                "target_operator_agent_id": "operator-B",
+                "message": "Share the domain model.",
+                "objective": "Knowledge share",
+                "required_artifacts": ["notes.md"],
+                "expires_at": 4_000_000_000.0,
+            },
+        )
+    )
+    approved = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_approve_handoff",
+            {
+                "operator_agent_id": "operator-0",
+                "handoff_id": handoff["handoff_id"],
+                "delivery": "queue",
+            },
+        )
+    )
+    listed = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_list_handoffs",
+            {"target_operator_agent_id": "operator-B"},
+        )
+    )
+    fetched = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_get_handoff",
+            {
+                "operator_agent_id": "operator-B",
+                "handoff_id": handoff["handoff_id"],
+            },
+        )
+    )
+    acked = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_ack_handoff",
+            {
+                "operator_agent_id": "operator-B",
+                "handoff_id": handoff["handoff_id"],
+                "summary": "Received handoff.",
+                "status": "acknowledged",
+            },
+        )
+    )
+
+    assert approved["handoff"]["status"] == "sent"
+    assert approved["command"]["agent_id"] == "operator-B"
+    assert approved["command"]["payload"]["source"] == "operator_handoff"
+    assert listed[0]["handoff_id"] == handoff["handoff_id"]
+    assert fetched["safe_to_start"] is True
+    assert acked["status"] == "acknowledged"
+    assert acked["delivery_evidence"]["agent_acknowledged"] is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_operator_knowledge_link_tools_scope_and_deliver(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    mcp = build_mcp_server(store)
+
+    for payload in [
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+        {
+            "agent_id": "operator-B",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "nohup", "cwd": str(tmp_path / "operator-B")},
+        },
+        {
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        },
+    ]:
+        await mcp.call_tool("pbx_register_agent", payload)
+    review = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_ensure_fork",
+            {
+                "operator_agent_id": "operator-0",
+                "source_caller_agent_id": "caller-1",
+                "fork_agent_id": "operator-0-fork-caller-1-review-1",
+                "fork_track_id": "review-1",
+                "fork_purpose": "review",
+                "access_mode": "review_readonly",
+                "source_cwd": str(caller_cwd),
+                "work_root": str(tmp_path / ".agent-pbx-review" / "review"),
+                "status": "running",
+                "metadata": {"pbx_mode": "report"},
+            },
+        )
+    )
+
+    proposed = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_propose_knowledge_handoff",
+            {
+                "operator_agent_id": review["fork_agent_id"],
+                "source_agent_id": review["fork_agent_id"],
+                "target_agent_id": "operator-B",
+                "source_operator_fork_id": review["operator_fork_id"],
+                "message": "Share the source routing constraints.",
+                "summary": "Routing context",
+            },
+        )
+    )
+    link = proposed["link"]
+    turn = proposed["turn"]
+
+    listed = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_list_knowledge_links",
+            {"operator_agent_id": "operator-0"},
+        )
+    )
+    context = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_get_knowledge_context",
+            {
+                "operator_agent_id": "operator-0",
+                "link_id": link["link_id"],
+            },
+        )
+    )
+    delivered = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_approve_knowledge_turn",
+            {
+                "operator_agent_id": "operator-0",
+                "link_id": link["link_id"],
+                "turn_id": turn["turn_id"],
+                "delivery": "queue",
+            },
+        )
+    )
+
+    assert [item["link_id"] for item in listed] == [link["link_id"]]
+    assert context["link"]["link_id"] == link["link_id"]
+    assert context["turns"][0]["turn_id"] == turn["turn_id"]
+    assert delivered["turn"]["delivery_status"] == "queued"
+    assert delivered["command"]["agent_id"] == "operator-B"
+    assert delivered["command"]["payload"]["source"] == "operator_knowledge_turn"
+    assert store.list_operator_fork_edges() == []
+    assert len(store.list_operator_forks(logical_operator_agent_id="operator-0")) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_operator_kb_tools_lifecycle(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    for payload in [
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+        {
+            "agent_id": "operator-B",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path / "operator-B")},
+        },
+    ]:
+        await mcp.call_tool("pbx_register_agent", payload)
+
+    proposed = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_propose",
+            {
+                "operator_agent_id": "operator-0",
+                "scope": "project",
+                "project": "agent-pbx",
+                "title": "Operator KB routing",
+                "summary": "Active KB entries are shared across operators.",
+                "body": "Promote only after root-operator review.",
+                "tags": ["kb", "routing"],
+            },
+        )
+    )
+    proposed_entries = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_search",
+            {
+                "operator_agent_id": "operator-0",
+                "status": "proposed",
+                "query": "routing",
+            },
+        )
+    )
+    updated = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_update",
+            {
+                "operator_agent_id": "operator-0",
+                "kb_id": proposed["kb_id"],
+                "updates": {
+                    "summary": "Active KB entries are visible across operators.",
+                    "body": "Root operators promote reviewed KB entries.",
+                    "tags": ["kb", "routing", "reviewed"],
+                },
+            },
+        )
+    )
+    promoted = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_promote",
+            {
+                "operator_agent_id": "operator-0",
+                "kb_id": proposed["kb_id"],
+            },
+        )
+    )
+    reject_candidate = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_propose",
+            {
+                "operator_agent_id": "operator-0",
+                "scope": "project",
+                "project": "agent-pbx",
+                "title": "Discarded KB",
+                "summary": "Superseded proposal.",
+                "body": "Do not publish.",
+            },
+        )
+    )
+    rejected = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_reject",
+            {
+                "operator_agent_id": "operator-0",
+                "kb_id": reject_candidate["kb_id"],
+                "summary": "Superseded.",
+            },
+        )
+    )
+    active_entries = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_search",
+            {
+                "operator_agent_id": "operator-B",
+                "query": "routing",
+            },
+        )
+    )
+    fetched = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_get",
+            {
+                "operator_agent_id": "operator-B",
+                "kb_id": proposed["kb_id"],
+            },
+        )
+    )
+    exported = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_export",
+            {
+                "operator_agent_id": "operator-0",
+                "query": "routing",
+            },
+        )
+    )
+    imported = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_import",
+            {
+                "operator_agent_id": "operator-B",
+                "bundle": exported,
+                "import_status": "proposed",
+            },
+        )
+    )
+
+    assert proposed["status"] == "proposed"
+    assert proposed["redaction_status"] == "clean"
+    assert [entry["kb_id"] for entry in proposed_entries] == [proposed["kb_id"]]
+    assert updated["summary"] == "Active KB entries are visible across operators."
+    assert updated["tags"] == ["kb", "routing", "reviewed"]
+    assert promoted["status"] == "active"
+    assert rejected["status"] == "rejected"
+    assert active_entries[0]["kb_id"] == proposed["kb_id"]
+    assert fetched["kb_id"] == proposed["kb_id"]
+    assert exported["format"] == "agent-pbx-operator-kb-v1"
+    assert imported["imported_count"] == 1
+    assert imported["entries"][0]["created_by_operator_agent_id"] == "operator-B"
 
 
 def test_operator_campaign_blocks_when_caller_has_no_codex_session(tmp_path: Path) -> None:

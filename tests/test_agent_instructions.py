@@ -68,6 +68,12 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "metadata.work_root" in instructions
     assert "pbx_operator_route_review_escalation" in instructions
     assert "pbx_operator_request_project_spawn" in instructions
+    assert "pbx_operator_ack_handoff" in instructions
+    assert "pbx_operator_update_handoff" in instructions
+    assert "pbx_operator_kb_propose" in instructions
+    assert "pbx_operator_kb_propose_from_link" in instructions
+    assert "rejection, retirement" in instructions
+    assert "must not promote durable knowledge directly" in instructions
     assert "operator-mediated path" in instructions
 
 
@@ -135,6 +141,13 @@ def test_runbook_payload_includes_command_guidance() -> None:
         "pbx_operator_request_project_spawn" in item
         for item in payload["agent_types"]
     )
+    assert any("pbx_operator_kb_propose" in item for item in payload["agent_types"])
+    assert any(
+        "update, promote, reject, retire, export, and import" in item
+        for item in payload["agent_types"]
+    )
+    assert any("pbx_operator_ack_handoff" in item for item in payload["agent_types"])
+    assert any("pbx_operator_update_handoff" in item for item in payload["agent_types"])
 
 
 def test_install_agent_instructions_check_missing_target(tmp_path: Path) -> None:

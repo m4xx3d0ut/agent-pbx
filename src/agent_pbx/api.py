@@ -55,6 +55,11 @@ from .pull_requests import (
 )
 from .schemas import (
     AgentActiveRequest,
+    AgentPruneApplyResponse,
+    AgentPruneBatchListResponse,
+    AgentPruneBatchResponse,
+    AgentPrunePreviewResponse,
+    AgentPruneRequest,
     AgentRegisterRequest,
     AgentResponse,
     CommandAckRequest,
@@ -86,6 +91,34 @@ from .schemas import (
     OperatorForkRebindSourceSessionRequest,
     OperatorForkResponse,
     OperatorFollowupRequest,
+    OperatorHandoffAckRequest,
+    OperatorHandoffApproveRequest,
+    OperatorHandoffCreateRequest,
+    OperatorHandoffDeliveryResponse,
+    OperatorHandoffListResponse,
+    OperatorHandoffResponse,
+    OperatorHandoffUpdateRequest,
+    OperatorKbEntryCreateRequest,
+    OperatorKbEntryResponse,
+    OperatorKbExportResponse,
+    OperatorKbFromLinkRequest,
+    OperatorKbImportRequest,
+    OperatorKbImportResponse,
+    OperatorKbListResponse,
+    OperatorKbPromoteRequest,
+    OperatorKbRejectRequest,
+    OperatorKbRetireRequest,
+    OperatorKbUpdateRequest,
+    OperatorKnowledgeContextResponse,
+    OperatorKnowledgeDeliveryResponse,
+    OperatorKnowledgeHandoffProposalRequest,
+    OperatorKnowledgeLinkCloseRequest,
+    OperatorKnowledgeLinkCreateRequest,
+    OperatorKnowledgeLinkListResponse,
+    OperatorKnowledgeLinkResponse,
+    OperatorKnowledgeProposalResponse,
+    OperatorKnowledgeTurnApproveRequest,
+    OperatorKnowledgeTurnCreateRequest,
     OperatorProjectSpawnListResponse,
     OperatorProjectSpawnRequest,
     OperatorProjectSpawnResponse,
@@ -278,6 +311,60 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         store: Store = Depends(get_store),
     ) -> list[dict[str, object]]:
         return store.list_agents(include_hidden=include_hidden)
+
+    @app.post(
+        "/v1/agents/prune/preview",
+        response_model=AgentPrunePreviewResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def preview_agent_prune(
+        request: AgentPruneRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        return store.preview_agent_prune(**request.model_dump())
+
+    @app.post(
+        "/v1/agents/prune/apply",
+        response_model=AgentPruneApplyResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def apply_agent_prune(
+        request: AgentPruneRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        criteria = request.model_dump()
+        preview = store.preview_agent_prune(**criteria)
+        batch = store.apply_agent_prune(
+            preview=preview,
+            criteria=criteria,
+            metadata=request.metadata,
+        )
+        return {"preview": preview, "batch": batch}
+
+    @app.get(
+        "/v1/agents/prune/batches",
+        response_model=AgentPruneBatchListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_agent_prune_batches(
+        limit: int = 20,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        return {"batches": store.list_agent_prune_batches(limit=limit)}
+
+    @app.post(
+        "/v1/agents/prune/batches/{batch_id}/undo",
+        response_model=AgentPruneBatchResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def undo_agent_prune_batch(
+        batch_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        batch = store.undo_agent_prune_batch(batch_id)
+        if batch is None:
+            raise HTTPException(status_code=404, detail="agent prune batch not found")
+        return batch
 
     @app.put(
         "/v1/agents/{agent_id}/pbx-active",
@@ -1375,6 +1462,542 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             to_fork_id=payload.to_fork_id,
             edge_type=payload.edge_type,
             summary=payload.summary,
+            metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/knowledge-links",
+        response_model=OperatorKnowledgeLinkListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_knowledge_links(
+        request: Request,
+        operator_agent_id: str | None = None,
+        source_agent_id: str | None = None,
+        target_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        links = await asyncio.to_thread(
+            operator_service.list_knowledge_links,
+            operator_agent_id=operator_agent_id,
+            source_agent_id=source_agent_id,
+            target_agent_id=target_agent_id,
+            status=status,
+            limit=limit,
+        )
+        return {"knowledge_links": links}
+
+    @app.post(
+        "/v1/operator/knowledge-links",
+        response_model=OperatorKnowledgeLinkResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def create_operator_knowledge_link(
+        payload: OperatorKnowledgeLinkCreateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.create_knowledge_link,
+            operator_agent_id=payload.operator_agent_id,
+            source_agent_id=payload.source_agent_id,
+            target_agent_id=payload.target_agent_id,
+            link_type=payload.link_type,
+            status=payload.status,
+            source_operator_fork_id=payload.source_operator_fork_id,
+            summary=payload.summary,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/knowledge-links/proposals",
+        response_model=OperatorKnowledgeProposalResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def propose_operator_knowledge_handoff(
+        payload: OperatorKnowledgeHandoffProposalRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.propose_knowledge_handoff,
+            operator_agent_id=payload.operator_agent_id,
+            source_agent_id=payload.source_agent_id,
+            target_agent_id=payload.target_agent_id,
+            message=payload.message,
+            link_type=payload.link_type,
+            source_operator_fork_id=payload.source_operator_fork_id,
+            summary=payload.summary,
+            metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/knowledge-links/{link_id}/context",
+        response_model=OperatorKnowledgeContextResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_operator_knowledge_context(
+        link_id: str,
+        request: Request,
+        operator_agent_id: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.knowledge_context,
+            operator_agent_id=operator_agent_id,
+            link_id=link_id,
+            limit=limit,
+        )
+
+    @app.post(
+        "/v1/operator/knowledge-links/{link_id}/turns",
+        response_model=OperatorKnowledgeDeliveryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def send_operator_knowledge_turn(
+        link_id: str,
+        payload: OperatorKnowledgeTurnCreateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.send_knowledge_turn,
+            operator_agent_id=payload.operator_agent_id,
+            link_id=link_id,
+            sender_agent_id=payload.sender_agent_id,
+            recipient_agent_id=payload.recipient_agent_id,
+            message=payload.message,
+            turn_type=payload.turn_type,
+            delivery=payload.delivery,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/knowledge-links/{link_id}/turns/{turn_id}/approve",
+        response_model=OperatorKnowledgeDeliveryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def approve_operator_knowledge_turn(
+        link_id: str,
+        turn_id: str,
+        payload: OperatorKnowledgeTurnApproveRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.approve_knowledge_turn,
+            operator_agent_id=payload.operator_agent_id,
+            link_id=link_id,
+            turn_id=turn_id,
+            delivery=payload.delivery,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/knowledge-links/{link_id}/close",
+        response_model=OperatorKnowledgeLinkResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def close_operator_knowledge_link(
+        link_id: str,
+        payload: OperatorKnowledgeLinkCloseRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.close_knowledge_link,
+            operator_agent_id=payload.operator_agent_id,
+            link_id=link_id,
+            status=payload.status,
+            summary=payload.summary,
+            metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/kb",
+        response_model=OperatorKbListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_kb_entries(
+        request: Request,
+        operator_agent_id: str,
+        query: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        status: str | None = "active",
+        tags: str | None = None,
+        include_expired: bool = False,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        parsed_tags = [
+            tag.strip()
+            for tag in str(tags or "").split(",")
+            if tag.strip()
+        ]
+        entries = await asyncio.to_thread(
+            operator_service.search_kb_entries,
+            operator_agent_id=operator_agent_id,
+            query=query,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=status,
+            tags=parsed_tags,
+            include_expired=include_expired,
+            limit=limit,
+        )
+        return {"kb_entries": entries}
+
+    @app.post(
+        "/v1/operator/kb",
+        response_model=OperatorKbEntryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def propose_operator_kb_entry(
+        payload: OperatorKbEntryCreateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.propose_kb_entry,
+            operator_agent_id=payload.operator_agent_id,
+            scope=payload.scope,
+            project=payload.project,
+            repo_root=payload.repo_root,
+            git_remote=payload.git_remote,
+            branch=payload.branch,
+            title=payload.title,
+            summary=payload.summary,
+            body=payload.body,
+            tags=payload.tags,
+            source_knowledge_link_id=payload.source_knowledge_link_id,
+            source_handoff_id=payload.source_handoff_id,
+            source_turn_ids=payload.source_turn_ids,
+            stale_after=payload.stale_after,
+            expires_at=payload.expires_at,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/kb/from-link",
+        response_model=OperatorKbEntryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def propose_operator_kb_from_link(
+        payload: OperatorKbFromLinkRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.propose_kb_from_link,
+            operator_agent_id=payload.operator_agent_id,
+            link_id=payload.link_id,
+            title=payload.title,
+            summary=payload.summary,
+            scope=payload.scope,
+            project=payload.project,
+            repo_root=payload.repo_root,
+            git_remote=payload.git_remote,
+            branch=payload.branch,
+            tags=payload.tags,
+            include_turn_ids=payload.include_turn_ids,
+            stale_after=payload.stale_after,
+            expires_at=payload.expires_at,
+            metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/kb/export",
+        response_model=OperatorKbExportResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def export_operator_kb_entries(
+        request: Request,
+        operator_agent_id: str,
+        query: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        status: str | None = "active",
+        tags: str | None = None,
+        include_expired: bool = False,
+        limit: int = 500,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        parsed_tags = [
+            tag.strip()
+            for tag in str(tags or "").split(",")
+            if tag.strip()
+        ]
+        return await run_operator_call(
+            operator_service.export_kb_entries,
+            operator_agent_id=operator_agent_id,
+            query=query,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=status,
+            tags=parsed_tags,
+            include_expired=include_expired,
+            limit=limit,
+        )
+
+    @app.post(
+        "/v1/operator/kb/import",
+        response_model=OperatorKbImportResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def import_operator_kb_entries(
+        payload: OperatorKbImportRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.import_kb_entries,
+            operator_agent_id=payload.operator_agent_id,
+            bundle=payload.bundle,
+            import_status=payload.import_status,
+            metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/kb/{kb_id}",
+        response_model=OperatorKbEntryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_operator_kb_entry(
+        kb_id: str,
+        request: Request,
+        operator_agent_id: str,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.get_kb_entry,
+            operator_agent_id=operator_agent_id,
+            kb_id=kb_id,
+        )
+
+    @app.patch(
+        "/v1/operator/kb/{kb_id}",
+        response_model=OperatorKbEntryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def update_operator_kb_entry(
+        kb_id: str,
+        payload: OperatorKbUpdateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        update_payload = payload.model_dump(exclude_unset=True)
+        operator_agent_id = str(update_payload.pop("operator_agent_id"))
+        metadata = update_payload.pop("metadata", {})
+        redaction_status = update_payload.pop("redaction_status", None)
+        return await run_operator_call(
+            operator_service.update_kb_entry,
+            operator_agent_id=operator_agent_id,
+            kb_id=kb_id,
+            updates=update_payload,
+            redaction_status=redaction_status,
+            metadata=metadata,
+        )
+
+    @app.post(
+        "/v1/operator/kb/{kb_id}/promote",
+        response_model=OperatorKbEntryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def promote_operator_kb_entry(
+        kb_id: str,
+        payload: OperatorKbPromoteRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.promote_kb_entry,
+            operator_agent_id=payload.operator_agent_id,
+            kb_id=kb_id,
+            redaction_status=payload.redaction_status,
+            summary=payload.summary,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/kb/{kb_id}/reject",
+        response_model=OperatorKbEntryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def reject_operator_kb_entry(
+        kb_id: str,
+        payload: OperatorKbRejectRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.reject_kb_entry,
+            operator_agent_id=payload.operator_agent_id,
+            kb_id=kb_id,
+            summary=payload.summary,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/kb/{kb_id}/retire",
+        response_model=OperatorKbEntryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def retire_operator_kb_entry(
+        kb_id: str,
+        payload: OperatorKbRetireRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.retire_kb_entry,
+            operator_agent_id=payload.operator_agent_id,
+            kb_id=kb_id,
+            summary=payload.summary,
+            metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/handoffs",
+        response_model=OperatorHandoffListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_handoffs(
+        request: Request,
+        operator_agent_id: str | None = None,
+        source_agent_id: str | None = None,
+        target_operator_agent_id: str | None = None,
+        target_caller_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        handoffs = await asyncio.to_thread(
+            operator_service.list_handoffs,
+            operator_agent_id=operator_agent_id,
+            source_agent_id=source_agent_id,
+            target_operator_agent_id=target_operator_agent_id,
+            target_caller_agent_id=target_caller_agent_id,
+            status=status,
+            limit=limit,
+        )
+        return {"handoffs": handoffs}
+
+    @app.post(
+        "/v1/operator/handoffs",
+        response_model=OperatorHandoffResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def create_operator_handoff(
+        payload: OperatorHandoffCreateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.create_handoff,
+            operator_agent_id=payload.operator_agent_id,
+            source_agent_id=payload.source_agent_id,
+            target_operator_agent_id=payload.target_operator_agent_id,
+            message=payload.message,
+            objective=payload.objective,
+            source_operator_fork_id=payload.source_operator_fork_id,
+            target_caller_agent_id=payload.target_caller_agent_id,
+            target_operator_fork_id=payload.target_operator_fork_id,
+            knowledge_link_id=payload.knowledge_link_id,
+            knowledge_turn_id=payload.knowledge_turn_id,
+            allowed_mutation_scope=payload.allowed_mutation_scope,
+            required_artifacts=payload.required_artifacts,
+            artifact_bundle=payload.artifact_bundle,
+            expires_at=payload.expires_at,
+            needs_ack=payload.needs_ack,
+            summary=payload.summary,
+            metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/handoffs/{handoff_id}",
+        response_model=OperatorHandoffResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_operator_handoff(
+        handoff_id: str,
+        request: Request,
+        operator_agent_id: str | None = None,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.get_handoff,
+            handoff_id=handoff_id,
+            operator_agent_id=operator_agent_id,
+        )
+
+    @app.post(
+        "/v1/operator/handoffs/{handoff_id}/approve",
+        response_model=OperatorHandoffDeliveryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def approve_operator_handoff(
+        handoff_id: str,
+        payload: OperatorHandoffApproveRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.approve_handoff,
+            operator_agent_id=payload.operator_agent_id,
+            handoff_id=handoff_id,
+            delivery=payload.delivery,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/handoffs/{handoff_id}/ack",
+        response_model=OperatorHandoffResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def ack_operator_handoff(
+        handoff_id: str,
+        payload: OperatorHandoffAckRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.ack_handoff,
+            operator_agent_id=payload.operator_agent_id,
+            handoff_id=handoff_id,
+            status=payload.status,
+            summary=payload.summary,
+            detail=payload.detail,
+            artifact_bundle=payload.artifact_bundle,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/handoffs/{handoff_id}/status",
+        response_model=OperatorHandoffResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def update_operator_handoff(
+        handoff_id: str,
+        payload: OperatorHandoffUpdateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.update_handoff,
+            operator_agent_id=payload.operator_agent_id,
+            handoff_id=handoff_id,
+            status=payload.status,
+            summary=payload.summary,
+            detail=payload.detail,
+            artifact_bundle=payload.artifact_bundle,
             metadata=payload.metadata,
         )
 

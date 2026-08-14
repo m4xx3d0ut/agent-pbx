@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 AgentType = Literal["caller", "operator"]
+AgentPrunePreset = Literal["terminal-callers", "stale-callers", "operator-forks"]
 CampaignDelivery = Literal["auto", "queue", "tmux"]
 CampaignStatus = Literal["running", "complete", "completed", "blocked", "failed", "canceled"]
 OperatorReviewEscalationRoute = Literal[
@@ -21,6 +22,55 @@ OperatorProjectSpawnStatus = Literal[
     "failed",
     "canceled",
     "cancelled",
+]
+OperatorKnowledgeLinkType = Literal[
+    "handoff",
+    "consult",
+    "domain_context",
+    "review_context",
+]
+OperatorKnowledgeLinkStatus = Literal[
+    "proposed",
+    "active",
+    "closed",
+    "canceled",
+    "cancelled",
+]
+OperatorKnowledgeTurnType = Literal[
+    "handoff",
+    "question",
+    "answer",
+    "note",
+]
+OperatorKnowledgeDeliveryStatus = Literal[
+    "pending_approval",
+    "recorded",
+    "queued",
+    "sent",
+    "failed",
+]
+OperatorHandoffStatus = Literal[
+    "proposed",
+    "approved",
+    "pending_launch",
+    "sent",
+    "acknowledged",
+    "running",
+    "complete",
+    "completed",
+    "blocked",
+    "failed",
+    "expired",
+    "canceled",
+    "cancelled",
+]
+OperatorKbScope = Literal["global", "project", "repo", "operator", "caller"]
+OperatorKbStatus = Literal["proposed", "active", "retired", "rejected"]
+OperatorKbRedactionStatus = Literal[
+    "unreviewed",
+    "clean",
+    "needs_review",
+    "blocked",
 ]
 AssignmentState = Literal[
     "pending",
@@ -92,6 +142,73 @@ class AgentResponse(BaseModel):
     latest_report_plan_option_count: int = 0
     latest_report_action_required: bool = False
     active_campaign_count: int = 0
+
+
+class AgentPruneRequest(BaseModel):
+    preset: AgentPrunePreset = "terminal-callers"
+    min_age_days: float = Field(default=30.0, ge=0.0, le=3650.0)
+    include_projects: list[str] = Field(default_factory=list)
+    exclude_projects: list[str] = Field(default_factory=list)
+    agent_ids: list[str] = Field(default_factory=list)
+    include_hidden: bool = False
+    include_starred: bool = False
+    require_no_tmux_pane: bool = True
+    limit: int = Field(default=500, ge=1, le=2000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentPruneCandidateResponse(BaseModel):
+    agent_id: str
+    agent_type: AgentType
+    project: str
+    status: str
+    effective_status: str | None = None
+    latest_report_status: str | None = None
+    last_seen_at: float
+    age_days: float
+    starred: bool = False
+    queued_command_count: int = 0
+    active_campaign_count: int = 0
+    reason: str
+    guard_reasons: list[str] = Field(default_factory=list)
+
+
+class AgentPrunePreviewResponse(BaseModel):
+    preset: str
+    min_age_days: float
+    include_hidden: bool = False
+    include_starred: bool = False
+    require_no_tmux_pane: bool = True
+    delete_thread: bool = False
+    candidate_count: int
+    skipped_count: int
+    candidates: list[AgentPruneCandidateResponse] = Field(default_factory=list)
+    skipped: list[AgentPruneCandidateResponse] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentPruneBatchResponse(BaseModel):
+    batch_id: str
+    preset: str
+    delete_thread: bool = False
+    criteria: dict[str, Any]
+    candidate_count: int
+    hidden_count: int
+    skipped_count: int
+    results: list[dict[str, Any]] = Field(default_factory=list)
+    undo_results: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: float
+    undone_at: float | None = None
+
+
+class AgentPruneApplyResponse(BaseModel):
+    preview: AgentPrunePreviewResponse
+    batch: AgentPruneBatchResponse
+
+
+class AgentPruneBatchListResponse(BaseModel):
+    batches: list[AgentPruneBatchResponse] = Field(default_factory=list)
 
 
 class StructuredPlanOption(BaseModel):
@@ -253,6 +370,330 @@ class OperatorForkEdgeResponse(BaseModel):
     summary: str | None = None
     metadata: dict[str, Any]
     created_at: float
+
+
+class OperatorKnowledgeLinkCreateRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    source_agent_id: str = Field(min_length=1, max_length=120)
+    target_agent_id: str = Field(min_length=1, max_length=120)
+    link_type: OperatorKnowledgeLinkType = "domain_context"
+    status: OperatorKnowledgeLinkStatus = "active"
+    source_operator_fork_id: str | None = Field(default=None, max_length=120)
+    summary: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKnowledgeHandoffProposalRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    source_agent_id: str = Field(min_length=1, max_length=120)
+    target_agent_id: str = Field(min_length=1, max_length=120)
+    message: str = Field(min_length=1)
+    link_type: OperatorKnowledgeLinkType = "domain_context"
+    source_operator_fork_id: str | None = Field(default=None, max_length=120)
+    summary: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKnowledgeTurnCreateRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    sender_agent_id: str = Field(min_length=1, max_length=120)
+    recipient_agent_id: str = Field(min_length=1, max_length=120)
+    message: str = Field(min_length=1)
+    turn_type: OperatorKnowledgeTurnType = "note"
+    delivery: CampaignDelivery | Literal["record_only"] = "auto"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKnowledgeTurnApproveRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    delivery: CampaignDelivery | Literal["record_only"] = "auto"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKnowledgeLinkCloseRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    status: OperatorKnowledgeLinkStatus = "closed"
+    summary: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKnowledgeTurnResponse(BaseModel):
+    turn_id: str
+    link_id: str
+    sender_agent_id: str
+    recipient_agent_id: str
+    turn_type: str
+    message: str
+    delivery_status: str
+    command_id: str | None = None
+    tmux_pane_id: str | None = None
+    error: str | None = None
+    metadata: dict[str, Any]
+    created_at: float
+
+
+class OperatorKnowledgeLinkResponse(BaseModel):
+    link_id: str
+    logical_operator_agent_id: str
+    operator_agent_id: str
+    source_agent_id: str
+    target_agent_id: str
+    source_operator_fork_id: str | None = None
+    link_type: str
+    status: str
+    summary: str | None = None
+    metadata: dict[str, Any]
+    created_at: float
+    updated_at: float
+    closed_at: float | None = None
+    pending_turn_count: int = 0
+    latest_turn_at: float | None = None
+
+
+class OperatorKnowledgeLinkListResponse(BaseModel):
+    knowledge_links: list[OperatorKnowledgeLinkResponse] = Field(default_factory=list)
+
+
+class OperatorKnowledgeContextResponse(BaseModel):
+    link: OperatorKnowledgeLinkResponse
+    turns: list[OperatorKnowledgeTurnResponse] = Field(default_factory=list)
+
+
+class OperatorKnowledgeProposalResponse(BaseModel):
+    link: OperatorKnowledgeLinkResponse
+    turn: OperatorKnowledgeTurnResponse
+    handoff: OperatorHandoffResponse | None = None
+
+
+class OperatorKnowledgeDeliveryResponse(BaseModel):
+    link: OperatorKnowledgeLinkResponse
+    turn: OperatorKnowledgeTurnResponse
+    command: CommandResponse | None = None
+
+
+class OperatorKbEntryCreateRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    scope: OperatorKbScope = "project"
+    project: str | None = Field(default=None, max_length=240)
+    repo_root: str | None = Field(default=None, max_length=1000)
+    git_remote: str | None = Field(default=None, max_length=1000)
+    branch: str | None = Field(default=None, max_length=240)
+    title: str = Field(min_length=1, max_length=400)
+    summary: str = Field(min_length=1, max_length=4000)
+    body: str = Field(min_length=1)
+    tags: list[str] = Field(default_factory=list)
+    source_knowledge_link_id: str | None = Field(default=None, max_length=120)
+    source_handoff_id: str | None = Field(default=None, max_length=120)
+    source_turn_ids: list[str] = Field(default_factory=list)
+    stale_after: float | None = None
+    expires_at: float | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKbFromLinkRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    link_id: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=400)
+    summary: str | None = Field(default=None, max_length=4000)
+    scope: OperatorKbScope = "project"
+    project: str | None = Field(default=None, max_length=240)
+    repo_root: str | None = Field(default=None, max_length=1000)
+    git_remote: str | None = Field(default=None, max_length=1000)
+    branch: str | None = Field(default=None, max_length=240)
+    tags: list[str] = Field(default_factory=list)
+    include_turn_ids: list[str] = Field(default_factory=list)
+    stale_after: float | None = None
+    expires_at: float | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKbPromoteRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    redaction_status: OperatorKbRedactionStatus = "clean"
+    summary: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKbUpdateRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    scope: OperatorKbScope | None = None
+    project: str | None = Field(default=None, max_length=240)
+    repo_root: str | None = Field(default=None, max_length=1000)
+    git_remote: str | None = Field(default=None, max_length=1000)
+    branch: str | None = Field(default=None, max_length=240)
+    title: str | None = Field(default=None, max_length=400)
+    summary: str | None = Field(default=None, max_length=4000)
+    body: str | None = None
+    tags: list[str] | None = None
+    redaction_status: OperatorKbRedactionStatus | None = None
+    stale_after: float | None = None
+    expires_at: float | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKbRetireRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    summary: str = Field(min_length=1, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKbRejectRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    summary: str = Field(min_length=1, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKbImportRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    bundle: dict[str, Any]
+    import_status: OperatorKbStatus = "proposed"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKbSourceResponse(BaseModel):
+    source_row_id: str
+    kb_id: str
+    source_type: str
+    source_id: str
+    metadata: dict[str, Any]
+    created_at: float
+
+
+class OperatorKbEntryResponse(BaseModel):
+    kb_id: str
+    scope: str
+    project: str | None = None
+    repo_root: str | None = None
+    git_remote: str | None = None
+    branch: str | None = None
+    title: str
+    summary: str
+    body: str
+    tags: list[str]
+    status: str
+    redaction_status: str
+    created_by_operator_agent_id: str
+    created_by_agent_id: str
+    source_knowledge_link_id: str | None = None
+    source_handoff_id: str | None = None
+    source_turn_ids: list[str]
+    stale_after: float | None = None
+    expires_at: float | None = None
+    metadata: dict[str, Any]
+    created_at: float
+    updated_at: float
+    promoted_at: float | None = None
+    retired_at: float | None = None
+    imported_at: float | None = None
+    sources: list[OperatorKbSourceResponse] = Field(default_factory=list)
+
+
+class OperatorKbListResponse(BaseModel):
+    kb_entries: list[OperatorKbEntryResponse] = Field(default_factory=list)
+
+
+class OperatorKbExportResponse(BaseModel):
+    format: str
+    version: int
+    exported_at: float
+    criteria: dict[str, Any]
+    entries: list[OperatorKbEntryResponse] = Field(default_factory=list)
+
+
+class OperatorKbImportResponse(BaseModel):
+    imported_count: int
+    skipped_count: int
+    entries: list[OperatorKbEntryResponse] = Field(default_factory=list)
+    skipped: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class OperatorHandoffCreateRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    source_agent_id: str = Field(min_length=1, max_length=120)
+    target_operator_agent_id: str = Field(min_length=1, max_length=120)
+    message: str = Field(min_length=1)
+    objective: str | None = Field(default=None, max_length=4000)
+    source_operator_fork_id: str | None = Field(default=None, max_length=120)
+    target_caller_agent_id: str | None = Field(default=None, max_length=120)
+    target_operator_fork_id: str | None = Field(default=None, max_length=120)
+    knowledge_link_id: str | None = Field(default=None, max_length=120)
+    knowledge_turn_id: str | None = Field(default=None, max_length=120)
+    allowed_mutation_scope: str | None = Field(default=None, max_length=4000)
+    required_artifacts: list[Any] = Field(default_factory=list)
+    artifact_bundle: list[Any] = Field(default_factory=list)
+    expires_at: float | None = None
+    needs_ack: bool = True
+    summary: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorHandoffApproveRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    delivery: CampaignDelivery | Literal["record_only"] = "auto"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorHandoffAckRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    status: OperatorHandoffStatus = "acknowledged"
+    summary: str = Field(min_length=1, max_length=4000)
+    detail: str | None = None
+    artifact_bundle: list[Any] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorHandoffUpdateRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    status: OperatorHandoffStatus
+    summary: str = Field(min_length=1, max_length=4000)
+    detail: str | None = None
+    artifact_bundle: list[Any] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorHandoffResponse(BaseModel):
+    handoff_id: str
+    logical_operator_agent_id: str
+    source_operator_agent_id: str
+    target_operator_agent_id: str
+    source_agent_id: str
+    source_operator_fork_id: str | None = None
+    target_caller_agent_id: str | None = None
+    target_operator_fork_id: str | None = None
+    knowledge_link_id: str | None = None
+    knowledge_turn_id: str | None = None
+    objective: str
+    message: str
+    allowed_mutation_scope: str | None = None
+    required_artifacts: list[Any]
+    artifact_bundle: list[Any]
+    status: str
+    needs_ack: bool
+    expires_at: float | None = None
+    time_remaining_seconds: float | None = None
+    expired: bool = False
+    safe_to_start: bool = True
+    acknowledged_at: float | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    command_id: str | None = None
+    tmux_pane_id: str | None = None
+    delivery_status: str | None = None
+    delivery_evidence: dict[str, Any]
+    error: str | None = None
+    summary: str | None = None
+    metadata: dict[str, Any]
+    created_at: float
+    updated_at: float
+
+
+class OperatorHandoffListResponse(BaseModel):
+    handoffs: list[OperatorHandoffResponse] = Field(default_factory=list)
+
+
+class OperatorHandoffDeliveryResponse(BaseModel):
+    handoff: OperatorHandoffResponse
+    command: CommandResponse | None = None
 
 
 class OperatorForkResponse(BaseModel):

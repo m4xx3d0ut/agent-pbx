@@ -164,6 +164,9 @@ project-working agent that reports or polls according to PBX mode. An
 call `pbx_operator_runbook`, create campaigns with one assignment per caller,
 inspect caller threads, send follow-ups, report assignment state, and finish the
 campaign. Operator agents must not poll or ack commands for caller agent IDs.
+Operators can use knowledge links plus executable handoffs for bounded transfers
+between operators or review forks without changing fork ownership, campaign
+assignment state, or source-session associations.
 
 Operator forks have roles. The default/edit fork may coordinate caller-directed
 edits. Review forks use `fork_purpose="review"` and
@@ -174,6 +177,18 @@ needs a new sibling project, request it with
 `pbx_operator_request_project_spawn`; the TUI/root operator must approve and
 launch that project as a normal caller agent. Do not directly create or attach
 project repositories from a review fork outside that operator-mediated path.
+If review work needs to transfer domain context, propose it with
+`pbx_operator_propose_knowledge_handoff`; review forks may list and inspect
+knowledge-link and handoff context, but the root operator/TUI must approve
+delivery with `pbx_operator_approve_handoff` or `/operator handoff approve`.
+Receiving operators acknowledge with `pbx_operator_ack_handoff` and report
+running, blocked, failed, or complete state with `pbx_operator_update_handoff`.
+When a knowledge link or handoff produces reusable operating guidance, operators
+and review forks may propose PBX-managed KB entries with
+`pbx_operator_kb_propose` or `pbx_operator_kb_propose_from_link`. Active KB
+publication, update, rejection, retirement, active imports, and export are
+root-operator actions. Review forks may search/get active KB entries and
+propose new entries, but they must not promote durable knowledge directly.
 
 If the operator asks for a Joplin note or document, call `pbx_joplin_status`
 first. If Joplin is available, use `pbx_joplin_create_document` to create
@@ -312,6 +327,12 @@ campaign tools rather than polling or acking caller commands. Use
 campaign, dispatch one assignment per caller, inspect caller threads, send
 follow-ups until each assignment satisfies its criteria or is blocked, report
 each assignment state, and finish the campaign.
+Use operator handoffs when the task is a bounded domain transfer between
+operators or review forks rather than a caller campaign assignment. Knowledge
+links record context; handoffs track approval, required target fork launch,
+delivery evidence, receiver acknowledgement, running state, TTL expiry, artifact
+summaries, and terminal state without changing fork ownership or caller
+source-session associations.
 
 Operator forks have roles. The default/edit fork may coordinate caller-directed
 edits. Review forks use `fork_purpose="review"` and
@@ -322,6 +343,14 @@ needs a new sibling project, request it with
 `pbx_operator_request_project_spawn`; the TUI/root operator must approve and
 launch that project as a normal caller agent. Do not directly create or attach
 project repositories from a review fork outside that operator-mediated path.
+If a review fork needs to hand domain context to another operator, call
+`pbx_operator_propose_knowledge_handoff`. Review forks can list and inspect
+knowledge-link and handoff context, but they cannot approve delivery or send
+unmediated knowledge turns; the root operator/TUI approves delivery.
+Operators can promote reusable, reviewed context into the PBX-managed KB. Review
+forks may search active KB entries and propose entries from knowledge links;
+root operators update, promote, reject, retire, export, and import canonical KB
+records.
 
 Caller agents are the default `agent_type="caller"` and keep the normal report
 or nohup behavior described above.
@@ -506,7 +535,7 @@ def runbook_payload() -> dict[str, Any]:
             "pbx_pr_context returns read-only GitHub pull request context for this agent project; agents use it for PR review only.",
             "pbx_issue_context returns read-only GitHub issue context for this agent project; agents use it for issue mitigation only.",
             "pbx_operator_runbook returns operator-agent campaign, review, and project-spawn guidance.",
-            "pbx_operator_* tools are for operator agents to create tracked campaigns, dispatch caller assignments, inspect caller threads, call pbx_operator_route_review_escalation, call pbx_operator_request_project_spawn for sibling project spawns, update assignment state, and finish campaigns.",
+            "pbx_operator_* tools are for operator agents to create tracked campaigns, dispatch caller assignments, inspect caller threads, call pbx_operator_route_review_escalation, call pbx_operator_request_project_spawn for sibling project spawns, create operator knowledge links and handoffs, propose/search/update/promote/reject/retire PBX-managed KB entries, update assignment or handoff state, and finish campaigns.",
         ],
         "agent_types": [
             "caller is the default agent_type and keeps existing report/nohup behavior.",
@@ -516,6 +545,10 @@ def runbook_payload() -> dict[str, Any]:
             "Review forks treat the caller source checkout as read-only and write only under metadata.work_root.",
             "Review forks route source-edit needs through pbx_operator_route_review_escalation.",
             "Review forks request sibling projects through pbx_operator_request_project_spawn; the TUI/root operator approves and launches the new project as a normal caller agent.",
+            "Review forks propose domain handoffs through pbx_operator_propose_knowledge_handoff; the TUI/root operator approves executable handoff delivery before another operator receives the workflow.",
+            "Review forks can search active KB entries and propose KB entries through pbx_operator_kb_propose or pbx_operator_kb_propose_from_link; root operators update, promote, reject, retire, export, and import canonical KB records.",
+            "Operators acknowledge handoffs through pbx_operator_ack_handoff and update running or terminal handoff state through pbx_operator_update_handoff.",
+            "Knowledge links and operator handoffs do not create fork edges, assignments, or source-session ownership.",
             "Campaign tables are the source of truth for campaign state; reports and commands are linked audit artifacts.",
         ],
         "pbx_modes": [

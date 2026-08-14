@@ -139,6 +139,481 @@ def build_mcp_server(
         )
 
     @mcp.tool()
+    def pbx_operator_create_knowledge_link(
+        operator_agent_id: str,
+        source_agent_id: str,
+        target_agent_id: str,
+        link_type: str = "domain_context",
+        status: str = "active",
+        source_operator_fork_id: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a read-only operator knowledge-sharing link."""
+        return operator_service.create_knowledge_link(
+            operator_agent_id=operator_agent_id,
+            source_agent_id=source_agent_id,
+            target_agent_id=target_agent_id,
+            link_type=link_type,
+            status=status,
+            source_operator_fork_id=source_operator_fork_id,
+            summary=summary,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_propose_knowledge_handoff(
+        operator_agent_id: str,
+        source_agent_id: str,
+        target_agent_id: str,
+        message: str,
+        link_type: str = "domain_context",
+        source_operator_fork_id: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Propose a knowledge handoff that requires operator/TUI delivery."""
+        return operator_service.propose_knowledge_handoff(
+            operator_agent_id=operator_agent_id,
+            source_agent_id=source_agent_id,
+            target_agent_id=target_agent_id,
+            message=message,
+            link_type=link_type,
+            source_operator_fork_id=source_operator_fork_id,
+            summary=summary,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_list_knowledge_links(
+        operator_agent_id: str,
+        source_agent_id: str | None = None,
+        target_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List operator knowledge-sharing links."""
+        return operator_service.list_knowledge_links(
+            operator_agent_id=operator_agent_id,
+            source_agent_id=source_agent_id,
+            target_agent_id=target_agent_id,
+            status=status,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_get_knowledge_context(
+        operator_agent_id: str,
+        link_id: str,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Return a knowledge link and its recorded turns."""
+        return operator_service.knowledge_context(
+            operator_agent_id=operator_agent_id,
+            link_id=link_id,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_send_knowledge_turn(
+        operator_agent_id: str,
+        link_id: str,
+        sender_agent_id: str,
+        recipient_agent_id: str,
+        message: str,
+        turn_type: str = "note",
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Send a knowledge-link turn without changing fork relationships."""
+        return operator_service.send_knowledge_turn(
+            operator_agent_id=operator_agent_id,
+            link_id=link_id,
+            sender_agent_id=sender_agent_id,
+            recipient_agent_id=recipient_agent_id,
+            message=message,
+            turn_type=turn_type,
+            delivery=delivery,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_approve_knowledge_turn(
+        operator_agent_id: str,
+        link_id: str,
+        turn_id: str,
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Approve and deliver a pending knowledge handoff turn."""
+        return operator_service.approve_knowledge_turn(
+            operator_agent_id=operator_agent_id,
+            link_id=link_id,
+            turn_id=turn_id,
+            delivery=delivery,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_close_knowledge_link(
+        operator_agent_id: str,
+        link_id: str,
+        status: str = "closed",
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Close a knowledge-sharing link."""
+        return operator_service.close_knowledge_link(
+            operator_agent_id=operator_agent_id,
+            link_id=link_id,
+            status=status,
+            summary=summary,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_search(
+        operator_agent_id: str,
+        query: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        status: str | None = "active",
+        tags: list[str] | None = None,
+        include_expired: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Search the PBX-managed operator knowledge base."""
+        return operator_service.search_kb_entries(
+            operator_agent_id=operator_agent_id,
+            query=query,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=status,
+            tags=tags or [],
+            include_expired=include_expired,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_get(
+        operator_agent_id: str,
+        kb_id: str,
+    ) -> dict[str, Any]:
+        """Return one PBX-managed operator KB entry."""
+        return operator_service.get_kb_entry(
+            operator_agent_id=operator_agent_id,
+            kb_id=kb_id,
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_propose(
+        operator_agent_id: str,
+        title: str,
+        summary: str,
+        body: str,
+        scope: str = "project",
+        project: str | None = None,
+        repo_root: str | None = None,
+        git_remote: str | None = None,
+        branch: str | None = None,
+        tags: list[str] | None = None,
+        source_knowledge_link_id: str | None = None,
+        source_handoff_id: str | None = None,
+        source_turn_ids: list[str] | None = None,
+        stale_after: float | None = None,
+        expires_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Propose durable operator knowledge for root-operator review."""
+        return operator_service.propose_kb_entry(
+            operator_agent_id=operator_agent_id,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            git_remote=git_remote,
+            branch=branch,
+            title=title,
+            summary=summary,
+            body=body,
+            tags=tags or [],
+            source_knowledge_link_id=source_knowledge_link_id,
+            source_handoff_id=source_handoff_id,
+            source_turn_ids=source_turn_ids or [],
+            stale_after=stale_after,
+            expires_at=expires_at,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_propose_from_link(
+        operator_agent_id: str,
+        link_id: str,
+        title: str,
+        summary: str | None = None,
+        scope: str = "project",
+        project: str | None = None,
+        repo_root: str | None = None,
+        git_remote: str | None = None,
+        branch: str | None = None,
+        tags: list[str] | None = None,
+        include_turn_ids: list[str] | None = None,
+        stale_after: float | None = None,
+        expires_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Propose a KB entry from an operator knowledge-link transcript."""
+        return operator_service.propose_kb_from_link(
+            operator_agent_id=operator_agent_id,
+            link_id=link_id,
+            title=title,
+            summary=summary,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            git_remote=git_remote,
+            branch=branch,
+            tags=tags or [],
+            include_turn_ids=include_turn_ids or [],
+            stale_after=stale_after,
+            expires_at=expires_at,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_promote(
+        operator_agent_id: str,
+        kb_id: str,
+        redaction_status: str = "clean",
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Promote a proposed KB entry into active canonical knowledge."""
+        return operator_service.promote_kb_entry(
+            operator_agent_id=operator_agent_id,
+            kb_id=kb_id,
+            redaction_status=redaction_status,
+            summary=summary,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_update(
+        operator_agent_id: str,
+        kb_id: str,
+        updates: dict[str, Any],
+        redaction_status: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Edit a KB entry before or after publication."""
+        return operator_service.update_kb_entry(
+            operator_agent_id=operator_agent_id,
+            kb_id=kb_id,
+            updates=updates,
+            redaction_status=redaction_status,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_reject(
+        operator_agent_id: str,
+        kb_id: str,
+        summary: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Reject a proposed KB entry while preserving audit history."""
+        return operator_service.reject_kb_entry(
+            operator_agent_id=operator_agent_id,
+            kb_id=kb_id,
+            summary=summary,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_retire(
+        operator_agent_id: str,
+        kb_id: str,
+        summary: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Retire an active operator KB entry."""
+        return operator_service.retire_kb_entry(
+            operator_agent_id=operator_agent_id,
+            kb_id=kb_id,
+            summary=summary,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_export(
+        operator_agent_id: str,
+        query: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        status: str | None = "active",
+        tags: list[str] | None = None,
+        include_expired: bool = False,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        """Export operator KB entries as a portable JSON-compatible bundle."""
+        return operator_service.export_kb_entries(
+            operator_agent_id=operator_agent_id,
+            query=query,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=status,
+            tags=tags or [],
+            include_expired=include_expired,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_import(
+        operator_agent_id: str,
+        bundle: dict[str, Any],
+        import_status: str = "proposed",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Import a portable operator KB bundle."""
+        return operator_service.import_kb_entries(
+            operator_agent_id=operator_agent_id,
+            bundle=bundle,
+            import_status=import_status,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_create_handoff(
+        operator_agent_id: str,
+        source_agent_id: str,
+        target_operator_agent_id: str,
+        message: str,
+        objective: str | None = None,
+        source_operator_fork_id: str | None = None,
+        target_caller_agent_id: str | None = None,
+        target_operator_fork_id: str | None = None,
+        knowledge_link_id: str | None = None,
+        knowledge_turn_id: str | None = None,
+        allowed_mutation_scope: str | None = None,
+        required_artifacts: list[Any] | None = None,
+        artifact_bundle: list[Any] | None = None,
+        expires_at: float | None = None,
+        needs_ack: bool = True,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create an executable operator-to-operator handoff workflow."""
+        return operator_service.create_handoff(
+            operator_agent_id=operator_agent_id,
+            source_agent_id=source_agent_id,
+            target_operator_agent_id=target_operator_agent_id,
+            message=message,
+            objective=objective,
+            source_operator_fork_id=source_operator_fork_id,
+            target_caller_agent_id=target_caller_agent_id,
+            target_operator_fork_id=target_operator_fork_id,
+            knowledge_link_id=knowledge_link_id,
+            knowledge_turn_id=knowledge_turn_id,
+            allowed_mutation_scope=allowed_mutation_scope,
+            required_artifacts=required_artifacts or [],
+            artifact_bundle=artifact_bundle or [],
+            expires_at=expires_at,
+            needs_ack=needs_ack,
+            summary=summary,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_list_handoffs(
+        operator_agent_id: str | None = None,
+        source_agent_id: str | None = None,
+        target_operator_agent_id: str | None = None,
+        target_caller_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List executable operator handoffs."""
+        return operator_service.list_handoffs(
+            operator_agent_id=operator_agent_id,
+            source_agent_id=source_agent_id,
+            target_operator_agent_id=target_operator_agent_id,
+            target_caller_agent_id=target_caller_agent_id,
+            status=status,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_get_handoff(
+        handoff_id: str,
+        operator_agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return a single operator handoff workflow."""
+        return operator_service.get_handoff(
+            handoff_id=handoff_id,
+            operator_agent_id=operator_agent_id,
+        )
+
+    @mcp.tool()
+    def pbx_operator_approve_handoff(
+        operator_agent_id: str,
+        handoff_id: str,
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Approve and deliver an operator handoff, or mark it pending launch."""
+        return operator_service.approve_handoff(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+            delivery=delivery,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_ack_handoff(
+        operator_agent_id: str,
+        handoff_id: str,
+        summary: str,
+        status: str = "acknowledged",
+        detail: str | None = None,
+        artifact_bundle: list[Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Acknowledge receipt or start of an operator handoff."""
+        return operator_service.ack_handoff(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+            status=status,
+            summary=summary,
+            detail=detail,
+            artifact_bundle=artifact_bundle or [],
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_update_handoff(
+        operator_agent_id: str,
+        handoff_id: str,
+        status: str,
+        summary: str,
+        detail: str | None = None,
+        artifact_bundle: list[Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Update an operator handoff to running, blocked, failed, or complete."""
+        return operator_service.update_handoff(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+            status=status,
+            summary=summary,
+            detail=detail,
+            artifact_bundle=artifact_bundle or [],
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
     def pbx_register_agent(
         agent_id: str,
         project: str,
