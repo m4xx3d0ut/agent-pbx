@@ -54,6 +54,7 @@ def test_operator_runbook_requires_visible_pbx_forks() -> None:
     assert "visible tmux/Codex pane" in delivery
     assert "must not implement caller repo changes directly" in delivery
     assert "Do not spawn or use Codex internal subagents" in delivery
+    assert "Manual KB seed runs" in delivery
     assert "multi_agent_v1" in delivery
 
 
@@ -984,6 +985,201 @@ async def test_mcp_operator_kb_tools_lifecycle(tmp_path: Path) -> None:
     assert exported["format"] == "agent-pbx-operator-kb-v1"
     assert imported["imported_count"] == 1
     assert imported["entries"][0]["created_by_operator_agent_id"] == "operator-B"
+
+
+async def test_mcp_operator_kb_seed_run_lifecycle(tmp_path: Path) -> None:
+    source_cwd = tmp_path / "caller-1"
+    source_cwd.mkdir()
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    for payload in [
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+        {
+            "agent_id": "operator-0-fork-review",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {
+                "operator_role": "fork",
+                "logical_operator_id": "operator-0",
+                "source_caller_agent_id": "caller-1",
+                "source_cwd": str(source_cwd),
+                "pbx_mode": "nohup",
+            },
+        },
+        {
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "pbx_mode": "report",
+                "cwd": str(source_cwd),
+                "codex_session_id": "session-caller-1",
+            },
+        },
+    ]:
+        await mcp.call_tool("pbx_register_agent", payload)
+
+    seeded = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_seed",
+            {
+                "operator_agent_id": "operator-0-fork-review",
+                "scope": "repo",
+                "project": "demo",
+                "repo_root": str(source_cwd),
+                "delivery": "queue",
+            },
+        )
+    )
+    seed_run = seeded["seed_run"]
+    command = seeded["command"]
+    seed_sync_key = seed_run["metadata"]["seed_sync_key"]
+
+    listed = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_list_seed_runs",
+            {"operator_agent_id": "operator-0", "status": "queued"},
+        )
+    )
+    fetched = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_get_seed_run",
+            {
+                "operator_agent_id": "operator-0-fork-review",
+                "seed_run_id": seed_run["seed_run_id"],
+            },
+        )
+    )
+    proposed = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_propose",
+            {
+                "operator_agent_id": "operator-0-fork-review",
+                "scope": "repo",
+                "project": "demo",
+                "repo_root": str(source_cwd),
+                "title": "Seeded operator workflow",
+                "summary": "Seed runs propose durable operator workflow guidance.",
+                "body": "Use seed-run metadata to keep imported knowledge auditable.",
+                "metadata": {
+                    "seed_run_id": seed_run["seed_run_id"],
+                    "seed_sync_key": seed_sync_key,
+                    "seed_type": seed_run["seed_type"],
+                    "extraction_version": "operator_kb_seed_v1",
+                },
+            },
+        )
+    )
+    completed = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_update_seed_run",
+            {
+                "operator_agent_id": "operator-0-fork-review",
+                "seed_run_id": seed_run["seed_run_id"],
+                "status": "complete",
+                "summary": "Created one KB proposal.",
+                "metadata": {"proposal_count": 1},
+            },
+        )
+    )
+
+    assert seed_run["status"] == "queued"
+    assert seed_run["logical_operator_agent_id"] == "operator-0"
+    assert seed_run["source_operator_agent_id"] == "operator-0-fork-review"
+    assert "pbx_operator_kb_propose" in seed_run["prompt"]
+    assert "pbx_operator_kb_update_seed_run" in seed_run["prompt"]
+    assert command["agent_id"] == "operator-0-fork-review"
+    assert command["payload"]["source"] == "operator_kb_seed_run"
+    assert command["payload"]["seed_run_id"] == seed_run["seed_run_id"]
+    assert [run["seed_run_id"] for run in listed] == [seed_run["seed_run_id"]]
+    assert fetched["seed_run_id"] == seed_run["seed_run_id"]
+    assert proposed["created_by_operator_agent_id"] == "operator-0"
+    assert proposed["created_by_agent_id"] == "operator-0-fork-review"
+    assert proposed["metadata"]["seed_run_id"] == seed_run["seed_run_id"]
+    assert len(proposed["sources"]) == 1
+    source = proposed["sources"][0]
+    assert source["source_type"] == "kb_seed_run"
+    assert source["source_id"] == seed_run["seed_run_id"]
+    assert source["metadata"] == {
+        "seed_type": seed_run["seed_type"],
+        "seed_sync_key": seed_sync_key,
+    }
+    assert completed["status"] == "complete"
+    assert completed["completed_at"] is not None
+    assert completed["metadata"]["proposal_count"] == 1
+
+
+def test_operator_kb_seed_run_provenance_requires_seeded_source(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    source_cwd = tmp_path / "caller-1"
+    source_cwd.mkdir()
+    for agent_id in [
+        "operator-0",
+        "operator-0-fork-review-1",
+        "operator-0-fork-review-2",
+    ]:
+        metadata = {"pbx_mode": "report", "cwd": str(tmp_path)}
+        if "-fork-" in agent_id:
+            metadata = {
+                "operator_role": "fork",
+                "logical_operator_id": "operator-0",
+                "source_cwd": str(source_cwd),
+                "pbx_mode": "nohup",
+            }
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=agent_id,
+                project="agent-pbx-operator",
+                agent_type="operator",
+                metadata=metadata,
+            )
+        )
+    service = OperatorService(store)
+
+    seeded = service.start_kb_seed_run(
+        operator_agent_id="operator-0-fork-review-1",
+        scope="repo",
+        project="demo",
+        repo_root=str(source_cwd),
+        delivery="queue",
+    )
+    seed_run = seeded["seed_run"]
+    seed_sync_key = seed_run["metadata"]["seed_sync_key"]
+
+    with pytest.raises(ValueError, match="different source operator"):
+        service.propose_kb_entry(
+            operator_agent_id="operator-0-fork-review-2",
+            title="Wrong fork seed proposal",
+            summary="This should not attach to another fork's seed run.",
+            body="Seed provenance belongs to the seeded source operator.",
+            metadata={
+                "seed_run_id": seed_run["seed_run_id"],
+                "seed_sync_key": seed_sync_key,
+            },
+        )
+    with pytest.raises(ValueError, match="different source operator"):
+        service.update_kb_seed_run(
+            operator_agent_id="operator-0-fork-review-2",
+            seed_run_id=seed_run["seed_run_id"],
+            status="complete",
+            summary="Wrong fork complete.",
+        )
+    completed = service.update_kb_seed_run(
+        operator_agent_id="operator-0",
+        seed_run_id=seed_run["seed_run_id"],
+        status="complete",
+        summary="Root closed the seed run.",
+    )
+    assert completed["status"] == "complete"
 
 
 def test_operator_campaign_blocks_when_caller_has_no_codex_session(tmp_path: Path) -> None:

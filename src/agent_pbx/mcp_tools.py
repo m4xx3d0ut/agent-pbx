@@ -486,6 +486,76 @@ def build_mcp_server(
         )
 
     @mcp.tool()
+    def pbx_operator_kb_seed(
+        operator_agent_id: str,
+        seed_type: str = "operator_self_seed",
+        scope: str = "project",
+        project: str | None = None,
+        repo_root: str | None = None,
+        git_remote: str | None = None,
+        branch: str | None = None,
+        prompt: str | None = None,
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Start a manual operator KB seed run and deliver the seed prompt."""
+        return operator_service.start_kb_seed_run(
+            operator_agent_id=operator_agent_id,
+            seed_type=seed_type,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            git_remote=git_remote,
+            branch=branch,
+            prompt=prompt,
+            delivery=delivery,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_list_seed_runs(
+        operator_agent_id: str,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List manual operator KB seed runs for a logical operator."""
+        return operator_service.list_kb_seed_runs(
+            operator_agent_id=operator_agent_id,
+            status=status,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_get_seed_run(
+        operator_agent_id: str,
+        seed_run_id: str,
+    ) -> dict[str, Any]:
+        """Return one manual operator KB seed run."""
+        return operator_service.get_kb_seed_run(
+            operator_agent_id=operator_agent_id,
+            seed_run_id=seed_run_id,
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_update_seed_run(
+        operator_agent_id: str,
+        seed_run_id: str,
+        status: str,
+        summary: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Update manual operator KB seed-run status after proposing entries."""
+        return operator_service.update_kb_seed_run(
+            operator_agent_id=operator_agent_id,
+            seed_run_id=seed_run_id,
+            status=status,
+            summary=summary,
+            error=error,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
     def pbx_operator_create_handoff(
         operator_agent_id: str,
         source_agent_id: str,
@@ -639,16 +709,30 @@ def build_mcp_server(
                 pbx_active=pbx_active,
             )
         )
+        registered_project = str(agent.get("project") or project)
+        registered_agent_type = str(agent.get("agent_type") or agent_type)
         store.append_event(
             "agent_registered",
             {
                 "agent_id": agent_id,
-                "project": project,
-                "agent_type": agent.get("agent_type", "caller"),
+                "project": registered_project,
+                "agent_type": registered_agent_type,
                 "pbx_active": pbx_active,
             },
             agent_id,
         )
+        if registered_project != project:
+            store.append_event(
+                "agent_registration_project_canonicalized",
+                {
+                    "agent_id": agent_id,
+                    "requested_project": project,
+                    "project": registered_project,
+                    "agent_type": registered_agent_type,
+                    "pbx_active": pbx_active,
+                },
+                agent_id,
+            )
         logger.debug("mcp.tool.finish name=pbx_register_agent agent_id=%s", agent_id)
         return agent
 
@@ -684,13 +768,13 @@ def build_mcp_server(
         status: str = "done",
         needs_input: bool = False,
         plan_options: list[str | dict[str, Any]] | None = None,
+        reporting_agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         logger.debug("mcp.tool.start name=pbx_report_turn agent_id=%s status=%s", agent_id, status)
         if store.get_agent(agent_id) is None:
             raise ValueError("agent not registered")
-        report = store.create_report(
-            agent_id,
+        request = store.report_request_with_identity_metadata(
             ReportCreateRequest(
                 project=project,
                 status=status,
@@ -698,8 +782,17 @@ def build_mcp_server(
                 detail=detail,
                 needs_input=needs_input,
                 plan_options=plan_options or [],
+                reporting_agent_id=reporting_agent_id,
                 metadata=metadata or {},
-            ),
+            )
+        )
+        violation = store.report_identity_violation_payload(agent_id, request)
+        if violation is not None:
+            store.append_event("report_identity_violation", violation, agent_id)
+            raise ValueError(str(violation["reason"]))
+        report = store.create_report(
+            agent_id,
+            request,
         )
         store.append_event(
             "report_created",
@@ -709,6 +802,7 @@ def build_mcp_server(
                 "status": status,
                 "summary": summary,
                 "needs_input": needs_input,
+                "created_at": report["created_at"],
             },
             report["report_id"],
         )

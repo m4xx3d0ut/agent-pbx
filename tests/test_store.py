@@ -109,6 +109,53 @@ def test_register_agent_preserves_operator_identity_on_default_refresh(
     assert agent["metadata"]["pbx_mode"] == "report"
 
 
+def test_register_agent_canonicalizes_root_operator_project_on_bad_refresh(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            name="operator-0",
+            agent_type="operator",
+            metadata={
+                "agent_type": "operator",
+                "operator_role": "root",
+                "cwd": str(tmp_path / "agent-pbx"),
+                "tmux_pane_id": "%1",
+                "launched_by": "agent-pbx-tui",
+            },
+        )
+    )
+    agent = store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="k1s-workerbee-private",
+            name="Codex k1s Stage 1 fork",
+            agent_type="operator",
+            metadata={
+                "agent_type": "operator",
+                "operator_role": "root",
+                "cwd": str(tmp_path / "k1s-workerbee-private"),
+                "tmux_pane_id": "%99",
+                "pbx_mode": "report",
+            },
+        )
+    )
+
+    assert agent["agent_type"] == "operator"
+    assert agent["project"] == "agent-pbx-operator"
+    assert agent["name"] == "operator-0"
+    assert agent["metadata"]["agent_type"] == "operator"
+    assert agent["metadata"]["operator_role"] == "root"
+    assert agent["metadata"]["cwd"] == str(tmp_path / "agent-pbx")
+    assert agent["metadata"]["tmux_pane_id"] == "%1"
+    assert agent["metadata"]["pbx_mode"] == "report"
+
+
 def test_register_agent_allows_explicit_operator_demote(tmp_path: Path) -> None:
     store = Store(tmp_path / "pbx.sqlite")
     store.init()

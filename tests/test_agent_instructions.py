@@ -39,6 +39,8 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "pbx_active=true" in instructions
     assert "pbx_mode=\"report\"" in instructions
     assert "AGENT_PBX_AGENT_ID" in instructions
+    assert "AGENT_PBX_REPORTING_AGENT_ID" in instructions
+    assert "reporting_agent_id" in instructions
     assert "codex-k1s-workerbee-private" in instructions
     assert "not a generic id shared" in instructions
     assert "metadata.codex_session_id" in instructions
@@ -72,6 +74,9 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "pbx_operator_update_handoff" in instructions
     assert "pbx_operator_kb_propose" in instructions
     assert "pbx_operator_kb_propose_from_link" in instructions
+    assert "pbx_operator_kb_seed" in instructions
+    assert "pbx_operator_kb_update_seed_run" in instructions
+    assert "seed_run_id" in instructions
     assert "rejection, retirement" in instructions
     assert "must not promote durable knowledge directly" in instructions
     assert "operator-mediated path" in instructions
@@ -84,6 +89,8 @@ def test_runbook_payload_includes_command_guidance() -> None:
     assert any("report mode" in item for item in payload["pbx_modes"])
     assert any("pbx_agent_runbook" in item for item in payload["session_start"])
     assert any("AGENT_PBX_AGENT_ID" in item for item in payload["session_start"])
+    assert any("AGENT_PBX_REPORTING_AGENT_ID" in item for item in payload["session_start"])
+    assert any("reporting_agent_id" in item for item in payload["tool_roles"])
     assert any("codex-k1s-workerbee-private" in item for item in payload["session_start"])
     assert any("not a shared generic id" in item for item in payload["session_start"])
     assert any("pbx_queue_command" in item for item in payload["tool_roles"])
@@ -142,6 +149,10 @@ def test_runbook_payload_includes_command_guidance() -> None:
         for item in payload["agent_types"]
     )
     assert any("pbx_operator_kb_propose" in item for item in payload["agent_types"])
+    assert any(
+        "pbx_operator_kb_update_seed_run" in item
+        for item in payload["agent_types"]
+    )
     assert any(
         "update, promote, reject, retire, export, and import" in item
         for item in payload["agent_types"]

@@ -763,11 +763,24 @@ def test_tui_alerts_only_for_attention_events() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
     assert app.should_alert({"type": "report_created"}) is True
+    assert app.should_alert({"type": "report_identity_violation"}) is True
     assert app.should_alert({"type": "agent_registered"}) is True
     assert app.should_alert({"type": "command_acked"}) is True
     assert app.should_alert({"type": "operator_campaign_event"}) is True
     assert app.should_alert({"type": "command_queued"}) is False
     assert app.should_alert({"type": "command_delivered"}) is False
+    assert (
+        app.event_agent_id(
+            {
+                "type": "report_identity_violation",
+                "payload": {
+                    "agent_id": "caller-1",
+                    "reporting_agent_id": "operator-0",
+                },
+            }
+        )
+        == "operator-0"
+    )
 
 
 def test_tui_flash_timer_tolerates_unmounted_attention() -> None:
@@ -3511,6 +3524,20 @@ def test_tui_operator_source_scopes_joplin_and_repo_context() -> None:
     assert app.joplin_scope_agent_id(fork_agent_id) == "caller-1"
     assert app.joplin_project_for_agent(fork_agent_id) == "k1s-workerbee-private"
     assert app.current_joplin_note_title(fork_agent_id, "note-1") == "Deploy Plan"
+    assert app.use_agent_joplin_note_scope("operator-0") is True
+    assert (
+        app.joplin_notes_url_for_agent("operator-0")
+        == "/v1/agents/operator-0/joplin/notes"
+    )
+    assert (
+        app.joplin_notes_url_for_agent("operator-0", "note-root")
+        == "/v1/agents/operator-0/joplin/notes/note-root"
+    )
+    assert app.use_agent_joplin_note_scope(fork_agent_id) is False
+    assert (
+        app.joplin_notes_url_for_agent(fork_agent_id)
+        == "/v1/projects/k1s-workerbee-private/joplin/notes"
+    )
     assert app.repo_scope_agent_id("operator-0") == "caller-1"
     assert app.repo_scope_agent_id(fork_agent_id) == "caller-1"
     assert app.repo_scope_agent_id("caller-1") == "caller-1"
@@ -5925,6 +5952,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/operator kb detail" in titles
     assert "/operator kb proposed" in titles
     assert "/operator kb proposed detail" in titles
+    assert "/operator kb seed" in titles
     assert "/operator kb promote" in titles
     assert "/operator kb reject" in titles
     assert "/operator kb retire" in titles
@@ -6006,6 +6034,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/operator kb detail",
         "/operator kb proposed",
         "/operator kb proposed detail",
+        "/operator kb seed",
         "/operator kb promote",
         "/operator kb reject",
         "/operator kb retire",
@@ -6732,6 +6761,70 @@ async def test_tui_joplin_rename_and_save_use_scoped_note_selection() -> None:
         ),
     ]
     assert loaded == ["agent-1", "agent-1"]
+
+
+async def test_tui_root_operator_joplin_save_uses_agent_note_scope() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    puts: list[tuple[str, dict[str, object]]] = []
+    loaded: list[str] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            if path == "/v1/joplin/status":
+                return Response({"configured": True, "available": True})
+            raise AssertionError(f"unexpected GET {path}")
+
+        async def put(self, path: str, **kwargs: object) -> Response:
+            puts.append((path, dict(kwargs.get("json") or {})))
+            return Response({})
+
+    async def fake_load_joplin_notes(agent_id: str) -> None:
+        loaded.append(agent_id)
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.load_joplin_notes = fake_load_joplin_notes  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "k1s-workerbee-private",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                },
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        app.query_one("#agent-id", Input).value = "operator-0"
+        app.set_selected_joplin_note_for_agent("operator-0", "note-root")
+
+        await app.rename_joplin_note("operator-0", title="Operator note")
+        app.query_one("#joplin-body", TextArea).text = "Operator body"
+        await app.save_joplin_note("operator-0")
+
+    assert puts == [
+        (
+            "/v1/agents/operator-0/joplin/notes/note-root",
+            {"title": "Operator note"},
+        ),
+        (
+            "/v1/agents/operator-0/joplin/notes/note-root",
+            {"body": "Operator body"},
+        ),
+    ]
+    assert loaded == ["operator-0", "operator-0"]
 
 
 async def test_tui_joplin_leader_shortcut_runs_action() -> None:
@@ -8225,10 +8318,11 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
     assert posts[1]["path"] == "/v1/agents/register"
     assert posts[1]["json"]["metadata"]["tmux_pane_id"] == "%42"  # type: ignore[index]
     assert launches[0]["env"] == {
-        "AGENT_PBX_SERVER_URL": "http://127.0.0.1:8765",
-        "AGENT_PBX_MCP_URL": "http://127.0.0.1:8765/mcp",
-        "AGENT_PBX_AGENT_ID": "operator-0",
-        "AGENT_PBX_AGENT_TYPE": "operator",
+            "AGENT_PBX_SERVER_URL": "http://127.0.0.1:8765",
+            "AGENT_PBX_MCP_URL": "http://127.0.0.1:8765/mcp",
+            "AGENT_PBX_AGENT_ID": "operator-0",
+            "AGENT_PBX_REPORTING_AGENT_ID": "operator-0",
+            "AGENT_PBX_AGENT_TYPE": "operator",
         "AGENT_PBX_AGENT_PROJECT": "agent-pbx-operator",
         "AGENT_PBX_PBX_MODE": "report",
         "AGENT_PBX_OPERATOR_ID": "operator-0",
@@ -8364,11 +8458,13 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
         await app.resume_selected_operator()
 
     assert killed == ["%152"]
-    assert launches[0]["command"] == "codex resume old-session"
+    launch_argv = shlex.split(str(launches[0]["command"]))
+    assert launch_argv == ["codex", "resume", "--cd", str(Path.cwd()), "old-session"]
     assert launches[0]["window_name"] == "operator-0"
     launch_env = launches[0]["env"]
     assert isinstance(launch_env, dict)
     assert launch_env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "old-session"
+    assert launch_env["AGENT_PBX_REPORTING_AGENT_ID"] == "operator-0"
     assert sent[0][0] == "%153"
     assert "agent_id: operator-0" in sent[0][1]
     register_body = posts[-1]["json"]
@@ -8578,7 +8674,15 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
     assert quit_calls == ["%10"]
     assert launches[0]["session_name"] == "agent-pbx"
     assert launches[0]["window_name"] == "agent-1"
-    assert launches[0]["command"] == "codex --search resume session-1"
+    launch_argv = shlex.split(str(launches[0]["command"]))
+    assert launch_argv == [
+        "codex",
+        "--search",
+        "resume",
+        "--cd",
+        str(Path.cwd()),
+        "session-1",
+    ]
     assert app.tmux_agent_targets["agent-1"] == "%11"
     assert posts[0]["path"] == "/v1/agents/register"
     metadata = posts[0]["json"]["metadata"]  # type: ignore[index]
@@ -8861,8 +8965,10 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     assert quit_calls == ["%30"]
     assert launches[0]["session_name"] == "agent-pbx-operators"
     assert launches[0]["window_name"] == "operator-0"
-    assert launches[0]["command"] == "codex resume current-session"
+    launch_argv = shlex.split(str(launches[0]["command"]))
+    assert launch_argv == ["codex", "resume", "--cd", str(Path.cwd()), "current-session"]
     assert launches[0]["env"]["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "current-session"
+    assert launches[0]["env"]["AGENT_PBX_REPORTING_AGENT_ID"] == "operator-0"
     assert posts[-1]["path"] == "/v1/agents/register"
     metadata = posts[-1]["json"]["metadata"]  # type: ignore[index]
     assert metadata["last_resume_codex_session_id"] == "current-session"
@@ -9101,6 +9207,127 @@ def test_tui_operator_resume_target_prefers_known_current_session() -> None:
     target = app.operator_resume_target("operator-0", candidates)
 
     assert target == candidates[0]
+
+
+def test_tui_operator_resume_target_skips_mismatched_report_identity(
+    tmp_path: Path,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    bad_session = tmp_path / "bad-session.jsonl"
+    good_session = tmp_path / "good-session.jsonl"
+    bad_session.write_text(
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "pbx_report_turn",
+                    "arguments": json.dumps(
+                        {
+                            "agent_id": "caller-1",
+                            "project": "demo",
+                            "summary": "Wrong",
+                            "detail": "Wrong identity.",
+                        }
+                    ),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    good_session.write_text(
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "pbx_report_turn",
+                    "arguments": json.dumps(
+                        {
+                            "agent_id": "operator-0",
+                            "project": "agent-pbx-operator",
+                            "summary": "Right",
+                            "detail": "Right identity.",
+                        }
+                    ),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "last_resume_codex_session_id": "bad-session",
+            },
+        }
+    }
+    candidates = [
+        OperatorSessionCandidate(
+            session_id="bad-session",
+            timestamp=20.0,
+            source="codex.sessions",
+            path=str(bad_session),
+        ),
+        OperatorSessionCandidate(
+            session_id="good-session",
+            timestamp=10.0,
+            source="codex.sessions",
+            path=str(good_session),
+        ),
+    ]
+
+    target = app.operator_resume_target("operator-0", candidates)
+
+    assert target == candidates[1]
+
+
+def test_tui_operator_resume_target_rejects_all_mismatched_report_identities(
+    tmp_path: Path,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    session_path = tmp_path / "bad-session.jsonl"
+    session_path.write_text(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "mcp_tool_call_end",
+                    "invocation": {
+                        "tool": "pbx_report_turn",
+                        "arguments": {
+                            "agent_id": "caller-1",
+                            "project": "demo",
+                            "summary": "Wrong",
+                            "detail": "Wrong identity.",
+                        },
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    target = app.operator_resume_target(
+        "operator-0",
+        [
+            OperatorSessionCandidate(
+                session_id="bad-session",
+                timestamp=20.0,
+                source="codex.sessions",
+                path=str(session_path),
+            )
+        ],
+    )
+
+    assert target is None
 
 
 def test_tui_operator_session_candidates_scan_codex_session_files(
@@ -9399,6 +9626,11 @@ def test_tui_operator_prompts_require_visible_pbx_forks() -> None:
         assert "multi_agent_v1" in prompt
         assert "spawn or use Codex internal subagents" in prompt
     assert "must not implement caller repo changes directly" in root_prompt
+    assert "metadata.reporting_agent_id: operator-0" in root_prompt
+    assert "`agent_id=operator-0`" in root_prompt
+    assert "Never report under a caller agent ID" in root_prompt
+    assert "metadata.reporting_agent_id: operator-0-fork-caller-1" in fork_prompt
+    assert "`reporting_agent_id=operator-0-fork-caller-1`" in fork_prompt
     assert "Do not dispatch to regular caller tmux panes" in monitor_prompt
 
 
@@ -10077,9 +10309,182 @@ async def test_tui_unseen_latest_blinks_attention_bar() -> None:
         app.render_unseen_attention()
         blink_text = str(attention.renderable)
 
-    assert steady_text == "NEW unseen latest report: agent-1"
-    assert blink_text == "!!! unseen latest report: agent-1"
+    assert steady_text == "NEW latest: agent-1"
+    assert blink_text == "NEW! latest: agent-1"
     assert attention.has_class("unseen-active")
+
+
+async def test_tui_unseen_latest_uses_latest_report_status_labels() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.agents = {
+            "agent-blocked": {
+                "agent_id": "agent-blocked",
+                "status": "blocked",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+                "latest_report_status": "blocked",
+            },
+            "agent-canceled": {
+                "agent_id": "agent-canceled",
+                "status": "canceled",
+                "project": "agent-pbx",
+                "last_seen_at": 124.0,
+                "latest_report_status": "canceled",
+            },
+            "agent-done": {
+                "agent_id": "agent-done",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 125.0,
+                "latest_report_status": "done",
+            },
+            "agent-failed": {
+                "agent_id": "agent-failed",
+                "status": "failed",
+                "project": "agent-pbx",
+                "last_seen_at": 126.0,
+                "latest_report_status": "failed",
+            },
+            "agent-working": {
+                "agent_id": "agent-working",
+                "status": "working",
+                "project": "agent-pbx",
+                "last_seen_at": 127.0,
+                "latest_report_status": "working",
+            },
+        }
+        app.unseen_latest_agent_ids = set(app.agents)
+        app.render_agents()
+        table = app.query_one("#agents", DataTable)
+        rows = {
+            agent_id: table.get_row(agent_id)[1]
+            for agent_id in app.agents
+        }
+
+    assert rows == {
+        "agent-blocked": "BLOCK",
+        "agent-canceled": "CANC",
+        "agent-done": "DONE",
+        "agent-failed": "FAIL",
+        "agent-working": "NEW",
+    }
+
+
+async def test_tui_unseen_latest_attention_groups_by_status() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.agents = {
+            "agent-done": {
+                "agent_id": "agent-done",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+                "latest_report_status": "done",
+            },
+            "agent-failed": {
+                "agent_id": "agent-failed",
+                "status": "failed",
+                "project": "agent-pbx",
+                "last_seen_at": 124.0,
+                "latest_report_status": "failed",
+            },
+            "agent-working": {
+                "agent_id": "agent-working",
+                "status": "working",
+                "project": "agent-pbx",
+                "last_seen_at": 125.0,
+                "latest_report_status": "working",
+            },
+        }
+        app.unseen_latest_agent_ids = set(app.agents)
+        app.attention_blink_phase = False
+        app.render_unseen_attention()
+        attention = app.query_one("#attention")
+        steady_text = str(attention.renderable)
+        target_agent_id = app.attention_agent_id
+        app.attention_blink_phase = True
+        app.render_unseen_attention()
+        blink_text = str(attention.renderable)
+
+    assert steady_text == (
+        "FAIL latest: agent-failed | DONE latest: agent-done | "
+        "NEW latest: agent-working"
+    )
+    assert blink_text == (
+        "FAIL! latest: agent-failed | DONE! latest: agent-done | "
+        "NEW! latest: agent-working"
+    )
+    assert target_agent_id == "agent-failed"
+
+
+async def test_tui_unseen_latest_attention_stays_visible_when_blink_disabled() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", agent_blink=False)
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+                "latest_report_status": "done",
+            }
+        }
+        app.unseen_latest_agent_ids.add("agent-1")
+        app.attention_blink_phase = True
+        app.render_unseen_attention()
+        attention = app.query_one("#attention")
+        has_flash_class = "attention-flash" in app.screen.classes
+
+    assert str(attention.renderable) == "DONE latest: agent-1"
+    assert attention.has_class("unseen-active")
+    assert has_flash_class is False
+
+
+async def test_tui_unseen_latest_does_not_clear_active_visual_flash() -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        visual_flash=True,
+        agent_blink=False,
+    )
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "project": "agent-pbx",
+                "last_seen_at": 123.0,
+                "latest_report_status": "done",
+            }
+        }
+        app.unseen_latest_agent_ids.add("agent-1")
+        app.flash_for_event(
+            {
+                "type": "report_created",
+                "subject_id": "report-1",
+                "payload": {"agent_id": "agent-1"},
+            }
+        )
+        attention = app.query_one("#attention")
+        app.render_unseen_attention()
+        flash_text = str(attention.renderable)
+        flash_active = attention.has_class("attention-active")
+        flash_class_active = "attention-flash" in app.screen.classes
+        app.clear_flash(app.flash_generation)
+        restored_text = str(attention.renderable)
+        restored_active = attention.has_class("attention-active")
+        restored_flash_class_active = "attention-flash" in app.screen.classes
+
+    assert flash_text == "New report created: report-1"
+    assert flash_active is True
+    assert flash_class_active is True
+    assert restored_text == "DONE latest: agent-1"
+    assert restored_active is False
+    assert restored_flash_class_active is False
 
 
 async def test_tui_clicking_unseen_alert_opens_first_latest() -> None:
@@ -10299,7 +10704,7 @@ async def test_tui_operator_campaign_flash_targets_fork_agent() -> None:
     assert click._stop_propagation is True
 
 
-async def test_tui_selected_report_event_opens_latest_from_thread() -> None:
+async def test_tui_selected_report_event_keeps_thread_unseen() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     refreshed_agents = 0
     refreshed_selected: list[str] = []
@@ -10346,17 +10751,17 @@ async def test_tui_selected_report_event_opens_latest_from_thread() -> None:
                 "subject_id": "report-1",
                 "payload": {
                     "agent_id": "agent-1",
-                    "status": "working",
-                    "summary": "Working",
+                    "status": "done",
+                    "summary": "Done",
                 },
             }
         )
         for coro in worker_coros:
             await coro
 
-    assert app.active_agent_tab == "latest-tab"
-    assert tabs.active == "latest-tab"
-    assert app.unseen_latest_agent_ids == set()
+    assert app.active_agent_tab == "thread-tab"
+    assert tabs.active == "thread-tab"
+    assert app.unseen_latest_agent_ids == {"agent-1"}
     assert refreshed_agents == 1
     assert refreshed_selected == ["agent-1"]
 
@@ -10609,6 +11014,109 @@ async def test_tui_operator_kb_promote_requires_selected_proposal() -> None:
     assert loaded == []
 
 
+async def test_tui_operator_kb_seed_uses_selected_fork_context(tmp_path: Path) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    source_cwd = tmp_path / "caller-1"
+    source_cwd.mkdir()
+    started: list[tuple[str, dict[str, object]]] = []
+    loaded: list[tuple[str, str | None]] = []
+    refreshed_events = 0
+
+    async def fake_start_operator_kb_seed_run(
+        operator_agent_id: str,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        started.append((operator_agent_id, kwargs))
+        return {
+            "seed_run": {
+                "seed_run_id": "seed-1",
+                "logical_operator_agent_id": "operator-0",
+                "source_operator_agent_id": operator_agent_id,
+                "seed_type": "operator_self_seed",
+                "scope": kwargs["scope"],
+                "project": kwargs["project"],
+                "repo_root": kwargs["repo_root"],
+                "git_remote": None,
+                "branch": None,
+                "status": "queued",
+                "delivery_status": "queued",
+                "command_id": "cmd-1",
+                "tmux_pane_id": None,
+                "metadata": {"seed_sync_key": "sync-1"},
+            },
+            "command": {
+                "command_id": "cmd-1",
+                "status": "queued",
+                "agent_id": operator_agent_id,
+            },
+        }
+
+    async def fake_open_operator_kb_for_agent(
+        agent_id: str,
+        *,
+        status: str = "active",
+    ) -> None:
+        loaded.append((agent_id, status))
+
+    async def fake_refresh_events() -> None:
+        nonlocal refreshed_events
+        refreshed_events += 1
+
+    app.start_operator_kb_seed_run = fake_start_operator_kb_seed_run  # type: ignore[method-assign]
+    app.open_operator_kb_for_agent = fake_open_operator_kb_for_agent  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0-fork-review": {
+                "agent_id": "operator-0-fork-review",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "running",
+                "last_seen_at": 123.0,
+                "metadata": {
+                    "operator_role": "fork",
+                    "logical_operator_id": "operator-0",
+                    "source_caller_agent_id": "caller-1",
+                    "source_cwd": str(source_cwd),
+                },
+            },
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "status": "running",
+                "last_seen_at": 123.0,
+                "metadata": {"cwd": str(source_cwd)},
+            },
+        }
+        app.selected_agent_id = "operator-0-fork-review"
+        refreshed_events = 0
+
+        await app.seed_selected_operator_kb()
+
+    assert started == [
+        (
+            "operator-0-fork-review",
+            {
+                "scope": "repo",
+                "project": "demo",
+                "repo_root": str(source_cwd),
+                "git_remote": None,
+                "branch": None,
+                "metadata": {
+                    "triggered_by": "agent-pbx-tui",
+                    "selected_operator_agent_id": "operator-0-fork-review",
+                    "selected_logical_operator_id": "operator-0",
+                    "source_caller_agent_id": "caller-1",
+                },
+            },
+        )
+    ]
+    assert loaded == [("operator-0-fork-review", "proposed")]
+    assert refreshed_events == 1
+
+
 async def test_tui_operator_kb_event_refreshes_selected_tab() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     refreshed_kb: list[str] = []
@@ -10741,7 +11249,7 @@ async def test_tui_agent_status_refresh_marks_unseen_latest() -> None:
         row = table.get_row("agent-1")
 
     assert app.unseen_latest_agent_ids == {"agent-1"}
-    assert row[1] == "NEW"
+    assert row[1] == "DONE"
 
 
 async def test_tui_agent_status_refresh_does_not_mark_engaged_latest() -> None:
@@ -12542,18 +13050,22 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert "pbx_operator_kb_get" in agent_pbx_config
     assert "pbx_operator_kb_propose" in agent_pbx_config
     assert "pbx_operator_kb_propose_from_link" in agent_pbx_config
-    assert "pbx_operator_approve_handoff" not in agent_pbx_config
-    assert "pbx_operator_update_handoff" not in agent_pbx_config
-    assert "pbx_operator_send_knowledge_turn" not in agent_pbx_config
-    assert "pbx_operator_approve_knowledge_turn" not in agent_pbx_config
-    assert "pbx_operator_create_knowledge_link" not in agent_pbx_config
-    assert "pbx_operator_close_knowledge_link" not in agent_pbx_config
-    assert "pbx_operator_kb_promote" not in agent_pbx_config
-    assert "pbx_operator_kb_update" not in agent_pbx_config
-    assert "pbx_operator_kb_reject" not in agent_pbx_config
-    assert "pbx_operator_kb_retire" not in agent_pbx_config
-    assert "pbx_operator_kb_import" not in agent_pbx_config
-    assert "pbx_operator_kb_export" not in agent_pbx_config
+    assert "pbx_operator_kb_list_seed_runs" in agent_pbx_config
+    assert "pbx_operator_kb_get_seed_run" in agent_pbx_config
+    assert "pbx_operator_kb_update_seed_run" in agent_pbx_config
+    assert '"pbx_operator_kb_seed"' not in agent_pbx_config
+    assert '"pbx_operator_approve_handoff"' not in agent_pbx_config
+    assert '"pbx_operator_update_handoff"' not in agent_pbx_config
+    assert '"pbx_operator_send_knowledge_turn"' not in agent_pbx_config
+    assert '"pbx_operator_approve_knowledge_turn"' not in agent_pbx_config
+    assert '"pbx_operator_create_knowledge_link"' not in agent_pbx_config
+    assert '"pbx_operator_close_knowledge_link"' not in agent_pbx_config
+    assert '"pbx_operator_kb_promote"' not in agent_pbx_config
+    assert '"pbx_operator_kb_update"' not in agent_pbx_config
+    assert '"pbx_operator_kb_reject"' not in agent_pbx_config
+    assert '"pbx_operator_kb_retire"' not in agent_pbx_config
+    assert '"pbx_operator_kb_import"' not in agent_pbx_config
+    assert '"pbx_operator_kb_export"' not in agent_pbx_config
     assert "pbx_queue_command" not in agent_pbx_config
     assert 'url = "http://127.0.0.1:8765/mcp"' in workerbee_config
     assert 'default_tools_approval_mode = "approve"' in workerbee_config

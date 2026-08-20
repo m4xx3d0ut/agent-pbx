@@ -133,6 +133,90 @@ async def test_mcp_reporting_and_command_tools(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_report_turn_rejects_declared_identity_mismatch(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {"agent_id": "operator-0", "project": "agent-pbx-operator", "agent_type": "operator"},
+    )
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {"agent_id": "caller-1", "project": "demo"},
+    )
+
+    with pytest.raises(Exception):
+        await mcp.call_tool(
+            "pbx_report_turn",
+            {
+                "agent_id": "caller-1",
+                "project": "demo",
+                "summary": "Wrong identity",
+                "detail": "This report is from an operator session.",
+                "reporting_agent_id": "operator-0",
+            },
+        )
+
+    assert store.list_reports("caller-1") == []
+    events = [
+        event
+        for event in store.list_events()
+        if event["type"] == "report_identity_violation"
+    ]
+    assert len(events) == 1
+    assert events[0]["payload"]["agent_id"] == "caller-1"
+    assert events[0]["payload"]["reporting_agent_id"] == "operator-0"
+
+
+@pytest.mark.asyncio
+async def test_mcp_register_root_operator_canonicalizes_project_drift(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    agent = tool_json(
+        await mcp.call_tool(
+            "pbx_register_agent",
+            {
+                "agent_id": "operator-0",
+                "project": "k1s-workerbee-private",
+                "agent_type": "operator",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                    "cwd": str(tmp_path / "k1s-workerbee-private"),
+                },
+            },
+        )
+    )
+
+    assert agent["agent_type"] == "operator"
+    assert agent["project"] == "agent-pbx-operator"
+    assert agent["metadata"]["operator_role"] == "root"
+    events = store.list_events()
+    registered = [event for event in events if event["type"] == "agent_registered"]
+    canonicalized = [
+        event
+        for event in events
+        if event["type"] == "agent_registration_project_canonicalized"
+    ]
+    assert registered[-1]["payload"]["project"] == "agent-pbx-operator"
+    assert canonicalized[-1]["payload"] == {
+        "agent_id": "operator-0",
+        "requested_project": "k1s-workerbee-private",
+        "project": "agent-pbx-operator",
+        "agent_type": "operator",
+        "pbx_active": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_mcp_register_agent_infers_codex_session_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

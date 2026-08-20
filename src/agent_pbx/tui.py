@@ -58,8 +58,17 @@ FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
 ATTENTION_EVENT_TYPES = {
     "agent_registered",
     "report_created",
+    "report_identity_violation",
     "command_acked",
     "operator_campaign_event",
+    "operator_kb_seed_requested",
+    "operator_kb_seed_queued",
+    "operator_kb_seed_sent",
+    "operator_kb_seed_failed",
+    "operator_kb_seed_complete",
+    "operator_kb_seed_completed",
+    "operator_kb_seed_canceled",
+    "operator_kb_seed_cancelled",
     "operator_project_spawn_requested",
     "operator_project_spawn_failed",
     "operator_project_spawn_launched",
@@ -90,6 +99,11 @@ MAX_SPLIT_PERCENT = 75
 SPLIT_PERCENT_STEP = 5
 PBX_REPORT_MODE = "report"
 PBX_NOHUP_MODE = "nohup"
+LATEST_REPORT_DONE_STATUSES = {"complete", "completed", "done"}
+LATEST_REPORT_FAILED_STATUSES = {"error", "failed", "failure"}
+LATEST_REPORT_BLOCKED_STATUSES = {"blocked"}
+LATEST_REPORT_CANCELED_STATUSES = {"canceled", "cancelled"}
+LATEST_REPORT_ALERT_ORDER = ("FAIL", "BLOCK", "CANC", "DONE", "NEW")
 CALLER_AGENT_TYPE = "caller"
 OPERATOR_AGENT_TYPE = "operator"
 OPERATOR_ROLE_ROOT = "root"
@@ -104,6 +118,7 @@ CODEX_RESTART_WAIT_SECONDS = 5.0
 CODEX_RESTART_LAUNCH_ATTEMPTS = 3
 CODEX_RESTART_STABILIZE_SECONDS = 2.0
 CODEX_RESTART_RETRY_SECONDS = 1.0
+OPERATOR_SESSION_IDENTITY_SCAN_BYTES = 512_000
 REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV = (
     "AGENT_PBX_TUI_REVIEW_MCP_APPROVAL_SERVERS"
 )
@@ -152,6 +167,9 @@ REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_operator_kb_get",
     "pbx_operator_kb_propose",
     "pbx_operator_kb_propose_from_link",
+    "pbx_operator_kb_list_seed_runs",
+    "pbx_operator_kb_get_seed_run",
+    "pbx_operator_kb_update_seed_run",
     "pbx_pr_context",
     "pbx_issue_context",
     "pbx_joplin_status",
@@ -444,6 +462,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/operator kb detail",
     "/operator kb proposed",
     "/operator kb proposed detail",
+    "/operator kb seed",
     "/operator kb promote",
     "/operator kb reject",
     "/operator kb retire",
@@ -4419,6 +4438,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator kb detail", "Show the latest active KB entry body", self.palette_operator_kb_detail)
         yield SystemCommand("/operator kb proposed", "Show proposed KB entries for the selected operator", self.palette_operator_kb_proposed)
         yield SystemCommand("/operator kb proposed detail", "Show the oldest proposed KB entry body", self.palette_operator_kb_proposed_detail)
+        yield SystemCommand("/operator kb seed", "Ask the selected operator to propose durable KB entries", self.palette_operator_kb_seed)
         yield SystemCommand("/operator kb promote", "Promote the oldest clean proposed KB entry", self.palette_operator_kb_promote)
         yield SystemCommand("/operator kb reject", "Reject the oldest proposed KB entry", self.palette_operator_kb_reject)
         yield SystemCommand("/operator kb retire", "Retire the selected active KB entry", self.palette_operator_kb_retire)
@@ -4825,6 +4845,13 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.show_selected_operator_kb_detail(status="proposed"),
             name="palette-operator-kb-proposed-detail",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_seed(self) -> None:
+        self.run_worker(
+            self.seed_selected_operator_kb(),
+            name="palette-operator-kb-seed",
             exclusive=True,
         )
 
@@ -6073,7 +6100,7 @@ class AgentPBXTUI(App[None]):
         selected_columns = columns or self.rendered_agent_columns
         values = {
             STARRED_AGENT_COLUMN: "*" if agent_id in self.starred_agent_ids else "",
-            "New": "NEW" if agent_id in self.unseen_latest_agent_ids else "",
+            "New": self.format_unseen_latest_alert(agent_id),
             "Agent": agent_id,
             "Operator": agent_id,
             "Type": self.format_agent_type(agent),
@@ -6987,6 +7014,50 @@ class AgentPBXTUI(App[None]):
             return cells
         return [Text(cell, style=style) for cell in cells]
 
+    def normalized_latest_report_status(self, agent: dict[str, Any] | None) -> str:
+        if agent is None:
+            return ""
+        for key in ("latest_report_status", "status", "effective_status"):
+            status = str(agent.get(key) or "").strip().lower()
+            if not status:
+                continue
+            if status.startswith("stale-"):
+                status = status.removeprefix("stale-")
+            return status
+        return ""
+
+    def latest_report_alert_label(self, agent: dict[str, Any] | None) -> str:
+        status = self.normalized_latest_report_status(agent)
+        if status in LATEST_REPORT_FAILED_STATUSES:
+            return "FAIL"
+        if status in LATEST_REPORT_BLOCKED_STATUSES:
+            return "BLOCK"
+        if status in LATEST_REPORT_CANCELED_STATUSES:
+            return "CANC"
+        if status in LATEST_REPORT_DONE_STATUSES:
+            return "DONE"
+        return "NEW"
+
+    def format_unseen_latest_alert(self, agent_id: str) -> str:
+        if agent_id not in self.unseen_latest_agent_ids:
+            return ""
+        return self.latest_report_alert_label(self.agents.get(agent_id))
+
+    def unseen_latest_alert_groups(self) -> list[tuple[str, list[str]]]:
+        grouped: dict[str, list[str]] = {
+            label: [] for label in LATEST_REPORT_ALERT_ORDER
+        }
+        for agent_id in sorted(self.unseen_latest_agent_ids):
+            label = self.format_unseen_latest_alert(agent_id)
+            if not label:
+                continue
+            grouped.setdefault(label, []).append(agent_id)
+        return [
+            (label, grouped[label])
+            for label in LATEST_REPORT_ALERT_ORDER
+            if grouped.get(label)
+        ]
+
     def format_usage_state(self, agent: dict[str, Any]) -> str:
         tokens = int_value(agent.get("estimated_visible_tokens_per_hour")) or 0
         polls = int_value(agent.get("polls_per_hour")) or 0
@@ -7013,6 +7084,9 @@ class AgentPBXTUI(App[None]):
         attention = self.query_one_or_none("#attention", Static)
         if attention is None:
             return
+        if attention.has_class("attention-active"):
+            return
+        blink_active = self.agent_blink_enabled and self.attention_blink_phase
         if self.tmux_plan_selector_agent_ids:
             agent_ids = sorted(self.tmux_plan_selector_agent_ids)
             self.attention_agent_id = agent_ids[0]
@@ -7020,17 +7094,15 @@ class AgentPBXTUI(App[None]):
             extra = len(agent_ids) - 3
             if extra > 0:
                 agents = f"{agents}, +{extra}"
-            marker = "PLAN!" if self.attention_blink_phase else "PLAN"
+            marker = "PLAN!" if blink_active else "PLAN"
             attention.update(
                 f"{marker} selection pending: {agents} "
                 "(/plan:1 start, /plan:2 clear context & start, /plan:3 stay)"
             )
             attention.add_class("unseen-active")
-            self.set_attention_flash_class(
-                self.agent_blink_enabled and self.attention_blink_phase
-            )
+            self.set_attention_flash_class(blink_active)
             return
-        if not self.agent_blink_enabled or not self.unseen_latest_agent_ids:
+        if not self.unseen_latest_agent_ids:
             if attention.has_class("unseen-active"):
                 attention.update("")
                 attention.remove_class("unseen-active")
@@ -7038,16 +7110,33 @@ class AgentPBXTUI(App[None]):
                     self.attention_agent_id = None
             self.set_attention_flash_class(False)
             return
-        unseen_agent_ids = sorted(self.unseen_latest_agent_ids)
-        self.attention_agent_id = unseen_agent_ids[0]
-        agents = ", ".join(unseen_agent_ids[:3])
-        extra = len(self.unseen_latest_agent_ids) - 3
+        groups = self.unseen_latest_alert_groups()
+        if not groups:
+            attention.update("")
+            attention.remove_class("unseen-active")
+            self.attention_agent_id = None
+            self.set_attention_flash_class(False)
+            return
+        self.attention_agent_id = groups[0][1][0]
+        parts: list[str] = []
+        displayed_count = 0
+        max_displayed = 3
+        for label, agent_ids in groups:
+            if displayed_count >= max_displayed:
+                break
+            visible_agent_ids = agent_ids[: max_displayed - displayed_count]
+            if not visible_agent_ids:
+                continue
+            marker = f"{label}!" if blink_active else label
+            agents = ", ".join(visible_agent_ids)
+            parts.append(f"{marker} latest: {agents}")
+            displayed_count += len(visible_agent_ids)
+        extra = len(self.unseen_latest_agent_ids) - displayed_count
         if extra > 0:
-            agents = f"{agents}, +{extra}"
-        marker = "!!!" if self.attention_blink_phase else "NEW"
-        attention.update(f"{marker} unseen latest report: {agents}")
+            parts.append(f"+{extra}")
+        attention.update(" | ".join(parts))
         attention.add_class("unseen-active")
-        self.set_attention_flash_class(self.attention_blink_phase)
+        self.set_attention_flash_class(blink_active)
 
     def set_attention_flash_class(self, enabled: bool) -> None:
         try:
@@ -7632,6 +7721,37 @@ class AgentPBXTUI(App[None]):
 
     def joplin_project_for_agent(self, agent_id: str) -> str:
         return self.project_for_agent(self.joplin_scope_agent_id(agent_id))
+
+    def use_agent_joplin_note_scope(self, agent_id: str) -> bool:
+        agent = self.agents.get(agent_id)
+        return (
+            isinstance(agent, dict)
+            and self.agent_type(agent) == OPERATOR_AGENT_TYPE
+            and self.operator_role(agent) == OPERATOR_ROLE_ROOT
+        )
+
+    def agent_joplin_notes_url(self, agent_id: str, note_id: str | None = None) -> str:
+        base = f"/v1/agents/{quote(agent_id, safe='')}/joplin/notes"
+        if note_id is None:
+            return base
+        return f"{base}/{quote(note_id, safe='')}"
+
+    def joplin_notes_url_for_agent(
+        self,
+        agent_id: str,
+        note_id: str | None = None,
+    ) -> str:
+        if self.use_agent_joplin_note_scope(agent_id):
+            return self.agent_joplin_notes_url(agent_id, note_id)
+        return self.project_joplin_notes_url(
+            self.joplin_project_for_agent(agent_id),
+            note_id,
+        )
+
+    def joplin_scope_label_for_agent(self, agent_id: str) -> str:
+        if self.use_agent_joplin_note_scope(agent_id):
+            return f"agent {agent_id}"
+        return f"project {self.joplin_project_for_agent(agent_id)}"
 
     def repo_scope_agent_id(self, agent_id: str) -> str:
         agent = self.agents.get(agent_id)
@@ -10058,7 +10178,11 @@ class AgentPBXTUI(App[None]):
             new_pane_id = await self.launch_restart_pane(
                 session_name=session_name,
                 window_name=agent_id,
-                command=self.operator_resume_command(codex_command, target.session_id),
+                command=self.operator_resume_command(
+                    codex_command,
+                    target.session_id,
+                    cd=cwd,
+                ),
                 label=agent_id,
                 cwd=cwd,
                 env=env,
@@ -10304,7 +10428,7 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return False
-        command = self.operator_resume_command(codex_command, session_id)
+        command = self.operator_resume_command(codex_command, session_id, cd=cwd)
         if not await self.quit_or_kill_tmux_pane(pane.pane_id, label=agent_id):
             return False
         try:
@@ -11581,7 +11705,15 @@ class AgentPBXTUI(App[None]):
                 f"- metadata.cwd: {cwd}",
                 '- metadata.pbx_mode: "report"',
                 '- metadata.agent_type: "operator"',
+                f"- metadata.reporting_agent_id: {agent_id}",
                 *extra,
+                "",
+                "Every pbx_report_turn from this session must use "
+                f"`agent_id={agent_id}`, `reporting_agent_id={agent_id}`, "
+                f"and `metadata.reporting_agent_id={agent_id}`. Never report "
+                "under a caller agent ID from this operator session; use "
+                "operator campaign, fork, handoff, or KB tools for caller "
+                "coordination.",
                 "",
                 "Call pbx_operator_runbook before starting campaign work. "
                 "Use operator campaign tools to dispatch caller assignments, "
@@ -11648,6 +11780,7 @@ class AgentPBXTUI(App[None]):
             AGENT_PBX_SERVER_URL_ENV: self.server,
             AGENT_PBX_MCP_URL_ENV: mcp_url,
             "AGENT_PBX_AGENT_ID": agent_id,
+            "AGENT_PBX_REPORTING_AGENT_ID": agent_id,
             "AGENT_PBX_AGENT_TYPE": OPERATOR_AGENT_TYPE,
             "AGENT_PBX_AGENT_PROJECT": "agent-pbx-operator",
             "AGENT_PBX_PBX_MODE": PBX_REPORT_MODE,
@@ -11853,6 +11986,11 @@ class AgentPBXTUI(App[None]):
                 f"- metadata.cwd: {cwd}",
                 '- metadata.pbx_mode: "report"',
                 '- metadata.launched_by: "agent-pbx-tui"',
+                f"- metadata.reporting_agent_id: {agent_id}",
+                "",
+                "Every pbx_report_turn from this session must use "
+                f"`agent_id={agent_id}`, `reporting_agent_id={agent_id}`, "
+                f"and `metadata.reporting_agent_id={agent_id}`.",
                 "",
                 f"Source project: {source_cwd}",
                 f"Spawn request ID: {request.get('spawn_request_id')}",
@@ -11880,6 +12018,7 @@ class AgentPBXTUI(App[None]):
             AGENT_PBX_SERVER_URL_ENV: self.server,
             AGENT_PBX_MCP_URL_ENV: mcp_url,
             "AGENT_PBX_AGENT_ID": agent_id,
+            "AGENT_PBX_REPORTING_AGENT_ID": agent_id,
             "AGENT_PBX_AGENT_TYPE": CALLER_AGENT_TYPE,
             "AGENT_PBX_AGENT_PROJECT": project,
             "AGENT_PBX_PBX_MODE": PBX_REPORT_MODE,
@@ -11913,6 +12052,7 @@ class AgentPBXTUI(App[None]):
             "agent_type": CALLER_AGENT_TYPE,
             "pbx_mode": PBX_REPORT_MODE,
             "cwd": cwd,
+            "reporting_agent_id": agent_id,
             "launched_by": "agent-pbx-tui",
             "server_url": self.server,
             "mcp_url": mcp_url,
@@ -11966,6 +12106,7 @@ class AgentPBXTUI(App[None]):
             "operator_role": OPERATOR_ROLE_ROOT,
             "pbx_mode": PBX_REPORT_MODE,
             "cwd": cwd,
+            "reporting_agent_id": agent_id,
             "logical_only": False,
             "launched_by": "agent-pbx-tui",
             "server_url": self.server,
@@ -12309,6 +12450,78 @@ class AgentPBXTUI(App[None]):
             for entry in self.dedupe_operator_session_entries(raw_entries)
         ]
 
+    @staticmethod
+    def codex_session_pbx_report_agent_id_from_record(
+        record: dict[str, Any],
+    ) -> str | None:
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        arguments: object | None = None
+        if (
+            payload.get("type") == "function_call"
+            and payload.get("name") == "pbx_report_turn"
+        ):
+            arguments = payload.get("arguments")
+        elif payload.get("type") == "mcp_tool_call_end":
+            invocation = payload.get("invocation")
+            if (
+                isinstance(invocation, dict)
+                and invocation.get("tool") == "pbx_report_turn"
+            ):
+                arguments = invocation.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(arguments, dict):
+            return None
+        agent_id = str(arguments.get("agent_id") or "").strip()
+        return agent_id or None
+
+    def operator_session_pbx_report_agent_ids(
+        self,
+        candidate: OperatorSessionCandidate,
+    ) -> set[str]:
+        path_text = str(candidate.path or "").strip()
+        if not path_text:
+            return set()
+        path = Path(path_text).expanduser()
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return set()
+        start_at = max(size - OPERATOR_SESSION_IDENTITY_SCAN_BYTES, 0)
+        try:
+            with path.open("rb") as handle:
+                handle.seek(start_at)
+                if start_at:
+                    handle.readline()
+                text = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            return set()
+        agent_ids: set[str] = set()
+        for line in text.splitlines():
+            if "pbx_report_turn" not in line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            agent_id = self.codex_session_pbx_report_agent_id_from_record(record)
+            if agent_id:
+                agent_ids.add(agent_id)
+        return agent_ids
+
+    def operator_session_has_report_identity_conflict(
+        self,
+        agent_id: str,
+        candidate: OperatorSessionCandidate,
+    ) -> bool:
+        report_agent_ids = self.operator_session_pbx_report_agent_ids(candidate)
+        return bool(report_agent_ids and report_agent_ids != {agent_id})
+
     def operator_resume_target(
         self,
         agent_id: str,
@@ -12316,6 +12529,14 @@ class AgentPBXTUI(App[None]):
     ) -> OperatorSessionCandidate | None:
         if not candidates:
             return None
+        safe_candidates = [
+            candidate
+            for candidate in candidates
+            if not self.operator_session_has_report_identity_conflict(agent_id, candidate)
+        ]
+        if not safe_candidates:
+            return None
+        candidates = safe_candidates
         current_session_ids = self.current_operator_session_ids(agent_id)
         for candidate in candidates:
             if candidate.session_id in current_session_ids:
@@ -12833,6 +13054,7 @@ class AgentPBXTUI(App[None]):
         fork_metadata = {
             "agent_type": OPERATOR_AGENT_TYPE,
             "operator_role": OPERATOR_ROLE_FORK,
+            "reporting_agent_id": fork_agent_id,
             "logical_operator_id": logical_operator_id,
             "source_caller_agent_id": source_caller_agent_id,
             "source_codex_session_id": source_session_id,
@@ -13626,6 +13848,89 @@ class AgentPBXTUI(App[None]):
             return payload
         raise RuntimeError("KB retirement response was not an object")
 
+    async def start_operator_kb_seed_run(
+        self,
+        operator_agent_id: str,
+        *,
+        seed_type: str = "operator_self_seed",
+        scope: str = "project",
+        project: str | None = None,
+        repo_root: str | None = None,
+        git_remote: str | None = None,
+        branch: str | None = None,
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            "/v1/operator/kb/seed-runs",
+            json={
+                "operator_agent_id": operator_agent_id,
+                "seed_type": seed_type,
+                "scope": scope,
+                "project": project,
+                "repo_root": repo_root,
+                "git_remote": git_remote,
+                "branch": branch,
+                "delivery": delivery,
+                "metadata": metadata or {},
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("KB seed response was not an object")
+
+    def operator_kb_seed_context(
+        self,
+        operator_agent_id: str,
+        operator_agent: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = self.agent_metadata(operator_agent)
+        source_caller_agent_id = str(
+            metadata.get("source_caller_agent_id")
+            or metadata.get("default_source_caller_agent_id")
+            or ""
+        ).strip()
+        source_agent = (
+            self.agents.get(source_caller_agent_id) if source_caller_agent_id else None
+        )
+        source_metadata = self.agent_metadata(source_agent)
+        project = (
+            str(source_agent.get("project") or "").strip()
+            if isinstance(source_agent, dict)
+            else ""
+        ) or str(operator_agent.get("project") or "").strip()
+        repo_root = (
+            str(metadata.get("source_cwd") or "").strip()
+            or str(source_metadata.get("cwd") or "").strip()
+            or str(metadata.get("cwd") or "").strip()
+        )
+        git_remote = (
+            str(metadata.get("git_remote") or "").strip()
+            or str(source_metadata.get("git_remote") or "").strip()
+        )
+        branch = (
+            str(metadata.get("branch") or "").strip()
+            or str(source_metadata.get("branch") or "").strip()
+        )
+        return {
+            "scope": "repo" if repo_root else "project",
+            "project": project or None,
+            "repo_root": repo_root or None,
+            "git_remote": git_remote or None,
+            "branch": branch or None,
+            "metadata": {
+                "triggered_by": "agent-pbx-tui",
+                "selected_operator_agent_id": operator_agent_id,
+                "selected_logical_operator_id": self.logical_operator_id_for_agent(
+                    operator_agent
+                ),
+                "source_caller_agent_id": source_caller_agent_id or None,
+            },
+        }
+
     def operator_kb_operator_id_for_agent(self, agent_id: str) -> str | None:
         agent = self.agents.get(agent_id)
         if agent is None or self.agent_type(agent) != OPERATOR_AGENT_TYPE:
@@ -13937,6 +14242,70 @@ class AgentPBXTUI(App[None]):
             return
         await self.open_operator_kb_for_agent(operator_agent_id, status=status)
 
+    async def seed_selected_operator_kb(self) -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if not isinstance(operator_agent, dict):
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        if self.agent_type(operator_agent) != OPERATOR_AGENT_TYPE:
+            self.notify("Select an operator before starting a KB seed run.", severity="warning")
+            return
+        context = self.operator_kb_seed_context(operator_agent_id, operator_agent)
+        try:
+            result = await self.start_operator_kb_seed_run(
+                operator_agent_id,
+                scope=str(context.get("scope") or "project"),
+                project=(
+                    context.get("project")
+                    if isinstance(context.get("project"), str)
+                    else None
+                ),
+                repo_root=(
+                    context.get("repo_root")
+                    if isinstance(context.get("repo_root"), str)
+                    else None
+                ),
+                git_remote=(
+                    context.get("git_remote")
+                    if isinstance(context.get("git_remote"), str)
+                    else None
+                ),
+                branch=(
+                    context.get("branch")
+                    if isinstance(context.get("branch"), str)
+                    else None
+                ),
+                metadata=(
+                    context.get("metadata")
+                    if isinstance(context.get("metadata"), dict)
+                    else {}
+                ),
+            )
+        except Exception as exc:
+            self.notify(f"Unable to start KB seed run: {exc}", severity="error")
+            return
+        seed_run = result.get("seed_run") if isinstance(result.get("seed_run"), dict) else {}
+        seed_run_id = str(seed_run.get("seed_run_id") or "").strip()
+        status = str(seed_run.get("status") or "requested").strip()
+        command = result.get("command") if isinstance(result.get("command"), dict) else None
+        await self.open_operator_kb_for_agent(operator_agent_id, status="proposed")
+        detail = self.query_one_or_none("#operator-kb-detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_operator_kb_seed_run_detail(result)
+        await self.refresh_events()
+        label = seed_run_id or "requested"
+        command_note = ""
+        if command:
+            command_note = f" via {command.get('status') or 'command'}"
+        severity = "error" if status == "failed" else "information"
+        self.notify(
+            f"KB seed run {label} {status or 'started'}{command_note}.",
+            severity=severity,
+        )
+
     async def reject_oldest_operator_kb_proposal(self) -> None:
         operator_agent_id = self.selected_operator_kb_agent_id()
         if not operator_agent_id:
@@ -14038,6 +14407,50 @@ class AgentPBXTUI(App[None]):
         await self.load_operator_kb(operator_agent_id, status="retired")
         self.notify(f"Retired operator KB entry {kb_id}.")
         await self.refresh_events()
+
+    def format_operator_kb_seed_run_detail(self, result: dict[str, Any]) -> str:
+        seed_run = (
+            result.get("seed_run") if isinstance(result.get("seed_run"), dict) else {}
+        )
+        command = result.get("command") if isinstance(result.get("command"), dict) else {}
+        metadata = (
+            seed_run.get("metadata")
+            if isinstance(seed_run.get("metadata"), dict)
+            else {}
+        )
+        evidence = (
+            metadata.get("delivery_evidence")
+            if isinstance(metadata.get("delivery_evidence"), dict)
+            else {}
+        )
+        lines = [
+            "Operator KB seed run",
+            "",
+            f"Seed Run: {seed_run.get('seed_run_id') or '-'}",
+            f"Logical Operator: {seed_run.get('logical_operator_agent_id') or '-'}",
+            f"Source Operator: {seed_run.get('source_operator_agent_id') or '-'}",
+            f"Status: {seed_run.get('status') or '-'}",
+            f"Delivery: {seed_run.get('delivery_status') or '-'}",
+            f"Command: {seed_run.get('command_id') or command.get('command_id') or '-'}",
+            f"Tmux Pane: {seed_run.get('tmux_pane_id') or evidence.get('tmux_pane_id') or '-'}",
+            f"Seed Type: {seed_run.get('seed_type') or '-'}",
+            f"Scope: {seed_run.get('scope') or '-'}",
+            f"Project: {seed_run.get('project') or '-'}",
+            f"Repo: {seed_run.get('repo_root') or '-'}",
+            f"Remote: {seed_run.get('git_remote') or '-'}",
+            f"Branch: {seed_run.get('branch') or '-'}",
+            f"Sync Key: {metadata.get('seed_sync_key') or '-'}",
+        ]
+        if seed_run.get("error"):
+            lines.extend(["", "Error:", str(seed_run.get("error"))])
+        lines.extend(
+            [
+                "",
+                "Next:",
+                "Review proposed entries in this KB tab after the operator completes the seed run.",
+            ]
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def primary_operator_kb_entry(
@@ -14622,6 +15035,7 @@ class AgentPBXTUI(App[None]):
             "agent_type": OPERATOR_AGENT_TYPE,
             "operator_role": OPERATOR_ROLE_FORK,
             "operator_fork_id": str(fork.get("operator_fork_id") or ""),
+            "reporting_agent_id": fork_agent_id,
             "logical_operator_id": str(fork.get("logical_operator_agent_id") or ""),
             "source_caller_agent_id": str(fork.get("source_caller_agent_id") or ""),
             "source_codex_session_id": str(fork.get("source_codex_session_id") or ""),
@@ -15010,7 +15424,11 @@ class AgentPBXTUI(App[None]):
             )
         if not await self.kill_tui_owned_operator_pane(agent_id):
             return
-        command = self.operator_resume_command(codex_command, target.session_id)
+        command = self.operator_resume_command(
+            codex_command,
+            target.session_id,
+            cd=cwd,
+        )
         env = self.operator_launch_env(
             agent_id=agent_id,
             cwd=cwd,
@@ -16063,9 +16481,8 @@ class AgentPBXTUI(App[None]):
         if not (self.joplin_configured and self.joplin_available):
             raise RuntimeError(self.format_joplin_unavailable_summary(self.joplin_status))
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
-        project = self.joplin_project_for_agent(agent_id)
         response = await self.api_client().get(
-            self.project_joplin_notes_url(project),
+            self.joplin_notes_url_for_agent(agent_id),
             headers=auth_headers(self.token),
             timeout=20,
         )
@@ -16208,9 +16625,8 @@ class AgentPBXTUI(App[None]):
         note_id: str,
     ) -> dict[str, Any]:
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
-        project = self.joplin_project_for_agent(agent_id)
         response = await self.api_client().get(
-            self.project_joplin_notes_url(project, note_id),
+            self.joplin_notes_url_for_agent(agent_id, note_id),
             headers=auth_headers(self.token),
             timeout=20,
         )
@@ -16683,7 +17099,6 @@ class AgentPBXTUI(App[None]):
         if table is None or body is None:
             return
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
-        project = self.joplin_project_for_agent(agent_id)
         if not self.joplin_configured:
             table.clear()
             body.text = self.format_joplin_unavailable(self.joplin_status)
@@ -16692,10 +17107,10 @@ class AgentPBXTUI(App[None]):
             table.clear()
             body.text = self.format_joplin_unavailable(self.joplin_status)
             return
-        body.text = f"Loading project Joplin notes for {project}..."
+        body.text = f"Loading Joplin notes for {self.joplin_scope_label_for_agent(agent_id)}..."
         try:
             response = await self.api_client().get(
-                self.project_joplin_notes_url(project),
+                self.joplin_notes_url_for_agent(agent_id),
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -16703,7 +17118,10 @@ class AgentPBXTUI(App[None]):
             notes = response.json()
         except Exception as exc:
             table.clear()
-            body.text = f"Unable to load Joplin notes for {project}: {exc}"
+            body.text = (
+                f"Unable to load Joplin notes for "
+                f"{self.joplin_scope_label_for_agent(agent_id)}: {exc}"
+            )
             return
         self.render_joplin_notes(agent_id, notes)
         if notes:
@@ -16779,12 +17197,11 @@ class AgentPBXTUI(App[None]):
         if not agent_id:
             return
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
-        project = self.joplin_project_for_agent(agent_id)
         body = self.query_one("#joplin-body", TextArea)
         body.text = f"Loading Joplin note {note_id}..."
         try:
             response = await self.api_client().get(
-                self.project_joplin_notes_url(project, note_id),
+                self.joplin_notes_url_for_agent(agent_id, note_id),
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -16854,11 +17271,10 @@ class AgentPBXTUI(App[None]):
     async def create_joplin_note(self, agent_id: str, *, title: str) -> None:
         if not await self.ensure_joplin_available():
             return
-        project = self.joplin_project_for_agent(agent_id)
         body = f"# {title.strip()}\n\n"
         try:
             response = await self.api_client().post(
-                self.project_joplin_notes_url(project),
+                self.joplin_notes_url_for_agent(agent_id),
                 json={"title": title.strip(), "body": body},
                 headers=auth_headers(self.token),
                 timeout=20,
@@ -16888,10 +17304,9 @@ class AgentPBXTUI(App[None]):
         if not note_id:
             self.notify("Select a Joplin note before renaming.", severity="warning")
             return
-        project = self.joplin_project_for_agent(agent_id)
         try:
             response = await self.api_client().put(
-                self.project_joplin_notes_url(project, note_id),
+                self.joplin_notes_url_for_agent(agent_id, note_id),
                 json={"title": title.strip()},
                 headers=auth_headers(self.token),
                 timeout=20,
@@ -16920,10 +17335,9 @@ class AgentPBXTUI(App[None]):
     async def delete_joplin_note(self, agent_id: str, note_id: str) -> None:
         if not await self.ensure_joplin_available():
             return
-        project = self.joplin_project_for_agent(agent_id)
         try:
             response = await self.api_client().delete(
-                self.project_joplin_notes_url(project, note_id),
+                self.joplin_notes_url_for_agent(agent_id, note_id),
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -16943,11 +17357,10 @@ class AgentPBXTUI(App[None]):
         if not note_id:
             self.notify("Select a Joplin note before saving.", severity="warning")
             return
-        project = self.joplin_project_for_agent(agent_id)
         body = self.query_one("#joplin-body", TextArea)
         try:
             response = await self.api_client().put(
-                self.project_joplin_notes_url(project, note_id),
+                self.joplin_notes_url_for_agent(agent_id, note_id),
                 json={"body": body.text},
                 headers=auth_headers(self.token),
                 timeout=20,
@@ -18861,8 +19274,6 @@ class AgentPBXTUI(App[None]):
         selected_detail_visible = (
             agent_id == selected_agent_id and self.selected_agent_detail_visible()
         )
-        if event_type == "report_created" and selected_detail_visible:
-            self.activate_latest_tab()
         if event_type == "report_created" and agent_id:
             self.apply_report_created_event(agent_id, event)
         if event_type == "agent_starred_changed" and agent_id:
@@ -19357,6 +19768,16 @@ class AgentPBXTUI(App[None]):
                 or payload.get("operator_agent_id")
             )
             return str(agent_id) if agent_id else None
+        if str(event.get("type")) == "report_identity_violation":
+            agent_id = payload.get("reporting_agent_id") or payload.get("agent_id")
+            return str(agent_id) if agent_id else None
+        if str(event.get("type") or "").startswith("operator_kb_seed_"):
+            agent_id = (
+                payload.get("source_operator_agent_id")
+                or payload.get("logical_operator_agent_id")
+                or payload.get("operator_agent_id")
+            )
+            return str(agent_id) if agent_id else None
         agent_id = payload.get("agent_id")
         return str(agent_id) if agent_id else None
 
@@ -19379,7 +19800,8 @@ class AgentPBXTUI(App[None]):
         if not isinstance(payload, dict):
             return None
         agent_id = (
-            payload.get("created_by_operator_agent_id")
+            payload.get("logical_operator_agent_id")
+            or payload.get("created_by_operator_agent_id")
             or payload.get("operator_agent_id")
         )
         return str(agent_id) if agent_id else None

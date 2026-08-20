@@ -20,6 +20,12 @@ If the environment contains `AGENT_PBX_AGENT_ID`, use that value exactly; the
 TUI uses it for operator and fork identities. Otherwise choose a project-specific
 stable caller id such as `codex-k1s-workerbee-private`, not a generic id shared
 across repositories.
+If the environment contains `AGENT_PBX_REPORTING_AGENT_ID`, every
+`pbx_report_turn` call from this session must use that value for both
+`agent_id` and `reporting_agent_id`, and should also include
+`metadata.reporting_agent_id` with the same value. Do not report under another
+agent ID; use operator campaign, fork, handoff, or queue tools for delegated
+work instead.
 Include `metadata.codex_session_id` when the current Codex session id is known;
 operator fork creation blocks until callers expose that session id.
 Registration defaults `pbx_active=true`; treat that as "Use Agent PBX" being on
@@ -188,7 +194,10 @@ and review forks may propose PBX-managed KB entries with
 `pbx_operator_kb_propose` or `pbx_operator_kb_propose_from_link`. Active KB
 publication, update, rejection, retirement, active imports, and export are
 root-operator actions. Review forks may search/get active KB entries and
-propose new entries, but they must not promote durable knowledge directly.
+propose new entries, but they must not promote durable knowledge directly. Manual
+KB seed runs use `pbx_operator_kb_seed` to deliver the prompt and
+`pbx_operator_kb_update_seed_run` to record completion; seed-run proposals must
+include the supplied `seed_run_id` metadata.
 
 If the operator asks for a Joplin note or document, call `pbx_joplin_status`
 first. If Joplin is available, use `pbx_joplin_create_document` to create
@@ -253,7 +262,9 @@ operator follow-up queues, detailed report history, and TUI visibility.
    is on.
 3. Immediately call `pbx_report_turn` with `status="working"` so the operator
    can see that the session is connected.
-4. If the local AGENTS.md guidance is unclear or stale, call
+4. If `AGENT_PBX_REPORTING_AGENT_ID` is set, use that value as both
+   `agent_id` and `reporting_agent_id` in every report.
+5. If the local AGENTS.md guidance is unclear or stale, call
    `pbx_agent_runbook` for the current MCP-exposed Agent PBX contract.
 
 ## MCP Tool Roles
@@ -263,7 +274,8 @@ operator follow-up queues, detailed report history, and TUI visibility.
   metadata, and PBX active state.
 - `pbx_set_active`: turn PBX visibility off or back on for this session.
 - `pbx_report_turn`: report status, details, needs-input state, and structured
-  plan options.
+  plan options. TUI-launched sessions should pass `reporting_agent_id` matching
+  their own `agent_id`; Agent PBX rejects declared identity mismatches.
 - `pbx_poll_commands`: in explicit nohup mode only, receive queued operator
   commands for this agent.
 - `pbx_ack_command`: in explicit nohup mode only, acknowledge a delivered
@@ -518,6 +530,7 @@ def runbook_payload() -> dict[str, Any]:
         ),
         "session_start": [
             "Use AGENT_PBX_AGENT_ID exactly when it is set; otherwise choose a project-specific stable caller id such as codex-k1s-workerbee-private, not a shared generic id.",
+            "Use AGENT_PBX_REPORTING_AGENT_ID as both agent_id and reporting_agent_id for every pbx_report_turn when it is set.",
             "Call pbx_register_agent with project, name, cwd, task, metadata.pbx_mode, and metadata.codex_session_id when known; pbx_active defaults true.",
             "Send an initial pbx_report_turn with status='working'.",
             "Call pbx_agent_runbook if local AGENTS.md guidance is unclear or stale.",
@@ -526,7 +539,7 @@ def runbook_payload() -> dict[str, Any]:
             "pbx_agent_runbook returns current Agent PBX agent guidance.",
             "pbx_register_agent registers or refreshes this session identity, metadata, and PBX active state.",
             "pbx_set_active turns PBX visibility off or back on for this session.",
-            "pbx_report_turn reports status, detail, needs-input state, and structured plan_options.",
+            "pbx_report_turn reports status, detail, needs-input state, and structured plan_options; declared reporting_agent_id must match agent_id.",
             "pbx_poll_commands receives queued operator commands in explicit nohup mode only.",
             "pbx_ack_command acknowledges a delivered command for this agent_id after handling it in explicit nohup mode.",
             "pbx_queue_command is for operators, the TUI, tests, and control-plane helpers; agents should not self-queue work.",
@@ -535,7 +548,7 @@ def runbook_payload() -> dict[str, Any]:
             "pbx_pr_context returns read-only GitHub pull request context for this agent project; agents use it for PR review only.",
             "pbx_issue_context returns read-only GitHub issue context for this agent project; agents use it for issue mitigation only.",
             "pbx_operator_runbook returns operator-agent campaign, review, and project-spawn guidance.",
-            "pbx_operator_* tools are for operator agents to create tracked campaigns, dispatch caller assignments, inspect caller threads, call pbx_operator_route_review_escalation, call pbx_operator_request_project_spawn for sibling project spawns, create operator knowledge links and handoffs, propose/search/update/promote/reject/retire PBX-managed KB entries, update assignment or handoff state, and finish campaigns.",
+            "pbx_operator_* tools are for operator agents to create tracked campaigns, dispatch caller assignments, inspect caller threads, call pbx_operator_route_review_escalation, call pbx_operator_request_project_spawn for sibling project spawns, create operator knowledge links and handoffs, start/update KB seed runs, propose/search/update/promote/reject/retire PBX-managed KB entries, update assignment or handoff state, and finish campaigns.",
         ],
         "agent_types": [
             "caller is the default agent_type and keeps existing report/nohup behavior.",
@@ -546,7 +559,7 @@ def runbook_payload() -> dict[str, Any]:
             "Review forks route source-edit needs through pbx_operator_route_review_escalation.",
             "Review forks request sibling projects through pbx_operator_request_project_spawn; the TUI/root operator approves and launches the new project as a normal caller agent.",
             "Review forks propose domain handoffs through pbx_operator_propose_knowledge_handoff; the TUI/root operator approves executable handoff delivery before another operator receives the workflow.",
-            "Review forks can search active KB entries and propose KB entries through pbx_operator_kb_propose or pbx_operator_kb_propose_from_link; root operators update, promote, reject, retire, export, and import canonical KB records.",
+            "Review forks can search active KB entries, propose KB entries through pbx_operator_kb_propose or pbx_operator_kb_propose_from_link, and mark their KB seed runs complete through pbx_operator_kb_update_seed_run; root operators update, promote, reject, retire, export, and import canonical KB records.",
             "Operators acknowledge handoffs through pbx_operator_ack_handoff and update running or terminal handoff state through pbx_operator_update_handoff.",
             "Knowledge links and operator handoffs do not create fork edges, assignments, or source-session ownership.",
             "Campaign tables are the source of truth for campaign state; reports and commands are linked audit artifacts.",

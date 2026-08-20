@@ -143,6 +143,46 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
     assert events.json()[1]["payload"]["created_at"] == report.json()["created_at"]
 
 
+def test_report_endpoint_rejects_declared_identity_mismatch(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+        },
+    )
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "caller-1", "project": "demo"},
+    )
+
+    report = client.post(
+        "/v1/agents/caller-1/reports",
+        json={
+            "project": "demo",
+            "summary": "Wrong identity",
+            "detail": "This report is from an operator session.",
+            "reporting_agent_id": "operator-0",
+        },
+    )
+    reports = client.get("/v1/agents/caller-1/reports")
+    events = client.get("/v1/events")
+
+    assert report.status_code == 409
+    assert reports.json() == []
+    violations = [
+        event
+        for event in events.json()
+        if event["type"] == "report_identity_violation"
+    ]
+    assert len(violations) == 1
+    assert violations[0]["payload"]["agent_id"] == "caller-1"
+    assert violations[0]["payload"]["reporting_agent_id"] == "operator-0"
+
+
 def test_register_agent_infers_codex_session_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -205,7 +245,11 @@ def test_set_agent_pbx_active_endpoint_updates_agent_and_events(tmp_path: Path) 
 
     registered = client.post(
         "/v1/agents/register",
-        json={"agent_id": "operator-0", "project": "ops", "agent_type": "operator"},
+        json={
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+        },
     )
     updated = client.put("/v1/agents/operator-0/pbx-active", json={"active": False})
     missing = client.put("/v1/agents/missing/pbx-active", json={"active": False})
@@ -1488,6 +1532,123 @@ def test_operator_kb_api_propose_promote_export_and_import(
     )
     assert rejected.status_code == 200
     assert rejected.json()["status"] == "rejected"
+
+
+def test_operator_kb_api_seed_run_proposal_and_completion(
+    tmp_path: Path,
+) -> None:
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    for payload in [
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+        {
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "pbx_mode": "report",
+                "cwd": str(caller_cwd),
+                "codex_session_id": "session-caller-1",
+                "codex_host_id": "local",
+            },
+        },
+    ]:
+        client.post("/v1/agents/register", json=payload)
+    fork = client.post(
+        "/v1/operator/forks/ensure",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_caller_agent_id": "caller-1",
+            "fork_agent_id": "operator-0-fork-caller-1-review-1",
+            "fork_track_id": "review-1",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+            "source_cwd": str(caller_cwd),
+            "work_root": str(tmp_path / ".agent-pbx-review" / "review"),
+            "status": "running",
+            "metadata": {"pbx_mode": "nohup"},
+        },
+    ).json()
+
+    seeded = client.post(
+        "/v1/operator/kb/seed-runs",
+        json={
+            "operator_agent_id": fork["fork_agent_id"],
+            "scope": "repo",
+            "project": "demo",
+            "repo_root": str(caller_cwd),
+            "delivery": "queue",
+        },
+    )
+    assert seeded.status_code == 200
+    seeded_payload = seeded.json()
+    seed_run = seeded_payload["seed_run"]
+    command = seeded_payload["command"]
+    seed_sync_key = seed_run["metadata"]["seed_sync_key"]
+    assert seed_run["status"] == "queued"
+    assert seed_run["logical_operator_agent_id"] == "operator-0"
+    assert seed_run["source_operator_agent_id"] == fork["fork_agent_id"]
+    assert command["agent_id"] == fork["fork_agent_id"]
+    assert command["payload"]["source"] == "operator_kb_seed_run"
+    assert command["payload"]["seed_run_id"] == seed_run["seed_run_id"]
+
+    listed = client.get(
+        "/v1/operator/kb/seed-runs",
+        params={"operator_agent_id": "operator-0", "status": "queued"},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["seed_runs"][0]["seed_run_id"] == seed_run["seed_run_id"]
+
+    proposed = client.post(
+        "/v1/operator/kb",
+        json={
+            "operator_agent_id": fork["fork_agent_id"],
+            "scope": "repo",
+            "project": "demo",
+            "repo_root": str(caller_cwd),
+            "title": "Seeded review practice",
+            "summary": "Review forks can seed durable operator guidance.",
+            "body": "A KB seed run records provenance before root promotion.",
+            "metadata": {
+                "seed_run_id": seed_run["seed_run_id"],
+                "seed_sync_key": seed_sync_key,
+                "seed_type": seed_run["seed_type"],
+                "extraction_version": "operator_kb_seed_v1",
+            },
+        },
+    )
+    assert proposed.status_code == 200
+    kb_entry = proposed.json()
+    assert kb_entry["created_by_operator_agent_id"] == "operator-0"
+    assert kb_entry["created_by_agent_id"] == fork["fork_agent_id"]
+    assert len(kb_entry["sources"]) == 1
+    source = kb_entry["sources"][0]
+    assert source["source_type"] == "kb_seed_run"
+    assert source["source_id"] == seed_run["seed_run_id"]
+    assert source["metadata"] == {
+        "seed_type": seed_run["seed_type"],
+        "seed_sync_key": seed_sync_key,
+    }
+
+    completed = client.patch(
+        f"/v1/operator/kb/seed-runs/{seed_run['seed_run_id']}",
+        json={
+            "operator_agent_id": fork["fork_agent_id"],
+            "status": "complete",
+            "summary": "Created one KB proposal.",
+            "metadata": {"proposal_count": 1},
+        },
+    )
+    assert completed.status_code == 200
+    completed_payload = completed.json()
+    assert completed_payload["status"] == "complete"
+    assert completed_payload["completed_at"] is not None
+    assert completed_payload["metadata"]["proposal_count"] == 1
 
 
 def test_operator_handoff_api_create_approve_ack_and_complete(

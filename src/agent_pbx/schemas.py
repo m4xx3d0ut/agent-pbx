@@ -72,6 +72,16 @@ OperatorKbRedactionStatus = Literal[
     "needs_review",
     "blocked",
 ]
+OperatorKbSeedRunStatus = Literal[
+    "requested",
+    "queued",
+    "sent",
+    "failed",
+    "complete",
+    "completed",
+    "canceled",
+    "cancelled",
+]
 AssignmentState = Literal[
     "pending",
     "sent",
@@ -237,6 +247,7 @@ class ReportCreateRequest(BaseModel):
     detail: str = Field(min_length=1)
     needs_input: bool = False
     plan_options: list[PlanOption] = Field(default_factory=list)
+    reporting_agent_id: str | None = Field(default=None, max_length=120)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -605,6 +616,58 @@ class OperatorKbImportResponse(BaseModel):
     skipped_count: int
     entries: list[OperatorKbEntryResponse] = Field(default_factory=list)
     skipped: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class OperatorKbSeedRunCreateRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    seed_type: str = Field(default="operator_self_seed", min_length=1, max_length=80)
+    scope: OperatorKbScope = "project"
+    project: str | None = Field(default=None, max_length=240)
+    repo_root: str | None = Field(default=None, max_length=1000)
+    git_remote: str | None = Field(default=None, max_length=1000)
+    branch: str | None = Field(default=None, max_length=240)
+    prompt: str | None = None
+    delivery: CampaignDelivery = "auto"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKbSeedRunUpdateRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    status: OperatorKbSeedRunStatus
+    summary: str | None = Field(default=None, max_length=4000)
+    error: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKbSeedRunResponse(BaseModel):
+    seed_run_id: str
+    logical_operator_agent_id: str
+    source_operator_agent_id: str
+    seed_type: str
+    scope: str
+    project: str | None = None
+    repo_root: str | None = None
+    git_remote: str | None = None
+    branch: str | None = None
+    prompt: str
+    status: str
+    command_id: str | None = None
+    tmux_pane_id: str | None = None
+    delivery_status: str | None = None
+    error: str | None = None
+    metadata: dict[str, Any]
+    created_at: float
+    updated_at: float
+    completed_at: float | None = None
+
+
+class OperatorKbSeedRunListResponse(BaseModel):
+    seed_runs: list[OperatorKbSeedRunResponse] = Field(default_factory=list)
+
+
+class OperatorKbSeedRunDeliveryResponse(BaseModel):
+    seed_run: OperatorKbSeedRunResponse
+    command: CommandResponse | None = None
 
 
 class OperatorHandoffCreateRequest(BaseModel):

@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import socket
+import uuid
 from typing import Any
 
 from . import tmux as tmux_support
@@ -113,11 +114,29 @@ OPERATOR_KB_STATUSES = {
     "retired",
     "rejected",
 }
+OPERATOR_KB_SCOPES = {"global", "project", "repo", "operator", "caller"}
 OPERATOR_KB_REDACTION_STATUSES = {
     "unreviewed",
     "clean",
     "needs_review",
     "blocked",
+}
+OPERATOR_KB_SEED_RUN_STATUSES = {
+    "requested",
+    "queued",
+    "sent",
+    "failed",
+    "complete",
+    "completed",
+    "canceled",
+    "cancelled",
+}
+OPERATOR_KB_SEED_TERMINAL_STATUSES = {
+    "failed",
+    "complete",
+    "completed",
+    "canceled",
+    "cancelled",
 }
 OPERATOR_KB_SECRET_PATTERNS = (
     re.compile(
@@ -159,6 +178,7 @@ def operator_runbook_payload() -> dict[str, Any]:
             "Start a campaign with title, objective, shared criteria, and one assignment per caller.",
             "Dispatch or follow up through pbx_operator_start_campaign and pbx_operator_send_followup.",
             "Use operator handoffs for executable domain transfers between operators or review forks without changing fork ownership.",
+            "Use manual KB seed runs to ask an operator or fork to propose durable knowledge from its current context.",
             "Keep the root operator turn active while assignments are running; periodically recheck campaign state.",
             "Inspect caller reports and threads with pbx_operator_get_thread.",
             "Mark each assignment complete, blocked, or needing follow-up with pbx_operator_report_assignment.",
@@ -173,7 +193,8 @@ def operator_runbook_payload() -> dict[str, Any]:
             "When review work needs a new sibling project, request it with pbx_operator_request_project_spawn; the TUI must approve and launch the new caller agent.",
             "When review work needs to transfer domain context to another operator, propose a knowledge handoff; the TUI/root operator approves the executable handoff delivery.",
             "Operator handoffs track required target fork launch, delivery evidence, receiver acknowledgement, running state, TTL expiry, artifact summaries, and terminal state.",
-            "Promote durable operator knowledge into the PBX-managed KB only from the root operator; forks may propose entries and read active entries.",
+            "Manual KB seed runs deliver a seed prompt to the selected operator or fork; that session proposes KB entries and updates seed-run status when finished.",
+            "Promote durable operator knowledge into the PBX-managed KB only from the root operator; forks may propose entries, update their seed-run status, and read active entries.",
             "Knowledge links and handoffs do not create fork edges, campaign assignments, or source-session ownership.",
             "The root operator coordinates campaigns and reviews evidence; it must not implement caller repo changes directly.",
             "Do not spawn or use Codex internal subagents for caller work; do not call multi_agent_v1.",
@@ -1029,17 +1050,36 @@ class OperatorService:
     ) -> dict[str, Any]:
         operator = self._require_operator(operator_agent_id)
         logical_operator_id = self._logical_operator_agent_id(operator)
+        metadata_payload = metadata or {}
         normalized_turn_ids = self._require_operator_kb_source_context(
             logical_operator_id=logical_operator_id,
             source_knowledge_link_id=source_knowledge_link_id,
             source_handoff_id=source_handoff_id,
             source_turn_ids=source_turn_ids or [],
         )
+        seed_sources: list[dict[str, Any]] = []
+        seed_run_id = str(metadata_payload.get("seed_run_id") or "").strip()
+        if seed_run_id:
+            seed_run = self._require_operator_kb_seed_run_usable(
+                seed_run_id,
+                logical_operator_id,
+                operator_agent_id,
+            )
+            seed_sources.append(
+                {
+                    "source_type": "kb_seed_run",
+                    "source_id": seed_run_id,
+                    "metadata": {
+                        "seed_type": seed_run.get("seed_type"),
+                        "seed_sync_key": metadata_payload.get("seed_sync_key"),
+                    },
+                }
+            )
         redaction_status = self._operator_kb_redaction_status(
             title=title,
             summary=summary,
             body=body,
-            metadata=metadata or {},
+            metadata=metadata_payload,
         )
         entry = self.store.create_operator_kb_entry(
             scope=scope,
@@ -1061,9 +1101,10 @@ class OperatorService:
             stale_after=stale_after,
             expires_at=expires_at,
             metadata={
-                **(metadata or {}),
+                **metadata_payload,
                 "proposed_by_operator_agent_id": operator_agent_id,
             },
+            sources=seed_sources,
         )
         self._record_kb_event(
             "operator_kb_proposed",
@@ -1519,6 +1560,193 @@ class OperatorService:
             operator_agent_id,
         )
         return result
+
+    def start_kb_seed_run(
+        self,
+        *,
+        operator_agent_id: str,
+        seed_type: str = "operator_self_seed",
+        scope: str = "project",
+        project: str | None = None,
+        repo_root: str | None = None,
+        git_remote: str | None = None,
+        branch: str | None = None,
+        prompt: str | None = None,
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        defaults = self._operator_kb_seed_defaults(operator)
+        resolved_seed_type = str(seed_type or "operator_self_seed").strip().lower()
+        resolved_scope = self._normalize_operator_kb_scope(scope)
+        resolved_project = project or defaults.get("project")
+        resolved_repo_root = repo_root or defaults.get("repo_root")
+        resolved_git_remote = git_remote or defaults.get("git_remote")
+        resolved_branch = branch or defaults.get("branch")
+        seed_run_id = str(uuid.uuid4())
+        base_metadata = {
+            **defaults,
+            **(metadata or {}),
+            "seed_run_id": seed_run_id,
+            "seed_type": resolved_seed_type,
+            "seed_scope": resolved_scope,
+            "source_operator_agent_id": operator_agent_id,
+            "logical_operator_id": logical_operator_id,
+            "extraction_version": "operator_kb_seed_v1",
+        }
+        sync_key = self._operator_kb_seed_sync_key(
+            logical_operator_id=logical_operator_id,
+            seed_type=resolved_seed_type,
+            scope=resolved_scope,
+            project=resolved_project,
+            repo_root=resolved_repo_root,
+            git_remote=resolved_git_remote,
+            branch=resolved_branch,
+        )
+        base_metadata["seed_sync_key"] = sync_key
+        rendered_prompt = str(prompt or "").strip() or self.render_kb_seed_prompt(
+            operator_agent_id=operator_agent_id,
+            logical_operator_id=logical_operator_id,
+            seed_run_id=seed_run_id,
+            seed_type=resolved_seed_type,
+            scope=resolved_scope,
+            project=resolved_project,
+            repo_root=resolved_repo_root,
+            git_remote=resolved_git_remote,
+            branch=resolved_branch,
+            seed_sync_key=sync_key,
+        )
+        base_metadata["content_fingerprint"] = hashlib.sha256(
+            rendered_prompt.encode("utf-8")
+        ).hexdigest()
+        seed_run = self.store.create_operator_kb_seed_run(
+            seed_run_id=seed_run_id,
+            logical_operator_agent_id=logical_operator_id,
+            source_operator_agent_id=operator_agent_id,
+            seed_type=resolved_seed_type,
+            scope=resolved_scope,
+            project=resolved_project,
+            repo_root=resolved_repo_root,
+            git_remote=resolved_git_remote,
+            branch=resolved_branch,
+            prompt=rendered_prompt,
+            metadata=base_metadata,
+        )
+        self._record_kb_seed_event(
+            "operator_kb_seed_requested",
+            seed_run,
+            summary="Operator KB seed run requested",
+        )
+        try:
+            command = self._deliver_operator_seed_run(
+                seed_run=seed_run,
+                delivery=delivery,
+            )
+        except Exception as exc:
+            updated = self.store.update_operator_kb_seed_run(
+                seed_run_id,
+                status="failed",
+                error=str(exc),
+                metadata={"delivery": delivery},
+            )
+            if updated is None:
+                raise RuntimeError("KB seed run failure update failed") from exc
+            self._record_kb_seed_event(
+                "operator_kb_seed_failed",
+                updated,
+                summary="Operator KB seed delivery failed",
+            )
+            return {"seed_run": updated, "command": None}
+        evidence = self._seed_delivery_evidence(command)
+        updated = self.store.update_operator_kb_seed_run(
+            seed_run_id,
+            status=str(command.get("status") or "queued"),
+            command_id=str(command.get("command_id") or ""),
+            tmux_pane_id=str(evidence.get("tmux_pane_id") or "") or None,
+            delivery_status=str(command.get("status") or ""),
+            metadata={"delivery": delivery, "delivery_evidence": evidence},
+        )
+        if updated is None:
+            raise RuntimeError("KB seed run delivery update failed")
+        self._record_kb_seed_event(
+            "operator_kb_seed_sent"
+            if str(command.get("status") or "") == "sent"
+            else "operator_kb_seed_queued",
+            updated,
+            summary="Operator KB seed prompt delivered",
+        )
+        return {"seed_run": updated, "command": command}
+
+    def list_kb_seed_runs(
+        self,
+        *,
+        operator_agent_id: str,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        normalized_status = (
+            self._normalize_operator_kb_seed_run_status(status)
+            if status is not None
+            else None
+        )
+        return self.store.list_operator_kb_seed_runs(
+            logical_operator_agent_id=logical_operator_id,
+            status=normalized_status,
+            limit=limit,
+        )
+
+    def get_kb_seed_run(
+        self,
+        *,
+        operator_agent_id: str,
+        seed_run_id: str,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        return self._require_operator_kb_seed_run_visible(
+            seed_run_id,
+            logical_operator_id,
+        )
+
+    def update_kb_seed_run(
+        self,
+        *,
+        operator_agent_id: str,
+        seed_run_id: str,
+        status: str,
+        summary: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        self._require_operator_kb_seed_run_usable(
+            seed_run_id,
+            logical_operator_id,
+            operator_agent_id,
+        )
+        normalized_status = self._normalize_operator_kb_seed_run_status(status)
+        updated = self.store.update_operator_kb_seed_run(
+            seed_run_id,
+            status=normalized_status,
+            error=error,
+            metadata={
+                **(metadata or {}),
+                "updated_by_operator_agent_id": operator_agent_id,
+                "summary": summary,
+            },
+        )
+        if updated is None:
+            raise RuntimeError("KB seed run update failed")
+        self._record_kb_seed_event(
+            f"operator_kb_seed_{normalized_status}",
+            updated,
+            summary=summary or f"Operator KB seed run {normalized_status}",
+        )
+        return updated
 
     def create_handoff(
         self,
@@ -2495,6 +2723,58 @@ class OperatorService:
             status="sent",
         )
 
+    def _deliver_operator_seed_run(
+        self,
+        *,
+        seed_run: dict[str, Any],
+        delivery: str,
+    ) -> dict[str, Any]:
+        source_operator_agent_id = str(
+            seed_run.get("source_operator_agent_id") or ""
+        ).strip()
+        target = self._require_agent(source_operator_agent_id)
+        if target.get("agent_type") != OPERATOR_AGENT_TYPE:
+            raise ValueError("KB seed target is not an operator")
+        resolved = str(delivery or "auto").strip().lower()
+        mode = str((target.get("metadata") or {}).get("pbx_mode") or "report").lower()
+        if resolved == "auto":
+            resolved = "queue" if mode == NOHUP_MODE else "tmux"
+        payload = {
+            "message": seed_run["prompt"],
+            "source": "operator_kb_seed_run",
+            "seed_run_id": seed_run["seed_run_id"],
+            "operator_agent_id": source_operator_agent_id,
+            "logical_operator_id": seed_run["logical_operator_agent_id"],
+            "seed_type": seed_run["seed_type"],
+            "scope": seed_run["scope"],
+            "project": seed_run.get("project"),
+            "repo_root": seed_run.get("repo_root"),
+            "git_remote": seed_run.get("git_remote"),
+            "branch": seed_run.get("branch"),
+        }
+        if resolved == "queue":
+            return self.store.create_command(
+                CommandCreateRequest(
+                    agent_id=source_operator_agent_id,
+                    type="send_input",
+                    payload=payload,
+                )
+            )
+        if resolved != "tmux":
+            raise ValueError("delivery must be auto, queue, or tmux")
+        pane = self._resolve_tmux_pane(target)
+        tmux_support.send_text(pane.pane_id, seed_run["prompt"], tmux_bin=self.tmux_bin)
+        payload["tmux_pane_id"] = pane.pane_id
+        payload["tmux_target"] = pane.target_label
+        return self.store.create_command(
+            CommandCreateRequest(
+                agent_id=source_operator_agent_id,
+                type="send_input",
+                payload=payload,
+            ),
+            status="sent",
+        )
+
     def _deliver_knowledge_turn(
         self,
         turn: dict[str, Any],
@@ -2967,6 +3247,19 @@ class OperatorService:
             "tmux_target": payload.get("tmux_target"),
         }
 
+    @staticmethod
+    def _seed_delivery_evidence(command: dict[str, Any]) -> dict[str, Any]:
+        payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        return {
+            "command_id": command.get("command_id"),
+            "command_status": command.get("status"),
+            "delivery_status": command.get("status"),
+            "delivered_to_pane": bool(payload.get("tmux_pane_id")),
+            "submitted_to_codex": bool(payload.get("tmux_pane_id")),
+            "tmux_pane_id": payload.get("tmux_pane_id"),
+            "tmux_target": payload.get("tmux_target"),
+        }
+
     def _mark_handoff_knowledge_turn_delivered(
         self,
         handoff: dict[str, Any],
@@ -3053,6 +3346,36 @@ class OperatorService:
                 "source_handoff_id": entry.get("source_handoff_id"),
             },
             str(entry.get("kb_id") or ""),
+        )
+
+    def _record_kb_seed_event(
+        self,
+        event_type: str,
+        seed_run: dict[str, Any],
+        *,
+        summary: str,
+    ) -> None:
+        self.store.append_event(
+            event_type,
+            {
+                "seed_run_id": seed_run.get("seed_run_id"),
+                "operator_agent_id": seed_run.get("source_operator_agent_id"),
+                "logical_operator_agent_id": seed_run.get(
+                    "logical_operator_agent_id"
+                ),
+                "source_operator_agent_id": seed_run.get(
+                    "source_operator_agent_id"
+                ),
+                "seed_type": seed_run.get("seed_type"),
+                "scope": seed_run.get("scope"),
+                "project": seed_run.get("project"),
+                "repo_root": seed_run.get("repo_root"),
+                "status": seed_run.get("status"),
+                "delivery_status": seed_run.get("delivery_status"),
+                "command_id": seed_run.get("command_id"),
+                "summary": summary,
+            },
+            str(seed_run.get("seed_run_id") or ""),
         )
 
     def _agent_with_fork_delivery_metadata(
@@ -3373,6 +3696,164 @@ class OperatorService:
             normalized_turn_ids.append(turn_id)
         return normalized_turn_ids
 
+    def _operator_kb_seed_defaults(self, operator: dict[str, Any]) -> dict[str, Any]:
+        metadata = (
+            operator.get("metadata")
+            if isinstance(operator.get("metadata"), dict)
+            else {}
+        )
+        source_caller_id = str(metadata.get("source_caller_agent_id") or "").strip()
+        source_agent = self.store.get_agent(source_caller_id) if source_caller_id else None
+        source_metadata = (
+            source_agent.get("metadata")
+            if isinstance(source_agent, dict)
+            and isinstance(source_agent.get("metadata"), dict)
+            else {}
+        )
+        project = (
+            str(source_agent.get("project") or "").strip()
+            if isinstance(source_agent, dict)
+            else ""
+        ) or str(operator.get("project") or "").strip()
+        repo_root = (
+            str(metadata.get("source_cwd") or "").strip()
+            or str(source_metadata.get("cwd") or "").strip()
+            or str(metadata.get("cwd") or "").strip()
+        )
+        return {
+            "project": project or None,
+            "repo_root": repo_root or None,
+            "git_remote": str(metadata.get("git_remote") or "").strip() or None,
+            "branch": str(metadata.get("branch") or "").strip() or None,
+            "source_caller_agent_id": source_caller_id or None,
+            "source_codex_session_id": (
+                str(metadata.get("source_codex_session_id") or "").strip() or None
+            ),
+            "source_operator_codex_session_id": (
+                str(
+                    metadata.get("fork_codex_session_id")
+                    or metadata.get("codex_session_id")
+                    or metadata.get("codex_thread_id")
+                    or ""
+                ).strip()
+                or None
+            ),
+        }
+
+    @staticmethod
+    def _operator_kb_seed_sync_key(
+        *,
+        logical_operator_id: str,
+        seed_type: str,
+        scope: str,
+        project: str | None,
+        repo_root: str | None,
+        git_remote: str | None,
+        branch: str | None,
+    ) -> str:
+        text = "\0".join(
+            [
+                str(logical_operator_id or ""),
+                str(seed_type or ""),
+                str(scope or ""),
+                str(project or ""),
+                str(repo_root or ""),
+                str(git_remote or ""),
+                str(branch or ""),
+            ]
+        )
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def render_kb_seed_prompt(
+        *,
+        operator_agent_id: str,
+        logical_operator_id: str,
+        seed_run_id: str,
+        seed_type: str,
+        scope: str,
+        project: str | None,
+        repo_root: str | None,
+        git_remote: str | None,
+        branch: str | None,
+        seed_sync_key: str,
+    ) -> str:
+        return "\n".join(
+            [
+                "Seed the Agent PBX operator KB with durable domain knowledge.",
+                "",
+                f"Seed run: {seed_run_id}",
+                f"Operator agent: {operator_agent_id}",
+                f"Logical operator: {logical_operator_id}",
+                f"Seed type: {seed_type}",
+                f"Scope: {scope}",
+                f"Project: {project or '-'}",
+                f"Repo root: {repo_root or '-'}",
+                f"Git remote: {git_remote or '-'}",
+                f"Branch: {branch or '-'}",
+                f"Sync key: {seed_sync_key}",
+                "",
+                "Task:",
+                "- Review your current durable domain knowledge for this operator context.",
+                "- Search existing active and proposed KB entries before proposing new ones.",
+                "- Propose small atomic KB entries only for reusable operating guidance.",
+                "- Exclude secrets, credentials, personal data, proprietary raw dumps, transient status, and speculation.",
+                "- Prefer stable procedures, constraints, architecture notes, validation rules, and known pitfalls.",
+                "- If nothing durable should be saved, do not create KB entries.",
+                "",
+                "For each durable item, call pbx_operator_kb_propose with:",
+                f"- operator_agent_id={operator_agent_id!r}",
+                f"- scope={scope!r}",
+                f"- project={project!r}",
+                f"- repo_root={repo_root!r}",
+                f"- git_remote={git_remote!r}",
+                f"- branch={branch!r}",
+                "- concise title, summary, body, and tags",
+                "- metadata containing:",
+                f"  seed_run_id={seed_run_id!r}",
+                f"  seed_type={seed_type!r}",
+                f"  seed_sync_key={seed_sync_key!r}",
+                "  extraction_version='operator_kb_seed_v1'",
+                f"  source_operator_agent_id={operator_agent_id!r}",
+                f"  logical_operator_id={logical_operator_id!r}",
+                "",
+                "When finished, call pbx_operator_kb_update_seed_run with:",
+                f"- operator_agent_id={operator_agent_id!r}",
+                f"- seed_run_id={seed_run_id!r}",
+                "- status='complete' if done, or status='failed' with error if blocked",
+                "- summary describing how many KB proposals were created or why none were created",
+                "",
+                "Do not promote KB entries. Promotion stays with root-operator review.",
+            ]
+        )
+
+    def _require_operator_kb_seed_run_visible(
+        self,
+        seed_run_id: str,
+        logical_operator_id: str,
+    ) -> dict[str, Any]:
+        seed_run = self.store.get_operator_kb_seed_run(seed_run_id)
+        if seed_run is None:
+            raise ValueError("KB seed run not found")
+        if str(seed_run.get("logical_operator_agent_id") or "") != logical_operator_id:
+            raise ValueError("KB seed run belongs to a different operator")
+        return seed_run
+
+    def _require_operator_kb_seed_run_usable(
+        self,
+        seed_run_id: str,
+        logical_operator_id: str,
+        operator_agent_id: str,
+    ) -> dict[str, Any]:
+        seed_run = self._require_operator_kb_seed_run_visible(
+            seed_run_id,
+            logical_operator_id,
+        )
+        source_operator_id = str(seed_run.get("source_operator_agent_id") or "").strip()
+        if operator_agent_id not in {logical_operator_id, source_operator_id}:
+            raise ValueError("KB seed run belongs to a different source operator")
+        return seed_run
+
     def _require_operator_kb_entry(self, kb_id: str) -> dict[str, Any]:
         entry = self.store.get_operator_kb_entry(kb_id)
         if entry is None:
@@ -3546,10 +4027,24 @@ class OperatorService:
         return normalized
 
     @staticmethod
+    def _normalize_operator_kb_scope(scope: str | None) -> str:
+        normalized = str(scope or "project").strip().lower()
+        if normalized not in OPERATOR_KB_SCOPES:
+            raise ValueError("KB scope is invalid")
+        return normalized
+
+    @staticmethod
     def _normalize_operator_kb_redaction_status(status: str | None) -> str:
         normalized = str(status or "unreviewed").strip().lower()
         if normalized not in OPERATOR_KB_REDACTION_STATUSES:
             raise ValueError("KB redaction status is invalid")
+        return normalized
+
+    @staticmethod
+    def _normalize_operator_kb_seed_run_status(status: str | None) -> str:
+        normalized = str(status or "requested").strip().lower()
+        if normalized not in OPERATOR_KB_SEED_RUN_STATUSES:
+            raise ValueError("KB seed run status is invalid")
         return normalized
 
     @staticmethod

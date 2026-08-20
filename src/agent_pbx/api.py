@@ -108,6 +108,11 @@ from .schemas import (
     OperatorKbPromoteRequest,
     OperatorKbRejectRequest,
     OperatorKbRetireRequest,
+    OperatorKbSeedRunCreateRequest,
+    OperatorKbSeedRunDeliveryResponse,
+    OperatorKbSeedRunListResponse,
+    OperatorKbSeedRunResponse,
+    OperatorKbSeedRunUpdateRequest,
     OperatorKbUpdateRequest,
     OperatorKnowledgeContextResponse,
     OperatorKnowledgeDeliveryResponse,
@@ -290,15 +295,28 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 update={"metadata": enrich_codex_session_metadata(request.metadata)}
             )
         agent = store.register_agent(request)
+        registered_project = str(agent.get("project") or request.project)
+        registered_agent_type = str(agent.get("agent_type") or request.agent_type)
         store.append_event(
             "agent_registered",
             {
                 "agent_id": request.agent_id,
-                "project": request.project,
-                "agent_type": request.agent_type,
+                "project": registered_project,
+                "agent_type": registered_agent_type,
             },
             request.agent_id,
         )
+        if registered_project != request.project:
+            store.append_event(
+                "agent_registration_project_canonicalized",
+                {
+                    "agent_id": request.agent_id,
+                    "requested_project": request.project,
+                    "project": registered_project,
+                    "agent_type": registered_agent_type,
+                },
+                request.agent_id,
+            )
         return agent
 
     @app.get(
@@ -452,6 +470,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     ) -> dict[str, object]:
         if store.get_agent(agent_id) is None:
             raise HTTPException(status_code=404, detail="agent not registered")
+        request = store.report_request_with_identity_metadata(request)
+        violation = store.report_identity_violation_payload(agent_id, request)
+        if violation is not None:
+            store.append_event("report_identity_violation", violation, agent_id)
+            raise HTTPException(status_code=409, detail=violation["reason"])
         report = store.create_report(agent_id, request)
         store.append_event(
             "report_created",
@@ -1762,6 +1785,88 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             operator_agent_id=payload.operator_agent_id,
             bundle=payload.bundle,
             import_status=payload.import_status,
+            metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/kb/seed-runs",
+        response_model=OperatorKbSeedRunListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_kb_seed_runs(
+        request: Request,
+        operator_agent_id: str,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        seed_runs = await asyncio.to_thread(
+            operator_service.list_kb_seed_runs,
+            operator_agent_id=operator_agent_id,
+            status=status,
+            limit=limit,
+        )
+        return {"seed_runs": seed_runs}
+
+    @app.post(
+        "/v1/operator/kb/seed-runs",
+        response_model=OperatorKbSeedRunDeliveryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def start_operator_kb_seed_run(
+        payload: OperatorKbSeedRunCreateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.start_kb_seed_run,
+            operator_agent_id=payload.operator_agent_id,
+            seed_type=payload.seed_type,
+            scope=payload.scope,
+            project=payload.project,
+            repo_root=payload.repo_root,
+            git_remote=payload.git_remote,
+            branch=payload.branch,
+            prompt=payload.prompt,
+            delivery=payload.delivery,
+            metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/kb/seed-runs/{seed_run_id}",
+        response_model=OperatorKbSeedRunResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_operator_kb_seed_run(
+        seed_run_id: str,
+        request: Request,
+        operator_agent_id: str,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.get_kb_seed_run,
+            operator_agent_id=operator_agent_id,
+            seed_run_id=seed_run_id,
+        )
+
+    @app.patch(
+        "/v1/operator/kb/seed-runs/{seed_run_id}",
+        response_model=OperatorKbSeedRunResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def update_operator_kb_seed_run(
+        seed_run_id: str,
+        payload: OperatorKbSeedRunUpdateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.update_kb_seed_run,
+            operator_agent_id=payload.operator_agent_id,
+            seed_run_id=seed_run_id,
+            status=payload.status,
+            summary=payload.summary,
+            error=payload.error,
             metadata=payload.metadata,
         )
 

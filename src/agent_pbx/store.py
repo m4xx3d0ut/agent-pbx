@@ -18,7 +18,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -27,6 +27,8 @@ POLL_WARN_PER_HOUR = 24
 STALE_WORKING_SECONDS = 600
 STALE_WORKING_STATUSES = {"running", "working"}
 OPERATOR_AGENT_TYPE = "operator"
+OPERATOR_PROJECT = "agent-pbx-operator"
+OPERATOR_ROLE_ROOT = "root"
 OPERATOR_ROLE_FORK = "fork"
 OPERATOR_TERMINAL_BASE_STATES = (
     "complete",
@@ -108,7 +110,29 @@ OPERATOR_KB_REDACTION_STATUSES = {
     "needs_review",
     "blocked",
 }
+OPERATOR_KB_SEED_RUN_STATUSES = {
+    "requested",
+    "queued",
+    "sent",
+    "failed",
+    "complete",
+    "completed",
+    "canceled",
+    "cancelled",
+}
+OPERATOR_KB_SEED_TERMINAL_STATUSES = {
+    "failed",
+    "complete",
+    "completed",
+    "canceled",
+    "cancelled",
+}
 OPERATOR_KB_EXPORT_FORMAT = "agent-pbx-operator-kb-v1"
+REPORTING_AGENT_ID_METADATA_KEYS = (
+    "reporting_agent_id",
+    "pbx_reporting_agent_id",
+    "session_agent_id",
+)
 
 
 def _operator_active_state_sql(status_column: str, completed_column: str) -> str:
@@ -590,6 +614,32 @@ class Store:
                         ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS operator_kb_seed_runs (
+                    seed_run_id TEXT PRIMARY KEY,
+                    logical_operator_agent_id TEXT NOT NULL,
+                    source_operator_agent_id TEXT NOT NULL,
+                    seed_type TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    project TEXT,
+                    repo_root TEXT,
+                    git_remote TEXT,
+                    branch TEXT,
+                    prompt TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'requested',
+                    command_id TEXT,
+                    tmux_pane_id TEXT,
+                    delivery_status TEXT,
+                    error TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    completed_at REAL,
+                    FOREIGN KEY(logical_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(source_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(command_id) REFERENCES commands(command_id)
+                        ON DELETE SET NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_operator_campaigns_operator_updated
                     ON operator_campaigns(operator_agent_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_operator_campaigns_status_updated
@@ -672,6 +722,14 @@ class Store:
                     ON operator_kb_sources(kb_id, source_type);
                 CREATE INDEX IF NOT EXISTS idx_operator_kb_events_kb_created
                     ON operator_kb_events(kb_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_seed_runs_logical_status
+                    ON operator_kb_seed_runs(
+                        logical_operator_agent_id,
+                        status,
+                        updated_at DESC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_seed_runs_source
+                    ON operator_kb_seed_runs(source_operator_agent_id, updated_at DESC);
                 """
             )
             previous_schema_version = self._schema_version(conn)
@@ -1015,6 +1073,10 @@ class Store:
                 if existing
                 else "caller"
             )
+            existing_metadata = self._json_object(existing["metadata_json"]) if existing else {}
+            existing_operator_role = (
+                str(existing_metadata.get("operator_role") or "").strip().lower()
+            )
             requested_type = self._normalized_agent_type(request.agent_type)
             has_metadata_agent_type = "agent_type" in request_metadata
             metadata_type = (
@@ -1040,6 +1102,17 @@ class Store:
                 agent_type = "caller"
             if agent_type == "operator" or has_metadata_agent_type:
                 request_metadata["agent_type"] = agent_type
+            is_root_operator_registration = (
+                agent_type == OPERATOR_AGENT_TYPE
+                and existing_fork_identity is None
+                and requested_operator_role != OPERATOR_ROLE_FORK
+            )
+            preserve_existing_root_operator_identity = (
+                is_root_operator_registration
+                and existing_type == OPERATOR_AGENT_TYPE
+                and existing_operator_role != OPERATOR_ROLE_FORK
+                and request.project != OPERATOR_PROJECT
+            )
             if preserve_existing_operator_identity:
                 for key in (
                     "agent_type",
@@ -1058,6 +1131,27 @@ class Store:
                     "last_resume_codex_session_id",
                 ):
                     request_metadata.pop(key, None)
+            if preserve_existing_root_operator_identity:
+                for key in (
+                    "operator_role",
+                    "logical_operator_id",
+                    "source_caller_agent_id",
+                    "source_codex_session_id",
+                    "cwd",
+                    "tmux_pane_id",
+                    "tmux_target",
+                    "tmux_session",
+                    "active_tmux_pane_id",
+                    "launched_by",
+                    "mcp_url",
+                    "token_env",
+                    "codex_command",
+                    "operator_session_history",
+                    "last_resume_codex_session_id",
+                ):
+                    request_metadata.pop(key, None)
+            if is_root_operator_registration:
+                request_metadata["operator_role"] = OPERATOR_ROLE_ROOT
             if existing_fork_identity is not None and requested_operator_role != OPERATOR_ROLE_FORK:
                 for key in (
                     "agent_type",
@@ -1079,12 +1173,18 @@ class Store:
             )
             if existing_fork_identity is not None:
                 metadata.update(existing_fork_identity)
+            elif is_root_operator_registration:
+                metadata["operator_role"] = OPERATOR_ROLE_ROOT
             metadata_json = json.dumps(metadata)
             name = request.name
             project = request.project
             if existing_fork_identity is not None and existing:
                 name = name or existing["name"]
                 project = existing["project"]
+            elif is_root_operator_registration:
+                project = OPERATOR_PROJECT
+                if preserve_existing_root_operator_identity and existing:
+                    name = existing["name"]
             elif preserve_existing_operator_identity and existing:
                 name = existing["name"]
                 project = existing["project"]
@@ -1131,14 +1231,7 @@ class Store:
         existing_json: str | None,
         metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        existing: dict[str, Any] = {}
-        if existing_json:
-            try:
-                decoded = json.loads(existing_json)
-            except json.JSONDecodeError:
-                decoded = {}
-            if isinstance(decoded, dict):
-                existing = decoded
+        existing = Store._json_object(existing_json)
 
         merged = dict(existing)
         for key, value in metadata.items():
@@ -1153,6 +1246,16 @@ class Store:
             merged[key] = value
         Store._backfill_agent_cwd(merged)
         return merged
+
+    @staticmethod
+    def _json_object(value: str | None) -> dict[str, Any]:
+        if not value:
+            return {}
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
 
     @staticmethod
     def _backfill_agent_cwd(metadata: dict[str, Any]) -> None:
@@ -1609,6 +1712,63 @@ class Store:
         if report is None:
             raise RuntimeError("report insert failed")
         return report
+
+    @staticmethod
+    def report_request_with_identity_metadata(
+        request: ReportCreateRequest,
+    ) -> ReportCreateRequest:
+        reporting_agent_id = str(request.reporting_agent_id or "").strip()
+        if not reporting_agent_id:
+            return request
+        metadata = dict(request.metadata or {})
+        metadata.setdefault("reporting_agent_id", reporting_agent_id)
+        return request.model_copy(update={"metadata": metadata})
+
+    @classmethod
+    def declared_reporting_agent_id(
+        cls,
+        request: ReportCreateRequest,
+    ) -> str | None:
+        reporting_agent_id = str(request.reporting_agent_id or "").strip()
+        if reporting_agent_id:
+            return reporting_agent_id
+        metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        for key in REPORTING_AGENT_ID_METADATA_KEYS:
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                return value
+        return None
+
+    def report_identity_violation_payload(
+        self,
+        agent_id: str,
+        request: ReportCreateRequest,
+    ) -> dict[str, Any] | None:
+        reporting_agent_id = self.declared_reporting_agent_id(request)
+        if not reporting_agent_id or reporting_agent_id == agent_id:
+            return None
+        target_agent = self.get_agent(agent_id)
+        reporting_agent = self.get_agent(reporting_agent_id)
+        return {
+            "agent_id": agent_id,
+            "reporting_agent_id": reporting_agent_id,
+            "target_agent_type": (
+                target_agent.get("agent_type") if isinstance(target_agent, dict) else None
+            ),
+            "reporting_agent_type": (
+                reporting_agent.get("agent_type")
+                if isinstance(reporting_agent, dict)
+                else None
+            ),
+            "project": request.project,
+            "status": request.status,
+            "summary": request.summary,
+            "reason": (
+                "reporting_agent_id must match agent_id; use operator "
+                "campaign or handoff tools instead of writing reports for "
+                "another agent"
+            ),
+        }
 
     def mark_latest_report_seen(self, agent_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -3799,6 +3959,173 @@ class Store:
             "skipped": skipped,
         }
 
+    def create_operator_kb_seed_run(
+        self,
+        *,
+        seed_run_id: str | None = None,
+        logical_operator_agent_id: str,
+        source_operator_agent_id: str,
+        seed_type: str,
+        scope: str,
+        prompt: str,
+        project: str | None = None,
+        repo_root: str | None = None,
+        git_remote: str | None = None,
+        branch: str | None = None,
+        status: str = "requested",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_seed_type = str(seed_type or "operator_self_seed").strip().lower()
+        normalized_prompt = str(prompt or "").strip()
+        if not normalized_seed_type:
+            raise ValueError("KB seed type is required")
+        if not normalized_prompt:
+            raise ValueError("KB seed prompt is required")
+        normalized_status = self._normalize_operator_kb_seed_run_status(status)
+        resolved_seed_run_id = str(seed_run_id or uuid.uuid4()).strip()
+        if not resolved_seed_run_id:
+            raise ValueError("KB seed run id is required")
+        current = now_ts()
+        completed_at = (
+            current
+            if normalized_status in OPERATOR_KB_SEED_TERMINAL_STATUSES
+            else None
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_kb_seed_runs
+                    (seed_run_id, logical_operator_agent_id,
+                     source_operator_agent_id, seed_type, scope, project,
+                     repo_root, git_remote, branch, prompt, status,
+                     metadata_json, created_at, updated_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    resolved_seed_run_id,
+                    logical_operator_agent_id,
+                    source_operator_agent_id,
+                    normalized_seed_type,
+                    self._normalize_operator_kb_scope(scope),
+                    self._none_if_blank(project),
+                    self._none_if_blank(repo_root),
+                    self._none_if_blank(git_remote),
+                    self._none_if_blank(branch),
+                    normalized_prompt,
+                    normalized_status,
+                    json.dumps(metadata or {}),
+                    current,
+                    current,
+                    completed_at,
+                ),
+            )
+        run = self.get_operator_kb_seed_run(resolved_seed_run_id)
+        if run is None:
+            raise RuntimeError("operator KB seed run insert failed")
+        return run
+
+    def get_operator_kb_seed_run(self, seed_run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                {self._operator_kb_seed_run_select_sql()}
+                WHERE seed_run_id = ?
+                """,
+                (seed_run_id,),
+            ).fetchone()
+        return self._operator_kb_seed_run_from_row(row) if row else None
+
+    def list_operator_kb_seed_runs(
+        self,
+        *,
+        logical_operator_agent_id: str | None = None,
+        source_operator_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(int(limit), 1), 500)
+        where: list[str] = []
+        params: list[Any] = []
+        if logical_operator_agent_id:
+            where.append("logical_operator_agent_id = ?")
+            params.append(str(logical_operator_agent_id).strip())
+        if source_operator_agent_id:
+            where.append("source_operator_agent_id = ?")
+            params.append(str(source_operator_agent_id).strip())
+        if status:
+            where.append("status = ?")
+            params.append(self._normalize_operator_kb_seed_run_status(status))
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(safe_limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                {self._operator_kb_seed_run_select_sql()}
+                {clause}
+                ORDER BY updated_at DESC, created_at DESC, seed_run_id ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._operator_kb_seed_run_from_row(row) for row in rows]
+
+    def update_operator_kb_seed_run(
+        self,
+        seed_run_id: str,
+        *,
+        status: str | None = None,
+        command_id: str | None = None,
+        tmux_pane_id: str | None = None,
+        delivery_status: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        existing = self.get_operator_kb_seed_run(seed_run_id)
+        if existing is None:
+            return None
+        normalized_status = (
+            self._normalize_operator_kb_seed_run_status(status)
+            if status is not None
+            else str(existing.get("status") or "requested")
+        )
+        current = now_ts()
+        completed_at = existing.get("completed_at")
+        if (
+            completed_at is None
+            and normalized_status in OPERATOR_KB_SEED_TERMINAL_STATUSES
+        ):
+            completed_at = current
+        merged_metadata = dict(existing.get("metadata") or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_kb_seed_runs
+                SET status = ?,
+                    command_id = COALESCE(?, command_id),
+                    tmux_pane_id = COALESCE(?, tmux_pane_id),
+                    delivery_status = COALESCE(?, delivery_status),
+                    error = ?,
+                    metadata_json = ?,
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE seed_run_id = ?
+                """,
+                (
+                    normalized_status,
+                    self._none_if_blank(command_id),
+                    self._none_if_blank(tmux_pane_id),
+                    self._none_if_blank(delivery_status),
+                    self._none_if_blank(error),
+                    json.dumps(merged_metadata),
+                    current,
+                    completed_at,
+                    seed_run_id,
+                ),
+            )
+        return self.get_operator_kb_seed_run(seed_run_id) if cursor.rowcount else None
+
     def create_operator_handoff(
         self,
         *,
@@ -4244,6 +4571,17 @@ class Store:
             FROM operator_kb_entries
         """
 
+    @staticmethod
+    def _operator_kb_seed_run_select_sql() -> str:
+        return """
+            SELECT seed_run_id, logical_operator_agent_id,
+                   source_operator_agent_id, seed_type, scope, project,
+                   repo_root, git_remote, branch, prompt, status, command_id,
+                   tmux_pane_id, delivery_status, error, metadata_json,
+                   created_at, updated_at, completed_at
+            FROM operator_kb_seed_runs
+        """
+
     @classmethod
     def _operator_fork_row_for_agent(
         cls,
@@ -4375,6 +4713,13 @@ class Store:
         return normalized
 
     @staticmethod
+    def _normalize_operator_kb_seed_run_status(status: str | None) -> str:
+        normalized = str(status or "requested").strip().lower()
+        if normalized not in OPERATOR_KB_SEED_RUN_STATUSES:
+            raise ValueError("KB seed run status is invalid")
+        return normalized
+
+    @staticmethod
     def _operator_kb_sources_payload(
         *,
         kb_id: str,
@@ -4452,6 +4797,17 @@ class Store:
                 decoded if isinstance(decoded, type(default)) else default
             )
         data["sources"] = []
+        return data
+
+    @staticmethod
+    def _operator_kb_seed_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        metadata_json = data.pop("metadata_json")
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
         return data
 
     @staticmethod

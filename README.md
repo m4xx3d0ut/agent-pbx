@@ -308,7 +308,8 @@ approval, required target fork launch, delivery evidence, receiver
 acknowledgement, started/running state, TTL expiry, artifact summaries, and
 terminal status without creating fork edges or changing source-session
 ownership. Durable operator knowledge is stored in `operator_kb_entries`,
-`operator_kb_sources`, and `operator_kb_events` after root-operator review.
+`operator_kb_sources`, and `operator_kb_events` after root-operator review;
+manual seed-run provenance is stored in `operator_kb_seed_runs`.
 Reports and commands still provide the audit trail and link back to
 campaigns with report metadata and command payload fields such as
 `campaign_id`, `assignment_id`, `operator_agent_id`, and `operator_fork_id`.
@@ -390,6 +391,16 @@ with `pbx_operator_kb_export` and import them with `pbx_operator_kb_import`;
 active import and promotion require clean redaction state or an explicit manual
 override in metadata.
 
+Use `/operator kb seed` to manually ask the selected root operator or fork to
+extract durable operating guidance from its current context. Agent PBX records a
+seed run, delivers a normal `send_input` prompt by queue or tmux, and includes a
+stable `seed_run_id` and `seed_sync_key` for future sync/dedupe. The receiving
+operator searches existing KB entries, proposes small atomic entries with
+`pbx_operator_kb_propose`, includes the supplied seed metadata, then marks the
+run finished with `pbx_operator_kb_update_seed_run`. Seed runs create proposed
+entries only; root promotion, rejection, retirement, import, and export stay on
+the existing review path.
+
 KB bodies and export bundles may contain private, proprietary, or personally
 identifying context from operator handoffs. Keep exports under ignored local
 paths such as `artifacts/`, `runs/`, or `state/`; repo ignore rules also exclude
@@ -406,9 +417,10 @@ review fork proposes a knowledge handoff, select the logical operator and run
 `/operator handoffs` to inspect workflow state, `/operator handoff approve` to
 approve delivery, and `/operator handoff launch` if the target operator needs a
 caller fork before the handoff can run. When that exchange produces durable
-guidance, run `/operator kb proposed` to open the `KB` tab on proposed entries,
-select the proposal to review its body, then use `Promote` to publish the clean
-proposal or `Reject` to reject it.
+guidance, run `/operator kb seed` against the operator or fork that holds the
+context, then run `/operator kb proposed` to open the `KB` tab on proposed
+entries, select proposals to review their bodies, and use `Promote` to publish
+clean proposals or `Reject` to reject them.
 
 ## Planned Local Validation
 
@@ -791,8 +803,8 @@ commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
 `/operator handoffs`, `/operator handoff approve`,
 `/operator handoff launch`, `/operator knowledge links`, `/operator knowledge send`,
 `/operator kb`, `/operator kb detail`, `/operator kb proposed`,
-`/operator kb proposed detail`, `/operator kb promote`, `/operator kb reject`,
-`/operator kb retire`, `/operator project spawn`, `/pr`, `/pr refresh`,
+`/operator kb proposed detail`, `/operator kb seed`, `/operator kb promote`,
+`/operator kb reject`, `/operator kb retire`, `/operator project spawn`, `/pr`, `/pr refresh`,
 `/pr review`, `/pr validate`, `/pr url`, `/pr merge`, `/issue`, `/issue refresh`, `/issue mitigate`,
 `/issue url`, `/issue clear`, configured `/joplin`, `/joplin new`,
 `/joplin rename`, `/joplin delete`, `/joplin copy`,
