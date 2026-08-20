@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agent_pbx.agent import (
@@ -72,6 +73,8 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "pbx_operator_request_project_spawn" in instructions
     assert "pbx_operator_ack_handoff" in instructions
     assert "pbx_operator_update_handoff" in instructions
+    assert "pbx_operator_preflight_handoff" in instructions
+    assert "/operator handoff preflight" in instructions
     assert "pbx_operator_kb_propose" in instructions
     assert "pbx_operator_kb_propose_from_link" in instructions
     assert "pbx_operator_kb_context" in instructions
@@ -167,6 +170,7 @@ def test_runbook_payload_includes_command_guidance() -> None:
     )
     assert any("pbx_operator_ack_handoff" in item for item in payload["agent_types"])
     assert any("pbx_operator_update_handoff" in item for item in payload["agent_types"])
+    assert any("pbx_operator_preflight_handoff" in item for item in payload["agent_types"])
 
 
 def test_install_agent_instructions_check_missing_target(tmp_path: Path) -> None:
@@ -241,6 +245,160 @@ def test_agent_cli_prints_runbook(capsys) -> None:
     assert result == 0
     assert "Agent PBX Runbook" in out
     assert "pbx_report_turn" in out
+
+
+def test_agent_cli_runs_operator_kb_flow_uat(monkeypatch, capsys) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run_operator_kb_flow_uat(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "run": "uat-1",
+            "base": kwargs["server"],
+            "project": kwargs["project"],
+            "results": [],
+            "failures": [],
+            "cleanup": [],
+        }
+
+    monkeypatch.setattr(
+        "agent_pbx.cli.run_operator_kb_flow_uat",
+        fake_run_operator_kb_flow_uat,
+    )
+
+    result = main(
+        [
+            "uat",
+            "operator-kb-flow",
+            "--server",
+            "http://pbx.test",
+            "--token",
+            "secret",
+            "--project",
+            "demo",
+            "--tmux-sink",
+            "--tmux-session",
+            "agent-pbx",
+            "--json",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert '"run": "uat-1"' in out
+    assert calls == [
+        {
+            "server": "http://pbx.test",
+            "token": "secret",
+            "project": "demo",
+            "tmux_sink": True,
+            "tmux_session": "agent-pbx",
+            "controlled_cwd": None,
+            "cleanup": True,
+            "timeout": 20.0,
+            "state_root": None,
+            "tmux_bin": "tmux",
+        }
+    ]
+
+
+def test_agent_cli_operator_kb_flow_uat_ci_profile_and_json_output(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    calls: list[dict[str, object]] = []
+    output = tmp_path / "runs" / "uat-result.json"
+
+    def fake_run_operator_kb_flow_uat(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "run": "uat-ci-1",
+            "base": kwargs["server"],
+            "project": kwargs["project"],
+            "results": [],
+            "failures": [],
+            "cleanup": [],
+        }
+
+    monkeypatch.setattr(
+        "agent_pbx.cli.run_operator_kb_flow_uat",
+        fake_run_operator_kb_flow_uat,
+    )
+
+    result = main(
+        [
+            "uat",
+            "operator-kb-flow",
+            "--server",
+            "http://pbx.test",
+            "--token",
+            "ci-secret",
+            "--tmux-sink",
+            "--no-cleanup",
+            "--ci",
+            "--state-root",
+            str(tmp_path / "state"),
+            "--tmux-bin",
+            "tmux-test",
+            "--output",
+            str(output),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "# Operator KB Flow UAT uat-ci-1" in out
+    written = json.loads(output.read_text(encoding="utf-8"))
+    assert written["run"] == "uat-ci-1"
+    assert calls == [
+        {
+            "server": "http://pbx.test",
+            "token": "ci-secret",
+            "project": "agent-pbx-kb-sim",
+            "tmux_sink": False,
+            "tmux_session": None,
+            "controlled_cwd": None,
+            "cleanup": True,
+            "timeout": 20.0,
+            "state_root": tmp_path / "state",
+            "tmux_bin": "tmux-test",
+        }
+    ]
+
+
+def test_agent_cli_operator_kb_flow_cleanup_uses_manifest(monkeypatch, capsys) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_cleanup_operator_kb_flow_uat(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "run": "uat-1",
+            "base": "http://pbx.test",
+            "cleanup": [{"kind": "agent_dismissed", "agent_id": "sim"}],
+            "failed_count": 0,
+        }
+
+    monkeypatch.setattr(
+        "agent_pbx.cli.cleanup_operator_kb_flow_uat",
+        fake_cleanup_operator_kb_flow_uat,
+    )
+
+    result = main(["uat", "cleanup", "--run", "uat-1", "--token", "secret"])
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "# Operator KB Flow UAT uat-1" in out
+    assert calls == [
+        {
+            "server": None,
+            "token": "secret",
+            "run": "uat-1",
+            "state_root": None,
+            "timeout": 20.0,
+            "tmux_bin": "tmux",
+        }
+    ]
 
 
 def test_agent_cli_installs_instructions(tmp_path: Path, capsys) -> None:

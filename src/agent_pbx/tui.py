@@ -104,6 +104,8 @@ LATEST_REPORT_FAILED_STATUSES = {"error", "failed", "failure"}
 LATEST_REPORT_BLOCKED_STATUSES = {"blocked"}
 LATEST_REPORT_CANCELED_STATUSES = {"canceled", "cancelled"}
 LATEST_REPORT_ALERT_ORDER = ("FAIL", "BLOCK", "CANC", "DONE", "NEW")
+HANDOFF_PREFLIGHT_STALE_SECONDS = 300.0
+HANDOFF_ACK_WARN_SECONDS = 60.0
 CALLER_AGENT_TYPE = "caller"
 OPERATOR_AGENT_TYPE = "operator"
 OPERATOR_ROLE_ROOT = "root"
@@ -163,6 +165,7 @@ REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_operator_get_knowledge_context",
     "pbx_operator_list_handoffs",
     "pbx_operator_get_handoff",
+    "pbx_operator_preflight_handoff",
     "pbx_operator_kb_search",
     "pbx_operator_kb_context",
     "pbx_operator_kb_get",
@@ -456,6 +459,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/operator fork prev",
     "/operator fork review",
     "/operator handoffs",
+    "/operator handoff preflight",
     "/operator handoff approve",
     "/operator handoff launch",
     "/operator knowledge links",
@@ -4432,6 +4436,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator fork prev", "View the previous fork pane for the selected operator", self.palette_operator_fork_prev)
         yield SystemCommand("/operator fork review", "Start a read-only review fork for the selected operator/caller", self.palette_operator_fork_review)
         yield SystemCommand("/operator handoffs", "Show handoffs for the selected operator", self.palette_operator_handoffs)
+        yield SystemCommand("/operator handoff preflight", "Preview delivery readiness for the oldest pending operator handoff", self.palette_operator_handoff_preflight)
         yield SystemCommand("/operator handoff approve", "Approve or retry the oldest pending operator handoff", self.palette_operator_handoff_approve)
         yield SystemCommand("/operator handoff launch", "Launch the required fork for a pending handoff", self.palette_operator_handoff_launch)
         yield SystemCommand("/operator knowledge links", "Show knowledge links for the selected operator", self.palette_operator_knowledge_links)
@@ -4800,6 +4805,13 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.approve_pending_operator_handoff(),
             name="palette-operator-handoff-approve",
+            exclusive=True,
+        )
+
+    def palette_operator_handoff_preflight(self) -> None:
+        self.run_worker(
+            self.preflight_pending_operator_handoff(),
+            name="palette-operator-handoff-preflight",
             exclusive=True,
         )
 
@@ -6215,6 +6227,12 @@ class AgentPBXTUI(App[None]):
             previous = previous_last_seen.get(agent_id)
             latest_viewed_at = self.latest_viewed_at_by_agent.get(agent_id)
             shared_seen_at = self.shared_latest_seen_at(agent_id)
+            if self.latest_report_suppressed(agent):
+                self.latest_viewed_at_by_agent[agent_id] = current_report_at
+                viewed_changed = viewed_changed or latest_viewed_at != current_report_at
+                self.unseen_latest_agent_ids.discard(agent_id)
+                self.agent_last_seen_at[agent_id] = current_report_at
+                continue
             if shared_seen_at is not None and current_report_at <= shared_seen_at:
                 if (
                     latest_viewed_at is None
@@ -7045,6 +7063,8 @@ class AgentPBXTUI(App[None]):
         return ""
 
     def latest_report_alert_label(self, agent: dict[str, Any] | None) -> str:
+        if self.latest_report_suppressed(agent):
+            return ""
         status = self.normalized_latest_report_status(agent)
         if status in LATEST_REPORT_FAILED_STATUSES:
             return "FAIL"
@@ -7060,6 +7080,16 @@ class AgentPBXTUI(App[None]):
         if agent_id not in self.unseen_latest_agent_ids:
             return ""
         return self.latest_report_alert_label(self.agents.get(agent_id))
+
+    @staticmethod
+    def latest_report_suppressed(agent: dict[str, Any] | None) -> bool:
+        if agent is None:
+            return False
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        return bool(
+            agent.get("latest_report_suppress_tui_alerts")
+            or metadata.get("suppress_tui_alerts")
+        )
 
     def unseen_latest_alert_groups(self) -> list[tuple[str, list[str]]]:
         grouped: dict[str, list[str]] = {
@@ -13437,6 +13467,27 @@ class AgentPBXTUI(App[None]):
             return payload
         raise RuntimeError("handoff approval response was not an object")
 
+    async def preflight_operator_handoff(
+        self,
+        logical_operator_id: str,
+        handoff_id: str,
+        *,
+        delivery: str = "auto",
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/handoffs/{handoff_id}/preflight",
+            json={
+                "operator_agent_id": logical_operator_id,
+                "delivery": delivery,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("handoff preflight response was not an object")
+
     async def show_selected_operator_handoffs(self) -> None:
         operator_agent_id = self.selected_operator_agent_id()
         if not operator_agent_id:
@@ -13461,6 +13512,57 @@ class AgentPBXTUI(App[None]):
                 handoffs,
             )
         self.activate_latest_tab()
+
+    async def preflight_pending_operator_handoff(self) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        try:
+            handoffs = await self.fetch_operator_handoffs(
+                logical_operator_id,
+                limit=50,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to fetch operator handoffs: {exc}", severity="error")
+            return
+        candidates = [
+            handoff
+            for handoff in handoffs
+            if str(handoff.get("status") or "") in {"proposed", "approved", "pending_launch"}
+        ]
+        if not candidates:
+            self.notify(f"No pending operator handoffs for {logical_operator_id}.")
+            return
+        handoff = candidates[0]
+        source_operator_id = str(
+            handoff.get("logical_operator_agent_id") or logical_operator_id
+        )
+        handoff_id = str(handoff.get("handoff_id") or "").strip()
+        if not handoff_id:
+            self.notify("Pending handoff is missing an id.", severity="error")
+            return
+        try:
+            preflight = await self.preflight_operator_handoff(
+                source_operator_id,
+                handoff_id,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to preflight operator handoff: {exc}", severity="error")
+            return
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_operator_handoff_preflight(preflight)
+        self.activate_latest_tab()
+        severity = "information" if bool(preflight.get("ok")) else "warning"
+        self.notify(
+            f"Handoff preflight {preflight.get('status') or 'checked'}.",
+            severity=severity,
+        )
 
     async def approve_pending_operator_handoff(self) -> None:
         operator_agent_id = self.selected_operator_agent_id()
@@ -13495,7 +13597,14 @@ class AgentPBXTUI(App[None]):
         if not handoff_id:
             self.notify("Pending handoff is missing an id.", severity="error")
             return
+        preflight: dict[str, Any] | None = None
+        preflight_warning = ""
         try:
+            preflight = await self.preflight_operator_handoff(
+                source_operator_id,
+                handoff_id,
+            )
+            preflight_warning = self.operator_handoff_preflight_warning(preflight)
             result = await self.approve_operator_handoff(
                 source_operator_id,
                 handoff_id,
@@ -13507,6 +13616,15 @@ class AgentPBXTUI(App[None]):
         command = result.get("command") if isinstance(result.get("command"), dict) else {}
         detail = self.query_one_or_none("#detail", TextArea)
         if detail is not None:
+            preflight_lines = ""
+            if preflight is not None:
+                preflight_lines = (
+                    "\n"
+                    f"Preflight: {preflight.get('status') or '-'} "
+                    f"{preflight.get('resolved_delivery') or '-'}\n"
+                    f"Preflight reason: {preflight.get('reason') or '-'}\n"
+                    f"Preflight warnings: {len(preflight.get('warnings') or [])}"
+                )
             detail.text = (
                 "Operator handoff approval result.\n\n"
                 f"Handoff: {handoff_id}\n"
@@ -13516,6 +13634,7 @@ class AgentPBXTUI(App[None]):
                 f"Target fork: {updated.get('target_operator_fork_id') or '-'}\n"
                 f"Delivery: {updated.get('delivery_status') or '-'}\n"
                 f"Command: {command.get('command_id') or '-'}"
+                f"{preflight_lines}"
             )
         await self.refresh_events()
         target = str(updated.get("target_operator_agent_id") or "")
@@ -13524,6 +13643,11 @@ class AgentPBXTUI(App[None]):
         status = str(updated.get("status") or "")
         if status == "pending_launch":
             self.notify("Handoff is pending required fork launch.", severity="warning")
+        elif preflight_warning:
+            self.notify(
+                f"Operator handoff approved with preflight warning: {preflight_warning}",
+                severity="warning",
+            )
         else:
             self.notify(f"Operator handoff {handoff_id} approved.")
 
@@ -13629,6 +13753,8 @@ class AgentPBXTUI(App[None]):
             )
             artifacts = handoff.get("artifact_bundle")
             artifact_count = len(artifacts) if isinstance(artifacts, list) else 0
+            preflight_state = self.operator_handoff_preflight_state(handoff)
+            monitor_state = self.operator_handoff_monitor_state(handoff, evidence)
             lines.extend(
                 [
                     f"- {handoff.get('handoff_id')}",
@@ -13638,11 +13764,137 @@ class AgentPBXTUI(App[None]):
                     f"  target fork: {handoff.get('target_operator_fork_id') or '-'}",
                     f"  expires in: {remaining_text}",
                     f"  delivery: {handoff.get('delivery_status') or '-'}  command: {handoff.get('command_id') or '-'}",
+                    f"  pane: {evidence.get('tmux_pane_id') or '-'}  target command: {evidence.get('target_command') or '-'}",
+                    f"  codex-like: {evidence.get('codex_like_target')}  submitted: {evidence.get('submitted_to_codex')}",
                     f"  ack: {evidence.get('agent_acknowledged')}  started: {evidence.get('agent_started')}",
+                    f"  preflight: {preflight_state}",
+                    f"  monitor: {monitor_state}",
                     f"  artifacts: {artifact_count}",
                     f"  summary: {handoff.get('summary') or '-'}",
                 ]
             )
+        return "\n".join(lines)
+
+    def operator_handoff_preflight_state(self, handoff: dict[str, Any]) -> str:
+        metadata = handoff.get("metadata") if isinstance(handoff.get("metadata"), dict) else {}
+        preflight = (
+            metadata.get("delivery_preflight")
+            if isinstance(metadata.get("delivery_preflight"), dict)
+            else None
+        )
+        if preflight is None:
+            status = str(handoff.get("status") or "").strip().lower()
+            return "not recorded" if status in {"proposed", "approved"} else "-"
+        checked_at = float_value(preflight.get("checked_at"))
+        age_text = "-"
+        stale_text = ""
+        if checked_at is not None:
+            age = max(0.0, time.time() - checked_at)
+            age_text = f"{age:.0f}s ago"
+            if age > HANDOFF_PREFLIGHT_STALE_SECONDS:
+                stale_text = " stale"
+        warnings = preflight.get("warnings")
+        warning_count = len(warnings) if isinstance(warnings, list) else 0
+        reason = str(preflight.get("reason") or "").strip()
+        reason_text = f" reason={reason}" if reason else ""
+        return (
+            f"{preflight.get('status') or '-'}"
+            f"/{preflight.get('resolved_delivery') or '-'}"
+            f" age={age_text}{stale_text}"
+            f" warnings={warning_count}{reason_text}"
+        )
+
+    def operator_handoff_monitor_state(
+        self,
+        handoff: dict[str, Any],
+        evidence: dict[str, Any],
+    ) -> str:
+        status = str(handoff.get("status") or "").strip().lower()
+        if status in {"complete", "completed", "failed", "blocked", "expired", "canceled", "cancelled"}:
+            return "terminal"
+        if bool(evidence.get("agent_started")) or handoff.get("started_at"):
+            return "running"
+        if bool(evidence.get("agent_acknowledged")) or handoff.get("acknowledged_at"):
+            return "acknowledged; waiting start"
+        if status == "sent" and bool(handoff.get("needs_ack")):
+            sent_at = float_value(handoff.get("updated_at")) or float_value(
+                handoff.get("created_at")
+            )
+            age = max(0.0, time.time() - sent_at) if sent_at is not None else None
+            if age is None:
+                return "sent; awaiting ack"
+            level = "late" if age >= HANDOFF_ACK_WARN_SECONDS else "pending"
+            return f"{level}; awaiting ack {age:.0f}s"
+        if status == "pending_launch":
+            return "waiting target fork launch"
+        return "-"
+
+    def operator_handoff_preflight_warning(self, preflight: dict[str, Any] | None) -> str:
+        if preflight is None:
+            return "handoff was approved without a preflight result"
+        checked_at = float_value(preflight.get("checked_at"))
+        if checked_at is not None and time.time() - checked_at > HANDOFF_PREFLIGHT_STALE_SECONDS:
+            return "handoff preflight is stale"
+        warnings = preflight.get("warnings")
+        if isinstance(warnings, list) and warnings:
+            return "; ".join(str(item) for item in warnings if str(item).strip())
+        if not bool(preflight.get("ok")):
+            return str(preflight.get("reason") or preflight.get("status") or "preflight failed")
+        return ""
+
+    def format_operator_handoff_preflight(self, preflight: dict[str, Any]) -> str:
+        pane = preflight.get("pane") if isinstance(preflight.get("pane"), dict) else {}
+        target = preflight.get("target") if isinstance(preflight.get("target"), dict) else {}
+        target_fork = (
+            preflight.get("target_fork")
+            if isinstance(preflight.get("target_fork"), dict)
+            else {}
+        )
+        kb_context = (
+            preflight.get("kb_context")
+            if isinstance(preflight.get("kb_context"), dict)
+            else {}
+        )
+        warnings = preflight.get("warnings")
+        warning_lines = [
+            f"- {item}" for item in warnings if isinstance(item, str)
+        ] if isinstance(warnings, list) else []
+        lines = [
+            "Operator handoff delivery preflight.",
+            "",
+            f"Handoff: {preflight.get('handoff_id') or '-'}",
+            f"Status: {preflight.get('status') or '-'}",
+            f"OK: {preflight.get('ok')}  possible: {preflight.get('delivery_possible')}",
+            f"Requested delivery: {preflight.get('requested_delivery') or '-'}",
+            f"Resolved delivery: {preflight.get('resolved_delivery') or '-'}",
+            f"Checked: {preflight.get('checked_at') or '-'}",
+            f"Reason: {preflight.get('reason') or '-'}",
+            "",
+            "Target:",
+            f"- operator: {target.get('agent_id') or preflight.get('target_operator_agent_id') or '-'}",
+            f"- pbx mode: {target.get('pbx_mode') or '-'}",
+            f"- cwd: {target.get('cwd') or '-'}",
+            f"- tmux pane: {target.get('tmux_pane_id') or '-'}",
+            "",
+            "Target fork:",
+            f"- fork: {target_fork.get('fork_agent_id') or '-'}",
+            f"- status: {target_fork.get('status') or '-'}",
+            f"- pending: {target_fork.get('operator_fork_pending')}",
+            "",
+            "Pane:",
+            f"- pane: {pane.get('pane_id') or '-'}",
+            f"- target: {pane.get('target_label') or '-'}",
+            f"- command: {pane.get('current_command') or '-'}",
+            f"- cwd: {pane.get('cwd') or '-'}",
+            f"- codex-like: {pane.get('codex_like_target')}",
+            "",
+            "KB context:",
+            f"- satisfied: {kb_context.get('satisfied_by_kb')}",
+            f"- matches: {kb_context.get('match_count') if kb_context else 0}",
+            "",
+            "Warnings:",
+            *(warning_lines or ["- none"]),
+        ]
         return "\n".join(lines)
 
     async def show_selected_operator_knowledge_links(self) -> None:
@@ -19545,9 +19797,18 @@ class AgentPBXTUI(App[None]):
         )
 
     def mark_latest_unseen(self, agent_id: str) -> None:
+        agent = self.agents.get(agent_id)
         current_report_at = self.latest_report_timestamp(agent_id)
         latest_viewed_at = self.latest_viewed_at_by_agent.get(agent_id)
         shared_seen_at = self.shared_latest_seen_at(agent_id)
+        if self.latest_report_suppressed(agent):
+            if current_report_at is not None:
+                self.latest_viewed_at_by_agent[agent_id] = current_report_at
+                self.save_settings()
+            self.unseen_latest_agent_ids.discard(agent_id)
+            self.render_agents()
+            self.render_unseen_attention()
+            return
         if current_report_at is not None:
             if shared_seen_at is not None and current_report_at <= shared_seen_at:
                 if latest_viewed_at is None or latest_viewed_at < shared_seen_at:
@@ -19613,6 +19874,9 @@ class AgentPBXTUI(App[None]):
         agent["latest_report_status"] = status
         agent["latest_report_needs_input"] = bool(payload.get("needs_input", False))
         agent["latest_report_action_required"] = bool(payload.get("needs_input", False))
+        agent["latest_report_suppress_tui_alerts"] = bool(
+            payload.get("suppress_tui_alerts")
+        )
         if event_at is not None:
             agent["last_seen_at"] = max(
                 self.agent_last_seen(agent_id) or 0.0,
@@ -19622,6 +19886,11 @@ class AgentPBXTUI(App[None]):
                 self.latest_report_timestamp(agent_id) or 0.0,
                 event_at,
             )
+        if self.latest_report_suppressed(agent):
+            current_report_at = self.latest_report_timestamp(agent_id)
+            if current_report_at is not None:
+                self.latest_viewed_at_by_agent[agent_id] = current_report_at
+            self.unseen_latest_agent_ids.discard(agent_id)
         self.render_agents()
 
     def render_events(self) -> None:

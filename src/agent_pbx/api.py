@@ -97,6 +97,8 @@ from .schemas import (
     OperatorHandoffCreateRequest,
     OperatorHandoffDeliveryResponse,
     OperatorHandoffListResponse,
+    OperatorHandoffPreflightRequest,
+    OperatorHandoffPreflightResponse,
     OperatorHandoffResponse,
     OperatorHandoffUpdateRequest,
     OperatorKbCompileReportRequest,
@@ -494,6 +496,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     "status": request.status,
                     "summary": request.summary,
                     "needs_input": request.needs_input,
+                    "suppress_tui_alerts": bool(
+                        isinstance(request.metadata, dict)
+                        and request.metadata.get("suppress_tui_alerts")
+                    ),
                     "created_at": report["created_at"],
                 },
                 report["report_id"],
@@ -2158,6 +2164,24 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             operator_service.get_handoff,
             handoff_id=handoff_id,
             operator_agent_id=operator_agent_id,
+        )
+
+    @app.post(
+        "/v1/operator/handoffs/{handoff_id}/preflight",
+        response_model=OperatorHandoffPreflightResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def preflight_operator_handoff(
+        handoff_id: str,
+        payload: OperatorHandoffPreflightRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.preflight_handoff_delivery,
+            operator_agent_id=payload.operator_agent_id,
+            handoff_id=handoff_id,
+            delivery=payload.delivery,
         )
 
     @app.post(

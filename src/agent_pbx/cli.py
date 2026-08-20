@@ -37,6 +37,11 @@ from .sim_agent import run_sim_agent
 from .sim_client import run_sim_client
 from .store import Store
 from .tui import run_tui
+from .uat import (
+    cleanup_operator_kb_flow_uat,
+    operator_kb_flow_markdown,
+    run_operator_kb_flow_uat,
+)
 from .workerbee import (
     env_workerbee_bin,
     env_workerbee_cache_seconds,
@@ -200,6 +205,11 @@ def build_parser() -> argparse.ArgumentParser:
     status_mcp.add_argument("--port", type=int, default=default_port())
     status_mcp.add_argument("--state-root", type=Path, default=None)
     status_mcp.add_argument("--db", type=Path, default=None)
+    status_mcp.add_argument(
+        "--token",
+        default=None,
+        help="Accepted for command symmetry; status reads local daemon metadata.",
+    )
     serve_mcp = mcp_subcommands.add_parser(
         "serve", help="Serve Agent PBX MCP in the foreground."
     )
@@ -208,6 +218,48 @@ def build_parser() -> argparse.ArgumentParser:
     tui = subcommands.add_parser("tui", help="Run the Agent PBX TUI.")
     tui.add_argument("--server", default=default_client_server())
     tui.add_argument("--token", default=os.getenv("AGENT_PBX_TOKEN"))
+
+    uat = subcommands.add_parser(
+        "uat", help="Run operator workflow user-acceptance checks."
+    )
+    uat_subcommands = uat.add_subparsers(dest="uat_command", required=True)
+    operator_kb_flow = uat_subcommands.add_parser(
+        "operator-kb-flow",
+        help="Exercise the operator KB, handoff, preflight, and alert-suppression flow.",
+    )
+    operator_kb_flow.add_argument("--server", default=default_client_server())
+    operator_kb_flow.add_argument("--token", default=os.getenv("AGENT_PBX_TOKEN"))
+    operator_kb_flow.add_argument("--project", default="agent-pbx-kb-sim")
+    operator_kb_flow.add_argument("--tmux-sink", action="store_true")
+    operator_kb_flow.add_argument("--tmux-session", default=None)
+    operator_kb_flow.add_argument("--controlled-cwd", type=Path, default=None)
+    operator_kb_flow.add_argument("--no-cleanup", action="store_true")
+    operator_kb_flow.add_argument("--timeout", type=float, default=20.0)
+    operator_kb_flow.add_argument("--state-root", type=Path, default=None)
+    operator_kb_flow.add_argument("--tmux-bin", default="tmux")
+    operator_kb_flow.add_argument(
+        "--ci",
+        action="store_true",
+        help="Run the CI-safe non-tmux UAT profile with cleanup enabled.",
+    )
+    operator_kb_flow.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Write the full JSON result or Markdown summary to this path.",
+    )
+    operator_kb_flow.add_argument("--json", action="store_true")
+    uat_cleanup = uat_subcommands.add_parser(
+        "cleanup", help="Retry cleanup for a persisted operator KB flow UAT run."
+    )
+    uat_cleanup.add_argument("--server", default=None)
+    uat_cleanup.add_argument("--token", default=os.getenv("AGENT_PBX_TOKEN"))
+    uat_cleanup.add_argument("--run", required=True)
+    uat_cleanup.add_argument("--state-root", type=Path, default=None)
+    uat_cleanup.add_argument("--timeout", type=float, default=20.0)
+    uat_cleanup.add_argument("--tmux-bin", default="tmux")
+    uat_cleanup.add_argument("--json", action="store_true")
+    uat_cleanup.add_argument("--output", type=Path, default=None)
 
     sim_agent = subcommands.add_parser("sim-agent", help="Run a simulated reporting agent.")
     sim_agent.add_argument("--server", default=default_client_server())
@@ -333,6 +385,67 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "uat":
+        if args.uat_command == "operator-kb-flow":
+            tmux_sink = bool(args.tmux_sink)
+            cleanup = not args.no_cleanup
+            if args.ci:
+                tmux_sink = False
+                cleanup = True
+            result = run_operator_kb_flow_uat(
+                server=args.server,
+                token=args.token,
+                project=args.project,
+                tmux_sink=tmux_sink,
+                tmux_session=args.tmux_session,
+                controlled_cwd=args.controlled_cwd,
+                cleanup=cleanup,
+                timeout=args.timeout,
+                state_root=args.state_root,
+                tmux_bin=args.tmux_bin,
+            )
+            if args.json:
+                rendered = json.dumps(result, indent=2, sort_keys=True)
+            else:
+                rendered = operator_kb_flow_markdown(result)
+            if args.output is not None:
+                _write_cli_output(args.output, _render_cli_output(args.output, result, rendered))
+            print(rendered)
+            return 0 if not result.get("failures") else 1
+        if args.uat_command == "cleanup":
+            result = cleanup_operator_kb_flow_uat(
+                server=args.server,
+                token=args.token,
+                run=args.run,
+                state_root=args.state_root,
+                timeout=args.timeout,
+                tmux_bin=args.tmux_bin,
+            )
+            if args.json:
+                rendered = json.dumps(result, indent=2, sort_keys=True)
+            else:
+                rendered = operator_kb_flow_markdown(
+                    {
+                        "run": result.get("run"),
+                        "base": result.get("base"),
+                        "project": "cleanup",
+                        "failures": [],
+                        "results": [
+                            {
+                                "stage": "cleanup",
+                                "name": "retry cleanup",
+                                "ok": not bool(result.get("failed_count")),
+                            }
+                        ],
+                        "cleanup": result.get("cleanup") or [],
+                    }
+                )
+            if args.output is not None:
+                _write_cli_output(args.output, _render_cli_output(args.output, result, rendered))
+            print(rendered)
+            return 0 if not result.get("failed_count") else 1
+        return 0
+
     if args.command == "tui":
         run_tui(server=args.server, token=args.token)
         return 0
@@ -403,6 +516,18 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
             os.getenv("AGENT_PBX_JOPLIN_WEBDAV_PASSWORD", "").strip() or None
         ),
     )
+
+
+def _write_cli_output(path: Path, content: str) -> None:
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content.rstrip() + "\n", encoding="utf-8")
+
+
+def _render_cli_output(path: Path, result: dict[str, object], fallback: str) -> str:
+    if path.suffix.lower() == ".json":
+        return json.dumps(result, indent=2, sort_keys=True)
+    return fallback
 
 
 def _daemon_metadata_defaults(args: argparse.Namespace) -> dict[str, object]:

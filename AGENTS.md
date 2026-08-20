@@ -205,6 +205,9 @@ If review work needs to transfer domain context, propose it with
 `pbx_operator_propose_knowledge_handoff`; review forks may list and inspect
 knowledge-link and handoff context, but the root operator/TUI must approve
 delivery with `pbx_operator_approve_handoff` or `/operator handoff approve`.
+Use `pbx_operator_preflight_handoff` or `/operator handoff preflight` before
+delivery when pane readiness, queue/nohup routing, or attached KB context should
+be checked without sending anything.
 Receiving operators acknowledge with `pbx_operator_ack_handoff` and report
 running, blocked, failed, or complete state with `pbx_operator_update_handoff`.
 When a knowledge link or handoff produces reusable operating guidance, operators

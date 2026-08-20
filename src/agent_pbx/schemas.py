@@ -153,6 +153,7 @@ class AgentResponse(BaseModel):
     latest_report_needs_input: bool = False
     latest_report_plan_option_count: int = 0
     latest_report_action_required: bool = False
+    latest_report_suppress_tui_alerts: bool = False
     active_campaign_count: int = 0
 
 
@@ -772,6 +773,11 @@ class OperatorHandoffApproveRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class OperatorHandoffPreflightRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    delivery: CampaignDelivery | Literal["record_only"] = "auto"
+
+
 class OperatorHandoffAckRequest(BaseModel):
     operator_agent_id: str = Field(min_length=1, max_length=120)
     status: OperatorHandoffStatus = "acknowledged"
@@ -833,6 +839,27 @@ class OperatorHandoffListResponse(BaseModel):
 class OperatorHandoffDeliveryResponse(BaseModel):
     handoff: OperatorHandoffResponse
     command: CommandResponse | None = None
+
+
+class OperatorHandoffPreflightResponse(BaseModel):
+    handoff_id: str
+    operator_agent_id: str
+    target_operator_agent_id: str
+    target_caller_agent_id: str | None = None
+    checked_at: float
+    requested_delivery: str
+    resolved_delivery: str
+    ok: bool
+    delivery_possible: bool
+    status: str
+    reason: str | None = None
+    retryable: bool = False
+    target: dict[str, Any] = Field(default_factory=dict)
+    target_fork: dict[str, Any] | None = None
+    pane: dict[str, Any] | None = None
+    warnings: list[str] = Field(default_factory=list)
+    kb_context: dict[str, Any] | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class OperatorForkResponse(BaseModel):

@@ -5944,6 +5944,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/operator fork prev" in titles
     assert "/operator fork review" in titles
     assert "/operator handoffs" in titles
+    assert "/operator handoff preflight" in titles
     assert "/operator handoff approve" in titles
     assert "/operator handoff launch" in titles
     assert "/operator knowledge links" in titles
@@ -6026,6 +6027,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/operator fork prev",
         "/operator fork review",
         "/operator handoffs",
+        "/operator handoff preflight",
         "/operator handoff approve",
         "/operator handoff launch",
         "/operator knowledge links",
@@ -10032,6 +10034,29 @@ def test_tui_startup_marks_unviewed_latest_report_new() -> None:
     assert app.unseen_latest_agent_ids == {"agent-1"}
 
 
+def test_tui_startup_suppresses_synthetic_latest_report_alert() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "done",
+            "project": "agent-pbx",
+            "last_seen_at": 102.0,
+            "latest_report_created_at": 101.0,
+            "latest_report_seen_at": None,
+            "latest_report_status": "done",
+            "latest_report_suppress_tui_alerts": True,
+        }
+    }
+
+    changed = app.update_unseen_from_agent_refresh({})
+
+    assert changed is True
+    assert app.unseen_latest_agent_ids == set()
+    assert app.latest_viewed_at_by_agent == {"agent-1": 101.0}
+    assert app.latest_report_alert_label(app.agents["agent-1"]) == ""
+
+
 def test_tui_agent_without_latest_report_does_not_mark_new() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     app.agents = {
@@ -10284,6 +10309,44 @@ async def test_tui_replayed_report_event_respects_shared_seen_marker() -> None:
 
     assert app.unseen_latest_agent_ids == set()
     assert app.latest_viewed_at_by_agent == {"agent-1": 200.0}
+    assert row[1] == ""
+
+
+async def test_tui_suppressed_report_event_updates_state_without_new_marker() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "status": "running",
+                "effective_status": "running",
+                "project": "agent-pbx",
+                "last_seen_at": 100.0,
+            }
+        }
+        app.render_agents()
+        event = {
+            "event_id": 12,
+            "type": "report_created",
+            "subject_id": "report-1",
+            "created_at": 201.0,
+            "payload": {
+                "agent_id": "agent-1",
+                "status": "done",
+                "summary": "Synthetic UAT report",
+                "needs_input": False,
+                "created_at": 201.0,
+                "suppress_tui_alerts": True,
+            },
+        }
+        app.apply_report_created_event("agent-1", event)
+        table = app.query_one("#agents", DataTable)
+        row = table.get_row("agent-1")
+
+    assert app.agents["agent-1"]["status"] == "done"
+    assert app.agents["agent-1"]["latest_report_suppress_tui_alerts"] is True
+    assert app.unseen_latest_agent_ids == set()
     assert row[1] == ""
 
 
@@ -13046,6 +13109,7 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert "pbx_operator_get_knowledge_context" in agent_pbx_config
     assert "pbx_operator_list_handoffs" in agent_pbx_config
     assert "pbx_operator_get_handoff" in agent_pbx_config
+    assert "pbx_operator_preflight_handoff" in agent_pbx_config
     assert "pbx_operator_kb_search" in agent_pbx_config
     assert "pbx_operator_kb_context" in agent_pbx_config
     assert "pbx_operator_kb_get" in agent_pbx_config
@@ -13847,3 +13911,211 @@ async def test_tui_launch_pending_operator_handoff_fork_retries_approval() -> No
 
     assert launches == [("operator-B", "caller-1")]
     assert approvals == [("operator-0", "handoff-1")]
+
+
+async def test_tui_preflight_pending_operator_handoff_formats_result() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fetched: list[tuple[str, str | None]] = []
+    preflights: list[tuple[str, str, str]] = []
+
+    async def fake_fetch_operator_handoffs(
+        logical_operator_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        _ = limit
+        fetched.append((logical_operator_id, status))
+        return [
+            {
+                "handoff_id": "handoff-1",
+                "logical_operator_agent_id": "operator-0",
+                "target_operator_agent_id": "operator-B",
+                "status": "proposed",
+            }
+        ]
+
+    async def fake_preflight_operator_handoff(
+        logical_operator_id: str,
+        handoff_id: str,
+        delivery: str = "auto",
+    ) -> dict[str, object]:
+        preflights.append((logical_operator_id, handoff_id, delivery))
+        return {
+            "handoff_id": handoff_id,
+            "status": "ready",
+            "ok": True,
+            "delivery_possible": True,
+            "requested_delivery": "auto",
+            "resolved_delivery": "queue",
+            "checked_at": 123.0,
+            "target": {"agent_id": "operator-B", "pbx_mode": "nohup"},
+            "target_fork": None,
+            "pane": None,
+            "warnings": [],
+            "kb_context": {"satisfied_by_kb": True, "match_count": 2},
+        }
+
+    app.fetch_operator_handoffs = fake_fetch_operator_handoffs  # type: ignore[method-assign]
+    app.preflight_operator_handoff = fake_preflight_operator_handoff  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        await app.preflight_pending_operator_handoff()
+        detail = app.query_one("#detail", TextArea)
+
+    assert fetched == [("operator-0", None)]
+    assert preflights == [("operator-0", "handoff-1", "auto")]
+    assert "Handoff: handoff-1" in detail.text
+    assert "Resolved delivery: queue" in detail.text
+    assert "Checked: 123.0" in detail.text
+    assert "matches: 2" in detail.text
+
+
+@pytest.mark.asyncio
+async def test_tui_approve_pending_operator_handoff_preflights_first() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    order: list[str] = []
+    loaded_threads: list[str] = []
+
+    async def fake_fetch_operator_handoffs(
+        logical_operator_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        _ = (status, limit)
+        assert logical_operator_id == "operator-0"
+        order.append("fetch")
+        return [
+            {
+                "handoff_id": "handoff-1",
+                "logical_operator_agent_id": "operator-0",
+                "target_operator_agent_id": "operator-B",
+                "status": "proposed",
+            }
+        ]
+
+    async def fake_preflight_operator_handoff(
+        logical_operator_id: str,
+        handoff_id: str,
+        delivery: str = "auto",
+    ) -> dict[str, object]:
+        assert (logical_operator_id, handoff_id, delivery) == (
+            "operator-0",
+            "handoff-1",
+            "auto",
+        )
+        order.append("preflight")
+        return {
+            "handoff_id": handoff_id,
+            "status": "ready",
+            "ok": True,
+            "delivery_possible": True,
+            "requested_delivery": "auto",
+            "resolved_delivery": "queue",
+            "checked_at": 123.0,
+            "target": {"agent_id": "operator-B", "pbx_mode": "nohup"},
+            "target_fork": None,
+            "pane": None,
+            "warnings": [],
+        }
+
+    async def fake_approve_operator_handoff(
+        logical_operator_id: str,
+        handoff_id: str,
+        *,
+        delivery: str = "auto",
+    ) -> dict[str, object]:
+        assert order[-1] == "preflight"
+        assert (logical_operator_id, handoff_id, delivery) == (
+            "operator-0",
+            "handoff-1",
+            "auto",
+        )
+        order.append("approve")
+        return {
+            "handoff": {
+                "handoff_id": handoff_id,
+                "status": "sent",
+                "target_operator_agent_id": "operator-B",
+                "target_caller_agent_id": "-",
+                "target_operator_fork_id": "-",
+                "delivery_status": "sent",
+            },
+            "command": {"command_id": "cmd-1"},
+        }
+
+    async def fake_refresh_events() -> None:
+        order.append("refresh")
+
+    async def fake_load_thread(agent_id: str) -> None:
+        loaded_threads.append(agent_id)
+
+    app.fetch_operator_handoffs = fake_fetch_operator_handoffs  # type: ignore[method-assign]
+    app.preflight_operator_handoff = fake_preflight_operator_handoff  # type: ignore[method-assign]
+    app.approve_operator_handoff = fake_approve_operator_handoff  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_thread = fake_load_thread  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        order.clear()
+        await app.approve_pending_operator_handoff()
+        detail = app.query_one("#detail", TextArea)
+
+    assert order == ["fetch", "preflight", "approve", "refresh"]
+    assert loaded_threads == ["operator-B"]
+    assert "Preflight: ready queue" in detail.text
+    assert "Preflight warnings: 0" in detail.text
+
+
+def test_tui_operator_handoff_monitor_renders_pending_ack(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 170.0)
+
+    text = app.format_operator_handoffs(
+        "operator-0",
+        [
+            {
+                "handoff_id": "handoff-1",
+                "status": "sent",
+                "safe_to_start": True,
+                "source_agent_id": "operator-0",
+                "target_operator_agent_id": "operator-B",
+                "needs_ack": True,
+                "updated_at": 100.0,
+                "metadata": {
+                    "delivery_preflight": {
+                        "status": "ready",
+                        "resolved_delivery": "queue",
+                        "checked_at": 120.0,
+                        "warnings": ["target has no tmux pane"],
+                    }
+                },
+                "delivery_evidence": {
+                    "agent_acknowledged": False,
+                    "agent_started": False,
+                },
+            }
+        ],
+    )
+
+    assert "preflight: ready/queue age=50s ago warnings=1" in text
+    assert "monitor: late; awaiting ack 70s" in text

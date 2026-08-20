@@ -184,7 +184,9 @@ lifecycle management. Use `agent-pbx mcp serve` or the compatibility command
 `agent-pbx serve` only when you want a foreground/debug process.
 
 `agent-pbx mcp status` prints the MCP URL, health URL, DB path, log path,
-metadata path, and a Codex connection command:
+metadata path, and a Codex connection command. It also accepts `--token` as a
+no-op compatibility flag, which keeps copied lifecycle commands symmetrical
+with `start`, `restart`, `tui`, and UAT commands:
 
 ```bash
 codex mcp add agent-pbx --url http://127.0.0.1:8765/mcp \
@@ -365,12 +367,14 @@ operator starts. Review forks can list and inspect knowledge-link, handoff, and
 KB context, but they cannot approve delivery or send unmediated knowledge turns.
 The root operator/TUI uses
 `/operator handoffs` to inspect pending handoffs and
-`/operator handoff approve` to approve the oldest pending handoff. If the target
-operator needs a caller fork that has not been launched, the handoff moves to
-`pending_launch`; use `/operator handoff launch` to launch the required fork and
-retry delivery. Agent PBX then sends a normal `send_input` command or tmux
-direct message to the target operator without creating a fork edge, campaign
-assignment, or source-session association.
+`/operator handoff preflight` to dry-run pane readiness, queue/nohup routing,
+required target-fork state, and attached KB context without sending anything.
+Use `/operator handoff approve` to approve the oldest pending handoff. If the
+target operator needs a caller fork that has not been launched, the handoff
+moves to `pending_launch`; use `/operator handoff launch` to launch the
+required fork and retry delivery. Agent PBX then sends a normal `send_input`
+command or tmux direct message to the target operator without creating a fork
+edge, campaign assignment, or source-session association.
 
 Receiving operators should acknowledge handoffs with
 `pbx_operator_ack_handoff`. Use `status="acknowledged"` after reading the linked
@@ -378,7 +382,9 @@ context and `status="running"` only after the target workflow actually starts.
 Use `pbx_operator_update_handoff` for `blocked`, `failed`, `complete`, or other
 terminal states. Delivery evidence distinguishes tmux/queue delivery from
 receiver acknowledgement and start, so a pane paste is not treated as workflow
-success by itself.
+success by itself. Tmux evidence records the resolved pane, target command,
+paste/send-key steps, and whether the target looked Codex-like; `submitted` is
+only true for a Codex-like target.
 
 When a knowledge link or handoff produces reusable operating guidance, review
 forks and operators can propose KB entries with `pbx_operator_kb_propose` or
@@ -435,15 +441,16 @@ the review fork requests a sibling project, select the operator and use
 `Spawn P` or `/operator project spawn`; the spawned project should then appear
 as a normal caller in the Agents pane after its Codex session registers. When a
 review fork proposes a knowledge handoff, select the logical operator and run
-`/operator handoffs` to inspect workflow state, `/operator handoff approve` to
-approve delivery, and `/operator handoff launch` if the target operator needs a
-caller fork before the handoff can run. When that exchange produces durable
-guidance, run `/operator kb seed` against the operator or fork that holds the
-context, then run `/operator kb proposed` to open the `KB` tab on proposed
-entries, select proposals to review their bodies, and use `Promote` to publish
-clean proposals or `Reject` to reject them. If the operator already reported
-explicit KB candidates, use `/operator kb compile` first, then review the
-proposed entries in the same tab.
+`/operator handoffs` to inspect workflow state, `/operator handoff preflight`
+to verify the target route, `/operator handoff approve` to approve delivery,
+and `/operator handoff launch` if the target operator needs a caller fork
+before the handoff can run. When that exchange produces durable guidance, run
+`/operator kb seed` against the operator or fork that holds the context, then
+run `/operator kb proposed` to open the `KB` tab on proposed entries, select
+proposals to review their bodies, and use `Promote` to publish clean proposals
+or `Reject` to reject them. If the operator already reported explicit KB
+candidates, use `/operator kb compile` first, then review the proposed entries
+in the same tab.
 
 ## Planned Local Validation
 
@@ -455,6 +462,34 @@ docker run --rm -p 8765:8765 -e AGENT_PBX_TOKEN=dev-token agent-pbx:workerbee
 agent-pbx sim-agent --token dev-token --once
 agent-pbx sim-client --token dev-token --agent-id sim-agent-1 --message "Proceed"
 ```
+
+For a bounded operator KB/handoff UAT run against a live daemon, use the
+reusable harness. Synthetic agents and reports include suppressed TUI alerts,
+and cleanup hides synthetic agents plus retires/rejects generated KB proposals.
+Every run writes a private manifest under the Agent PBX state root so cleanup
+can be retried if the process is interrupted:
+
+```bash
+agent-pbx uat operator-kb-flow --server http://127.0.0.1:8765 --token dev-token
+agent-pbx uat operator-kb-flow --server http://127.0.0.1:8765 --token dev-token \
+  --tmux-sink --tmux-session auto --output runs/operator-kb-flow.json
+agent-pbx uat cleanup --run kb-sim-YYYYMMDDHHMMSS-xxxxxxxx --token dev-token
+agent-pbx uat operator-kb-flow --ci --server http://127.0.0.1:8765 --token dev-token
+```
+
+The tmux profile preflights server health, controlled cwd, tmux binary, and the
+target tmux session before creating synthetic operators. `--tmux-session auto`
+prefers `AGENT_PBX_TUI_OPERATOR_TMUX_SESSION`, then `agent-pbx`, then
+`agent-pbx-operators`, and reports a warning if it has to fall back. The `--ci`
+profile disables tmux delivery and forces cleanup, which keeps the harness
+suitable for automated test jobs that only need API-level validation. Use
+`--output path.json` to preserve the complete run evidence while keeping the
+terminal summary compact.
+
+The TUI handoff list shows the latest recorded delivery preflight age/warnings
+and a lightweight ack monitor for sent handoffs. Approving a pending handoff
+runs preflight first and records that preflight in the handoff metadata before
+delivery.
 
 ## WorkerBee TUI Status
 
@@ -823,7 +858,7 @@ Press `Ctrl+P` to open the command palette. Agent PBX adds slash-style operator
 commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
 `/workerbee`, `/campaigns`, `/campaign report`, `/campaign copy`,
 `/operator fork prev`, `/operator fork next`, `/operator fork review`,
-`/operator handoffs`, `/operator handoff approve`,
+`/operator handoffs`, `/operator handoff preflight`, `/operator handoff approve`,
 `/operator handoff launch`, `/operator knowledge links`, `/operator knowledge send`,
 `/operator kb`, `/operator kb detail`, `/operator kb proposed`,
 `/operator kb proposed detail`, `/operator kb seed`, `/operator kb compile`,

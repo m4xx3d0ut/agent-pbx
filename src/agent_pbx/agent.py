@@ -187,6 +187,9 @@ If review work needs to transfer domain context, propose it with
 `pbx_operator_propose_knowledge_handoff`; review forks may list and inspect
 knowledge-link and handoff context, but the root operator/TUI must approve
 delivery with `pbx_operator_approve_handoff` or `/operator handoff approve`.
+Use `pbx_operator_preflight_handoff` or `/operator handoff preflight` before
+delivery when pane readiness, queue/nohup routing, or attached KB context should
+be checked without sending anything.
 Receiving operators acknowledge with `pbx_operator_ack_handoff` and report
 running, blocked, failed, or complete state with `pbx_operator_update_handoff`.
 When a knowledge link or handoff produces reusable operating guidance, operators
@@ -565,7 +568,7 @@ def runbook_payload() -> dict[str, Any]:
             "Review forks treat the caller source checkout as read-only and write only under metadata.work_root.",
             "Review forks route source-edit needs through pbx_operator_route_review_escalation.",
             "Review forks request sibling projects through pbx_operator_request_project_spawn; the TUI/root operator approves and launches the new project as a normal caller agent.",
-            "Review forks propose domain handoffs through pbx_operator_propose_knowledge_handoff; the TUI/root operator approves executable handoff delivery before another operator receives the workflow.",
+            "Review forks propose domain handoffs through pbx_operator_propose_knowledge_handoff; the TUI/root operator can preflight delivery through pbx_operator_preflight_handoff and approves executable handoff delivery before another operator receives the workflow.",
             "Review forks can search active KB entries, request KB context through pbx_operator_kb_context, compile explicit report KB candidates through pbx_operator_kb_compile_report, propose KB entries through pbx_operator_kb_propose or pbx_operator_kb_propose_from_link, and mark their KB seed runs complete through pbx_operator_kb_update_seed_run; root operators update, promote, reject, retire, export, import, and rebuild indexes for canonical KB records.",
             "Operators acknowledge handoffs through pbx_operator_ack_handoff and update running or terminal handoff state through pbx_operator_update_handoff.",
             "Knowledge links and operator handoffs do not create fork edges, assignments, or source-session ownership.",

@@ -337,6 +337,43 @@ def test_operator_handoff_blocks_until_required_target_fork_launch(
     assert store.list_operator_fork_edges() == []
 
 
+def test_operator_handoff_preflight_does_not_create_required_target_fork(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-B",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"pbx_mode": "nohup", "cwd": str(tmp_path / "operator-B")},
+        )
+    )
+    service = OperatorService(store)
+    handoff = service.create_handoff(
+        operator_agent_id="operator-0",
+        source_agent_id="operator-0",
+        target_operator_agent_id="operator-B",
+        target_caller_agent_id="caller-1",
+        message="Check target fork readiness before delivery.",
+    )
+
+    preflight = service.preflight_handoff_delivery(
+        operator_agent_id="operator-0",
+        handoff_id=handoff["handoff_id"],
+        delivery="queue",
+    )
+
+    assert preflight["ok"] is False
+    assert preflight["status"] == "pending_launch"
+    assert preflight["reason"] == "required target operator fork would be created on approval"
+    assert preflight["target_fork"] is None
+    assert preflight["retryable"] is True
+    assert store.list_operator_forks(logical_operator_agent_id="operator-B") == []
+
+
 def test_operator_handoff_expires_before_start(tmp_path: Path) -> None:
     store = Store(tmp_path / "pbx.sqlite")
     store.init()
@@ -701,6 +738,16 @@ async def test_mcp_operator_handoff_tools_create_approve_and_ack(
             },
         )
     )
+    preflight = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_preflight_handoff",
+            {
+                "operator_agent_id": "operator-0",
+                "handoff_id": handoff["handoff_id"],
+                "delivery": "queue",
+            },
+        )
+    )
     listed = tool_json(
         await mcp.call_tool(
             "pbx_operator_list_handoffs",
@@ -731,6 +778,9 @@ async def test_mcp_operator_handoff_tools_create_approve_and_ack(
     assert approved["handoff"]["status"] == "sent"
     assert approved["command"]["agent_id"] == "operator-B"
     assert approved["command"]["payload"]["source"] == "operator_handoff"
+    assert preflight["ok"] is True
+    assert preflight["resolved_delivery"] == "queue"
+    assert preflight["target"]["agent_id"] == "operator-B"
     assert listed[0]["handoff_id"] == handoff["handoff_id"]
     assert fetched["safe_to_start"] is True
     assert acked["status"] == "acknowledged"

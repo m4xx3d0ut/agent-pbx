@@ -53,6 +53,13 @@ def test_mcp_daemon_status_reports_stale_metadata(
     assert status["mcp_url"] == "http://127.0.0.1:9876/mcp"
 
 
+def test_mcp_status_accepts_token_for_command_symmetry() -> None:
+    args = build_parser().parse_args(["mcp", "status", "--token", "secret"])
+
+    assert args.mcp_command == "status"
+    assert args.token == "secret"
+
+
 def test_pid_match_rejects_unreadable_proc_cmdline_on_linux(
     tmp_path: Path,
     monkeypatch,

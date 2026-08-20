@@ -2099,6 +2099,11 @@ class OperatorService:
         if str(handoff.get("status") or "") in HANDOFF_TERMINAL_STATUSES:
             raise ValueError("handoff is already terminal")
         target_fork = self._handoff_required_target_fork(handoff)
+        preflight = self.preflight_handoff_delivery(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+            delivery=delivery,
+        )
         if target_fork is not None and not self._handoff_target_fork_ready(target_fork):
             updated = self.store.update_operator_handoff(
                 str(handoff["handoff_id"]),
@@ -2107,6 +2112,7 @@ class OperatorService:
                 summary="Required target operator fork is not launched.",
                 metadata={
                     **(metadata or {}),
+                    "delivery_preflight": preflight,
                     "pending_launch_reason": target_fork.get("summary")
                     or target_fork.get("status"),
                     "target_fork_agent_id": target_fork.get("fork_agent_id"),
@@ -2126,7 +2132,25 @@ class OperatorService:
                 str(handoff["handoff_id"]),
                 status="approved",
                 delivery_status="recorded",
-                metadata=metadata or {},
+                delivery_evidence={
+                    "delivery_mode": "record_only",
+                    "requested_delivery": resolved_delivery,
+                    "resolved_delivery": "record_only",
+                    "delivery_status": "recorded",
+                    "pane_resolved": False,
+                    "delivered_to_pane": False,
+                    "text_pasted": False,
+                    "pasted_to_input": False,
+                    "enter_sent": False,
+                    "submitted_to_codex": False,
+                    "agent_acknowledged": False,
+                    "agent_started": False,
+                    "preflight": preflight,
+                },
+                metadata={
+                    **(metadata or {}),
+                    "delivery_preflight": preflight,
+                },
             )
             if updated is None:
                 raise RuntimeError("handoff approval update failed")
@@ -2148,6 +2172,7 @@ class OperatorService:
             delivery=resolved_delivery,
         )
         evidence = self._handoff_delivery_evidence(command)
+        evidence["preflight"] = preflight
         updated = self.store.update_operator_handoff(
             str(handoff["handoff_id"]),
             status="sent",
@@ -2157,6 +2182,7 @@ class OperatorService:
             delivery_evidence=evidence,
             metadata={
                 **(metadata or {}),
+                "delivery_preflight": preflight,
                 "approved_by_operator_agent_id": operator_agent_id,
             },
         )
@@ -2174,6 +2200,133 @@ class OperatorService:
             command=command,
         )
         return {"handoff": updated, "command": command}
+
+    def preflight_handoff_delivery(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_id: str,
+        delivery: str = "auto",
+    ) -> dict[str, Any]:
+        handoff = self._require_handoff_for_source_operator(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+        )
+        handoff = self._expire_handoff_if_due(handoff)
+        requested_delivery = str(delivery or "auto").strip().lower() or "auto"
+        target_operator_id = str(handoff.get("target_operator_agent_id") or "").strip()
+        target = self._require_agent(target_operator_id)
+        if target.get("agent_type") != OPERATOR_AGENT_TYPE:
+            raise ValueError("logical root operator is not registered")
+        target_fork = self._existing_handoff_target_fork(handoff)
+        target_metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+        mode = str(target_metadata.get("pbx_mode") or "report").strip().lower()
+        resolved_delivery = requested_delivery
+        if resolved_delivery == "auto":
+            resolved_delivery = "queue" if mode == NOHUP_MODE else "tmux"
+        kb_context = None
+        metadata = handoff.get("metadata") if isinstance(handoff.get("metadata"), dict) else {}
+        if isinstance(metadata.get("kb_context"), dict):
+            kb_context = metadata["kb_context"]
+        base = {
+            "handoff_id": str(handoff.get("handoff_id") or ""),
+            "operator_agent_id": operator_agent_id,
+            "target_operator_agent_id": target_operator_id,
+            "target_caller_agent_id": str(handoff.get("target_caller_agent_id") or "")
+            or None,
+            "checked_at": now_ts(),
+            "requested_delivery": requested_delivery,
+            "resolved_delivery": resolved_delivery,
+            "ok": False,
+            "delivery_possible": False,
+            "status": "failed",
+            "reason": None,
+            "retryable": False,
+            "target": self._delivery_target_payload(target),
+            "target_fork": self._delivery_fork_payload(target_fork)
+            if target_fork is not None
+            else None,
+            "pane": None,
+            "warnings": [],
+            "kb_context": kb_context,
+            "metadata": {},
+        }
+        if str(handoff.get("status") or "") == "expired":
+            return {
+                **base,
+                "status": "expired",
+                "reason": "handoff has expired",
+                "retryable": False,
+            }
+        if str(handoff.get("status") or "") in HANDOFF_TERMINAL_STATUSES:
+            return {
+                **base,
+                "status": "terminal",
+                "reason": "handoff is already terminal",
+                "retryable": False,
+            }
+        if (
+            str(handoff.get("target_caller_agent_id") or "").strip()
+            and target_fork is None
+        ):
+            return {
+                **base,
+                "status": "pending_launch",
+                "reason": "required target operator fork would be created on approval",
+                "retryable": True,
+            }
+        if target_fork is not None and not self._handoff_target_fork_ready(target_fork):
+            return {
+                **base,
+                "status": "pending_launch",
+                "reason": target_fork.get("summary")
+                or target_fork.get("status")
+                or "required target operator fork is not launched",
+                "retryable": True,
+            }
+        if resolved_delivery == "record_only":
+            return {
+                **base,
+                "ok": True,
+                "delivery_possible": True,
+                "status": "ready",
+                "reason": None,
+            }
+        if resolved_delivery == "queue":
+            return {
+                **base,
+                "ok": True,
+                "delivery_possible": True,
+                "status": "ready",
+                "reason": None,
+                "metadata": {"target_pbx_mode": mode},
+            }
+        if resolved_delivery != "tmux":
+            return {
+                **base,
+                "status": "failed",
+                "reason": "delivery must be auto, queue, tmux, or record_only",
+                "retryable": False,
+            }
+        pane_result = self._preflight_tmux_target(target)
+        return {
+            **base,
+            "ok": bool(pane_result.get("ok")),
+            "delivery_possible": bool(pane_result.get("ok")),
+            "status": "ready" if pane_result.get("ok") else "failed",
+            "reason": pane_result.get("reason"),
+            "retryable": bool(pane_result.get("retryable")),
+            "pane": pane_result.get("pane"),
+            "warnings": pane_result.get("warnings") or [],
+            "metadata": {
+                "target_pbx_mode": mode,
+                **(
+                    pane_result.get("metadata")
+                    if isinstance(pane_result.get("metadata"), dict)
+                    else {}
+                ),
+            },
+        }
 
     def ack_handoff(
         self,
@@ -2851,6 +3004,9 @@ class OperatorService:
         payload = {
             "message": message,
             "source": source,
+            "requested_delivery": delivery,
+            "resolved_delivery": resolved,
+            "delivery_mode": resolved,
             "campaign_id": campaign_id,
             "assignment_id": assignment_id,
             "operator_agent_id": operator_agent_id,
@@ -2877,6 +3033,13 @@ class OperatorService:
         tmux_support.send_text(pane.pane_id, message, tmux_bin=self.tmux_bin)
         payload["tmux_pane_id"] = pane.pane_id
         payload["tmux_target"] = pane.target_label
+        payload["tmux_target_command"] = pane.current_command
+        payload["tmux_target_title"] = pane.title
+        payload["tmux_target_cwd"] = pane.cwd
+        payload["tmux_target_window"] = pane.window_name
+        payload["tmux_target_codex_like"] = self._codex_like_command(
+            pane.current_command
+        )
         return self.store.create_command(
             CommandCreateRequest(
                 agent_id=str(fork["fork_agent_id"]),
@@ -2906,6 +3069,9 @@ class OperatorService:
             "message": message,
             **payload,
             "logical_operator_id": logical_operator_id,
+            "requested_delivery": delivery,
+            "resolved_delivery": resolved,
+            "delivery_mode": resolved,
         }
         if resolved == "queue":
             return self.store.create_command(
@@ -2921,6 +3087,13 @@ class OperatorService:
         tmux_support.send_text(pane.pane_id, message, tmux_bin=self.tmux_bin)
         command_payload["tmux_pane_id"] = pane.pane_id
         command_payload["tmux_target"] = pane.target_label
+        command_payload["tmux_target_command"] = pane.current_command
+        command_payload["tmux_target_title"] = pane.title
+        command_payload["tmux_target_cwd"] = pane.cwd
+        command_payload["tmux_target_window"] = pane.window_name
+        command_payload["tmux_target_codex_like"] = self._codex_like_command(
+            pane.current_command
+        )
         return self.store.create_command(
             CommandCreateRequest(
                 agent_id=logical_operator_id,
@@ -2949,6 +3122,9 @@ class OperatorService:
         payload = {
             "message": seed_run["prompt"],
             "source": "operator_kb_seed_run",
+            "requested_delivery": delivery,
+            "resolved_delivery": resolved,
+            "delivery_mode": resolved,
             "seed_run_id": seed_run["seed_run_id"],
             "operator_agent_id": source_operator_agent_id,
             "logical_operator_id": seed_run["logical_operator_agent_id"],
@@ -2973,6 +3149,13 @@ class OperatorService:
         tmux_support.send_text(pane.pane_id, seed_run["prompt"], tmux_bin=self.tmux_bin)
         payload["tmux_pane_id"] = pane.pane_id
         payload["tmux_target"] = pane.target_label
+        payload["tmux_target_command"] = pane.current_command
+        payload["tmux_target_title"] = pane.title
+        payload["tmux_target_cwd"] = pane.cwd
+        payload["tmux_target_window"] = pane.window_name
+        payload["tmux_target_codex_like"] = self._codex_like_command(
+            pane.current_command
+        )
         return self.store.create_command(
             CommandCreateRequest(
                 agent_id=source_operator_agent_id,
@@ -3015,6 +3198,9 @@ class OperatorService:
         payload = {
             "message": turn["message"],
             "source": "operator_knowledge_turn",
+            "requested_delivery": delivery,
+            "resolved_delivery": resolved,
+            "delivery_mode": resolved,
             "knowledge_link_id": link["link_id"],
             "knowledge_turn_id": turn["turn_id"],
             "operator_agent_id": operator_agent_id,
@@ -3039,6 +3225,13 @@ class OperatorService:
             tmux_pane_id = pane.pane_id
             payload["tmux_pane_id"] = pane.pane_id
             payload["tmux_target"] = pane.target_label
+            payload["tmux_target_command"] = pane.current_command
+            payload["tmux_target_title"] = pane.title
+            payload["tmux_target_cwd"] = pane.cwd
+            payload["tmux_target_window"] = pane.window_name
+            payload["tmux_target_codex_like"] = self._codex_like_command(
+                pane.current_command
+            )
             command = self.store.create_command(
                 CommandCreateRequest(
                     agent_id=recipient_agent_id,
@@ -3314,6 +3507,32 @@ class OperatorService:
             },
         )
 
+    def _existing_handoff_target_fork(
+        self,
+        handoff: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        target_operator_fork_id = str(
+            handoff.get("target_operator_fork_id") or ""
+        ).strip()
+        if target_operator_fork_id:
+            return (
+                self.store.get_operator_fork(target_operator_fork_id)
+                or self.store.get_operator_fork_for_agent(target_operator_fork_id)
+            )
+        target_caller_agent_id = str(handoff.get("target_caller_agent_id") or "").strip()
+        target_operator_agent_id = str(
+            handoff.get("target_operator_agent_id") or ""
+        ).strip()
+        if not target_caller_agent_id or not target_operator_agent_id:
+            return None
+        forks = self.store.list_operator_forks(
+            logical_operator_agent_id=target_operator_agent_id,
+            source_caller_agent_id=target_caller_agent_id,
+            fork_track_id=DEFAULT_FORK_TRACK_ID,
+            limit=1,
+        )
+        return forks[0] if forks else None
+
     @staticmethod
     def _handoff_target_fork_ready(fork: dict[str, Any]) -> bool:
         status = str(fork.get("status") or "").strip().lower()
@@ -3444,28 +3663,51 @@ class OperatorService:
     @staticmethod
     def _handoff_delivery_evidence(command: dict[str, Any]) -> dict[str, Any]:
         payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        tmux_pane_id = payload.get("tmux_pane_id")
+        delivered_to_pane = bool(tmux_pane_id)
+        codex_like_target = bool(payload.get("tmux_target_codex_like"))
         return {
             "command_id": command.get("command_id"),
             "command_status": command.get("status"),
             "delivery_status": command.get("status"),
-            "delivered_to_pane": bool(payload.get("tmux_pane_id")),
-            "pasted_to_input": bool(payload.get("tmux_pane_id")),
-            "submitted_to_codex": bool(payload.get("tmux_pane_id")),
+            "delivery_mode": payload.get("delivery_mode")
+            or ("tmux" if delivered_to_pane else "queue"),
+            "requested_delivery": payload.get("requested_delivery"),
+            "resolved_delivery": payload.get("resolved_delivery")
+            or ("tmux" if delivered_to_pane else "queue"),
+            "pane_resolved": delivered_to_pane,
+            "delivered_to_pane": delivered_to_pane,
+            "text_pasted": delivered_to_pane,
+            "pasted_to_input": delivered_to_pane,
+            "enter_sent": delivered_to_pane,
+            "submitted_to_codex": delivered_to_pane and codex_like_target,
+            "target_command": payload.get("tmux_target_command"),
+            "target_title": payload.get("tmux_target_title"),
+            "target_cwd": payload.get("tmux_target_cwd"),
+            "target_window": payload.get("tmux_target_window"),
+            "codex_like_target": codex_like_target,
             "agent_acknowledged": False,
             "agent_started": False,
-            "tmux_pane_id": payload.get("tmux_pane_id"),
+            "tmux_pane_id": tmux_pane_id,
             "tmux_target": payload.get("tmux_target"),
         }
 
     @staticmethod
     def _seed_delivery_evidence(command: dict[str, Any]) -> dict[str, Any]:
         payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        delivered_to_pane = bool(payload.get("tmux_pane_id"))
+        codex_like_target = bool(payload.get("tmux_target_codex_like"))
         return {
             "command_id": command.get("command_id"),
             "command_status": command.get("status"),
             "delivery_status": command.get("status"),
-            "delivered_to_pane": bool(payload.get("tmux_pane_id")),
-            "submitted_to_codex": bool(payload.get("tmux_pane_id")),
+            "pane_resolved": delivered_to_pane,
+            "delivered_to_pane": delivered_to_pane,
+            "text_pasted": delivered_to_pane,
+            "enter_sent": delivered_to_pane,
+            "submitted_to_codex": delivered_to_pane and codex_like_target,
+            "target_command": payload.get("tmux_target_command"),
+            "codex_like_target": codex_like_target,
             "tmux_pane_id": payload.get("tmux_pane_id"),
             "tmux_target": payload.get("tmux_target"),
         }
@@ -3719,6 +3961,80 @@ class OperatorService:
             )
         return pane
 
+    def _preflight_tmux_target(self, agent: dict[str, Any]) -> dict[str, Any]:
+        try:
+            panes = tmux_support.list_panes(self.tmux_bin)
+        except Exception as exc:  # noqa: BLE001 - preflight should explain tmux failures.
+            return {
+                "ok": False,
+                "reason": f"tmux is unavailable: {exc}",
+                "retryable": True,
+                "pane": None,
+                "warnings": [],
+                "metadata": {},
+            }
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        tmux_pane_id = str(metadata.get("tmux_pane_id") or "").strip()
+        if tmux_pane_id:
+            matches = [
+                pane
+                for pane in panes
+                if pane.pane_id == tmux_pane_id or pane.target_label == tmux_pane_id
+            ]
+            if len(matches) == 1:
+                pane = matches[0]
+                explicit_match = self._explicit_tmux_pane_matches_agent(pane, agent)
+                warnings = self._tmux_binding_warnings(pane, agent)
+                return {
+                    "ok": explicit_match,
+                    "reason": None
+                    if explicit_match
+                    else "explicit tmux pane matched but cwd/project context did not match",
+                    "retryable": not explicit_match,
+                    "pane": self._tmux_pane_payload(pane),
+                    "warnings": warnings,
+                    "metadata": {
+                        "explicit_tmux_pane_id": tmux_pane_id,
+                        "explicit_pane_match": explicit_match,
+                    },
+                }
+            if len(matches) > 1:
+                return {
+                    "ok": False,
+                    "reason": "multiple local tmux panes matched explicit tmux_pane_id",
+                    "retryable": True,
+                    "pane": None,
+                    "warnings": [],
+                    "metadata": {"explicit_tmux_pane_id": tmux_pane_id},
+                }
+            return {
+                "ok": False,
+                "reason": "explicit tmux_pane_id was not found locally",
+                "retryable": True,
+                "pane": None,
+                "warnings": [],
+                "metadata": {"explicit_tmux_pane_id": tmux_pane_id},
+            }
+        try:
+            pane = self._resolve_tmux_pane(agent)
+        except Exception as exc:  # noqa: BLE001 - preserve operator-facing reason.
+            return {
+                "ok": False,
+                "reason": str(exc),
+                "retryable": True,
+                "pane": None,
+                "warnings": [],
+                "metadata": {},
+            }
+        return {
+            "ok": True,
+            "reason": None,
+            "retryable": False,
+            "pane": self._tmux_pane_payload(pane),
+            "warnings": self._tmux_binding_warnings(pane, agent),
+            "metadata": {},
+        }
+
     def _explicit_tmux_pane_matches_agent(
         self,
         pane: tmux_support.TmuxPane,
@@ -3734,6 +4050,68 @@ class OperatorService:
         if not has_match_hint:
             return True
         return tmux_support.pane_matches_agent(pane, agent)
+
+    @staticmethod
+    def _codex_like_command(command: Any) -> bool:
+        text = str(command or "").strip().lower()
+        return bool(text and ("codex" in text or text in {"node"}))
+
+    def _tmux_pane_payload(self, pane: tmux_support.TmuxPane) -> dict[str, Any]:
+        return {
+            "session_name": pane.session_name,
+            "window_index": pane.window_index,
+            "pane_index": pane.pane_index,
+            "pane_id": pane.pane_id,
+            "target_label": pane.target_label,
+            "active": pane.active,
+            "current_command": pane.current_command,
+            "title": pane.title,
+            "cwd": pane.cwd,
+            "window_name": pane.window_name,
+            "codex_like_target": self._codex_like_command(pane.current_command),
+        }
+
+    def _tmux_binding_warnings(
+        self,
+        pane: tmux_support.TmuxPane,
+        agent: dict[str, Any],
+    ) -> list[str]:
+        warnings: list[str] = []
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        agent_cwd = str(metadata.get("cwd") or "").strip()
+        if agent_cwd and pane.cwd != agent_cwd:
+            warnings.append("tmux pane cwd differs from agent metadata cwd")
+        if not self._codex_like_command(pane.current_command):
+            warnings.append("tmux target command does not look like Codex")
+        return warnings
+
+    @staticmethod
+    def _delivery_target_payload(agent: dict[str, Any]) -> dict[str, Any]:
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        return {
+            "agent_id": agent.get("agent_id"),
+            "agent_type": agent.get("agent_type"),
+            "project": agent.get("project"),
+            "status": agent.get("status"),
+            "pbx_mode": metadata.get("pbx_mode"),
+            "cwd": metadata.get("cwd"),
+            "tmux_pane_id": metadata.get("tmux_pane_id"),
+        }
+
+    @staticmethod
+    def _delivery_fork_payload(fork: dict[str, Any] | None) -> dict[str, Any] | None:
+        if fork is None:
+            return None
+        metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+        return {
+            "operator_fork_id": fork.get("operator_fork_id"),
+            "fork_agent_id": fork.get("fork_agent_id"),
+            "source_caller_agent_id": fork.get("source_caller_agent_id"),
+            "status": fork.get("status"),
+            "summary": fork.get("summary"),
+            "tmux_pane_id": fork.get("tmux_pane_id"),
+            "operator_fork_pending": bool(metadata.get("operator_fork_pending")),
+        }
 
     def _is_operator_fork_agent(self, agent: dict[str, Any]) -> bool:
         metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}

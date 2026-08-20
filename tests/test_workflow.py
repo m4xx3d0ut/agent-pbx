@@ -299,6 +299,32 @@ def test_mark_latest_report_seen_is_shared_state(tmp_path: Path) -> None:
     assert events[-1]["payload"]["latest_report_seen_at"] == report["created_at"]
 
 
+def test_report_metadata_can_suppress_tui_alerts(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+    report = client.post(
+        "/v1/agents/agent-1/reports",
+        json={
+            "project": "demo",
+            "status": "working",
+            "summary": "Synthetic validation report",
+            "detail": "Should update state without a TUI alert.",
+            "metadata": {"suppress_tui_alerts": True},
+        },
+    )
+    agents = client.get("/v1/agents").json()
+    events = client.get("/v1/events").json()
+
+    assert report.status_code == 200
+    assert agents[0]["latest_report_suppress_tui_alerts"] is True
+    assert events[-1]["type"] == "report_created"
+    assert events[-1]["payload"]["suppress_tui_alerts"] is True
+
+
 def test_audited_working_report_clears_stale_blocked_status(tmp_path: Path) -> None:
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
 
@@ -1827,6 +1853,16 @@ def test_operator_handoff_api_create_approve_ack_and_complete(
     assert handoff.status_code == 200
     handoff_payload = handoff.json()
     handoff_id = handoff_payload["handoff_id"]
+
+    preflight = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/preflight",
+        json={"operator_agent_id": "operator-0", "delivery": "queue"},
+    )
+    assert preflight.status_code == 200
+    preflight_payload = preflight.json()
+    assert preflight_payload["ok"] is False
+    assert preflight_payload["status"] == "pending_launch"
+    assert preflight_payload["target_fork"] is None
 
     listed = client.get(
         "/v1/operator/handoffs",

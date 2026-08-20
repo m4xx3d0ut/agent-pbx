@@ -5590,6 +5590,7 @@ class Store:
         data["latest_report_needs_input"] = False
         data["latest_report_plan_option_count"] = 0
         data["latest_report_action_required"] = False
+        data["latest_report_suppress_tui_alerts"] = False
         data["active_campaign_count"] = 0
         return data
 
@@ -5618,7 +5619,8 @@ class Store:
     ) -> None:
         row = conn.execute(
             """
-            SELECT report_id, status, needs_input, plan_options_json, created_at
+            SELECT report_id, status, needs_input, plan_options_json, metadata_json,
+                   created_at
             FROM reports
             WHERE agent_id = ?
             ORDER BY created_at DESC, report_id DESC
@@ -5632,14 +5634,23 @@ class Store:
             plan_options = json.loads(row["plan_options_json"])
         except json.JSONDecodeError:
             plan_options = []
+        try:
+            report_metadata = json.loads(row["metadata_json"] or "{}")
+        except json.JSONDecodeError:
+            report_metadata = {}
         option_count = len(plan_options) if isinstance(plan_options, list) else 0
         needs_input = bool(row["needs_input"])
+        suppress_alerts = bool(
+            isinstance(report_metadata, dict)
+            and report_metadata.get("suppress_tui_alerts")
+        )
         agent["latest_report_id"] = row["report_id"]
         agent["latest_report_created_at"] = row["created_at"]
         agent["latest_report_status"] = row["status"]
         agent["latest_report_needs_input"] = needs_input
         agent["latest_report_plan_option_count"] = option_count
         agent["latest_report_action_required"] = needs_input or option_count > 0
+        agent["latest_report_suppress_tui_alerts"] = suppress_alerts
 
     @staticmethod
     def _add_queue_summary(

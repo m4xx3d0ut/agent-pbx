@@ -682,6 +682,19 @@ def build_mcp_server(
         )
 
     @mcp.tool()
+    def pbx_operator_preflight_handoff(
+        operator_agent_id: str,
+        handoff_id: str,
+        delivery: str = "auto",
+    ) -> dict[str, Any]:
+        """Dry-run operator handoff delivery and return target/pane readiness."""
+        return operator_service.preflight_handoff_delivery(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+            delivery=delivery,
+        )
+
+    @mcp.tool()
     def pbx_operator_approve_handoff(
         operator_agent_id: str,
         handoff_id: str,
@@ -858,6 +871,10 @@ def build_mcp_server(
                 "status": status,
                 "summary": summary,
                 "needs_input": needs_input,
+                "suppress_tui_alerts": bool(
+                    isinstance(request.metadata, dict)
+                    and request.metadata.get("suppress_tui_alerts")
+                ),
                 "created_at": report["created_at"],
             },
             report["report_id"],
