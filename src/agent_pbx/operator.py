@@ -200,7 +200,7 @@ def operator_runbook_payload() -> dict[str, Any]:
             "When review work needs to transfer domain context to another operator, propose a knowledge handoff; the TUI/root operator approves the executable handoff delivery.",
             "Operator handoffs track required target fork launch, delivery evidence, receiver acknowledgement, running state, TTL expiry, artifact summaries, and terminal state.",
             "Manual KB seed runs deliver a seed prompt to the selected operator or fork; that session proposes KB entries and updates seed-run status when finished.",
-            "Use pbx_operator_kb_context or handoff metadata.kb_query to attach existing active KB entries before transferring domain context.",
+            "Use pbx_operator_kb_context or handoff metadata.kb_query to attach existing active KB entries before transferring domain context; context lookup uses SQLite-local hybrid keyword/semantic retrieval by default.",
             "Promote durable operator knowledge into the PBX-managed KB only from the root operator; forks may propose entries, compile explicit report candidates, update their seed-run status, and read active entries.",
             "Knowledge links and handoffs do not create fork edges, campaign assignments, or source-session ownership.",
             "The root operator coordinates campaigns and reviews evidence; it must not implement caller repo changes directly.",
@@ -1207,6 +1207,7 @@ class OperatorService:
         status: str | None = "active",
         tags: list[str] | None = None,
         include_expired: bool = False,
+        semantic: bool = False,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         operator = self._require_operator(operator_agent_id)
@@ -1224,6 +1225,7 @@ class OperatorService:
             status=normalized_status,
             tags=tags or [],
             include_expired=include_expired,
+            semantic=semantic,
             limit=limit,
         )
         return [
@@ -1244,6 +1246,7 @@ class OperatorService:
         tags: list[str] | None = None,
         include_expired: bool = False,
         include_proposed: bool = False,
+        semantic: bool = True,
         limit: int = 5,
     ) -> dict[str, Any]:
         operator = self._require_operator(operator_agent_id)
@@ -1268,6 +1271,7 @@ class OperatorService:
             status=status,
             tags=tags or [],
             include_expired=include_expired,
+            semantic=semantic,
             limit=limit,
         )
         if include_proposed:
@@ -1278,6 +1282,21 @@ class OperatorService:
                 or str(entry.get("created_by_operator_agent_id") or "")
                 == logical_operator_id
             ]
+        semantic_match_count = 0
+        for entry in entries:
+            metadata = entry.get("metadata") if isinstance(entry, dict) else {}
+            retrieval = (
+                metadata.get("retrieval")
+                if isinstance(metadata, dict)
+                else None
+            )
+            sources = (
+                retrieval.get("sources")
+                if isinstance(retrieval, dict)
+                else []
+            )
+            if isinstance(sources, list) and "semantic" in sources:
+                semantic_match_count += 1
         return {
             "operator_agent_id": operator_agent_id,
             "logical_operator_agent_id": logical_operator_id,
@@ -1289,6 +1308,9 @@ class OperatorService:
             "tags": tags or [],
             "include_expired": include_expired,
             "include_proposed": include_proposed,
+            "retrieval_mode": "hybrid" if semantic else "keyword",
+            "semantic": semantic,
+            "semantic_match_count": semantic_match_count,
             "satisfied_by_kb": bool(entries),
             "match_count": len(entries),
             "kb_entries": entries,
@@ -4722,6 +4744,10 @@ class OperatorService:
                 ),
                 include_proposed=self._truthy_metadata_flag(
                     payload.get("kb_include_proposed")
+                ),
+                semantic=not (
+                    "kb_semantic" in payload
+                    and not self._truthy_metadata_flag(payload.get("kb_semantic"))
                 ),
                 limit=int(payload.get("kb_limit") or 5),
             )

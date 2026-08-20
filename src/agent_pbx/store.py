@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
 import sqlite3
 import uuid
@@ -18,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -130,6 +132,35 @@ OPERATOR_KB_SEED_TERMINAL_STATUSES = {
 OPERATOR_KB_INDEX_JOB_OPERATIONS = {"upsert", "delete", "rebuild"}
 OPERATOR_KB_INDEX_JOB_STATUSES = {"queued", "running", "complete", "failed"}
 OPERATOR_KB_EXPORT_FORMAT = "agent-pbx-operator-kb-v1"
+OPERATOR_KB_SEMANTIC_CHUNK_WORDS = 180
+OPERATOR_KB_SEMANTIC_CHUNK_OVERLAP = 36
+OPERATOR_KB_SEMANTIC_MAX_TERMS = 160
+OPERATOR_KB_SEMANTIC_MIN_SCORE = 0.08
+OPERATOR_KB_SEMANTIC_SYNONYMS = {
+    "ack": ("acknowledge", "receipt"),
+    "acknowledge": ("ack", "receipt"),
+    "agent": ("operator", "session"),
+    "approval": ("approve", "permission"),
+    "approve": ("approval", "permission"),
+    "context": ("knowledge", "guidance"),
+    "fork": ("workspace", "session"),
+    "handoff": ("transfer", "knowledge", "context"),
+    "kb": ("knowledge", "context"),
+    "knowledge": ("context", "guidance"),
+    "operator": ("agent", "coordinator"),
+    "pane": ("tmux", "terminal"),
+    "preflight": ("readiness", "check"),
+    "repo": ("repository", "checkout", "project"),
+    "repository": ("repo", "checkout", "project"),
+    "review": ("audit", "readonly"),
+    "rout": ("route", "routing", "handoff"),
+    "route": ("routing", "handoff"),
+    "routing": ("route", "handoff"),
+    "session": ("agent", "operator"),
+    "tmux": ("pane", "terminal"),
+    "validate": ("validation", "verify", "test"),
+    "validation": ("validate", "verify", "test"),
+}
 REPORTING_AGENT_ID_METADATA_KEYS = (
     "reporting_agent_id",
     "pbx_reporting_agent_id",
@@ -656,6 +687,20 @@ class Store:
                         ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS operator_kb_chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    kb_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    semantic_signature_json TEXT NOT NULL DEFAULT '{}',
+                    token_count INTEGER NOT NULL DEFAULT 0,
+                    content_hash TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(kb_id) REFERENCES operator_kb_entries(kb_id)
+                        ON DELETE CASCADE,
+                    UNIQUE(kb_id, chunk_index)
+                );
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS operator_kb_fts USING fts5(
                     kb_id UNINDEXED,
                     title,
@@ -767,6 +812,10 @@ class Store:
                     ON operator_kb_index_jobs(status, created_at ASC, job_id ASC);
                 CREATE INDEX IF NOT EXISTS idx_operator_kb_index_jobs_kb_updated
                     ON operator_kb_index_jobs(kb_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_chunks_kb_index
+                    ON operator_kb_chunks(kb_id, chunk_index);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_chunks_hash
+                    ON operator_kb_chunks(content_hash);
                 """
             )
             previous_schema_version = self._schema_version(conn)
@@ -868,6 +917,8 @@ class Store:
                 self._backfill_latest_report_seen(conn)
             if previous_schema_version < 20:
                 self._rebuild_operator_kb_fts(conn)
+            if previous_schema_version < 21:
+                self._rebuild_operator_kb_semantic_chunks(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -3684,17 +3735,19 @@ class Store:
         status: str | None = "active",
         tags: list[str] | None = None,
         include_expired: bool = False,
+        semantic: bool = False,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         self.process_operator_kb_index_jobs(limit=200)
         safe_limit = min(max(int(limit), 1), 500)
+        normalized_query = str(query or "").strip()
         normalized_tags = self._normalize_tags(tags or [])
         terms = [
             term.strip().lower()
-            for term in str(query or "").split()
+            for term in normalized_query.split()
             if term.strip()
         ]
-        match_query = self._operator_kb_fts_match_query(query)
+        match_query = self._operator_kb_fts_match_query(normalized_query)
         with self.connect() as conn:
             if match_query:
                 try:
@@ -3734,6 +3787,19 @@ class Store:
                     limit=safe_limit,
                 )
             entries = [self._operator_kb_entry_from_row(row) for row in rows]
+            if semantic and normalized_query:
+                entries = self._merge_operator_kb_semantic_search_results(
+                    conn,
+                    keyword_entries=entries,
+                    query=normalized_query,
+                    scope=scope,
+                    project=project,
+                    repo_root=repo_root,
+                    status=status,
+                    tags=normalized_tags,
+                    include_expired=include_expired,
+                    limit=safe_limit,
+                )
             for entry in entries:
                 entry["sources"] = self._operator_kb_sources_for_entry(
                     conn,
@@ -3831,6 +3897,203 @@ class Store:
             """,
             (*params, limit),
         ).fetchall()
+
+    def _merge_operator_kb_semantic_search_results(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        keyword_entries: list[dict[str, Any]],
+        query: str,
+        scope: str | None,
+        project: str | None,
+        repo_root: str | None,
+        status: str | None,
+        tags: list[str],
+        include_expired: bool,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        query_signature = self._operator_kb_semantic_signature(query)
+        if not query_signature:
+            return keyword_entries[:limit]
+        ranked: dict[str, dict[str, Any]] = {}
+        for index, entry in enumerate(keyword_entries):
+            kb_id = str(entry.get("kb_id") or "")
+            if not kb_id:
+                continue
+            keyword_score = max(0.0, 1.0 - (index * 0.01))
+            ranked[kb_id] = {
+                "entry": entry,
+                "score": keyword_score,
+                "keyword_rank": index + 1,
+                "semantic_score": None,
+                "semantic_chunks": [],
+                "sources": ["keyword"],
+            }
+        for match in self._search_operator_kb_semantic_chunks(
+            conn,
+            query_signature=query_signature,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=status,
+            tags=tags,
+            include_expired=include_expired,
+            limit=limit,
+        ):
+            entry = match["entry"]
+            kb_id = str(entry.get("kb_id") or "")
+            if not kb_id:
+                continue
+            semantic_score = float(match.get("semantic_score") or 0.0)
+            combined_score = max(
+                semantic_score,
+                0.45 + min(semantic_score, 0.5),
+            )
+            current = ranked.get(kb_id)
+            if current is None:
+                ranked[kb_id] = {
+                    "entry": entry,
+                    "score": combined_score,
+                    "keyword_rank": None,
+                    "semantic_score": semantic_score,
+                    "semantic_chunks": match.get("semantic_chunks") or [],
+                    "sources": ["semantic"],
+                }
+                continue
+            current["score"] = max(float(current.get("score") or 0.0), combined_score)
+            current["semantic_score"] = semantic_score
+            current["semantic_chunks"] = match.get("semantic_chunks") or []
+            sources = current.setdefault("sources", [])
+            if "semantic" not in sources:
+                sources.append("semantic")
+
+        ranked_items = sorted(
+            ranked.values(),
+            key=lambda item: (
+                -float(item.get("score") or 0.0),
+                self._operator_kb_status_sort_rank(item["entry"]),
+                -float(item["entry"].get("updated_at") or 0.0),
+                -float(item["entry"].get("created_at") or 0.0),
+            ),
+        )
+        results: list[dict[str, Any]] = []
+        for item in ranked_items[:limit]:
+            entry = dict(item["entry"])
+            metadata = dict(entry.get("metadata") or {})
+            metadata["retrieval"] = {
+                "mode": "hybrid" if len(item.get("sources") or []) > 1 else item["sources"][0],
+                "sources": list(item.get("sources") or []),
+                "score": round(float(item.get("score") or 0.0), 6),
+                "keyword_rank": item.get("keyword_rank"),
+                "semantic_score": (
+                    round(float(item["semantic_score"]), 6)
+                    if item.get("semantic_score") is not None
+                    else None
+                ),
+                "semantic_chunks": item.get("semantic_chunks") or [],
+            }
+            entry["metadata"] = metadata
+            results.append(entry)
+        return results
+
+    def _search_operator_kb_semantic_chunks(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        query_signature: dict[str, float],
+        scope: str | None,
+        project: str | None,
+        repo_root: str | None,
+        status: str | None,
+        tags: list[str],
+        include_expired: bool,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        where, params = self._operator_kb_search_filters(
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=status,
+            tags=tags,
+            include_expired=include_expired,
+            table_alias="e",
+        )
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        candidate_limit = min(max(limit * 80, 200), 5000)
+        rows = conn.execute(
+            f"""
+            SELECT c.chunk_id, c.kb_id, c.chunk_index,
+                   c.semantic_signature_json, c.token_count, c.content_hash,
+                   e.updated_at, e.created_at
+            FROM operator_kb_chunks c
+            JOIN operator_kb_entries e ON e.kb_id = c.kb_id
+            {clause}
+            ORDER BY e.updated_at DESC, c.chunk_index ASC
+            LIMIT ?
+            """,
+            (*params, candidate_limit),
+        ).fetchall()
+        best_by_kb: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            signature = self._operator_kb_semantic_signature_from_json(
+                row["semantic_signature_json"]
+            )
+            score = self._operator_kb_semantic_similarity(query_signature, signature)
+            if score < OPERATOR_KB_SEMANTIC_MIN_SCORE:
+                continue
+            kb_id = str(row["kb_id"])
+            chunk = {
+                "chunk_id": row["chunk_id"],
+                "chunk_index": int(row["chunk_index"]),
+                "score": round(score, 6),
+                "token_count": int(row["token_count"] or 0),
+                "content_hash": row["content_hash"],
+            }
+            current = best_by_kb.get(kb_id)
+            if current is None:
+                best_by_kb[kb_id] = {
+                    "kb_id": kb_id,
+                    "semantic_score": score,
+                    "semantic_chunks": [chunk],
+                }
+                continue
+            chunks = current.setdefault("semantic_chunks", [])
+            chunks.append(chunk)
+            chunks.sort(key=lambda item: -float(item.get("score") or 0.0))
+            del chunks[3:]
+            current["semantic_score"] = max(float(current["semantic_score"]), score)
+        ranked = sorted(
+            best_by_kb.values(),
+            key=lambda item: -float(item.get("semantic_score") or 0.0),
+        )[:limit]
+        results: list[dict[str, Any]] = []
+        for item in ranked:
+            row = conn.execute(
+                f"""
+                {self._operator_kb_entry_select_sql()}
+                WHERE kb_id = ?
+                """,
+                (item["kb_id"],),
+            ).fetchone()
+            if row is None:
+                continue
+            results.append(
+                {
+                    "entry": self._operator_kb_entry_from_row(row),
+                    "semantic_score": item["semantic_score"],
+                    "semantic_chunks": item["semantic_chunks"],
+                }
+            )
+        return results
+
+    @staticmethod
+    def _operator_kb_status_sort_rank(entry: dict[str, Any]) -> int:
+        status = str(entry.get("status") or "").strip().lower()
+        if status == "active":
+            return 0
+        if status == "proposed":
+            return 1
+        return 2
 
     def _operator_kb_search_filters(
         self,
@@ -4388,13 +4651,22 @@ class Store:
                 try:
                     if operation == "rebuild":
                         self._rebuild_operator_kb_fts(conn)
+                        self._rebuild_operator_kb_semantic_chunks(conn)
                     elif operation == "delete":
                         self._delete_operator_kb_fts_entry(
                             conn,
                             str(job.get("kb_id") or ""),
                         )
+                        self._delete_operator_kb_semantic_chunks(
+                            conn,
+                            str(job.get("kb_id") or ""),
+                        )
                     else:
                         self._upsert_operator_kb_fts_entry(
+                            conn,
+                            str(job.get("kb_id") or ""),
+                        )
+                        self._upsert_operator_kb_semantic_chunks(
                             conn,
                             str(job.get("kb_id") or ""),
                         )
@@ -5201,6 +5473,255 @@ class Store:
                 """,
                 cls._operator_kb_fts_entry_payload(entry),
             )
+
+    @classmethod
+    def _delete_operator_kb_semantic_chunks(
+        cls,
+        conn: sqlite3.Connection,
+        kb_id: str,
+    ) -> None:
+        normalized_kb_id = str(kb_id or "").strip()
+        if not normalized_kb_id:
+            return
+        conn.execute("DELETE FROM operator_kb_chunks WHERE kb_id = ?", (normalized_kb_id,))
+
+    @classmethod
+    def _upsert_operator_kb_semantic_chunks(
+        cls,
+        conn: sqlite3.Connection,
+        kb_id: str,
+    ) -> None:
+        normalized_kb_id = str(kb_id or "").strip()
+        if not normalized_kb_id:
+            return
+        cls._delete_operator_kb_semantic_chunks(conn, normalized_kb_id)
+        row = conn.execute(
+            f"""
+            {cls._operator_kb_entry_select_sql()}
+            WHERE kb_id = ?
+            """,
+            (normalized_kb_id,),
+        ).fetchone()
+        if row is None:
+            return
+        entry = cls._operator_kb_entry_from_row(row)
+        current = now_ts()
+        for chunk in cls._operator_kb_semantic_chunks_for_entry(entry):
+            conn.execute(
+                """
+                INSERT INTO operator_kb_chunks
+                    (chunk_id, kb_id, chunk_index, semantic_signature_json,
+                     token_count, content_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chunk["chunk_id"],
+                    normalized_kb_id,
+                    chunk["chunk_index"],
+                    json.dumps(chunk["semantic_signature"], sort_keys=True),
+                    chunk["token_count"],
+                    chunk["content_hash"],
+                    current,
+                    current,
+                ),
+            )
+
+    @classmethod
+    def _rebuild_operator_kb_semantic_chunks(cls, conn: sqlite3.Connection) -> None:
+        conn.execute("DELETE FROM operator_kb_chunks")
+        rows = conn.execute(cls._operator_kb_entry_select_sql()).fetchall()
+        current = now_ts()
+        for row in rows:
+            entry = cls._operator_kb_entry_from_row(row)
+            kb_id = str(entry.get("kb_id") or "").strip()
+            if not kb_id:
+                continue
+            for chunk in cls._operator_kb_semantic_chunks_for_entry(entry):
+                conn.execute(
+                    """
+                    INSERT INTO operator_kb_chunks
+                        (chunk_id, kb_id, chunk_index, semantic_signature_json,
+                         token_count, content_hash, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chunk["chunk_id"],
+                        kb_id,
+                        chunk["chunk_index"],
+                        json.dumps(chunk["semantic_signature"], sort_keys=True),
+                        chunk["token_count"],
+                        chunk["content_hash"],
+                        current,
+                        current,
+                    ),
+                )
+
+    @classmethod
+    def _operator_kb_semantic_chunks_for_entry(
+        cls,
+        entry: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        kb_id = str(entry.get("kb_id") or "").strip()
+        if not kb_id:
+            return []
+        document_text = cls._operator_kb_semantic_document_text(entry)
+        chunks = cls._operator_kb_chunk_text(document_text)
+        payloads: list[dict[str, Any]] = []
+        for index, chunk_text in enumerate(chunks):
+            signature = cls._operator_kb_semantic_signature(chunk_text)
+            if not signature:
+                continue
+            content_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
+            chunk_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"agent-pbx:operator-kb:{kb_id}:{index}:{content_hash}",
+                )
+            )
+            payloads.append(
+                {
+                    "chunk_id": chunk_id,
+                    "chunk_index": index,
+                    "semantic_signature": signature,
+                    "token_count": len(cls._operator_kb_semantic_tokens(chunk_text)),
+                    "content_hash": content_hash,
+                }
+            )
+        return payloads
+
+    @staticmethod
+    def _operator_kb_semantic_document_text(entry: dict[str, Any]) -> str:
+        tags = entry.get("tags") if isinstance(entry.get("tags"), list) else []
+        parts = [
+            str(entry.get("title") or ""),
+            str(entry.get("summary") or ""),
+            str(entry.get("body") or ""),
+            " ".join(str(tag) for tag in tags),
+            str(entry.get("project") or ""),
+            str(entry.get("repo_root") or ""),
+        ]
+        return "\n".join(part for part in parts if part.strip())
+
+    @staticmethod
+    def _operator_kb_chunk_text(text: str) -> list[str]:
+        words = re.findall(r"\S+", str(text or ""))
+        if not words:
+            return []
+        chunk_size = OPERATOR_KB_SEMANTIC_CHUNK_WORDS
+        overlap = min(OPERATOR_KB_SEMANTIC_CHUNK_OVERLAP, chunk_size // 2)
+        if len(words) <= chunk_size:
+            return [" ".join(words)]
+        chunks: list[str] = []
+        step = chunk_size - overlap
+        start = 0
+        while start < len(words):
+            chunk_words = words[start : start + chunk_size]
+            if chunk_words:
+                chunks.append(" ".join(chunk_words))
+            if start + chunk_size >= len(words):
+                break
+            start += step
+        return chunks
+
+    @classmethod
+    def _operator_kb_semantic_signature(cls, text: str) -> dict[str, float]:
+        weights: dict[str, float] = {}
+        for token, weight in cls._operator_kb_semantic_weighted_terms(text):
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+            weights[token_hash] = weights.get(token_hash, 0.0) + weight
+        if not weights:
+            return {}
+        top_items = sorted(
+            weights.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:OPERATOR_KB_SEMANTIC_MAX_TERMS]
+        norm = math.sqrt(sum(value * value for _, value in top_items))
+        if norm <= 0:
+            return {}
+        return {
+            key: round(value / norm, 8)
+            for key, value in top_items
+            if value > 0
+        }
+
+    @classmethod
+    def _operator_kb_semantic_weighted_terms(cls, text: str) -> list[tuple[str, float]]:
+        weighted: list[tuple[str, float]] = []
+        for token in cls._operator_kb_semantic_tokens(text):
+            weighted.append((token, 1.0))
+            for synonym in OPERATOR_KB_SEMANTIC_SYNONYMS.get(token, ()):
+                weighted.append((synonym, 0.35))
+        return weighted
+
+    @classmethod
+    def _operator_kb_semantic_tokens(cls, text: str) -> list[str]:
+        tokens: list[str] = []
+        for raw in re.findall(r"[a-z0-9_]{2,}", str(text or "").lower()):
+            pieces = [raw]
+            if "_" in raw:
+                pieces.extend(part for part in raw.split("_") if len(part) >= 2)
+            for piece in pieces:
+                normalized = cls._operator_kb_semantic_normalize_token(piece)
+                if normalized:
+                    tokens.append(normalized)
+        return tokens
+
+    @staticmethod
+    def _operator_kb_semantic_normalize_token(token: str) -> str | None:
+        normalized = str(token or "").strip("_").lower()
+        if len(normalized) < 2:
+            return None
+        if normalized.isdigit() and len(normalized) > 4:
+            return None
+        for suffix, min_length in (
+            ("ization", 9),
+            ("ation", 8),
+            ("ing", 6),
+            ("ers", 6),
+            ("ies", 6),
+            ("ed", 5),
+            ("es", 5),
+            ("s", 4),
+        ):
+            if len(normalized) >= min_length and normalized.endswith(suffix):
+                if suffix == "ies":
+                    normalized = f"{normalized[:-3]}y"
+                else:
+                    normalized = normalized[: -len(suffix)]
+                break
+        return normalized
+
+    @staticmethod
+    def _operator_kb_semantic_signature_from_json(raw: str | None) -> dict[str, float]:
+        try:
+            decoded = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(decoded, dict):
+            return {}
+        signature: dict[str, float] = {}
+        for key, value in decoded.items():
+            normalized_key = str(key or "").strip()
+            if not normalized_key:
+                continue
+            try:
+                signature[normalized_key] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return signature
+
+    @staticmethod
+    def _operator_kb_semantic_similarity(
+        left: dict[str, float],
+        right: dict[str, float],
+    ) -> float:
+        if not left or not right:
+            return 0.0
+        small, large = (left, right) if len(left) <= len(right) else (right, left)
+        score = 0.0
+        for key, value in small.items():
+            score += value * large.get(key, 0.0)
+        return max(0.0, min(score, 1.0))
 
     @staticmethod
     def _operator_kb_sources_payload(

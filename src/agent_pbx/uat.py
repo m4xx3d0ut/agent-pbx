@@ -18,7 +18,7 @@ from .paths import default_state_root
 
 UAT_MANIFEST_FORMAT = "agent-pbx-operator-kb-flow-uat-v1"
 DEFAULT_TMUX_SESSION_CANDIDATES = ("agent-pbx", "agent-pbx-operators")
-UAT_STAGE_ORDER = ("0", "1", "2", "3", "4", "5", "6", "7")
+UAT_STAGE_ORDER = ("0", "1", "2", "3", "4", "5", "6", "7", "8")
 UAT_TERMINAL_HANDOFF_STATUSES = {
     "complete",
     "completed",
@@ -36,6 +36,7 @@ UAT_STAGE_DEPENDENCIES = {
     "5": {"0", "1", "2"},
     "6": {"0", "1"},
     "7": {"0", "1", "2"},
+    "8": {"0", "1", "2"},
 }
 
 
@@ -457,6 +458,8 @@ class OperatorKbFlowUAT:
                 self.run_stage("6", self.stage_6_failure_and_recovery)
             if self.should_run_stage("7"):
                 self.run_stage("7", self.stage_7_multi_operator_lifecycle)
+            if self.should_run_stage("8"):
+                self.run_stage("8", self.stage_8_semantic_kb_retrieval)
         except BaseException as exc:  # noqa: BLE001 - UAT output must include failures.
             self.unexpected_error = "".join(
                 traceback.format_exception_only(type(exc), exc)
@@ -1647,6 +1650,164 @@ class OperatorKbFlowUAT:
                 "target_operator_fork_id": completed.get("target_operator_fork_id"),
                 "target_caller_agent_id": completed.get("target_caller_agent_id"),
                 "command_id": completed.get("command_id"),
+            },
+        )
+
+    def stage_8_semantic_kb_retrieval(self) -> None:
+        if not self.created_kb_ids:
+            raise AssertionError("stage 8 requires a promoted KB entry from stage 2")
+        kb_id = self.created_kb_ids[0]
+        semantic_query = "knowledge coordinator route guidance"
+        keyword_only = self.client.request(
+            "GET",
+            "/v1/operator/kb",
+            query={
+                "operator_agent_id": self.sim_b,
+                "query": semantic_query,
+                "project": self.project,
+                "tags": "kb-sim",
+                "semantic": False,
+                "limit": 5,
+            },
+        )
+        keyword_ids = [
+            entry.get("kb_id")
+            for entry in keyword_only.get("kb_entries", [])
+            if isinstance(entry, dict)
+        ]
+        semantic_search = self.client.request(
+            "GET",
+            "/v1/operator/kb",
+            query={
+                "operator_agent_id": self.sim_b,
+                "query": semantic_query,
+                "project": self.project,
+                "tags": "kb-sim",
+                "semantic": True,
+                "limit": 5,
+            },
+        )
+        semantic_entries = semantic_search.get("kb_entries", [])
+        semantic_ids = [
+            entry.get("kb_id")
+            for entry in semantic_entries
+            if isinstance(entry, dict)
+        ]
+        retrieval = (
+            semantic_entries[0].get("metadata", {}).get("retrieval", {})
+            if semantic_entries and isinstance(semantic_entries[0], dict)
+            else {}
+        )
+        self.check(
+            "8",
+            "semantic KB search finds differently worded context",
+            kb_id not in keyword_ids
+            and kb_id in semantic_ids
+            and "semantic" in retrieval.get("sources", []),
+            {
+                "query": semantic_query,
+                "keyword_ids": keyword_ids,
+                "semantic_ids": semantic_ids,
+                "retrieval": retrieval,
+            },
+        )
+        context = self.client.request(
+            "POST",
+            "/v1/operator/kb/context",
+            {
+                "operator_agent_id": self.sim_b,
+                "query": semantic_query,
+                "project": self.project,
+                "tags": ["kb-sim"],
+                "semantic": True,
+                "limit": 5,
+            },
+        )
+        context_ids = [entry.get("kb_id") for entry in context.get("kb_entries", [])]
+        self.check(
+            "8",
+            "semantic KB context reports hybrid retrieval evidence",
+            context.get("retrieval_mode") == "hybrid"
+            and context.get("semantic_match_count", 0) >= 1
+            and kb_id in context_ids,
+            {
+                "retrieval_mode": context.get("retrieval_mode"),
+                "semantic_match_count": context.get("semantic_match_count"),
+                "context_ids": context_ids,
+            },
+        )
+        handoff = self.client.request(
+            "POST",
+            "/v1/operator/handoffs",
+            {
+                "operator_agent_id": self.sim_a,
+                "source_agent_id": self.sim_a,
+                "target_operator_agent_id": self.sim_b,
+                "objective": "Validate semantic KB context attachment.",
+                "message": "Use the semantic KB context if it satisfies the request.",
+                "allowed_mutation_scope": "record-only UAT semantic retrieval",
+                "needs_ack": True,
+                "summary": f"UAT semantic KB handoff {self.tag}",
+                "metadata": {
+                    "kb_query": semantic_query,
+                    "kb_project": self.project,
+                    "kb_tags": ["kb-sim"],
+                    "kb_semantic": True,
+                    "kb_limit": 5,
+                    "uat_run": self.tag,
+                    "uat_stage": "8",
+                },
+            },
+        )
+        handoff_id = str(handoff["handoff_id"])
+        self.handoff_ids.append(handoff_id)
+        handoff_context = handoff.get("metadata", {}).get("kb_context", {})
+        handoff_ids = [
+            entry.get("kb_id")
+            for entry in handoff_context.get("kb_entries", [])
+            if isinstance(entry, dict)
+        ]
+        self.check(
+            "8",
+            "handoff metadata can attach semantic KB context",
+            handoff.get("metadata", {}).get("kb_context_satisfied") is True
+            and handoff_context.get("semantic_match_count", 0) >= 1
+            and kb_id in handoff_ids,
+            {
+                "handoff_id": handoff_id,
+                "handoff_ids": handoff_ids,
+                "semantic_match_count": handoff_context.get("semantic_match_count"),
+            },
+        )
+        approved = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(handoff_id)}/approve",
+            {
+                "operator_agent_id": self.sim_a,
+                "delivery": "record_only",
+                "metadata": {"uat_run": self.tag, "uat_stage": "8"},
+            },
+        )
+        completed = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(handoff_id)}/status",
+            {
+                "operator_agent_id": self.sim_b,
+                "status": "complete",
+                "summary": "Stage 8 semantic context handoff completed.",
+                "metadata": {"uat_run": self.tag, "uat_stage": "8"},
+            },
+        )
+        self.check(
+            "8",
+            "semantic KB handoff reaches terminal record-only state",
+            approved.get("command") is None
+            and approved.get("handoff", {}).get("delivery_status") == "recorded"
+            and completed.get("status") == "complete",
+            {
+                "delivery_status": approved.get("handoff", {}).get("delivery_status"),
+                "command": approved.get("command"),
+                "status": completed.get("status"),
             },
         )
 

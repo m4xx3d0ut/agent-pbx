@@ -1693,6 +1693,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         status: str | None = "active",
         tags: str | None = None,
         include_expired: bool = False,
+        semantic: bool = False,
         limit: int = 50,
     ) -> dict[str, object]:
         operator_service = request.app.state.operator_service
@@ -1711,6 +1712,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             status=status,
             tags=parsed_tags,
             include_expired=include_expired,
+            semantic=semantic,
             limit=limit,
         )
         return {"kb_entries": entries}
@@ -1736,6 +1738,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             tags=payload.tags,
             include_expired=payload.include_expired,
             include_proposed=payload.include_proposed,
+            semantic=payload.semantic,
             limit=payload.limit,
         )
 

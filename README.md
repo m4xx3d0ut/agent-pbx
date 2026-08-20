@@ -311,9 +311,11 @@ acknowledgement, started/running state, TTL expiry, artifact summaries, and
 terminal status without creating fork edges or changing source-session
 ownership. Durable operator knowledge is stored in `operator_kb_entries`,
 `operator_kb_sources`, and `operator_kb_events` after root-operator review;
-manual seed-run provenance is stored in `operator_kb_seed_runs`. Full-text
-search state is maintained in SQLite FTS tables through
-`operator_kb_index_jobs`, so KB search remains portable with the PBX database.
+manual seed-run provenance is stored in `operator_kb_seed_runs`. Full-text and
+semantic-lite search state is maintained through `operator_kb_index_jobs`, the
+SQLite FTS table, and hashed-signature chunk rows in `operator_kb_chunks`, so KB
+search remains portable with the PBX database and does not require a vector
+service.
 Reports and commands still provide the audit trail and link back to
 campaigns with report metadata and command payload fields such as
 `campaign_id`, `assignment_id`, `operator_agent_id`, and `operator_fork_id`.
@@ -399,8 +401,14 @@ records with `pbx_operator_kb_retire`, `/operator kb retire`, or `Retire`.
 Active KB entries are readable by other operators through
 `pbx_operator_kb_search`, `pbx_operator_kb_context`, `pbx_operator_kb_get`, and
 `/operator kb`. Handoff flows can request the same lookup by passing `kb_query`
-or `include_kb_context=true` metadata. Context lookup defaults to project scope
-and only narrows by repo path when `repo_root` or `kb_repo_root` is supplied.
+or `include_kb_context=true` metadata. Context lookup defaults to project scope,
+only narrows by repo path when `repo_root` or `kb_repo_root` is supplied, and
+uses SQLite-local hybrid keyword/semantic retrieval unless `semantic=false` is
+passed. Raw KB search remains keyword-first by default; pass `semantic=true` to
+`pbx_operator_kb_search` or `/v1/operator/kb` when differently worded queries
+should be considered. Returned entries include non-persistent retrieval evidence
+under `metadata.retrieval`, including source type, score, and matched chunk
+metadata.
 Root operators can export portable
 JSON-compatible KB bundles
 with `pbx_operator_kb_export` and import them with `pbx_operator_kb_import`;
@@ -416,7 +424,7 @@ auto-compile those candidates as proposed KB entries, dedupe them with a content
 hash, attach the source report in `operator_kb_sources`, and keep promotion on
 the root review path. Use `/operator kb compile` to manually retry compilation
 for the selected operator's latest report, and `/operator kb reindex` to rebuild
-the SQLite FTS index.
+the SQLite FTS and semantic chunk indexes.
 
 Use `/operator kb seed` to manually ask the selected root operator or fork to
 extract durable operating guidance from its current context. Agent PBX records a
@@ -433,6 +441,13 @@ identifying context from operator handoffs. Keep exports under ignored local
 paths such as `artifacts/`, `runs/`, or `state/`; repo ignore rules also exclude
 root-level `*operator-kb*.json`, `*operator_kb*.json`, and
 `agent-pbx-operator-kb*.json` bundle files.
+
+Current semantic KB support is intentionally local and deterministic. It chunks
+canonical KB text, stores hashed sparse term signatures, and combines those
+scores with the existing keyword/FTS path. The practical roadmap from here is:
+add operator feedback on accepted/rejected retrievals, add optional export of
+derived chunk metadata, then consider a true embedding provider or graph edges
+only after retrieval quality gaps are visible in normal operator work.
 
 First use from a running tmux-mode TUI is: select the source caller, use
 `Start O` or press `O` to ensure the logical operator exists, use `Review W` or
@@ -496,7 +511,10 @@ negative-path recovery checks: expired handoffs, missing target forks,
 preflight timestamp readiness, non-Codex tmux evidence, and idempotent cleanup
 expectations. Stage 7 covers a record-only multi-operator lifecycle where a
 third operator resolves KB context, acknowledges, runs, completes, and avoids
-unwanted fork/source-session associations.
+unwanted fork/source-session associations. Stage 8 validates SQLite-native
+semantic KB retrieval: keyword-only search misses a differently worded query,
+hybrid search finds the promoted KB entry, and handoff metadata can attach that
+semantic context.
 
 Successful cleanup is followed by an audit that checks for visible synthetic
 agents, active UAT KB leaks, non-terminal UAT handoffs, and live UAT tmux

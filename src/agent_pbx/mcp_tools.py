@@ -281,6 +281,7 @@ def build_mcp_server(
         status: str | None = "active",
         tags: list[str] | None = None,
         include_expired: bool = False,
+        semantic: bool = False,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Search the PBX-managed operator knowledge base."""
@@ -293,6 +294,7 @@ def build_mcp_server(
             status=status,
             tags=tags or [],
             include_expired=include_expired,
+            semantic=semantic,
             limit=limit,
         )
 
@@ -307,6 +309,7 @@ def build_mcp_server(
         tags: list[str] | None = None,
         include_expired: bool = False,
         include_proposed: bool = False,
+        semantic: bool = True,
         limit: int = 5,
     ) -> dict[str, Any]:
         """Return KB matches that can satisfy a knowledge-link or handoff request."""
@@ -320,6 +323,7 @@ def build_mcp_server(
             tags=tags or [],
             include_expired=include_expired,
             include_proposed=include_proposed,
+            semantic=semantic,
             limit=limit,
         )
 
@@ -343,7 +347,7 @@ def build_mcp_server(
 
     @mcp.tool()
     def pbx_operator_kb_rebuild_index() -> dict[str, Any]:
-        """Queue and process a full operator KB FTS rebuild."""
+        """Queue and process a full operator KB SQLite index rebuild."""
         job = store.create_operator_kb_index_job(
             operation="rebuild",
             metadata={"requested_by": "mcp"},

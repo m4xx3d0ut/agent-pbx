@@ -1032,6 +1032,28 @@ async def test_mcp_operator_kb_tools_lifecycle(tmp_path: Path) -> None:
             },
         )
     )
+    keyword_miss = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_search",
+            {
+                "operator_agent_id": "operator-B",
+                "query": "knowledge coordinator route guidance",
+                "project": "agent-pbx",
+                "semantic": False,
+            },
+        )
+    )
+    semantic_context = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_context",
+            {
+                "operator_agent_id": "operator-B",
+                "query": "knowledge coordinator route guidance",
+                "project": "agent-pbx",
+                "semantic": True,
+            },
+        )
+    )
     report = tool_json(
         await mcp.call_tool(
             "pbx_report_turn",
@@ -1091,6 +1113,15 @@ async def test_mcp_operator_kb_tools_lifecycle(tmp_path: Path) -> None:
     assert imported["entries"][0]["created_by_operator_agent_id"] == "operator-B"
     assert context["satisfied_by_kb"] is True
     assert context["kb_entries"][0]["kb_id"] == proposed["kb_id"]
+    assert keyword_miss == []
+    assert semantic_context["retrieval_mode"] == "hybrid"
+    assert semantic_context["semantic_match_count"] >= 1
+    assert semantic_context["kb_entries"][0]["kb_id"] == proposed["kb_id"]
+    assert (
+        "semantic"
+        in semantic_context["kb_entries"][0]["metadata"]["retrieval"]["sources"]
+    )
+    assert semantic_context["kb_entries"][0]["metadata"]["retrieval"]["semantic_chunks"]
     assert compiled_from_report["proposed_count"] == 0
     assert compiled_from_report["skipped"][0]["reason"] == "duplicate_content_hash"
     assert compiled_entries[0]["metadata"]["compiled_from_report_id"] == report["report_id"]

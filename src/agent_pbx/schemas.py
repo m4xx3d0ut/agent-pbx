@@ -616,6 +616,7 @@ class OperatorKbContextRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     include_expired: bool = False
     include_proposed: bool = False
+    semantic: bool = True
     limit: int = Field(default=5, ge=1, le=50)
 
 
@@ -630,6 +631,9 @@ class OperatorKbContextResponse(BaseModel):
     tags: list[str]
     include_expired: bool
     include_proposed: bool
+    retrieval_mode: str = "keyword"
+    semantic: bool = False
+    semantic_match_count: int = 0
     satisfied_by_kb: bool
     match_count: int
     kb_entries: list[OperatorKbEntryResponse] = Field(default_factory=list)
