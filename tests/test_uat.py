@@ -71,6 +71,12 @@ def test_uat_manifest_round_trips_private_file(tmp_path: Path) -> None:
     assert path.stat().st_mode & 0o777 == 0o600
 
 
+def test_selected_uat_stages_include_required_setup() -> None:
+    assert uat.selected_uat_stages(stage="6") == ("0", "1", "6")
+    assert uat.selected_uat_stages(from_stage="6") == ("0", "1", "2", "6", "7")
+    assert uat.selected_uat_stages(stage="5") == ("0", "1", "2", "5")
+
+
 def test_operator_kb_flow_manifest_only_lists_created_agents(
     monkeypatch,
     tmp_path: Path,
@@ -90,6 +96,48 @@ def test_operator_kb_flow_manifest_only_lists_created_agents(
 
     assert payload["synthetic_agents"] == [harness.sim_a, harness.sim_b, harness.sim_fork]
     assert harness.sim_tmux not in payload["synthetic_agents"]
+
+
+def test_operator_kb_flow_cleanup_resource_states(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        uat,
+        "resolve_tmux_session",
+        lambda *_args, **_kwargs: ("agent-pbx", ["agent-pbx"], []),
+    )
+    harness = uat.OperatorKbFlowUAT(
+        server="http://pbx.test",
+        token=None,
+        state_root=tmp_path,
+    )
+    harness.cleanup = [
+        {"kind": "kb_retired", "kb_id": "kb-1", "status": "retired"},
+        {"kind": "agent_dismissed", "agent_id": "agent-1"},
+        {"kind": "tmux_pane_already_absent", "tmux_pane_id": "%1", "returncode": 0},
+    ]
+
+    assert harness.cleanup_resource_states() == [
+        {
+            "resource_type": "kb",
+            "resource_id": "kb-1",
+            "state": "retired",
+            "terminal": True,
+        },
+        {
+            "resource_type": "agent",
+            "resource_id": "agent-1",
+            "state": "dismissed",
+            "terminal": True,
+        },
+        {
+            "resource_type": "tmux_pane",
+            "resource_id": "%1",
+            "state": "tmux_pane_already_absent",
+            "terminal": True,
+        },
+    ]
 
 
 def test_operator_kb_flow_cleanup_failure_count_tracks_failures(
@@ -277,3 +325,81 @@ def test_cleanup_operator_kb_flow_uat_treats_missing_tmux_pane_as_clean(
 
     assert result["failed_count"] == 0
     assert result["cleanup"][0]["kind"] == "tmux_pane_already_absent"
+
+
+def test_tmux_pane_liveness_uses_list_panes_membership(monkeypatch) -> None:
+    monkeypatch.setattr(
+        uat.subprocess,
+        "run",
+        lambda argv, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="%1\n%2\n",
+            stderr="",
+            argv=argv,
+        ),
+    )
+
+    assert uat.tmux_pane_liveness("tmux-test", "%2") == {
+        "tmux_pane_id": "%2",
+        "live": True,
+        "returncode": 0,
+        "stderr": "",
+    }
+    assert uat.tmux_pane_liveness("tmux-test", "%3")["live"] is False
+
+
+def test_compare_operator_kb_flow_uat_runs_reports_deltas(tmp_path: Path) -> None:
+    base = {
+        "format": uat.UAT_MANIFEST_FORMAT,
+        "status": "complete",
+        "base": "http://pbx.test",
+        "project": "demo",
+    }
+    uat.write_uat_manifest(
+        {
+            **base,
+            "run": "run-a",
+            "results": [{"stage": "1", "ok": True, "evidence": {}}],
+            "failures": [],
+            "cleanup": [{"kind": "agent_dismissed"}],
+            "cleanup_failed_count": 0,
+            "non_sim_report_change_count": 0,
+            "duration_seconds": 2.0,
+            "stage_timings": {"1": {"duration_seconds": 1.0}},
+        },
+        tmp_path,
+    )
+    uat.write_uat_manifest(
+        {
+            **base,
+            "run": "run-b",
+            "results": [
+                {"stage": "1", "ok": True, "evidence": {}},
+                {"stage": "2", "ok": False, "evidence": {"warnings": ["warn"]}},
+            ],
+            "failures": ["2: failed"],
+            "cleanup": [{"kind": "agent_dismissed"}, {"kind": "tmux_pane_killed"}],
+            "cleanup_failed_count": 0,
+            "non_sim_report_change_count": 1,
+            "duration_seconds": 5.5,
+            "stage_timings": {
+                "1": {"duration_seconds": 1.5},
+                "2": {"duration_seconds": 2.0},
+            },
+        },
+        tmp_path,
+    )
+
+    result = uat.compare_operator_kb_flow_uat_runs(
+        run_a="run-a",
+        run_b="run-b",
+        state_root=tmp_path,
+    )
+
+    assert result["deltas"]["check_count"] == 1
+    assert result["deltas"]["failure_count"] == 1
+    assert result["deltas"]["warning_count"] == 1
+    assert result["deltas"]["non_sim_report_change_count"] == 1
+    assert result["deltas"]["duration_seconds"] == 3.5
+    assert result["deltas"]["stage_durations"]["1"] == 0.5
+    assert result["deltas"]["stage_durations"]["2"] == 2.0

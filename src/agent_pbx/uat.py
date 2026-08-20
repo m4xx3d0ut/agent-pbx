@@ -18,6 +18,56 @@ from .paths import default_state_root
 
 UAT_MANIFEST_FORMAT = "agent-pbx-operator-kb-flow-uat-v1"
 DEFAULT_TMUX_SESSION_CANDIDATES = ("agent-pbx", "agent-pbx-operators")
+UAT_STAGE_ORDER = ("0", "1", "2", "3", "4", "5", "6", "7")
+UAT_TERMINAL_HANDOFF_STATUSES = {
+    "complete",
+    "completed",
+    "blocked",
+    "failed",
+    "expired",
+    "canceled",
+    "cancelled",
+}
+UAT_STAGE_DEPENDENCIES = {
+    "1": {"0"},
+    "2": {"0", "1"},
+    "3": {"0", "1", "2"},
+    "4": {"0", "1", "2"},
+    "5": {"0", "1", "2"},
+    "6": {"0", "1"},
+    "7": {"0", "1", "2"},
+}
+
+
+def normalize_uat_stage(value: str | int | None, *, flag_name: str) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if normalized not in UAT_STAGE_ORDER:
+        raise ValueError(f"{flag_name} must be one of {', '.join(UAT_STAGE_ORDER)}")
+    return normalized
+
+
+def selected_uat_stages(
+    *,
+    stage: str | int | None = None,
+    from_stage: str | int | None = None,
+) -> tuple[str, ...]:
+    normalized_stage = normalize_uat_stage(stage, flag_name="stage")
+    normalized_from_stage = normalize_uat_stage(from_stage, flag_name="from_stage")
+    if normalized_stage and normalized_from_stage:
+        raise ValueError("stage and from_stage are mutually exclusive")
+    if normalized_stage:
+        requested = {normalized_stage}
+    elif normalized_from_stage:
+        start = UAT_STAGE_ORDER.index(normalized_from_stage)
+        requested = set(UAT_STAGE_ORDER[start:])
+    else:
+        requested = set(UAT_STAGE_ORDER)
+    required = set(requested)
+    for item in list(requested):
+        required.update(UAT_STAGE_DEPENDENCIES.get(item, set()))
+    return tuple(stage_id for stage_id in UAT_STAGE_ORDER if stage_id in required)
 
 
 def uat_manifest_dir(state_root: Path | None = None) -> Path:
@@ -148,6 +198,22 @@ def cleanup_tmux_pane(tmux_bin: str, tmux_pane_id: str) -> dict[str, Any]:
         "tmux_pane_id": tmux_pane_id,
         "returncode": killed.returncode,
         "stderr": stderr,
+    }
+
+
+def tmux_pane_liveness(tmux_bin: str, tmux_pane_id: str) -> dict[str, Any]:
+    result = subprocess.run(
+        [tmux_bin, "list-panes", "-a", "-F", "#{pane_id}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    panes = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return {
+        "tmux_pane_id": tmux_pane_id,
+        "live": tmux_pane_id in panes,
+        "returncode": result.returncode,
+        "stderr": result.stderr.strip(),
     }
 
 
@@ -301,11 +367,25 @@ class OperatorKbFlowUAT:
         timeout: float = 20.0,
         state_root: Path | None = None,
         tmux_bin: str = "tmux",
+        stage: str | int | None = None,
+        from_stage: str | int | None = None,
+        skip_tmux: bool = False,
     ) -> None:
         self.client = UATClient(server=server, token=token, timeout=timeout)
         self.project = project
-        self.tmux_sink = tmux_sink
+        self.skip_tmux = skip_tmux
+        self.tmux_sink = bool(tmux_sink and not skip_tmux)
         self.tmux_bin = tmux_bin
+        self.stage_filter = normalize_uat_stage(stage, flag_name="stage")
+        self.from_stage_filter = normalize_uat_stage(from_stage, flag_name="from_stage")
+        self.selected_stages = selected_uat_stages(
+            stage=self.stage_filter,
+            from_stage=self.from_stage_filter,
+        )
+        self.requested_stages = selected_uat_stages(
+            stage=self.stage_filter,
+            from_stage=self.from_stage_filter,
+        )
         resolved_session, sessions, warnings = resolve_tmux_session(
             tmux_session,
             tmux_bin=tmux_bin,
@@ -320,8 +400,10 @@ class OperatorKbFlowUAT:
         self.tag = f"kb-sim-{suffix}"
         self.sim_a = f"operator-kb-sim-a-{suffix}"
         self.sim_b = f"operator-kb-sim-b-{suffix}"
+        self.sim_c = f"operator-kb-sim-c-{suffix}"
         self.sim_fork = f"operator-kb-sim-a-fork-{suffix}"
         self.sim_tmux = f"operator-kb-sim-tmux-{suffix}"
+        self.sim_caller = f"operator-kb-sim-caller-{suffix}"
         self.created_agents = [self.sim_a, self.sim_b, self.sim_fork]
         self.active_kb_ids: list[str] = []
         self.secret_kb_ids: list[str] = []
@@ -331,36 +413,62 @@ class OperatorKbFlowUAT:
         self.results: list[dict[str, Any]] = []
         self.failures: list[str] = []
         self.cleanup: list[dict[str, Any]] = []
+        self.cleanup_audit: dict[str, Any] = {}
         self.unexpected_error: str | None = None
         self.before_reports: dict[str, str | None] = {}
         self.non_sim_report_changes: list[dict[str, str | None]] = []
         self.started_at = time.time()
+        self.ended_at: float | None = None
+        self.stage_timings: dict[str, dict[str, float | str]] = {}
+        self.executed_stages: list[str] = []
+        self.skipped_stages: list[str] = []
         self.manifest_path = uat_manifest_path(self.tag, state_root)
 
     def run(self) -> dict[str, Any]:
         self.write_manifest("starting")
         try:
-            self.stage_0_preflight()
+            self.run_stage("0", self.stage_0_preflight)
             self.before_reports = self.latest_reports_snapshot()
-            self.stage_1_register()
-            kb_id = self.stage_2_compile_and_promote()
-            self.stage_3_context_and_record_only(kb_id)
-            self.stage_4_guards_and_reindex()
-            if self.tmux_sink:
-                self.stage_5_tmux_sink()
-            else:
-                self.check(
-                    "5",
-                    "tmux sink stage skipped",
-                    True,
-                    {"tmux_sink": False},
-                )
+            if self.should_run_stage("1"):
+                self.run_stage("1", self.stage_1_register)
+            kb_id = self.created_kb_ids[0] if self.created_kb_ids else None
+            if self.should_run_stage("2"):
+                kb_id = self.run_stage("2", self.stage_2_compile_and_promote)
+            if self.should_run_stage("3"):
+                if not kb_id:
+                    raise AssertionError("stage 3 requires stage 2 KB setup")
+                self.run_stage("3", lambda: self.stage_3_context_and_record_only(kb_id))
+            if self.should_run_stage("4"):
+                self.run_stage("4", self.stage_4_guards_and_reindex)
+            if self.should_run_stage("5"):
+                if self.tmux_sink:
+                    self.run_stage("5", self.stage_5_tmux_sink)
+                else:
+                    self.run_stage(
+                        "5",
+                        lambda: self.check(
+                            "5",
+                            "tmux sink stage skipped",
+                            True,
+                            {"tmux_sink": False, "skip_tmux": self.skip_tmux},
+                        ),
+                    )
+            if self.should_run_stage("6"):
+                self.run_stage("6", self.stage_6_failure_and_recovery)
+            if self.should_run_stage("7"):
+                self.run_stage("7", self.stage_7_multi_operator_lifecycle)
         except BaseException as exc:  # noqa: BLE001 - UAT output must include failures.
             self.unexpected_error = "".join(
                 traceback.format_exception_only(type(exc), exc)
             ).strip()
             self.check("runtime", "unexpected exception", False, self.unexpected_error)
         finally:
+            self.ended_at = time.time()
+            self.skipped_stages = [
+                stage_id
+                for stage_id in UAT_STAGE_ORDER
+                if stage_id not in self.executed_stages
+            ]
             after_reports = self.latest_reports_snapshot()
             self.non_sim_report_changes = self.changed_reports(
                 self.before_reports,
@@ -379,6 +487,7 @@ class OperatorKbFlowUAT:
                             "cleanup": self.cleanup,
                         },
                     )
+                self.post_cleanup_audit()
             self.write_manifest("complete" if not self.failures else "failed")
         return {
             "run": self.tag,
@@ -395,11 +504,60 @@ class OperatorKbFlowUAT:
             "non_sim_report_changes": self.non_sim_report_changes[:20],
             "non_sim_report_change_count": len(self.non_sim_report_changes),
             "cleanup": self.cleanup,
+            "cleanup_resource_states": self.cleanup_resource_states(),
+            "cleanup_audit": self.cleanup_audit,
+            "cleanup_failed_count": self.cleanup_failure_count(),
+            "selected_stages": list(self.selected_stages),
+            "executed_stages": self.executed_stages,
+            "skipped_stages": self.skipped_stages,
+            "stage_timings": self.stage_timings,
+            "duration_seconds": self.duration_seconds(),
         }
+
+    def should_run_stage(self, stage: str) -> bool:
+        return stage in self.selected_stages
+
+    def run_stage(self, stage: str, func):
+        started_at = time.time()
+        self.executed_stages.append(stage)
+        self.stage_timings[stage] = {"started_at": started_at, "status": "running"}
+        self.write_manifest("running")
+        try:
+            result = func()
+        except BaseException:
+            ended_at = time.time()
+            self.stage_timings[stage].update(
+                {
+                    "ended_at": ended_at,
+                    "duration_seconds": ended_at - started_at,
+                    "status": "failed",
+                }
+            )
+            self.write_manifest("running")
+            raise
+        ended_at = time.time()
+        self.stage_timings[stage].update(
+            {
+                "ended_at": ended_at,
+                "duration_seconds": ended_at - started_at,
+                "status": "complete",
+            }
+        )
+        self.write_manifest("running")
+        return result
+
+    def duration_seconds(self) -> float:
+        return (self.ended_at or time.time()) - self.started_at
 
     def check(self, stage: str, name: str, ok: bool, evidence: Any = None) -> None:
         self.results.append(
-            {"stage": stage, "name": name, "ok": bool(ok), "evidence": evidence}
+            {
+                "stage": stage,
+                "name": name,
+                "ok": bool(ok),
+                "evidence": evidence,
+                "checked_at": time.time(),
+            }
         )
         if not ok:
             self.failures.append(f"{stage}: {name}")
@@ -416,8 +574,10 @@ class OperatorKbFlowUAT:
             "cleanup_operator_agent_id": self.sim_a,
             "sim_a": self.sim_a,
             "sim_b": self.sim_b,
+            "sim_c": self.sim_c,
             "sim_fork": self.sim_fork,
             "sim_tmux": self.sim_tmux,
+            "sim_caller": self.sim_caller,
             "synthetic_agents": list(self.created_agents),
             "active_kb_ids": self.active_kb_ids,
             "secret_kb_ids": self.secret_kb_ids,
@@ -429,7 +589,18 @@ class OperatorKbFlowUAT:
             "controlled_cwd": self.controlled_cwd,
             "failures": self.failures,
             "unexpected_error": self.unexpected_error,
+            "results": self.results,
             "cleanup": self.cleanup,
+            "cleanup_resource_states": self.cleanup_resource_states(),
+            "cleanup_failed_count": self.cleanup_failure_count(),
+            "cleanup_audit": self.cleanup_audit,
+            "stage_filter": self.stage_filter,
+            "from_stage_filter": self.from_stage_filter,
+            "selected_stages": list(self.selected_stages),
+            "executed_stages": self.executed_stages,
+            "skipped_stages": self.skipped_stages,
+            "stage_timings": self.stage_timings,
+            "duration_seconds": self.duration_seconds(),
             "created_at": self.started_at,
             "updated_at": time.time(),
         }
@@ -1151,6 +1322,333 @@ class OperatorKbFlowUAT:
                 ),
             },
         )
+        tmux_complete = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(handoff_id)}/status",
+            {
+                "operator_agent_id": self.sim_tmux,
+                "status": "complete",
+                "summary": "Controlled tmux receiver completed synthetic delivery.",
+                "artifact_bundle": [{"name": "tmux-uat-result", "status": "pass"}],
+                "metadata": {"uat_run": self.tag},
+            },
+        )
+        self.check(
+            "5",
+            "tmux-backed handoff reaches terminal complete state",
+            tmux_complete.get("status") == "complete"
+            and tmux_complete.get("completed_at") is not None,
+            {
+                "status": tmux_complete.get("status"),
+                "completed_at": tmux_complete.get("completed_at"),
+            },
+        )
+
+    def stage_6_failure_and_recovery(self) -> None:
+        expired_handoff = self.client.request(
+            "POST",
+            "/v1/operator/handoffs",
+            {
+                "operator_agent_id": self.sim_a,
+                "source_agent_id": self.sim_a,
+                "target_operator_agent_id": self.sim_b,
+                "objective": "Validate expired handoff recovery path.",
+                "message": "This synthetic handoff is intentionally expired.",
+                "expires_at": time.time() - 1.0,
+                "needs_ack": True,
+                "summary": f"UAT expired handoff {self.tag}",
+                "metadata": {"uat_run": self.tag, "uat_stage": "6"},
+            },
+        )
+        expired_id = str(expired_handoff["handoff_id"])
+        self.handoff_ids.append(expired_id)
+        expired = self.client.request(
+            "GET",
+            f"/v1/operator/handoffs/{self.quote(expired_id)}",
+            query={"operator_agent_id": self.sim_a},
+        )
+        expired_approve = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(expired_id)}/approve",
+            {"operator_agent_id": self.sim_a, "delivery": "record_only"},
+            expect=(400, 409, 422),
+        )
+        self.check(
+            "6",
+            "expired handoff refuses approval before start",
+            expired.get("status") == "expired"
+            and expired.get("safe_to_start") is False
+            and expired_approve.get("http_status") in {400, 409, 422},
+            {
+                "handoff_id": expired_id,
+                "status": expired.get("status"),
+                "safe_to_start": expired.get("safe_to_start"),
+                "approve": expired_approve,
+            },
+        )
+        caller = self.client.request(
+            "POST",
+            "/v1/agents/register",
+            {
+                "agent_id": self.sim_caller,
+                "project": self.project,
+                "agent_type": "caller",
+                "metadata": {
+                    "cwd": f"/tmp/agent-pbx-kb-sim/{self.tag}/{self.sim_caller}",
+                    "codex_session_id": f"uat-session-{self.tag}",
+                    "uat_run": self.tag,
+                    "suppress_tui_alerts": True,
+                },
+            },
+        )
+        if self.sim_caller not in self.created_agents:
+            self.created_agents.append(self.sim_caller)
+        self.check(
+            "6",
+            "registered synthetic target caller for pending fork path",
+            caller.get("agent_type") == "caller",
+            {"agent_id": self.sim_caller, "agent_type": caller.get("agent_type")},
+        )
+        pending_handoff = self.client.request(
+            "POST",
+            "/v1/operator/handoffs",
+            {
+                "operator_agent_id": self.sim_a,
+                "source_agent_id": self.sim_a,
+                "target_operator_agent_id": self.sim_b,
+                "target_caller_agent_id": self.sim_caller,
+                "objective": "Validate required target fork pending-launch path.",
+                "message": "This synthetic handoff requires a target operator fork.",
+                "needs_ack": True,
+                "summary": f"UAT pending-launch handoff {self.tag}",
+                "metadata": {"uat_run": self.tag, "uat_stage": "6"},
+            },
+        )
+        pending_id = str(pending_handoff["handoff_id"])
+        self.handoff_ids.append(pending_id)
+        pending_preflight = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(pending_id)}/preflight",
+            {"operator_agent_id": self.sim_a, "delivery": "queue"},
+        )
+        pending_approval = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(pending_id)}/approve",
+            {
+                "operator_agent_id": self.sim_a,
+                "delivery": "queue",
+                "metadata": {"uat_run": self.tag, "uat_stage": "6"},
+            },
+        )
+        self.check(
+            "6",
+            "missing target fork transitions to pending_launch without command",
+            pending_preflight.get("status") == "pending_launch"
+            and pending_approval.get("handoff", {}).get("status") == "pending_launch"
+            and pending_approval.get("command") is None,
+            {
+                "preflight": {
+                    "status": pending_preflight.get("status"),
+                    "reason": pending_preflight.get("reason"),
+                    "checked_at": pending_preflight.get("checked_at"),
+                },
+                "approval_status": pending_approval.get("handoff", {}).get("status"),
+                "command": pending_approval.get("command"),
+            },
+        )
+        blocked = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(pending_id)}/status",
+            {
+                "operator_agent_id": self.sim_b,
+                "status": "blocked",
+                "summary": "UAT pending-launch path stopped at expected blocker.",
+                "detail": "No target fork should be created by this negative-path check.",
+                "metadata": {"uat_run": self.tag, "uat_stage": "6"},
+            },
+        )
+        self.check(
+            "6",
+            "pending_launch handoff can be marked terminal blocked",
+            blocked.get("status") == "blocked" and blocked.get("completed_at") is not None,
+            {"status": blocked.get("status"), "completed_at": blocked.get("completed_at")},
+        )
+        self.check(
+            "6",
+            "preflight timestamp supports stale-warning monitors",
+            isinstance(pending_preflight.get("checked_at"), (int, float)),
+            {"checked_at": pending_preflight.get("checked_at")},
+        )
+        tmux_non_submitted = not self.tmux_sink or any(
+            result.get("stage") == "5"
+            and result.get("name") == "tmux approval records sent command and precise pane evidence"
+            and isinstance(result.get("evidence"), dict)
+            and result["evidence"].get("submitted_to_codex") is False
+            for result in self.results
+        )
+        self.check(
+            "6",
+            "non-Codex tmux evidence is non-submitted when tmux stage runs",
+            tmux_non_submitted,
+            {"tmux_sink": self.tmux_sink},
+        )
+
+    def stage_7_multi_operator_lifecycle(self) -> None:
+        if not self.created_kb_ids:
+            raise AssertionError("stage 7 requires a promoted KB entry from stage 2")
+        kb_id = self.created_kb_ids[0]
+        operator_c = self.client.request(
+            "POST",
+            "/v1/agents/register",
+            {
+                "agent_id": self.sim_c,
+                "project": "agent-pbx-operator",
+                "agent_type": "operator",
+                "metadata": {
+                    "pbx_mode": "report",
+                    "cwd": f"/tmp/agent-pbx-kb-sim/{self.tag}/{self.sim_c}",
+                    "operator_role": "root",
+                    "uat_run": self.tag,
+                    "suppress_tui_alerts": True,
+                },
+            },
+        )
+        if self.sim_c not in self.created_agents:
+            self.created_agents.append(self.sim_c)
+        self.check(
+            "7",
+            "registered third synthetic root operator",
+            operator_c.get("agent_type") == "operator",
+            {"agent_id": self.sim_c, "agent_type": operator_c.get("agent_type")},
+        )
+        context = self.client.request(
+            "POST",
+            "/v1/operator/kb/context",
+            {
+                "operator_agent_id": self.sim_c,
+                "query": "project-scoped KB context repo roots",
+                "project": self.project,
+                "tags": ["kb-sim"],
+                "limit": 5,
+            },
+        )
+        context_ids = [entry.get("kb_id") for entry in context.get("kb_entries", [])]
+        self.check(
+            "7",
+            "third operator resolves seeded KB context",
+            context.get("satisfied_by_kb") is True and kb_id in context_ids,
+            {"context_ids": context_ids, "match_count": context.get("match_count")},
+        )
+        handoff = self.client.request(
+            "POST",
+            "/v1/operator/handoffs",
+            {
+                "operator_agent_id": self.sim_a,
+                "source_agent_id": self.sim_a,
+                "target_operator_agent_id": self.sim_c,
+                "objective": "Validate multi-operator KB-backed handoff lifecycle.",
+                "message": "Use the attached KB context and report a terminal result.",
+                "allowed_mutation_scope": "record-only UAT lifecycle",
+                "required_artifacts": [{"name": "stage-7-summary", "required": True}],
+                "needs_ack": True,
+                "summary": f"UAT multi-operator lifecycle {self.tag}",
+                "metadata": {
+                    "kb_query": "project-scoped KB context repo roots",
+                    "kb_project": self.project,
+                    "kb_tags": ["kb-sim"],
+                    "kb_limit": 5,
+                    "uat_run": self.tag,
+                    "uat_stage": "7",
+                },
+            },
+        )
+        handoff_id = str(handoff["handoff_id"])
+        self.handoff_ids.append(handoff_id)
+        preflight = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(handoff_id)}/preflight",
+            {"operator_agent_id": self.sim_a, "delivery": "record_only"},
+        )
+        approved = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(handoff_id)}/approve",
+            {
+                "operator_agent_id": self.sim_a,
+                "delivery": "record_only",
+                "metadata": {"uat_run": self.tag, "uat_stage": "7"},
+            },
+        )
+        self.check(
+            "7",
+            "record-only multi-operator approval attaches KB without command",
+            preflight.get("ok") is True
+            and preflight.get("resolved_delivery") == "record_only"
+            and approved.get("command") is None
+            and approved.get("handoff", {}).get("delivery_status") == "recorded",
+            {
+                "preflight_status": preflight.get("status"),
+                "kb_satisfied": (preflight.get("kb_context") or {}).get("satisfied_by_kb")
+                if isinstance(preflight.get("kb_context"), dict)
+                else None,
+                "delivery_status": approved.get("handoff", {}).get("delivery_status"),
+            },
+        )
+        acked = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(handoff_id)}/ack",
+            {
+                "operator_agent_id": self.sim_c,
+                "status": "acknowledged",
+                "summary": "Stage 7 receiver read the KB-backed handoff.",
+                "metadata": {"uat_run": self.tag, "uat_stage": "7"},
+            },
+        )
+        running = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(handoff_id)}/status",
+            {
+                "operator_agent_id": self.sim_c,
+                "status": "running",
+                "summary": "Stage 7 receiver asked a synthetic clarifying question.",
+                "detail": "Question path is represented as a running update in this record-only UAT.",
+                "metadata": {"uat_run": self.tag, "uat_stage": "7", "question_tx": True},
+            },
+        )
+        completed = self.client.request(
+            "POST",
+            f"/v1/operator/handoffs/{self.quote(handoff_id)}/status",
+            {
+                "operator_agent_id": self.sim_c,
+                "status": "complete",
+                "summary": "Stage 7 receiver completed the synthetic lifecycle.",
+                "artifact_bundle": [{"name": "stage-7-summary", "status": "pass"}],
+                "metadata": {"uat_run": self.tag, "uat_stage": "7"},
+            },
+        )
+        self.check(
+            "7",
+            "multi-operator receiver ack/running/complete lifecycle works",
+            acked.get("status") == "acknowledged"
+            and running.get("status") == "running"
+            and completed.get("status") == "complete",
+            {
+                "ack": acked.get("status"),
+                "running": running.get("status"),
+                "complete": completed.get("status"),
+            },
+        )
+        self.check(
+            "7",
+            "multi-operator lifecycle avoids fork/source association drift",
+            completed.get("target_operator_fork_id") is None
+            and completed.get("target_caller_agent_id") is None
+            and completed.get("command_id") is None,
+            {
+                "target_operator_fork_id": completed.get("target_operator_fork_id"),
+                "target_caller_agent_id": completed.get("target_caller_agent_id"),
+                "command_id": completed.get("command_id"),
+            },
+        )
 
     def latest_reports_snapshot(self) -> dict[str, str | None]:
         snapshot: dict[str, str | None] = {}
@@ -1282,6 +1780,141 @@ class OperatorKbFlowUAT:
                 failed_count += 1
         return failed_count
 
+    def cleanup_resource_states(self) -> list[dict[str, Any]]:
+        states: list[dict[str, Any]] = []
+        for item in self.cleanup:
+            kind = str(item.get("kind") or "")
+            terminal = not kind.endswith("_failed") and int(item.get("returncode") or 0) == 0
+            if "kb_id" in item:
+                states.append(
+                    {
+                        "resource_type": "kb",
+                        "resource_id": item.get("kb_id"),
+                        "state": item.get("status") or kind,
+                        "terminal": terminal,
+                    }
+                )
+            elif "agent_id" in item:
+                states.append(
+                    {
+                        "resource_type": "agent",
+                        "resource_id": item.get("agent_id"),
+                        "state": "dismissed" if terminal else kind,
+                        "terminal": terminal,
+                    }
+                )
+            elif "tmux_pane_id" in item:
+                states.append(
+                    {
+                        "resource_type": "tmux_pane",
+                        "resource_id": item.get("tmux_pane_id"),
+                        "state": kind,
+                        "terminal": terminal,
+                    }
+                )
+        return states
+
+    def post_cleanup_audit(self) -> None:
+        visible_agent_ids: list[str] = []
+        hidden_not_dismissed: list[str] = []
+        try:
+            visible_agents = self.client.request("GET", "/v1/agents")
+            visible_agent_ids = [
+                str(agent.get("agent_id") or "")
+                for agent in visible_agents
+                if str(agent.get("agent_id") or "") in set(self.created_agents)
+            ]
+            hidden_agents = self.client.request(
+                "GET",
+                "/v1/agents",
+                query={"include_hidden": True},
+            )
+            created = set(self.created_agents)
+            hidden_not_dismissed = [
+                str(agent.get("agent_id") or "")
+                for agent in hidden_agents
+                if str(agent.get("agent_id") or "") in created
+                and agent.get("dismissed_at") is None
+            ]
+        except Exception as exc:
+            self.check("audit", "synthetic agent visibility audit completed", False, str(exc))
+            return
+        self.check(
+            "audit",
+            "no synthetic agents visible after cleanup",
+            not visible_agent_ids and not hidden_not_dismissed,
+            {
+                "visible_agent_ids": visible_agent_ids,
+                "hidden_not_dismissed": hidden_not_dismissed,
+            },
+        )
+        active_leaks: list[str] = []
+        for kb_id in self.active_kb_ids:
+            try:
+                entry = self.client.request(
+                    "GET",
+                    f"/v1/operator/kb/{self.quote(kb_id)}",
+                    query={"operator_agent_id": self.sim_a},
+                )
+            except Exception:
+                continue
+            if entry.get("status") == "active":
+                active_leaks.append(str(kb_id))
+        self.check(
+            "audit",
+            "no active UAT KB entries after cleanup",
+            not active_leaks,
+            {"active_leaks": active_leaks},
+        )
+        nonterminal_handoffs: list[dict[str, Any]] = []
+        try:
+            handoffs = self.client.request(
+                "GET",
+                "/v1/operator/handoffs",
+                query={"source_agent_id": self.sim_a, "limit": 100},
+            ).get("handoffs", [])
+        except Exception as exc:
+            self.check("audit", "UAT handoff terminal-state audit completed", False, str(exc))
+            return
+        for handoff in handoffs:
+            if not isinstance(handoff, dict):
+                continue
+            metadata = handoff.get("metadata") if isinstance(handoff.get("metadata"), dict) else {}
+            if metadata.get("uat_run") != self.tag:
+                continue
+            status = str(handoff.get("status") or "")
+            if status not in UAT_TERMINAL_HANDOFF_STATUSES:
+                nonterminal_handoffs.append(
+                    {
+                        "handoff_id": handoff.get("handoff_id"),
+                        "status": status,
+                    }
+                )
+        self.check(
+            "audit",
+            "no pending UAT handoffs after cleanup",
+            not nonterminal_handoffs,
+            {"nonterminal_handoffs": nonterminal_handoffs},
+        )
+        pane_live = False
+        pane_evidence: dict[str, Any] = {"tmux_pane_id": self.tmux_pane_id}
+        if self.tmux_pane_id:
+            pane_evidence.update(tmux_pane_liveness(self.tmux_bin, self.tmux_pane_id))
+            pane_live = bool(pane_evidence.get("live"))
+        self.check(
+            "audit",
+            "no live UAT tmux pane after cleanup",
+            not pane_live,
+            pane_evidence,
+        )
+        self.cleanup_audit = {
+            "visible_agent_ids": visible_agent_ids,
+            "hidden_not_dismissed": hidden_not_dismissed,
+            "active_kb_leaks": active_leaks,
+            "nonterminal_handoffs": nonterminal_handoffs,
+            "tmux_pane_live": pane_live,
+        }
+
     @staticmethod
     def quote(value: str) -> str:
         return urllib.parse.quote(value, safe="")
@@ -1299,6 +1932,9 @@ def run_operator_kb_flow_uat(
     timeout: float = 20.0,
     state_root: Path | None = None,
     tmux_bin: str = "tmux",
+    stage: str | int | None = None,
+    from_stage: str | int | None = None,
+    skip_tmux: bool = False,
 ) -> dict[str, Any]:
     return OperatorKbFlowUAT(
         server=server,
@@ -1311,13 +1947,109 @@ def run_operator_kb_flow_uat(
         timeout=timeout,
         state_root=state_root,
         tmux_bin=tmux_bin,
+        stage=stage,
+        from_stage=from_stage,
+        skip_tmux=skip_tmux,
     ).run()
+
+
+def uat_result_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    cleanup = payload.get("cleanup") if isinstance(payload.get("cleanup"), list) else []
+    failures = payload.get("failures") if isinstance(payload.get("failures"), list) else []
+    stage_timings = (
+        payload.get("stage_timings") if isinstance(payload.get("stage_timings"), dict) else {}
+    )
+    return {
+        "run": payload.get("run"),
+        "status": payload.get("status"),
+        "check_count": len(results),
+        "pass_count": sum(1 for item in results if isinstance(item, dict) and item.get("ok")),
+        "failure_count": len(failures),
+        "warning_count": uat_warning_count(payload),
+        "cleanup_count": len(cleanup),
+        "cleanup_failed_count": int(payload.get("cleanup_failed_count") or 0),
+        "non_sim_report_change_count": int(payload.get("non_sim_report_change_count") or 0),
+        "duration_seconds": float(payload.get("duration_seconds") or 0.0),
+        "executed_stages": payload.get("executed_stages") or [],
+        "skipped_stages": payload.get("skipped_stages") or [],
+        "stage_durations": {
+            str(stage): float(timing.get("duration_seconds") or 0.0)
+            for stage, timing in stage_timings.items()
+            if isinstance(timing, dict)
+        },
+    }
+
+
+def uat_warning_count(payload: dict[str, Any]) -> int:
+    count = 0
+    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("evidence")
+        if isinstance(evidence, dict):
+            warnings = evidence.get("warnings")
+            if isinstance(warnings, list):
+                count += len(warnings)
+            elif warnings:
+                count += 1
+        if "warning" in str(item.get("name") or "").lower():
+            count += 1
+    return count
+
+
+def compare_operator_kb_flow_uat_runs(
+    *,
+    run_a: str,
+    run_b: str,
+    state_root: Path | None = None,
+) -> dict[str, Any]:
+    manifest_a = read_uat_manifest(run_a, state_root)
+    manifest_b = read_uat_manifest(run_b, state_root)
+    summary_a = uat_result_summary(manifest_a)
+    summary_b = uat_result_summary(manifest_b)
+    all_stages = sorted(
+        {
+            *summary_a.get("stage_durations", {}).keys(),
+            *summary_b.get("stage_durations", {}).keys(),
+        },
+        key=lambda value: UAT_STAGE_ORDER.index(value) if value in UAT_STAGE_ORDER else 99,
+    )
+    return {
+        "run_a": run_a,
+        "run_b": run_b,
+        "manifest_a": str(uat_manifest_path(run_a, state_root)),
+        "manifest_b": str(uat_manifest_path(run_b, state_root)),
+        "summary_a": summary_a,
+        "summary_b": summary_b,
+        "deltas": {
+            "check_count": summary_b["check_count"] - summary_a["check_count"],
+            "pass_count": summary_b["pass_count"] - summary_a["pass_count"],
+            "failure_count": summary_b["failure_count"] - summary_a["failure_count"],
+            "warning_count": summary_b["warning_count"] - summary_a["warning_count"],
+            "cleanup_count": summary_b["cleanup_count"] - summary_a["cleanup_count"],
+            "cleanup_failed_count": summary_b["cleanup_failed_count"]
+            - summary_a["cleanup_failed_count"],
+            "non_sim_report_change_count": summary_b["non_sim_report_change_count"]
+            - summary_a["non_sim_report_change_count"],
+            "duration_seconds": summary_b["duration_seconds"] - summary_a["duration_seconds"],
+            "stage_durations": {
+                stage: summary_b.get("stage_durations", {}).get(stage, 0.0)
+                - summary_a.get("stage_durations", {}).get(stage, 0.0)
+                for stage in all_stages
+            },
+        },
+    }
 
 
 def operator_kb_flow_markdown(result: dict[str, Any]) -> str:
     failures = result.get("failures") if isinstance(result.get("failures"), list) else []
     results = result.get("results") if isinstance(result.get("results"), list) else []
     pass_count = sum(1 for item in results if isinstance(item, dict) and item.get("ok"))
+    stage_timings = (
+        result.get("stage_timings") if isinstance(result.get("stage_timings"), dict) else {}
+    )
     lines = [
         f"# Operator KB Flow UAT {result.get('run')}",
         "",
@@ -1325,9 +2057,13 @@ def operator_kb_flow_markdown(result: dict[str, Any]) -> str:
         f"- Project: `{result.get('project')}`",
         f"- Manifest: `{result.get('manifest_path') or '-'}`",
         f"- Tmux session: `{result.get('tmux_session') or '-'}`",
+        f"- Duration: {float(result.get('duration_seconds') or 0.0):.2f}s",
         f"- Checks: {pass_count}/{len(results)} passed",
         f"- Failures: {len(failures)}",
+        f"- Cleanup failures: {result.get('cleanup_failed_count') or 0}",
         f"- Non-synthetic report changes: {result.get('non_sim_report_change_count')}",
+        f"- Executed stages: {', '.join(str(item) for item in result.get('executed_stages', [])) or '-'}",
+        f"- Skipped stages: {', '.join(str(item) for item in result.get('skipped_stages', [])) or '-'}",
         "",
         "## Results",
         "",
@@ -1341,8 +2077,49 @@ def operator_kb_flow_markdown(result: dict[str, Any]) -> str:
     for item in result.get("cleanup", []):
         if isinstance(item, dict):
             lines.append(f"- {item.get('kind')}: {item}")
+    if stage_timings:
+        lines.extend(["", "## Stage Durations", ""])
+        for stage in UAT_STAGE_ORDER:
+            timing = stage_timings.get(stage)
+            if isinstance(timing, dict):
+                lines.append(
+                    f"- Stage {stage}: {float(timing.get('duration_seconds') or 0.0):.2f}s"
+                )
+    cleanup_audit = result.get("cleanup_audit")
+    if isinstance(cleanup_audit, dict) and cleanup_audit:
+        lines.extend(["", "## Cleanup Audit", ""])
+        for key, value in cleanup_audit.items():
+            lines.append(f"- {key}: {value}")
     if failures:
         lines.extend(["", "## Failures", ""])
         for failure in failures:
             lines.append(f"- {failure}")
+    return "\n".join(lines)
+
+
+def uat_compare_markdown(result: dict[str, Any]) -> str:
+    summary_a = result.get("summary_a") if isinstance(result.get("summary_a"), dict) else {}
+    summary_b = result.get("summary_b") if isinstance(result.get("summary_b"), dict) else {}
+    deltas = result.get("deltas") if isinstance(result.get("deltas"), dict) else {}
+    lines = [
+        f"# Operator KB Flow UAT Compare {result.get('run_a')} -> {result.get('run_b')}",
+        "",
+        f"- Run A checks: {summary_a.get('pass_count')}/{summary_a.get('check_count')}",
+        f"- Run B checks: {summary_b.get('pass_count')}/{summary_b.get('check_count')}",
+        f"- Failure delta: {deltas.get('failure_count')}",
+        f"- Warning delta: {deltas.get('warning_count')}",
+        f"- Cleanup failure delta: {deltas.get('cleanup_failed_count')}",
+        f"- Non-synthetic report drift delta: {deltas.get('non_sim_report_change_count')}",
+        f"- Duration delta: {float(deltas.get('duration_seconds') or 0.0):.2f}s",
+        "",
+        "## Stage Duration Deltas",
+        "",
+    ]
+    stage_deltas = (
+        deltas.get("stage_durations")
+        if isinstance(deltas.get("stage_durations"), dict)
+        else {}
+    )
+    for stage, value in stage_deltas.items():
+        lines.append(f"- Stage {stage}: {float(value or 0.0):.2f}s")
     return "\n".join(lines)

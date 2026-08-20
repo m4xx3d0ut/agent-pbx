@@ -39,8 +39,10 @@ from .store import Store
 from .tui import run_tui
 from .uat import (
     cleanup_operator_kb_flow_uat,
+    compare_operator_kb_flow_uat_runs,
     operator_kb_flow_markdown,
     run_operator_kb_flow_uat,
+    uat_compare_markdown,
 )
 from .workerbee import (
     env_workerbee_bin,
@@ -238,6 +240,21 @@ def build_parser() -> argparse.ArgumentParser:
     operator_kb_flow.add_argument("--state-root", type=Path, default=None)
     operator_kb_flow.add_argument("--tmux-bin", default="tmux")
     operator_kb_flow.add_argument(
+        "--stage",
+        default=None,
+        help="Run one logical UAT stage plus its setup dependencies.",
+    )
+    operator_kb_flow.add_argument(
+        "--from-stage",
+        default=None,
+        help="Run from one logical UAT stage through the final stage, plus setup dependencies.",
+    )
+    operator_kb_flow.add_argument(
+        "--skip-tmux",
+        action="store_true",
+        help="Disable tmux delivery even if --tmux-sink is present.",
+    )
+    operator_kb_flow.add_argument(
         "--ci",
         action="store_true",
         help="Run the CI-safe non-tmux UAT profile with cleanup enabled.",
@@ -260,6 +277,18 @@ def build_parser() -> argparse.ArgumentParser:
     uat_cleanup.add_argument("--tmux-bin", default="tmux")
     uat_cleanup.add_argument("--json", action="store_true")
     uat_cleanup.add_argument("--output", type=Path, default=None)
+    uat_compare = uat_subcommands.add_parser(
+        "compare", help="Compare two persisted operator KB flow UAT manifests."
+    )
+    uat_compare.add_argument(
+        "--run",
+        action="append",
+        required=True,
+        help="Run id to compare. Provide exactly two values in oldest-to-newest order.",
+    )
+    uat_compare.add_argument("--state-root", type=Path, default=None)
+    uat_compare.add_argument("--json", action="store_true")
+    uat_compare.add_argument("--output", type=Path, default=None)
 
     sim_agent = subcommands.add_parser("sim-agent", help="Run a simulated reporting agent.")
     sim_agent.add_argument("--server", default=default_client_server())
@@ -392,6 +421,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.ci:
                 tmux_sink = False
                 cleanup = True
+            if args.skip_tmux:
+                tmux_sink = False
             result = run_operator_kb_flow_uat(
                 server=args.server,
                 token=args.token,
@@ -403,6 +434,9 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 state_root=args.state_root,
                 tmux_bin=args.tmux_bin,
+                stage=args.stage,
+                from_stage=args.from_stage,
+                skip_tmux=bool(args.skip_tmux),
             )
             if args.json:
                 rendered = json.dumps(result, indent=2, sort_keys=True)
@@ -444,6 +478,24 @@ def main(argv: list[str] | None = None) -> int:
                 _write_cli_output(args.output, _render_cli_output(args.output, result, rendered))
             print(rendered)
             return 0 if not result.get("failed_count") else 1
+        if args.uat_command == "compare":
+            runs = list(args.run or [])
+            if len(runs) != 2:
+                print("error: uat compare requires exactly two --run values", file=sys.stderr)
+                return 2
+            result = compare_operator_kb_flow_uat_runs(
+                run_a=runs[0],
+                run_b=runs[1],
+                state_root=args.state_root,
+            )
+            if args.json:
+                rendered = json.dumps(result, indent=2, sort_keys=True)
+            else:
+                rendered = uat_compare_markdown(result)
+            if args.output is not None:
+                _write_cli_output(args.output, _render_cli_output(args.output, result, rendered))
+            print(rendered)
+            return 0
         return 0
 
     if args.command == "tui":

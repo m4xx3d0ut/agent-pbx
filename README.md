@@ -475,6 +475,9 @@ agent-pbx uat operator-kb-flow --server http://127.0.0.1:8765 --token dev-token 
   --tmux-sink --tmux-session auto --output runs/operator-kb-flow.json
 agent-pbx uat cleanup --run kb-sim-YYYYMMDDHHMMSS-xxxxxxxx --token dev-token
 agent-pbx uat operator-kb-flow --ci --server http://127.0.0.1:8765 --token dev-token
+agent-pbx uat operator-kb-flow --from-stage 6 --ci \
+  --server http://127.0.0.1:8765 --token dev-token
+agent-pbx uat compare --run kb-sim-old --run kb-sim-new
 ```
 
 The tmux profile preflights server health, controlled cwd, tmux binary, and the
@@ -485,6 +488,20 @@ profile disables tmux delivery and forces cleanup, which keeps the harness
 suitable for automated test jobs that only need API-level validation. Use
 `--output path.json` to preserve the complete run evidence while keeping the
 terminal summary compact.
+
+Use `--stage N` to run one logical UAT stage plus required setup, or
+`--from-stage N` to run the later-stage slice plus setup. `--skip-tmux` disables
+tmux delivery even when a copied command includes `--tmux-sink`. Stage 6 covers
+negative-path recovery checks: expired handoffs, missing target forks,
+preflight timestamp readiness, non-Codex tmux evidence, and idempotent cleanup
+expectations. Stage 7 covers a record-only multi-operator lifecycle where a
+third operator resolves KB context, acknowledges, runs, completes, and avoids
+unwanted fork/source-session associations.
+
+Successful cleanup is followed by an audit that checks for visible synthetic
+agents, active UAT KB leaks, non-terminal UAT handoffs, and live UAT tmux
+panes. `agent-pbx uat compare --run A --run B` reads persisted manifests and
+reports check, failure, warning, duration, cleanup, and report-drift deltas.
 
 The TUI handoff list shows the latest recorded delivery preflight age/warnings
 and a lightweight ack monitor for sent handoffs. Approving a pending handoff

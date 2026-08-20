@@ -298,6 +298,9 @@ def test_agent_cli_runs_operator_kb_flow_uat(monkeypatch, capsys) -> None:
             "timeout": 20.0,
             "state_root": None,
             "tmux_bin": "tmux",
+            "stage": None,
+            "from_stage": None,
+            "skip_tmux": False,
         }
     ]
 
@@ -341,6 +344,9 @@ def test_agent_cli_operator_kb_flow_uat_ci_profile_and_json_output(
             str(tmp_path / "state"),
             "--tmux-bin",
             "tmux-test",
+            "--from-stage",
+            "6",
+            "--skip-tmux",
             "--output",
             str(output),
         ]
@@ -363,8 +369,63 @@ def test_agent_cli_operator_kb_flow_uat_ci_profile_and_json_output(
             "timeout": 20.0,
             "state_root": tmp_path / "state",
             "tmux_bin": "tmux-test",
+            "stage": None,
+            "from_stage": "6",
+            "skip_tmux": True,
         }
     ]
+
+
+def test_agent_cli_operator_kb_flow_compare(monkeypatch, tmp_path: Path, capsys) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_compare_operator_kb_flow_uat_runs(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "run_a": kwargs["run_a"],
+            "run_b": kwargs["run_b"],
+            "summary_a": {"pass_count": 1, "check_count": 1},
+            "summary_b": {"pass_count": 2, "check_count": 2},
+            "deltas": {
+                "failure_count": 0,
+                "warning_count": 1,
+                "cleanup_failed_count": 0,
+                "non_sim_report_change_count": 0,
+                "duration_seconds": 1.25,
+                "stage_durations": {"1": 1.25},
+            },
+        }
+
+    monkeypatch.setattr(
+        "agent_pbx.cli.compare_operator_kb_flow_uat_runs",
+        fake_compare_operator_kb_flow_uat_runs,
+    )
+
+    result = main(
+        [
+            "uat",
+            "compare",
+            "--run",
+            "run-a",
+            "--run",
+            "run-b",
+            "--state-root",
+            str(tmp_path),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "# Operator KB Flow UAT Compare run-a -> run-b" in out
+    assert calls == [{"run_a": "run-a", "run_b": "run-b", "state_root": tmp_path}]
+
+
+def test_agent_cli_operator_kb_flow_compare_requires_two_runs(capsys) -> None:
+    result = main(["uat", "compare", "--run", "run-a"])
+
+    err = capsys.readouterr().err
+    assert result == 2
+    assert "exactly two --run values" in err
 
 
 def test_agent_cli_operator_kb_flow_cleanup_uses_manifest(monkeypatch, capsys) -> None:
