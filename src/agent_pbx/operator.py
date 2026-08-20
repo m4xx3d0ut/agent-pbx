@@ -147,6 +147,11 @@ OPERATOR_KB_SECRET_PATTERNS = (
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
+OPERATOR_KB_REPORT_CANDIDATE_KEYS = (
+    "operator_kb_candidates",
+    "kb_candidates",
+    "kb_proposals",
+)
 DEFAULT_OPERATOR_TMUX_SESSION = "agent-pbx-operators"
 OPERATOR_TMUX_SESSION_ENV = "AGENT_PBX_TUI_OPERATOR_TMUX_SESSION"
 ID_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -179,6 +184,7 @@ def operator_runbook_payload() -> dict[str, Any]:
             "Dispatch or follow up through pbx_operator_start_campaign and pbx_operator_send_followup.",
             "Use operator handoffs for executable domain transfers between operators or review forks without changing fork ownership.",
             "Use manual KB seed runs to ask an operator or fork to propose durable knowledge from its current context.",
+            "Compile explicit KB candidates from operator reports when normal work surfaces durable reusable guidance.",
             "Keep the root operator turn active while assignments are running; periodically recheck campaign state.",
             "Inspect caller reports and threads with pbx_operator_get_thread.",
             "Mark each assignment complete, blocked, or needing follow-up with pbx_operator_report_assignment.",
@@ -194,7 +200,8 @@ def operator_runbook_payload() -> dict[str, Any]:
             "When review work needs to transfer domain context to another operator, propose a knowledge handoff; the TUI/root operator approves the executable handoff delivery.",
             "Operator handoffs track required target fork launch, delivery evidence, receiver acknowledgement, running state, TTL expiry, artifact summaries, and terminal state.",
             "Manual KB seed runs deliver a seed prompt to the selected operator or fork; that session proposes KB entries and updates seed-run status when finished.",
-            "Promote durable operator knowledge into the PBX-managed KB only from the root operator; forks may propose entries, update their seed-run status, and read active entries.",
+            "Use pbx_operator_kb_context or handoff metadata.kb_query to attach existing active KB entries before transferring domain context.",
+            "Promote durable operator knowledge into the PBX-managed KB only from the root operator; forks may propose entries, compile explicit report candidates, update their seed-run status, and read active entries.",
             "Knowledge links and handoffs do not create fork edges, campaign assignments, or source-session ownership.",
             "The root operator coordinates campaigns and reviews evidence; it must not implement caller repo changes directly.",
             "Do not spawn or use Codex internal subagents for caller work; do not call multi_agent_v1.",
@@ -1047,6 +1054,7 @@ class OperatorService:
         stale_after: float | None = None,
         expires_at: float | None = None,
         metadata: dict[str, Any] | None = None,
+        sources: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         operator = self._require_operator(operator_agent_id)
         logical_operator_id = self._logical_operator_agent_id(operator)
@@ -1104,7 +1112,7 @@ class OperatorService:
                 **metadata_payload,
                 "proposed_by_operator_agent_id": operator_agent_id,
             },
-            sources=seed_sources,
+            sources=[*seed_sources, *(sources or [])],
         )
         self._record_kb_event(
             "operator_kb_proposed",
@@ -1223,6 +1231,199 @@ class OperatorService:
             for entry in entries
             if self._operator_can_read_kb_entry(entry, logical_operator_id)
         ]
+
+    def kb_context_for_request(
+        self,
+        *,
+        operator_agent_id: str,
+        query: str,
+        target_operator_agent_id: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        tags: list[str] | None = None,
+        include_expired: bool = False,
+        include_proposed: bool = False,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        target_logical_operator_id = None
+        if target_operator_agent_id:
+            target_operator = self._require_operator(target_operator_agent_id)
+            target_logical_operator_id = self._logical_operator_agent_id(target_operator)
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            raise ValueError("KB context query is required")
+        defaults = self._operator_kb_seed_defaults(operator)
+        resolved_project = project if project is not None else defaults.get("project")
+        resolved_repo_root = repo_root if repo_root is not None else None
+        status = None if include_proposed else "active"
+        entries = self.search_kb_entries(
+            operator_agent_id=operator_agent_id,
+            query=normalized_query,
+            scope=scope,
+            project=resolved_project,
+            repo_root=resolved_repo_root,
+            status=status,
+            tags=tags or [],
+            include_expired=include_expired,
+            limit=limit,
+        )
+        if include_proposed:
+            entries = [
+                entry
+                for entry in entries
+                if str(entry.get("status") or "") == "active"
+                or str(entry.get("created_by_operator_agent_id") or "")
+                == logical_operator_id
+            ]
+        return {
+            "operator_agent_id": operator_agent_id,
+            "logical_operator_agent_id": logical_operator_id,
+            "target_operator_agent_id": target_logical_operator_id,
+            "query": normalized_query,
+            "scope": scope,
+            "project": resolved_project,
+            "repo_root": resolved_repo_root,
+            "tags": tags or [],
+            "include_expired": include_expired,
+            "include_proposed": include_proposed,
+            "satisfied_by_kb": bool(entries),
+            "match_count": len(entries),
+            "kb_entries": entries,
+        }
+
+    def compile_kb_candidates_from_report(
+        self,
+        *,
+        operator_agent_id: str,
+        report_id: str | None = None,
+        report: dict[str, Any] | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        selected_report = report
+        if selected_report is None:
+            if not report_id:
+                raise ValueError("report_id is required")
+            selected_report = self.store.get_report(report_id)
+        if selected_report is None:
+            raise ValueError("report not found")
+        selected_report_id = str(selected_report.get("report_id") or "").strip()
+        report_agent_id = str(selected_report.get("agent_id") or "").strip()
+        if not self._agent_resolves_to_logical_operator(
+            report_agent_id,
+            logical_operator_id,
+        ):
+            raise ValueError("report belongs to a different operator")
+        candidates = self._operator_kb_candidates_from_report(selected_report)
+        safe_limit = min(max(int(limit), 1), 100)
+        entries: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        defaults = self._operator_kb_seed_defaults(operator)
+        for index, candidate in enumerate(candidates[:safe_limit]):
+            if not isinstance(candidate, dict):
+                skipped.append({"index": index, "reason": "candidate is not an object"})
+                continue
+            try:
+                title = str(candidate.get("title") or "").strip()
+                summary = str(candidate.get("summary") or "").strip()
+                body = str(candidate.get("body") or candidate.get("content") or "").strip()
+                if not title or not summary or not body:
+                    raise ValueError("candidate requires title, summary, and body")
+                candidate_metadata = (
+                    candidate.get("metadata")
+                    if isinstance(candidate.get("metadata"), dict)
+                    else {}
+                )
+                content_hash = self._operator_kb_content_hash(
+                    logical_operator_id=logical_operator_id,
+                    title=title,
+                    summary=summary,
+                    body=body,
+                )
+                duplicate = self.store.find_operator_kb_entry_by_content_hash(
+                    logical_operator_agent_id=logical_operator_id,
+                    content_hash=content_hash,
+                    statuses=["proposed", "active"],
+                )
+                if duplicate is not None:
+                    skipped.append(
+                        {
+                            "index": index,
+                            "reason": "duplicate_content_hash",
+                            "kb_id": duplicate.get("kb_id"),
+                        }
+                    )
+                    continue
+                tags = candidate.get("tags") if isinstance(candidate.get("tags"), list) else []
+                entry = self.propose_kb_entry(
+                    operator_agent_id=operator_agent_id,
+                    scope=str(candidate.get("scope") or "project"),
+                    project=candidate.get("project", defaults.get("project")),
+                    repo_root=candidate.get("repo_root", defaults.get("repo_root")),
+                    git_remote=candidate.get("git_remote", defaults.get("git_remote")),
+                    branch=candidate.get("branch", defaults.get("branch")),
+                    title=title,
+                    summary=summary,
+                    body=body,
+                    tags=tags,
+                    stale_after=self._float_or_none(candidate.get("stale_after")),
+                    expires_at=self._float_or_none(candidate.get("expires_at")),
+                    metadata={
+                        **candidate_metadata,
+                        "compiled_from_report_id": selected_report_id,
+                        "compiled_from_report_agent_id": report_agent_id,
+                        "compile_source": "report_metadata",
+                        "content_hash": content_hash,
+                    },
+                    sources=[
+                        {
+                            "source_type": "report",
+                            "source_id": selected_report_id,
+                            "metadata": {
+                                "agent_id": report_agent_id,
+                                "status": selected_report.get("status"),
+                                "candidate_index": index,
+                            },
+                        }
+                    ],
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad candidate should not drop the report.
+                skipped.append({"index": index, "reason": str(exc)})
+                continue
+            entries.append(entry)
+        if len(candidates) > safe_limit:
+            skipped.extend(
+                {
+                    "index": index,
+                    "reason": "candidate limit exceeded",
+                }
+                for index in range(safe_limit, len(candidates))
+            )
+        self.store.append_event(
+            "operator_kb_report_compiled",
+            {
+                "operator_agent_id": operator_agent_id,
+                "logical_operator_agent_id": logical_operator_id,
+                "report_id": selected_report_id,
+                "report_agent_id": report_agent_id,
+                "proposed_count": len(entries),
+                "skipped_count": len(skipped),
+            },
+            selected_report_id,
+        )
+        return {
+            "operator_agent_id": operator_agent_id,
+            "logical_operator_agent_id": logical_operator_id,
+            "report_id": selected_report_id,
+            "proposed_count": len(entries),
+            "skipped_count": len(skipped),
+            "entries": entries,
+            "skipped": skipped,
+        }
 
     def get_kb_entry(
         self,
@@ -1797,6 +1998,12 @@ class OperatorService:
         if not normalized_message:
             raise ValueError("handoff message is required")
         normalized_objective = str(objective or summary or normalized_message).strip()
+        metadata_payload = self._metadata_with_requested_kb_context(
+            metadata or {},
+            operator_agent_id=operator_agent_id,
+            target_operator_agent_id=target_logical_operator_id,
+            default_query=normalized_objective or normalized_message,
+        )
         handoff = self.store.create_operator_handoff(
             logical_operator_agent_id=logical_operator_id,
             source_operator_agent_id=operator_agent_id,
@@ -1818,7 +2025,7 @@ class OperatorService:
             needs_ack=needs_ack,
             expires_at=expires_at,
             summary=summary or normalized_objective,
-            metadata=metadata or {},
+            metadata=metadata_payload,
         )
         self._record_handoff_event(
             "operator_handoff_created",
@@ -3162,6 +3369,7 @@ class OperatorService:
             "Artifact bundle",
             handoff.get("artifact_bundle") or [],
         )
+        kb_context_lines = self._handoff_kb_context_lines(handoff)
         expires_at = handoff.get("expires_at")
         time_remaining = handoff.get("time_remaining_seconds")
         expiry_line = "Expires: -"
@@ -3201,6 +3409,8 @@ class OperatorService:
                 *artifact_lines,
                 "",
                 *bundle_lines,
+                "",
+                *kb_context_lines,
                 "",
                 "Receiver actions:",
                 "- Reply with pbx_operator_ack_handoff after reading the handoff.",
@@ -4046,6 +4256,140 @@ class OperatorService:
         if normalized not in OPERATOR_KB_SEED_RUN_STATUSES:
             raise ValueError("KB seed run status is invalid")
         return normalized
+
+    @staticmethod
+    def _operator_kb_content_hash(
+        *,
+        logical_operator_id: str,
+        title: str,
+        summary: str,
+        body: str,
+    ) -> str:
+        text = "\0".join(
+            [
+                str(logical_operator_id or ""),
+                str(title or "").strip().lower(),
+                str(summary or "").strip().lower(),
+                str(body or "").strip(),
+            ]
+        )
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _operator_kb_candidates_from_report(report: dict[str, Any]) -> list[Any]:
+        metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else {}
+        candidates: list[Any] = []
+        for key in OPERATOR_KB_REPORT_CANDIDATE_KEYS:
+            value = metadata.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+            elif isinstance(value, dict):
+                candidates.append(value)
+        return candidates
+
+    @staticmethod
+    def _truthy_metadata_flag(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _metadata_with_requested_kb_context(
+        self,
+        metadata: dict[str, Any],
+        *,
+        operator_agent_id: str,
+        target_operator_agent_id: str | None,
+        default_query: str,
+    ) -> dict[str, Any]:
+        payload = dict(metadata)
+        if isinstance(payload.get("kb_context"), dict):
+            return payload
+        include_context = self._truthy_metadata_flag(payload.get("include_kb_context"))
+        query = str(
+            payload.get("kb_query")
+            or payload.get("knowledge_query")
+            or (default_query if include_context else "")
+        ).strip()
+        if not query:
+            return payload
+        try:
+            context = self.kb_context_for_request(
+                operator_agent_id=operator_agent_id,
+                target_operator_agent_id=target_operator_agent_id,
+                query=query,
+                scope=(
+                    str(payload.get("kb_scope") or "").strip()
+                    or str(payload.get("scope") or "").strip()
+                    or None
+                ),
+                project=(
+                    str(payload.get("kb_project") or "").strip()
+                    or str(payload.get("project") or "").strip()
+                    or None
+                ),
+                repo_root=(
+                    str(payload.get("kb_repo_root") or "").strip()
+                    or str(payload.get("repo_root") or "").strip()
+                    or None
+                ),
+                tags=(
+                    payload.get("kb_tags")
+                    if isinstance(payload.get("kb_tags"), list)
+                    else []
+                ),
+                include_expired=self._truthy_metadata_flag(
+                    payload.get("kb_include_expired")
+                ),
+                include_proposed=self._truthy_metadata_flag(
+                    payload.get("kb_include_proposed")
+                ),
+                limit=int(payload.get("kb_limit") or 5),
+            )
+        except Exception as exc:  # noqa: BLE001 - handoff should still be creatable.
+            payload["kb_context_error"] = str(exc)
+            return payload
+        payload["kb_context"] = context
+        payload["kb_context_satisfied"] = bool(context.get("satisfied_by_kb"))
+        return payload
+
+    @staticmethod
+    def _handoff_kb_context_lines(handoff: dict[str, Any]) -> list[str]:
+        metadata = handoff.get("metadata") if isinstance(handoff.get("metadata"), dict) else {}
+        context = metadata.get("kb_context") if isinstance(metadata.get("kb_context"), dict) else None
+        if context is None:
+            return ["KB context:", "- none requested"]
+        entries = (
+            context.get("kb_entries")
+            if isinstance(context.get("kb_entries"), list)
+            else []
+        )
+        lines = [
+            "KB context:",
+            f"- query: {context.get('query') or '-'}",
+            f"- satisfied: {'yes' if context.get('satisfied_by_kb') else 'no'}",
+        ]
+        if not entries:
+            lines.append("- matches: none")
+            return lines
+        lines.append("Matches:")
+        for entry in entries[:5]:
+            if not isinstance(entry, dict):
+                continue
+            body = str(entry.get("body") or "").strip()
+            excerpt = body[:800] + ("..." if len(body) > 800 else "")
+            tags = entry.get("tags") if isinstance(entry.get("tags"), list) else []
+            lines.extend(
+                [
+                    f"- {entry.get('kb_id')}: {entry.get('title') or '-'}",
+                    f"  summary: {entry.get('summary') or '-'}",
+                    f"  tags: {', '.join(str(tag) for tag in tags) or '-'}",
+                    "  body:",
+                    *[f"    {line}" for line in excerpt.splitlines() or ["-"]],
+                ]
+            )
+        return lines
 
     @staticmethod
     def _operator_kb_redaction_status(

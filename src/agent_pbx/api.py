@@ -16,6 +16,7 @@ from fastapi import (
     FastAPI,
     Header,
     HTTPException,
+    Query,
     Request,
     status,
 )
@@ -98,12 +99,20 @@ from .schemas import (
     OperatorHandoffListResponse,
     OperatorHandoffResponse,
     OperatorHandoffUpdateRequest,
+    OperatorKbCompileReportRequest,
+    OperatorKbCompileReportResponse,
+    OperatorKbContextRequest,
+    OperatorKbContextResponse,
     OperatorKbEntryCreateRequest,
     OperatorKbEntryResponse,
     OperatorKbExportResponse,
     OperatorKbFromLinkRequest,
     OperatorKbImportRequest,
     OperatorKbImportResponse,
+    OperatorKbIndexJobListResponse,
+    OperatorKbIndexJobRequest,
+    OperatorKbIndexJobResponse,
+    OperatorKbIndexRunResponse,
     OperatorKbListResponse,
     OperatorKbPromoteRequest,
     OperatorKbRejectRequest,
@@ -468,7 +477,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         http_request: Request,
         store: Store = Depends(get_store),
     ) -> dict[str, object]:
-        if store.get_agent(agent_id) is None:
+        agent = store.get_agent(agent_id)
+        if agent is None:
             raise HTTPException(status_code=404, detail="agent not registered")
         request = store.report_request_with_identity_metadata(request)
         violation = store.report_identity_violation_payload(agent_id, request)
@@ -488,6 +498,29 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 },
                 report["report_id"],
             )
+        if str(agent.get("agent_type") or "") == "operator":
+            metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else {}
+            if any(
+                key in metadata
+                for key in ("operator_kb_candidates", "kb_candidates", "kb_proposals")
+            ):
+                operator_service = http_request.app.state.operator_service
+                try:
+                    await asyncio.to_thread(
+                        operator_service.compile_kb_candidates_from_report,
+                        operator_agent_id=agent_id,
+                        report=report,
+                    )
+                except Exception as exc:  # noqa: BLE001 - report storage must not depend on KB compile.
+                    store.append_event(
+                        "operator_kb_report_compile_failed",
+                        {
+                            "report_id": report["report_id"],
+                            "agent_id": agent_id,
+                            "error": str(exc),
+                        },
+                        report["report_id"],
+                    )
         await append_joplin_report_log(http_request, store, report)
         return report
 
@@ -1675,6 +1708,90 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             limit=limit,
         )
         return {"kb_entries": entries}
+
+    @app.post(
+        "/v1/operator/kb/context",
+        response_model=OperatorKbContextResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def operator_kb_context(
+        payload: OperatorKbContextRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.kb_context_for_request,
+            operator_agent_id=payload.operator_agent_id,
+            query=payload.query,
+            target_operator_agent_id=payload.target_operator_agent_id,
+            scope=payload.scope,
+            project=payload.project,
+            repo_root=payload.repo_root,
+            tags=payload.tags,
+            include_expired=payload.include_expired,
+            include_proposed=payload.include_proposed,
+            limit=payload.limit,
+        )
+
+    @app.post(
+        "/v1/operator/kb/compile-report",
+        response_model=OperatorKbCompileReportResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def compile_operator_kb_report(
+        payload: OperatorKbCompileReportRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.compile_kb_candidates_from_report,
+            operator_agent_id=payload.operator_agent_id,
+            report_id=payload.report_id,
+            limit=payload.limit,
+        )
+
+    @app.get(
+        "/v1/operator/kb/index-jobs",
+        response_model=OperatorKbIndexJobListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_kb_index_jobs(
+        job_status: str | None = Query(default=None, alias="status"),
+        limit: int = 50,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        return {
+            "index_jobs": store.list_operator_kb_index_jobs(
+                status=job_status,
+                limit=limit,
+            )
+        }
+
+    @app.post(
+        "/v1/operator/kb/index-jobs",
+        response_model=OperatorKbIndexJobResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def create_operator_kb_index_job(
+        payload: OperatorKbIndexJobRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        return store.create_operator_kb_index_job(
+            operation=payload.operation,
+            kb_id=payload.kb_id,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/kb/index-jobs/run",
+        response_model=OperatorKbIndexRunResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def run_operator_kb_index_jobs(
+        limit: int = 100,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        return store.process_operator_kb_index_jobs(limit=limit)
 
     @app.post(
         "/v1/operator/kb",

@@ -1651,6 +1651,132 @@ def test_operator_kb_api_seed_run_proposal_and_completion(
     assert completed_payload["metadata"]["proposal_count"] == 1
 
 
+def test_operator_kb_report_compile_context_and_index_api(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    for payload in [
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path)},
+        },
+        {
+            "agent_id": "operator-B",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"pbx_mode": "report", "cwd": str(tmp_path / "operator-B")},
+        },
+    ]:
+        client.post("/v1/agents/register", json=payload)
+
+    report = client.post(
+        "/v1/agents/operator-0/reports",
+        json={
+            "project": "agent-pbx-operator",
+            "status": "working",
+            "summary": "Compiled reusable KB candidate",
+            "detail": "The operator identified durable harness routing guidance.",
+            "metadata": {
+                "operator_kb_candidates": [
+                    {
+                        "scope": "project",
+                        "project": "demo",
+                        "title": "Windows harness routing",
+                        "summary": "Windows helper work should be handed off with TTL awareness.",
+                        "body": (
+                            "When validating Windows helpers, include expiry and "
+                            "artifact expectations in the operator handoff."
+                        ),
+                        "tags": ["windows", "handoff"],
+                    }
+                ]
+            },
+        },
+    )
+    assert report.status_code == 200
+    report_id = report.json()["report_id"]
+
+    proposed = client.get(
+        "/v1/operator/kb",
+        params={
+            "operator_agent_id": "operator-0",
+            "status": "proposed",
+            "query": "Windows TTL",
+            "project": "demo",
+        },
+    )
+    assert proposed.status_code == 200
+    proposed_entries = proposed.json()["kb_entries"]
+    assert len(proposed_entries) == 1
+    kb_entry = proposed_entries[0]
+    assert kb_entry["metadata"]["compiled_from_report_id"] == report_id
+    assert kb_entry["metadata"]["content_hash"]
+    assert kb_entry["sources"][0]["source_type"] == "report"
+    assert kb_entry["sources"][0]["source_id"] == report_id
+
+    duplicate = client.post(
+        "/v1/operator/kb/compile-report",
+        json={"operator_agent_id": "operator-0", "report_id": report_id},
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["proposed_count"] == 0
+    assert duplicate.json()["skipped"][0]["reason"] == "duplicate_content_hash"
+
+    promoted = client.post(
+        f"/v1/operator/kb/{kb_entry['kb_id']}/promote",
+        json={"operator_agent_id": "operator-0"},
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["status"] == "active"
+
+    context = client.post(
+        "/v1/operator/kb/context",
+        json={
+            "operator_agent_id": "operator-B",
+            "query": "Windows helper TTL",
+            "project": "demo",
+        },
+    )
+    assert context.status_code == 200
+    context_payload = context.json()
+    assert context_payload["satisfied_by_kb"] is True
+    assert context_payload["kb_entries"][0]["kb_id"] == kb_entry["kb_id"]
+
+    handoff = client.post(
+        "/v1/operator/handoffs",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_agent_id": "operator-0",
+            "target_operator_agent_id": "operator-B",
+            "message": "Use the Windows helper validation context.",
+            "metadata": {
+                "kb_query": "Windows helper TTL",
+                "kb_project": "demo",
+            },
+        },
+    )
+    assert handoff.status_code == 200
+    handoff_context = handoff.json()["metadata"]["kb_context"]
+    assert handoff_context["satisfied_by_kb"] is True
+    assert handoff_context["kb_entries"][0]["kb_id"] == kb_entry["kb_id"]
+
+    rebuild = client.post(
+        "/v1/operator/kb/index-jobs",
+        json={"operation": "rebuild", "metadata": {"test": True}},
+    )
+    assert rebuild.status_code == 200
+    assert rebuild.json()["status"] == "queued"
+    ran = client.post("/v1/operator/kb/index-jobs/run", params={"limit": 1000})
+    assert ran.status_code == 200
+    assert ran.json()["failed_count"] == 0
+    listed = client.get(
+        "/v1/operator/kb/index-jobs",
+        params={"status": "complete", "limit": 10},
+    )
+    assert listed.status_code == 200
+    assert any(job["operation"] == "rebuild" for job in listed.json()["index_jobs"])
+
+
 def test_operator_handoff_api_create_approve_ack_and_complete(
     tmp_path: Path,
 ) -> None:

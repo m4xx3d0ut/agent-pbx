@@ -164,9 +164,11 @@ REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_operator_list_handoffs",
     "pbx_operator_get_handoff",
     "pbx_operator_kb_search",
+    "pbx_operator_kb_context",
     "pbx_operator_kb_get",
     "pbx_operator_kb_propose",
     "pbx_operator_kb_propose_from_link",
+    "pbx_operator_kb_compile_report",
     "pbx_operator_kb_list_seed_runs",
     "pbx_operator_kb_get_seed_run",
     "pbx_operator_kb_update_seed_run",
@@ -4439,6 +4441,8 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator kb proposed", "Show proposed KB entries for the selected operator", self.palette_operator_kb_proposed)
         yield SystemCommand("/operator kb proposed detail", "Show the oldest proposed KB entry body", self.palette_operator_kb_proposed_detail)
         yield SystemCommand("/operator kb seed", "Ask the selected operator to propose durable KB entries", self.palette_operator_kb_seed)
+        yield SystemCommand("/operator kb compile", "Compile KB proposals from the selected operator's latest report", self.palette_operator_kb_compile)
+        yield SystemCommand("/operator kb reindex", "Rebuild the operator KB search index", self.palette_operator_kb_reindex)
         yield SystemCommand("/operator kb promote", "Promote the oldest clean proposed KB entry", self.palette_operator_kb_promote)
         yield SystemCommand("/operator kb reject", "Reject the oldest proposed KB entry", self.palette_operator_kb_reject)
         yield SystemCommand("/operator kb retire", "Retire the selected active KB entry", self.palette_operator_kb_retire)
@@ -4852,6 +4856,20 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.seed_selected_operator_kb(),
             name="palette-operator-kb-seed",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_compile(self) -> None:
+        self.run_worker(
+            self.compile_selected_operator_kb_report(),
+            name="palette-operator-kb-compile",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_reindex(self) -> None:
+        self.run_worker(
+            self.reindex_operator_kb(),
+            name="palette-operator-kb-reindex",
             exclusive=True,
         )
 
@@ -13882,6 +13900,46 @@ class AgentPBXTUI(App[None]):
             return payload
         raise RuntimeError("KB seed response was not an object")
 
+    async def compile_operator_kb_report(
+        self,
+        operator_agent_id: str,
+        report_id: str,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            "/v1/operator/kb/compile-report",
+            json={
+                "operator_agent_id": operator_agent_id,
+                "report_id": report_id,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("KB compile response was not an object")
+
+    async def rebuild_operator_kb_index(self) -> dict[str, Any]:
+        created = await self.api_client().post(
+            "/v1/operator/kb/index-jobs",
+            json={
+                "operation": "rebuild",
+                "metadata": {"requested_by": "agent-pbx-tui"},
+            },
+            headers=auth_headers(self.token),
+        )
+        created.raise_for_status()
+        run = await self.api_client().post(
+            "/v1/operator/kb/index-jobs/run",
+            params={"limit": 1000},
+            headers=auth_headers(self.token),
+        )
+        run.raise_for_status()
+        payload = run.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("KB index response was not an object")
+
     def operator_kb_seed_context(
         self,
         operator_agent_id: str,
@@ -14306,6 +14364,60 @@ class AgentPBXTUI(App[None]):
             severity=severity,
         )
 
+    async def compile_selected_operator_kb_report(self) -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if not isinstance(operator_agent, dict):
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        if self.agent_type(operator_agent) != OPERATOR_AGENT_TYPE:
+            self.notify("Select an operator before compiling KB proposals.", severity="warning")
+            return
+        latest = self.latest_report_by_agent.get(operator_agent_id)
+        report_id = str((latest or {}).get("report_id") or "").strip()
+        if not report_id:
+            report_id = str(operator_agent.get("latest_report_id") or "").strip()
+        if not report_id:
+            self.notify("Selected operator has no latest report to compile.", severity="warning")
+            return
+        try:
+            result = await self.compile_operator_kb_report(operator_agent_id, report_id)
+        except Exception as exc:
+            self.notify(f"Unable to compile KB proposals: {exc}", severity="error")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        detail = self.query_one_or_none("#operator-kb-detail", TextArea)
+        await self.open_operator_kb_for_agent(operator_agent_id, status="proposed")
+        if detail is not None:
+            detail.text = self.format_operator_kb_compile_result(result)
+        await self.refresh_events()
+        proposed_count = int_value(result.get("proposed_count")) or 0
+        skipped_count = int_value(result.get("skipped_count")) or 0
+        self.notify(
+            f"Compiled KB proposals for {logical_operator_id}: "
+            f"{proposed_count} proposed, {skipped_count} skipped."
+        )
+
+    async def reindex_operator_kb(self) -> None:
+        try:
+            result = await self.rebuild_operator_kb_index()
+        except Exception as exc:
+            self.notify(f"Unable to rebuild KB index: {exc}", severity="error")
+            return
+        detail = self.query_one_or_none("#operator-kb-detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_operator_kb_index_result(result)
+        processed = int_value(result.get("processed_count")) or 0
+        failed = int_value(result.get("failed_count")) or 0
+        severity = "error" if failed else "information"
+        self.notify(
+            f"KB index rebuild processed {processed} job{'s' if processed != 1 else ''}; "
+            f"{failed} failed.",
+            severity=severity,
+        )
+
     async def reject_oldest_operator_kb_proposal(self) -> None:
         operator_agent_id = self.selected_operator_kb_agent_id()
         if not operator_agent_id:
@@ -14450,6 +14562,70 @@ class AgentPBXTUI(App[None]):
                 "Review proposed entries in this KB tab after the operator completes the seed run.",
             ]
         )
+        return "\n".join(lines)
+
+    def format_operator_kb_compile_result(self, result: dict[str, Any]) -> str:
+        entries = result.get("entries") if isinstance(result.get("entries"), list) else []
+        skipped = result.get("skipped") if isinstance(result.get("skipped"), list) else []
+        lines = [
+            "Operator KB compile result",
+            "",
+            f"Operator: {result.get('operator_agent_id') or '-'}",
+            f"Logical operator: {result.get('logical_operator_agent_id') or '-'}",
+            f"Report: {result.get('report_id') or '-'}",
+            f"Proposed: {result.get('proposed_count') or 0}",
+            f"Skipped: {result.get('skipped_count') or 0}",
+            "",
+            "Proposals:",
+        ]
+        if not entries:
+            lines.append("- none")
+        else:
+            for entry in entries[:20]:
+                if isinstance(entry, dict):
+                    lines.append(
+                        f"- {entry.get('kb_id')}: {entry.get('title') or '-'} "
+                        f"({entry.get('redaction_status') or '-'})"
+                    )
+        lines.append("")
+        lines.append("Skipped:")
+        if not skipped:
+            lines.append("- none")
+        else:
+            for item in skipped[:20]:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"- index {item.get('index')}: {item.get('reason') or '-'}"
+                    )
+        return "\n".join(lines)
+
+    def format_operator_kb_index_result(self, result: dict[str, Any]) -> str:
+        jobs = result.get("jobs") if isinstance(result.get("jobs"), list) else []
+        failed = result.get("failed") if isinstance(result.get("failed"), list) else []
+        lines = [
+            "Operator KB index result",
+            "",
+            f"Processed: {result.get('processed_count') or 0}",
+            f"Failed: {result.get('failed_count') or 0}",
+            "",
+            "Jobs:",
+        ]
+        if not jobs:
+            lines.append("- none")
+        else:
+            for job in jobs[:20]:
+                if isinstance(job, dict):
+                    lines.append(
+                        f"- {job.get('job_id')}: {job.get('operation')} "
+                        f"{job.get('status')}"
+                    )
+        if failed:
+            lines.extend(["", "Failures:"])
+            for job in failed[:20]:
+                if isinstance(job, dict):
+                    lines.append(
+                        f"- {job.get('job_id')}: {job.get('error') or 'failed'}"
+                    )
         return "\n".join(lines)
 
     @staticmethod

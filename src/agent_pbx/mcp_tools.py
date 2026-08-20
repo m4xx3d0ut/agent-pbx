@@ -297,6 +297,61 @@ def build_mcp_server(
         )
 
     @mcp.tool()
+    def pbx_operator_kb_context(
+        operator_agent_id: str,
+        query: str,
+        target_operator_agent_id: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        tags: list[str] | None = None,
+        include_expired: bool = False,
+        include_proposed: bool = False,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        """Return KB matches that can satisfy a knowledge-link or handoff request."""
+        return operator_service.kb_context_for_request(
+            operator_agent_id=operator_agent_id,
+            query=query,
+            target_operator_agent_id=target_operator_agent_id,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            tags=tags or [],
+            include_expired=include_expired,
+            include_proposed=include_proposed,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_compile_report(
+        operator_agent_id: str,
+        report_id: str,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Compile explicit KB proposal candidates from an operator report."""
+        return operator_service.compile_kb_candidates_from_report(
+            operator_agent_id=operator_agent_id,
+            report_id=report_id,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_run_index_jobs(limit: int = 100) -> dict[str, Any]:
+        """Process queued operator KB index jobs."""
+        return store.process_operator_kb_index_jobs(limit=limit)
+
+    @mcp.tool()
+    def pbx_operator_kb_rebuild_index() -> dict[str, Any]:
+        """Queue and process a full operator KB FTS rebuild."""
+        job = store.create_operator_kb_index_job(
+            operation="rebuild",
+            metadata={"requested_by": "mcp"},
+        )
+        result = store.process_operator_kb_index_jobs(limit=1000)
+        return {"job": job, "result": result}
+
+    @mcp.tool()
     def pbx_operator_kb_get(
         operator_agent_id: str,
         kb_id: str,
@@ -772,7 +827,8 @@ def build_mcp_server(
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         logger.debug("mcp.tool.start name=pbx_report_turn agent_id=%s status=%s", agent_id, status)
-        if store.get_agent(agent_id) is None:
+        agent = store.get_agent(agent_id)
+        if agent is None:
             raise ValueError("agent not registered")
         request = store.report_request_with_identity_metadata(
             ReportCreateRequest(
@@ -806,6 +862,27 @@ def build_mcp_server(
             },
             report["report_id"],
         )
+        if str(agent.get("agent_type") or "") == "operator":
+            report_metadata = report.get("metadata") if isinstance(report.get("metadata"), dict) else {}
+            if any(
+                key in report_metadata
+                for key in ("operator_kb_candidates", "kb_candidates", "kb_proposals")
+            ):
+                try:
+                    operator_service.compile_kb_candidates_from_report(
+                        operator_agent_id=agent_id,
+                        report=report,
+                    )
+                except Exception as exc:  # noqa: BLE001 - preserve report delivery.
+                    store.append_event(
+                        "operator_kb_report_compile_failed",
+                        {
+                            "report_id": report["report_id"],
+                            "agent_id": agent_id,
+                            "error": str(exc),
+                        },
+                        report["report_id"],
+                    )
         append_joplin_report_log(store, joplin, report)
         logger.debug(
             "mcp.tool.finish name=pbx_report_turn agent_id=%s report_id=%s",

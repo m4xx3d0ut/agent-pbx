@@ -972,6 +972,60 @@ async def test_mcp_operator_kb_tools_lifecycle(tmp_path: Path) -> None:
             },
         )
     )
+    context = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_context",
+            {
+                "operator_agent_id": "operator-B",
+                "query": "routing",
+                "project": "agent-pbx",
+            },
+        )
+    )
+    report = tool_json(
+        await mcp.call_tool(
+            "pbx_report_turn",
+            {
+                "agent_id": "operator-0",
+                "project": "agent-pbx-operator",
+                "status": "working",
+                "summary": "KB candidate report",
+                "detail": "Operator found reusable audit guidance.",
+                "metadata": {
+                    "kb_candidates": [
+                        {
+                            "scope": "project",
+                            "project": "agent-pbx",
+                            "title": "Polling audit guidance",
+                            "summary": "Polling diagnostics stay separate from caller work.",
+                            "body": "Do not mark caller work blocked for control-plane polling diagnostics.",
+                            "tags": ["polling", "audit"],
+                        }
+                    ]
+                },
+            },
+        )
+    )
+    compiled_from_report = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_compile_report",
+            {
+                "operator_agent_id": "operator-0",
+                "report_id": report["report_id"],
+            },
+        )
+    )
+    compiled_entries = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_search",
+            {
+                "operator_agent_id": "operator-0",
+                "status": "proposed",
+                "query": "polling audit",
+            },
+        )
+    )
+    rebuilt = tool_json(await mcp.call_tool("pbx_operator_kb_rebuild_index", {}))
 
     assert proposed["status"] == "proposed"
     assert proposed["redaction_status"] == "clean"
@@ -985,6 +1039,12 @@ async def test_mcp_operator_kb_tools_lifecycle(tmp_path: Path) -> None:
     assert exported["format"] == "agent-pbx-operator-kb-v1"
     assert imported["imported_count"] == 1
     assert imported["entries"][0]["created_by_operator_agent_id"] == "operator-B"
+    assert context["satisfied_by_kb"] is True
+    assert context["kb_entries"][0]["kb_id"] == proposed["kb_id"]
+    assert compiled_from_report["proposed_count"] == 0
+    assert compiled_from_report["skipped"][0]["reason"] == "duplicate_content_hash"
+    assert compiled_entries[0]["metadata"]["compiled_from_report_id"] == report["report_id"]
+    assert rebuilt["result"]["failed_count"] == 0
 
 
 async def test_mcp_operator_kb_seed_run_lifecycle(tmp_path: Path) -> None:

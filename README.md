@@ -309,7 +309,9 @@ acknowledgement, started/running state, TTL expiry, artifact summaries, and
 terminal status without creating fork edges or changing source-session
 ownership. Durable operator knowledge is stored in `operator_kb_entries`,
 `operator_kb_sources`, and `operator_kb_events` after root-operator review;
-manual seed-run provenance is stored in `operator_kb_seed_runs`.
+manual seed-run provenance is stored in `operator_kb_seed_runs`. Full-text
+search state is maintained in SQLite FTS tables through
+`operator_kb_index_jobs`, so KB search remains portable with the PBX database.
 Reports and commands still provide the audit trail and link back to
 campaigns with report metadata and command payload fields such as
 `campaign_id`, `assignment_id`, `operator_agent_id`, and `operator_fork_id`.
@@ -355,9 +357,13 @@ If review work needs to transfer domain context to another operator, the review
 fork can call `pbx_operator_propose_knowledge_handoff` with the source review
 fork agent, target operator agent, and handoff message. Metadata may include a
 `target_caller_agent_id`, `allowed_mutation_scope`, `required_artifacts`,
-redacted `artifact_bundle`, `expires_at`, and `needs_ack`. Review forks can list
-and inspect knowledge-link and handoff context, but they cannot approve delivery
-or send unmediated knowledge turns. The root operator/TUI uses
+redacted `artifact_bundle`, `expires_at`, `needs_ack`, and optional KB lookup
+fields such as `kb_query`, `kb_project`, `kb_repo_root`, `kb_tags`, and
+`include_kb_context=true`. When a KB query is present, Agent PBX attaches active
+KB matches to the handoff metadata and delivered prompt before the receiving
+operator starts. Review forks can list and inspect knowledge-link, handoff, and
+KB context, but they cannot approve delivery or send unmediated knowledge turns.
+The root operator/TUI uses
 `/operator handoffs` to inspect pending handoffs and
 `/operator handoff approve` to approve the oldest pending handoff. If the target
 operator needs a caller fork that has not been launched, the handoff moves to
@@ -385,11 +391,26 @@ edit entries with `pbx_operator_kb_update`, reject bad proposals with
 `pbx_operator_kb_reject`, `/operator kb reject`, or `Reject`, and retire active
 records with `pbx_operator_kb_retire`, `/operator kb retire`, or `Retire`.
 Active KB entries are readable by other operators through
-`pbx_operator_kb_search`, `pbx_operator_kb_get`, and `/operator kb`. Root
-operators can export portable JSON-compatible KB bundles
+`pbx_operator_kb_search`, `pbx_operator_kb_context`, `pbx_operator_kb_get`, and
+`/operator kb`. Handoff flows can request the same lookup by passing `kb_query`
+or `include_kb_context=true` metadata. Context lookup defaults to project scope
+and only narrows by repo path when `repo_root` or `kb_repo_root` is supplied.
+Root operators can export portable
+JSON-compatible KB bundles
 with `pbx_operator_kb_export` and import them with `pbx_operator_kb_import`;
 active import and promotion require clean redaction state or an explicit manual
 override in metadata.
+
+Operators can also compile proposed KB entries from normal working reports by
+including report metadata under `operator_kb_candidates`, `kb_candidates`, or
+`kb_proposals`. Each candidate is an object with `title`, `summary`, `body`, and
+optional `scope`, `project`, `repo_root`, `git_remote`, `branch`, `tags`,
+`stale_after`, `expires_at`, and `metadata`. The API and MCP report paths
+auto-compile those candidates as proposed KB entries, dedupe them with a content
+hash, attach the source report in `operator_kb_sources`, and keep promotion on
+the root review path. Use `/operator kb compile` to manually retry compilation
+for the selected operator's latest report, and `/operator kb reindex` to rebuild
+the SQLite FTS index.
 
 Use `/operator kb seed` to manually ask the selected root operator or fork to
 extract durable operating guidance from its current context. Agent PBX records a
@@ -420,7 +441,9 @@ caller fork before the handoff can run. When that exchange produces durable
 guidance, run `/operator kb seed` against the operator or fork that holds the
 context, then run `/operator kb proposed` to open the `KB` tab on proposed
 entries, select proposals to review their bodies, and use `Promote` to publish
-clean proposals or `Reject` to reject them.
+clean proposals or `Reject` to reject them. If the operator already reported
+explicit KB candidates, use `/operator kb compile` first, then review the
+proposed entries in the same tab.
 
 ## Planned Local Validation
 
@@ -803,8 +826,9 @@ commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
 `/operator handoffs`, `/operator handoff approve`,
 `/operator handoff launch`, `/operator knowledge links`, `/operator knowledge send`,
 `/operator kb`, `/operator kb detail`, `/operator kb proposed`,
-`/operator kb proposed detail`, `/operator kb seed`, `/operator kb promote`,
-`/operator kb reject`, `/operator kb retire`, `/operator project spawn`, `/pr`, `/pr refresh`,
+`/operator kb proposed detail`, `/operator kb seed`, `/operator kb compile`,
+`/operator kb reindex`, `/operator kb promote`, `/operator kb reject`,
+`/operator kb retire`, `/operator project spawn`, `/pr`, `/pr refresh`,
 `/pr review`, `/pr validate`, `/pr url`, `/pr merge`, `/issue`, `/issue refresh`, `/issue mitigate`,
 `/issue url`, `/issue clear`, configured `/joplin`, `/joplin new`,
 `/joplin rename`, `/joplin delete`, `/joplin copy`,

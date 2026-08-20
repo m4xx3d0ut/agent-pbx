@@ -18,7 +18,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -127,6 +127,8 @@ OPERATOR_KB_SEED_TERMINAL_STATUSES = {
     "canceled",
     "cancelled",
 }
+OPERATOR_KB_INDEX_JOB_OPERATIONS = {"upsert", "delete", "rebuild"}
+OPERATOR_KB_INDEX_JOB_STATUSES = {"queued", "running", "complete", "failed"}
 OPERATOR_KB_EXPORT_FORMAT = "agent-pbx-operator-kb-v1"
 REPORTING_AGENT_ID_METADATA_KEYS = (
     "reporting_agent_id",
@@ -640,6 +642,31 @@ class Store:
                         ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS operator_kb_index_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    kb_id TEXT,
+                    operation TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    error TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    completed_at REAL,
+                    FOREIGN KEY(kb_id) REFERENCES operator_kb_entries(kb_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS operator_kb_fts USING fts5(
+                    kb_id UNINDEXED,
+                    title,
+                    summary,
+                    body,
+                    tags,
+                    project,
+                    repo_root,
+                    tokenize = 'unicode61'
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_operator_campaigns_operator_updated
                     ON operator_campaigns(operator_agent_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_operator_campaigns_status_updated
@@ -730,6 +757,16 @@ class Store:
                     );
                 CREATE INDEX IF NOT EXISTS idx_operator_kb_seed_runs_source
                     ON operator_kb_seed_runs(source_operator_agent_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_created_status
+                    ON operator_kb_entries(
+                        created_by_operator_agent_id,
+                        status,
+                        updated_at DESC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_index_jobs_status_created
+                    ON operator_kb_index_jobs(status, created_at ASC, job_id ASC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_index_jobs_kb_updated
+                    ON operator_kb_index_jobs(kb_id, updated_at DESC);
                 """
             )
             previous_schema_version = self._schema_version(conn)
@@ -829,6 +866,8 @@ class Store:
             self._backfill_agent_type(conn)
             if previous_schema_version < 7:
                 self._backfill_latest_report_seen(conn)
+            if previous_schema_version < 20:
+                self._rebuild_operator_kb_fts(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -3609,6 +3648,12 @@ class Store:
                     current,
                 ),
             )
+            self._queue_operator_kb_index_job(
+                conn,
+                kb_id=kb_id,
+                operation="upsert",
+                metadata={"source": "create_operator_kb_entry"},
+            )
         entry = self.get_operator_kb_entry(kb_id)
         if entry is None:
             raise RuntimeError("operator KB entry insert failed")
@@ -3641,29 +3686,122 @@ class Store:
         include_expired: bool = False,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
+        self.process_operator_kb_index_jobs(limit=200)
         safe_limit = min(max(int(limit), 1), 500)
-        where: list[str] = []
-        params: list[Any] = []
-        if scope:
-            where.append("scope = ?")
-            params.append(self._normalize_operator_kb_scope(scope))
-        if project:
-            where.append("project = ?")
-            params.append(str(project).strip())
-        if repo_root:
-            where.append("repo_root = ?")
-            params.append(str(repo_root).strip())
-        if status:
-            where.append("status = ?")
-            params.append(self._normalize_operator_kb_status(status))
-        if not include_expired:
-            where.append("(expires_at IS NULL OR expires_at > ?)")
-            params.append(now_ts())
+        normalized_tags = self._normalize_tags(tags or [])
         terms = [
             term.strip().lower()
             for term in str(query or "").split()
             if term.strip()
         ]
+        match_query = self._operator_kb_fts_match_query(query)
+        with self.connect() as conn:
+            if match_query:
+                try:
+                    rows = self._search_operator_kb_entries_fts(
+                        conn,
+                        match_query=match_query,
+                        scope=scope,
+                        project=project,
+                        repo_root=repo_root,
+                        status=status,
+                        tags=normalized_tags,
+                        include_expired=include_expired,
+                        limit=safe_limit,
+                    )
+                except sqlite3.OperationalError:
+                    rows = self._search_operator_kb_entries_like(
+                        conn,
+                        terms=terms,
+                        scope=scope,
+                        project=project,
+                        repo_root=repo_root,
+                        status=status,
+                        tags=normalized_tags,
+                        include_expired=include_expired,
+                        limit=safe_limit,
+                    )
+            else:
+                rows = self._search_operator_kb_entries_like(
+                    conn,
+                    terms=terms,
+                    scope=scope,
+                    project=project,
+                    repo_root=repo_root,
+                    status=status,
+                    tags=normalized_tags,
+                    include_expired=include_expired,
+                    limit=safe_limit,
+                )
+            entries = [self._operator_kb_entry_from_row(row) for row in rows]
+            for entry in entries:
+                entry["sources"] = self._operator_kb_sources_for_entry(
+                    conn,
+                    str(entry["kb_id"]),
+                )
+        return entries
+
+    def _search_operator_kb_entries_fts(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        match_query: str,
+        scope: str | None,
+        project: str | None,
+        repo_root: str | None,
+        status: str | None,
+        tags: list[str],
+        include_expired: bool,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        where, params = self._operator_kb_search_filters(
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=status,
+            tags=tags,
+            include_expired=include_expired,
+            table_alias="e",
+        )
+        clause = " AND ".join(["operator_kb_fts MATCH ?", *where])
+        return conn.execute(
+            f"""
+            {self._operator_kb_entry_select_sql("e")}
+            JOIN operator_kb_fts ON operator_kb_fts.kb_id = e.kb_id
+            WHERE {clause}
+            ORDER BY
+                bm25(operator_kb_fts) ASC,
+                CASE WHEN e.status = 'active' THEN 0
+                     WHEN e.status = 'proposed' THEN 1
+                     ELSE 2 END ASC,
+                e.updated_at DESC,
+                e.created_at DESC
+            LIMIT ?
+            """,
+            (match_query, *params, limit),
+        ).fetchall()
+
+    def _search_operator_kb_entries_like(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        terms: list[str],
+        scope: str | None,
+        project: str | None,
+        repo_root: str | None,
+        status: str | None,
+        tags: list[str],
+        include_expired: bool,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        where, params = self._operator_kb_search_filters(
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            status=status,
+            tags=tags,
+            include_expired=include_expired,
+        )
         for term in terms:
             where.append(
                 """
@@ -3679,7 +3817,8 @@ class Store:
             like = f"%{term}%"
             params.extend([like, like, like, like, like])
         clause = f"WHERE {' AND '.join(where)}" if where else ""
-        query_sql = f"""
+        return conn.execute(
+            f"""
             {self._operator_kb_entry_select_sql()}
             {clause}
             ORDER BY
@@ -3689,24 +3828,43 @@ class Store:
                 updated_at DESC,
                 created_at DESC
             LIMIT ?
-        """
-        params.append(safe_limit)
-        normalized_tags = set(self._normalize_tags(tags or []))
-        with self.connect() as conn:
-            rows = conn.execute(query_sql, tuple(params)).fetchall()
-            entries = [self._operator_kb_entry_from_row(row) for row in rows]
-            if normalized_tags:
-                entries = [
-                    entry
-                    for entry in entries
-                    if normalized_tags.issubset(set(entry.get("tags") or []))
-                ]
-            for entry in entries:
-                entry["sources"] = self._operator_kb_sources_for_entry(
-                    conn,
-                    str(entry["kb_id"]),
-                )
-        return entries
+            """,
+            (*params, limit),
+        ).fetchall()
+
+    def _operator_kb_search_filters(
+        self,
+        *,
+        scope: str | None,
+        project: str | None,
+        repo_root: str | None,
+        status: str | None,
+        tags: list[str],
+        include_expired: bool,
+        table_alias: str | None = None,
+    ) -> tuple[list[str], list[Any]]:
+        prefix = f"{table_alias}." if table_alias else ""
+        where: list[str] = []
+        params: list[Any] = []
+        if scope:
+            where.append(f"{prefix}scope = ?")
+            params.append(self._normalize_operator_kb_scope(scope))
+        if project:
+            where.append(f"{prefix}project = ?")
+            params.append(str(project).strip())
+        if repo_root:
+            where.append(f"{prefix}repo_root = ?")
+            params.append(str(repo_root).strip())
+        if status:
+            where.append(f"{prefix}status = ?")
+            params.append(self._normalize_operator_kb_status(status))
+        if not include_expired:
+            where.append(f"({prefix}expires_at IS NULL OR {prefix}expires_at > ?)")
+            params.append(now_ts())
+        for tag in tags:
+            where.append(f"lower({prefix}tags_json) LIKE ?")
+            params.append(f'%"{tag}"%')
+        return where, params
 
     def update_operator_kb_entry(
         self,
@@ -3841,6 +3999,12 @@ class Store:
                         ),
                         current,
                     ),
+                )
+                self._queue_operator_kb_index_job(
+                    conn,
+                    kb_id=kb_id,
+                    operation="upsert",
+                    metadata={"source": event_type},
                 )
         return self.get_operator_kb_entry(kb_id) if cursor.rowcount else None
 
@@ -4125,6 +4289,192 @@ class Store:
                 ),
             )
         return self.get_operator_kb_seed_run(seed_run_id) if cursor.rowcount else None
+
+    def create_operator_kb_index_job(
+        self,
+        *,
+        operation: str,
+        kb_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_operation = self._normalize_operator_kb_index_operation(operation)
+        current = now_ts()
+        job_id = str(uuid.uuid4())
+        with self.connect() as conn:
+            self._queue_operator_kb_index_job(
+                conn,
+                job_id=job_id,
+                kb_id=kb_id,
+                operation=normalized_operation,
+                metadata=metadata or {},
+                created_at=current,
+            )
+        job = self.get_operator_kb_index_job(job_id)
+        if job is None:
+            raise RuntimeError("operator KB index job insert failed")
+        return job
+
+    def get_operator_kb_index_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT job_id, kb_id, operation, status, error, metadata_json,
+                       created_at, updated_at, completed_at
+                FROM operator_kb_index_jobs
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+        return self._operator_kb_index_job_from_row(row) if row else None
+
+    def list_operator_kb_index_jobs(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(int(limit), 1), 500)
+        where: list[str] = []
+        params: list[Any] = []
+        if status:
+            where.append("status = ?")
+            params.append(self._normalize_operator_kb_index_status(status))
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT job_id, kb_id, operation, status, error, metadata_json,
+                       created_at, updated_at, completed_at
+                FROM operator_kb_index_jobs
+                {clause}
+                ORDER BY created_at DESC, job_id DESC
+                LIMIT ?
+                """,
+                (*params, safe_limit),
+            ).fetchall()
+        return [self._operator_kb_index_job_from_row(row) for row in rows]
+
+    def process_operator_kb_index_jobs(self, *, limit: int = 100) -> dict[str, Any]:
+        safe_limit = min(max(int(limit), 1), 1000)
+        processed: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT job_id, kb_id, operation, status, error, metadata_json,
+                       created_at, updated_at, completed_at
+                FROM operator_kb_index_jobs
+                WHERE status = 'queued'
+                ORDER BY created_at ASC, job_id ASC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+            for row in rows:
+                job = self._operator_kb_index_job_from_row(row)
+                job_id = str(job["job_id"])
+                operation = str(job.get("operation") or "upsert")
+                current = now_ts()
+                cursor = conn.execute(
+                    """
+                    UPDATE operator_kb_index_jobs
+                    SET status = 'running', updated_at = ?, error = NULL
+                    WHERE job_id = ? AND status = 'queued'
+                    """,
+                    (current, job_id),
+                )
+                if not cursor.rowcount:
+                    continue
+                try:
+                    if operation == "rebuild":
+                        self._rebuild_operator_kb_fts(conn)
+                    elif operation == "delete":
+                        self._delete_operator_kb_fts_entry(
+                            conn,
+                            str(job.get("kb_id") or ""),
+                        )
+                    else:
+                        self._upsert_operator_kb_fts_entry(
+                            conn,
+                            str(job.get("kb_id") or ""),
+                        )
+                except Exception as exc:  # noqa: BLE001 - index failures are inspectable jobs.
+                    finished_at = now_ts()
+                    conn.execute(
+                        """
+                        UPDATE operator_kb_index_jobs
+                        SET status = 'failed',
+                            error = ?,
+                            updated_at = ?,
+                            completed_at = ?
+                        WHERE job_id = ?
+                        """,
+                        (str(exc), finished_at, finished_at, job_id),
+                    )
+                    failed.append({**job, "status": "failed", "error": str(exc)})
+                    continue
+                finished_at = now_ts()
+                conn.execute(
+                    """
+                    UPDATE operator_kb_index_jobs
+                    SET status = 'complete',
+                        error = NULL,
+                        updated_at = ?,
+                        completed_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (finished_at, finished_at, job_id),
+                )
+                processed.append({**job, "status": "complete"})
+        return {
+            "processed_count": len(processed),
+            "failed_count": len(failed),
+            "jobs": processed,
+            "failed": failed,
+        }
+
+    def find_operator_kb_entry_by_content_hash(
+        self,
+        *,
+        logical_operator_agent_id: str,
+        content_hash: str,
+        statuses: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_hash = str(content_hash or "").strip()
+        if not normalized_hash:
+            return None
+        where = [
+            "created_by_operator_agent_id = ?",
+            "json_extract(metadata_json, '$.content_hash') = ?",
+        ]
+        params: list[Any] = [str(logical_operator_agent_id).strip(), normalized_hash]
+        normalized_statuses = [
+            self._normalize_operator_kb_status(status)
+            for status in (statuses or [])
+            if str(status or "").strip()
+        ]
+        if normalized_statuses:
+            placeholders = ",".join("?" for _ in normalized_statuses)
+            where.append(f"status IN ({placeholders})")
+            params.extend(normalized_statuses)
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                {self._operator_kb_entry_select_sql()}
+                WHERE {' AND '.join(where)}
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+            if row is None:
+                return None
+            entry = self._operator_kb_entry_from_row(row)
+            entry["sources"] = self._operator_kb_sources_for_entry(
+                conn,
+                str(entry["kb_id"]),
+            )
+            return entry
 
     def create_operator_handoff(
         self,
@@ -4560,16 +4910,28 @@ class Store:
         """
 
     @staticmethod
-    def _operator_kb_entry_select_sql() -> str:
+    def _operator_kb_entry_select_sql(alias: str | None = None) -> str:
+        table = "operator_kb_entries"
+        prefix = ""
+        if alias:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
+                raise ValueError("invalid table alias")
+            table = f"{table} AS {alias}"
+            prefix = f"{alias}."
         return """
-            SELECT kb_id, scope, project, repo_root, git_remote, branch,
-                   title, summary, body, tags_json, status, redaction_status,
-                   created_by_operator_agent_id, created_by_agent_id,
-                   source_knowledge_link_id, source_handoff_id,
-                   source_turn_ids_json, stale_after, expires_at, metadata_json,
-                   created_at, updated_at, promoted_at, retired_at, imported_at
-            FROM operator_kb_entries
-        """
+            SELECT {prefix}kb_id, {prefix}scope, {prefix}project,
+                   {prefix}repo_root, {prefix}git_remote, {prefix}branch,
+                   {prefix}title, {prefix}summary, {prefix}body,
+                   {prefix}tags_json, {prefix}status, {prefix}redaction_status,
+                   {prefix}created_by_operator_agent_id,
+                   {prefix}created_by_agent_id,
+                   {prefix}source_knowledge_link_id, {prefix}source_handoff_id,
+                   {prefix}source_turn_ids_json, {prefix}stale_after,
+                   {prefix}expires_at, {prefix}metadata_json,
+                   {prefix}created_at, {prefix}updated_at, {prefix}promoted_at,
+                   {prefix}retired_at, {prefix}imported_at
+            FROM {table}
+        """.format(prefix=prefix, table=table)
 
     @staticmethod
     def _operator_kb_seed_run_select_sql() -> str:
@@ -4720,6 +5082,127 @@ class Store:
         return normalized
 
     @staticmethod
+    def _normalize_operator_kb_index_operation(operation: str) -> str:
+        normalized = str(operation or "upsert").strip().lower()
+        if normalized not in OPERATOR_KB_INDEX_JOB_OPERATIONS:
+            raise ValueError("KB index operation is invalid")
+        return normalized
+
+    @staticmethod
+    def _normalize_operator_kb_index_status(status: str | None) -> str:
+        normalized = str(status or "queued").strip().lower()
+        if normalized not in OPERATOR_KB_INDEX_JOB_STATUSES:
+            raise ValueError("KB index job status is invalid")
+        return normalized
+
+    @staticmethod
+    def _operator_kb_fts_match_query(query: str | None) -> str | None:
+        terms = [
+            term
+            for term in re.findall(r"[a-z0-9_]{2,}", str(query or "").lower())
+            if term.strip()
+        ][:12]
+        if not terms:
+            return None
+        return " AND ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
+
+    @staticmethod
+    def _queue_operator_kb_index_job(
+        conn: sqlite3.Connection,
+        *,
+        operation: str,
+        kb_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        job_id: str | None = None,
+        created_at: float | None = None,
+    ) -> None:
+        normalized_operation = Store._normalize_operator_kb_index_operation(operation)
+        current = created_at if created_at is not None else now_ts()
+        conn.execute(
+            """
+            INSERT INTO operator_kb_index_jobs
+                (job_id, kb_id, operation, status, error, metadata_json,
+                 created_at, updated_at, completed_at)
+            VALUES (?, ?, ?, 'queued', NULL, ?, ?, ?, NULL)
+            """,
+            (
+                str(job_id or uuid.uuid4()),
+                Store._none_if_blank(kb_id),
+                normalized_operation,
+                json.dumps(metadata or {}),
+                current,
+                current,
+            ),
+        )
+
+    @staticmethod
+    def _operator_kb_fts_entry_payload(entry: dict[str, Any]) -> tuple[Any, ...]:
+        tags = entry.get("tags") if isinstance(entry.get("tags"), list) else []
+        return (
+            entry.get("kb_id"),
+            entry.get("title") or "",
+            entry.get("summary") or "",
+            entry.get("body") or "",
+            " ".join(str(tag) for tag in tags),
+            entry.get("project") or "",
+            entry.get("repo_root") or "",
+        )
+
+    @staticmethod
+    def _delete_operator_kb_fts_entry(
+        conn: sqlite3.Connection,
+        kb_id: str,
+    ) -> None:
+        normalized_kb_id = str(kb_id or "").strip()
+        if not normalized_kb_id:
+            return
+        conn.execute("DELETE FROM operator_kb_fts WHERE kb_id = ?", (normalized_kb_id,))
+
+    @classmethod
+    def _upsert_operator_kb_fts_entry(
+        cls,
+        conn: sqlite3.Connection,
+        kb_id: str,
+    ) -> None:
+        normalized_kb_id = str(kb_id or "").strip()
+        if not normalized_kb_id:
+            return
+        cls._delete_operator_kb_fts_entry(conn, normalized_kb_id)
+        row = conn.execute(
+            f"""
+            {cls._operator_kb_entry_select_sql()}
+            WHERE kb_id = ?
+            """,
+            (normalized_kb_id,),
+        ).fetchone()
+        if row is None:
+            return
+        entry = cls._operator_kb_entry_from_row(row)
+        conn.execute(
+            """
+            INSERT INTO operator_kb_fts
+                (kb_id, title, summary, body, tags, project, repo_root)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            cls._operator_kb_fts_entry_payload(entry),
+        )
+
+    @classmethod
+    def _rebuild_operator_kb_fts(cls, conn: sqlite3.Connection) -> None:
+        conn.execute("DELETE FROM operator_kb_fts")
+        rows = conn.execute(cls._operator_kb_entry_select_sql()).fetchall()
+        for row in rows:
+            entry = cls._operator_kb_entry_from_row(row)
+            conn.execute(
+                """
+                INSERT INTO operator_kb_fts
+                    (kb_id, title, summary, body, tags, project, repo_root)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                cls._operator_kb_fts_entry_payload(entry),
+            )
+
+    @staticmethod
     def _operator_kb_sources_payload(
         *,
         kb_id: str,
@@ -4801,6 +5284,17 @@ class Store:
 
     @staticmethod
     def _operator_kb_seed_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        metadata_json = data.pop("metadata_json")
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return data
+
+    @staticmethod
+    def _operator_kb_index_job_from_row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         metadata_json = data.pop("metadata_json")
         try:

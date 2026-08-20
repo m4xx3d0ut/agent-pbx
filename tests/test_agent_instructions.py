@@ -74,6 +74,8 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "pbx_operator_update_handoff" in instructions
     assert "pbx_operator_kb_propose" in instructions
     assert "pbx_operator_kb_propose_from_link" in instructions
+    assert "pbx_operator_kb_context" in instructions
+    assert "operator_kb_candidates" in instructions
     assert "pbx_operator_kb_seed" in instructions
     assert "pbx_operator_kb_update_seed_run" in instructions
     assert "seed_run_id" in instructions
@@ -149,12 +151,18 @@ def test_runbook_payload_includes_command_guidance() -> None:
         for item in payload["agent_types"]
     )
     assert any("pbx_operator_kb_propose" in item for item in payload["agent_types"])
+    assert any("pbx_operator_kb_context" in item for item in payload["agent_types"])
+    assert any(
+        "pbx_operator_kb_compile_report" in item
+        for item in payload["agent_types"]
+    )
     assert any(
         "pbx_operator_kb_update_seed_run" in item
         for item in payload["agent_types"]
     )
     assert any(
-        "update, promote, reject, retire, export, and import" in item
+        "update, promote, reject, retire, export, import, and rebuild indexes"
+        in item
         for item in payload["agent_types"]
     )
     assert any("pbx_operator_ack_handoff" in item for item in payload["agent_types"])

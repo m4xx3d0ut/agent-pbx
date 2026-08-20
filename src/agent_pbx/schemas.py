@@ -82,6 +82,8 @@ OperatorKbSeedRunStatus = Literal[
     "canceled",
     "cancelled",
 ]
+OperatorKbIndexJobOperation = Literal["upsert", "delete", "rebuild"]
+OperatorKbIndexJobStatus = Literal["queued", "running", "complete", "failed"]
 AssignmentState = Literal[
     "pending",
     "sent",
@@ -601,6 +603,80 @@ class OperatorKbEntryResponse(BaseModel):
 
 class OperatorKbListResponse(BaseModel):
     kb_entries: list[OperatorKbEntryResponse] = Field(default_factory=list)
+
+
+class OperatorKbContextRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    query: str = Field(min_length=1, max_length=4000)
+    target_operator_agent_id: str | None = Field(default=None, max_length=120)
+    scope: OperatorKbScope | None = None
+    project: str | None = Field(default=None, max_length=240)
+    repo_root: str | None = Field(default=None, max_length=1000)
+    tags: list[str] = Field(default_factory=list)
+    include_expired: bool = False
+    include_proposed: bool = False
+    limit: int = Field(default=5, ge=1, le=50)
+
+
+class OperatorKbContextResponse(BaseModel):
+    operator_agent_id: str
+    logical_operator_agent_id: str
+    target_operator_agent_id: str | None = None
+    query: str
+    scope: str | None = None
+    project: str | None = None
+    repo_root: str | None = None
+    tags: list[str]
+    include_expired: bool
+    include_proposed: bool
+    satisfied_by_kb: bool
+    match_count: int
+    kb_entries: list[OperatorKbEntryResponse] = Field(default_factory=list)
+
+
+class OperatorKbCompileReportRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    report_id: str = Field(min_length=1, max_length=120)
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class OperatorKbCompileReportResponse(BaseModel):
+    operator_agent_id: str
+    logical_operator_agent_id: str
+    report_id: str
+    proposed_count: int
+    skipped_count: int
+    entries: list[OperatorKbEntryResponse] = Field(default_factory=list)
+    skipped: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class OperatorKbIndexJobRequest(BaseModel):
+    operation: OperatorKbIndexJobOperation = "rebuild"
+    kb_id: str | None = Field(default=None, max_length=120)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorKbIndexJobResponse(BaseModel):
+    job_id: str
+    kb_id: str | None = None
+    operation: str
+    status: str
+    error: str | None = None
+    metadata: dict[str, Any]
+    created_at: float
+    updated_at: float
+    completed_at: float | None = None
+
+
+class OperatorKbIndexJobListResponse(BaseModel):
+    index_jobs: list[OperatorKbIndexJobResponse] = Field(default_factory=list)
+
+
+class OperatorKbIndexRunResponse(BaseModel):
+    processed_count: int
+    failed_count: int
+    jobs: list[dict[str, Any]] = Field(default_factory=list)
+    failed: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class OperatorKbExportResponse(BaseModel):

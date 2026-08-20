@@ -13047,9 +13047,11 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert "pbx_operator_list_handoffs" in agent_pbx_config
     assert "pbx_operator_get_handoff" in agent_pbx_config
     assert "pbx_operator_kb_search" in agent_pbx_config
+    assert "pbx_operator_kb_context" in agent_pbx_config
     assert "pbx_operator_kb_get" in agent_pbx_config
     assert "pbx_operator_kb_propose" in agent_pbx_config
     assert "pbx_operator_kb_propose_from_link" in agent_pbx_config
+    assert "pbx_operator_kb_compile_report" in agent_pbx_config
     assert "pbx_operator_kb_list_seed_runs" in agent_pbx_config
     assert "pbx_operator_kb_get_seed_run" in agent_pbx_config
     assert "pbx_operator_kb_update_seed_run" in agent_pbx_config
@@ -13066,6 +13068,8 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert '"pbx_operator_kb_retire"' not in agent_pbx_config
     assert '"pbx_operator_kb_import"' not in agent_pbx_config
     assert '"pbx_operator_kb_export"' not in agent_pbx_config
+    assert '"pbx_operator_kb_run_index_jobs"' not in agent_pbx_config
+    assert '"pbx_operator_kb_rebuild_index"' not in agent_pbx_config
     assert "pbx_queue_command" not in agent_pbx_config
     assert 'url = "http://127.0.0.1:8765/mcp"' in workerbee_config
     assert 'default_tools_approval_mode = "approve"' in workerbee_config
