@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -132,6 +132,18 @@ OPERATOR_KB_SEED_TERMINAL_STATUSES = {
 OPERATOR_KB_INDEX_JOB_OPERATIONS = {"upsert", "delete", "rebuild"}
 OPERATOR_KB_INDEX_JOB_STATUSES = {"queued", "running", "complete", "failed"}
 OPERATOR_KB_EXPORT_FORMAT = "agent-pbx-operator-kb-v1"
+OPERATOR_KB_FEEDBACK_TYPES = {
+    "accepted",
+    "rejected",
+    "stale",
+    "wrong_scope",
+    "unsafe",
+    "miss",
+}
+OPERATOR_KB_RETRIEVAL_PROVIDER = "sqlite"
+OPERATOR_KB_RETRIEVAL_INDEX_VERSION = "sqlite-hybrid-v1"
+OPERATOR_KB_RETRIEVAL_MODEL_KEYWORD = "keyword-fts-like"
+OPERATOR_KB_RETRIEVAL_MODEL_SEMANTIC = "hashed-sparse-v1"
 OPERATOR_KB_SEMANTIC_CHUNK_WORDS = 180
 OPERATOR_KB_SEMANTIC_CHUNK_OVERLAP = 36
 OPERATOR_KB_SEMANTIC_MAX_TERMS = 160
@@ -701,6 +713,80 @@ class Store:
                     UNIQUE(kb_id, chunk_index)
                 );
 
+                CREATE TABLE IF NOT EXISTS operator_kb_queries (
+                    query_id TEXT PRIMARY KEY,
+                    logical_operator_agent_id TEXT NOT NULL,
+                    operator_agent_id TEXT NOT NULL,
+                    target_operator_agent_id TEXT,
+                    query TEXT NOT NULL,
+                    scope TEXT,
+                    project TEXT,
+                    repo_root TEXT,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    include_expired INTEGER NOT NULL DEFAULT 0,
+                    include_proposed INTEGER NOT NULL DEFAULT 0,
+                    semantic INTEGER NOT NULL DEFAULT 0,
+                    retrieval_mode TEXT NOT NULL DEFAULT 'keyword',
+                    retrieval_provider TEXT NOT NULL DEFAULT 'sqlite',
+                    retrieval_model TEXT NOT NULL DEFAULT 'keyword-fts-like',
+                    index_version TEXT NOT NULL DEFAULT 'sqlite-hybrid-v1',
+                    source TEXT NOT NULL DEFAULT 'search',
+                    limit_count INTEGER NOT NULL DEFAULT 0,
+                    match_count INTEGER NOT NULL DEFAULT 0,
+                    semantic_match_count INTEGER NOT NULL DEFAULT 0,
+                    satisfied_by_kb INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(logical_operator_agent_id) REFERENCES agents(agent_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(operator_agent_id) REFERENCES agents(agent_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(target_operator_agent_id) REFERENCES agents(agent_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_kb_query_matches (
+                    match_id TEXT PRIMARY KEY,
+                    query_id TEXT NOT NULL,
+                    kb_id TEXT,
+                    rank INTEGER NOT NULL,
+                    retrieval_mode TEXT NOT NULL DEFAULT 'keyword',
+                    retrieval_sources_json TEXT NOT NULL DEFAULT '[]',
+                    score REAL,
+                    keyword_rank INTEGER,
+                    semantic_score REAL,
+                    semantic_chunks_json TEXT NOT NULL DEFAULT '[]',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(query_id) REFERENCES operator_kb_queries(query_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(kb_id) REFERENCES operator_kb_entries(kb_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_kb_feedback (
+                    feedback_id TEXT PRIMARY KEY,
+                    query_id TEXT,
+                    match_id TEXT,
+                    kb_id TEXT,
+                    logical_operator_agent_id TEXT NOT NULL,
+                    operator_agent_id TEXT NOT NULL,
+                    feedback TEXT NOT NULL,
+                    summary TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(query_id) REFERENCES operator_kb_queries(query_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(match_id) REFERENCES operator_kb_query_matches(match_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(kb_id) REFERENCES operator_kb_entries(kb_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(logical_operator_agent_id) REFERENCES agents(agent_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(operator_agent_id) REFERENCES agents(agent_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS operator_kb_fts USING fts5(
                     kb_id UNINDEXED,
                     title,
@@ -816,6 +902,18 @@ class Store:
                     ON operator_kb_chunks(kb_id, chunk_index);
                 CREATE INDEX IF NOT EXISTS idx_operator_kb_chunks_hash
                     ON operator_kb_chunks(content_hash);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_queries_operator_created
+                    ON operator_kb_queries(logical_operator_agent_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_queries_project_created
+                    ON operator_kb_queries(project, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_query_matches_query_rank
+                    ON operator_kb_query_matches(query_id, rank ASC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_query_matches_kb
+                    ON operator_kb_query_matches(kb_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_feedback_query_created
+                    ON operator_kb_feedback(query_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_feedback_kb_created
+                    ON operator_kb_feedback(kb_id, created_at DESC);
                 """
             )
             previous_schema_version = self._schema_version(conn)
@@ -4095,6 +4193,343 @@ class Store:
             return 1
         return 2
 
+    def create_operator_kb_query(
+        self,
+        *,
+        logical_operator_agent_id: str,
+        operator_agent_id: str,
+        query: str,
+        matches: list[dict[str, Any]],
+        target_operator_agent_id: str | None = None,
+        scope: str | None = None,
+        project: str | None = None,
+        repo_root: str | None = None,
+        tags: list[str] | None = None,
+        include_expired: bool = False,
+        include_proposed: bool = False,
+        semantic: bool = False,
+        retrieval_mode: str = "keyword",
+        source: str = "search",
+        limit: int = 50,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            raise ValueError("KB query text is required")
+        query_id = str(uuid.uuid4())
+        current = now_ts()
+        normalized_tags = self._normalize_tags(tags or [])
+        semantic_match_count = 0
+        for entry in matches:
+            retrieval = self._operator_kb_entry_retrieval(entry)
+            sources = retrieval.get("sources") if isinstance(retrieval, dict) else []
+            if isinstance(sources, list) and "semantic" in sources:
+                semantic_match_count += 1
+        retrieval_model = (
+            OPERATOR_KB_RETRIEVAL_MODEL_SEMANTIC
+            if semantic
+            else OPERATOR_KB_RETRIEVAL_MODEL_KEYWORD
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_kb_queries
+                    (query_id, logical_operator_agent_id, operator_agent_id,
+                     target_operator_agent_id, query, scope, project, repo_root,
+                     tags_json, include_expired, include_proposed, semantic,
+                     retrieval_mode, retrieval_provider, retrieval_model,
+                     index_version, source, limit_count, match_count,
+                     semantic_match_count, satisfied_by_kb, metadata_json,
+                     created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    query_id,
+                    str(logical_operator_agent_id).strip(),
+                    str(operator_agent_id).strip(),
+                    self._none_if_blank(target_operator_agent_id),
+                    normalized_query,
+                    self._none_if_blank(scope),
+                    self._none_if_blank(project),
+                    self._none_if_blank(repo_root),
+                    json.dumps(normalized_tags),
+                    1 if include_expired else 0,
+                    1 if include_proposed else 0,
+                    1 if semantic else 0,
+                    str(retrieval_mode or "keyword"),
+                    OPERATOR_KB_RETRIEVAL_PROVIDER,
+                    retrieval_model,
+                    OPERATOR_KB_RETRIEVAL_INDEX_VERSION,
+                    str(source or "search").strip() or "search",
+                    min(max(int(limit), 1), 500),
+                    len(matches),
+                    semantic_match_count,
+                    1 if matches else 0,
+                    json.dumps(metadata or {}),
+                    current,
+                ),
+            )
+            for index, entry in enumerate(matches, start=1):
+                match_id = str(uuid.uuid4())
+                retrieval = self._operator_kb_entry_retrieval(entry)
+                sources = retrieval.get("sources") if isinstance(retrieval, dict) else []
+                chunks = (
+                    retrieval.get("semantic_chunks")
+                    if isinstance(retrieval, dict)
+                    else []
+                )
+                conn.execute(
+                    """
+                    INSERT INTO operator_kb_query_matches
+                        (match_id, query_id, kb_id, rank, retrieval_mode,
+                         retrieval_sources_json, score, keyword_rank,
+                         semantic_score, semantic_chunks_json, metadata_json,
+                         created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        match_id,
+                        query_id,
+                        self._none_if_blank(entry.get("kb_id")),
+                        index,
+                        str(retrieval.get("mode") or retrieval_mode or "keyword")
+                        if isinstance(retrieval, dict)
+                        else str(retrieval_mode or "keyword"),
+                        json.dumps(sources if isinstance(sources, list) else []),
+                        self._float_or_none(
+                            retrieval.get("score") if isinstance(retrieval, dict) else None
+                        ),
+                        self._int_or_none(
+                            retrieval.get("keyword_rank")
+                            if isinstance(retrieval, dict)
+                            else index
+                        ),
+                        self._float_or_none(
+                            retrieval.get("semantic_score")
+                            if isinstance(retrieval, dict)
+                            else None
+                        ),
+                        json.dumps(chunks if isinstance(chunks, list) else []),
+                        json.dumps(
+                            {
+                                "title": entry.get("title"),
+                                "status": entry.get("status"),
+                                "project": entry.get("project"),
+                            }
+                        ),
+                        current,
+                    ),
+                )
+        query_record = self.get_operator_kb_query(query_id)
+        if query_record is None:
+            raise RuntimeError("operator KB query insert failed")
+        return query_record
+
+    def get_operator_kb_query(self, query_id: str) -> dict[str, Any] | None:
+        normalized_query_id = str(query_id or "").strip()
+        if not normalized_query_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT query_id, logical_operator_agent_id, operator_agent_id,
+                       target_operator_agent_id, query, scope, project, repo_root,
+                       tags_json, include_expired, include_proposed, semantic,
+                       retrieval_mode, retrieval_provider, retrieval_model,
+                       index_version, source, limit_count, match_count,
+                       semantic_match_count, satisfied_by_kb, metadata_json,
+                       created_at
+                FROM operator_kb_queries
+                WHERE query_id = ?
+                """,
+                (normalized_query_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            query = self._operator_kb_query_from_row(row)
+            query["matches"] = self._operator_kb_query_matches_for_query(
+                conn,
+                normalized_query_id,
+            )
+            query["feedback"] = self._operator_kb_feedback_for_query(
+                conn,
+                normalized_query_id,
+            )
+            query["feedback_summary"] = self._operator_kb_feedback_summary_for_query(
+                conn,
+                normalized_query_id,
+            )
+        return query
+
+    def list_operator_kb_queries(
+        self,
+        *,
+        logical_operator_agent_id: str,
+        misses: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(int(limit), 1), 500)
+        where = ["logical_operator_agent_id = ?"]
+        params: list[Any] = [str(logical_operator_agent_id).strip()]
+        if misses:
+            where.append(
+                """
+                (
+                    match_count = 0
+                    OR EXISTS (
+                        SELECT 1
+                        FROM operator_kb_feedback f
+                        WHERE f.query_id = operator_kb_queries.query_id
+                          AND f.feedback = 'miss'
+                    )
+                    OR (
+                        EXISTS (
+                            SELECT 1
+                            FROM operator_kb_feedback f
+                            WHERE f.query_id = operator_kb_queries.query_id
+                              AND f.feedback IN ('rejected', 'stale', 'wrong_scope', 'unsafe')
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM operator_kb_feedback f
+                            WHERE f.query_id = operator_kb_queries.query_id
+                              AND f.feedback = 'accepted'
+                        )
+                    )
+                )
+                """
+            )
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT query_id, logical_operator_agent_id, operator_agent_id,
+                       target_operator_agent_id, query, scope, project, repo_root,
+                       tags_json, include_expired, include_proposed, semantic,
+                       retrieval_mode, retrieval_provider, retrieval_model,
+                       index_version, source, limit_count, match_count,
+                       semantic_match_count, satisfied_by_kb, metadata_json,
+                       created_at
+                FROM operator_kb_queries
+                WHERE {' AND '.join(where)}
+                ORDER BY created_at DESC, query_id DESC
+                LIMIT ?
+                """,
+                (*params, safe_limit),
+            ).fetchall()
+            queries = [self._operator_kb_query_from_row(row) for row in rows]
+            for query in queries:
+                query_id = str(query.get("query_id") or "")
+                query["matches"] = self._operator_kb_query_matches_for_query(
+                    conn,
+                    query_id,
+                )
+                query["feedback_summary"] = (
+                    self._operator_kb_feedback_summary_for_query(conn, query_id)
+                )
+        return queries
+
+    def create_operator_kb_feedback(
+        self,
+        *,
+        logical_operator_agent_id: str,
+        operator_agent_id: str,
+        feedback: str,
+        query_id: str | None = None,
+        match_id: str | None = None,
+        kb_id: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_feedback = self._normalize_operator_kb_feedback(feedback)
+        feedback_id = str(uuid.uuid4())
+        current = now_ts()
+        normalized_query_id = self._none_if_blank(query_id)
+        normalized_match_id = self._none_if_blank(match_id)
+        normalized_kb_id = self._none_if_blank(kb_id)
+        with self.connect() as conn:
+            if normalized_match_id:
+                row = conn.execute(
+                    """
+                    SELECT query_id, kb_id
+                    FROM operator_kb_query_matches
+                    WHERE match_id = ?
+                    """,
+                    (normalized_match_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("KB query match not found")
+                match_query_id = str(row["query_id"] or "")
+                match_kb_id = str(row["kb_id"] or "")
+                if normalized_query_id and normalized_query_id != match_query_id:
+                    raise ValueError("KB query match belongs to a different query")
+                if normalized_kb_id and match_kb_id and normalized_kb_id != match_kb_id:
+                    raise ValueError("KB query match belongs to a different KB entry")
+                normalized_query_id = normalized_query_id or match_query_id
+                normalized_kb_id = normalized_kb_id or match_kb_id or None
+            if normalized_query_id:
+                query_row = conn.execute(
+                    """
+                    SELECT logical_operator_agent_id
+                    FROM operator_kb_queries
+                    WHERE query_id = ?
+                    """,
+                    (normalized_query_id,),
+                ).fetchone()
+                if query_row is None:
+                    raise ValueError("KB query not found")
+                if (
+                    str(query_row["logical_operator_agent_id"] or "")
+                    != str(logical_operator_agent_id).strip()
+                ):
+                    raise ValueError("KB query belongs to a different operator")
+            if normalized_kb_id:
+                kb_row = conn.execute(
+                    """
+                    SELECT kb_id
+                    FROM operator_kb_entries
+                    WHERE kb_id = ?
+                    """,
+                    (normalized_kb_id,),
+                ).fetchone()
+                if kb_row is None:
+                    raise ValueError("KB entry not found")
+            if not normalized_query_id and not normalized_kb_id:
+                raise ValueError("KB feedback requires a query_id, match_id, or kb_id")
+            conn.execute(
+                """
+                INSERT INTO operator_kb_feedback
+                    (feedback_id, query_id, match_id, kb_id,
+                     logical_operator_agent_id, operator_agent_id, feedback,
+                     summary, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    feedback_id,
+                    normalized_query_id,
+                    normalized_match_id,
+                    normalized_kb_id,
+                    str(logical_operator_agent_id).strip(),
+                    str(operator_agent_id).strip(),
+                    normalized_feedback,
+                    self._none_if_blank(summary),
+                    json.dumps(metadata or {}),
+                    current,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT feedback_id, query_id, match_id, kb_id,
+                       logical_operator_agent_id, operator_agent_id, feedback,
+                       summary, metadata_json, created_at
+                FROM operator_kb_feedback
+                WHERE feedback_id = ?
+                """,
+                (feedback_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("operator KB feedback insert failed")
+        return self._operator_kb_feedback_from_row(row)
+
     def _operator_kb_search_filters(
         self,
         *,
@@ -5368,6 +5803,13 @@ class Store:
         return normalized
 
     @staticmethod
+    def _normalize_operator_kb_feedback(feedback: str | None) -> str:
+        normalized = str(feedback or "").strip().lower()
+        if normalized not in OPERATOR_KB_FEEDBACK_TYPES:
+            raise ValueError("KB feedback value is invalid")
+        return normalized
+
+    @staticmethod
     def _operator_kb_fts_match_query(query: str | None) -> str | None:
         terms = [
             term
@@ -5804,6 +6246,62 @@ class Store:
         return data
 
     @staticmethod
+    def _operator_kb_query_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        for key, default in (
+            ("tags_json", []),
+            ("metadata_json", {}),
+        ):
+            raw = data.pop(key)
+            try:
+                decoded = json.loads(raw or json.dumps(default))
+            except json.JSONDecodeError:
+                decoded = default
+            data[key.removesuffix("_json")] = (
+                decoded if isinstance(decoded, type(default)) else default
+            )
+        for key in (
+            "include_expired",
+            "include_proposed",
+            "semantic",
+            "satisfied_by_kb",
+        ):
+            data[key] = bool(data.get(key))
+        data["matches"] = []
+        data["feedback"] = []
+        data["feedback_summary"] = {}
+        return data
+
+    @staticmethod
+    def _operator_kb_query_match_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        for key, default in (
+            ("retrieval_sources_json", []),
+            ("semantic_chunks_json", []),
+            ("metadata_json", {}),
+        ):
+            raw = data.pop(key)
+            try:
+                decoded = json.loads(raw or json.dumps(default))
+            except json.JSONDecodeError:
+                decoded = default
+            data[key.removesuffix("_json")] = (
+                decoded if isinstance(decoded, type(default)) else default
+            )
+        return data
+
+    @staticmethod
+    def _operator_kb_feedback_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        metadata_json = data.pop("metadata_json")
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return data
+
+    @staticmethod
     def _operator_kb_seed_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         metadata_json = data.pop("metadata_json")
@@ -5841,6 +6339,95 @@ class Store:
             (kb_id,),
         ).fetchall()
         return [Store._operator_kb_source_from_row(row) for row in rows]
+
+    @staticmethod
+    def _operator_kb_query_matches_for_query(
+        conn: sqlite3.Connection,
+        query_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT match_id, query_id, kb_id, rank, retrieval_mode,
+                   retrieval_sources_json, score, keyword_rank, semantic_score,
+                   semantic_chunks_json, metadata_json, created_at
+            FROM operator_kb_query_matches
+            WHERE query_id = ?
+            ORDER BY rank ASC, created_at ASC
+            """,
+            (query_id,),
+        ).fetchall()
+        return [Store._operator_kb_query_match_from_row(row) for row in rows]
+
+    @staticmethod
+    def _operator_kb_feedback_for_query(
+        conn: sqlite3.Connection,
+        query_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT feedback_id, query_id, match_id, kb_id,
+                   logical_operator_agent_id, operator_agent_id, feedback,
+                   summary, metadata_json, created_at
+            FROM operator_kb_feedback
+            WHERE query_id = ?
+            ORDER BY created_at DESC, feedback_id DESC
+            """,
+            (query_id,),
+        ).fetchall()
+        return [Store._operator_kb_feedback_from_row(row) for row in rows]
+
+    @staticmethod
+    def _operator_kb_feedback_summary_for_query(
+        conn: sqlite3.Connection,
+        query_id: str,
+    ) -> dict[str, int]:
+        rows = conn.execute(
+            """
+            SELECT feedback, COUNT(*) AS count
+            FROM operator_kb_feedback
+            WHERE query_id = ?
+            GROUP BY feedback
+            """,
+            (query_id,),
+        ).fetchall()
+        return {str(row["feedback"]): int(row["count"] or 0) for row in rows}
+
+    @staticmethod
+    def _operator_kb_entry_retrieval(entry: dict[str, Any]) -> dict[str, Any]:
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        retrieval = (
+            metadata.get("retrieval")
+            if isinstance(metadata.get("retrieval"), dict)
+            else {}
+        )
+        if retrieval:
+            return dict(retrieval)
+        return {
+            "mode": "keyword",
+            "sources": ["keyword"],
+            "score": None,
+            "keyword_rank": None,
+            "semantic_score": None,
+            "semantic_chunks": [],
+        }
+
+    @staticmethod
+    def _float_or_none(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _int_or_none(value: Any) -> int | None:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _agent_prune_candidate_from_agent(

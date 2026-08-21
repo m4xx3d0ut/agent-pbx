@@ -18,7 +18,7 @@ from .paths import default_state_root
 
 UAT_MANIFEST_FORMAT = "agent-pbx-operator-kb-flow-uat-v1"
 DEFAULT_TMUX_SESSION_CANDIDATES = ("agent-pbx", "agent-pbx-operators")
-UAT_STAGE_ORDER = ("0", "1", "2", "3", "4", "5", "6", "7", "8")
+UAT_STAGE_ORDER = ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
 UAT_TERMINAL_HANDOFF_STATUSES = {
     "complete",
     "completed",
@@ -37,6 +37,7 @@ UAT_STAGE_DEPENDENCIES = {
     "6": {"0", "1"},
     "7": {"0", "1", "2"},
     "8": {"0", "1", "2"},
+    "9": {"0", "1", "2"},
 }
 
 
@@ -460,6 +461,8 @@ class OperatorKbFlowUAT:
                 self.run_stage("7", self.stage_7_multi_operator_lifecycle)
             if self.should_run_stage("8"):
                 self.run_stage("8", self.stage_8_semantic_kb_retrieval)
+            if self.should_run_stage("9"):
+                self.run_stage("9", self.stage_9_kb_feedback_observability)
         except BaseException as exc:  # noqa: BLE001 - UAT output must include failures.
             self.unexpected_error = "".join(
                 traceback.format_exception_only(type(exc), exc)
@@ -1808,6 +1811,153 @@ class OperatorKbFlowUAT:
                 "delivery_status": approved.get("handoff", {}).get("delivery_status"),
                 "command": approved.get("command"),
                 "status": completed.get("status"),
+            },
+        )
+
+    def stage_9_kb_feedback_observability(self) -> None:
+        if not self.created_kb_ids:
+            raise AssertionError("stage 9 requires a promoted KB entry from stage 2")
+        kb_id = self.created_kb_ids[0]
+        useful_context = self.client.request(
+            "POST",
+            "/v1/operator/kb/context",
+            {
+                "operator_agent_id": self.sim_b,
+                "query": "knowledge coordinator route guidance",
+                "project": self.project,
+                "tags": ["kb-sim"],
+                "semantic": True,
+                "limit": 5,
+            },
+        )
+        useful_query_id = str(useful_context.get("query_id") or "")
+        useful_entry = (
+            useful_context.get("kb_entries", [{}])[0]
+            if useful_context.get("kb_entries")
+            else {}
+        )
+        retrieval = useful_entry.get("metadata", {}).get("retrieval", {})
+        accepted = self.client.request(
+            "POST",
+            f"/v1/operator/kb/queries/{self.quote(useful_query_id)}/feedback",
+            {
+                "operator_agent_id": self.sim_b,
+                "match_id": retrieval.get("match_id"),
+                "kb_id": kb_id,
+                "feedback": "accepted",
+                "summary": "UAT accepted semantic KB match.",
+                "metadata": {"uat_run": self.tag, "uat_stage": "9"},
+            },
+        )
+        self.check(
+            "9",
+            "accepted KB retrieval feedback records against match",
+            bool(useful_query_id)
+            and accepted.get("feedback") == "accepted"
+            and accepted.get("query_id") == useful_query_id
+            and accepted.get("match_id") == retrieval.get("match_id"),
+            {
+                "query_id": useful_query_id,
+                "match_id": retrieval.get("match_id"),
+                "feedback": accepted.get("feedback"),
+            },
+        )
+        miss_context = self.client.request(
+            "POST",
+            "/v1/operator/kb/context",
+            {
+                "operator_agent_id": self.sim_b,
+                "query": "zirconium nebula escrow glyph",
+                "project": self.project,
+                "tags": ["kb-sim"],
+                "semantic": True,
+                "limit": 5,
+            },
+        )
+        miss_query_id = str(miss_context.get("query_id") or "")
+        miss_feedback = self.client.request(
+            "POST",
+            f"/v1/operator/kb/queries/{self.quote(miss_query_id)}/feedback",
+            {
+                "operator_agent_id": self.sim_b,
+                "feedback": "miss",
+                "summary": "UAT marked unmatched query as a KB miss.",
+                "metadata": {"uat_run": self.tag, "uat_stage": "9"},
+            },
+        )
+        self.check(
+            "9",
+            "miss KB retrieval feedback records without match",
+            miss_context.get("satisfied_by_kb") is False
+            and bool(miss_query_id)
+            and miss_feedback.get("feedback") == "miss"
+            and miss_feedback.get("query_id") == miss_query_id,
+            {
+                "query_id": miss_query_id,
+                "match_count": miss_context.get("match_count"),
+                "feedback": miss_feedback.get("feedback"),
+            },
+        )
+        history = self.client.request(
+            "GET",
+            "/v1/operator/kb/queries",
+            query={"operator_agent_id": self.sim_b, "limit": 20},
+        )
+        history_queries = history.get("queries", [])
+        history_ids = [
+            str(query.get("query_id") or "")
+            for query in history_queries
+            if isinstance(query, dict)
+        ]
+        self.check(
+            "9",
+            "KB query history includes feedback summaries",
+            useful_query_id in history_ids
+            and miss_query_id in history_ids
+            and any(
+                query.get("feedback_summary", {}).get("accepted") == 1
+                for query in history_queries
+                if isinstance(query, dict)
+                and str(query.get("query_id") or "") == useful_query_id
+            ),
+            {"history_ids": history_ids[:8]},
+        )
+        misses = self.client.request(
+            "GET",
+            "/v1/operator/kb/queries",
+            query={"operator_agent_id": self.sim_b, "misses": True, "limit": 20},
+        )
+        miss_ids = [
+            str(query.get("query_id") or "")
+            for query in misses.get("queries", [])
+            if isinstance(query, dict)
+        ]
+        self.check(
+            "9",
+            "KB miss report includes explicit miss and excludes accepted match",
+            miss_query_id in miss_ids and useful_query_id not in miss_ids,
+            {"miss_ids": miss_ids},
+        )
+        exported = self.client.request(
+            "GET",
+            "/v1/operator/kb/export",
+            query={
+                "operator_agent_id": self.sim_a,
+                "query": "Durable handoff routing guidance",
+                "project": self.project,
+            },
+        )
+        exported_text = json.dumps(exported, sort_keys=True)
+        self.check(
+            "9",
+            "KB export excludes retrieval observability records",
+            "operator_kb_queries" not in exported_text
+            and useful_query_id not in exported_text
+            and miss_query_id not in exported_text,
+            {
+                "exported_count": len(exported.get("entries", []))
+                if isinstance(exported.get("entries"), list)
+                else 0,
             },
         )
 

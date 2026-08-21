@@ -296,6 +296,9 @@ def build_mcp_server(
             include_expired=include_expired,
             semantic=semantic,
             limit=limit,
+            record_query=bool(str(query or "").strip()),
+            query_source="mcp_search",
+            query_metadata={"requested_by": "pbx_operator_kb_search"},
         )
 
     @mcp.tool()
@@ -325,6 +328,51 @@ def build_mcp_server(
             include_proposed=include_proposed,
             semantic=semantic,
             limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_list_queries(
+        operator_agent_id: str,
+        misses: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List recent KB retrieval queries for an operator."""
+        return operator_service.list_kb_queries(
+            operator_agent_id=operator_agent_id,
+            misses=misses,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_get_query(
+        operator_agent_id: str,
+        query_id: str,
+    ) -> dict[str, Any]:
+        """Return one KB retrieval query with matches and feedback."""
+        return operator_service.get_kb_query(
+            operator_agent_id=operator_agent_id,
+            query_id=query_id,
+        )
+
+    @mcp.tool()
+    def pbx_operator_kb_feedback(
+        operator_agent_id: str,
+        feedback: str,
+        query_id: str | None = None,
+        match_id: str | None = None,
+        kb_id: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record explicit operator feedback for a KB retrieval result or miss."""
+        return operator_service.create_kb_feedback(
+            operator_agent_id=operator_agent_id,
+            query_id=query_id,
+            match_id=match_id,
+            kb_id=kb_id,
+            feedback=feedback,
+            summary=summary,
+            metadata=metadata or {},
         )
 
     @mcp.tool()

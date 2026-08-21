@@ -108,6 +108,8 @@ from .schemas import (
     OperatorKbEntryCreateRequest,
     OperatorKbEntryResponse,
     OperatorKbExportResponse,
+    OperatorKbFeedbackRequest,
+    OperatorKbFeedbackResponse,
     OperatorKbFromLinkRequest,
     OperatorKbImportRequest,
     OperatorKbImportResponse,
@@ -117,6 +119,8 @@ from .schemas import (
     OperatorKbIndexRunResponse,
     OperatorKbListResponse,
     OperatorKbPromoteRequest,
+    OperatorKbQueryListResponse,
+    OperatorKbQueryResponse,
     OperatorKbRejectRequest,
     OperatorKbRetireRequest,
     OperatorKbSeedRunCreateRequest,
@@ -1714,6 +1718,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             include_expired=include_expired,
             semantic=semantic,
             limit=limit,
+            record_query=bool(str(query or "").strip()),
+            query_source="search",
+            query_metadata={"requested_by": "list_operator_kb_entries"},
         )
         return {"kb_entries": entries}
 
@@ -1740,6 +1747,65 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             include_proposed=payload.include_proposed,
             semantic=payload.semantic,
             limit=payload.limit,
+        )
+
+    @app.get(
+        "/v1/operator/kb/queries",
+        response_model=OperatorKbQueryListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_kb_queries(
+        request: Request,
+        operator_agent_id: str,
+        misses: bool = False,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        queries = await asyncio.to_thread(
+            operator_service.list_kb_queries,
+            operator_agent_id=operator_agent_id,
+            misses=misses,
+            limit=limit,
+        )
+        return {"queries": queries}
+
+    @app.get(
+        "/v1/operator/kb/queries/{query_id}",
+        response_model=OperatorKbQueryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_operator_kb_query(
+        query_id: str,
+        operator_agent_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.get_kb_query,
+            operator_agent_id=operator_agent_id,
+            query_id=query_id,
+        )
+
+    @app.post(
+        "/v1/operator/kb/queries/{query_id}/feedback",
+        response_model=OperatorKbFeedbackResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def create_operator_kb_query_feedback(
+        query_id: str,
+        payload: OperatorKbFeedbackRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.create_kb_feedback,
+            operator_agent_id=payload.operator_agent_id,
+            query_id=query_id,
+            match_id=payload.match_id,
+            kb_id=payload.kb_id,
+            feedback=payload.feedback,
+            summary=payload.summary,
+            metadata=payload.metadata,
         )
 
     @app.post(

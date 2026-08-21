@@ -82,6 +82,14 @@ OperatorKbSeedRunStatus = Literal[
     "canceled",
     "cancelled",
 ]
+OperatorKbFeedbackType = Literal[
+    "accepted",
+    "rejected",
+    "stale",
+    "wrong_scope",
+    "unsafe",
+    "miss",
+]
 OperatorKbIndexJobOperation = Literal["upsert", "delete", "rebuild"]
 OperatorKbIndexJobStatus = Literal["queued", "running", "complete", "failed"]
 AssignmentState = Literal[
@@ -634,9 +642,80 @@ class OperatorKbContextResponse(BaseModel):
     retrieval_mode: str = "keyword"
     semantic: bool = False
     semantic_match_count: int = 0
+    query_id: str | None = None
     satisfied_by_kb: bool
     match_count: int
     kb_entries: list[OperatorKbEntryResponse] = Field(default_factory=list)
+
+
+class OperatorKbQueryMatchResponse(BaseModel):
+    match_id: str
+    query_id: str
+    kb_id: str | None = None
+    rank: int
+    retrieval_mode: str
+    retrieval_sources: list[str] = Field(default_factory=list)
+    score: float | None = None
+    keyword_rank: int | None = None
+    semantic_score: float | None = None
+    semantic_chunks: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: float
+
+
+class OperatorKbFeedbackResponse(BaseModel):
+    feedback_id: str
+    query_id: str | None = None
+    match_id: str | None = None
+    kb_id: str | None = None
+    logical_operator_agent_id: str
+    operator_agent_id: str
+    feedback: str
+    summary: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: float
+
+
+class OperatorKbQueryResponse(BaseModel):
+    query_id: str
+    logical_operator_agent_id: str
+    operator_agent_id: str
+    target_operator_agent_id: str | None = None
+    query: str
+    scope: str | None = None
+    project: str | None = None
+    repo_root: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    include_expired: bool
+    include_proposed: bool
+    semantic: bool
+    retrieval_mode: str
+    retrieval_provider: str
+    retrieval_model: str
+    index_version: str
+    source: str
+    limit_count: int
+    match_count: int
+    semantic_match_count: int
+    satisfied_by_kb: bool
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: float
+    matches: list[OperatorKbQueryMatchResponse] = Field(default_factory=list)
+    feedback: list[OperatorKbFeedbackResponse] = Field(default_factory=list)
+    feedback_summary: dict[str, int] = Field(default_factory=dict)
+
+
+class OperatorKbQueryListResponse(BaseModel):
+    queries: list[OperatorKbQueryResponse] = Field(default_factory=list)
+
+
+class OperatorKbFeedbackRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    match_id: str | None = Field(default=None, max_length=120)
+    kb_id: str | None = Field(default=None, max_length=120)
+    feedback: OperatorKbFeedbackType
+    summary: str | None = Field(default=None, max_length=4000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class OperatorKbCompileReportRequest(BaseModel):

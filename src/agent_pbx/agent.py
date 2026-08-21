@@ -196,7 +196,11 @@ When a knowledge link or handoff produces reusable operating guidance, operators
 and review forks may propose PBX-managed KB entries with
 `pbx_operator_kb_propose` or `pbx_operator_kb_propose_from_link`, and may query
 existing active entries with `pbx_operator_kb_context` before starting a
-knowledge handoff. A handoff can include `metadata.kb_query` or
+knowledge handoff. Context and recorded search results include `query_id` and
+`match_id` retrieval evidence; use `pbx_operator_kb_feedback` to mark useful,
+wrong, stale, unsafe, wrong-scope, or missed results, and
+`pbx_operator_kb_list_queries` / `pbx_operator_kb_get_query` to inspect query
+history and misses. A handoff can include `metadata.kb_query` or
 `metadata.include_kb_context=true` to attach matching active KB entries to the
 delivered handoff prompt. Operator reports can include
 `metadata.operator_kb_candidates`, `metadata.kb_candidates`, or
@@ -558,7 +562,7 @@ def runbook_payload() -> dict[str, Any]:
             "pbx_pr_context returns read-only GitHub pull request context for this agent project; agents use it for PR review only.",
             "pbx_issue_context returns read-only GitHub issue context for this agent project; agents use it for issue mitigation only.",
             "pbx_operator_runbook returns operator-agent campaign, review, and project-spawn guidance.",
-            "pbx_operator_* tools are for operator agents to create tracked campaigns, dispatch caller assignments, inspect caller threads, call pbx_operator_route_review_escalation, call pbx_operator_request_project_spawn for sibling project spawns, create operator knowledge links and handoffs, start/update KB seed runs, compile/report/search/context/update/promote/reject/retire PBX-managed KB entries, update assignment or handoff state, and finish campaigns.",
+            "pbx_operator_* tools are for operator agents to create tracked campaigns, dispatch caller assignments, inspect caller threads, call pbx_operator_route_review_escalation, call pbx_operator_request_project_spawn for sibling project spawns, create operator knowledge links and handoffs, start/update KB seed runs, compile/report/search/context/feedback/update/promote/reject/retire PBX-managed KB entries, inspect KB query history and misses, update assignment or handoff state, and finish campaigns.",
         ],
         "agent_types": [
             "caller is the default agent_type and keeps existing report/nohup behavior.",
@@ -569,7 +573,7 @@ def runbook_payload() -> dict[str, Any]:
             "Review forks route source-edit needs through pbx_operator_route_review_escalation.",
             "Review forks request sibling projects through pbx_operator_request_project_spawn; the TUI/root operator approves and launches the new project as a normal caller agent.",
             "Review forks propose domain handoffs through pbx_operator_propose_knowledge_handoff; the TUI/root operator can preflight delivery through pbx_operator_preflight_handoff and approves executable handoff delivery before another operator receives the workflow.",
-            "Review forks can search active KB entries, request SQLite-local hybrid keyword/semantic KB context through pbx_operator_kb_context, compile explicit report KB candidates through pbx_operator_kb_compile_report, propose KB entries through pbx_operator_kb_propose or pbx_operator_kb_propose_from_link, and mark their KB seed runs complete through pbx_operator_kb_update_seed_run; root operators update, promote, reject, retire, export, import, and rebuild indexes for canonical KB records.",
+            "Review forks can search active KB entries, request SQLite-local hybrid keyword/semantic KB context through pbx_operator_kb_context, inspect KB query history/misses, record retrieval feedback through pbx_operator_kb_feedback, compile explicit report KB candidates through pbx_operator_kb_compile_report, propose KB entries through pbx_operator_kb_propose or pbx_operator_kb_propose_from_link, and mark their KB seed runs complete through pbx_operator_kb_update_seed_run; root operators update, promote, reject, retire, export, import, and rebuild indexes for canonical KB records.",
             "Operators acknowledge handoffs through pbx_operator_ack_handoff and update running or terminal handoff state through pbx_operator_update_handoff.",
             "Knowledge links and operator handoffs do not create fork edges, assignments, or source-session ownership.",
             "Campaign tables are the source of truth for campaign state; reports and commands are linked audit artifacts.",

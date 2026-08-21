@@ -168,6 +168,9 @@ REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_operator_preflight_handoff",
     "pbx_operator_kb_search",
     "pbx_operator_kb_context",
+    "pbx_operator_kb_list_queries",
+    "pbx_operator_kb_get_query",
+    "pbx_operator_kb_feedback",
     "pbx_operator_kb_get",
     "pbx_operator_kb_propose",
     "pbx_operator_kb_propose_from_link",
@@ -468,6 +471,9 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/operator kb detail",
     "/operator kb proposed",
     "/operator kb proposed detail",
+    "/operator kb search",
+    "/operator kb history",
+    "/operator kb misses",
     "/operator kb seed",
     "/operator kb promote",
     "/operator kb reject",
@@ -3924,8 +3930,12 @@ class AgentPBXTUI(App[None]):
         self.selected_campaign_id_by_operator: dict[str, str] = {}
         self.selected_campaign_report_id_by_operator: dict[str, str] = {}
         self.operator_kb_entries_by_operator: dict[str, dict[str, dict[str, Any]]] = {}
+        self.operator_kb_queries_by_operator: dict[str, dict[str, dict[str, Any]]] = {}
         self.selected_operator_kb_id_by_operator: dict[str, str] = {}
+        self.selected_operator_kb_query_id_by_operator: dict[str, str] = {}
         self.operator_kb_status_filter_by_operator: dict[str, str] = {}
+        self.operator_kb_mode_by_operator: dict[str, str] = {}
+        self.operator_kb_search_query_by_operator: dict[str, str] = {}
         self.joplin_configured = False
         self.joplin_available = False
         self.joplin_status: dict[str, Any] = {}
@@ -4231,6 +4241,11 @@ class AgentPBXTUI(App[None]):
                         )
                         yield NavigationTextArea(id="operator-kb-detail", read_only=True)
                         with Vertical(id="operator-kb-actions"):
+                            with Horizontal(id="operator-kb-search-actions"):
+                                yield Input(placeholder="KB query", id="operator-kb-query")
+                                yield Button("Search", id="operator-kb-search")
+                                yield Button("History", id="operator-kb-history")
+                                yield Button("Misses", id="operator-kb-misses")
                             with Horizontal(id="operator-kb-filter-actions"):
                                 yield Button("Refresh", id="operator-kb-refresh")
                                 yield Button("Active", id="operator-kb-active")
@@ -4241,6 +4256,9 @@ class AgentPBXTUI(App[None]):
                                 yield Button("Promote", id="operator-kb-promote")
                                 yield Button("Reject", id="operator-kb-reject")
                                 yield Button("Retire", id="operator-kb-retire")
+                                yield Button("Useful", id="operator-kb-feedback-accepted")
+                                yield Button("Wrong", id="operator-kb-feedback-rejected")
+                                yield Button("Miss", id="operator-kb-feedback-miss")
                     with TabPane("Joplin", id="joplin-tab"):
                         yield Static("Joplin: checking...", id="joplin-status")
                         yield DataTable(
@@ -4445,6 +4463,9 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator kb detail", "Show the latest active KB entry body", self.palette_operator_kb_detail)
         yield SystemCommand("/operator kb proposed", "Show proposed KB entries for the selected operator", self.palette_operator_kb_proposed)
         yield SystemCommand("/operator kb proposed detail", "Show the oldest proposed KB entry body", self.palette_operator_kb_proposed_detail)
+        yield SystemCommand("/operator kb search", "Search active KB entries with hybrid retrieval", self.palette_operator_kb_search)
+        yield SystemCommand("/operator kb history", "Show recent KB retrieval queries", self.palette_operator_kb_history)
+        yield SystemCommand("/operator kb misses", "Show KB retrieval misses and rejected matches", self.palette_operator_kb_misses)
         yield SystemCommand("/operator kb seed", "Ask the selected operator to propose durable KB entries", self.palette_operator_kb_seed)
         yield SystemCommand("/operator kb compile", "Compile KB proposals from the selected operator's latest report", self.palette_operator_kb_compile)
         yield SystemCommand("/operator kb reindex", "Rebuild the operator KB search index", self.palette_operator_kb_reindex)
@@ -4861,6 +4882,27 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.show_selected_operator_kb_detail(status="proposed"),
             name="palette-operator-kb-proposed-detail",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_search(self) -> None:
+        self.run_worker(
+            self.search_operator_kb(),
+            name="palette-operator-kb-search",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_history(self) -> None:
+        self.run_worker(
+            self.load_operator_kb_queries_for_selected(),
+            name="palette-operator-kb-history",
+            exclusive=True,
+        )
+
+    def palette_operator_kb_misses(self) -> None:
+        self.run_worker(
+            self.load_operator_kb_queries_for_selected(misses=True),
+            name="palette-operator-kb-misses",
             exclusive=True,
         )
 
@@ -7277,7 +7319,11 @@ class AgentPBXTUI(App[None]):
             self.select_campaign(str(event.row_key.value))
             return
         if event.data_table.id == "operator-kb":
-            self.select_operator_kb_entry(str(event.row_key.value))
+            key = str(event.row_key.value)
+            if key.startswith("query:"):
+                self.select_operator_kb_query(key.removeprefix("query:"))
+            else:
+                self.select_operator_kb_entry(key)
             return
         if event.data_table.id == "joplin-notes":
             await self.select_joplin_note(str(event.row_key.value))
@@ -7309,7 +7355,11 @@ class AgentPBXTUI(App[None]):
             self.select_campaign(str(event.cell_key.row_key.value))
             return
         if event.data_table.id == "operator-kb":
-            self.select_operator_kb_entry(str(event.cell_key.row_key.value))
+            key = str(event.cell_key.row_key.value)
+            if key.startswith("query:"):
+                self.select_operator_kb_query(key.removeprefix("query:"))
+            else:
+                self.select_operator_kb_entry(key)
             return
         if event.data_table.id == "joplin-notes":
             await self.select_joplin_note(str(event.cell_key.row_key.value))
@@ -9496,7 +9546,31 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "operator-kb-refresh":
             if self.selected_agent_id:
-                await self.load_operator_kb(self.selected_agent_id)
+                logical_operator_id = self.operator_kb_operator_id_for_agent(
+                    self.selected_agent_id
+                )
+                mode = (
+                    self.operator_kb_mode_by_operator.get(logical_operator_id or "")
+                    if logical_operator_id
+                    else None
+                )
+                if mode == "history":
+                    await self.load_operator_kb_queries(self.selected_agent_id)
+                elif mode == "misses":
+                    await self.load_operator_kb_queries(self.selected_agent_id, misses=True)
+                elif mode == "search":
+                    await self.search_operator_kb()
+                else:
+                    await self.load_operator_kb(self.selected_agent_id)
+            return
+        if event.button.id == "operator-kb-search":
+            await self.search_operator_kb()
+            return
+        if event.button.id == "operator-kb-history":
+            await self.load_operator_kb_queries_for_selected()
+            return
+        if event.button.id == "operator-kb-misses":
+            await self.load_operator_kb_queries_for_selected(misses=True)
             return
         operator_kb_status_buttons = {
             "operator-kb-active": "active",
@@ -9520,6 +9594,15 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "operator-kb-retire":
             await self.retire_selected_operator_kb_entry()
+            return
+        feedback_buttons = {
+            "operator-kb-feedback-accepted": "accepted",
+            "operator-kb-feedback-rejected": "rejected",
+            "operator-kb-feedback-miss": "miss",
+        }
+        feedback = feedback_buttons.get(str(event.button.id or ""))
+        if feedback is not None:
+            await self.feedback_selected_operator_kb(feedback)
             return
         if event.button.id == "start-operator":
             await self.start_operator_agent()
@@ -14029,6 +14112,7 @@ class AgentPBXTUI(App[None]):
         *,
         status: str | None = "active",
         query: str | None = None,
+        semantic: bool = False,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
@@ -14039,6 +14123,7 @@ class AgentPBXTUI(App[None]):
             params["status"] = status
         if query:
             params["query"] = query
+            params["semantic"] = semantic
         response = await self.api_client().get(
             "/v1/operator/kb",
             params=params,
@@ -14052,6 +14137,60 @@ class AgentPBXTUI(App[None]):
         if not isinstance(entries, list):
             return []
         return [item for item in entries if isinstance(item, dict)]
+
+    async def fetch_operator_kb_queries(
+        self,
+        logical_operator_id: str,
+        *,
+        misses: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        response = await self.api_client().get(
+            "/v1/operator/kb/queries",
+            params={
+                "operator_agent_id": logical_operator_id,
+                "misses": misses,
+                "limit": limit,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return []
+        queries = payload.get("queries")
+        if not isinstance(queries, list):
+            return []
+        return [item for item in queries if isinstance(item, dict)]
+
+    async def submit_operator_kb_feedback(
+        self,
+        logical_operator_id: str,
+        *,
+        query_id: str,
+        feedback: str,
+        match_id: str | None = None,
+        kb_id: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/kb/queries/{query_id}/feedback",
+            json={
+                "operator_agent_id": logical_operator_id,
+                "match_id": match_id,
+                "kb_id": kb_id,
+                "feedback": feedback,
+                "summary": summary,
+                "metadata": metadata or {},
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("KB feedback response was not an object")
 
     async def promote_operator_kb_entry(
         self,
@@ -14286,6 +14425,7 @@ class AgentPBXTUI(App[None]):
             or "active"
         )
         self.operator_kb_status_filter_by_operator[logical_operator_id] = resolved_status
+        self.operator_kb_mode_by_operator[logical_operator_id] = "entries"
         if status_label is not None:
             status_label.update(
                 f"KB: loading {resolved_status} entries for "
@@ -14334,6 +14474,125 @@ class AgentPBXTUI(App[None]):
                 f"{logical_operator_id}."
             )
 
+    async def search_operator_kb(self) -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            self.notify("Select an operator before searching KB.", severity="warning")
+            return
+        logical_operator_id = self.operator_kb_operator_id_for_agent(operator_agent_id)
+        if not logical_operator_id:
+            self.notify("KB search is available for operator agents only.", severity="warning")
+            return
+        query_input = self.query_one_or_none("#operator-kb-query", Input)
+        query = str(query_input.value if query_input is not None else "").strip()
+        if not query:
+            self.notify("Enter a KB query before searching.", severity="warning")
+            return
+        status_label = self.query_one_or_none("#operator-kb-status", Static)
+        detail = self.query_one_or_none("#operator-kb-detail", TextArea)
+        self.operator_kb_search_query_by_operator[logical_operator_id] = query
+        self.operator_kb_mode_by_operator[logical_operator_id] = "search"
+        if status_label is not None:
+            status_label.update(f"KB: searching for {query!r}...")
+        try:
+            entries = await self.fetch_operator_kb_entries(
+                logical_operator_id,
+                status="active",
+                query=query,
+                semantic=True,
+                limit=50,
+            )
+        except Exception as exc:
+            self.render_operator_kb(logical_operator_id, [], status="search")
+            if status_label is not None:
+                status_label.update(f"KB: search failed ({exc})")
+            if detail is not None:
+                detail.text = f"Unable to search operator KB for {logical_operator_id}: {exc}"
+            return
+        self.operator_kb_entries_by_operator[logical_operator_id] = {
+            str(entry.get("kb_id") or "").strip(): entry
+            for entry in entries
+            if str(entry.get("kb_id") or "").strip()
+        }
+        self.render_operator_kb(logical_operator_id, entries, status="search")
+        if status_label is not None:
+            status_label.update(
+                f"KB: {len(entries)} search result"
+                f"{'' if len(entries) == 1 else 's'} for {logical_operator_id}"
+            )
+        if entries:
+            self.select_operator_kb_entry(
+                str(entries[0].get("kb_id") or ""),
+                logical_operator_id=logical_operator_id,
+            )
+        elif detail is not None:
+            detail.text = f"No KB matches for {query!r}."
+
+    async def load_operator_kb_queries_for_selected(self, *, misses: bool = False) -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            self.notify("Select an operator before loading KB history.", severity="warning")
+            return
+        await self.load_operator_kb_queries(operator_agent_id, misses=misses)
+
+    async def load_operator_kb_queries(
+        self,
+        agent_id: str,
+        *,
+        misses: bool = False,
+    ) -> None:
+        status_label = self.query_one_or_none("#operator-kb-status", Static)
+        detail = self.query_one_or_none("#operator-kb-detail", TextArea)
+        logical_operator_id = self.operator_kb_operator_id_for_agent(agent_id)
+        if logical_operator_id is None:
+            self.render_operator_kb_queries("", [], misses=misses)
+            if status_label is not None:
+                status_label.update("KB: select an operator agent")
+            if detail is not None:
+                detail.text = "KB query history is shown for operator agents only."
+            return
+        mode = "misses" if misses else "history"
+        self.operator_kb_mode_by_operator[logical_operator_id] = mode
+        if status_label is not None:
+            status_label.update(f"KB: loading {mode} for {logical_operator_id}...")
+        try:
+            queries = await self.fetch_operator_kb_queries(
+                logical_operator_id,
+                misses=misses,
+                limit=100,
+            )
+        except Exception as exc:
+            self.render_operator_kb_queries(logical_operator_id, [], misses=misses)
+            if status_label is not None:
+                status_label.update(f"KB: unable to load {mode} ({exc})")
+            if detail is not None:
+                detail.text = f"Unable to load KB {mode} for {logical_operator_id}: {exc}"
+            return
+        self.operator_kb_queries_by_operator[logical_operator_id] = {
+            str(query.get("query_id") or "").strip(): query
+            for query in queries
+            if str(query.get("query_id") or "").strip()
+        }
+        self.render_operator_kb_queries(logical_operator_id, queries, misses=misses)
+        if status_label is not None:
+            status_label.update(
+                f"KB: {len(queries)} {mode} quer"
+                f"{'y' if len(queries) == 1 else 'ies'} for {logical_operator_id}"
+            )
+        selected = self.selected_operator_kb_query_id_by_operator.get(logical_operator_id)
+        if selected not in self.operator_kb_queries_by_operator.get(
+            logical_operator_id,
+            {},
+        ):
+            selected = str(queries[0].get("query_id") or "") if queries else ""
+        if selected:
+            self.select_operator_kb_query(
+                selected,
+                logical_operator_id=logical_operator_id,
+            )
+        elif detail is not None:
+            detail.text = f"No KB {mode} queries for {logical_operator_id}."
+
     @staticmethod
     def order_operator_kb_entries(
         entries: list[dict[str, Any]],
@@ -14367,11 +14626,16 @@ class AgentPBXTUI(App[None]):
         table = self.query_one_or_none("#operator-kb", DataTable)
         if table is None:
             return
-        table.clear()
+        table.clear(columns=True)
+        if status == "search":
+            table.add_columns("Mode", "Score", "Feedback", "Project", "Title", "Tags", "Updated")
+        else:
+            table.add_columns("Status", "Redact", "Scope", "Project", "Title", "Tags", "Updated")
         for entry in entries:
             kb_id = str(entry.get("kb_id") or "").strip()
             if not kb_id:
                 continue
+            retrieval = self.operator_kb_entry_retrieval(entry)
             tags = entry.get("tags") if isinstance(entry.get("tags"), list) else []
             tag_text = ", ".join(str(tag) for tag in tags[:3]) or "-"
             if len(tags) > 3:
@@ -14382,16 +14646,31 @@ class AgentPBXTUI(App[None]):
                 if updated_at is not None
                 else "-"
             )
-            table.add_row(
-                str(entry.get("status") or status or "-"),
-                str(entry.get("redaction_status") or "-"),
-                str(entry.get("scope") or "-"),
-                str(entry.get("project") or "-"),
-                str(entry.get("title") or kb_id),
-                tag_text,
-                updated_text,
-                key=kb_id,
-            )
+            if status == "search":
+                score = float_value(retrieval.get("score"))
+                score_text = f"{score:.3f}" if score is not None else "-"
+                feedback = str(retrieval.get("feedback") or "-")
+                table.add_row(
+                    str(retrieval.get("mode") or "-"),
+                    score_text,
+                    feedback,
+                    str(entry.get("project") or "-"),
+                    str(entry.get("title") or kb_id),
+                    tag_text,
+                    updated_text,
+                    key=kb_id,
+                )
+            else:
+                table.add_row(
+                    str(entry.get("status") or status or "-"),
+                    str(entry.get("redaction_status") or "-"),
+                    str(entry.get("scope") or "-"),
+                    str(entry.get("project") or "-"),
+                    str(entry.get("title") or kb_id),
+                    tag_text,
+                    updated_text,
+                    key=kb_id,
+                )
         selected = self.selected_operator_kb_id_by_operator.get(logical_operator_id)
         if selected and selected in self.operator_kb_entries_by_operator.get(
             logical_operator_id,
@@ -14400,6 +14679,62 @@ class AgentPBXTUI(App[None]):
             try:
                 table.move_cursor(
                     row=table.get_row_index(selected),
+                    animate=False,
+                    scroll=True,
+                )
+            except Exception:
+                pass
+
+    def render_operator_kb_queries(
+        self,
+        logical_operator_id: str,
+        queries: list[dict[str, Any]],
+        *,
+        misses: bool,
+    ) -> None:
+        table = self.query_one_or_none("#operator-kb", DataTable)
+        if table is None:
+            return
+        table.clear(columns=True)
+        table.add_columns("When", "Matches", "Feedback", "Mode", "Query", "Project", "Source")
+        for query in queries:
+            query_id = str(query.get("query_id") or "").strip()
+            if not query_id:
+                continue
+            created_at = float_value(query.get("created_at"))
+            created_text = (
+                self.format_short_time(created_at)
+                if created_at is not None
+                else "-"
+            )
+            feedback_summary = (
+                query.get("feedback_summary")
+                if isinstance(query.get("feedback_summary"), dict)
+                else {}
+            )
+            feedback_text = ", ".join(
+                f"{key}:{value}"
+                for key, value in sorted(feedback_summary.items())
+                if value
+            ) or "-"
+            table.add_row(
+                created_text,
+                str(query.get("match_count") or 0),
+                feedback_text,
+                str(query.get("retrieval_mode") or "-"),
+                str(query.get("query") or query_id),
+                str(query.get("project") or "-"),
+                str(query.get("source") or ("misses" if misses else "history")),
+                key=f"query:{query_id}",
+            )
+        selected = self.selected_operator_kb_query_id_by_operator.get(logical_operator_id)
+        if selected and selected in self.operator_kb_queries_by_operator.get(
+            logical_operator_id,
+            {},
+        ):
+            try:
+                table.move_cursor(
+                    row=table.get_row_index(f"query:{selected}"),
                     animate=False,
                     scroll=True,
                 )
@@ -14426,6 +14761,7 @@ class AgentPBXTUI(App[None]):
         if entry is None:
             return
         self.selected_operator_kb_id_by_operator[resolved_operator_id] = kb_id
+        self.selected_operator_kb_query_id_by_operator.pop(resolved_operator_id, None)
         table = self.query_one_or_none("#operator-kb", DataTable)
         if table is not None:
             try:
@@ -14441,6 +14777,44 @@ class AgentPBXTUI(App[None]):
             detail.text = self.format_operator_kb_entry_detail(
                 resolved_operator_id,
                 entry,
+            )
+
+    def select_operator_kb_query(
+        self,
+        query_id: str,
+        *,
+        logical_operator_id: str | None = None,
+    ) -> None:
+        resolved_operator_id = logical_operator_id
+        if resolved_operator_id is None and self.selected_agent_id:
+            resolved_operator_id = self.operator_kb_operator_id_for_agent(
+                self.selected_agent_id
+            )
+        if not resolved_operator_id:
+            return
+        query = self.operator_kb_queries_by_operator.get(
+            resolved_operator_id,
+            {},
+        ).get(query_id)
+        if query is None:
+            return
+        self.selected_operator_kb_query_id_by_operator[resolved_operator_id] = query_id
+        self.selected_operator_kb_id_by_operator.pop(resolved_operator_id, None)
+        table = self.query_one_or_none("#operator-kb", DataTable)
+        if table is not None:
+            try:
+                table.move_cursor(
+                    row=table.get_row_index(f"query:{query_id}"),
+                    animate=False,
+                    scroll=True,
+                )
+            except Exception:
+                pass
+        detail = self.query_one_or_none("#operator-kb-detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_operator_kb_query_detail(
+                resolved_operator_id,
+                query,
             )
 
     def selected_operator_kb_entry_for_operator(
@@ -14772,6 +15146,67 @@ class AgentPBXTUI(App[None]):
         self.notify(f"Retired operator KB entry {kb_id}.")
         await self.refresh_events()
 
+    async def feedback_selected_operator_kb(self, feedback: str) -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            self.notify("Select an operator before recording KB feedback.", severity="warning")
+            return
+        logical_operator_id = self.operator_kb_operator_id_for_agent(operator_agent_id)
+        if not logical_operator_id:
+            self.notify("KB feedback is available for operator agents only.", severity="warning")
+            return
+        entry = self.selected_operator_kb_entry_for_operator(logical_operator_id)
+        query = None
+        query_id = ""
+        match_id = None
+        kb_id = None
+        if entry is not None:
+            retrieval = self.operator_kb_entry_retrieval(entry)
+            query_id = str(retrieval.get("query_id") or "").strip()
+            match_id = str(retrieval.get("match_id") or "").strip() or None
+            kb_id = str(entry.get("kb_id") or "").strip() or None
+        if not query_id:
+            selected_query_id = self.selected_operator_kb_query_id_by_operator.get(
+                logical_operator_id,
+                "",
+            )
+            query = self.operator_kb_queries_by_operator.get(
+                logical_operator_id,
+                {},
+            ).get(selected_query_id)
+            query_id = selected_query_id if query is not None else ""
+        if not query_id:
+            self.notify(
+                "Select a KB search result or query history row before recording feedback.",
+                severity="warning",
+            )
+            return
+        summary = {
+            "accepted": "Marked useful from the Agent PBX TUI.",
+            "rejected": "Marked wrong from the Agent PBX TUI.",
+            "miss": "Marked as a KB miss from the Agent PBX TUI.",
+        }.get(feedback, f"Marked {feedback} from the Agent PBX TUI.")
+        try:
+            result = await self.submit_operator_kb_feedback(
+                logical_operator_id,
+                query_id=query_id,
+                match_id=match_id,
+                kb_id=kb_id,
+                feedback=feedback,
+                summary=summary,
+                metadata={"source": "agent-pbx-tui"},
+            )
+        except Exception as exc:
+            self.notify(f"Unable to record KB feedback: {exc}", severity="error")
+            return
+        detail = self.query_one_or_none("#operator-kb-detail", TextArea)
+        if detail is not None:
+            detail.text = (
+                f"Recorded KB feedback {result.get('feedback')} for query {query_id}."
+            )
+        self.notify(f"Recorded KB feedback: {feedback}.")
+        await self.refresh_events()
+
     def format_operator_kb_seed_run_detail(self, result: dict[str, Any]) -> str:
         seed_run = (
             result.get("seed_run") if isinstance(result.get("seed_run"), dict) else {}
@@ -14954,6 +15389,84 @@ class AgentPBXTUI(App[None]):
             )
         return "\n".join(lines)
 
+    @staticmethod
+    def operator_kb_entry_retrieval(entry: dict[str, Any]) -> dict[str, Any]:
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        retrieval = (
+            metadata.get("retrieval")
+            if isinstance(metadata.get("retrieval"), dict)
+            else {}
+        )
+        return dict(retrieval) if isinstance(retrieval, dict) else {}
+
+    def format_operator_kb_query_detail(
+        self,
+        logical_operator_id: str,
+        query: dict[str, Any],
+    ) -> str:
+        matches = (
+            query.get("matches")
+            if isinstance(query.get("matches"), list)
+            else []
+        )
+        feedback_summary = (
+            query.get("feedback_summary")
+            if isinstance(query.get("feedback_summary"), dict)
+            else {}
+        )
+        created_at = float_value(query.get("created_at"))
+        created_text = (
+            self.format_short_time(created_at)
+            if created_at is not None
+            else "-"
+        )
+        lines = [
+            f"Operator KB query: {logical_operator_id}",
+            "",
+            f"Query ID: {query.get('query_id')}",
+            f"Query: {query.get('query') or '-'}",
+            f"Created: {created_text}",
+            f"Source: {query.get('source') or '-'}",
+            f"Mode: {query.get('retrieval_mode') or '-'}",
+            f"Provider: {query.get('retrieval_provider') or '-'}",
+            f"Model: {query.get('retrieval_model') or '-'}",
+            f"Index: {query.get('index_version') or '-'}",
+            f"Project: {query.get('project') or '-'}",
+            f"Repo: {query.get('repo_root') or '-'}",
+            f"Matches: {query.get('match_count') or 0}",
+            f"Semantic matches: {query.get('semantic_match_count') or 0}",
+            f"Feedback: {json.dumps(feedback_summary, sort_keys=True)}",
+            "",
+            "Top Matches:",
+        ]
+        if not matches:
+            lines.append("- none")
+        for match in matches[:5]:
+            if not isinstance(match, dict):
+                continue
+            score = float_value(match.get("score"))
+            semantic_score = float_value(match.get("semantic_score"))
+            score_text = f"{score:.3f}" if score is not None else "-"
+            lines.append(
+                f"- rank {match.get('rank')}: {match.get('kb_id') or '-'} "
+                f"mode={match.get('retrieval_mode') or '-'} score={score_text}"
+            )
+            if semantic_score is not None:
+                lines.append(f"  semantic_score: {semantic_score:.3f}")
+            chunks = (
+                match.get("semantic_chunks")
+                if isinstance(match.get("semantic_chunks"), list)
+                else []
+            )
+            for chunk in chunks[:3]:
+                if isinstance(chunk, dict):
+                    lines.append(
+                        "  chunk "
+                        f"{chunk.get('chunk_index')}: score={chunk.get('score')} "
+                        f"tokens={chunk.get('token_count')}"
+                    )
+        return "\n".join(lines)
+
     def format_operator_kb_entry_detail(
         self,
         logical_operator_id: str,
@@ -14966,6 +15479,7 @@ class AgentPBXTUI(App[None]):
             if isinstance(entry.get("metadata"), dict)
             else {}
         )
+        retrieval = self.operator_kb_entry_retrieval(entry)
         lines = [
             f"Operator KB entry: {logical_operator_id}",
             "",
@@ -14997,6 +15511,33 @@ class AgentPBXTUI(App[None]):
                 if isinstance(source, dict):
                     lines.append(
                         f"- {source.get('source_type')}: {source.get('source_id')}"
+                    )
+        if retrieval:
+            lines.extend(
+                [
+                    "",
+                    "Retrieval:",
+                    f"query_id: {retrieval.get('query_id') or '-'}",
+                    f"match_id: {retrieval.get('match_id') or '-'}",
+                    f"mode: {retrieval.get('mode') or '-'}",
+                    f"sources: {', '.join(str(item) for item in retrieval.get('sources', [])) or '-'}",
+                    f"score: {retrieval.get('score') if retrieval.get('score') is not None else '-'}",
+                    f"semantic_score: {retrieval.get('semantic_score') if retrieval.get('semantic_score') is not None else '-'}",
+                    "chunks:",
+                ]
+            )
+            chunks = (
+                retrieval.get("semantic_chunks")
+                if isinstance(retrieval.get("semantic_chunks"), list)
+                else []
+            )
+            if not chunks:
+                lines.append("- none")
+            for chunk in chunks[:5]:
+                if isinstance(chunk, dict):
+                    lines.append(
+                        f"- {chunk.get('chunk_index')}: "
+                        f"score={chunk.get('score')} tokens={chunk.get('token_count')}"
                     )
         lines.extend(
             [

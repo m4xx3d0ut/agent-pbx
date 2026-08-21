@@ -200,7 +200,8 @@ def operator_runbook_payload() -> dict[str, Any]:
             "When review work needs to transfer domain context to another operator, propose a knowledge handoff; the TUI/root operator approves the executable handoff delivery.",
             "Operator handoffs track required target fork launch, delivery evidence, receiver acknowledgement, running state, TTL expiry, artifact summaries, and terminal state.",
             "Manual KB seed runs deliver a seed prompt to the selected operator or fork; that session proposes KB entries and updates seed-run status when finished.",
-            "Use pbx_operator_kb_context or handoff metadata.kb_query to attach existing active KB entries before transferring domain context; context lookup uses SQLite-local hybrid keyword/semantic retrieval by default.",
+            "Use pbx_operator_kb_context or handoff metadata.kb_query to attach existing active KB entries before transferring domain context; context lookup uses SQLite-local hybrid keyword/semantic retrieval by default and returns query_id/match_id values for pbx_operator_kb_feedback.",
+            "Use pbx_operator_kb_list_queries, pbx_operator_kb_get_query, and pbx_operator_kb_feedback to inspect query history, review top matched chunks, record accepted/rejected retrievals, and report misses.",
             "Promote durable operator knowledge into the PBX-managed KB only from the root operator; forks may propose entries, compile explicit report candidates, update their seed-run status, and read active entries.",
             "Knowledge links and handoffs do not create fork edges, campaign assignments, or source-session ownership.",
             "The root operator coordinates campaigns and reviews evidence; it must not implement caller repo changes directly.",
@@ -1209,9 +1210,17 @@ class OperatorService:
         include_expired: bool = False,
         semantic: bool = False,
         limit: int = 50,
+        record_query: bool = False,
+        query_source: str = "search",
+        target_operator_agent_id: str | None = None,
+        query_metadata: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         operator = self._require_operator(operator_agent_id)
         logical_operator_id = self._logical_operator_agent_id(operator)
+        target_logical_operator_id = None
+        if target_operator_agent_id:
+            target_operator = self._require_operator(target_operator_agent_id)
+            target_logical_operator_id = self._logical_operator_agent_id(target_operator)
         normalized_status = (
             self._normalize_operator_kb_status(status)
             if status is not None
@@ -1228,11 +1237,31 @@ class OperatorService:
             semantic=semantic,
             limit=limit,
         )
-        return [
+        visible_entries = [
             entry
             for entry in entries
             if self._operator_can_read_kb_entry(entry, logical_operator_id)
         ]
+        if record_query and str(query or "").strip():
+            visible_entries, _query_record = self._attach_kb_query_record(
+                operator_agent_id=operator_agent_id,
+                logical_operator_id=logical_operator_id,
+                target_operator_agent_id=target_logical_operator_id,
+                query=str(query or "").strip(),
+                scope=scope,
+                project=project,
+                repo_root=repo_root,
+                tags=tags or [],
+                include_expired=include_expired,
+                include_proposed=normalized_status is None,
+                semantic=semantic,
+                retrieval_mode="hybrid" if semantic else "keyword",
+                source=query_source,
+                limit=limit,
+                entries=visible_entries,
+                metadata=query_metadata or {},
+            )
+        return visible_entries
 
     def kb_context_for_request(
         self,
@@ -1282,6 +1311,24 @@ class OperatorService:
                 or str(entry.get("created_by_operator_agent_id") or "")
                 == logical_operator_id
             ]
+        entries, query_record = self._attach_kb_query_record(
+            operator_agent_id=operator_agent_id,
+            logical_operator_id=logical_operator_id,
+            target_operator_agent_id=target_logical_operator_id,
+            query=normalized_query,
+            scope=scope,
+            project=resolved_project,
+            repo_root=resolved_repo_root,
+            tags=tags or [],
+            include_expired=include_expired,
+            include_proposed=include_proposed,
+            semantic=semantic,
+            retrieval_mode="hybrid" if semantic else "keyword",
+            source="context",
+            limit=limit,
+            entries=entries,
+            metadata={"requested_by": "kb_context_for_request"},
+        )
         semantic_match_count = 0
         for entry in entries:
             metadata = entry.get("metadata") if isinstance(entry, dict) else {}
@@ -1311,10 +1358,143 @@ class OperatorService:
             "retrieval_mode": "hybrid" if semantic else "keyword",
             "semantic": semantic,
             "semantic_match_count": semantic_match_count,
+            "query_id": query_record.get("query_id"),
             "satisfied_by_kb": bool(entries),
             "match_count": len(entries),
             "kb_entries": entries,
         }
+
+    def _attach_kb_query_record(
+        self,
+        *,
+        operator_agent_id: str,
+        logical_operator_id: str,
+        target_operator_agent_id: str | None,
+        query: str,
+        scope: str | None,
+        project: str | None,
+        repo_root: str | None,
+        tags: list[str],
+        include_expired: bool,
+        include_proposed: bool,
+        semantic: bool,
+        retrieval_mode: str,
+        source: str,
+        limit: int,
+        entries: list[dict[str, Any]],
+        metadata: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        query_record = self.store.create_operator_kb_query(
+            logical_operator_agent_id=logical_operator_id,
+            operator_agent_id=operator_agent_id,
+            target_operator_agent_id=target_operator_agent_id,
+            query=query,
+            scope=scope,
+            project=project,
+            repo_root=repo_root,
+            tags=tags,
+            include_expired=include_expired,
+            include_proposed=include_proposed,
+            semantic=semantic,
+            retrieval_mode=retrieval_mode,
+            source=source,
+            limit=limit,
+            matches=entries,
+            metadata=metadata,
+        )
+        matches = (
+            query_record.get("matches")
+            if isinstance(query_record.get("matches"), list)
+            else []
+        )
+        match_by_kb = {
+            str(match.get("kb_id") or ""): match
+            for match in matches
+            if isinstance(match, dict) and str(match.get("kb_id") or "").strip()
+        }
+        annotated: list[dict[str, Any]] = []
+        for index, entry in enumerate(entries, start=1):
+            copied = dict(entry)
+            metadata_payload = (
+                dict(copied.get("metadata"))
+                if isinstance(copied.get("metadata"), dict)
+                else {}
+            )
+            retrieval = (
+                dict(metadata_payload.get("retrieval"))
+                if isinstance(metadata_payload.get("retrieval"), dict)
+                else {}
+            )
+            match = match_by_kb.get(str(copied.get("kb_id") or ""))
+            retrieval.setdefault("mode", retrieval_mode if semantic else "keyword")
+            retrieval.setdefault("sources", ["semantic"] if semantic else ["keyword"])
+            retrieval.setdefault("keyword_rank", index)
+            retrieval["query_id"] = query_record["query_id"]
+            if match is not None:
+                retrieval["match_id"] = match.get("match_id")
+                retrieval["rank"] = match.get("rank")
+            metadata_payload["retrieval"] = retrieval
+            copied["metadata"] = metadata_payload
+            annotated.append(copied)
+        return annotated, query_record
+
+    def list_kb_queries(
+        self,
+        *,
+        operator_agent_id: str,
+        misses: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        return self.store.list_operator_kb_queries(
+            logical_operator_agent_id=logical_operator_id,
+            misses=misses,
+            limit=limit,
+        )
+
+    def get_kb_query(
+        self,
+        *,
+        operator_agent_id: str,
+        query_id: str,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        query = self.store.get_operator_kb_query(query_id)
+        if query is None:
+            raise ValueError("KB query not found")
+        if str(query.get("logical_operator_agent_id") or "") != logical_operator_id:
+            raise ValueError("KB query belongs to a different operator")
+        return query
+
+    def create_kb_feedback(
+        self,
+        *,
+        operator_agent_id: str,
+        feedback: str,
+        query_id: str | None = None,
+        match_id: str | None = None,
+        kb_id: str | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        if kb_id:
+            entry = self._require_operator_kb_entry(kb_id)
+            if not self._operator_can_read_kb_entry(entry, logical_operator_id):
+                raise ValueError("KB entry belongs to a different operator")
+        return self.store.create_operator_kb_feedback(
+            logical_operator_agent_id=logical_operator_id,
+            operator_agent_id=operator_agent_id,
+            query_id=query_id,
+            match_id=match_id,
+            kb_id=kb_id,
+            feedback=feedback,
+            summary=summary,
+            metadata=metadata or {},
+        )
 
     def compile_kb_candidates_from_report(
         self,

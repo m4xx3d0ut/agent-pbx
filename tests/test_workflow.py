@@ -1767,6 +1767,53 @@ def test_operator_kb_report_compile_context_and_index_api(tmp_path: Path) -> Non
     context_payload = context.json()
     assert context_payload["satisfied_by_kb"] is True
     assert context_payload["kb_entries"][0]["kb_id"] == kb_entry["kb_id"]
+    assert context_payload["query_id"]
+    retrieval = context_payload["kb_entries"][0]["metadata"]["retrieval"]
+    assert retrieval["query_id"] == context_payload["query_id"]
+    feedback = client.post(
+        f"/v1/operator/kb/queries/{context_payload['query_id']}/feedback",
+        json={
+            "operator_agent_id": "operator-B",
+            "match_id": retrieval["match_id"],
+            "kb_id": kb_entry["kb_id"],
+            "feedback": "accepted",
+            "summary": "Useful Windows helper context.",
+        },
+    )
+    assert feedback.status_code == 200
+    assert feedback.json()["feedback"] == "accepted"
+    queries = client.get(
+        "/v1/operator/kb/queries",
+        params={"operator_agent_id": "operator-B"},
+    )
+    assert queries.status_code == 200
+    assert queries.json()["queries"][0]["feedback_summary"]["accepted"] == 1
+
+    miss_context = client.post(
+        "/v1/operator/kb/context",
+        json={
+            "operator_agent_id": "operator-B",
+            "query": "zirconium nebula escrow glyph",
+            "project": "demo",
+        },
+    )
+    assert miss_context.status_code == 200
+    assert miss_context.json()["satisfied_by_kb"] is False
+    miss_feedback = client.post(
+        f"/v1/operator/kb/queries/{miss_context.json()['query_id']}/feedback",
+        json={
+            "operator_agent_id": "operator-B",
+            "feedback": "miss",
+            "summary": "No match was useful.",
+        },
+    )
+    assert miss_feedback.status_code == 200
+    misses = client.get(
+        "/v1/operator/kb/queries",
+        params={"operator_agent_id": "operator-B", "misses": True},
+    )
+    assert misses.status_code == 200
+    assert misses.json()["queries"][0]["query_id"] == miss_context.json()["query_id"]
 
     handoff = client.post(
         "/v1/operator/handoffs",

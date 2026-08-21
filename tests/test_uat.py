@@ -73,9 +73,18 @@ def test_uat_manifest_round_trips_private_file(tmp_path: Path) -> None:
 
 def test_selected_uat_stages_include_required_setup() -> None:
     assert uat.selected_uat_stages(stage="6") == ("0", "1", "6")
-    assert uat.selected_uat_stages(from_stage="6") == ("0", "1", "2", "6", "7", "8")
+    assert uat.selected_uat_stages(from_stage="6") == (
+        "0",
+        "1",
+        "2",
+        "6",
+        "7",
+        "8",
+        "9",
+    )
     assert uat.selected_uat_stages(stage="5") == ("0", "1", "2", "5")
     assert uat.selected_uat_stages(stage="8") == ("0", "1", "2", "8")
+    assert uat.selected_uat_stages(stage="9") == ("0", "1", "2", "9")
 
 
 def test_operator_kb_flow_manifest_only_lists_created_agents(

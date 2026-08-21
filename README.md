@@ -409,6 +409,14 @@ passed. Raw KB search remains keyword-first by default; pass `semantic=true` to
 should be considered. Returned entries include non-persistent retrieval evidence
 under `metadata.retrieval`, including source type, score, and matched chunk
 metadata.
+KB lookups are also recorded as query history. Context responses and recorded
+search results include `query_id` and per-entry `match_id` values so operators
+can call `pbx_operator_kb_feedback` with `accepted`, `rejected`, `stale`,
+`wrong_scope`, `unsafe`, or `miss`. Use `pbx_operator_kb_list_queries`,
+`pbx_operator_kb_get_query`, `/operator kb history`, and `/operator kb misses`
+to review prior searches, top matched chunks, feedback counts, and miss reports.
+The TUI KB tab has a query box plus `Search`, `History`, `Misses`, `Useful`,
+`Wrong`, and `Miss` controls for visual review.
 Root operators can export portable
 JSON-compatible KB bundles
 with `pbx_operator_kb_export` and import them with `pbx_operator_kb_import`;
@@ -444,10 +452,12 @@ root-level `*operator-kb*.json`, `*operator_kb*.json`, and
 
 Current semantic KB support is intentionally local and deterministic. It chunks
 canonical KB text, stores hashed sparse term signatures, and combines those
-scores with the existing keyword/FTS path. The practical roadmap from here is:
-add operator feedback on accepted/rejected retrievals, add optional export of
-derived chunk metadata, then consider a true embedding provider or graph edges
-only after retrieval quality gaps are visible in normal operator work.
+scores with the existing keyword/FTS path. Retrieval feedback and query
+observability are canonical SQLite records, while export/import continues to
+move only reviewed KB entries. The practical roadmap from here is to tune
+retrieval from accepted/rejected/miss history, then consider a true embedding
+provider or graph edges only after retrieval quality gaps are visible in normal
+operator work.
 
 First use from a running tmux-mode TUI is: select the source caller, use
 `Start O` or press `O` to ensure the logical operator exists, use `Review W` or
@@ -514,7 +524,9 @@ third operator resolves KB context, acknowledges, runs, completes, and avoids
 unwanted fork/source-session associations. Stage 8 validates SQLite-native
 semantic KB retrieval: keyword-only search misses a differently worded query,
 hybrid search finds the promoted KB entry, and handoff metadata can attach that
-semantic context.
+semantic context. Stage 9 records accepted retrieval feedback, records a miss,
+lists query history and miss reports, fetches match/chunk detail, and verifies
+portable KB export still omits query-history and feedback observability records.
 
 Successful cleanup is followed by an audit that checks for visible synthetic
 agents, active UAT KB leaks, non-terminal UAT handoffs, and live UAT tmux

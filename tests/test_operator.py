@@ -1054,6 +1054,64 @@ async def test_mcp_operator_kb_tools_lifecycle(tmp_path: Path) -> None:
             },
         )
     )
+    accepted_feedback = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_feedback",
+            {
+                "operator_agent_id": "operator-B",
+                "query_id": semantic_context["query_id"],
+                "match_id": semantic_context["kb_entries"][0]["metadata"]["retrieval"][
+                    "match_id"
+                ],
+                "kb_id": proposed["kb_id"],
+                "feedback": "accepted",
+                "summary": "Useful retrieval.",
+            },
+        )
+    )
+    miss_context = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_context",
+            {
+                "operator_agent_id": "operator-B",
+                "query": "zirconium nebula escrow glyph",
+                "project": "agent-pbx",
+                "semantic": True,
+            },
+        )
+    )
+    miss_feedback = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_feedback",
+            {
+                "operator_agent_id": "operator-B",
+                "query_id": miss_context["query_id"],
+                "feedback": "miss",
+                "summary": "No suitable KB entry.",
+            },
+        )
+    )
+    query_history = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_list_queries",
+            {"operator_agent_id": "operator-B", "limit": 10},
+        )
+    )
+    miss_history = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_list_queries",
+            {"operator_agent_id": "operator-B", "misses": True, "limit": 10},
+        )
+    )
+    fetched_query = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_kb_get_query",
+            {
+                "operator_agent_id": "operator-B",
+                "query_id": semantic_context["query_id"],
+            },
+        )
+    )
     report = tool_json(
         await mcp.call_tool(
             "pbx_report_turn",
@@ -1116,16 +1174,66 @@ async def test_mcp_operator_kb_tools_lifecycle(tmp_path: Path) -> None:
     assert keyword_miss == []
     assert semantic_context["retrieval_mode"] == "hybrid"
     assert semantic_context["semantic_match_count"] >= 1
+    assert semantic_context["query_id"]
     assert semantic_context["kb_entries"][0]["kb_id"] == proposed["kb_id"]
     assert (
         "semantic"
         in semantic_context["kb_entries"][0]["metadata"]["retrieval"]["sources"]
     )
+    assert semantic_context["kb_entries"][0]["metadata"]["retrieval"]["query_id"] == semantic_context["query_id"]
+    assert semantic_context["kb_entries"][0]["metadata"]["retrieval"]["match_id"]
     assert semantic_context["kb_entries"][0]["metadata"]["retrieval"]["semantic_chunks"]
+    assert accepted_feedback["feedback"] == "accepted"
+    assert accepted_feedback["query_id"] == semantic_context["query_id"]
+    assert miss_context["satisfied_by_kb"] is False
+    assert miss_context["query_id"]
+    assert miss_feedback["feedback"] == "miss"
+    assert {item["query_id"] for item in query_history} >= {
+        semantic_context["query_id"],
+        miss_context["query_id"],
+    }
+    assert miss_context["query_id"] in {item["query_id"] for item in miss_history}
+    assert any(
+        item["query"] == "knowledge coordinator route guidance"
+        and item["match_count"] == 0
+        for item in miss_history
+    )
+    assert fetched_query["feedback_summary"]["accepted"] == 1
+    assert fetched_query["matches"][0]["match_id"] == accepted_feedback["match_id"]
     assert compiled_from_report["proposed_count"] == 0
     assert compiled_from_report["skipped"][0]["reason"] == "duplicate_content_hash"
     assert compiled_entries[0]["metadata"]["compiled_from_report_id"] == report["report_id"]
     assert rebuilt["result"]["failed_count"] == 0
+
+
+def test_operator_kb_feedback_rejects_unreadable_kb_id(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    for agent_id in ("operator-0", "operator-B"):
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=agent_id,
+                project="agent-pbx-operator",
+                agent_type="operator",
+                metadata={"pbx_mode": "report", "cwd": str(tmp_path / agent_id)},
+            )
+        )
+    service = OperatorService(store)
+    proposed = service.propose_kb_entry(
+        operator_agent_id="operator-0",
+        scope="project",
+        project="agent-pbx",
+        title="Private proposal",
+        summary="Not promoted yet.",
+        body="Only the creating operator can see this proposed entry.",
+    )
+
+    with pytest.raises(ValueError, match="different operator"):
+        service.create_kb_feedback(
+            operator_agent_id="operator-B",
+            kb_id=proposed["kb_id"],
+            feedback="rejected",
+        )
 
 
 async def test_mcp_operator_kb_seed_run_lifecycle(tmp_path: Path) -> None:

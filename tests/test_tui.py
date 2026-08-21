@@ -5953,6 +5953,9 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/operator kb detail" in titles
     assert "/operator kb proposed" in titles
     assert "/operator kb proposed detail" in titles
+    assert "/operator kb search" in titles
+    assert "/operator kb history" in titles
+    assert "/operator kb misses" in titles
     assert "/operator kb seed" in titles
     assert "/operator kb promote" in titles
     assert "/operator kb reject" in titles
@@ -6036,6 +6039,9 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/operator kb detail",
         "/operator kb proposed",
         "/operator kb proposed detail",
+        "/operator kb search",
+        "/operator kb history",
+        "/operator kb misses",
         "/operator kb seed",
         "/operator kb promote",
         "/operator kb reject",
@@ -10969,6 +10975,158 @@ async def test_tui_operator_kb_tab_loads_entries() -> None:
     assert "1 proposed entry for operator-0" in str(status.renderable)
 
 
+async def test_tui_operator_kb_search_history_and_feedback() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fetched: list[dict[str, object]] = []
+    feedback_calls: list[dict[str, object]] = []
+
+    async def fake_fetch_operator_kb_entries(
+        logical_operator_id: str,
+        *,
+        status: str | None = "active",
+        query: str | None = None,
+        semantic: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        fetched.append(
+            {
+                "logical_operator_id": logical_operator_id,
+                "status": status,
+                "query": query,
+                "semantic": semantic,
+                "limit": limit,
+            }
+        )
+        return [
+            {
+                "kb_id": "kb-1",
+                "status": "active",
+                "redaction_status": "clean",
+                "scope": "project",
+                "project": "agent-pbx",
+                "title": "Review handoff model",
+                "summary": "Operators can promote reviewed handoff context.",
+                "body": "Use retrieval feedback for tuning.",
+                "tags": ["handoff", "kb"],
+                "created_at": 100.0,
+                "updated_at": 120.0,
+                "sources": [],
+                "metadata": {
+                    "retrieval": {
+                        "query_id": "query-1",
+                        "match_id": "match-1",
+                        "mode": "semantic",
+                        "sources": ["semantic"],
+                        "score": 0.77,
+                        "semantic_score": 0.31,
+                        "semantic_chunks": [
+                            {"chunk_index": 0, "score": 0.31, "token_count": 20}
+                        ],
+                    }
+                },
+            }
+        ]
+
+    async def fake_fetch_operator_kb_queries(
+        logical_operator_id: str,
+        *,
+        misses: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        assert logical_operator_id == "operator-0"
+        assert misses is False
+        assert limit == 100
+        return [
+            {
+                "query_id": "query-1",
+                "logical_operator_agent_id": "operator-0",
+                "operator_agent_id": "operator-0",
+                "query": "handoff routing",
+                "project": "agent-pbx",
+                "retrieval_mode": "hybrid",
+                "retrieval_provider": "sqlite",
+                "retrieval_model": "hashed-sparse-v1",
+                "index_version": "sqlite-hybrid-v1",
+                "source": "search",
+                "match_count": 1,
+                "semantic_match_count": 1,
+                "created_at": 130.0,
+                "feedback_summary": {"accepted": 1},
+                "matches": [
+                    {
+                        "match_id": "match-1",
+                        "query_id": "query-1",
+                        "kb_id": "kb-1",
+                        "rank": 1,
+                        "retrieval_mode": "semantic",
+                        "score": 0.77,
+                        "semantic_score": 0.31,
+                        "semantic_chunks": [
+                            {"chunk_index": 0, "score": 0.31, "token_count": 20}
+                        ],
+                    }
+                ],
+            }
+        ]
+
+    async def fake_submit_operator_kb_feedback(
+        logical_operator_id: str,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        feedback_calls.append({"logical_operator_id": logical_operator_id, **kwargs})
+        return {"feedback_id": "feedback-1", "feedback": kwargs["feedback"]}
+
+    app.fetch_operator_kb_entries = fake_fetch_operator_kb_entries  # type: ignore[method-assign]
+    app.fetch_operator_kb_queries = fake_fetch_operator_kb_queries  # type: ignore[method-assign]
+    app.submit_operator_kb_feedback = fake_submit_operator_kb_feedback  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "running",
+                "last_seen_at": 123.0,
+                "metadata": {"operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        app.activate_operator_kb_tab()
+        query_input = app.query_one("#operator-kb-query", Input)
+        query_input.value = "handoff routing"
+
+        await app.search_operator_kb()
+        await app.feedback_selected_operator_kb("accepted")
+        await app.load_operator_kb_queries("operator-0")
+
+        table = app.query_one("#operator-kb", DataTable)
+        detail = app.query_one("#operator-kb-detail", TextArea)
+
+    assert {
+        "logical_operator_id": "operator-0",
+        "status": "active",
+        "query": "handoff routing",
+        "semantic": True,
+        "limit": 50,
+    } in fetched
+    assert {
+        "logical_operator_id": "operator-0",
+        "status": "active",
+        "query": None,
+        "semantic": False,
+        "limit": 100,
+    } in fetched
+    assert feedback_calls[0]["query_id"] == "query-1"
+    assert feedback_calls[0]["match_id"] == "match-1"
+    assert feedback_calls[0]["kb_id"] == "kb-1"
+    assert feedback_calls[0]["feedback"] == "accepted"
+    assert table.row_count == 1
+    assert "Operator KB query: operator-0" in detail.text
+    assert "Feedback: {\"accepted\": 1}" in detail.text
+
+
 async def test_tui_operator_kb_promote_uses_selected_proposal() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     promoted: list[tuple[str, str]] = []
@@ -13113,6 +13271,9 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert "pbx_operator_kb_search" in agent_pbx_config
     assert "pbx_operator_kb_context" in agent_pbx_config
     assert "pbx_operator_kb_get" in agent_pbx_config
+    assert "pbx_operator_kb_list_queries" in agent_pbx_config
+    assert "pbx_operator_kb_get_query" in agent_pbx_config
+    assert "pbx_operator_kb_feedback" in agent_pbx_config
     assert "pbx_operator_kb_propose" in agent_pbx_config
     assert "pbx_operator_kb_propose_from_link" in agent_pbx_config
     assert "pbx_operator_kb_compile_report" in agent_pbx_config
