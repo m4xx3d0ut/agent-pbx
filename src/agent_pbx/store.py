@@ -32,6 +32,11 @@ OPERATOR_AGENT_TYPE = "operator"
 OPERATOR_PROJECT = "agent-pbx-operator"
 OPERATOR_ROLE_ROOT = "root"
 OPERATOR_ROLE_FORK = "fork"
+ROOT_OPERATOR_SOURCE_KEYS = (
+    "default_source_caller_agent_id",
+    "default_source_caller_project",
+    "default_source_codex_session_id",
+)
 OPERATOR_TERMINAL_BASE_STATES = (
     "complete",
     "completed",
@@ -1339,6 +1344,17 @@ class Store:
                 ):
                     request_metadata.pop(key, None)
             if is_root_operator_registration:
+                if (
+                    existing_type == OPERATOR_AGENT_TYPE
+                    and existing_operator_role != OPERATOR_ROLE_FORK
+                ):
+                    for key in ROOT_OPERATOR_SOURCE_KEYS:
+                        if (
+                            key in request_metadata
+                            and not _non_empty_string(request_metadata.get(key))
+                            and _non_empty_string(existing_metadata.get(key))
+                        ):
+                            request_metadata.pop(key, None)
                 request_metadata["operator_role"] = OPERATOR_ROLE_ROOT
             if existing_fork_identity is not None and requested_operator_role != OPERATOR_ROLE_FORK:
                 for key in (

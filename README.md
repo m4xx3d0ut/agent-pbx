@@ -343,8 +343,20 @@ note when Joplin is configured.
 The Operators pane keeps root operators and their fork sessions together. Use
 `Review W`, press `W`, or run `/operator fork review` with a root operator or
 its caller-scoped fork selected to create a read-only review fork in the
-configured scratch work root. Use `Prev F6` and `Next F7` to cycle the visible
-fork pane for the selected logical operator.
+configured scratch work root. For a root operator, the review fork uses that
+operator's default source caller first, then its active default/edit fork
+source; stale Agents-pane cursor state is ignored. Use `Prev F6` and `Next F7`
+to cycle the visible fork pane for the selected logical operator.
+
+Review fork launch normally uses Codex transcript continuation so the review
+operator inherits the source session context. If Codex rejects that continuation
+with `invalid_encrypted_content`, Agent PBX restarts the review fork as a fresh
+Codex session with the same PBX fork identity, source metadata, scratch
+`work_root`, and preapproved review MCP tools. Fresh-context forks still start
+at the ready prompt and receive no review task during creation, but operators
+should provide needed domain context through the first prompt, KB context, or a
+knowledge handoff. Set `AGENT_PBX_TUI_REVIEW_FORK_LAUNCH_MODE=fresh_context`
+to skip transcript continuation for new review forks.
 
 Review forks should treat the source checkout as read-only and write only under
 their configured `work_root`. If a finding requires edits in the source repo,
@@ -460,9 +472,12 @@ provider or graph edges only after retrieval quality gaps are visible in normal
 operator work.
 
 First use from a running tmux-mode TUI is: select the source caller, use
-`Start O` or press `O` to ensure the logical operator exists, use `Review W` or
-press `W` to create a read-only review fork, then prompt that review fork. When
-the review fork requests a sibling project, select the operator and use
+`Start O` or press `O` to ensure the logical operator exists and is bound to
+that caller, select the logical operator in the Operators pane, use `Review W`
+or press `W` to create a read-only review fork, then prompt that review fork.
+The new review fork starts at a ready Codex prompt after registration and does
+not receive a review task during creation. When the review fork requests a
+sibling project, select the operator and use
 `Spawn P` or `/operator project spawn`; the spawned project should then appear
 as a normal caller in the Agents pane after its Codex session registers. When a
 review fork proposes a knowledge handoff, select the logical operator and run

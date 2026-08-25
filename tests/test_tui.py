@@ -9185,6 +9185,208 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
     assert captures == ["operator-0-fork-caller-review-1"]
 
 
+async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    work_root = tmp_path / "review"
+    source_cwd = tmp_path / "caller"
+    work_root.mkdir()
+    source_cwd.mkdir()
+    broken_session = tmp_path / "broken-session.jsonl"
+    broken_session.write_text(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "message": {
+                        "error": {
+                            "code": "invalid_encrypted_content",
+                            "message": (
+                                "Encrypted content item_id did not match the target "
+                                "item id."
+                            ),
+                        }
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    quit_calls: list[str] = []
+    posts: list[dict[str, object]] = []
+    sent: list[tuple[str, str]] = []
+    captures: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            assert path == "/v1/auth/check"
+            return Response({"ok": True})
+
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            if path == "/v1/operator/forks/ensure":
+                body = kwargs["json"]  # type: ignore[index]
+                return Response(
+                    {
+                        "operator_fork_id": "fork-1",
+                        "logical_operator_agent_id": body["operator_agent_id"],  # type: ignore[index]
+                        "fork_agent_id": body["fork_agent_id"],  # type: ignore[index]
+                        "source_caller_agent_id": body["source_caller_agent_id"],  # type: ignore[index]
+                        "source_codex_session_id": "source-session",
+                        "fork_track_id": body["fork_track_id"],  # type: ignore[index]
+                        "fork_purpose": body["fork_purpose"],  # type: ignore[index]
+                        "access_mode": body["access_mode"],  # type: ignore[index]
+                        "work_root": body["work_root"],  # type: ignore[index]
+                        "tmux_pane_id": body["tmux_pane_id"],  # type: ignore[index]
+                        "status": "running",
+                        "summary": "Fork relaunched fresh.",
+                        "metadata": body["metadata"],  # type: ignore[index]
+                    }
+                )
+            raise AssertionError(path)
+
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return [
+            tmux_support.TmuxPane(
+                "agent-pbx-operators",
+                "1",
+                "0",
+                "%20",
+                True,
+                "node",
+                "operator-0-fork-caller-review-1",
+                str(work_root),
+                100,
+                30,
+                200,
+                window_name="operator-0-fork-caller-review-1",
+            )
+        ]
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%21"
+
+    def fake_quit_pane(target: str, **_: object) -> bool:
+        quit_calls.append(target)
+        return True
+
+    async def fake_configure_operator_codex_mcp(**_: object) -> None:
+        return None
+
+    async def fake_send_text_to_tmux_pane(
+        pane_id: str,
+        message: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        sent.append((pane_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captures.append(agent_id)
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
+    app.operator_session_candidates = lambda agent_id: [  # type: ignore[assignment,method-assign]
+        OperatorSessionCandidate(
+            session_id="fork-session",
+            timestamp=10.0,
+            source="codex.sessions",
+            path=str(broken_session),
+        )
+    ]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%21")
+    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+    monkeypatch.setattr(tmux_support, "capture_pane", lambda *args, **kwargs: "")
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0-fork-caller-review-1": {
+                "agent_id": "operator-0-fork-caller-review-1",
+                "agent_type": "operator",
+                "project": "demo",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "fork",
+                    "logical_operator_id": "operator-0",
+                    "source_caller_agent_id": "caller-1",
+                    "source_codex_session_id": "source-session",
+                    "fork_codex_session_id": "fork-session",
+                    "fork_track_id": "review-1",
+                    "fork_purpose": "review",
+                    "access_mode": "review_readonly",
+                    "source_cwd": str(source_cwd),
+                    "work_root": str(work_root),
+                    "cwd": str(work_root),
+                    "tmux_pane_id": "%20",
+                    "launched_by": "agent-pbx-tui",
+                    "review_mcp_approval_servers": ["agent-pbx", "workerbee"],
+                },
+            }
+        }
+        app.tmux_agent_targets["operator-0-fork-caller-review-1"] = "%20"
+        app.tmux_manual_override_agent_ids.add("operator-0-fork-caller-review-1")
+        app.tmux_direct_agent_modes["operator-0-fork-caller-review-1"] = True
+        await app.restart_tmux_codex_session("operator-0-fork-caller-review-1")
+
+    assert quit_calls == ["%20"]
+    argv = shlex.split(str(launches[0]["command"]))
+    assert argv[0] == "codex"
+    assert "resume" not in argv
+    assert "fork" not in argv
+    assert "--sandbox" in argv
+    assert "workspace-write" in argv
+    assert str(work_root) in argv
+    bootstrap_prompt = argv[-1]
+    assert "agent_id: operator-0-fork-caller-review-1" in bootstrap_prompt
+    assert "fresh Codex session" in bootstrap_prompt
+    assert launches[0]["env"]["AGENT_PBX_OPERATOR_FORK_LAUNCH_MODE"] == "fresh_context"
+    assert "AGENT_PBX_RESUME_CODEX_SESSION_ID" not in launches[0]["env"]
+    metadata = posts[0]["json"]["metadata"]  # type: ignore[index]
+    assert metadata["review_launch_mode"] == "fresh_context"
+    assert metadata["source_continuation_disabled_reason"] == "invalid_encrypted_content"
+    assert "fork_codex_session_id" not in metadata
+    assert sent == []
+    assert captures == ["operator-0-fork-caller-review-1"]
+
+
 def test_tui_operator_resume_target_prefers_known_current_session() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     app.agents = {
@@ -9336,6 +9538,69 @@ def test_tui_operator_resume_target_rejects_all_mismatched_report_identities(
     )
 
     assert target is None
+
+
+def test_tui_operator_resume_target_skips_invalid_encrypted_content(
+    tmp_path: Path,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    bad_session = tmp_path / "bad-session.jsonl"
+    good_session = tmp_path / "good-session.jsonl"
+    bad_session.write_text(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "message": {
+                        "error": {
+                            "code": "invalid_encrypted_content",
+                            "message": (
+                                "Encrypted content item_id did not match the target "
+                                "item id."
+                            ),
+                        }
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    good_session.write_text(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "message": "clean",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    target = app.operator_resume_target(
+        "operator-0",
+        [
+            OperatorSessionCandidate(
+                session_id="bad-session",
+                timestamp=20.0,
+                source="codex.sessions",
+                path=str(bad_session),
+            ),
+            OperatorSessionCandidate(
+                session_id="good-session",
+                timestamp=10.0,
+                source="codex.sessions",
+                path=str(good_session),
+            ),
+        ],
+    )
+
+    assert target is not None
+    assert target.session_id == "good-session"
 
 
 def test_tui_operator_session_candidates_scan_codex_session_files(
@@ -13173,6 +13438,249 @@ def test_tui_review_fork_source_prefers_root_default_over_stale_caller() -> None
     )
 
 
+def test_tui_review_fork_source_prefers_root_default_over_focused_caller() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "default_source_caller_agent_id": "codex-k1s-workerbee-private",
+            },
+        },
+        "codex-k1s-workerbee-private": {
+            "agent_id": "codex-k1s-workerbee-private",
+            "agent_type": "caller",
+            "project": "k1s-workerbee-private",
+            "metadata": {"codex_session_id": "workerbee-session"},
+        },
+        "codex-micropc-debian": {
+            "agent_id": "codex-micropc-debian",
+            "agent_type": "caller",
+            "project": "micropc-debian",
+            "metadata": {"codex_session_id": "micropc-session"},
+        },
+    }
+    app.selected_agent_id = "codex-micropc-debian"
+    app.focused_caller_agent_id_for_fork = lambda: "codex-micropc-debian"  # type: ignore[method-assign]
+
+    assert (
+        app.source_caller_agent_id_for_review_fork("operator-0")
+        == "codex-k1s-workerbee-private"
+    )
+
+
+def test_tui_review_fork_source_prefers_active_default_fork_over_agents_state() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {"agent_type": "operator", "operator_role": "root"},
+        },
+        "operator-0-fork-codex-k1s-workerbee-private": {
+            "agent_id": "operator-0-fork-codex-k1s-workerbee-private",
+            "agent_type": "operator",
+            "status": "running",
+            "effective_status": "running",
+            "project": "k1s-workerbee-private",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "logical_operator_id": "operator-0",
+                "source_caller_agent_id": "codex-k1s-workerbee-private",
+                "source_codex_session_id": "workerbee-session",
+                "fork_track_id": "default",
+                "fork_purpose": "edit",
+                "operator_fork_pending": False,
+            },
+        },
+        "codex-k1s-workerbee-private": {
+            "agent_id": "codex-k1s-workerbee-private",
+            "agent_type": "caller",
+            "project": "k1s-workerbee-private",
+            "metadata": {"codex_session_id": "workerbee-session"},
+        },
+        "codex-micropc-debian": {
+            "agent_id": "codex-micropc-debian",
+            "agent_type": "caller",
+            "project": "micropc-debian",
+            "metadata": {"codex_session_id": "micropc-session"},
+        },
+    }
+    app.selected_agent_id = "codex-micropc-debian"
+    app.focused_caller_agent_id_for_fork = lambda: "codex-micropc-debian"  # type: ignore[method-assign]
+    app.selected_caller_agent_id_for_fork = lambda: "codex-micropc-debian"  # type: ignore[method-assign]
+
+    assert (
+        app.source_caller_agent_id_for_review_fork("operator-0")
+        == "codex-k1s-workerbee-private"
+    )
+
+
+def test_tui_review_fork_source_has_no_agents_fallback_for_root_operator() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {"agent_type": "operator", "operator_role": "root"},
+        },
+        "codex-micropc-debian": {
+            "agent_id": "codex-micropc-debian",
+            "agent_type": "caller",
+            "project": "micropc-debian",
+            "metadata": {"codex_session_id": "micropc-session"},
+        },
+    }
+    app.selected_agent_id = "codex-micropc-debian"
+    app.focused_caller_agent_id_for_fork = lambda: "codex-micropc-debian"  # type: ignore[method-assign]
+    app.selected_caller_agent_id_for_fork = lambda: "codex-micropc-debian"  # type: ignore[method-assign]
+
+    assert app.source_caller_agent_id_for_review_fork("operator-0") is None
+
+
+async def test_tui_review_fork_source_resolves_hidden_default_fork_from_registry() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    gets: list[dict[str, object]] = []
+
+    class Response:
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def get(self, path: str, **kwargs: object) -> Response:
+            gets.append({"path": path, **kwargs})
+            if path == "/v1/operator/forks":
+                return Response(
+                    {
+                        "forks": [
+                            {
+                                "fork_agent_id": (
+                                    "operator-0-fork-codex-k1s-workerbee-private"
+                                ),
+                                "source_caller_agent_id": (
+                                    "codex-k1s-workerbee-private"
+                                ),
+                                "source_codex_session_id": "workerbee-session",
+                                "fork_track_id": "default",
+                                "fork_purpose": "edit",
+                                "status": "done",
+                                "metadata": {
+                                    "operator_role": "fork",
+                                    "logical_operator_id": "operator-0",
+                                    "source_caller_agent_id": (
+                                        "codex-k1s-workerbee-private"
+                                    ),
+                                    "fork_track_id": "default",
+                                    "fork_purpose": "edit",
+                                    "operator_fork_pending": False,
+                                },
+                            },
+                            {
+                                "fork_agent_id": (
+                                    "operator-0-fork-codex-micropc-debian-review-1"
+                                ),
+                                "source_caller_agent_id": "codex-micropc-debian",
+                                "fork_track_id": "review-1",
+                                "fork_purpose": "review",
+                                "status": "running",
+                                "metadata": {
+                                    "source_caller_agent_id": "codex-micropc-debian",
+                                    "fork_track_id": "review-1",
+                                    "fork_purpose": "review",
+                                    "operator_fork_pending": False,
+                                },
+                            },
+                        ]
+                    }
+                )
+            raise AssertionError(path)
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {"agent_type": "operator", "operator_role": "root"},
+        },
+        "codex-micropc-debian": {
+            "agent_id": "codex-micropc-debian",
+            "agent_type": "caller",
+            "project": "micropc-debian",
+            "metadata": {"codex_session_id": "micropc-session"},
+        },
+    }
+    app.selected_agent_id = "codex-micropc-debian"
+    app.focused_caller_agent_id_for_fork = lambda: "codex-micropc-debian"  # type: ignore[method-assign]
+    app.selected_caller_agent_id_for_fork = lambda: "codex-micropc-debian"  # type: ignore[method-assign]
+
+    assert (
+        await app.resolve_source_caller_agent_id_for_review_fork("operator-0")
+        == "codex-k1s-workerbee-private"
+    )
+    assert gets[0]["path"] == "/v1/operator/forks"
+    assert gets[0]["params"] == {  # type: ignore[index]
+        "operator_agent_id": "operator-0",
+        "fork_track_id": "default",
+        "limit": 500,
+    }
+
+
+def test_tui_default_operator_fork_source_records_refuse_ambiguity() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert (
+        app.single_default_operator_fork_source_agent_id_from_records(
+            [
+                {
+                    "source_caller_agent_id": "caller-1",
+                    "fork_track_id": "default",
+                    "fork_purpose": "edit",
+                    "status": "running",
+                    "metadata": {"operator_fork_pending": False},
+                },
+                {
+                    "source_caller_agent_id": "caller-2",
+                    "fork_track_id": "default",
+                    "fork_purpose": "edit",
+                    "status": "done",
+                    "metadata": {"operator_fork_pending": False},
+                },
+            ]
+        )
+        is None
+    )
+
+
+def test_tui_operator_root_metadata_omits_source_keys_without_binding() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    metadata = app.operator_root_metadata(
+        "operator-0",
+        cwd="/tmp/agent-pbx",
+        codex_command="codex",
+        mcp_url="http://127.0.0.1:8765/mcp",
+        session_name="agent-pbx-operators",
+    )
+
+    assert "default_source_caller_agent_id" not in metadata
+    assert "default_source_caller_project" not in metadata
+    assert "default_source_codex_session_id" not in metadata
+
+
 def test_tui_operator_fork_command_supports_cd_and_sandbox() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -13501,6 +14009,12 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
         opened.append(agent_id)
         return True
 
+    async def fail_send_text_to_tmux_pane(*_: object, **__: object) -> bool:
+        raise AssertionError("review fork creation should not paste a task after launch")
+
+    def fail_agents_pane_fallback() -> str | None:
+        raise AssertionError("Review W from an operator must not inspect Agents pane state")
+
     def fake_launch_pane(**kwargs: object) -> str:
         launches.append(kwargs)
         return "%dead" if len(launches) == 1 else "%77"
@@ -13509,6 +14023,9 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
     app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    app.send_text_to_tmux_pane = fail_send_text_to_tmux_pane  # type: ignore[method-assign]
+    app.focused_caller_agent_id_for_fork = fail_agents_pane_fallback  # type: ignore[method-assign]
+    app.selected_caller_agent_id_for_fork = fail_agents_pane_fallback  # type: ignore[method-assign]
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
@@ -13538,6 +14055,16 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
                     "codex_host_id": "local",
                 },
             },
+            "codex-micropc-debian": {
+                "agent_id": "codex-micropc-debian",
+                "agent_type": "caller",
+                "project": "stale",
+                "metadata": {
+                    "cwd": str(tmp_path / "stale"),
+                    "codex_session_id": "stale-session",
+                    "codex_host_id": "local",
+                },
+            },
         }
         app.selected_agent_id = "operator-0"
         await app.start_review_operator_fork()
@@ -13551,7 +14078,16 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
     assert "--cd" in argv
     assert "--sandbox" in argv
     assert "workspace-write" in argv
-    assert "source-session" in argv
+    assert argv[1] == "fork"
+    assert argv[-2] == "source-session"
+    bootstrap_prompt = argv[-1]
+    assert "Register this session with:" in bootstrap_prompt
+    assert "wait at the Codex prompt for operator instructions" in bootstrap_prompt
+    assert "Do not begin review or caller work until the operator sends a task" in bootstrap_prompt
+    assert "Startup readiness:" in bootstrap_prompt
+    assert 'status="waiting"' in bootstrap_prompt
+    assert "Initial instructions:" not in bootstrap_prompt
+    assert "stale-session" not in argv
     config_overrides = [
         argv[index + 1]
         for index, item in enumerate(argv)
@@ -13586,6 +14122,7 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
     assert env["AGENT_PBX_OPERATOR_WORK_ROOT"] == str(work_root)
     assert [post["path"] for post in posts] == ["/v1/operator/forks/ensure"]
     ensure_body = posts[-1]["json"]
+    assert ensure_body["source_caller_agent_id"] == "caller-1"  # type: ignore[index]
     assert ensure_body["fork_track_id"] == "review-1"  # type: ignore[index]
     assert ensure_body["fork_purpose"] == "review"  # type: ignore[index]
     assert ensure_body["access_mode"] == "review_readonly"  # type: ignore[index]
@@ -13594,6 +14131,170 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
         "agent-pbx",
         "workerbee",
     ]
+    assert opened and "review-1" in opened[0]
+    assert app.tmux_agent_targets[str(ensure_body["fork_agent_id"])] == "%77"  # type: ignore[index]
+    assert app.tmux_direct_agent_modes[str(ensure_body["fork_agent_id"])] is True  # type: ignore[index]
+
+
+async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller"
+    source_cwd.mkdir()
+    monkeypatch.setenv(
+        REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,
+        "agent-pbx,workerbee",
+    )
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    posts: list[dict[str, object]] = []
+    quit_calls: list[str] = []
+    opened: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            if path == "/v1/auth/check":
+                return Response({"ok": True})
+            if path == "/v1/operator/forks":
+                return Response({"forks": []})
+            raise AssertionError(path)
+
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            body = kwargs["json"]  # type: ignore[index]
+            if path == "/v1/operator/forks/ensure":
+                metadata = body["metadata"]  # type: ignore[index]
+                return Response(
+                    {
+                        "operator_fork_id": "fork-review-1",
+                        "logical_operator_agent_id": body["operator_agent_id"],  # type: ignore[index]
+                        "fork_agent_id": body["fork_agent_id"],  # type: ignore[index]
+                        "source_caller_agent_id": body["source_caller_agent_id"],  # type: ignore[index]
+                        "source_codex_session_id": "source-session",
+                        "fork_track_id": body["fork_track_id"],  # type: ignore[index]
+                        "fork_purpose": body["fork_purpose"],  # type: ignore[index]
+                        "access_mode": body["access_mode"],  # type: ignore[index]
+                        "source_cwd": body["source_cwd"],  # type: ignore[index]
+                        "work_root": body["work_root"],  # type: ignore[index]
+                        "cwd": body["work_root"],  # type: ignore[index]
+                        "codex_home": None,
+                        "codex_host_id": None,
+                        "tmux_pane_id": body["tmux_pane_id"],  # type: ignore[index]
+                        "status": "running",
+                        "summary": "Fork launched from Agent PBX TUI.",
+                        "metadata": metadata,
+                        "created_at": 1.0,
+                        "updated_at": 1.0,
+                        "last_used_at": 1.0,
+                        "completed_at": None,
+                        "edges": [],
+                    }
+                )
+            raise AssertionError(path)
+
+    async def fake_configure_operator_codex_mcp(**_: object) -> None:
+        return None
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_open_latest_for_agent(agent_id: str) -> bool:
+        opened.append(agent_id)
+        return True
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%bad" if len(launches) == 1 else "%fresh"
+
+    def fake_quit_pane(target: str, **_: object) -> bool:
+        quit_calls.append(target)
+        return True
+
+    def fake_capture_pane(target: str, **_: object) -> str:
+        if target == "%bad":
+            return (
+                '{"code":"invalid_encrypted_content","message":"Encrypted '
+                'content item_id did not match the target item id."}'
+            )
+        return ""
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "list_panes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target in {"%bad", "%fresh"})
+    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+    monkeypatch.setattr(tmux_support, "capture_pane", fake_capture_pane)
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                    "default_source_caller_agent_id": "caller-1",
+                },
+            },
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(source_cwd),
+                    "codex_session_id": "source-session",
+                    "codex_host_id": "local",
+                },
+            },
+        }
+        app.selected_agent_id = "operator-0"
+        await app.start_review_operator_fork()
+
+    assert len(launches) == 2
+    assert quit_calls == ["%bad"]
+    first_argv = shlex.split(str(launches[0]["command"]))
+    second_argv = shlex.split(str(launches[1]["command"]))
+    assert first_argv[1] == "fork"
+    assert first_argv[-2] == "source-session"
+    assert "fork" not in second_argv
+    assert "source-session" not in second_argv
+    assert second_argv[0] == "codex"
+    assert second_argv[-1].startswith("Use Agent PBX as an operator agent.")
+    assert "fresh Codex session" in second_argv[-1]
+    assert "Startup readiness:" in second_argv[-1]
+    assert 'status="waiting"' in second_argv[-1]
+    assert launches[1]["env"]["AGENT_PBX_OPERATOR_FORK_LAUNCH_MODE"] == "fresh_context"
+    assert posts and posts[0]["path"] == "/v1/operator/forks/ensure"
+    ensure_body = posts[0]["json"]
+    metadata = ensure_body["metadata"]  # type: ignore[index]
+    assert metadata["review_launch_mode"] == "fresh_context"
+    assert metadata["source_continuation_disabled_reason"] == "invalid_encrypted_content"
+    assert ensure_body["tmux_pane_id"] == "%fresh"  # type: ignore[index]
     assert opened and "review-1" in opened[0]
 
 

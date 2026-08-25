@@ -115,12 +115,21 @@ DEFAULT_OPERATOR_FORK_PURPOSE = "edit"
 DEFAULT_OPERATOR_FORK_ACCESS_MODE = "edit"
 REVIEW_OPERATOR_FORK_PURPOSE = "review"
 REVIEW_OPERATOR_FORK_ACCESS_MODE = "review_readonly"
+REVIEW_OPERATOR_FORK_LAUNCH_MODE_CODEX_FORK = "codex_fork"
+REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT = "fresh_context"
+REVIEW_OPERATOR_FORK_LAUNCH_MODE_ENV = "AGENT_PBX_TUI_REVIEW_FORK_LAUNCH_MODE"
 DEFAULT_OPERATOR_TMUX_SESSION = "agent-pbx-operators"
 CODEX_RESTART_WAIT_SECONDS = 5.0
 CODEX_RESTART_LAUNCH_ATTEMPTS = 3
 CODEX_RESTART_STABILIZE_SECONDS = 2.0
 CODEX_RESTART_RETRY_SECONDS = 1.0
 OPERATOR_SESSION_IDENTITY_SCAN_BYTES = 512_000
+OPERATOR_SESSION_HEALTH_SCAN_BYTES = 512_000
+REVIEW_FORK_HEALTH_CAPTURE_LINES = 80
+CODEX_INVALID_ENCRYPTED_CONTENT_MARKERS = (
+    "invalid_encrypted_content",
+    "encrypted content item_id did not match",
+)
 REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV = (
     "AGENT_PBX_TUI_REVIEW_MCP_APPROVAL_SERVERS"
 )
@@ -4452,7 +4461,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator purge", "Purge the selected operator", self.palette_operator_purge)
         yield SystemCommand("/operator fork next", "View the next fork pane for the selected operator", self.palette_operator_fork_next)
         yield SystemCommand("/operator fork prev", "View the previous fork pane for the selected operator", self.palette_operator_fork_prev)
-        yield SystemCommand("/operator fork review", "Start a read-only review fork for the selected operator/caller", self.palette_operator_fork_review)
+        yield SystemCommand("/operator fork review", "Start a read-only review fork for the selected operator", self.palette_operator_fork_review)
         yield SystemCommand("/operator handoffs", "Show handoffs for the selected operator", self.palette_operator_handoffs)
         yield SystemCommand("/operator handoff preflight", "Preview delivery readiness for the oldest pending operator handoff", self.palette_operator_handoff_preflight)
         yield SystemCommand("/operator handoff approve", "Approve or retry the oldest pending operator handoff", self.palette_operator_handoff_approve)
@@ -6604,6 +6613,125 @@ class AgentPBXTUI(App[None]):
         if len(source_agent_ids) == 1:
             return next(iter(source_agent_ids))
         return None
+
+    def single_default_operator_fork_source_agent_id_from_records(
+        self,
+        forks: Iterable[dict[str, Any]],
+    ) -> str | None:
+        source_agent_ids: set[str] = set()
+        for fork in forks:
+            metadata = (
+                fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+            )
+            track_id = str(
+                fork.get("fork_track_id")
+                or metadata.get("fork_track_id")
+                or DEFAULT_OPERATOR_FORK_TRACK_ID
+            ).strip()
+            purpose = str(
+                fork.get("fork_purpose")
+                or metadata.get("fork_purpose")
+                or DEFAULT_OPERATOR_FORK_PURPOSE
+            ).strip()
+            if track_id != DEFAULT_OPERATOR_FORK_TRACK_ID:
+                continue
+            if purpose != DEFAULT_OPERATOR_FORK_PURPOSE:
+                continue
+            pending = str(metadata.get("operator_fork_pending") or "").strip().lower()
+            if pending in {"1", "true", "yes"}:
+                continue
+            status = (
+                str(fork.get("status") or metadata.get("status") or "")
+                .strip()
+                .lower()
+            )
+            if status in {
+                "blocked",
+                "canceled",
+                "cancelled",
+                "expired",
+                "failed",
+                "failure",
+                "superseded",
+            }:
+                continue
+            source_agent_id = str(
+                fork.get("source_caller_agent_id")
+                or metadata.get("source_caller_agent_id")
+                or ""
+            ).strip()
+            if source_agent_id:
+                source_agent_ids.add(source_agent_id)
+        if len(source_agent_ids) == 1:
+            return next(iter(source_agent_ids))
+        return None
+
+    async def fork_table_source_caller_agent_id_for_review_fork(
+        self,
+        operator_agent_id: str,
+    ) -> str | None:
+        operator_agent = self.agents.get(operator_agent_id)
+        if not isinstance(operator_agent, dict):
+            return None
+        if self.operator_role(operator_agent) == OPERATOR_ROLE_FORK:
+            return None
+        logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
+        try:
+            response = await self.api_client().get(
+                "/v1/operator/forks",
+                params={
+                    "operator_agent_id": logical_operator_id,
+                    "fork_track_id": DEFAULT_OPERATOR_FORK_TRACK_ID,
+                    "limit": 500,
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("forks"), list):
+            return None
+        forks = [item for item in payload["forks"] if isinstance(item, dict)]
+        return self.single_default_operator_fork_source_agent_id_from_records(forks)
+
+    async def resolve_source_caller_agent_id_for_review_fork(
+        self,
+        operator_agent_id: str,
+    ) -> str | None:
+        source_agent_id = self.source_caller_agent_id_for_review_fork(
+            operator_agent_id
+        )
+        if source_agent_id:
+            return source_agent_id
+        return await self.fork_table_source_caller_agent_id_for_review_fork(
+            operator_agent_id
+        )
+
+    async def ensure_agent_loaded(self, agent_id: str) -> dict[str, Any] | None:
+        agent = self.agents.get(agent_id)
+        if isinstance(agent, dict):
+            return agent
+        try:
+            response = await self.api_client().get(
+                "/v1/agents",
+                params={"include_hidden": "true"},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            agents = response.json()
+        except Exception:
+            return None
+        if not isinstance(agents, list):
+            return None
+        for item in agents:
+            if not isinstance(item, dict):
+                continue
+            item_agent_id = str(item.get("agent_id") or "").strip()
+            if item_agent_id:
+                self.agents[item_agent_id] = item
+        loaded = self.agents.get(agent_id)
+        return loaded if isinstance(loaded, dict) else None
 
     def agents_render_signature(self) -> tuple[Any, ...]:
         return (
@@ -10391,18 +10519,26 @@ class AgentPBXTUI(App[None]):
         work_root = str(metadata.get("work_root") or metadata.get("cwd") or pane.cwd).strip()
         candidates = await asyncio.to_thread(self.operator_session_candidates, agent_id)
         target = self.operator_restart_target(agent_id, candidates)
-        bootstrap = self.operator_bootstrap_prompt(
-            agent_id,
-            work_root,
-            logical_operator_id=logical_operator_id,
-            source_caller_agent_id=source_caller_agent_id,
-            source_codex_session_id=source_session_id,
-            fork_track_id=fork_track_id,
-            fork_purpose=fork_purpose,
-            access_mode=access_mode,
-            source_cwd=source_cwd or work_root,
-            work_root=work_root,
+        target_invalid_encrypted_content = (
+            target is not None
+            and self.operator_session_has_invalid_encrypted_content(target)
         )
+        if (
+            not target_invalid_encrypted_content
+            and fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            and await self.tmux_pane_has_invalid_encrypted_content(pane.pane_id)
+        ):
+            target_invalid_encrypted_content = True
+        if target_invalid_encrypted_content:
+            target = None
+        review_launch_mode = self.normalize_review_operator_fork_launch_mode(
+            str(metadata.get("review_launch_mode") or "")
+        )
+        if (
+            fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            and target_invalid_encrypted_content
+        ):
+            review_launch_mode = REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
         raw_review_servers = metadata.get("review_mcp_approval_servers", [])
         review_servers = (
             tuple(
@@ -10425,31 +10561,86 @@ class AgentPBXTUI(App[None]):
             if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
             else ()
         )
-        if target is not None:
-            command = self.operator_resume_command(
-                codex_command,
-                target.session_id,
-                cd=work_root if work_root and work_root != source_cwd else None,
-                sandbox=(
-                    "workspace-write"
-                    if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
-                    else None
-                ),
-                config_overrides=review_config_overrides,
+        sandbox = (
+            "workspace-write"
+            if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            else None
+        )
+
+        def build_bootstrap(mode: str) -> str:
+            return self.operator_bootstrap_prompt(
+                agent_id,
+                work_root,
+                logical_operator_id=logical_operator_id,
+                source_caller_agent_id=source_caller_agent_id,
+                source_codex_session_id=source_session_id,
+                fork_track_id=fork_track_id,
+                fork_purpose=fork_purpose,
+                access_mode=access_mode,
+                source_cwd=source_cwd or work_root,
+                work_root=work_root,
+                review_launch_mode=mode,
             )
-        else:
-            command = self.operator_fork_command(
+
+        def build_command(
+            mode: str,
+            resume_target: OperatorSessionCandidate | None,
+        ) -> str:
+            bootstrap_prompt = build_bootstrap(mode)
+            if resume_target is not None:
+                return self.operator_resume_command(
+                    codex_command,
+                    resume_target.session_id,
+                    cd=work_root if work_root and work_root != source_cwd else None,
+                    sandbox=sandbox,
+                    config_overrides=review_config_overrides,
+                )
+            if (
+                fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+                and mode == REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
+            ):
+                return self.codex_start_command(
+                    codex_command,
+                    bootstrap_prompt,
+                    cd=work_root if work_root and work_root != source_cwd else None,
+                    sandbox=sandbox,
+                    config_overrides=review_config_overrides,
+                )
+            return self.operator_fork_command(
                 codex_command,
                 source_session_id,
-                bootstrap,
+                bootstrap_prompt,
                 cd=work_root if work_root and work_root != source_cwd else None,
-                sandbox=(
-                    "workspace-write"
-                    if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
-                    else None
-                ),
+                sandbox=sandbox,
                 config_overrides=review_config_overrides,
             )
+
+        def build_env(
+            mode: str,
+            resume_target: OperatorSessionCandidate | None,
+        ) -> dict[str, str]:
+            launch_env = self.operator_launch_env(
+                agent_id=agent_id,
+                cwd=work_root,
+                mcp_url=mcp_url,
+                operator_role=OPERATOR_ROLE_FORK,
+                logical_operator_id=logical_operator_id,
+                source_caller_agent_id=source_caller_agent_id,
+                source_codex_session_id=source_session_id,
+                fork_track_id=fork_track_id,
+                fork_purpose=fork_purpose,
+                access_mode=access_mode,
+                source_cwd=source_cwd or work_root,
+                work_root=work_root,
+                review_launch_mode=mode,
+            )
+            if resume_target is not None:
+                launch_env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = (
+                    resume_target.session_id
+                )
+            return launch_env
+
+        command = build_command(review_launch_mode, target)
         try:
             await self.configure_operator_codex_mcp(
                 codex_command=codex_command,
@@ -10460,22 +10651,6 @@ class AgentPBXTUI(App[None]):
             return False
         if not await self.quit_or_kill_tmux_pane(pane.pane_id, label=agent_id):
             return False
-        env = self.operator_launch_env(
-            agent_id=agent_id,
-            cwd=work_root,
-            mcp_url=mcp_url,
-            operator_role=OPERATOR_ROLE_FORK,
-            logical_operator_id=logical_operator_id,
-            source_caller_agent_id=source_caller_agent_id,
-            source_codex_session_id=source_session_id,
-            fork_track_id=fork_track_id,
-            fork_purpose=fork_purpose,
-            access_mode=access_mode,
-            source_cwd=source_cwd or work_root,
-            work_root=work_root,
-        )
-        if target is not None:
-            env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
         try:
             new_pane_id = await self.launch_restart_pane(
                 session_name=session_name,
@@ -10483,8 +10658,31 @@ class AgentPBXTUI(App[None]):
                 command=command,
                 label=agent_id,
                 cwd=work_root,
-                env=env,
+                env=build_env(review_launch_mode, target),
             )
+            if (
+                fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+                and review_launch_mode
+                != REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
+                and await self.tmux_pane_has_invalid_encrypted_content(new_pane_id)
+            ):
+                self.notify(
+                    "Codex continuation failed encrypted-content verification; "
+                    "restarting review fork with fresh context.",
+                    severity="warning",
+                )
+                await self.quit_or_kill_tmux_pane(new_pane_id, label=agent_id)
+                target = None
+                target_invalid_encrypted_content = True
+                review_launch_mode = REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
+                new_pane_id = await self.launch_restart_pane(
+                    session_name=session_name,
+                    window_name=agent_id,
+                    command=build_command(review_launch_mode, target),
+                    label=agent_id,
+                    cwd=work_root,
+                    env=build_env(review_launch_mode, target),
+                )
         except Exception as exc:
             self.notify(f"Unable to relaunch {agent_id}: {exc}", severity="error")
             return False
@@ -10493,6 +10691,13 @@ class AgentPBXTUI(App[None]):
             "tmux_pane_id": new_pane_id,
             "last_tmux_restart_at": time.time(),
         }
+        if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
+            fork_metadata["review_launch_mode"] = review_launch_mode
+        if target_invalid_encrypted_content:
+            fork_metadata["source_continuation_disabled_reason"] = (
+                "invalid_encrypted_content"
+            )
+            fork_metadata.pop("fork_codex_session_id", None)
         if target is not None:
             fork_metadata["fork_codex_session_id"] = target.session_id
         try:
@@ -10522,7 +10727,10 @@ class AgentPBXTUI(App[None]):
         self.tmux_direct_agent_modes[agent_id] = True
         if target is not None:
             await asyncio.sleep(1.0)
-            await self.send_text_to_tmux_pane(new_pane_id, bootstrap)
+            await self.send_text_to_tmux_pane(
+                new_pane_id,
+                build_bootstrap(review_launch_mode),
+            )
         self.save_settings()
         suffix = f" on Codex session {target.session_id}" if target else ""
         self.notify(f"Restarted {agent_id}{suffix}.")
@@ -11707,6 +11915,17 @@ class AgentPBXTUI(App[None]):
         normalized = slugify(value or default).lower()
         return normalized[:80] or default
 
+    def normalize_review_operator_fork_launch_mode(self, value: str | None) -> str:
+        normalized = slugify(value or REVIEW_OPERATOR_FORK_LAUNCH_MODE_CODEX_FORK).lower()
+        if normalized in {"fresh", "fresh-context", "fresh_context", "new", "start"}:
+            return REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
+        return REVIEW_OPERATOR_FORK_LAUNCH_MODE_CODEX_FORK
+
+    def review_operator_fork_launch_mode(self) -> str:
+        return self.normalize_review_operator_fork_launch_mode(
+            os.getenv(REVIEW_OPERATOR_FORK_LAUNCH_MODE_ENV)
+        )
+
     def selected_caller_agent_id_for_fork(self) -> str | None:
         focused_agent_id = self.focused_agent_table_id()
         if focused_agent_id and focused_agent_id in self.agents:
@@ -11762,6 +11981,7 @@ class AgentPBXTUI(App[None]):
         access_mode: str | None = None,
         source_cwd: str | None = None,
         work_root: str | None = None,
+        review_launch_mode: str | None = None,
     ) -> str:
         logical_id = logical_operator_id or agent_id
         resolved_track_id = self.normalize_operator_fork_track_id(fork_track_id)
@@ -11781,6 +12001,9 @@ class AgentPBXTUI(App[None]):
                 else REVIEW_OPERATOR_FORK_ACCESS_MODE
             ),
         )
+        resolved_review_launch_mode = self.normalize_review_operator_fork_launch_mode(
+            review_launch_mode
+        )
         extra = []
         if source_caller_agent_id:
             extra.extend(
@@ -11795,12 +12018,20 @@ class AgentPBXTUI(App[None]):
                     f"- metadata.source_cwd: {source_cwd or cwd}",
                     f"- metadata.work_root: {work_root or cwd}",
                     "",
-                    "This session is a fork of the caller's Codex session. "
+                    "This session is an Agent PBX fork associated with the "
+                    "caller source and Codex session. "
                     "Keep work for this caller isolated in this fork and report "
                     "through Agent PBX for the logical operator to review. "
                     "This visible Agent PBX tmux pane is the fork; do not spawn "
                     "or use Codex internal subagents such as multi_agent_v1 for "
-                    "caller work.",
+                    "caller work. Register with Agent PBX, then wait at the "
+                    "Codex prompt for operator instructions. Do not begin "
+                    "review or caller work until the operator sends a task.",
+                    "",
+                    "Startup readiness: after registration, call "
+                    "pbx_operator_runbook once, send pbx_report_turn with "
+                    "status=\"waiting\" and needs_input=true, then stop at the "
+                    "Codex prompt until the operator sends a task.",
                 ]
             )
             if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
@@ -11815,6 +12046,19 @@ class AgentPBXTUI(App[None]):
                         "the caller project directly.",
                     ]
                 )
+                if (
+                    resolved_review_launch_mode
+                    == REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
+                ):
+                    extra.extend(
+                        [
+                            "",
+                            "This review fork was started as a fresh Codex session "
+                            "instead of a Codex transcript continuation. Use the "
+                            "source metadata, Agent PBX tools, KB context, and "
+                            "operator prompts as the source of truth for context.",
+                        ]
+                    )
         else:
             extra.extend(
                 [
@@ -11901,6 +12145,7 @@ class AgentPBXTUI(App[None]):
         access_mode: str | None = None,
         source_cwd: str | None = None,
         work_root: str | None = None,
+        review_launch_mode: str | None = None,
     ) -> dict[str, str]:
         logical_id = logical_operator_id or agent_id
         resolved_track_id = self.normalize_operator_fork_track_id(fork_track_id)
@@ -11920,6 +12165,9 @@ class AgentPBXTUI(App[None]):
                 else REVIEW_OPERATOR_FORK_ACCESS_MODE
             ),
         )
+        resolved_review_launch_mode = self.normalize_review_operator_fork_launch_mode(
+            review_launch_mode
+        )
         env = {
             AGENT_PBX_SERVER_URL_ENV: self.server,
             AGENT_PBX_MCP_URL_ENV: mcp_url,
@@ -11938,6 +12186,10 @@ class AgentPBXTUI(App[None]):
             env["AGENT_PBX_OPERATOR_FORK_TRACK_ID"] = resolved_track_id
             env["AGENT_PBX_OPERATOR_FORK_PURPOSE"] = resolved_purpose
             env["AGENT_PBX_OPERATOR_ACCESS_MODE"] = resolved_access_mode
+            if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
+                env["AGENT_PBX_OPERATOR_FORK_LAUNCH_MODE"] = (
+                    resolved_review_launch_mode
+                )
         if source_caller_agent_id:
             env["AGENT_PBX_SOURCE_CALLER_AGENT_ID"] = source_caller_agent_id
         if source_codex_session_id:
@@ -12258,10 +12510,22 @@ class AgentPBXTUI(App[None]):
             "token_env": AGENT_PBX_TOKEN_ENV,
             "tmux_session": session_name,
             "codex_command": codex_command,
-            "default_source_caller_agent_id": default_source_caller_agent_id or "",
-            "default_source_caller_project": default_source_caller_project or "",
-            "default_source_codex_session_id": default_source_codex_session_id or "",
         }
+        if any(
+            value is not None
+            for value in (
+                default_source_caller_agent_id,
+                default_source_caller_project,
+                default_source_codex_session_id,
+            )
+        ):
+            metadata.update(
+                {
+                    "default_source_caller_agent_id": default_source_caller_agent_id or "",
+                    "default_source_caller_project": default_source_caller_project or "",
+                    "default_source_codex_session_id": default_source_codex_session_id or "",
+                }
+            )
         if tmux_pane_id:
             metadata["tmux_pane_id"] = tmux_pane_id
         if resumed_codex_session_id:
@@ -12404,6 +12668,58 @@ class AgentPBXTUI(App[None]):
             if value:
                 session_ids.add(value)
         return session_ids
+
+    def codex_invalid_encrypted_content_detected(self, text: str) -> bool:
+        normalized = text.lower()
+        return any(
+            marker in normalized for marker in CODEX_INVALID_ENCRYPTED_CONTENT_MARKERS
+        )
+
+    def operator_session_tail_text(
+        self,
+        candidate: OperatorSessionCandidate,
+        *,
+        max_bytes: int,
+    ) -> str:
+        path_text = str(candidate.path or "").strip()
+        if not path_text:
+            return ""
+        path = Path(path_text).expanduser()
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return ""
+        start_at = max(size - max(0, max_bytes), 0)
+        try:
+            with path.open("rb") as handle:
+                handle.seek(start_at)
+                if start_at:
+                    handle.readline()
+                return handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            return ""
+
+    def operator_session_has_invalid_encrypted_content(
+        self,
+        candidate: OperatorSessionCandidate,
+    ) -> bool:
+        return self.codex_invalid_encrypted_content_detected(
+            self.operator_session_tail_text(
+                candidate,
+                max_bytes=OPERATOR_SESSION_HEALTH_SCAN_BYTES,
+            )
+        )
+
+    async def tmux_pane_has_invalid_encrypted_content(self, pane_id: str) -> bool:
+        try:
+            captured = await asyncio.to_thread(
+                tmux_support.capture_pane,
+                pane_id,
+                lines=REVIEW_FORK_HEALTH_CAPTURE_LINES,
+            )
+        except Exception:
+            return False
+        return self.codex_invalid_encrypted_content_detected(captured)
 
     def codex_history_summaries(self, codex_home: Path) -> dict[str, tuple[float, str]]:
         path = codex_home / "history.jsonl"
@@ -12676,7 +12992,13 @@ class AgentPBXTUI(App[None]):
         safe_candidates = [
             candidate
             for candidate in candidates
-            if not self.operator_session_has_report_identity_conflict(agent_id, candidate)
+            if (
+                not self.operator_session_has_report_identity_conflict(
+                    agent_id,
+                    candidate,
+                )
+                and not self.operator_session_has_invalid_encrypted_content(candidate)
+            )
         ]
         if not safe_candidates:
             return None
@@ -13221,46 +13543,68 @@ class AgentPBXTUI(App[None]):
             fork_metadata["review_mcp_approval_servers"] = list(
                 review_mcp_approval_servers
             )
-        bootstrap = self.operator_bootstrap_prompt(
-            fork_agent_id,
-            launch_cwd,
-            logical_operator_id=logical_operator_id,
-            source_caller_agent_id=source_caller_agent_id,
-            source_codex_session_id=source_session_id,
-            fork_track_id=resolved_track_id,
-            fork_purpose=resolved_purpose,
-            access_mode=resolved_access_mode,
-            source_cwd=caller_cwd,
-            work_root=launch_cwd,
+        review_launch_mode = (
+            self.review_operator_fork_launch_mode()
+            if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            else REVIEW_OPERATOR_FORK_LAUNCH_MODE_CODEX_FORK
         )
-        command = self.operator_fork_command(
-            codex_command,
-            source_session_id,
-            bootstrap,
-            cd=launch_cwd if launch_cwd and launch_cwd != caller_cwd else None,
-            sandbox=(
-                "workspace-write"
-                if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
-                else None
-            ),
-            config_overrides=(
-                review_operator_config_overrides(
-                    review_mcp_approval_servers,
-                    mcp_url=mcp_url,
-                    codex_home=self.codex_home_dir(),
-                    work_root=launch_cwd,
+        if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
+            fork_metadata["review_launch_mode"] = review_launch_mode
+        review_config_overrides = (
+            review_operator_config_overrides(
+                review_mcp_approval_servers,
+                mcp_url=mcp_url,
+                codex_home=self.codex_home_dir(),
+                work_root=launch_cwd,
+            )
+            if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            else ()
+        )
+        sandbox = (
+            "workspace-write"
+            if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            else None
+        )
+
+        def build_bootstrap(mode: str) -> str:
+            return self.operator_bootstrap_prompt(
+                fork_agent_id,
+                launch_cwd,
+                logical_operator_id=logical_operator_id,
+                source_caller_agent_id=source_caller_agent_id,
+                source_codex_session_id=source_session_id,
+                fork_track_id=resolved_track_id,
+                fork_purpose=resolved_purpose,
+                access_mode=resolved_access_mode,
+                source_cwd=caller_cwd,
+                work_root=launch_cwd,
+                review_launch_mode=mode,
+            )
+
+        def build_command(mode: str) -> str:
+            bootstrap_prompt = build_bootstrap(mode)
+            if (
+                resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+                and mode == REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
+            ):
+                return self.codex_start_command(
+                    codex_command,
+                    bootstrap_prompt,
+                    cd=launch_cwd if launch_cwd and launch_cwd != caller_cwd else None,
+                    sandbox=sandbox,
+                    config_overrides=review_config_overrides,
                 )
-                if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
-                else ()
-            ),
-        )
-        pane_id = await self.launch_restart_pane(
-            session_name=session_name,
-            window_name=fork_agent_id,
-            command=command,
-            label=fork_agent_id,
-            cwd=launch_cwd,
-            env=self.operator_launch_env(
+            return self.operator_fork_command(
+                codex_command,
+                source_session_id,
+                bootstrap_prompt,
+                cd=launch_cwd if launch_cwd and launch_cwd != caller_cwd else None,
+                sandbox=sandbox,
+                config_overrides=review_config_overrides,
+            )
+
+        def build_env(mode: str) -> dict[str, str]:
+            return self.operator_launch_env(
                 agent_id=fork_agent_id,
                 cwd=launch_cwd,
                 mcp_url=mcp_url,
@@ -13273,8 +13617,41 @@ class AgentPBXTUI(App[None]):
                 access_mode=resolved_access_mode,
                 source_cwd=caller_cwd,
                 work_root=launch_cwd,
-            ),
+                review_launch_mode=mode,
+            )
+
+        pane_id = await self.launch_restart_pane(
+            session_name=session_name,
+            window_name=fork_agent_id,
+            command=build_command(review_launch_mode),
+            label=fork_agent_id,
+            cwd=launch_cwd,
+            env=build_env(review_launch_mode),
         )
+        if (
+            resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            and review_launch_mode == REVIEW_OPERATOR_FORK_LAUNCH_MODE_CODEX_FORK
+            and await self.tmux_pane_has_invalid_encrypted_content(pane_id)
+        ):
+            self.notify(
+                "Codex fork continuation failed encrypted-content verification; "
+                "restarting review fork with fresh context.",
+                severity="warning",
+            )
+            await self.quit_or_kill_tmux_pane(pane_id, label=fork_agent_id)
+            review_launch_mode = REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
+            fork_metadata["review_launch_mode"] = review_launch_mode
+            fork_metadata["source_continuation_disabled_reason"] = (
+                "invalid_encrypted_content"
+            )
+            pane_id = await self.launch_restart_pane(
+                session_name=session_name,
+                window_name=fork_agent_id,
+                command=build_command(review_launch_mode),
+                label=fork_agent_id,
+                cwd=launch_cwd,
+                env=build_env(review_launch_mode),
+            )
         self.tmux_agent_targets[fork_agent_id] = pane_id
         self.tmux_manual_override_agent_ids.add(fork_agent_id)
         self.tmux_detached_agent_ids.discard(fork_agent_id)
@@ -15753,9 +16130,6 @@ class AgentPBXTUI(App[None]):
         if self.operator_role(operator_agent) == OPERATOR_ROLE_FORK:
             source_agent_id = str(metadata.get("source_caller_agent_id") or "").strip()
             return source_agent_id or None
-        focused_caller = self.focused_caller_agent_id_for_fork()
-        if focused_caller:
-            return focused_caller
         default_source = str(metadata.get("default_source_caller_agent_id") or "").strip()
         if default_source:
             return default_source
@@ -15764,7 +16138,7 @@ class AgentPBXTUI(App[None]):
         )
         if active_source:
             return active_source
-        return self.selected_caller_agent_id_for_fork()
+        return None
 
     def operator_review_work_root(
         self,
@@ -15870,15 +16244,17 @@ class AgentPBXTUI(App[None]):
             return
         await self.reconcile_operator_tmux_targets()
         logical_operator_id = self.logical_operator_id_for_agent(operator_agent)
-        source_caller_agent_id = self.source_caller_agent_id_for_review_fork(
+        source_caller_agent_id = await self.resolve_source_caller_agent_id_for_review_fork(
             operator_agent_id
         )
         if not source_caller_agent_id:
             self.notify(
-                "Select a caller or an operator with an active/default caller first.",
+                "Selected operator has no default or active source caller. "
+                "Start or bind the operator to a caller first.",
                 severity="warning",
             )
             return
+        await self.ensure_agent_loaded(source_caller_agent_id)
         blocker = self.operator_fork_start_blocker(source_caller_agent_id)
         if blocker:
             self.notify(blocker, severity="error")

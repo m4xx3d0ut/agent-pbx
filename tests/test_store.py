@@ -109,6 +109,51 @@ def test_register_agent_preserves_operator_identity_on_default_refresh(
     assert agent["metadata"]["pbx_mode"] == "report"
 
 
+def test_register_agent_preserves_root_operator_default_source_on_blank_refresh(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            name="operator-0",
+            agent_type="operator",
+            metadata={
+                "agent_type": "operator",
+                "operator_role": "root",
+                "cwd": str(tmp_path / "agent-pbx"),
+                "default_source_caller_agent_id": "caller-1",
+                "default_source_caller_project": "demo",
+                "default_source_codex_session_id": "session-1",
+            },
+        )
+    )
+    agent = store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            name="operator-0",
+            agent_type="operator",
+            metadata={
+                "agent_type": "operator",
+                "operator_role": "root",
+                "default_source_caller_agent_id": "",
+                "default_source_caller_project": "",
+                "default_source_codex_session_id": "",
+                "pbx_mode": "report",
+            },
+        )
+    )
+
+    assert agent["metadata"]["default_source_caller_agent_id"] == "caller-1"
+    assert agent["metadata"]["default_source_caller_project"] == "demo"
+    assert agent["metadata"]["default_source_codex_session_id"] == "session-1"
+    assert agent["metadata"]["pbx_mode"] == "report"
+
+
 def test_register_agent_canonicalizes_root_operator_project_on_bad_refresh(
     tmp_path: Path,
 ) -> None:
