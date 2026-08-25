@@ -11721,6 +11721,19 @@ class AgentPBXTUI(App[None]):
                 return self.selected_agent_id
         return None
 
+    def focused_caller_agent_id_for_fork(self) -> str | None:
+        try:
+            focused = self.focused
+        except ScreenStackError:
+            focused = None
+        if not isinstance(focused, DataTable) or focused.id != "agents":
+            return None
+        cursor_agent_id = self.agent_id_at_cursor()
+        if cursor_agent_id and cursor_agent_id in self.agents:
+            if self.agent_type(self.agents[cursor_agent_id]) == CALLER_AGENT_TYPE:
+                return cursor_agent_id
+        return None
+
     def operator_fork_start_blocker(self, source_caller_agent_id: str) -> str | None:
         caller = self.agents.get(source_caller_agent_id)
         if caller is None:
@@ -15740,15 +15753,18 @@ class AgentPBXTUI(App[None]):
         if self.operator_role(operator_agent) == OPERATOR_ROLE_FORK:
             source_agent_id = str(metadata.get("source_caller_agent_id") or "").strip()
             return source_agent_id or None
-        selected_caller = self.selected_caller_agent_id_for_fork()
-        if selected_caller:
-            return selected_caller
+        focused_caller = self.focused_caller_agent_id_for_fork()
+        if focused_caller:
+            return focused_caller
         default_source = str(metadata.get("default_source_caller_agent_id") or "").strip()
         if default_source:
             return default_source
-        return self.single_active_operator_fork_source_agent_id(
+        active_source = self.single_active_operator_fork_source_agent_id(
             self.logical_operator_id_for_agent(operator_agent)
         )
+        if active_source:
+            return active_source
+        return self.selected_caller_agent_id_for_fork()
 
     def operator_review_work_root(
         self,

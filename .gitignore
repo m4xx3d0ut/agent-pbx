@@ -16,6 +16,7 @@ state/
 .local/
 .codex/
 tmp/
+temp/
 # Benchmark/test artifacts
 snapshots/
 combined/

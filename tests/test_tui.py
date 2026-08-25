@@ -13139,6 +13139,40 @@ def test_tui_operator_fork_ids_preserve_default_and_track_review() -> None:
     assert "review-1" in review_id
 
 
+def test_tui_review_fork_source_prefers_root_default_over_stale_caller() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "default_source_caller_agent_id": "codex-k1s-workerbee-private",
+            },
+        },
+        "codex-k1s-workerbee-private": {
+            "agent_id": "codex-k1s-workerbee-private",
+            "agent_type": "caller",
+            "project": "k1s-workerbee-private",
+            "metadata": {"codex_session_id": "workerbee-session"},
+        },
+        "codex-micropc-debian": {
+            "agent_id": "codex-micropc-debian",
+            "agent_type": "caller",
+            "project": "micropc-debian",
+            "metadata": {"codex_session_id": "micropc-session"},
+        },
+    }
+    app.selected_agent_id = "codex-micropc-debian"
+
+    assert (
+        app.source_caller_agent_id_for_review_fork("operator-0")
+        == "codex-k1s-workerbee-private"
+    )
+
+
 def test_tui_operator_fork_command_supports_cd_and_sandbox() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
