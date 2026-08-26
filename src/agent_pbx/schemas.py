@@ -1423,3 +1423,76 @@ class FilePreviewResponse(BaseModel):
     text: str | None = None
     truncated: bool = False
     error: dict[str, Any] | None = None
+
+
+class FileDocumentResponse(BaseModel):
+    agent_id: str
+    cwd: str | None = None
+    path: str
+    kind: Literal["file", "directory", "error"]
+    size: int | None = None
+    mtime: float | None = None
+    extension: str | None = None
+    mime_type: str | None = None
+    is_text: bool = False
+    text: str | None = None
+    sha256: str | None = None
+    encoding: str | None = None
+    newline: str | None = None
+    language: str | None = None
+    line_count: int | None = None
+    read_only: bool = True
+    saved: bool = False
+    error: dict[str, Any] | None = None
+
+
+class FileDocumentWriteRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=1000)
+    text: str
+    previous_sha256: str | None = Field(default=None, max_length=128)
+    previous_mtime: float | None = None
+    create: bool = False
+
+
+class FileSearchResult(BaseModel):
+    path: str
+    line: int
+    column: int = 1
+    snippet: str
+
+
+class FileSearchResponse(BaseModel):
+    agent_id: str
+    cwd: str | None = None
+    path: str
+    query: str
+    results: list[FileSearchResult] = Field(default_factory=list)
+    truncated: bool = False
+    backend: str = "none"
+    error: dict[str, Any] | None = None
+
+
+class FileDiagnosticsRequest(BaseModel):
+    path: str = Field(default=".", min_length=1, max_length=1000)
+    tool: Literal["auto", "ruff", "mypy"] = "auto"
+
+
+class FileDiagnostic(BaseModel):
+    path: str
+    line: int
+    column: int = 1
+    severity: str = "error"
+    code: str | None = None
+    message: str
+    source: str
+
+
+class FileDiagnosticsResponse(BaseModel):
+    agent_id: str
+    cwd: str | None = None
+    path: str
+    tool: str = "auto"
+    available_tools: list[str] = Field(default_factory=list)
+    diagnostics: list[FileDiagnostic] = Field(default_factory=list)
+    backend: str = "none"
+    error: dict[str, Any] | None = None

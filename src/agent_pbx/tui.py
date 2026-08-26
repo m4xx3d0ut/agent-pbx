@@ -126,6 +126,8 @@ CODEX_RESTART_RETRY_SECONDS = 1.0
 OPERATOR_SESSION_IDENTITY_SCAN_BYTES = 512_000
 OPERATOR_SESSION_HEALTH_SCAN_BYTES = 512_000
 REVIEW_FORK_HEALTH_CAPTURE_LINES = 80
+REVIEW_FORK_HEALTH_CHECK_ATTEMPTS = 8
+REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS = 0.5
 CODEX_INVALID_ENCRYPTED_CONTENT_MARKERS = (
     "invalid_encrypted_content",
     "encrypted content item_id did not match",
@@ -249,6 +251,14 @@ CLIPBOARD_READ_COMMANDS = (
     ("termux-clipboard-get", ("termux-clipboard-get",)),
     ("tmux buffer", ("tmux", "show-buffer")),
 )
+CLIPBOARD_WRITE_COMMANDS = (
+    ("wl-copy", ("wl-copy",)),
+    ("xclip", ("xclip", "-selection", "clipboard", "-in")),
+    ("xsel", ("xsel", "--clipboard", "--input")),
+    ("pbcopy", ("pbcopy",)),
+    ("termux-clipboard-set", ("termux-clipboard-set",)),
+    ("tmux buffer", ("tmux", "load-buffer", "-")),
+)
 FOLLOW_UP_MIN_HEIGHT = 8
 FOLLOW_UP_MAX_HEIGHT = 15
 SENT_MESSAGE_HISTORY_LIMIT = 100
@@ -313,7 +323,11 @@ MOUSE_FOCUS_TARGET_IDS = {
     "thread",
     "thread-detail",
     "files",
+    "files-search-query",
+    "file-search-results",
     "file-preview",
+    "editor",
+    "editor-diagnostics",
     "workerbee-detail",
     "pull-requests",
     "pull-request-detail",
@@ -344,7 +358,10 @@ MOUSE_FOCUS_CONTAINER_TARGETS = {
     "thread-tab": "#thread",
     "thread-actions": "#thread",
     "files-tab": "#files",
-    "files-actions": "#files",
+    "files-search-actions": "#files-search-query",
+    "file-actions": "#files",
+    "editor-tab": "#editor",
+    "editor-actions": "#editor",
     "workerbee-tab": "#workerbee-detail",
     "pull-requests-tab": "#pull-requests",
     "pull-request-actions": "#pull-request-detail",
@@ -1554,6 +1571,37 @@ def read_clipboard_text() -> tuple[str, str]:
     )
 
 
+def write_clipboard_text(text: str) -> str:
+    errors: list[str] = []
+    for label, command in CLIPBOARD_WRITE_COMMANDS:
+        executable = command[0]
+        if shutil.which(executable) is None:
+            continue
+        try:
+            result = subprocess.run(
+                list(command),
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+        if result.returncode == 0:
+            return label
+        message = (result.stderr or result.stdout).strip()
+        if message:
+            errors.append(f"{label}: {message}")
+    if errors:
+        raise RuntimeError("; ".join(errors))
+    raise RuntimeError(
+        "no clipboard writer found; install wl-copy, xclip, xsel, pbcopy, "
+        "termux-clipboard-set, or run inside tmux with a writable tmux buffer"
+    )
+
+
 def latest_nonlocal_sent_prompt(
     history: list[str],
     *,
@@ -2382,6 +2430,59 @@ class JoplinDeleteConfirmScreen(ModalScreen[None]):
             self.dismiss()
 
 
+class EditorCloseConfirmScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(self, *, agent_id: str, path: str) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.path = path
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="editor-close-panel"):
+            yield Static("Close Editor File", id="editor-close-title")
+            yield Static(self.path, id="editor-close-path")
+            yield Static(
+                "This editor buffer has unsaved changes.",
+                id="editor-close-message",
+            )
+            with Horizontal(id="editor-close-actions"):
+                yield Button(
+                    "Save and Close",
+                    id="editor-close-save",
+                    variant="primary",
+                )
+                yield Button(
+                    "Discard",
+                    id="editor-close-discard",
+                    variant="error",
+                )
+                yield Button("Cancel", id="editor-close-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "editor-close-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "editor-close-save":
+            event.stop()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.save_and_close_editor_document(self.agent_id),  # type: ignore[attr-defined]
+                name=f"editor-save-close-{slugify(self.agent_id)}",
+                exclusive=True,
+            )
+            self.dismiss()
+            return
+        if event.button.id == "editor-close-discard":
+            event.stop()
+            self.app.close_editor_document(  # type: ignore[attr-defined]
+                self.agent_id,
+                notify=True,
+                discarded=True,
+            )
+            self.dismiss()
+
+
 class OperatorKillConfirmScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Close")]
 
@@ -3050,6 +3151,7 @@ class AgentPBXTUI(App[None]):
 
     JoplinNoteTitleScreen,
     JoplinDeleteConfirmScreen,
+    EditorCloseConfirmScreen,
     OperatorKillConfirmScreen,
     OperatorHistoryScreen,
     PullRequestMergeConfirmScreen,
@@ -3059,6 +3161,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-panel,
     #joplin-delete-panel,
+    #editor-close-panel,
     #operator-kill-panel,
     #operator-history-panel,
     #pr-merge-panel,
@@ -3080,6 +3183,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-modal-title,
     #joplin-delete-title,
+    #editor-close-title,
     #operator-kill-title,
     #operator-history-title,
     #pr-merge-title,
@@ -3103,6 +3207,8 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-input,
     #joplin-delete-note-title,
+    #editor-close-path,
+    #editor-close-message,
     #operator-kill-message,
     #pr-merge-confirm,
     #issue-clear-confirm {
@@ -3131,6 +3237,12 @@ class AgentPBXTUI(App[None]):
         content-align: center middle;
     }
 
+    #editor-close-path,
+    #editor-close-message {
+        color: $warning;
+        content-align: center middle;
+    }
+
     #operator-kill-message {
         color: $warning;
         content-align: center middle;
@@ -3138,6 +3250,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-actions,
     #joplin-delete-actions,
+    #editor-close-actions,
     #operator-kill-actions,
     #operator-history-actions,
     #pr-merge-actions,
@@ -3148,6 +3261,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-actions Button,
     #joplin-delete-actions Button,
+    #editor-close-actions Button,
     #operator-kill-actions Button,
     #operator-history-actions Button,
     #pr-merge-actions Button,
@@ -3394,8 +3508,33 @@ class AgentPBXTUI(App[None]):
     }
 
     #files {
-        height: 10;
+        height: 8;
         min-height: 5;
+    }
+
+    #files-search-actions {
+        height: 3;
+    }
+
+    #files-search-query {
+        width: 1fr;
+        height: 3;
+    }
+
+    #files-search-actions Button {
+        width: 10;
+        min-width: 7;
+    }
+
+    #file-search-status {
+        height: 1;
+        color: $secondary;
+        content-align: left middle;
+    }
+
+    #file-search-results {
+        height: 7;
+        min-height: 3;
     }
 
     #file-preview {
@@ -3410,6 +3549,44 @@ class AgentPBXTUI(App[None]):
     #file-actions Button {
         width: 1fr;
         min-width: 1;
+    }
+
+    #editor-status {
+        height: 1;
+        color: $secondary;
+        content-align: left middle;
+    }
+
+    #editor {
+        height: 1fr;
+        min-height: 16;
+        border: tall $accent;
+        background: $surface;
+        scrollbar-size: 0 1;
+        scrollbar-color: $accent;
+        scrollbar-color-hover: $warning;
+        scrollbar-background: $surface;
+    }
+
+    #editor-diagnostics {
+        height: 6;
+        min-height: 3;
+    }
+
+    #editor-actions {
+        height: 3;
+    }
+
+    #editor-actions Button {
+        width: 1fr;
+        min-width: 1;
+    }
+
+    #editor-hotkeys {
+        height: 1;
+        content-align: center middle;
+        color: $secondary;
+        background: $surface;
     }
 
     #workerbee-detail {
@@ -3598,6 +3775,7 @@ class AgentPBXTUI(App[None]):
     Screen.tiny-agent #detail,
     Screen.tiny-agent #tmux-stream,
     Screen.tiny-agent #file-preview,
+    Screen.tiny-agent #editor,
     Screen.tiny-agent #workerbee-detail,
     Screen.tiny-agent #pull-request-detail,
     Screen.tiny-agent #issue-detail,
@@ -3608,6 +3786,8 @@ class AgentPBXTUI(App[None]):
 
     Screen.tiny-agent #thread,
     Screen.tiny-agent #files,
+    Screen.tiny-agent #file-search-results,
+    Screen.tiny-agent #editor-diagnostics,
     Screen.tiny-agent #pull-requests,
     Screen.tiny-agent #issues,
     Screen.tiny-agent #operator-kb,
@@ -3676,6 +3856,7 @@ class AgentPBXTUI(App[None]):
         Binding("f5", "focus_operators", "Operators", key_display="F5", priority=True),
         Binding("f6", "prev_operator_fork", "Prev Fork", key_display="F6", priority=True),
         Binding("f7", "next_operator_fork", "Next Fork", key_display="F7", priority=True),
+        Binding("f9", "toggle_editor_fullscreen", "Editor Full", key_display="F9"),
         Binding("shift+o", "start_operator", "Start Operator", key_display="O"),
         Binding("y", "operator_history", "Operator History", priority=True),
         Binding("u", "resume_operator", "Resume Operator", priority=True),
@@ -3957,6 +4138,15 @@ class AgentPBXTUI(App[None]):
             str,
             dict[str, dict[str, dict[str, Any]]],
         ] = {}
+        self.file_search_results_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
+        self.file_search_query_by_agent: dict[str, str] = {}
+        self.selected_file_path_by_agent: dict[str, str] = {}
+        self.selected_file_line_by_agent: dict[str, int] = {}
+        self.editor_documents_by_agent: dict[str, dict[str, Any]] = {}
+        self.editor_dirty_agent_ids: set[str] = set()
+        self.editor_rendering = False
+        self.editor_rendered_agent_id: str | None = None
+        self.editor_fullscreen = False
         self.active_agent_tab_by_agent: dict[str, str] = {}
         self.message_draft_by_agent: dict[str, str] = {}
         self.tmux_message_draft_by_agent: dict[str, str] = {}
@@ -4052,6 +4242,11 @@ class AgentPBXTUI(App[None]):
             "F1 Agents | F2 Events | F3 View | F4 Input | Enter send | "
             "Ctrl+J newline | Ctrl+W word | Ctrl+T/F8 PBX"
         )
+
+    def editor_hotkeys_text(self) -> str:
+        if self.is_tiny_layout() or self.low_power_enabled:
+            return "F9 full | Save/Revert/Close buttons | copy path/text | check"
+        return "F9 fullscreen | Save/Revert/Close buttons | Copy Path/Text | Check"
 
     def joplin_hotkeys_text(self) -> str:
         return JOPLIN_SHORTCUT_HINT
@@ -4182,8 +4377,18 @@ class AgentPBXTUI(App[None]):
                             yield Button("Delete Queued", id="delete-queued")
                     with TabPane("Files", id="files-tab"):
                         yield Static("Path: .", id="file-path")
+                        with Horizontal(id="files-search-actions"):
+                            yield Input(placeholder="Search files", id="files-search-query")
+                            yield Button("Search", id="files-search")
+                            yield Button("Clear", id="files-search-clear")
                         yield DataTable(
                             id="files",
+                            cursor_type="row",
+                            show_row_labels=False,
+                        )
+                        yield Static("Search: -", id="file-search-status")
+                        yield DataTable(
+                            id="file-search-results",
                             cursor_type="row",
                             show_row_labels=False,
                         )
@@ -4197,6 +4402,32 @@ class AgentPBXTUI(App[None]):
                         with Horizontal(id="file-actions"):
                             yield Button("Refresh Files", id="files-refresh")
                             yield Button("Up", id="files-up")
+                            yield Button("Copy Path", id="files-copy-path")
+                            yield Button("Copy Text", id="files-copy-text")
+                            yield Button("Open Editor", id="files-open-editor")
+                    with TabPane("Editor", id="editor-tab"):
+                        yield Static("Editor: no file", id="editor-status")
+                        yield TextArea.code_editor(
+                            "",
+                            id="editor",
+                            language=None,
+                            soft_wrap=False,
+                            tab_behavior="indent",
+                        )
+                        yield NavigationTextArea(
+                            "Diagnostics: not run",
+                            id="editor-diagnostics",
+                            read_only=True,
+                        )
+                        with Horizontal(id="editor-actions"):
+                            yield Button("Save", id="editor-save", variant="primary")
+                            yield Button("Revert", id="editor-revert")
+                            yield Button("Copy Path", id="editor-copy-path")
+                            yield Button("Copy Text", id="editor-copy-text")
+                            yield Button("Check", id="editor-check")
+                            yield Button("Close", id="editor-close")
+                            yield Button("Full F9", id="editor-fullscreen")
+                        yield Static(self.editor_hotkeys_text(), id="editor-hotkeys")
                     with TabPane("WorkerBee", id="workerbee-tab"):
                         yield NavigationTextArea(id="workerbee-detail", read_only=True)
                         with Horizontal(id="workerbee-actions"):
@@ -4307,6 +4538,8 @@ class AgentPBXTUI(App[None]):
         thread.add_columns("M", "Time", "Kind", "Plan", "Status", "Summary")
         files = self.query_one("#files", DataTable)
         files.add_columns("Type", "Name", "Size", "Modified")
+        file_search_results = self.query_one("#file-search-results", DataTable)
+        file_search_results.add_columns("File", "Line", "Column", "Snippet")
         pull_requests = self.query_one("#pull-requests", DataTable)
         pull_requests.add_columns("#", "State", "Checks", "Title")
         issues = self.query_one("#issues", DataTable)
@@ -4412,6 +4645,24 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/latest", "Open the Latest tab", self.palette_latest)
         yield SystemCommand("/thread", "Open the Thread tab", self.palette_thread)
         yield SystemCommand("/files", "Open and refresh the Files tab", self.palette_files)
+        yield SystemCommand("/files refresh", "Refresh the selected agent Files tab", self.palette_files_refresh)
+        yield SystemCommand("/files up", "Open the parent directory in the Files tab", self.palette_files_up)
+        yield SystemCommand("/files search", "Focus file search for the selected agent", self.palette_files_search)
+        yield SystemCommand("/files search clear", "Clear file search results", self.palette_files_search_clear)
+        yield SystemCommand("/files copy path", "Copy the selected file path", self.palette_files_copy_path)
+        yield SystemCommand("/files copy text", "Copy the selected file text", self.palette_files_copy_text)
+        yield SystemCommand("/files open editor", "Open the selected file in the Editor tab", self.palette_editor)
+        yield SystemCommand("/editor", "Open the selected file in the Editor tab", self.palette_editor)
+        yield SystemCommand("/editor open", "Open the selected file in the Editor tab", self.palette_editor)
+        yield SystemCommand("/editor save", "Save the current editor file", self.palette_editor_save)
+        yield SystemCommand("/editor revert", "Revert the current editor file from disk", self.palette_editor_revert)
+        yield SystemCommand("/editor check", "Run diagnostics for the current editor file", self.palette_editor_check)
+        yield SystemCommand("/editor copy path", "Copy the current editor file path", self.palette_editor_copy_path)
+        yield SystemCommand("/editor copy text", "Copy the current editor text", self.palette_editor_copy_text)
+        yield SystemCommand("/editor fullscreen", "Toggle editor fullscreen", self.palette_editor_fullscreen)
+        yield SystemCommand("/editor close", "Close the current editor file", self.palette_editor_close)
+        yield SystemCommand("/editor focus", "Focus the Editor tab", self.palette_editor_focus)
+        yield SystemCommand("/editor reveal", "Reveal the current editor file in Files", self.palette_editor_reveal)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         yield SystemCommand("/campaigns", "Open and refresh operator campaigns", self.palette_campaigns)
         yield SystemCommand("/campaign monitor", "Ask the root operator to monitor selected campaign", self.palette_campaign_monitor)
@@ -4591,6 +4842,151 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.open_files_for_agent(agent_id),
             name="palette-files",
+            exclusive=True,
+        )
+
+    def palette_files_refresh(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        path = self.file_path_by_agent.get(agent_id, ".")
+        self.activate_agent_tab("files-tab")
+        self.run_worker(
+            self.load_agent_files(agent_id, path),
+            name="palette-files-refresh",
+            exclusive=True,
+        )
+
+    def palette_files_up(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.activate_agent_tab("files-tab")
+        self.run_worker(
+            self.load_parent_agent_files(agent_id),
+            name="palette-files-up",
+            exclusive=True,
+        )
+
+    def palette_files_search(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_files_search_for_agent(agent_id),
+            name="palette-files-search",
+            exclusive=True,
+        )
+
+    def palette_files_search_clear(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.activate_agent_tab("files-tab")
+        self.clear_file_search(agent_id)
+        self.focus_file_search()
+
+    def palette_files_copy_path(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.copy_selected_file_path(agent_id),
+            name="palette-files-copy-path",
+            exclusive=True,
+        )
+
+    def palette_files_copy_text(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.copy_selected_file_text(agent_id),
+            name="palette-files-copy-text",
+            exclusive=True,
+        )
+
+    def palette_editor(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_selected_file_in_editor(agent_id),
+            name="palette-editor",
+            exclusive=True,
+        )
+
+    def palette_editor_save(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.save_editor_document(agent_id),
+            name="palette-editor-save",
+            exclusive=True,
+        )
+
+    def palette_editor_revert(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.revert_editor_document(agent_id),
+            name="palette-editor-revert",
+            exclusive=True,
+        )
+
+    def palette_editor_check(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.check_editor_document(agent_id),
+            name="palette-editor-check",
+            exclusive=True,
+        )
+
+    def palette_editor_copy_path(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.copy_editor_path(agent_id),
+            name="palette-editor-copy-path",
+            exclusive=True,
+        )
+
+    def palette_editor_copy_text(self) -> None:
+        self.run_worker(
+            self.copy_editor_text(),
+            name="palette-editor-copy-text",
+            exclusive=True,
+        )
+
+    def palette_editor_fullscreen(self) -> None:
+        self.action_toggle_editor_fullscreen()
+
+    def palette_editor_close(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.request_close_editor_document(agent_id),
+            name="palette-editor-close",
+            exclusive=True,
+        )
+
+    def palette_editor_focus(self) -> None:
+        self.activate_agent_tab("editor-tab")
+        self.focus_right_pane_content()
+
+    def palette_editor_reveal(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.reveal_editor_document_in_files(agent_id),
+            name="palette-editor-reveal",
             exclusive=True,
         )
 
@@ -5494,6 +5890,13 @@ class AgentPBXTUI(App[None]):
         self.activate_agent_tab("files-tab")
         await self.load_agent_files(agent_id)
 
+    async def open_files_search_for_agent(self, agent_id: str) -> None:
+        await self.open_files_for_agent(agent_id)
+        if self.is_collapsed_layout():
+            self.show_compact_agent()
+        self.focus_file_search()
+        self.call_after_refresh(self.focus_file_search)
+
     async def open_workerbee_for_agent(self, agent_id: str) -> None:
         if agent_id in self.agents:
             await self.select_agent(agent_id)
@@ -5754,6 +6157,8 @@ class AgentPBXTUI(App[None]):
             target = self.query_one_or_none("#file-preview", RichLog)
             if target is None:
                 target = self.query_one_or_none("#files", DataTable)
+        elif self.active_agent_tab == "editor-tab":
+            target = self.query_one_or_none("#editor", TextArea)
         elif self.active_agent_tab == "workerbee-tab":
             target = self.query_one_or_none("#workerbee-detail", TextArea)
         elif self.active_agent_tab == "pull-requests-tab":
@@ -5974,6 +6379,11 @@ class AgentPBXTUI(App[None]):
             await self.load_tmux_capture(self.selected_agent_id)
         else:
             await self.load_latest_report(self.selected_agent_id)
+
+    def action_toggle_editor_fullscreen(self) -> None:
+        if self.active_agent_tab != "editor-tab":
+            self.activate_agent_tab("editor-tab")
+        self.toggle_editor_fullscreen()
 
     def is_tmux_direct_enabled(self, agent_id: str | None = None) -> bool:
         if not self.tmux_features_available:
@@ -7437,6 +7847,9 @@ class AgentPBXTUI(App[None]):
         if event.data_table.id == "files":
             await self.select_file_entry(str(event.row_key.value))
             return
+        if event.data_table.id == "file-search-results":
+            await self.select_file_search_result(str(event.row_key.value))
+            return
         if event.data_table.id == "pull-requests":
             await self.select_pull_request(str(event.row_key.value))
             return
@@ -7472,6 +7885,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.data_table.id == "files":
             await self.select_file_entry(str(event.cell_key.row_key.value))
+            return
+        if event.data_table.id == "file-search-results":
+            await self.select_file_search_result(str(event.cell_key.row_key.value))
             return
         if event.data_table.id == "pull-requests":
             await self.select_pull_request(str(event.cell_key.row_key.value))
@@ -7690,6 +8106,14 @@ class AgentPBXTUI(App[None]):
             self.tmux_message_draft_by_agent[self.selected_agent_id] = (
                 event.text_area.text
             )
+        if self.selected_agent_id and event.text_area.id == "editor":
+            self.update_editor_dirty_state(self.selected_agent_id)
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "files-search-query":
+            event.stop()
+            if self.selected_agent_id:
+                await self.search_agent_files(self.selected_agent_id, event.value)
 
     def set_agent_draft_text(
         self,
@@ -8588,6 +9012,8 @@ class AgentPBXTUI(App[None]):
                 name="agent-files",
                 exclusive=True,
             )
+        if self.active_agent_tab == "editor-tab" and agent_id:
+            self.render_editor_for_agent(agent_id)
         if self.active_agent_tab == "operator-kb-tab" and agent_id:
             self.run_async_worker(
                 lambda agent_id=agent_id: self.load_operator_kb(agent_id),
@@ -8626,6 +9052,7 @@ class AgentPBXTUI(App[None]):
         tmux_message = self.query_one_or_none("#tmux-message", TextArea)
         if tmux_message is not None:
             self.tmux_message_draft_by_agent[agent_id] = tmux_message.text
+        self.capture_editor_buffer(agent_id)
 
     def restore_agent_pane_state(self, agent_id: str) -> None:
         self.selected_thread_item_id = self.selected_thread_item_id_by_agent.get(
@@ -8740,6 +9167,8 @@ class AgentPBXTUI(App[None]):
     async def refresh_selected_agent(self, agent_id: str) -> None:
         if self.active_agent_tab == "files-tab":
             await self.load_agent_files(agent_id)
+        elif self.active_agent_tab == "editor-tab":
+            self.render_editor_for_agent(agent_id)
         elif self.active_agent_tab == "workerbee-tab":
             await self.load_workerbee_status(agent_id)
         elif self.active_agent_tab == "pull-requests-tab":
@@ -9601,6 +10030,43 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "files-up":
             if self.selected_agent_id:
                 await self.load_parent_agent_files(self.selected_agent_id)
+            return
+        if event.button.id == "files-search":
+            if self.selected_agent_id:
+                await self.search_agent_files(self.selected_agent_id)
+            return
+        if event.button.id == "files-search-clear":
+            self.clear_file_search(self.selected_agent_id)
+            return
+        if event.button.id == "files-copy-path":
+            await self.copy_selected_file_path(self.selected_agent_id)
+            return
+        if event.button.id == "files-copy-text":
+            await self.copy_selected_file_text(self.selected_agent_id)
+            return
+        if event.button.id == "files-open-editor":
+            await self.open_selected_file_in_editor(self.selected_agent_id)
+            return
+        if event.button.id == "editor-save":
+            await self.save_editor_document(self.selected_agent_id)
+            return
+        if event.button.id == "editor-revert":
+            await self.revert_editor_document(self.selected_agent_id)
+            return
+        if event.button.id == "editor-copy-path":
+            await self.copy_editor_path(self.selected_agent_id)
+            return
+        if event.button.id == "editor-copy-text":
+            await self.copy_editor_text()
+            return
+        if event.button.id == "editor-fullscreen":
+            self.toggle_editor_fullscreen()
+            return
+        if event.button.id == "editor-check":
+            await self.check_editor_document(self.selected_agent_id)
+            return
+        if event.button.id == "editor-close":
+            await self.request_close_editor_document(self.selected_agent_id)
             return
         if event.button.id == "workerbee-refresh":
             if self.selected_agent_id:
@@ -10664,7 +11130,7 @@ class AgentPBXTUI(App[None]):
                 fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
                 and review_launch_mode
                 != REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
-                and await self.tmux_pane_has_invalid_encrypted_content(new_pane_id)
+                and await self.review_fork_pane_has_invalid_encrypted_content(new_pane_id)
             ):
                 self.notify(
                     "Codex continuation failed encrypted-content verification; "
@@ -12675,6 +13141,86 @@ class AgentPBXTUI(App[None]):
             marker in normalized for marker in CODEX_INVALID_ENCRYPTED_CONTENT_MARKERS
         )
 
+    async def review_fork_pane_has_invalid_encrypted_content(
+        self,
+        pane_id: str,
+    ) -> bool:
+        attempts = max(1, int(REVIEW_FORK_HEALTH_CHECK_ATTEMPTS))
+        interval = max(0.0, float(REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS))
+        for attempt in range(attempts):
+            if await self.tmux_pane_has_invalid_encrypted_content(pane_id):
+                return True
+            if attempt < attempts - 1 and interval > 0:
+                await asyncio.sleep(interval)
+        return False
+
+    def operator_fork_matches_source_session(
+        self,
+        fork: dict[str, Any],
+        *,
+        logical_operator_id: str,
+        source_caller_agent_id: str,
+        source_codex_session_id: str,
+    ) -> bool:
+        metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+        fork_logical_operator_id = str(
+            fork.get("logical_operator_agent_id")
+            or metadata.get("logical_operator_id")
+            or ""
+        ).strip()
+        if fork_logical_operator_id and fork_logical_operator_id != logical_operator_id:
+            return False
+        fork_source_caller_agent_id = str(
+            fork.get("source_caller_agent_id")
+            or metadata.get("source_caller_agent_id")
+            or ""
+        ).strip()
+        if fork_source_caller_agent_id != source_caller_agent_id:
+            return False
+        fork_source_codex_session_id = str(
+            fork.get("source_codex_session_id")
+            or metadata.get("source_codex_session_id")
+            or ""
+        ).strip()
+        return fork_source_codex_session_id == source_codex_session_id
+
+    def review_source_continuation_previously_disabled(
+        self,
+        forks: Iterable[dict[str, Any]],
+        *,
+        logical_operator_id: str,
+        source_caller_agent_id: str,
+        source_codex_session_id: str,
+    ) -> bool:
+        for fork in forks:
+            if not isinstance(fork, dict):
+                continue
+            if not self.operator_fork_matches_source_session(
+                fork,
+                logical_operator_id=logical_operator_id,
+                source_caller_agent_id=source_caller_agent_id,
+                source_codex_session_id=source_codex_session_id,
+            ):
+                continue
+            metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
+            fork_track = self.normalize_operator_fork_track_id(
+                str(fork.get("fork_track_id") or metadata.get("fork_track_id") or "")
+            )
+            fork_purpose = self.normalize_operator_fork_label(
+                str(fork.get("fork_purpose") or metadata.get("fork_purpose") or ""),
+                default=(
+                    DEFAULT_OPERATOR_FORK_PURPOSE
+                    if fork_track == DEFAULT_OPERATOR_FORK_TRACK_ID
+                    else REVIEW_OPERATOR_FORK_PURPOSE
+                ),
+            )
+            if fork_purpose != REVIEW_OPERATOR_FORK_PURPOSE:
+                continue
+            reason = str(metadata.get("source_continuation_disabled_reason") or "")
+            if self.codex_invalid_encrypted_content_detected(reason):
+                return True
+        return False
+
     def operator_session_tail_text(
         self,
         candidate: OperatorSessionCandidate,
@@ -13376,6 +13922,15 @@ class AgentPBXTUI(App[None]):
             if isinstance(existing_payload, dict)
             else []
         )
+        source_continuation_previously_disabled = (
+            resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            and self.review_source_continuation_previously_disabled(
+                existing_forks,
+                logical_operator_id=logical_operator_id,
+                source_caller_agent_id=source_caller_agent_id,
+                source_codex_session_id=source_session_id,
+            )
+        )
         stale_rebind_candidates: list[dict[str, Any]] = []
         for fork in existing_forks:
             if not isinstance(fork, dict):
@@ -13550,6 +14105,21 @@ class AgentPBXTUI(App[None]):
         )
         if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
             fork_metadata["review_launch_mode"] = review_launch_mode
+        if (
+            resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            and review_launch_mode == REVIEW_OPERATOR_FORK_LAUNCH_MODE_CODEX_FORK
+            and source_continuation_previously_disabled
+        ):
+            review_launch_mode = REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
+            fork_metadata["review_launch_mode"] = review_launch_mode
+            fork_metadata["source_continuation_disabled_reason"] = (
+                "invalid_encrypted_content"
+            )
+            self.notify(
+                "Source continuation previously failed encrypted-content verification; "
+                "starting review fork with fresh context.",
+                severity="warning",
+            )
         review_config_overrides = (
             review_operator_config_overrides(
                 review_mcp_approval_servers,
@@ -13631,7 +14201,7 @@ class AgentPBXTUI(App[None]):
         if (
             resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
             and review_launch_mode == REVIEW_OPERATOR_FORK_LAUNCH_MODE_CODEX_FORK
-            and await self.tmux_pane_has_invalid_encrypted_content(pane_id)
+            and await self.review_fork_pane_has_invalid_encrypted_content(pane_id)
         ):
             self.notify(
                 "Codex fork continuation failed encrypted-content verification; "
@@ -17508,6 +18078,92 @@ class AgentPBXTUI(App[None]):
             raise ValueError("Files response was not an object")
         return payload
 
+    async def fetch_agent_file_document(
+        self,
+        agent_id: str,
+        path: str,
+    ) -> dict[str, Any]:
+        response = await self.api_client().get(
+            f"/v1/agents/{agent_id}/files/document",
+            params={"path": path},
+            headers=auth_headers(self.token),
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("File document response was not an object")
+        return payload
+
+    async def put_agent_file_document(
+        self,
+        agent_id: str,
+        *,
+        path: str,
+        text: str,
+        previous_sha256: str | None = None,
+        previous_mtime: float | None = None,
+        create: bool = False,
+    ) -> dict[str, Any]:
+        response = await self.api_client().put(
+            f"/v1/agents/{agent_id}/files/document",
+            json={
+                "path": path,
+                "text": text,
+                "previous_sha256": previous_sha256,
+                "previous_mtime": previous_mtime,
+                "create": create,
+            },
+            headers=auth_headers(self.token),
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("File document save response was not an object")
+        return payload
+
+    async def fetch_agent_file_search(
+        self,
+        agent_id: str,
+        *,
+        query: str,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        response = await self.api_client().get(
+            f"/v1/agents/{agent_id}/files/search",
+            params={
+                "query": query,
+                "path": path or self.file_path_by_agent.get(agent_id, "."),
+            },
+            headers=auth_headers(self.token),
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Files search response was not an object")
+        return payload
+
+    async def fetch_agent_file_diagnostics(
+        self,
+        agent_id: str,
+        *,
+        path: str,
+        tool: str = "auto",
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/agents/{agent_id}/files/diagnostics",
+            json={"path": path, "tool": tool},
+            headers=auth_headers(self.token),
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("File diagnostics response was not an object")
+        return payload
+
     async def load_agent_files(self, agent_id: str, path: str | None = None) -> None:
         current_path = path if path is not None else self.file_path_by_agent.get(agent_id, ".")
         path_label = self.query_one("#file-path", Static)
@@ -17532,6 +18188,109 @@ class AgentPBXTUI(App[None]):
             parent = "/".join(parts[:-1]) if len(parts) > 1 else "."
         await self.load_agent_files(agent_id, parent)
 
+    async def search_agent_files(self, agent_id: str, query: str | None = None) -> None:
+        search_input = self.query_one_or_none("#files-search-query", Input)
+        resolved_query = query if query is not None else (
+            search_input.value if search_input is not None else ""
+        )
+        resolved_query = resolved_query.strip()
+        self.file_search_query_by_agent[agent_id] = resolved_query
+        if search_input is not None and search_input.value != resolved_query:
+            search_input.value = resolved_query
+        status = self.query_one_or_none("#file-search-status", Static)
+        if not resolved_query:
+            self.clear_file_search(agent_id)
+            return
+        if status is not None:
+            status.update(f"Search: searching for {resolved_query!r}...")
+        try:
+            payload = await self.fetch_agent_file_search(
+                agent_id,
+                query=resolved_query,
+                path=self.file_path_by_agent.get(agent_id, "."),
+            )
+        except Exception as exc:
+            if status is not None:
+                status.update(f"Search: failed ({exc})")
+            return
+        self.render_file_search_results(payload)
+
+    def clear_file_search(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if resolved_agent_id:
+            self.file_search_results_by_agent[resolved_agent_id] = {}
+            self.file_search_query_by_agent[resolved_agent_id] = ""
+        search_input = self.query_one_or_none("#files-search-query", Input)
+        if search_input is not None:
+            search_input.value = ""
+        table = self.query_one_or_none("#file-search-results", DataTable)
+        if table is not None:
+            table.clear()
+        status = self.query_one_or_none("#file-search-status", Static)
+        if status is not None:
+            status.update("Search: -")
+
+    def focus_file_search(self) -> None:
+        search_input = self.query_one_or_none("#files-search-query", Input)
+        if search_input is not None:
+            search_input.focus()
+
+    def render_file_search_results(self, payload: dict[str, Any]) -> None:
+        agent_id = str(payload.get("agent_id") or self.selected_agent_id or "")
+        results = payload.get("results") if isinstance(payload.get("results"), list) else []
+        table = self.query_one("#file-search-results", DataTable)
+        table.clear()
+        result_map: dict[str, dict[str, Any]] = {}
+        for index, result in enumerate(results):
+            if not isinstance(result, dict):
+                continue
+            path = str(result.get("path") or "")
+            if not path:
+                continue
+            key = f"{index}:{path}:{result.get('line') or 0}:{result.get('column') or 0}"
+            result_map[key] = result
+            table.add_row(
+                path,
+                str(result.get("line") or ""),
+                str(result.get("column") or ""),
+                str(result.get("snippet") or ""),
+                key=key,
+            )
+        if agent_id:
+            self.file_search_results_by_agent[agent_id] = result_map
+            self.file_search_query_by_agent[agent_id] = str(payload.get("query") or "")
+        status = self.query_one_or_none("#file-search-status", Static)
+        if status is not None:
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else None
+            if error:
+                status.update(f"Search: {error.get('code') or 'SEARCH_ERROR'}")
+            else:
+                suffix = " truncated" if payload.get("truncated") else ""
+                status.update(
+                    f"Search: {len(result_map)} match(es) via {payload.get('backend') or 'none'}{suffix}"
+                )
+
+    async def select_file_search_result(self, row_key: str) -> None:
+        agent_id = self.selected_agent_id
+        if not agent_id:
+            return
+        result = self.file_search_results_by_agent.get(agent_id, {}).get(row_key)
+        if not result:
+            return
+        path = str(result.get("path") or "")
+        if not path:
+            return
+        self.selected_file_path_by_agent[agent_id] = path
+        try:
+            line = int(result.get("line") or 0)
+        except (TypeError, ValueError):
+            line = 0
+        if line > 0:
+            self.selected_file_line_by_agent[agent_id] = line
+        else:
+            self.selected_file_line_by_agent.pop(agent_id, None)
+        await self.load_file_preview(agent_id, path)
+
     async def select_file_entry(self, row_key: str) -> None:
         agent_id = self.selected_agent_id
         if not agent_id:
@@ -17539,6 +18298,10 @@ class AgentPBXTUI(App[None]):
         entry = self.file_entries_by_agent.get(agent_id, {}).get(row_key)
         if not entry:
             return
+        selected_path = str(entry.get("path") or row_key)
+        if selected_path:
+            self.selected_file_path_by_agent[agent_id] = selected_path
+            self.selected_file_line_by_agent.pop(agent_id, None)
         if entry.get("kind") == "directory":
             await self.load_agent_files(agent_id, str(entry.get("path") or "."))
             return
@@ -17559,6 +18322,480 @@ class AgentPBXTUI(App[None]):
             self.set_file_preview_text(f"Unable to preview {path}: {exc}")
             return
         self.set_file_preview_payload(payload)
+
+    def selected_file_path(self, agent_id: str | None = None) -> str | None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if not resolved_agent_id:
+            return None
+        path = self.selected_file_path_by_agent.get(resolved_agent_id)
+        return path.strip() if isinstance(path, str) and path.strip() else None
+
+    async def copy_selected_file_path(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        path = self.selected_file_path(resolved_agent_id)
+        if not resolved_agent_id or not path:
+            self.notify("Select a file or search result first.")
+            return
+        try:
+            source = await asyncio.to_thread(write_clipboard_text, path)
+        except Exception as exc:
+            self.notify(f"Unable to copy path: {exc}")
+            return
+        self.notify(f"Copied {path} via {source}.")
+
+    async def copy_selected_file_text(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        path = self.selected_file_path(resolved_agent_id)
+        if not resolved_agent_id or not path:
+            self.notify("Select a file or search result first.")
+            return
+        try:
+            payload = await self.fetch_agent_file_document(resolved_agent_id, path)
+        except Exception as exc:
+            self.notify(f"Unable to load file text: {exc}")
+            return
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else None
+        if error:
+            self.notify(
+                f"Unable to copy text: {error.get('code') or 'FILE_ERROR'}"
+            )
+            self.set_file_preview_text(self.format_file_error(error))
+            return
+        text = payload.get("text")
+        if not isinstance(text, str):
+            self.notify("Selected file has no readable text.")
+            return
+        try:
+            source = await asyncio.to_thread(write_clipboard_text, text)
+        except Exception as exc:
+            self.notify(f"Unable to copy text: {exc}")
+            return
+        self.notify(f"Copied text from {path} via {source}.")
+
+    def capture_editor_buffer(self, agent_id: str | None = None) -> None:
+        if self.editor_rendering:
+            return
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if not resolved_agent_id:
+            return
+        if self.editor_rendered_agent_id != resolved_agent_id:
+            return
+        document = self.editor_documents_by_agent.get(resolved_agent_id)
+        if not isinstance(document, dict):
+            return
+        editor = self.query_one_or_none("#editor", TextArea)
+        if editor is None:
+            return
+        document["current_text"] = editor.text
+        if editor.text != str(document.get("text") or ""):
+            self.editor_dirty_agent_ids.add(resolved_agent_id)
+        else:
+            self.editor_dirty_agent_ids.discard(resolved_agent_id)
+
+    def editor_document_for_agent(
+        self,
+        agent_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if not resolved_agent_id:
+            return None
+        document = self.editor_documents_by_agent.get(resolved_agent_id)
+        return document if isinstance(document, dict) else None
+
+    def format_editor_status(
+        self,
+        agent_id: str,
+        document: dict[str, Any] | None,
+    ) -> str:
+        if not document:
+            return "Editor: no file"
+        path = str(document.get("path") or "-")
+        dirty = "*" if agent_id in self.editor_dirty_agent_ids else ""
+        language = str(document.get("language") or "text")
+        line_count = document.get("line_count")
+        line_text = f" | {line_count} lines" if line_count else ""
+        return f"Editor: {dirty}{path} | {language}{line_text}"
+
+    def set_editor_status(self, text: str) -> None:
+        status = self.query_one_or_none("#editor-status", Static)
+        if status is not None:
+            status.update(text)
+
+    def set_editor_diagnostics(self, text: str) -> None:
+        diagnostics = self.query_one_or_none("#editor-diagnostics", TextArea)
+        if diagnostics is not None:
+            diagnostics.text = text
+
+    def update_editor_dirty_state(self, agent_id: str | None = None) -> None:
+        if self.editor_rendering:
+            return
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if not resolved_agent_id:
+            return
+        self.capture_editor_buffer(resolved_agent_id)
+        self.set_editor_status(
+            self.format_editor_status(
+                resolved_agent_id,
+                self.editor_document_for_agent(resolved_agent_id),
+            )
+        )
+
+    def render_editor_for_agent(self, agent_id: str) -> None:
+        editor = self.query_one_or_none("#editor", TextArea)
+        if editor is None:
+            return
+        document = self.editor_document_for_agent(agent_id)
+        self.editor_rendering = True
+        try:
+            self.editor_rendered_agent_id = agent_id
+            if not document:
+                editor.load_text("")
+                self.set_editor_status("Editor: no file")
+                self.set_editor_diagnostics("Diagnostics: not run")
+                return
+            current_text = (
+                document.get("current_text")
+                if "current_text" in document
+                else document.get("text")
+            )
+            editor.load_text(str(current_text) if current_text is not None else "")
+            self.set_editor_language(editor, document.get("language"))
+            line = self.selected_file_line_by_agent.get(agent_id)
+            if line is not None:
+                try:
+                    editor.move_cursor((max(0, line - 1), 0), center=True)
+                except Exception:
+                    pass
+            self.set_editor_status(self.format_editor_status(agent_id, document))
+        finally:
+            self.editor_rendering = False
+
+    def set_editor_language(self, editor: TextArea, language: Any) -> None:
+        language_name = str(language or "").strip() or None
+        try:
+            editor.language = language_name
+        except Exception:
+            try:
+                editor.language = None
+            except Exception:
+                pass
+
+    async def open_selected_file_in_editor(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        path = self.selected_file_path(resolved_agent_id)
+        if not resolved_agent_id or not path:
+            self.notify("Select a file or search result first.", severity="warning")
+            return
+        line = self.selected_file_line_by_agent.get(resolved_agent_id)
+        await self.open_editor_for_agent(resolved_agent_id, path=path, line=line)
+
+    async def open_editor_for_agent(
+        self,
+        agent_id: str,
+        *,
+        path: str,
+        line: int | None = None,
+    ) -> None:
+        self.set_editor_status(f"Editor: loading {path}...")
+        try:
+            payload = await self.fetch_agent_file_document(agent_id, path)
+        except Exception as exc:
+            self.set_editor_status(f"Editor: load failed ({exc})")
+            self.notify(f"Unable to open editor: {exc}", severity="error")
+            return
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else None
+        if error:
+            self.set_editor_status(f"Editor: {error.get('code') or 'FILE_ERROR'}")
+            self.set_editor_diagnostics(self.format_file_error(error))
+            self.notify(
+                f"Unable to open editor: {error.get('code') or 'FILE_ERROR'}",
+                severity="warning",
+            )
+            return
+        text = payload.get("text")
+        if not isinstance(text, str):
+            self.set_editor_status("Editor: selected file has no readable text")
+            self.notify("Selected file has no readable text.", severity="warning")
+            return
+        payload["current_text"] = text
+        self.editor_documents_by_agent[agent_id] = payload
+        self.editor_dirty_agent_ids.discard(agent_id)
+        self.selected_file_path_by_agent[agent_id] = str(payload.get("path") or path)
+        if line and line > 0:
+            self.selected_file_line_by_agent[agent_id] = line
+        else:
+            self.selected_file_line_by_agent.pop(agent_id, None)
+        self.activate_agent_tab("editor-tab")
+        self.render_editor_for_agent(agent_id)
+        self.set_editor_diagnostics("Diagnostics: not run")
+        self.focus_right_pane_content()
+
+    async def save_editor_document(self, agent_id: str | None = None) -> bool:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        document = self.editor_document_for_agent(resolved_agent_id)
+        if not resolved_agent_id or document is None:
+            self.notify("Open a file in the editor first.", severity="warning")
+            return False
+        self.capture_editor_buffer(resolved_agent_id)
+        path = str(document.get("path") or "")
+        text = str(document.get("current_text") or "")
+        if not path:
+            self.notify("Editor file path is missing.", severity="warning")
+            return False
+        self.set_editor_status(f"Editor: saving {path}...")
+        try:
+            payload = await self.put_agent_file_document(
+                resolved_agent_id,
+                path=path,
+                text=text,
+                previous_sha256=(
+                    str(document.get("sha256"))
+                    if document.get("sha256") is not None
+                    else None
+                ),
+                previous_mtime=(
+                    float(document.get("mtime"))
+                    if document.get("mtime") is not None
+                    else None
+                ),
+            )
+        except Exception as exc:
+            self.set_editor_status(f"Editor: save failed ({exc})")
+            self.notify(f"Unable to save editor file: {exc}", severity="error")
+            return False
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else None
+        if error:
+            self.set_editor_status(f"Editor: {error.get('code') or 'SAVE_FAILED'}")
+            self.set_editor_diagnostics(self.format_file_error(error))
+            self.notify(
+                f"Unable to save: {error.get('code') or 'SAVE_FAILED'}",
+                severity="warning",
+            )
+            return False
+        payload["current_text"] = str(payload.get("text") or text)
+        self.editor_documents_by_agent[resolved_agent_id] = payload
+        self.editor_dirty_agent_ids.discard(resolved_agent_id)
+        self.render_editor_for_agent(resolved_agent_id)
+        await self.load_agent_files(
+            resolved_agent_id,
+            self.file_path_by_agent.get(resolved_agent_id, "."),
+        )
+        self.notify(f"Saved {payload.get('path') or path}.")
+        return True
+
+    async def revert_editor_document(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        document = self.editor_document_for_agent(resolved_agent_id)
+        if not resolved_agent_id or document is None:
+            self.notify("Open a file in the editor first.", severity="warning")
+            return
+        path = str(document.get("path") or "")
+        if not path:
+            self.notify("Editor file path is missing.", severity="warning")
+            return
+        await self.open_editor_for_agent(resolved_agent_id, path=path)
+
+    async def copy_editor_path(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        document = self.editor_document_for_agent(resolved_agent_id)
+        if document is None:
+            self.notify("Open a file in the editor first.", severity="warning")
+            return
+        path = str(document.get("path") or "")
+        if not path:
+            self.notify("Editor file path is missing.", severity="warning")
+            return
+        try:
+            source = await asyncio.to_thread(write_clipboard_text, path)
+        except Exception as exc:
+            self.notify(f"Unable to copy editor path: {exc}", severity="error")
+            return
+        self.notify(f"Copied {path} via {source}.")
+
+    async def copy_editor_text(self) -> None:
+        editor = self.query_one_or_none("#editor", TextArea)
+        if editor is None:
+            return
+        try:
+            source = await asyncio.to_thread(write_clipboard_text, editor.text)
+        except Exception as exc:
+            self.notify(f"Unable to copy editor text: {exc}", severity="error")
+            return
+        self.notify(f"Copied editor text via {source}.")
+
+    async def check_editor_document(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        document = self.editor_document_for_agent(resolved_agent_id)
+        if not resolved_agent_id or document is None:
+            self.notify("Open a file in the editor first.", severity="warning")
+            return
+        path = str(document.get("path") or "")
+        if not path:
+            self.notify("Editor file path is missing.", severity="warning")
+            return
+        self.set_editor_diagnostics(f"Diagnostics: checking {path}...")
+        try:
+            payload = await self.fetch_agent_file_diagnostics(
+                resolved_agent_id,
+                path=path,
+            )
+        except Exception as exc:
+            self.set_editor_diagnostics(f"Diagnostics failed:\n{exc}")
+            self.notify(f"Diagnostics failed: {exc}", severity="error")
+            return
+        self.set_editor_diagnostics(self.format_file_diagnostics(payload))
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else None
+        if error:
+            self.notify(
+                f"Diagnostics unavailable: {error.get('code') or 'DIAGNOSTIC_ERROR'}",
+                severity="warning",
+            )
+        else:
+            diagnostics = payload.get("diagnostics")
+            count = len(diagnostics) if isinstance(diagnostics, list) else 0
+            self.notify(f"Diagnostics complete: {count} issue(s).")
+
+    async def request_close_editor_document(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        document = self.editor_document_for_agent(resolved_agent_id)
+        if not resolved_agent_id or document is None:
+            self.notify("No editor file is open.", severity="warning")
+            return
+        self.capture_editor_buffer(resolved_agent_id)
+        if resolved_agent_id in self.editor_dirty_agent_ids:
+            self.push_screen(
+                EditorCloseConfirmScreen(
+                    agent_id=resolved_agent_id,
+                    path=str(document.get("path") or "file"),
+                )
+            )
+            return
+        self.close_editor_document(resolved_agent_id, notify=True)
+
+    async def save_and_close_editor_document(
+        self,
+        agent_id: str | None = None,
+    ) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if not resolved_agent_id:
+            self.notify("No editor file is open.", severity="warning")
+            return
+        if await self.save_editor_document(resolved_agent_id):
+            self.close_editor_document(resolved_agent_id, notify=True)
+
+    def close_editor_document(
+        self,
+        agent_id: str | None = None,
+        *,
+        notify: bool = False,
+        discarded: bool = False,
+    ) -> bool:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        document = self.editor_document_for_agent(resolved_agent_id)
+        if not resolved_agent_id or document is None:
+            if notify:
+                self.notify("No editor file is open.", severity="warning")
+            return False
+        path = str(document.get("path") or "file")
+        self.editor_documents_by_agent.pop(resolved_agent_id, None)
+        self.editor_dirty_agent_ids.discard(resolved_agent_id)
+        if self.editor_rendered_agent_id == resolved_agent_id:
+            self.editor_rendered_agent_id = None
+            editor = self.query_one_or_none("#editor", TextArea)
+            if editor is not None:
+                self.editor_rendering = True
+                try:
+                    editor.load_text("")
+                finally:
+                    self.editor_rendering = False
+            self.set_editor_status("Editor: no file")
+            self.set_editor_diagnostics("Diagnostics: not run")
+        if self.editor_fullscreen:
+            self.editor_fullscreen = False
+            self.apply_layout_class()
+        if self.active_agent_tab == "editor-tab":
+            self.activate_agent_tab("files-tab")
+        self.focus_right_pane_content()
+        if notify:
+            message = f"Discarded changes and closed {path}." if discarded else f"Closed {path}."
+            self.notify(message)
+        return True
+
+    async def reveal_editor_document_in_files(
+        self,
+        agent_id: str | None = None,
+    ) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        document = self.editor_document_for_agent(resolved_agent_id)
+        if not resolved_agent_id or document is None:
+            self.notify("Open a file in the editor first.", severity="warning")
+            return
+        path = str(document.get("path") or "")
+        if not path:
+            self.notify("Editor file path is missing.", severity="warning")
+            return
+        directory = path.rsplit("/", 1)[0] if "/" in path else "."
+        self.activate_agent_tab("files-tab")
+        await self.load_agent_files(resolved_agent_id, directory or ".")
+        self.selected_file_path_by_agent[resolved_agent_id] = path
+        await self.load_file_preview(resolved_agent_id, path)
+        self.focus_right_pane_content()
+
+    def format_file_diagnostics(self, payload: dict[str, Any]) -> str:
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else None
+        available = payload.get("available_tools")
+        if not isinstance(available, list):
+            available = []
+        diagnostics = payload.get("diagnostics")
+        if not isinstance(diagnostics, list):
+            diagnostics = []
+        lines = [
+            f"Diagnostics: {payload.get('backend') or payload.get('tool') or 'none'}",
+            f"Path: {payload.get('path') or '-'}",
+            f"Available: {', '.join(str(item) for item in available) or '-'}",
+            f"Issues: {len(diagnostics)}",
+        ]
+        if error:
+            lines.extend(
+                [
+                    "",
+                    f"Code: {error.get('code') or 'DIAGNOSTIC_ERROR'}",
+                    f"Message: {error.get('message') or ''}",
+                ]
+            )
+            if error.get("remediation"):
+                lines.append(f"Remediation: {error.get('remediation')}")
+            return "\n".join(lines)
+        if not diagnostics:
+            lines.append("")
+            lines.append("No diagnostics reported.")
+            return "\n".join(lines)
+        lines.append("")
+        for item in diagnostics[:100]:
+            if not isinstance(item, dict):
+                continue
+            location = (
+                f"{item.get('path') or '-'}:"
+                f"{item.get('line') or 1}:"
+                f"{item.get('column') or 1}"
+            )
+            code = f" [{item.get('code')}]" if item.get("code") else ""
+            lines.append(
+                f"{location} {item.get('severity') or 'error'} "
+                f"{item.get('source') or '-'}{code}: {item.get('message') or ''}"
+            )
+        if len(diagnostics) > 100:
+            lines.append(f"... {len(diagnostics) - 100} more")
+        return "\n".join(lines)
+
+    def toggle_editor_fullscreen(self) -> None:
+        self.editor_fullscreen = not self.editor_fullscreen
+        if self.editor_fullscreen:
+            self.activate_agent_tab("editor-tab")
+        self.apply_layout_class()
+        self.focus_right_pane_content()
+        state = "enabled" if self.editor_fullscreen else "disabled"
+        self.notify(f"Editor fullscreen {state}.")
 
     def render_file_error(self, agent_id: str, message: str) -> None:
         table = self.query_one("#files", DataTable)
@@ -20339,6 +21576,7 @@ class AgentPBXTUI(App[None]):
                 tiny_home and self.tiny_home_panel == TINY_HOME_EVENTS,
                 "tiny-events",
             )
+            screen.set_class(self.editor_fullscreen, "editor-fullscreen")
         self.apply_layout_dimensions()
         self.render_agent_columns()
         self.render_operator_columns()
@@ -20351,7 +21589,12 @@ class AgentPBXTUI(App[None]):
         right = self.query_one_or_none("#right", Vertical)
         if left is None or right is None:
             return
-        if self.effective_layout_mode == SPLIT_TUI_LAYOUT:
+        if self.editor_fullscreen:
+            left.styles.display = "none"
+            right.styles.display = "block"
+            left.styles.width = "100%"
+            right.styles.width = "100%"
+        elif self.effective_layout_mode == SPLIT_TUI_LAYOUT:
             left.styles.display = "block"
             right.styles.display = "block"
             left.styles.width = f"{self.split_percent}%"
@@ -20456,6 +21699,9 @@ class AgentPBXTUI(App[None]):
         tmux_hotkeys = self.query_one_or_none("#tmux-hotkeys", Static)
         if tmux_hotkeys is not None:
             tmux_hotkeys.update(self.tmux_hotkeys_text())
+        editor_hotkeys = self.query_one_or_none("#editor-hotkeys", Static)
+        if editor_hotkeys is not None:
+            editor_hotkeys.update(self.editor_hotkeys_text())
 
     def restore_layout_focus(self) -> None:
         if not self.is_collapsed_layout():

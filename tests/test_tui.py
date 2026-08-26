@@ -12,6 +12,7 @@ from agent_pbx import tmux as tmux_support
 from agent_pbx.tui import (
     AgentPBXTUI,
     CustomSlashCommand,
+    EditorCloseConfirmScreen,
     OperatorHistoryScreen,
     OperatorSessionCandidate,
     PLAN_PBX_CONTEXT_PROMPT,
@@ -57,6 +58,7 @@ from textual.widgets import (
     RichLog,
     Select,
     Static,
+    TabbedContent,
     TextArea,
 )
 
@@ -899,9 +901,26 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         export_all = app.query_one("#export-all", Button)
         delete_queued = app.query_one("#delete-queued", Button)
         files = app.query_one("#files", DataTable)
+        files_search_query = app.query_one("#files-search-query", Input)
+        file_search_results = app.query_one("#file-search-results", DataTable)
+        file_search_status = app.query_one("#file-search-status", Static)
         file_preview = app.query_one("#file-preview", RichLog)
         files_refresh = app.query_one("#files-refresh", Button)
         files_up = app.query_one("#files-up", Button)
+        files_copy_path = app.query_one("#files-copy-path", Button)
+        files_copy_text = app.query_one("#files-copy-text", Button)
+        files_open_editor = app.query_one("#files-open-editor", Button)
+        editor = app.query_one("#editor", TextArea)
+        editor_status = app.query_one("#editor-status", Static)
+        editor_diagnostics = app.query_one("#editor-diagnostics", TextArea)
+        editor_save = app.query_one("#editor-save", Button)
+        editor_revert = app.query_one("#editor-revert", Button)
+        editor_copy_path = app.query_one("#editor-copy-path", Button)
+        editor_copy_text = app.query_one("#editor-copy-text", Button)
+        editor_check = app.query_one("#editor-check", Button)
+        editor_close = app.query_one("#editor-close", Button)
+        editor_fullscreen = app.query_one("#editor-fullscreen", Button)
+        editor_hotkeys = app.query_one("#editor-hotkeys", Static)
         latest_plan_hint = app.query_one("#latest-plan-hint", Static)
         plan_hint = app.query_one("#plan-hint", Static)
         workerbee_detail = app.query_one("#workerbee-detail", TextArea)
@@ -934,6 +953,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert thread.show_row_labels is False
         assert files.cursor_type == "row"
         assert files.show_row_labels is False
+        assert file_search_results.cursor_type == "row"
+        assert file_search_results.show_row_labels is False
         assert operator_start.label.plain == "Start O"
         assert operator_history.label.plain == "Hist y"
         assert operator_resume.label.plain == "Resume u"
@@ -953,9 +974,26 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert export_marked.label.plain == "Export Marked"
         assert export_all.label.plain == "Export All"
         assert delete_queued.label.plain == "Delete Queued"
+        assert files_search_query.placeholder == "Search files"
+        assert str(file_search_status.renderable) == "Search: -"
         assert file_preview.can_focus is True
         assert files_refresh.label.plain == "Refresh Files"
         assert files_up.label.plain == "Up"
+        assert files_copy_path.label.plain == "Copy Path"
+        assert files_copy_text.label.plain == "Copy Text"
+        assert files_open_editor.label.plain == "Open Editor"
+        assert editor.read_only is False
+        assert str(editor_status.renderable) == "Editor: no file"
+        assert editor_diagnostics.read_only is True
+        assert editor_save.label.plain == "Save"
+        assert editor_revert.label.plain == "Revert"
+        assert editor_copy_path.label.plain == "Copy Path"
+        assert editor_copy_text.label.plain == "Copy Text"
+        assert editor_check.label.plain == "Check"
+        assert editor_close.label.plain == "Close"
+        assert editor_fullscreen.label.plain == "Full F9"
+        assert "Close" in str(editor_hotkeys.renderable)
+        assert "F9" in str(editor_hotkeys.renderable)
         assert latest_plan_hint.renderable == "Reply with /plan:1 optional notes."
         assert plan_hint.renderable == "Reply with /plan:1 optional notes."
         assert workerbee_detail.read_only is True
@@ -975,8 +1013,10 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "Ctrl+G" in str(joplin_hotkeys.renderable)
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
-        assert "#files {\n        height: 10;" in app.CSS
+        assert "#files {\n        height: 8;" in app.CSS
+        assert "#file-search-results {\n        height: 7;" in app.CSS
         assert "#file-preview {\n        height: 1fr;" in app.CSS
+        assert "#editor {\n        height: 1fr;" in app.CSS
         assert "#latest-plan-choice-panel,\n    #plan-choice-panel {" in app.CSS
         assert "#latest-plan-hint,\n    #plan-hint {" in app.CSS
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
@@ -4092,6 +4132,514 @@ async def test_tui_files_tab_loads_directory_and_preview() -> None:
     ]
 
 
+async def test_tui_files_search_copy_and_open_editor(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, dict[str, str]]] = []
+    copied: list[str] = []
+
+    def fake_clipboard(text: str) -> str:
+        copied.append(text)
+        return "test clipboard"
+
+    monkeypatch.setattr("agent_pbx.tui.write_clipboard_text", fake_clipboard)
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(
+            self,
+            path: str,
+            *,
+            params: dict[str, str] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            params = params or {}
+            calls.append((path, params))
+            if path == "/v1/joplin/status":
+                return Response({"configured": False, "available": False})
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path.endswith("/files/search"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": ".",
+                        "query": params["query"],
+                        "results": [
+                            {
+                                "path": "src/app.py",
+                                "line": 3,
+                                "column": 5,
+                                "snippet": "def target():",
+                            }
+                        ],
+                        "truncated": False,
+                        "backend": "python",
+                        "error": None,
+                    }
+                )
+            if path.endswith("/files/preview"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": params["path"],
+                        "kind": "file",
+                        "size": 25,
+                        "mtime": 123.0,
+                        "extension": ".py",
+                        "mime_type": "text/x-python",
+                        "is_text": True,
+                        "is_image": False,
+                        "is_gif": False,
+                        "text": "def target():\n    return 1\n",
+                        "truncated": False,
+                        "error": None,
+                    }
+                )
+            if path.endswith("/files/document"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": params["path"],
+                        "kind": "file",
+                        "size": 25,
+                        "mtime": 123.0,
+                        "extension": ".py",
+                        "mime_type": "text/x-python",
+                        "is_text": True,
+                        "text": "def target():\n    return 1\n",
+                        "sha256": "old-hash",
+                        "encoding": "utf-8",
+                        "newline": "lf",
+                        "language": "python",
+                        "line_count": 2,
+                        "read_only": False,
+                        "saved": False,
+                        "error": None,
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.file_path_by_agent["agent-1"] = "."
+        search_input = app.query_one("#files-search-query", Input)
+        search_input.value = "target"
+
+        await app.search_agent_files("agent-1")
+        await app.select_file_search_result("0:src/app.py:3:5")
+        await app.copy_selected_file_path("agent-1")
+        await app.copy_selected_file_text("agent-1")
+        await app.open_selected_file_in_editor("agent-1")
+        await pilot.pause()
+
+        assert app.query_one("#file-search-results", DataTable).row_count == 1
+        assert str(app.query_one("#file-search-status", Static).renderable) == (
+            "Search: 1 match(es) via python"
+        )
+        assert "def target()" in rich_log_plain(app.query_one("#file-preview", RichLog))
+        assert app.active_agent_tab == "editor-tab"
+        assert app.query_one("#agent-tabs", TabbedContent).active == "editor-tab"
+        assert app.query_one("#editor", TextArea).text == "def target():\n    return 1\n"
+        assert "src/app.py" in str(app.query_one("#editor-status", Static).renderable)
+
+    assert copied == ["src/app.py", "def target():\n    return 1\n"]
+    assert (
+        "/v1/agents/agent-1/files/search",
+        {"query": "target", "path": "."},
+    ) in calls
+
+
+async def test_tui_editor_persists_saves_and_toggles_fullscreen() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    saves: list[dict[str, object]] = []
+    diagnostics_posts: list[dict[str, object]] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(
+            self,
+            path: str,
+            *,
+            params: dict[str, str] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            params = params or {}
+            if path == "/v1/joplin/status":
+                return Response({"configured": False, "available": False})
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path.endswith("/files/document"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": params["path"],
+                        "kind": "file",
+                        "size": 10,
+                        "mtime": 123.0,
+                        "extension": ".py",
+                        "mime_type": "text/x-python",
+                        "is_text": True,
+                        "text": "old = 1\n",
+                        "sha256": "old-hash",
+                        "encoding": "utf-8",
+                        "newline": "lf",
+                        "language": "python",
+                        "line_count": 1,
+                        "read_only": False,
+                        "saved": False,
+                        "error": None,
+                    }
+                )
+            if path.endswith("/files"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": params.get("path", "."),
+                        "parent": None,
+                        "entries": [],
+                        "error": None,
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+        async def put(
+            self,
+            path: str,
+            *,
+            json: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            assert path.endswith("/files/document")
+            payload = json or {}
+            saves.append(payload)
+            return Response(
+                {
+                    "agent_id": "agent-1",
+                    "cwd": "/repo",
+                    "path": payload["path"],
+                    "kind": "file",
+                    "size": len(str(payload["text"]).encode()),
+                    "mtime": 456.0,
+                    "extension": ".py",
+                    "mime_type": "text/x-python",
+                    "is_text": True,
+                    "text": payload["text"],
+                    "sha256": "new-hash",
+                    "encoding": "utf-8",
+                    "newline": "lf",
+                    "language": "python",
+                    "line_count": 1,
+                    "read_only": False,
+                    "saved": True,
+                    "error": None,
+                }
+            )
+
+        async def post(
+            self,
+            path: str,
+            *,
+            json: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            assert path.endswith("/files/diagnostics")
+            diagnostics_posts.append(json or {})
+            return Response(
+                {
+                    "agent_id": "agent-1",
+                    "cwd": "/repo",
+                    "path": "src/app.py",
+                    "tool": "auto",
+                    "available_tools": ["ruff"],
+                    "diagnostics": [
+                        {
+                            "path": "src/app.py",
+                            "line": 1,
+                            "column": 1,
+                            "severity": "error",
+                            "code": "F401",
+                            "message": "unused import",
+                            "source": "ruff",
+                        }
+                    ],
+                    "backend": "ruff",
+                    "error": None,
+                }
+            )
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        await app.open_editor_for_agent("agent-1", path="src/app.py")
+        editor = app.query_one("#editor", TextArea)
+        editor.load_text("")
+        app.update_editor_dirty_state("agent-1")
+        app.save_current_agent_pane_state("agent-1")
+        app.selected_agent_id = "agent-2"
+        app.editor_documents_by_agent["agent-2"] = {
+            "path": "other.py",
+            "text": "agent2 = True\n",
+            "current_text": "agent2 = True\n",
+        }
+        app.save_current_agent_pane_state("agent-2")
+        assert app.editor_documents_by_agent["agent-2"]["current_text"] == (
+            "agent2 = True\n"
+        )
+        app.render_editor_for_agent("agent-2")
+        assert editor.text == "agent2 = True\n"
+
+        app.selected_agent_id = "agent-1"
+        app.render_editor_for_agent("agent-1")
+        assert editor.text == ""
+        assert "agent-1" in app.editor_dirty_agent_ids
+
+        await app.save_editor_document("agent-1")
+        assert saves == [
+            {
+                "path": "src/app.py",
+                "text": "",
+                "previous_sha256": "old-hash",
+                "previous_mtime": 123.0,
+                "create": False,
+            }
+        ]
+        assert "agent-1" not in app.editor_dirty_agent_ids
+        assert app.editor_documents_by_agent["agent-1"]["sha256"] == "new-hash"
+
+        await app.check_editor_document("agent-1")
+        diagnostics_text = app.query_one("#editor-diagnostics", TextArea).text
+        assert "Diagnostics: ruff" in diagnostics_text
+        assert "src/app.py:1:1 error ruff [F401]: unused import" in diagnostics_text
+        assert diagnostics_posts == [{"path": "src/app.py", "tool": "auto"}]
+
+        app.activate_agent_tab("editor-tab")
+        app.toggle_editor_fullscreen()
+        await pilot.pause()
+        assert app.editor_fullscreen is True
+        assert app.query_one("#left").styles.display == "none"
+        assert app.query_one("#right").styles.display == "block"
+
+        app.toggle_editor_fullscreen()
+        assert app.editor_fullscreen is False
+
+
+async def test_tui_editor_close_clears_clean_buffer_and_fullscreen() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.editor_documents_by_agent["agent-1"] = {
+            "path": "src/app.py",
+            "text": "old = 1\n",
+            "current_text": "old = 1\n",
+            "language": "python",
+            "line_count": 1,
+        }
+        app.activate_agent_tab("editor-tab")
+        app.render_editor_for_agent("agent-1")
+        app.toggle_editor_fullscreen()
+        await pilot.pause()
+
+        assert app.close_editor_document("agent-1") is True
+
+        assert "agent-1" not in app.editor_documents_by_agent
+        assert "agent-1" not in app.editor_dirty_agent_ids
+        assert app.query_one("#editor", TextArea).text == ""
+        assert str(app.query_one("#editor-status", Static).renderable) == "Editor: no file"
+        assert app.query_one("#editor-diagnostics", TextArea).text == "Diagnostics: not run"
+        assert app.active_agent_tab == "files-tab"
+        assert app.editor_fullscreen is False
+
+
+async def test_tui_editor_dirty_close_prompts_before_discarding() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.editor_documents_by_agent["agent-1"] = {
+            "path": "src/app.py",
+            "text": "old = 1\n",
+            "current_text": "old = 1\n",
+        }
+        app.activate_agent_tab("editor-tab")
+        app.render_editor_for_agent("agent-1")
+        editor = app.query_one("#editor", TextArea)
+        editor.load_text("new = 1\n")
+        app.update_editor_dirty_state("agent-1")
+
+        await app.request_close_editor_document("agent-1")
+        await pilot.pause()
+
+        assert isinstance(app.screen, EditorCloseConfirmScreen)
+        app.screen.dismiss()
+        await pilot.pause()
+        assert "agent-1" in app.editor_documents_by_agent
+        assert "agent-1" in app.editor_dirty_agent_ids
+
+        assert app.close_editor_document("agent-1", discarded=True) is True
+        assert "agent-1" not in app.editor_documents_by_agent
+        assert "agent-1" not in app.editor_dirty_agent_ids
+
+
+async def test_tui_editor_save_and_close_keeps_buffer_when_save_fails() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    saves: list[str | None] = []
+
+    async def fake_save_editor_document(agent_id: str | None = None) -> bool:
+        saves.append(agent_id)
+        return False
+
+    app.save_editor_document = fake_save_editor_document  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.editor_documents_by_agent["agent-1"] = {
+            "path": "src/app.py",
+            "text": "old = 1\n",
+            "current_text": "new = 1\n",
+        }
+
+        await app.save_and_close_editor_document("agent-1")
+
+        assert saves == ["agent-1"]
+        assert "agent-1" in app.editor_documents_by_agent
+
+
+async def test_tui_files_search_focus_helper() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    opened: list[str] = []
+
+    async def fake_open_files_for_agent(agent_id: str) -> None:
+        opened.append(agent_id)
+        app.selected_agent_id = agent_id
+        app.activate_agent_tab("files-tab")
+
+    app.open_files_for_agent = fake_open_files_for_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await app.open_files_search_for_agent("agent-1")
+        await pilot.pause()
+
+        assert opened == ["agent-1"]
+        assert app.active_agent_tab == "files-tab"
+        assert app.focused is app.query_one("#files-search-query", Input)
+
+
+async def test_tui_editor_reveal_loads_files_and_preview() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(
+            self,
+            path: str,
+            *,
+            params: dict[str, str] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            params = params or {}
+            calls.append((path, params))
+            if path == "/v1/joplin/status":
+                return Response({"configured": False, "available": False})
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path.endswith("/files"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": params.get("path", "."),
+                        "parent": ".",
+                        "entries": [],
+                        "error": None,
+                    }
+                )
+            if path.endswith("/files/preview"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": params["path"],
+                        "kind": "file",
+                        "is_text": True,
+                        "text": "old = 1\n",
+                        "truncated": False,
+                        "error": None,
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.editor_documents_by_agent["agent-1"] = {
+            "path": "src/app.py",
+            "text": "old = 1\n",
+            "current_text": "old = 1\n",
+        }
+
+        await app.reveal_editor_document_in_files("agent-1")
+
+        assert app.active_agent_tab == "files-tab"
+        assert app.file_path_by_agent["agent-1"] == "src"
+        assert app.selected_file_path_by_agent["agent-1"] == "src/app.py"
+        assert "old = 1" in rich_log_plain(app.query_one("#file-preview", RichLog))
+
+    assert ("/v1/agents/agent-1/files", {"path": "src"}) in calls
+    assert ("/v1/agents/agent-1/files/preview", {"path": "src/app.py"}) in calls
+
+
 async def test_tui_joplin_unavailable_does_not_call_note_endpoints() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     calls: list[str] = []
@@ -5929,6 +6477,24 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/latest" in titles
     assert "/thread" in titles
     assert "/files" in titles
+    assert "/files refresh" in titles
+    assert "/files up" in titles
+    assert "/files search" in titles
+    assert "/files search clear" in titles
+    assert "/files copy path" in titles
+    assert "/files copy text" in titles
+    assert "/files open editor" in titles
+    assert "/editor" in titles
+    assert "/editor open" in titles
+    assert "/editor save" in titles
+    assert "/editor revert" in titles
+    assert "/editor check" in titles
+    assert "/editor copy path" in titles
+    assert "/editor copy text" in titles
+    assert "/editor fullscreen" in titles
+    assert "/editor close" in titles
+    assert "/editor focus" in titles
+    assert "/editor reveal" in titles
     assert "/workerbee" in titles
     assert "/campaigns" in titles
     assert "/campaign monitor" in titles
@@ -8655,6 +9221,8 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_ATTEMPTS", 1)
+    monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
     monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%11")
@@ -8945,6 +9513,8 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_ATTEMPTS", 1)
+    monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
     monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%31")
@@ -14029,6 +14599,8 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_ATTEMPTS", 1)
+    monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", lambda *args, **kwargs: [])
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
     monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%77")
@@ -14228,8 +14800,13 @@ async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
         quit_calls.append(target)
         return True
 
+    capture_counts: dict[str, int] = {}
+
     def fake_capture_pane(target: str, **_: object) -> str:
+        capture_counts[target] = capture_counts.get(target, 0) + 1
         if target == "%bad":
+            if capture_counts[target] == 1:
+                return ""
             return (
                 '{"code":"invalid_encrypted_content","message":"Encrypted '
                 'content item_id did not match the target item id."}'
@@ -14243,6 +14820,8 @@ async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_ATTEMPTS", 2)
+    monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", lambda *args, **kwargs: [])
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
     monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target in {"%bad", "%fresh"})
@@ -14276,6 +14855,7 @@ async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
         await app.start_review_operator_fork()
 
     assert len(launches) == 2
+    assert capture_counts["%bad"] == 2
     assert quit_calls == ["%bad"]
     first_argv = shlex.split(str(launches[0]["command"]))
     second_argv = shlex.split(str(launches[1]["command"]))
@@ -14296,6 +14876,171 @@ async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
     assert metadata["source_continuation_disabled_reason"] == "invalid_encrypted_content"
     assert ensure_body["tmux_pane_id"] == "%fresh"  # type: ignore[index]
     assert opened and "review-1" in opened[0]
+
+
+async def test_tui_start_review_operator_fork_uses_prior_failed_source_disposition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller"
+    source_cwd.mkdir()
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    posts: list[dict[str, object]] = []
+    opened: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    prior_failed_fork = {
+        "operator_fork_id": "fork-review-1",
+        "logical_operator_agent_id": "operator-0",
+        "fork_agent_id": "operator-0-fork-caller-1-review-1-old",
+        "source_caller_agent_id": "caller-1",
+        "source_codex_session_id": "source-session",
+        "fork_track_id": "review-1",
+        "fork_purpose": "review",
+        "access_mode": "review_readonly",
+        "source_cwd": str(source_cwd),
+        "work_root": str(tmp_path / ".agent-pbx-review" / "operator-0-caller-1-review-1"),
+        "tmux_pane_id": "%old",
+        "status": "completed",
+        "metadata": {
+            "agent_type": "operator",
+            "operator_role": "fork",
+            "logical_operator_id": "operator-0",
+            "source_caller_agent_id": "caller-1",
+            "source_codex_session_id": "source-session",
+            "fork_track_id": "review-1",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+            "review_launch_mode": "fresh_context",
+            "source_continuation_disabled_reason": "invalid_encrypted_content",
+        },
+    }
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            if path == "/v1/auth/check":
+                return Response({"ok": True})
+            if path == "/v1/operator/forks":
+                return Response({"forks": [prior_failed_fork]})
+            raise AssertionError(path)
+
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            body = kwargs["json"]  # type: ignore[index]
+            if path == "/v1/operator/forks/ensure":
+                metadata = body["metadata"]  # type: ignore[index]
+                return Response(
+                    {
+                        "operator_fork_id": "fork-review-2",
+                        "logical_operator_agent_id": body["operator_agent_id"],  # type: ignore[index]
+                        "fork_agent_id": body["fork_agent_id"],  # type: ignore[index]
+                        "source_caller_agent_id": body["source_caller_agent_id"],  # type: ignore[index]
+                        "source_codex_session_id": "source-session",
+                        "fork_track_id": body["fork_track_id"],  # type: ignore[index]
+                        "fork_purpose": body["fork_purpose"],  # type: ignore[index]
+                        "access_mode": body["access_mode"],  # type: ignore[index]
+                        "source_cwd": body["source_cwd"],  # type: ignore[index]
+                        "work_root": body["work_root"],  # type: ignore[index]
+                        "cwd": body["work_root"],  # type: ignore[index]
+                        "tmux_pane_id": body["tmux_pane_id"],  # type: ignore[index]
+                        "status": "running",
+                        "summary": "Fork launched from Agent PBX TUI.",
+                        "metadata": metadata,
+                        "created_at": 1.0,
+                        "updated_at": 1.0,
+                        "last_used_at": 1.0,
+                        "completed_at": None,
+                        "edges": [],
+                    }
+                )
+            raise AssertionError(path)
+
+    async def fake_configure_operator_codex_mcp(**_: object) -> None:
+        return None
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_open_latest_for_agent(agent_id: str) -> bool:
+        opened.append(agent_id)
+        return True
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%fresh"
+
+    def fail_capture_pane(*_: object, **__: object) -> str:
+        raise AssertionError("fresh-context preflight should skip continuation health checks")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "list_panes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%fresh")
+    monkeypatch.setattr(tmux_support, "capture_pane", fail_capture_pane)
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                    "default_source_caller_agent_id": "caller-1",
+                },
+            },
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(source_cwd),
+                    "codex_session_id": "source-session",
+                    "codex_host_id": "local",
+                },
+            },
+        }
+        app.selected_agent_id = "operator-0"
+        await app.start_review_operator_fork()
+
+    assert len(launches) == 1
+    argv = shlex.split(str(launches[0]["command"]))
+    assert argv[0] == "codex"
+    assert "fork" not in argv
+    assert "source-session" not in argv
+    assert "fresh Codex session" in argv[-1]
+    assert launches[0]["env"]["AGENT_PBX_OPERATOR_FORK_LAUNCH_MODE"] == "fresh_context"
+    assert posts and posts[0]["path"] == "/v1/operator/forks/ensure"
+    ensure_body = posts[0]["json"]
+    assert ensure_body["fork_track_id"] == "review-2"  # type: ignore[index]
+    metadata = ensure_body["metadata"]  # type: ignore[index]
+    assert metadata["review_launch_mode"] == "fresh_context"
+    assert metadata["source_continuation_disabled_reason"] == "invalid_encrypted_content"
+    assert opened and "review-2" in opened[0]
 
 
 @pytest.mark.asyncio

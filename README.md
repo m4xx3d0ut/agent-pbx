@@ -745,11 +745,13 @@ with `chmod 600`, and treat the Joplin profile directory as private.
 
 ## Files TUI Browser
 
-The TUI includes a read-only `Files` tab for the selected agent project. Agents
-must register with `metadata.cwd`; Agent PBX lists files relative to that
-directory and rejects absolute paths, parent traversal, and symlink escapes.
-Generated or noisy directories such as `.git`, `.venv`, `node_modules`,
-`artifacts`, and `runs` are hidden by default.
+The TUI includes a `Files` tab for the selected agent project. Agents must
+register with `metadata.cwd`; Agent PBX lists files relative to that directory
+and rejects absolute paths, parent traversal, and symlink escapes. Generated or
+noisy directories such as `.git`, `.venv`, `node_modules`, `artifacts`, and
+`runs` are hidden by default. Sensitive names and suffixes such as `.env`,
+`local.env`, private key files, token files, and credential files are excluded
+from text copy, editor, search, and diagnostics actions.
 
 Selecting a text file shows a bounded text preview. PNG images and GIF first
 frames render as a terminal-native color block preview plus a grayscale text
@@ -760,6 +762,28 @@ additional formats such as JPEG and WebP. If `chafa` is installed on the host,
 Agent PBX can use it as a best-effort fallback renderer. The preview avoids
 terminal-specific image protocols, so it works across desktop terminals, SSH,
 tmux, and Termux.
+
+Use the Files tab search box to run a bounded ripgrep-style project search. If
+`rg` is available on the daemon host, Agent PBX uses it with ignored and
+sensitive paths excluded; otherwise it falls back to a Python text search. Search
+results can be selected to preview a match. `Copy Path` copies the selected
+project-relative path, and `Copy Text` copies the full bounded text document for
+the selected file through the same guarded API.
+
+`Open Editor` opens the selected file or search result in the native `Editor`
+tab. The editor is a Textual text buffer with syntax highlighting when Textual
+has a language parser available. Buffers are cached per agent, so unsaved edits
+survive moving between tabs and selected agents during the TUI session. `Save`
+writes UTF-8 through an optimistic lock using the loaded file hash or mtime and
+reports a write conflict if the file changed on disk. `Revert` reloads the file
+from the daemon. `F9` or `Full F9` toggles an editor-fullscreen layout that keeps
+the TUI title and footer visible.
+
+`Check` runs best-effort diagnostics for the editor file through the daemon.
+Agent PBX currently supports `ruff` and `mypy` when installed on the daemon host;
+`auto` prefers the first available supported tool and returns a structured
+unavailable result when neither is present. Diagnostics are bounded by timeout
+and remain scoped to the selected agent's registered cwd.
 
 The Latest input can complete project paths with `@`. Type a project-relative
 reference such as `@README` or `@src/ag` and press `Tab`; Agent PBX loads the

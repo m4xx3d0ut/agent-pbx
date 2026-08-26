@@ -2,6 +2,7 @@ import base64
 import json
 import sqlite3
 import struct
+import subprocess
 import time
 from pathlib import Path
 import zlib
@@ -1194,6 +1195,223 @@ def test_agent_files_list_and_preview_are_scoped_to_agent_cwd(tmp_path: Path) ->
     assert png_preview.json()["image_preview_format"] == "ansi-truecolor-halfblocks"
     assert traversal.status_code == 200
     assert traversal.json()["error"]["code"] == "PATH_OUTSIDE_CWD"
+
+
+def test_agent_files_document_search_and_write_are_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("agent_pbx.files.shutil.which", lambda _name: None)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src"
+    src.mkdir()
+    app_py = src / "app.py"
+    app_py.write_text("def target():\n    return 'ok'\n", encoding="utf-8")
+    (repo / "README.md").write_text("Call target for setup.\n", encoding="utf-8")
+    (repo / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+    (repo / "build").mkdir()
+    (repo / "build" / "generated.py").write_text(
+        "def target(): pass\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside.py"
+    outside.write_text("def target(): pass\n", encoding="utf-8")
+    (repo / "outside-link").symlink_to(outside)
+
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "agent-1",
+            "project": "demo",
+            "metadata": {"cwd": str(repo)},
+        },
+    )
+
+    document = client.get(
+        "/v1/agents/agent-1/files/document",
+        params={"path": "src/app.py"},
+    )
+    search = client.get(
+        "/v1/agents/agent-1/files/search",
+        params={"query": "def target", "path": "."},
+    )
+    secret = client.get(
+        "/v1/agents/agent-1/files/document",
+        params={"path": ".env"},
+    )
+    traversal = client.get(
+        "/v1/agents/agent-1/files/document",
+        params={"path": "../outside.py"},
+    )
+
+    assert document.status_code == 200
+    doc_payload = document.json()
+    assert doc_payload["text"] == "def target():\n    return 'ok'\n"
+    assert doc_payload["language"] == "python"
+    assert doc_payload["line_count"] == 2
+    assert doc_payload["sha256"]
+    assert search.status_code == 200
+    search_payload = search.json()
+    assert search_payload["backend"] == "python"
+    assert search_payload["results"] == [
+        {
+            "path": "src/app.py",
+            "line": 1,
+            "column": 1,
+            "snippet": "def target():",
+        }
+    ]
+    assert secret.status_code == 200
+    assert secret.json()["error"]["code"] == "SENSITIVE_FILE"
+    assert traversal.status_code == 200
+    assert traversal.json()["error"]["code"] == "PATH_OUTSIDE_CWD"
+
+    saved = client.put(
+        "/v1/agents/agent-1/files/document",
+        json={
+            "path": "src/app.py",
+            "text": "def target():\n    return 'saved'\n",
+            "previous_sha256": doc_payload["sha256"],
+        },
+    )
+    assert saved.status_code == 200
+    saved_payload = saved.json()
+    assert saved_payload["saved"] is True
+    assert app_py.read_text(encoding="utf-8") == "def target():\n    return 'saved'\n"
+
+    app_py.write_text("def target():\n    return 'external'\n", encoding="utf-8")
+    conflict = client.put(
+        "/v1/agents/agent-1/files/document",
+        json={
+            "path": "src/app.py",
+            "text": "def target():\n    return 'stale'\n",
+            "previous_sha256": saved_payload["sha256"],
+        },
+    )
+    assert conflict.status_code == 200
+    assert conflict.json()["saved"] is False
+    assert conflict.json()["error"]["code"] == "WRITE_CONFLICT"
+
+
+def test_agent_files_diagnostics_are_scoped_and_parsed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src"
+    src.mkdir()
+    app_py = src / "app.py"
+    app_py.write_text("import os\n", encoding="utf-8")
+    outside = tmp_path / "outside.py"
+    outside.write_text("import sys\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        return f"/usr/bin/{name}" if name == "ruff" else None
+
+    def fake_run(
+        args: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        assert kwargs["cwd"] == str(repo)
+        assert kwargs["timeout"] == 20.0
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            json.dumps(
+                [
+                    {
+                        "filename": str(app_py),
+                        "location": {"row": 1, "column": 8},
+                        "code": "F401",
+                        "message": "`os` imported but unused",
+                    },
+                    {
+                        "filename": str(outside),
+                        "location": {"row": 1, "column": 8},
+                        "code": "F401",
+                        "message": "`sys` imported but unused",
+                    },
+                ]
+            ),
+            "",
+        )
+
+    monkeypatch.setattr("agent_pbx.files.shutil.which", fake_which)
+    monkeypatch.setattr("agent_pbx.files.subprocess.run", fake_run)
+
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "agent-1",
+            "project": "demo",
+            "metadata": {"cwd": str(repo)},
+        },
+    )
+
+    diagnostics = client.post(
+        "/v1/agents/agent-1/files/diagnostics",
+        json={"path": "src/app.py"},
+    )
+
+    assert diagnostics.status_code == 200
+    payload = diagnostics.json()
+    assert payload["backend"] == "ruff"
+    assert payload["available_tools"] == ["ruff"]
+    assert payload["diagnostics"] == [
+        {
+            "path": "src/app.py",
+            "line": 1,
+            "column": 8,
+            "severity": "error",
+            "code": "F401",
+            "message": "`os` imported but unused",
+            "source": "ruff",
+        }
+    ]
+    assert calls[0][-1] == "src/app.py"
+
+    monkeypatch.setattr("agent_pbx.files.shutil.which", lambda _name: None)
+    unavailable = client.post(
+        "/v1/agents/agent-1/files/diagnostics",
+        json={"path": "src/app.py"},
+    )
+
+    assert unavailable.status_code == 200
+    assert unavailable.json()["backend"] == "none"
+    assert unavailable.json()["error"]["code"] == "DIAGNOSTIC_TOOL_UNAVAILABLE"
+
+
+def test_agent_files_diagnostics_reject_sensitive_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("agent_pbx.files.shutil.which", lambda name: f"/usr/bin/{name}")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "agent-1",
+            "project": "demo",
+            "metadata": {"cwd": str(repo)},
+        },
+    )
+
+    diagnostics = client.post(
+        "/v1/agents/agent-1/files/diagnostics",
+        json={"path": ".env"},
+    )
+
+    assert diagnostics.status_code == 200
+    assert diagnostics.json()["error"]["code"] == "SENSITIVE_FILE"
 
 
 def test_operator_project_spawn_api_request_list_and_status(tmp_path: Path) -> None:

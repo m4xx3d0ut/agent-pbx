@@ -67,8 +67,13 @@ from .schemas import (
     CommandCreateRequest,
     CommandResponse,
     EventResponse,
+    FileDiagnosticsRequest,
+    FileDiagnosticsResponse,
+    FileDocumentResponse,
+    FileDocumentWriteRequest,
     FileListResponse,
     FilePreviewResponse,
+    FileSearchResponse,
     JoplinCopyRequest,
     JoplinDocumentRequest,
     JoplinLogAppendRequest,
@@ -1427,6 +1432,97 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="agent not registered")
         files = request.app.state.files
         return await asyncio.to_thread(files.preview_for_agent, agent, path=path)
+
+    @app.get(
+        "/v1/agents/{agent_id}/files/document",
+        response_model=FileDocumentResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_agent_file_document(
+        agent_id: str,
+        request: Request,
+        path: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        files = request.app.state.files
+        return await asyncio.to_thread(files.document_for_agent, agent, path=path)
+
+    @app.put(
+        "/v1/agents/{agent_id}/files/document",
+        response_model=FileDocumentResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def put_agent_file_document(
+        agent_id: str,
+        payload: FileDocumentWriteRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        files = request.app.state.files
+        return await asyncio.to_thread(
+            files.write_document_for_agent,
+            agent,
+            path=payload.path,
+            text=payload.text,
+            previous_sha256=payload.previous_sha256,
+            previous_mtime=payload.previous_mtime,
+            create=payload.create,
+        )
+
+    @app.get(
+        "/v1/agents/{agent_id}/files/search",
+        response_model=FileSearchResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def search_agent_files(
+        agent_id: str,
+        request: Request,
+        query: str,
+        path: str = ".",
+        limit: int = Query(default=100, ge=1, le=500),
+        regex: bool = False,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        files = request.app.state.files
+        return await asyncio.to_thread(
+            files.search_for_agent,
+            agent,
+            query=query,
+            path=path,
+            limit=limit,
+            regex=regex,
+        )
+
+    @app.post(
+        "/v1/agents/{agent_id}/files/diagnostics",
+        response_model=FileDiagnosticsResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def check_agent_file_diagnostics(
+        agent_id: str,
+        payload: FileDiagnosticsRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        files = request.app.state.files
+        return await asyncio.to_thread(
+            files.diagnostics_for_agent,
+            agent,
+            path=payload.path,
+            tool=payload.tool,
+        )
 
     @app.get(
         "/v1/operator/runbook",
