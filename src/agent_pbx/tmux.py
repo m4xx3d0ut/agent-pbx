@@ -30,6 +30,16 @@ DEFAULT_QUIT_WAIT_SECONDS = 5.0
 PANE_EXIT_POLL_SECONDS = 0.1
 FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+AGENT_PATH_METADATA_KEYS = (
+    "cwd",
+    "repo",
+    "work_repo",
+    "current_repo",
+    "live_workerbee_repo",
+    "source_cwd",
+    "work_root",
+    "repos",
+)
 
 
 @dataclass(frozen=True)
@@ -334,50 +344,111 @@ def send_key(target: str, key: str, *, tmux_bin: str = "tmux") -> None:
     )
 
 
-def score_pane_for_agent(pane: TmuxPane, agent: Mapping[str, Any]) -> int:
+def iter_string_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        strings: list[str] = []
+        for item in value:
+            strings.extend(iter_string_values(item))
+        return strings
+    return []
+
+
+def unique_strings(values: Sequence[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = value.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        unique.append(text)
+    return unique
+
+
+def agent_path_hints(agent: Mapping[str, Any]) -> list[str]:
     metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
-    agent_cwd = str(metadata.get("cwd") or "")
-    project = str(agent.get("project") or "")
-    agent_id = str(agent.get("agent_id") or "")
-    name = str(agent.get("name") or "")
-    pane_text = f"{pane.title} {pane.cwd} {pane.current_command}".lower()
+    hints: list[str] = []
+    for key in AGENT_PATH_METADATA_KEYS:
+        hints.extend(iter_string_values(metadata.get(key)))
+    return [
+        value
+        for value in unique_strings(hints)
+        if "/" in value or value.startswith("~")
+    ]
+
+
+def agent_match_tokens(agent: Mapping[str, Any], path_hints: Sequence[str]) -> list[str]:
+    agent_id = str(agent.get("agent_id") or "").strip()
+    tokens = [
+        str(agent.get("project") or ""),
+        str(agent.get("name") or ""),
+        agent_id,
+    ]
+    if agent_id.startswith("codex-"):
+        tokens.append(agent_id.removeprefix("codex-"))
+    for path in path_hints:
+        name = Path(path).name
+        if name:
+            tokens.append(name)
+    return unique_strings(tokens)
+
+
+def score_pane_path_hints(pane: TmuxPane, path_hints: Sequence[str]) -> int:
+    pane_cwd = pane.cwd.rstrip("/")
+    pane_cwd_lower = pane.cwd.lower()
+    score = 0
+    for index, path in enumerate(path_hints):
+        hint = path.rstrip("/")
+        if not hint:
+            continue
+        if pane_cwd == hint:
+            exact_score = 80 if len(path_hints) == 1 else 70
+            if index > 0:
+                exact_score = 100
+            score = max(score, exact_score)
+            continue
+        hint_name = Path(hint).name.lower()
+        if hint_name and hint_name in pane_cwd_lower:
+            score = max(score, 30)
+    return score
+
+
+def score_pane_for_agent(pane: TmuxPane, agent: Mapping[str, Any]) -> int:
+    path_hints = agent_path_hints(agent)
+    pane_text = (
+        f"{pane.title} {pane.cwd} {pane.current_command} {pane.window_name}"
+    ).lower()
     score = 0
 
-    if agent_cwd:
-        if pane.cwd == agent_cwd:
-            score += 80
-        else:
-            cwd_name = Path(agent_cwd).name.lower()
-            if cwd_name and cwd_name in pane.cwd.lower():
-                score += 20
+    score += score_pane_path_hints(pane, path_hints)
 
     command = pane.current_command.lower()
     if command in {"codex", "node"} or "codex" in command:
         score += 30
 
-    for value, points in (
-        (project, 20),
-        (Path(agent_cwd).name if agent_cwd else "", 15),
-        (agent_id, 10),
-        (name, 10),
-    ):
-        token = value.strip().lower()
+    for token in agent_match_tokens(agent, path_hints):
+        token = token.lower()
         if token and token in pane_text:
-            score += points
+            score += 20
 
     return score
 
 
 def pane_matches_agent(pane: TmuxPane, agent: Mapping[str, Any]) -> bool:
-    metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
-    agent_cwd = str(metadata.get("cwd") or "")
+    path_hints = agent_path_hints(agent)
     project = str(agent.get("project") or "").strip().lower()
-    pane_text = f"{pane.title} {pane.cwd}".lower()
-    if not agent_cwd and not project:
+    tokens = [token.lower() for token in agent_match_tokens(agent, path_hints)]
+    pane_text = f"{pane.title} {pane.cwd} {pane.window_name}".lower()
+    if not path_hints and not project:
         return True
-    if agent_cwd and pane.cwd == agent_cwd:
+    if any(pane.cwd.rstrip("/") == path.rstrip("/") for path in path_hints):
         return True
     if project and project in pane_text:
+        return True
+    if any(token and token in pane_text for token in tokens):
         return True
     return False
 

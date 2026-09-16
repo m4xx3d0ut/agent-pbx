@@ -2090,6 +2090,76 @@ def test_tui_tmux_resolve_repairs_caller_target_bound_to_operator_pane() -> None
     assert "caller-1" not in app.tmux_agent_targets
 
 
+def test_tui_tmux_resolve_uses_repo_hints_when_caller_cwd_is_stale() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.agents = {
+        "codex-k1s-workerbee-private": {
+            "agent_id": "codex-k1s-workerbee-private",
+            "agent_type": "caller",
+            "project": "k1s-workerbee-private",
+            "metadata": {
+                "cwd": "/home/me/git/agent-pbx",
+                "repo": "/home/me/git/k1s-wt/k1s-workerbee-private",
+                "work_repo": "/home/me/git/k1s-wt/k1s-workerbee-private",
+                "repos": ["/home/me/git/k1s-wt/k1s-private"],
+            },
+        }
+    }
+    stale_cwd_pane = tmux_support.TmuxPane(
+        "agent-pbx",
+        "0",
+        "0",
+        "%10",
+        False,
+        "node",
+        "agent-pbx",
+        "/home/me/git/agent-pbx",
+        80,
+        24,
+        100,
+        window_name="node",
+    )
+    caller_pane = tmux_support.TmuxPane(
+        "k1s",
+        "1",
+        "5",
+        "%135",
+        True,
+        "node",
+        "k1s-workerbee-private",
+        "/home/me/git/k1s-wt/k1s-workerbee-private",
+        80,
+        24,
+        100,
+        window_name="node",
+    )
+    fork_pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "14",
+        "0",
+        "%226",
+        True,
+        "node",
+        "operator-0-codex-k1s-workerbee-private-review-4",
+        (
+            "/home/me/git/k1s-wt/.agent-pbx-review/"
+            "operator-0-codex-k1s-workerbee-private-review-4"
+        ),
+        80,
+        24,
+        100,
+        window_name="operator-0-fork-codex-k1s-workerbee-private-review-4",
+    )
+
+    pane, mode = app.resolve_tmux_pane(
+        "codex-k1s-workerbee-private",
+        [stale_cwd_pane, fork_pane, caller_pane],
+    )
+
+    assert pane == caller_pane
+    assert mode == "auto"
+
+
 def test_tui_tmux_resolve_recovers_root_operator_pane() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     app.agents = {
@@ -10954,6 +11024,50 @@ def test_tui_shared_latest_seen_refresh_clears_existing_marker() -> None:
 
     assert app.unseen_latest_agent_ids == set()
     assert app.latest_viewed_at_by_agent == {"agent-1": 102.0}
+
+
+def test_tui_unseen_latest_transitions_working_done_seen() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "status": "working",
+            "project": "agent-pbx",
+            "last_seen_at": 101.0,
+            "latest_report_created_at": 101.0,
+            "latest_report_seen_at": None,
+            "latest_report_status": "working",
+        }
+    }
+
+    app.update_unseen_from_agent_refresh({})
+
+    assert app.unseen_latest_agent_ids == {"agent-1"}
+    assert app.format_unseen_latest_alert("agent-1") == "NEW"
+
+    previous = app.agent_last_seen_at.copy()
+    app.agents["agent-1"] = {
+        "agent_id": "agent-1",
+        "status": "done",
+        "project": "agent-pbx",
+        "last_seen_at": 102.0,
+        "latest_report_created_at": 102.0,
+        "latest_report_seen_at": None,
+        "latest_report_status": "done",
+    }
+
+    app.update_unseen_from_agent_refresh(previous)
+
+    assert app.unseen_latest_agent_ids == {"agent-1"}
+    assert app.format_unseen_latest_alert("agent-1") == "DONE"
+
+    previous = app.agent_last_seen_at.copy()
+    app.agents["agent-1"]["latest_report_seen_at"] = 102.0
+
+    app.update_unseen_from_agent_refresh(previous)
+
+    assert app.unseen_latest_agent_ids == set()
+    assert app.format_unseen_latest_alert("agent-1") == ""
 
 
 def test_tui_shared_latest_seen_refresh_persists_watermark(

@@ -81,6 +81,50 @@ def test_tmux_pane_matches_agent_validates_cwd_or_project() -> None:
     assert tmux.pane_matches_agent(stale, agent) is False
 
 
+def test_tmux_choose_pane_uses_repo_hints_when_cwd_is_stale() -> None:
+    agent = {
+        "agent_id": "codex-k1s-workerbee-private",
+        "project": "k1s-workerbee-private",
+        "metadata": {
+            "cwd": "/home/me/git/agent-pbx",
+            "repo": "/home/me/git/k1s-wt/k1s-workerbee-private",
+            "repos": ["/home/me/git/k1s-wt/k1s-private"],
+        },
+    }
+    stale_cwd_pane = tmux.TmuxPane(
+        "agent-pbx",
+        "0",
+        "0",
+        "%1",
+        False,
+        "node",
+        "agent-pbx",
+        "/home/me/git/agent-pbx",
+        80,
+        20,
+        100,
+    )
+    caller_pane = tmux.TmuxPane(
+        "k1s",
+        "1",
+        "5",
+        "%135",
+        True,
+        "node",
+        "k1s-workerbee-private",
+        "/home/me/git/k1s-wt/k1s-workerbee-private",
+        80,
+        20,
+        100,
+    )
+
+    assert (
+        tmux.choose_pane_for_agent([stale_cwd_pane, caller_pane], agent)
+        == caller_pane
+    )
+    assert tmux.pane_matches_agent(caller_pane, agent) is True
+
+
 def test_tmux_list_and_capture_use_expected_commands(monkeypatch) -> None:
     calls: list[list[str]] = []
 
