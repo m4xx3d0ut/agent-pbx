@@ -2922,6 +2922,45 @@ def test_tui_reconcile_does_not_guess_when_operator_panes_duplicate() -> None:
     assert "operator-0" not in app.tmux_agent_targets
 
 
+def test_tui_reconcile_clears_inactive_operator_fork_without_live_pane() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    fork_agent_id = "operator-0-fork-caller-review-4"
+    app.agents = {
+        fork_agent_id: {
+            "agent_id": fork_agent_id,
+            "agent_type": "operator",
+            "project": "demo",
+            "status": "canceled",
+            "effective_status": "canceled",
+            "pbx_active": False,
+            "metadata": {
+                "operator_role": "fork",
+                "logical_operator_id": "operator-0",
+                "source_caller_agent_id": "caller-1",
+                "tmux_pane_id": "%226",
+            },
+        }
+    }
+    app.tmux_agent_targets[fork_agent_id] = "%226"
+    app.tmux_direct_agent_modes[fork_agent_id] = True
+    app.tmux_manual_override_agent_ids.add(fork_agent_id)
+    app.tmux_liveness_by_agent[fork_agent_id] = "live"
+    app.tmux_plan_selector_agent_ids.add(fork_agent_id)
+    app.tmux_plan_selector_pane_by_agent[fork_agent_id] = "%226"
+    app.tmux_plan_selector_indices_by_agent[fork_agent_id] = {1}
+
+    changed = app.reconcile_operator_tmux_targets_from_panes([])
+
+    assert changed is True
+    assert fork_agent_id not in app.tmux_agent_targets
+    assert fork_agent_id not in app.tmux_direct_agent_modes
+    assert fork_agent_id not in app.tmux_manual_override_agent_ids
+    assert fork_agent_id not in app.tmux_liveness_by_agent
+    assert fork_agent_id not in app.tmux_plan_selector_agent_ids
+    assert fork_agent_id not in app.tmux_plan_selector_pane_by_agent
+    assert fork_agent_id not in app.tmux_plan_selector_indices_by_agent
+
+
 async def test_tui_live_operator_root_pane_rejects_duplicate_without_saved_target(
     monkeypatch,
 ) -> None:
@@ -8980,6 +9019,114 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
     assert sent[0][0] == "%42"
     assert "operator-0" in sent[0][1]
     assert "Keep the root turn active while campaign assignments are running" in sent[0][1]
+
+
+async def test_tui_start_operator_does_not_bind_stale_caller_when_operator_selected(
+    monkeypatch,
+) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    posts: list[dict[str, object]] = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            assert path == "/v1/auth/check"
+            return Response({"ok": True})
+
+        async def post(self, path: str, **kwargs: object) -> Response:
+            assert path == "/v1/agents/register"
+            posts.append({"path": path, **kwargs})
+            body = kwargs["json"]  # type: ignore[index]
+            return Response(
+                {
+                    "agent_id": body["agent_id"],  # type: ignore[index]
+                    "agent_type": "operator",
+                    "project": "agent-pbx-operator",
+                    "name": body["agent_id"],  # type: ignore[index]
+                    "status": "registered",
+                    "effective_status": "registered",
+                    "pbx_active": True,
+                    "metadata": body["metadata"],  # type: ignore[index]
+                    "created_at": 1.0,
+                    "last_seen_at": 1.0,
+                }
+            )
+
+    async def fake_configure_operator_codex_mcp(**_: object) -> None:
+        return None
+
+    def fake_launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%42"
+
+    async def fake_send_text_to_tmux_pane(
+        pane_id: str,
+        message: str,
+        *,
+        status: Static | None = None,
+    ) -> bool:
+        _ = pane_id, message, status
+        return True
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_open_latest_for_agent(agent_id: str) -> bool:
+        _ = agent_id
+        return True
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
+    app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    app.selected_caller_agent_id_for_fork = lambda: "caller-1"  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+            },
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "status": "working",
+                "metadata": {
+                    "cwd": str(Path.cwd()),
+                    "codex_session_id": "session-caller-1",
+                },
+            },
+        }
+        app.selected_agent_id = "operator-0"
+        await app.start_operator_agent()
+
+    assert len(launches) == 1
+    assert len(posts) == 2
+    metadata = posts[0]["json"]["metadata"]  # type: ignore[index]
+    assert metadata["default_source_caller_agent_id"] == ""
+    assert metadata["default_source_codex_session_id"] == ""
 
 
 async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(

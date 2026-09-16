@@ -9705,6 +9705,9 @@ class AgentPBXTUI(App[None]):
             agent_id = str(agent.get("agent_id") or "").strip()
             if not agent_id or agent_id in self.tmux_detached_agent_ids:
                 continue
+            if self.clear_inactive_operator_fork_tmux_state(agent_id, agent, panes):
+                changed = True
+                continue
             matches = [
                 pane
                 for pane in panes
@@ -9826,6 +9829,49 @@ class AgentPBXTUI(App[None]):
     def clear_saved_tmux_target(self, agent_id: str) -> None:
         self.tmux_agent_targets.pop(agent_id, None)
         self.tmux_manual_override_agent_ids.discard(agent_id)
+
+    def clear_inactive_operator_fork_tmux_state(
+        self,
+        agent_id: str,
+        agent: dict[str, Any],
+        panes: list[tmux_support.TmuxPane],
+    ) -> bool:
+        if self.operator_role(agent) != OPERATOR_ROLE_FORK:
+            return False
+        if self.operator_fork_is_running(agent):
+            return False
+        if any(self.tmux_pane_allowed_for_agent(agent, pane) for pane in panes):
+            return False
+        candidate_pane_ids = {
+            str(self.tmux_agent_targets.get(agent_id) or "").strip(),
+            str(
+                (
+                    agent.get("metadata")
+                    if isinstance(agent.get("metadata"), dict)
+                    else {}
+                ).get("tmux_pane_id")
+                or ""
+            ).strip(),
+        }
+        candidate_pane_ids.discard("")
+        live_pane_ids = {pane.pane_id for pane in panes} | {
+            pane.target_label for pane in panes
+        }
+        if candidate_pane_ids and candidate_pane_ids & live_pane_ids:
+            return False
+        changed = (
+            agent_id in self.tmux_agent_targets
+            or agent_id in self.tmux_direct_agent_modes
+            or agent_id in self.tmux_manual_override_agent_ids
+            or agent_id in self.tmux_liveness_by_agent
+            or agent_id in self.tmux_plan_selector_agent_ids
+            or agent_id in self.tmux_plan_selector_pane_by_agent
+            or agent_id in self.tmux_plan_selector_indices_by_agent
+        )
+        if not changed:
+            return False
+        self.clear_operator_tmux_state(agent_id)
+        return True
 
     def resolve_tmux_pane(
         self,
@@ -12404,6 +12450,24 @@ class AgentPBXTUI(App[None]):
         if self.selected_agent_id and self.selected_agent_id in self.agents:
             if self.agent_type(self.agents[self.selected_agent_id]) == CALLER_AGENT_TYPE:
                 return self.selected_agent_id
+        return None
+
+    def start_operator_source_caller_agent_id(self) -> str | None:
+        focused_agent_id = self.focused_agent_table_id()
+        if focused_agent_id and focused_agent_id in self.agents:
+            agent = self.agents[focused_agent_id]
+            return (
+                focused_agent_id
+                if self.agent_type(agent) == CALLER_AGENT_TYPE
+                else None
+            )
+        if self.selected_agent_id and self.selected_agent_id in self.agents:
+            agent = self.agents[self.selected_agent_id]
+            return (
+                self.selected_agent_id
+                if self.agent_type(agent) == CALLER_AGENT_TYPE
+                else None
+            )
         return None
 
     def focused_caller_agent_id_for_fork(self) -> str | None:
@@ -16888,7 +16952,7 @@ class AgentPBXTUI(App[None]):
             )
             return
         source_caller_agent_id = source_caller_agent_id or (
-            self.selected_caller_agent_id_for_fork() if agent_id is None else None
+            self.start_operator_source_caller_agent_id() if agent_id is None else None
         )
         if source_caller_agent_id:
             blocker = self.operator_fork_start_blocker(source_caller_agent_id)
