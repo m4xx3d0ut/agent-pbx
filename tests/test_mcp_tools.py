@@ -173,6 +173,194 @@ async def test_mcp_report_turn_rejects_declared_identity_mismatch(
 
 
 @pytest.mark.asyncio
+async def test_mcp_register_agent_rejects_source_caller_identity_drift(
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller-source"
+    operator_cwd = tmp_path / "operator-source"
+    source_cwd.mkdir()
+    operator_cwd.mkdir()
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {
+                "cwd": str(operator_cwd),
+                "codex_session_id": "operator-session",
+                "default_source_caller_agent_id": "caller-1",
+            },
+        },
+    )
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(source_cwd),
+                "codex_session_id": "caller-session",
+            },
+        },
+    )
+
+    with pytest.raises(Exception):
+        await mcp.call_tool(
+            "pbx_register_agent",
+            {
+                "agent_id": "caller-1",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(operator_cwd),
+                    "codex_session_id": "operator-session",
+                },
+            },
+        )
+
+    caller = store.get_agent("caller-1")
+    assert caller is not None
+    assert caller["metadata"]["cwd"] == str(source_cwd)
+    assert caller["metadata"]["codex_session_id"] == "caller-session"
+    events = [
+        event
+        for event in store.list_events()
+        if event["type"] == "agent_registration_identity_violation"
+    ]
+    assert len(events) == 1
+    assert events[0]["payload"]["agent_id"] == "caller-1"
+    assert events[0]["payload"]["operator_session_collision"] == {
+        "operator_agent_id": "operator-0",
+        "metadata_key": "codex_session_id",
+        "codex_session_id": "operator-session",
+    }
+
+
+@pytest.mark.asyncio
+async def test_mcp_register_agent_allows_source_caller_same_cwd_restart(
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller-source"
+    operator_cwd = tmp_path / "operator-source"
+    source_cwd.mkdir()
+    operator_cwd.mkdir()
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {
+                "cwd": str(operator_cwd),
+                "codex_session_id": "operator-session",
+                "default_source_caller_agent_id": "caller-1",
+            },
+        },
+    )
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(source_cwd),
+                "codex_session_id": "caller-session-1",
+            },
+        },
+    )
+
+    restarted = tool_json(
+        await mcp.call_tool(
+            "pbx_register_agent",
+            {
+                "agent_id": "caller-1",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(source_cwd),
+                    "codex_session_id": "caller-session-2",
+                },
+            },
+        )
+    )
+
+    assert restarted["metadata"]["cwd"] == str(source_cwd)
+    assert restarted["metadata"]["codex_session_id"] == "caller-session-2"
+    assert [
+        event
+        for event in store.list_events()
+        if event["type"] == "agent_registration_identity_violation"
+    ] == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_register_agent_allows_source_caller_idempotent_legacy_session(
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller-source"
+    operator_cwd = tmp_path / "operator-source"
+    source_cwd.mkdir()
+    operator_cwd.mkdir()
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {
+                "cwd": str(operator_cwd),
+                "codex_session_id": "shared-legacy-session",
+                "default_source_caller_agent_id": "caller-1",
+            },
+        },
+    )
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(source_cwd),
+                "codex_session_id": "shared-legacy-session",
+            },
+        },
+    )
+
+    registered = tool_json(
+        await mcp.call_tool(
+            "pbx_register_agent",
+            {
+                "agent_id": "caller-1",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(source_cwd),
+                    "codex_session_id": "shared-legacy-session",
+                },
+            },
+        )
+    )
+
+    assert registered["metadata"]["cwd"] == str(source_cwd)
+    assert registered["metadata"]["codex_session_id"] == "shared-legacy-session"
+    assert [
+        event
+        for event in store.list_events()
+        if event["type"] == "agent_registration_identity_violation"
+    ] == []
+
+
+@pytest.mark.asyncio
 async def test_mcp_register_root_operator_canonicalizes_project_drift(
     tmp_path: Path,
 ) -> None:

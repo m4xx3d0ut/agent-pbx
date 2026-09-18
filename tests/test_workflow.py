@@ -184,6 +184,189 @@ def test_report_endpoint_rejects_declared_identity_mismatch(tmp_path: Path) -> N
     assert violations[0]["payload"]["reporting_agent_id"] == "operator-0"
 
 
+def test_register_endpoint_rejects_source_caller_identity_drift(
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller-source"
+    operator_cwd = tmp_path / "operator-source"
+    source_cwd.mkdir()
+    operator_cwd.mkdir()
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {
+                "cwd": str(operator_cwd),
+                "codex_session_id": "operator-session",
+                "default_source_caller_agent_id": "caller-1",
+            },
+        },
+    )
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(source_cwd),
+                "codex_session_id": "caller-session",
+            },
+        },
+    )
+
+    drift = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(operator_cwd),
+                "codex_session_id": "operator-session",
+            },
+        },
+    )
+    agents = client.get("/v1/agents")
+    events = client.get("/v1/events")
+
+    assert drift.status_code == 409
+    assert "source-linked caller registration" in drift.json()["detail"]
+    caller = next(
+        agent for agent in agents.json() if agent["agent_id"] == "caller-1"
+    )
+    assert caller["metadata"]["cwd"] == str(source_cwd)
+    assert caller["metadata"]["codex_session_id"] == "caller-session"
+    violations = [
+        event
+        for event in events.json()
+        if event["type"] == "agent_registration_identity_violation"
+    ]
+    assert len(violations) == 1
+    assert violations[0]["payload"]["agent_id"] == "caller-1"
+    assert violations[0]["payload"]["operator_session_collision"] == {
+        "operator_agent_id": "operator-0",
+        "metadata_key": "codex_session_id",
+        "codex_session_id": "operator-session",
+    }
+
+
+def test_register_endpoint_allows_source_caller_same_cwd_restart(
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller-source"
+    operator_cwd = tmp_path / "operator-source"
+    source_cwd.mkdir()
+    operator_cwd.mkdir()
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {
+                "cwd": str(operator_cwd),
+                "codex_session_id": "operator-session",
+                "default_source_caller_agent_id": "caller-1",
+            },
+        },
+    )
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(source_cwd),
+                "codex_session_id": "caller-session-1",
+            },
+        },
+    )
+
+    restart = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(source_cwd),
+                "codex_session_id": "caller-session-2",
+            },
+        },
+    )
+    events = client.get("/v1/events")
+
+    assert restart.status_code == 200
+    assert restart.json()["metadata"]["cwd"] == str(source_cwd)
+    assert restart.json()["metadata"]["codex_session_id"] == "caller-session-2"
+    assert [
+        event
+        for event in events.json()
+        if event["type"] == "agent_registration_identity_violation"
+    ] == []
+
+
+def test_register_endpoint_allows_source_caller_idempotent_legacy_session(
+    tmp_path: Path,
+) -> None:
+    source_cwd = tmp_path / "caller-source"
+    operator_cwd = tmp_path / "operator-source"
+    source_cwd.mkdir()
+    operator_cwd.mkdir()
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {
+                "cwd": str(operator_cwd),
+                "codex_session_id": "shared-legacy-session",
+                "default_source_caller_agent_id": "caller-1",
+            },
+        },
+    )
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(source_cwd),
+                "codex_session_id": "shared-legacy-session",
+            },
+        },
+    )
+
+    repeat = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(source_cwd),
+                "codex_session_id": "shared-legacy-session",
+            },
+        },
+    )
+    events = client.get("/v1/events")
+
+    assert repeat.status_code == 200
+    assert repeat.json()["metadata"]["cwd"] == str(source_cwd)
+    assert repeat.json()["metadata"]["codex_session_id"] == "shared-legacy-session"
+    assert [
+        event
+        for event in events.json()
+        if event["type"] == "agent_registration_identity_violation"
+    ] == []
+
+
 def test_register_agent_infers_codex_session_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

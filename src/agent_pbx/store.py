@@ -183,6 +183,21 @@ REPORTING_AGENT_ID_METADATA_KEYS = (
     "pbx_reporting_agent_id",
     "session_agent_id",
 )
+AGENT_REGISTRATION_REBIND_OVERRIDE_METADATA_KEYS = (
+    "allow_source_caller_rebind",
+    "agent_pbx_allow_source_caller_rebind",
+    "identity_repair_approved",
+)
+AGENT_REGISTRATION_SESSION_ID_METADATA_KEYS = (
+    "codex_session_id",
+    "codex_thread_id",
+)
+OPERATOR_SESSION_ID_METADATA_KEYS = (
+    "codex_session_id",
+    "codex_thread_id",
+    "last_resume_codex_session_id",
+    "fork_codex_session_id",
+)
 
 
 def _operator_active_state_sql(status_column: str, completed_column: str) -> str:
@@ -1423,6 +1438,87 @@ class Store:
             )
         return self.get_agent(request.agent_id) or {}
 
+    def agent_registration_identity_violation_payload(
+        self,
+        request: AgentRegisterRequest,
+    ) -> dict[str, Any] | None:
+        """Detect source-caller registrations that would overwrite operator links."""
+        request_metadata = dict(request.metadata or {})
+        if self._registration_allows_source_caller_rebind(request_metadata):
+            return None
+        requested_type = self._normalized_agent_type(request.agent_type)
+        metadata_type = (
+            self._normalized_agent_type(request_metadata.get("agent_type"))
+            if "agent_type" in request_metadata
+            else ""
+        )
+        if requested_type == OPERATOR_AGENT_TYPE or metadata_type == OPERATOR_AGENT_TYPE:
+            return None
+        self._backfill_agent_cwd(request_metadata)
+        with self.connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT agent_id, agent_type, project, metadata_json
+                FROM agents
+                WHERE agent_id = ?
+                """,
+                (request.agent_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            if self._normalized_agent_type(existing["agent_type"]) != "caller":
+                return None
+            source_links = self._source_link_refs_for_caller(conn, request.agent_id)
+            if int(source_links["total"]) <= 0:
+                return None
+            existing_metadata = self._json_object(existing["metadata_json"])
+            self._backfill_agent_cwd(existing_metadata)
+            existing_cwd = self._normalized_identity_path(existing_metadata.get("cwd"))
+            requested_cwd = self._normalized_identity_path(request_metadata.get("cwd"))
+            cwd_changed = bool(
+                existing_cwd and requested_cwd and existing_cwd != requested_cwd
+            )
+            existing_session_ids = self._registration_session_ids(existing_metadata)
+            requested_session_ids = self._registration_session_ids(request_metadata)
+            session_changed = bool(
+                requested_session_ids
+                and not requested_session_ids.issubset(existing_session_ids)
+            )
+            operator_collision = (
+                self._operator_session_collision(conn, requested_session_ids)
+                if cwd_changed or session_changed
+                else None
+            )
+            if not cwd_changed and operator_collision is None:
+                return None
+        reason = (
+            "source-linked caller registration would rebind cwd or Codex session; "
+            "use an explicit identity repair override for deliberate migrations"
+        )
+        if operator_collision is not None:
+            reason = (
+                "source-linked caller registration reused an operator Codex session; "
+                "register the operator under its operator agent_id or use an explicit "
+                "identity repair override for deliberate migrations"
+            )
+        return {
+            "agent_id": request.agent_id,
+            "requested_project": request.project,
+            "existing_project": existing["project"],
+            "existing_cwd": existing_cwd,
+            "requested_cwd": requested_cwd,
+            "cwd_changed": cwd_changed,
+            "existing_codex_session_id": existing_metadata.get("codex_session_id"),
+            "requested_codex_session_id": request_metadata.get("codex_session_id"),
+            "requested_codex_thread_id": request_metadata.get("codex_thread_id"),
+            "source_links": source_links,
+            "operator_session_collision": operator_collision,
+            "override_metadata_keys": list(
+                AGENT_REGISTRATION_REBIND_OVERRIDE_METADATA_KEYS
+            ),
+            "reason": reason,
+        }
+
     @staticmethod
     def _normalized_agent_type(value: Any) -> str:
         agent_type = str(value or "caller").strip().lower()
@@ -1471,6 +1567,107 @@ class Store:
         repo_path = Path(str(repo)).expanduser()
         if repo_path.is_absolute() and repo_path.is_dir():
             metadata["cwd"] = str(repo_path)
+
+    @staticmethod
+    def _registration_allows_source_caller_rebind(
+        metadata: dict[str, Any],
+    ) -> bool:
+        for key in AGENT_REGISTRATION_REBIND_OVERRIDE_METADATA_KEYS:
+            value = metadata.get(key)
+            if isinstance(value, bool):
+                if value:
+                    return True
+                continue
+            if str(value or "").strip().lower() in {"1", "true", "yes", "approved"}:
+                return True
+        return False
+
+    @staticmethod
+    def _registration_session_ids(metadata: dict[str, Any]) -> set[str]:
+        session_ids: set[str] = set()
+        for key in AGENT_REGISTRATION_SESSION_ID_METADATA_KEYS:
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                session_ids.add(value)
+        return session_ids
+
+    @staticmethod
+    def _normalized_identity_path(value: Any) -> str | None:
+        if not _non_empty_string(value):
+            return None
+        return str(Path(str(value)).expanduser())
+
+    def _source_link_refs_for_caller(
+        self,
+        conn: sqlite3.Connection,
+        agent_id: str,
+    ) -> dict[str, Any]:
+        fork_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM operator_forks
+                WHERE source_caller_agent_id = ?
+                """,
+                (agent_id,),
+            ).fetchone()[0]
+        )
+        assignment_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM operator_campaign_assignments
+                WHERE target_agent_id = ?
+                """,
+                (agent_id,),
+            ).fetchone()[0]
+        )
+        root_operator_ids: list[str] = []
+        rows = conn.execute(
+            """
+            SELECT agent_id, metadata_json
+            FROM agents
+            WHERE agent_type = ?
+            """,
+            (OPERATOR_AGENT_TYPE,),
+        ).fetchall()
+        for row in rows:
+            metadata = self._json_object(row["metadata_json"])
+            if str(metadata.get("default_source_caller_agent_id") or "") == agent_id:
+                root_operator_ids.append(str(row["agent_id"]))
+        return {
+            "operator_fork_count": fork_count,
+            "operator_assignment_count": assignment_count,
+            "root_operator_ids": root_operator_ids,
+            "total": fork_count + assignment_count + len(root_operator_ids),
+        }
+
+    def _operator_session_collision(
+        self,
+        conn: sqlite3.Connection,
+        session_ids: set[str],
+    ) -> dict[str, str] | None:
+        if not session_ids:
+            return None
+        rows = conn.execute(
+            """
+            SELECT agent_id, metadata_json
+            FROM agents
+            WHERE agent_type = ?
+            """,
+            (OPERATOR_AGENT_TYPE,),
+        ).fetchall()
+        for row in rows:
+            metadata = self._json_object(row["metadata_json"])
+            for key in OPERATOR_SESSION_ID_METADATA_KEYS:
+                value = str(metadata.get(key) or "").strip()
+                if value and value in session_ids:
+                    return {
+                        "operator_agent_id": str(row["agent_id"]),
+                        "metadata_key": key,
+                        "codex_session_id": value,
+                    }
+        return None
 
     def get_agent(self, agent_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:

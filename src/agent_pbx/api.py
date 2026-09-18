@@ -314,6 +314,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             request = request.model_copy(
                 update={"metadata": enrich_codex_session_metadata(request.metadata)}
             )
+        violation = store.agent_registration_identity_violation_payload(request)
+        if violation is not None:
+            store.append_event(
+                "agent_registration_identity_violation",
+                violation,
+                request.agent_id,
+            )
+            raise HTTPException(status_code=409, detail=violation["reason"])
         agent = store.register_agent(request)
         registered_project = str(agent.get("project") or request.project)
         registered_agent_type = str(agent.get("agent_type") or request.agent_type)

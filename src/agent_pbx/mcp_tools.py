@@ -819,16 +819,19 @@ def build_mcp_server(
             if str(agent_type).strip().lower() == "caller"
             else request_metadata
         )
-        agent = store.register_agent(
-            AgentRegisterRequest(
-                agent_id=agent_id,
-                project=project,
-                name=name,
-                agent_type=agent_type,  # type: ignore[arg-type]
-                metadata=enriched_metadata,
-                pbx_active=pbx_active,
-            )
+        request = AgentRegisterRequest(
+            agent_id=agent_id,
+            project=project,
+            name=name,
+            agent_type=agent_type,  # type: ignore[arg-type]
+            metadata=enriched_metadata,
+            pbx_active=pbx_active,
         )
+        violation = store.agent_registration_identity_violation_payload(request)
+        if violation is not None:
+            store.append_event("agent_registration_identity_violation", violation, agent_id)
+            raise ValueError(str(violation["reason"]))
+        agent = store.register_agent(request)
         registered_project = str(agent.get("project") or project)
         registered_agent_type = str(agent.get("agent_type") or agent_type)
         store.append_event(
