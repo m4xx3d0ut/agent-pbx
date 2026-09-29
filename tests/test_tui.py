@@ -4266,6 +4266,7 @@ async def test_tui_files_tab_loads_directory_and_preview() -> None:
 
     assert calls == [
         ("/v1/joplin/status", {}),
+        ("/v1/codex/config", {}),
         ("/v1/agents", {}),
         ("/v1/events", {"tail": "true", "limit": 50}),
         ("/v1/agents/agent-1/files", {"path": "."}),
@@ -6615,6 +6616,11 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/ctrlc" in titles
     assert "/restart" in titles
     assert "/codex restart" in titles
+    assert "/codex" in titles
+    assert "/codex config" in titles
+    assert "/codex config refresh" in titles
+    assert "/codex config save" in titles
+    assert "/codex mcp wire" in titles
     assert "/codex update" in titles
     assert "/tmux" in titles
     assert "/latest" in titles
@@ -6767,6 +6773,12 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/joplin log stop",
         "/joplin save",
         "/joplin sync",
+        "/codex",
+        "/codex config",
+        "/codex config refresh",
+        "/codex config save",
+        "/codex mcp wire",
+        "/codex update",
     } <= names
     assert {
         "/agents prune",
@@ -16485,3 +16497,178 @@ def test_tui_operator_handoff_monitor_renders_pending_ack(monkeypatch) -> None:
 
     assert "preflight: ready/queue age=50s ago warnings=1" in text
     assert "monitor: late; awaiting ack 70s" in text
+
+
+def codex_config_tui_payload() -> dict[str, object]:
+    return {
+        "path": "/home/test/.codex/config.toml",
+        "exists": True,
+        "mtime": 123.0,
+        "size_bytes": 42,
+        "parse_error": None,
+        "fields": [
+            {
+                "key": "model",
+                "label": "Default model",
+                "description": "Default model slug.",
+                "configured": True,
+                "value": "gpt-5.6-sol",
+                "value_preview": "gpt-5.6-sol",
+                "editable": True,
+                "sensitive": False,
+            },
+            {
+                "key": "approval_policy",
+                "label": "Approval policy",
+                "description": "Default shell approval policy.",
+                "configured": False,
+                "value": None,
+                "value_preview": "",
+                "editable": True,
+                "sensitive": False,
+            },
+        ],
+        "mcp_servers": [
+            {
+                "name": "agent-pbx",
+                "url": "http://127.0.0.1:8767/mcp",
+                "bearer_token_env_var": "AGENT_PBX_TOKEN",
+                "http_headers": {},
+                "env_keys": [],
+            }
+        ],
+        "hidden_items": [
+            {
+                "key": "model_providers",
+                "label": "model_providers",
+                "policy": "read_only",
+                "configured": True,
+                "value_preview": "configured",
+                "reason": "Provider tables stay hidden.",
+            }
+        ],
+        "requirements": [],
+        "warnings": ["Configured Codex model is unknown."],
+        "editable_paths": ["approval_policy", "model"],
+        "secret_update_paths": ["mcp_servers.<server>.http_headers.<header>"],
+    }
+
+
+async def test_tui_loads_and_renders_codex_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            if path == "/v1/codex/config":
+                return Response(codex_config_tui_payload())
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path == "/v1/joplin/status":
+                return Response({"configured": False, "available": False})
+            return Response({})
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.inspect_codex_posture",
+        lambda: CodexCliPosture("", "", "", "", "", 0, None, ()),
+    )
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="test")
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.query_one("#codex-config-fields", DataTable)
+        assert table.row_count >= 3
+        app.select_codex_config_field("model")
+        assert app.query_one("#codex-config-key", Input).value == "model"
+        assert app.query_one("#codex-config-value", Input).value == "gpt-5.6-sol"
+        detail = app.query_one("#codex-config-detail", TextArea).text
+        assert "Default model" in detail
+        assert "Provider tables stay hidden" not in detail
+
+
+async def test_tui_codex_config_save_wire_and_secret_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_: object) -> Response:
+            if path == "/v1/codex/config":
+                return Response(codex_config_tui_payload())
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path == "/v1/joplin/status":
+                return Response({"configured": False, "available": False})
+            return Response({})
+
+        async def patch(self, path: str, **kwargs: object) -> Response:
+            calls.append({"path": path, **kwargs})
+            return Response(
+                {
+                    "ok": True,
+                    "changed_paths": ["model"],
+                    "backup_path": None,
+                    "config": codex_config_tui_payload(),
+                }
+            )
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.inspect_codex_posture",
+        lambda: CodexCliPosture("", "", "", "", "", 0, None, ()),
+    )
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="test")
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#codex-config-key", Input).value = "model"
+        app.query_one("#codex-config-value", Input).value = "gpt-5.6-sol"
+        await app.save_codex_config_field()
+        await app.wire_agent_pbx_mcp_config()
+        app.query_one("#codex-secret-path", Input).value = (
+            "mcp_servers.workerbee.http_headers.Authorization"
+        )
+        secret_input = app.query_one("#codex-secret-value", Input)
+        secret_input.value = "Bearer hidden"
+        await app.replace_codex_secret(remove=False)
+        assert secret_input.value == ""
+
+    assert calls[0]["path"] == "/v1/codex/config"
+    assert calls[0]["json"] == {"updates": {"model": "gpt-5.6-sol"}}
+    assert calls[1]["json"] == {
+        "agent_pbx_mcp": {
+            "url": "http://127.0.0.1:8765/mcp",
+            "bearer_token_env_var": "AGENT_PBX_TOKEN",
+            "default_tools_approval_mode": "approve",
+        }
+    }
+    assert calls[2]["json"] == {
+        "secret_updates": [
+            {
+                "path": "mcp_servers.workerbee.http_headers.Authorization",
+                "value": "Bearer hidden",
+            }
+        ]
+    }

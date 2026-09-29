@@ -135,6 +135,51 @@ class CodexCliUpdateResponse(BaseModel):
     after: dict[str, Any] = Field(default_factory=dict)
 
 
+class CodexConfigMcpPatchRequest(BaseModel):
+    url: str | None = Field(default=None, max_length=2000)
+    bearer_token_env_var: str | None = Field(default=None, max_length=120)
+    default_tools_approval_mode: str | None = Field(default=None, max_length=40)
+    enabled: bool | None = None
+    required: bool | None = None
+    startup_timeout_sec: float | None = Field(default=None, ge=0.0, le=600.0)
+    tool_timeout_sec: float | None = Field(default=None, ge=0.0, le=3600.0)
+
+
+class CodexConfigSecretPatchRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=300)
+    value: str | None = Field(default=None, max_length=20000)
+    remove: bool = False
+
+
+class CodexConfigPatchRequest(BaseModel):
+    updates: dict[str, Any] = Field(default_factory=dict)
+    remove: list[str] = Field(default_factory=list)
+    agent_pbx_mcp: CodexConfigMcpPatchRequest | None = None
+    secret_updates: list[CodexConfigSecretPatchRequest] = Field(default_factory=list)
+
+
+class CodexConfigViewResponse(BaseModel):
+    path: str
+    exists: bool
+    mtime: float | None = None
+    size_bytes: int = 0
+    parse_error: str | None = None
+    fields: list[dict[str, Any]] = Field(default_factory=list)
+    mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
+    hidden_items: list[dict[str, Any]] = Field(default_factory=list)
+    requirements: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    editable_paths: list[str] = Field(default_factory=list)
+    secret_update_paths: list[str] = Field(default_factory=list)
+
+
+class CodexConfigPatchResponse(BaseModel):
+    ok: bool
+    changed_paths: list[str] = Field(default_factory=list)
+    backup_path: str | None = None
+    config: CodexConfigViewResponse
+
+
 class AgentRegisterRequest(BaseModel):
     agent_id: str = Field(min_length=1, max_length=120)
     project: str = Field(min_length=1, max_length=240)

@@ -457,6 +457,11 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/ctrlc",
     "/restart",
     "/codex restart",
+    "/codex",
+    "/codex config",
+    "/codex config refresh",
+    "/codex config save",
+    "/codex mcp wire",
     "/codex update",
     "/tmux",
     "/latest",
@@ -3510,6 +3515,41 @@ class AgentPBXTUI(App[None]):
         height: auto;
     }
 
+    #codex-config-status {
+        height: auto;
+        color: $secondary;
+    }
+
+    #codex-config-fields {
+        height: 10;
+        min-height: 5;
+    }
+
+    #codex-config-detail {
+        height: 1fr;
+        min-height: 8;
+        border: tall $accent;
+    }
+
+    #codex-config-inputs,
+    #codex-config-actions,
+    #codex-secret-inputs,
+    #codex-secret-actions {
+        height: 3;
+    }
+
+    #codex-config-key,
+    #codex-config-value,
+    #codex-secret-path,
+    #codex-secret-value {
+        height: 3;
+    }
+
+    #codex-config-actions Button,
+    #codex-secret-actions Button {
+        width: 1fr;
+    }
+
     Screen.tiny-agent #codex-posture {
         display: none;
     }
@@ -4255,6 +4295,8 @@ class AgentPBXTUI(App[None]):
             CodexTranscriptBoundary,
         ] = {}
         self.codex_posture: CodexCliPosture | None = None
+        self.codex_config: dict[str, Any] | None = None
+        self.selected_codex_config_key: str | None = None
         self.file_path_by_agent: dict[str, str] = {}
         self.file_entries_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
         self.file_directory_entries_by_agent: dict[
@@ -4382,6 +4424,303 @@ class AgentPBXTUI(App[None]):
             error = str(result.get("error") or "unknown error")
             self.notify(f"Codex CLI update failed: {error}", severity="error")
         await self.refresh_codex_posture()
+        await self.load_codex_config()
+
+    async def load_codex_config(self) -> None:
+        status = self.query_one_or_none("#codex-config-status", Static)
+        if status is not None:
+            status.update("Codex config: loading...")
+        try:
+            response = await self.api_client().get(
+                "/v1/codex/config",
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            if status is not None:
+                status.update(f"Codex config: unavailable ({exc})")
+            detail = self.query_one_or_none("#codex-config-detail", TextArea)
+            if detail is not None:
+                detail.text = f"Codex config unavailable: {exc}"
+            return
+        self.codex_config = payload if isinstance(payload, dict) else {}
+        self.render_codex_config(self.codex_config)
+
+    def render_codex_config(self, payload: Mapping[str, Any] | None) -> None:
+        config = payload or {}
+        status = self.query_one_or_none("#codex-config-status", Static)
+        if status is not None:
+            warnings = config.get("warnings") if isinstance(config.get("warnings"), list) else []
+            warning_suffix = f" | warnings {len(warnings)}" if warnings else ""
+            exists = "present" if config.get("exists") else "not found"
+            status.update(
+                f"Codex config: {exists} | {config.get('path') or '-'}{warning_suffix}"
+            )
+        table = self.query_one_or_none("#codex-config-fields", DataTable)
+        if table is not None:
+            table.clear()
+            for field in config.get("fields") or []:
+                if not isinstance(field, dict):
+                    continue
+                key = str(field.get("key") or "")
+                if not key:
+                    continue
+                value = str(field.get("value_preview") or field.get("value") or "")
+                status_text = "set" if field.get("configured") else "unset"
+                if field.get("sensitive"):
+                    status_text = "hidden"
+                table.add_row(key, value or "-", status_text, key=key)
+            for item in config.get("hidden_items") or []:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("key") or "")
+                if not key:
+                    continue
+                value = str(item.get("value_preview") or "")
+                status_text = str(item.get("policy") or "read_only")
+                table.add_row(key, value or "-", status_text, key=f"hidden:{key}")
+        detail = self.query_one_or_none("#codex-config-detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_codex_config_detail(config)
+
+    def format_codex_config_detail(self, config: Mapping[str, Any]) -> str:
+        lines = [
+            "Codex Global Config",
+            f"Path: {config.get('path') or '-'}",
+            f"Status: {'present' if config.get('exists') else 'not found'}",
+            "",
+            "Editable safe keys:",
+        ]
+        editable = config.get("editable_paths") if isinstance(config.get("editable_paths"), list) else []
+        lines.append(", ".join(str(item) for item in editable) if editable else "-")
+        lines.extend(["", "Sensitive/read-only areas:"])
+        hidden_items = config.get("hidden_items") if isinstance(config.get("hidden_items"), list) else []
+        if hidden_items:
+            for item in hidden_items:
+                if not isinstance(item, dict):
+                    continue
+                configured = "configured" if item.get("configured") else "not configured"
+                lines.append(
+                    f"- {item.get('label') or item.get('key')}: {configured}; {item.get('policy')}"
+                )
+                reason = str(item.get("reason") or "").strip()
+                if reason:
+                    lines.append(f"  {reason}")
+        else:
+            lines.append("- none")
+        lines.extend(["", "MCP servers:"])
+        servers = config.get("mcp_servers") if isinstance(config.get("mcp_servers"), list) else []
+        if servers:
+            for server in servers:
+                if not isinstance(server, dict):
+                    continue
+                parts = [str(server.get("name") or "-")]
+                if server.get("url"):
+                    parts.append(f"url={server.get('url')}")
+                if server.get("command"):
+                    parts.append(f"command={server.get('command')}")
+                if server.get("bearer_token_env_var"):
+                    parts.append(f"bearer_env={server.get('bearer_token_env_var')}")
+                if server.get("http_headers"):
+                    parts.append("http_headers=hidden")
+                if server.get("env_keys"):
+                    parts.append("env=hidden")
+                lines.append("- " + " | ".join(parts))
+        else:
+            lines.append("- none")
+        requirements = config.get("requirements") if isinstance(config.get("requirements"), list) else []
+        present_requirements = [
+            item for item in requirements if isinstance(item, dict) and item.get("exists")
+        ]
+        lines.extend(["", "Admin/managed config:"])
+        if present_requirements:
+            for item in present_requirements:
+                keys = item.get("keys") if isinstance(item.get("keys"), list) else []
+                lines.append(
+                    f"- {item.get('kind')}: {item.get('path')} ({', '.join(str(key) for key in keys) or 'no keys'})"
+                )
+        else:
+            lines.append("- none detected")
+        warnings = config.get("warnings") if isinstance(config.get("warnings"), list) else []
+        if warnings:
+            lines.extend(["", "Warnings:"])
+            lines.extend(f"- {warning}" for warning in warnings)
+        secret_paths = (
+            config.get("secret_update_paths")
+            if isinstance(config.get("secret_update_paths"), list)
+            else []
+        )
+        lines.extend(["", "Opaque secret replacement paths:"])
+        lines.extend(f"- {path}" for path in secret_paths)
+        return "\n".join(lines)
+
+    def select_codex_config_field(self, key: str) -> None:
+        self.selected_codex_config_key = key
+        if key.startswith("hidden:"):
+            hidden_key = key.removeprefix("hidden:")
+            self.show_codex_hidden_detail(hidden_key)
+            return
+        field = self.codex_config_field(key)
+        if field is None:
+            return
+        key_input = self.query_one_or_none("#codex-config-key", Input)
+        value_input = self.query_one_or_none("#codex-config-value", Input)
+        if key_input is not None:
+            key_input.value = key
+        if value_input is not None:
+            value_input.value = str(field.get("value") or "")
+            value_input.focus()
+        detail = self.query_one_or_none("#codex-config-detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_codex_config_field_detail(field)
+
+    def show_codex_hidden_detail(self, hidden_key: str) -> None:
+        item = self.codex_config_hidden_item(hidden_key)
+        if item is None:
+            return
+        detail = self.query_one_or_none("#codex-config-detail", TextArea)
+        if detail is not None:
+            lines = [
+                str(item.get("label") or hidden_key),
+                f"Policy: {item.get('policy') or 'read_only'}",
+                f"Configured: {'yes' if item.get('configured') else 'no'}",
+                "",
+                str(item.get("reason") or ""),
+            ]
+            detail.text = "\n".join(lines).strip()
+
+    def codex_config_field(self, key: str) -> dict[str, Any] | None:
+        config = self.codex_config or {}
+        fields = config.get("fields") if isinstance(config.get("fields"), list) else []
+        for field in fields:
+            if isinstance(field, dict) and field.get("key") == key:
+                return field
+        return None
+
+    def codex_config_hidden_item(self, key: str) -> dict[str, Any] | None:
+        config = self.codex_config or {}
+        items = config.get("hidden_items") if isinstance(config.get("hidden_items"), list) else []
+        for item in items:
+            if isinstance(item, dict) and item.get("key") == key:
+                return item
+        return None
+
+    def format_codex_config_field_detail(self, field: Mapping[str, Any]) -> str:
+        lines = [
+            str(field.get("label") or field.get("key") or "Codex field"),
+            f"Key: {field.get('key') or '-'}",
+            f"Configured: {'yes' if field.get('configured') else 'no'}",
+            f"Editable: {'yes' if field.get('editable') else 'no'}",
+            f"Value: {field.get('value_preview') or field.get('value') or '-'}",
+            "",
+            str(field.get("description") or ""),
+        ]
+        return "\n".join(lines).strip()
+
+    async def save_codex_config_field(self) -> None:
+        key_input = self.query_one_or_none("#codex-config-key", Input)
+        value_input = self.query_one_or_none("#codex-config-value", Input)
+        key = key_input.value.strip() if key_input is not None else ""
+        value = value_input.value.strip() if value_input is not None else ""
+        if not key:
+            self.notify("Select or enter a Codex config key first.", severity="warning")
+            return
+        try:
+            response = await self.api_client().patch(
+                "/v1/codex/config",
+                json={"updates": {key: value}},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Codex config save failed: {exc}", severity="error")
+            return
+        config = result.get("config") if isinstance(result, dict) else None
+        self.codex_config = config if isinstance(config, dict) else self.codex_config
+        self.render_codex_config(self.codex_config)
+        self.notify(f"Saved Codex config {key}.")
+
+    async def remove_codex_config_field(self) -> None:
+        key_input = self.query_one_or_none("#codex-config-key", Input)
+        key = key_input.value.strip() if key_input is not None else ""
+        if not key:
+            self.notify("Select or enter a Codex config key first.", severity="warning")
+            return
+        try:
+            response = await self.api_client().patch(
+                "/v1/codex/config",
+                json={"remove": [key]},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Codex config remove failed: {exc}", severity="error")
+            return
+        config = result.get("config") if isinstance(result, dict) else None
+        self.codex_config = config if isinstance(config, dict) else self.codex_config
+        self.render_codex_config(self.codex_config)
+        self.notify(f"Removed Codex config {key}.")
+
+    async def wire_agent_pbx_mcp_config(self) -> None:
+        try:
+            response = await self.api_client().patch(
+                "/v1/codex/config",
+                json={
+                    "agent_pbx_mcp": {
+                        "url": agent_pbx_mcp_url(self.server),
+                        "bearer_token_env_var": AGENT_PBX_TOKEN_ENV,
+                        "default_tools_approval_mode": "approve",
+                    }
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Codex MCP config save failed: {exc}", severity="error")
+            return
+        config = result.get("config") if isinstance(result, dict) else None
+        self.codex_config = config if isinstance(config, dict) else self.codex_config
+        self.render_codex_config(self.codex_config)
+        self.notify("Agent PBX MCP config written to global Codex config.")
+
+    async def replace_codex_secret(self, *, remove: bool = False) -> None:
+        path_input = self.query_one_or_none("#codex-secret-path", Input)
+        value_input = self.query_one_or_none("#codex-secret-value", Input)
+        secret_path = path_input.value.strip() if path_input is not None else ""
+        secret_value = value_input.value if value_input is not None else ""
+        if not secret_path:
+            self.notify("Enter an opaque secret path first.", severity="warning")
+            return
+        if not remove and not secret_value:
+            self.notify("Enter a new secret value first.", severity="warning")
+            return
+        patch: dict[str, object] = {"path": secret_path}
+        if remove:
+            patch["remove"] = True
+        else:
+            patch["value"] = secret_value
+        try:
+            response = await self.api_client().patch(
+                "/v1/codex/config",
+                json={"secret_updates": [patch]},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Codex secret update failed: {exc}", severity="error")
+            return
+        if value_input is not None:
+            value_input.value = ""
+        config = result.get("config") if isinstance(result, dict) else None
+        self.codex_config = config if isinstance(config, dict) else self.codex_config
+        self.render_codex_config(self.codex_config)
+        action = "Removed" if remove else "Replaced"
+        self.notify(f"{action} opaque Codex secret path.")
 
     def format_codex_update_result(self, result: Mapping[str, Any]) -> list[str]:
         before = result.get("before") if isinstance(result.get("before"), dict) else {}
@@ -4574,6 +4913,47 @@ class AgentPBXTUI(App[None]):
                                 self.composer_hotkeys_text(),
                                 id="composer-hotkeys",
                             )
+                    with TabPane("Codex", id="codex-tab"):
+                        yield Static("Codex config: checking...", id="codex-config-status")
+                        yield DataTable(
+                            id="codex-config-fields",
+                            cursor_type="row",
+                            show_row_labels=False,
+                        )
+                        yield NavigationTextArea(
+                            id="codex-config-detail",
+                            read_only=True,
+                        )
+                        with Horizontal(id="codex-config-inputs"):
+                            yield Input(placeholder="Safe key", id="codex-config-key")
+                            yield Input(placeholder="Value", id="codex-config-value")
+                        with Horizontal(id="codex-config-actions"):
+                            yield Button("Refresh", id="codex-config-refresh")
+                            yield Button("Load", id="codex-config-load")
+                            yield Button("Save", id="codex-config-save", variant="primary")
+                            yield Button("Remove", id="codex-config-remove", variant="error")
+                            yield Button("Wire PBX MCP", id="codex-config-wire-pbx")
+                        with Horizontal(id="codex-secret-inputs"):
+                            yield Input(
+                                placeholder="Opaque secret path",
+                                id="codex-secret-path",
+                            )
+                            yield Input(
+                                placeholder="New secret value",
+                                id="codex-secret-value",
+                                password=True,
+                            )
+                        with Horizontal(id="codex-secret-actions"):
+                            yield Button(
+                                "Replace Secret",
+                                id="codex-secret-replace",
+                                variant="warning",
+                            )
+                            yield Button(
+                                "Remove Secret",
+                                id="codex-secret-remove",
+                                variant="error",
+                            )
                     with TabPane("Thread", id="thread-tab"):
                         yield DataTable(
                             id="thread",
@@ -4757,6 +5137,8 @@ class AgentPBXTUI(App[None]):
         self.render_operator_columns(operators)
         events = self.query_one("#events", DataTable)
         events.add_columns("ID", "Type", "Subject")
+        codex_config_fields = self.query_one("#codex-config-fields", DataTable)
+        codex_config_fields.add_columns("Key", "Value", "Status")
         thread = self.query_one("#thread", DataTable)
         thread.add_columns("M", "Time", "Kind", "Plan", "Status", "Summary")
         files = self.query_one("#files", DataTable)
@@ -4789,6 +5171,7 @@ class AgentPBXTUI(App[None]):
         self.render_latest_plan_choice_panel(None)
         self.render_plan_choice_panel(None)
         await self.refresh_joplin_status()
+        await self.load_codex_config()
         await self.refresh_agents()
         await self.refresh_events()
         self.run_worker(
@@ -4871,6 +5254,11 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/ctrlc", "Send Ctrl+C to the selected tmux pane", self.palette_ctrl_c)
         yield SystemCommand("/restart", "Restart the selected tmux Codex pane", self.palette_tmux_restart)
         yield SystemCommand("/codex restart", "Restart the selected tmux Codex pane", self.palette_tmux_restart)
+        yield SystemCommand("/codex", "Open global Codex config", self.palette_codex_config)
+        yield SystemCommand("/codex config", "Open global Codex config", self.palette_codex_config)
+        yield SystemCommand("/codex config refresh", "Refresh global Codex config", self.palette_codex_config_refresh)
+        yield SystemCommand("/codex config save", "Save the Codex config key/value editor", self.palette_codex_config_save)
+        yield SystemCommand("/codex mcp wire", "Write Agent PBX MCP config to global Codex config", self.palette_codex_mcp_wire)
         yield SystemCommand("/codex update", "Update host Codex CLI via the Agent PBX daemon", self.palette_codex_update)
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/latest", "Open the Latest tab", self.palette_latest)
@@ -5047,6 +5435,35 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.update_codex_cli_from_host(),
             name="codex-cli-update",
+            exclusive=True,
+        )
+
+    def palette_codex_config(self) -> None:
+        self.activate_agent_tab("codex-tab")
+        self.run_worker(
+            self.load_codex_config(),
+            name="codex-config-load",
+            exclusive=True,
+        )
+
+    def palette_codex_config_refresh(self) -> None:
+        self.run_worker(
+            self.load_codex_config(),
+            name="codex-config-refresh",
+            exclusive=True,
+        )
+
+    def palette_codex_config_save(self) -> None:
+        self.run_worker(
+            self.save_codex_config_field(),
+            name="codex-config-save",
+            exclusive=True,
+        )
+
+    def palette_codex_mcp_wire(self) -> None:
+        self.run_worker(
+            self.wire_agent_pbx_mcp_config(),
+            name="codex-mcp-wire",
             exclusive=True,
         )
 
@@ -6391,6 +6808,10 @@ class AgentPBXTUI(App[None]):
             target = self.query_one_or_none("#thread-detail", TextArea)
             if target is None:
                 target = self.query_one_or_none("#thread", DataTable)
+        elif self.active_agent_tab == "codex-tab":
+            target = self.query_one_or_none("#codex-config-detail", TextArea)
+            if target is None:
+                target = self.query_one_or_none("#codex-config-fields", DataTable)
         elif self.active_agent_tab == "files-tab":
             target = self.query_one_or_none("#file-preview", RichLog)
             if target is None:
@@ -8082,6 +8503,9 @@ class AgentPBXTUI(App[None]):
         if event.data_table.id == "thread":
             self.select_thread_item(str(event.row_key.value))
             return
+        if event.data_table.id == "codex-config-fields":
+            self.select_codex_config_field(str(event.row_key.value))
+            return
         if event.data_table.id == "files":
             await self.select_file_entry(str(event.row_key.value))
             return
@@ -8120,6 +8544,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.data_table.id == "thread":
             self.select_thread_item(str(event.cell_key.row_key.value))
+            return
+        if event.data_table.id == "codex-config-fields":
+            self.select_codex_config_field(str(event.cell_key.row_key.value))
             return
         if event.data_table.id == "files":
             await self.select_file_entry(str(event.cell_key.row_key.value))
@@ -9226,6 +9653,12 @@ class AgentPBXTUI(App[None]):
                     name="tmux-capture",
                     exclusive=True,
                 )
+        if self.active_agent_tab == "codex-tab":
+            self.run_async_worker(
+                self.load_codex_config,
+                name="codex-config",
+                exclusive=True,
+            )
         if self.active_agent_tab == "workerbee-tab" and agent_id:
             self.run_async_worker(
                 lambda agent_id=agent_id: self.load_workerbee_status(agent_id),
@@ -10499,6 +10932,31 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "codex-update":
             await self.update_codex_cli_from_host()
+            return
+        if event.button.id == "codex-config-refresh":
+            await self.load_codex_config()
+            return
+        if event.button.id == "codex-config-load":
+            key = self.selected_codex_config_key
+            if key:
+                self.select_codex_config_field(key)
+            else:
+                self.notify("Select a Codex config row first.", severity="warning")
+            return
+        if event.button.id == "codex-config-save":
+            await self.save_codex_config_field()
+            return
+        if event.button.id == "codex-config-remove":
+            await self.remove_codex_config_field()
+            return
+        if event.button.id == "codex-config-wire-pbx":
+            await self.wire_agent_pbx_mcp_config()
+            return
+        if event.button.id == "codex-secret-replace":
+            await self.replace_codex_secret(remove=False)
+            return
+        if event.button.id == "codex-secret-remove":
+            await self.replace_codex_secret(remove=True)
             return
         if event.button.id == "operator-stop":
             await self.stop_selected_operator()

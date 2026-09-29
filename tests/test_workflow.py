@@ -2542,3 +2542,93 @@ def test_codex_cli_update_endpoint_rejects_invalid_target(
 
     assert response.status_code == 400
     assert response.json()["detail"] == "bad target"
+
+def _codex_config_view_payload() -> dict[str, object]:
+    return {
+        "path": "/tmp/codex/config.toml",
+        "exists": True,
+        "mtime": 123.0,
+        "size_bytes": 20,
+        "parse_error": None,
+        "fields": [
+            {
+                "key": "model",
+                "label": "Default model",
+                "configured": True,
+                "value": "gpt-5.6-sol",
+                "editable": True,
+            }
+        ],
+        "mcp_servers": [],
+        "hidden_items": [],
+        "requirements": [],
+        "warnings": [],
+        "editable_paths": ["model"],
+        "secret_update_paths": ["mcp_servers.<server>.http_headers.<header>"],
+    }
+
+
+def test_codex_config_endpoint_returns_redacted_view(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "agent_pbx.api.load_codex_config_view",
+        lambda: _codex_config_view_payload(),
+    )
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    response = client.get("/v1/codex/config")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["path"] == "/tmp/codex/config.toml"
+    assert payload["fields"][0]["value"] == "gpt-5.6-sol"
+
+
+def test_codex_config_patch_endpoint_applies_safe_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    calls: list[dict[str, object]] = []
+
+    def fake_patch_codex_config(**kwargs: object) -> SimpleNamespace:
+        calls.append(kwargs)
+        return SimpleNamespace(
+            changed_paths=("model", "mcp_servers.agent-pbx.url"),
+            backup_path="/tmp/codex/config.toml.agent-pbx.bak",
+            view=_codex_config_view_payload(),
+        )
+
+    monkeypatch.setattr("agent_pbx.api.patch_codex_config", fake_patch_codex_config)
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    response = client.patch(
+        "/v1/codex/config",
+        json={
+            "updates": {"model": "gpt-5.6-sol"},
+            "agent_pbx_mcp": {"url": "http://127.0.0.1:8767/mcp"},
+            "secret_updates": [
+                {
+                    "path": "mcp_servers.workerbee.http_headers.Authorization",
+                    "value": "secret-token",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["changed_paths"] == ["model", "mcp_servers.agent-pbx.url"]
+    assert calls[0]["updates"] == {"model": "gpt-5.6-sol"}
+    assert calls[0]["agent_pbx_mcp"] == {"url": "http://127.0.0.1:8767/mcp"}
+    assert calls[0]["secret_updates"] == [
+        {
+            "path": "mcp_servers.workerbee.http_headers.Authorization",
+            "value": "secret-token",
+            "remove": False,
+        }
+    ]

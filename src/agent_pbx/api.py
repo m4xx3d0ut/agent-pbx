@@ -28,6 +28,7 @@ from . import __version__
 from .auth import get_store, require_token
 from .config import ServerConfig
 from .codex_sessions import enrich_codex_session_metadata
+from .codex_config import load_codex_config_view, patch_codex_config
 from .codex_cli import update_codex_cli_package
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
@@ -66,6 +67,9 @@ from .schemas import (
     AgentResponse,
     CodexCliUpdateRequest,
     CodexCliUpdateResponse,
+    CodexConfigPatchRequest,
+    CodexConfigPatchResponse,
+    CodexConfigViewResponse,
     CommandAckRequest,
     CommandCreateRequest,
     CommandResponse,
@@ -304,6 +308,49 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     @app.get("/v1/auth/check", dependencies=[Depends(require_token)])
     async def auth_check() -> dict[str, object]:
         return {"ok": True}
+
+    @app.get(
+        "/v1/codex/config",
+        response_model=CodexConfigViewResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_codex_config() -> dict[str, object]:
+        return load_codex_config_view()
+
+    @app.patch(
+        "/v1/codex/config",
+        response_model=CodexConfigPatchResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def patch_global_codex_config(
+        payload: CodexConfigPatchRequest,
+    ) -> dict[str, object]:
+        try:
+            result = await asyncio.to_thread(
+                patch_codex_config,
+                updates=payload.updates,
+                remove=payload.remove,
+                agent_pbx_mcp=(
+                    payload.agent_pbx_mcp.model_dump(exclude_none=True)
+                    if payload.agent_pbx_mcp is not None
+                    else None
+                ),
+                secret_updates=[
+                    item.model_dump(exclude_none=True)
+                    for item in payload.secret_updates
+                ],
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        return {
+            "ok": True,
+            "changed_paths": list(result.changed_paths),
+            "backup_path": result.backup_path,
+            "config": result.view,
+        }
 
     @app.post(
         "/v1/codex/cli/update",
