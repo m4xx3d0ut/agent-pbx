@@ -87,6 +87,38 @@ def test_selected_uat_stages_include_required_setup() -> None:
     assert uat.selected_uat_stages(stage="9") == ("0", "1", "2", "9")
 
 
+def test_codex_operator_flow_uat_matrix_covers_locked_flows() -> None:
+    matrix = uat.codex_operator_flow_uat_matrix(
+        model_slug="gpt-5.6-sol",
+        codex_cli_version="0.158.0",
+    )
+
+    assert matrix["format"] == uat.CODEX_OPERATOR_FLOW_UAT_FORMAT
+    assert matrix["model_slug"] == "gpt-5.6-sol"
+    assert matrix["codex_cli_version"] == "0.158.0"
+    case_ids = {item["id"] for item in matrix["cases"]}
+    assert {
+        "root-operator-spawn",
+        "default-fork-spawn",
+        "review-fork-transcript",
+        "review-fork-fresh-context",
+        "review-fork-resume-restart",
+        "native-plan-selector",
+        "hard-stop",
+        "joplin-transcript-copy",
+    } <= case_ids
+
+
+def test_codex_operator_flow_uat_markdown_renders_matrix() -> None:
+    matrix = uat.codex_operator_flow_uat_matrix()
+
+    rendered = uat.codex_operator_flow_uat_markdown(matrix)
+
+    assert "# Codex Operator Flow UAT Matrix" in rendered
+    assert "root-operator-spawn" in rendered
+    assert "gpt-5.6-sol" in rendered
+
+
 def test_operator_kb_flow_manifest_only_lists_created_agents(
     monkeypatch,
     tmp_path: Path,

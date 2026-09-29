@@ -2479,3 +2479,66 @@ def test_agent_files_reports_missing_cwd_as_structured_error(tmp_path: Path) -> 
     assert preview.status_code == 200
     assert preview.json()["error"]["code"] == "AGENT_CWD_MISSING"
     assert missing.status_code == 404
+
+
+def test_codex_cli_update_endpoint_uses_safe_update_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_update_codex_cli_package(*, target: str, timeout: float) -> dict[str, object]:
+        calls.append({"target": target, "timeout": timeout})
+        return {
+            "ok": True,
+            "target": target,
+            "package_spec": f"@openai/codex@{target}",
+            "command": ["npm", "install", "-g", f"@openai/codex@{target}"],
+            "returncode": 0,
+            "stdout": "updated",
+            "stderr": "",
+            "error": None,
+            "duration_seconds": 1.0,
+            "before": {"shell_version": "0.158.0"},
+            "after": {"shell_version": "0.159.0"},
+        }
+
+    monkeypatch.setattr(
+        "agent_pbx.api.update_codex_cli_package",
+        fake_update_codex_cli_package,
+    )
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    response = client.post(
+        "/v1/codex/cli/update",
+        json={"target": "0.159.0", "timeout_seconds": 45},
+    )
+
+    assert response.status_code == 200
+    assert calls == [{"target": "0.159.0", "timeout": 45.0}]
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["command"] == ["npm", "install", "-g", "@openai/codex@0.159.0"]
+    assert payload["after"]["shell_version"] == "0.159.0"
+
+
+def test_codex_cli_update_endpoint_rejects_invalid_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_update_codex_cli_package(*, target: str, timeout: float) -> dict[str, object]:
+        raise ValueError("bad target")
+
+    monkeypatch.setattr(
+        "agent_pbx.api.update_codex_cli_package",
+        fake_update_codex_cli_package,
+    )
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    response = client.post(
+        "/v1/codex/cli/update",
+        json={"target": "latest; nope"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "bad target"

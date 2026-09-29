@@ -28,6 +28,7 @@ from . import __version__
 from .auth import get_store, require_token
 from .config import ServerConfig
 from .codex_sessions import enrich_codex_session_metadata
+from .codex_cli import update_codex_cli_package
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
 from .joplin import (
@@ -63,6 +64,8 @@ from .schemas import (
     AgentPruneRequest,
     AgentRegisterRequest,
     AgentResponse,
+    CodexCliUpdateRequest,
+    CodexCliUpdateResponse,
     CommandAckRequest,
     CommandCreateRequest,
     CommandResponse,
@@ -301,6 +304,26 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     @app.get("/v1/auth/check", dependencies=[Depends(require_token)])
     async def auth_check() -> dict[str, object]:
         return {"ok": True}
+
+    @app.post(
+        "/v1/codex/cli/update",
+        response_model=CodexCliUpdateResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def update_codex_cli(
+        payload: CodexCliUpdateRequest = Body(default_factory=CodexCliUpdateRequest),
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                update_codex_cli_package,
+                target=payload.target,
+                timeout=payload.timeout_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
 
     @app.post(
         "/v1/agents/register",

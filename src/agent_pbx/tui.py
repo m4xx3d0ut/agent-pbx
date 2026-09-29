@@ -49,7 +49,16 @@ from .codex_cli import (
     CODEX_MODEL_ENV,
     CODEX_REASONING_EFFORT_ENV,
     CODEX_SERVICE_TIER_ENV,
+    CodexCliPosture,
     codex_model_config_overrides,
+    inspect_codex_posture,
+)
+from .codex_sessions import (
+    CodexSessionPathCache,
+    CodexTranscriptBoundary,
+    CodexTranscriptResult,
+    codex_session_transcript_boundary,
+    latest_assistant_transcript_for_session,
 )
 from . import tmux as tmux_support
 from .project_spawn import (
@@ -230,9 +239,10 @@ TINY_HOME_AGENTS = "agents"
 TINY_HOME_OPERATORS = "operators"
 TINY_HOME_EVENTS = "events"
 OPERATOR_PANEL_MIN_RATIO = 0.10
-OPERATOR_PANEL_DEFAULT_RATIO = 0.20
-OPERATOR_PANEL_MAX_RATIO = 0.20
+OPERATOR_PANEL_DEFAULT_RATIO = 0.25
+OPERATOR_PANEL_MAX_RATIO = 0.30
 OPERATOR_PANEL_MIN_HEIGHT = 5
+EVENTS_PANEL_DEFAULT_HEIGHT = 6
 DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
 DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
 DEFAULT_SLASH_COMMANDS_FILE = Path("agent-pbx/slash-commands.json")
@@ -286,6 +296,7 @@ STALE_POLL_SECONDS = 120
 QUEUED_COMMAND_WARN_SECONDS = 60
 ACTIVE_POLL_SECONDS = 60
 TMUX_LIVENESS_IDLE_SECONDS = 60
+TMUX_HARD_STOP_VERIFY_DELAY_SECONDS = 0.4
 SLASH_COMMAND_FOLLOWUP_DELAY_SECONDS = 0.2
 PLAN_MODE_FOLLOWUP_DELAY_SECONDS = 1.0
 PLAN_PBX_CONTEXT_PROMPT = (
@@ -301,9 +312,9 @@ PLAN_SELECTION_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 CODEX_NATIVE_PLAN_SELECTOR_CHOICES = {
-    1: "start coding",
-    2: "clear context & start",
-    3: "stay in plan mode",
+    1: "implement plan",
+    2: "clear context & implement",
+    3: "keep planning",
 }
 CODEX_NATIVE_SELECTOR_LINE_PATTERN = re.compile(
     r"^\s*(?P<marker>[›❯])?\s*(?P<index>[1-9][0-9]*)[.)]?\s+(?P<label>\S.*)$"
@@ -446,6 +457,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/ctrlc",
     "/restart",
     "/codex restart",
+    "/codex update",
     "/tmux",
     "/latest",
     "/thread",
@@ -1549,10 +1561,13 @@ def codex_native_plan_selector_indices(text: str) -> tuple[int, ...]:
     if not normalized_lines:
         return ()
     start_terms = (
+        "implement this plan",
+        "implement the plan",
         "start coding",
         "start implementation",
         "begin coding",
         "start work",
+        "switch to default",
     )
     stay_terms = (
         "stay in plan",
@@ -1560,6 +1575,7 @@ def codex_native_plan_selector_indices(text: str) -> tuple[int, ...]:
         "keep planning",
         "continue planning",
         "remain in plan",
+        "no, keep",
     )
     indexed_labels: dict[int, str] = {}
     marked_indices: set[int] = set()
@@ -1587,13 +1603,45 @@ def codex_native_plan_selector_indices(text: str) -> tuple[int, ...]:
         )
     ):
         return tuple(sorted(indexed_labels))
-    if marked_indices and len(indexed_labels) >= 2:
+    selector_context = any(
+        term in " ".join(normalized_lines[-40:])
+        for term in (
+            "plan",
+            "planning",
+            "implement",
+            "coding",
+            "context",
+            "approach",
+            "api shape",
+            "compatibility",
+            "migration",
+            "phase",
+        )
+    )
+    if marked_indices and len(indexed_labels) >= 2 and selector_context:
         return tuple(sorted(indexed_labels))
     return ()
 
 
 def contains_codex_native_plan_selector(text: str) -> bool:
     return bool(codex_native_plan_selector_indices(text))
+
+
+def contains_codex_copy_selector(text: str) -> bool:
+    clean = str(text or "")
+    lower = clean.casefold()
+    numbered_options = re.findall(
+        r"(?m)^\s*(?:[>❯▸➜*]\s*)?\d+[.)]\s+\S",
+        clean,
+    )
+    if len(numbered_options) < 2:
+        return False
+    if "/copy" in lower:
+        return True
+    copy_context = "copy" in lower or "clipboard" in lower
+    selector_context = "select" in lower or "choose" in lower or "which" in lower
+    response_context = "response" in lower or "message" in lower or "transcript" in lower
+    return copy_context and selector_context and response_context
 
 
 def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME_NAME) -> set[str]:
@@ -3458,6 +3506,14 @@ class AgentPBXTUI(App[None]):
         min-height: 8;
     }
 
+    #codex-posture {
+        height: auto;
+    }
+
+    Screen.tiny-agent #codex-posture {
+        display: none;
+    }
+
     #tmux-panel {
         display: none;
         height: 1fr;
@@ -3759,7 +3815,7 @@ class AgentPBXTUI(App[None]):
     }
 
     #events {
-        height: 12;
+        height: 6;
     }
 
     Screen.tiny-home #events {
@@ -4193,6 +4249,12 @@ class AgentPBXTUI(App[None]):
         self.joplin_notes_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
         self.selected_joplin_note_id: str | None = None
         self.selected_joplin_note_id_by_agent: dict[str, str] = {}
+        self.codex_session_path_cache = CodexSessionPathCache()
+        self.joplin_log_transcript_boundary_by_agent: dict[
+            str,
+            CodexTranscriptBoundary,
+        ] = {}
+        self.codex_posture: CodexCliPosture | None = None
         self.file_path_by_agent: dict[str, str] = {}
         self.file_entries_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
         self.file_directory_entries_by_agent: dict[
@@ -4285,6 +4347,104 @@ class AgentPBXTUI(App[None]):
             self.http_client = httpx.AsyncClient(base_url=self.server, timeout=10)
         return self.http_client
 
+    async def refresh_codex_posture(self) -> None:
+        posture = await asyncio.to_thread(inspect_codex_posture)
+        self.codex_posture = posture
+        panel = self.query_one_or_none("#codex-posture", Static)
+        if panel is not None:
+            panel.update(self.format_codex_posture(posture))
+        for warning in posture.warnings:
+            self.notify(warning, severity="warning")
+
+    async def update_codex_cli_from_host(self, target: str = "latest") -> None:
+        self.notify(f"Updating Codex CLI package to {target} via Agent PBX daemon...")
+        try:
+            response = await self.api_client().post(
+                "/v1/codex/cli/update",
+                json={"target": target},
+                headers=auth_headers(self.token),
+                timeout=240,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Codex CLI update failed: {exc}", severity="error")
+            return
+        detail = self.query_one_or_none("#detail", TextArea)
+        lines = self.format_codex_update_result(result)
+        if detail is not None:
+            detail.text = "\n".join(lines)
+        if bool(result.get("ok")):
+            after = result.get("after") if isinstance(result.get("after"), dict) else {}
+            shell_version = str(after.get("shell_version") or "-")
+            self.notify(f"Codex CLI update complete; shell CLI is {shell_version}.")
+        else:
+            error = str(result.get("error") or "unknown error")
+            self.notify(f"Codex CLI update failed: {error}", severity="error")
+        await self.refresh_codex_posture()
+
+    def format_codex_update_result(self, result: Mapping[str, Any]) -> list[str]:
+        before = result.get("before") if isinstance(result.get("before"), dict) else {}
+        after = result.get("after") if isinstance(result.get("after"), dict) else {}
+        command = result.get("command") if isinstance(result.get("command"), list) else []
+        lines = [
+            "Codex CLI Update",
+            f"Status: {'ok' if result.get('ok') else 'failed'}",
+            f"Target: {result.get('target') or '-'}",
+            f"Package: {result.get('package_spec') or '-'}",
+            f"Command: {shlex.join([str(part) for part in command]) if command else '-'}",
+            f"Return code: {result.get('returncode') if result.get('returncode') is not None else '-'}",
+            f"Duration: {float_value(result.get('duration_seconds')) or 0.0:.1f}s",
+            "",
+            "Before:",
+            f"  shell CLI: {before.get('shell_version') or '-'}",
+            f"  app-server: {before.get('app_server_version') or '-'}",
+            f"  latest stable: {before.get('latest_stable_version') or '-'}",
+            f"  npm-managed: {before.get('npm_managed') if before.get('npm_managed') is not None else '-'}",
+            "",
+            "After:",
+            f"  shell CLI: {after.get('shell_version') or '-'}",
+            f"  app-server: {after.get('app_server_version') or '-'}",
+            f"  latest stable: {after.get('latest_stable_version') or '-'}",
+            f"  npm-managed: {after.get('npm_managed') if after.get('npm_managed') is not None else '-'}",
+        ]
+        if result.get("error"):
+            lines.extend(["", f"Error: {result.get('error')}"])
+        stdout = str(result.get("stdout") or "").strip()
+        stderr = str(result.get("stderr") or "").strip()
+        if stdout:
+            lines.extend(["", "stdout:", stdout])
+        if stderr:
+            lines.extend(["", "stderr:", stderr])
+        return lines
+
+    def format_codex_posture(self, posture: CodexCliPosture | None) -> str:
+        if posture is None:
+            return "Codex: checking..."
+        parts = [
+            f"CLI {posture.shell_version or '-'}",
+            f"app-server {posture.app_server_version or '-'}",
+            f"latest {posture.latest_stable_version or '-'}",
+        ]
+        if posture.configured_model:
+            marker = ""
+            if posture.model_known is False:
+                marker = " !"
+            elif posture.model_known is None:
+                marker = " ?"
+            source = (
+                f" via {posture.configured_model_source}"
+                if posture.configured_model_source
+                else ""
+            )
+            parts.append(f"model {posture.configured_model}{marker}{source}")
+        if posture.model_catalog_count:
+            parts.append(f"catalog {posture.model_catalog_count}")
+        text = "Codex: " + " | ".join(parts)
+        if posture.warnings:
+            text += "\n" + "\n".join(f"Warning: {warning}" for warning in posture.warnings)
+        return text
+
     def composer_hotkeys_text(self) -> str:
         nav = (
             "a Agents | e Events | v View | i Input"
@@ -4342,6 +4502,7 @@ class AgentPBXTUI(App[None]):
                     yield Button("Hist y", id="operator-history")
                     yield Button("Resume u", id="operator-resume")
                     yield Button("Restart U", id="operator-restart")
+                    yield Button("Codex Upd", id="codex-update")
                     yield Button("Stop x", id="operator-stop")
                     yield Button("Review W", id="operator-fork-review")
                     yield Button("Spawn P", id="operator-project-spawn")
@@ -4359,6 +4520,7 @@ class AgentPBXTUI(App[None]):
                 yield Static("Agent: -", id="agent-title")
                 with TabbedContent(initial="latest-tab", id="agent-tabs"):
                     with TabPane("Latest", id="latest-tab"):
+                        yield Static("Codex: checking...", id="codex-posture")
                         yield NavigationTextArea(id="detail", read_only=True)
                         with Vertical(id="latest-plan-choice-panel"):
                             yield Static(
@@ -4629,6 +4791,13 @@ class AgentPBXTUI(App[None]):
         await self.refresh_joplin_status()
         await self.refresh_agents()
         await self.refresh_events()
+        self.run_worker(
+            self.refresh_codex_posture(),
+            name="codex-posture",
+            group="codex-posture",
+            exclusive=True,
+            exit_on_error=False,
+        )
         self.notify_custom_slash_command_errors()
         self.restart_refresh_timers()
         self.run_worker(
@@ -4702,6 +4871,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/ctrlc", "Send Ctrl+C to the selected tmux pane", self.palette_ctrl_c)
         yield SystemCommand("/restart", "Restart the selected tmux Codex pane", self.palette_tmux_restart)
         yield SystemCommand("/codex restart", "Restart the selected tmux Codex pane", self.palette_tmux_restart)
+        yield SystemCommand("/codex update", "Update host Codex CLI via the Agent PBX daemon", self.palette_codex_update)
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/latest", "Open the Latest tab", self.palette_latest)
         yield SystemCommand("/thread", "Open the Thread tab", self.palette_thread)
@@ -4870,6 +5040,13 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.restart_tmux_codex_session(agent_id),
             name=f"tmux-restart-{slugify(agent_id)}",
+            exclusive=True,
+        )
+
+    def palette_codex_update(self) -> None:
+        self.run_worker(
+            self.update_codex_cli_from_host(),
+            name="codex-cli-update",
             exclusive=True,
         )
 
@@ -10320,6 +10497,9 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "operator-restart":
             await self.restart_selected_operator()
             return
+        if event.button.id == "codex-update":
+            await self.update_codex_cli_from_host()
+            return
         if event.button.id == "operator-stop":
             await self.stop_selected_operator()
             return
@@ -10728,6 +10908,26 @@ class AgentPBXTUI(App[None]):
             return False
         return True
 
+    async def verify_tmux_hard_stop(self, agent_id: str, key_label: str) -> None:
+        await asyncio.sleep(TMUX_HARD_STOP_VERIFY_DELAY_SECONDS)
+        first = await self.capture_tmux_display_for_agent(agent_id)
+        await asyncio.sleep(TMUX_HARD_STOP_VERIFY_DELAY_SECONDS)
+        second = await self.capture_tmux_display_for_agent(agent_id)
+        await self.load_tmux_capture(agent_id)
+        if first is None or second is None:
+            self.notify(
+                f"Sent {key_label}; unable to verify tmux pane state.",
+                severity="warning",
+            )
+            return
+        if first == second:
+            self.notify(f"Sent {key_label}; tmux pane was stable after verification.")
+            return
+        self.notify(
+            f"Sent {key_label}; tmux pane was still changing after verification.",
+            severity="warning",
+        )
+
     async def send_escape_to_operator_scope(self, agent_id: str) -> bool:
         agent = self.agents.get(agent_id)
         if (
@@ -10778,7 +10978,6 @@ class AgentPBXTUI(App[None]):
             self.notify(
                 f"Sent Escape to {len(sent)} operator pane(s) for {agent_id}{suffix}."
             )
-            await self.load_tmux_capture(agent_id)
             return True
         return False
 
@@ -10846,14 +11045,32 @@ class AgentPBXTUI(App[None]):
         metadata = self.agent_metadata(agent)
         configured = str(metadata.get("codex_command") or "").strip()
         if configured:
-            return configured
+            normalized = self.codex_command_on_current_shell(configured)
+            return normalized or configured
         start_command = await self.tmux_pane_start_command(pane.pane_id)
         from_start = self.codex_command_from_start_command(start_command)
         if from_start:
-            return from_start
+            normalized = self.codex_command_on_current_shell(from_start)
+            return normalized or from_start
         if not allow_default:
             return ""
         return self.operator_codex_command()
+
+    def codex_command_on_current_shell(self, codex_command: str) -> str:
+        clean = codex_command.strip()
+        if not clean:
+            return self.operator_codex_command()
+        try:
+            argv = shlex.split(clean)
+        except ValueError:
+            return ""
+        if not argv:
+            return self.operator_codex_command()
+        executable = Path(argv[0]).name.lower()
+        if "codex" not in executable:
+            return clean
+        shell_parts = shlex.split(self.operator_codex_command())
+        return shlex.join([*shell_parts, *argv[1:]])
 
     def operator_restart_target(
         self,
@@ -11341,7 +11558,7 @@ class AgentPBXTUI(App[None]):
         codex_command = await self.codex_command_for_agent_restart(
             agent,
             pane,
-            allow_default=False,
+            allow_default=True,
         )
         if not codex_command:
             self.notify(
@@ -11793,12 +12010,13 @@ class AgentPBXTUI(App[None]):
         if self.is_tmux_direct_enabled(agent_id):
             sent_scope = await self.send_escape_to_operator_scope(agent_id)
             if sent_scope:
+                await self.verify_tmux_hard_stop(agent_id, "Escape")
                 return
             sent = await self.send_key_to_tmux(agent_id, "Escape")
             if not sent:
                 return
             self.notify(f"Sent Escape to Codex pane for {agent_id}.")
-            await self.load_tmux_capture(agent_id)
+            await self.verify_tmux_hard_stop(agent_id, "Escape")
             return
         command = await self.queue_command(
             agent_id,
@@ -11834,7 +12052,7 @@ class AgentPBXTUI(App[None]):
         if not sent:
             return
         self.notify(f"Sent Ctrl+C to Codex pane for {agent_id}.")
-        await self.load_tmux_capture(agent_id)
+        await self.verify_tmux_hard_stop(agent_id, "Ctrl+C")
 
     async def ping_agent(self) -> None:
         agent_id = self.query_one("#agent-id", Input).value.strip()
@@ -20145,8 +20363,109 @@ class AgentPBXTUI(App[None]):
             return
         await self.copy_latest_report_to_joplin(agent_id)
 
+    def codex_session_ids_for_agent(self, agent_id: str) -> tuple[str, ...]:
+        agent = self.agents.get(agent_id) or {}
+        metadata = agent.get("metadata")
+        if not isinstance(metadata, Mapping):
+            metadata = {}
+        values: list[str] = []
+        for key in (
+            "fork_codex_session_id",
+            "last_resume_codex_session_id",
+            "codex_session_id",
+            "codex_thread_id",
+            "active_source_codex_session_id",
+            "source_codex_session_id",
+            "default_source_codex_session_id",
+        ):
+            value = str(metadata.get(key) or "").strip()
+            if value and value not in values:
+                values.append(value)
+        return tuple(values)
 
-    async def copy_tmux_response_text(self, agent_id: str) -> tuple[str, str] | None:
+    async def copy_codex_transcript_response_text(
+        self,
+        agent_id: str,
+        *,
+        after_boundary: CodexTranscriptBoundary | None = None,
+    ) -> CodexTranscriptResult | None:
+        for session_id in self.codex_session_ids_for_agent(agent_id):
+            found = await asyncio.to_thread(
+                latest_assistant_transcript_for_session,
+                session_id,
+                codex_home=self.codex_home_dir(),
+                path_cache=self.codex_session_path_cache,
+            )
+            if found is None:
+                continue
+            if after_boundary is not None and not self.transcript_after_boundary(
+                found,
+                after_boundary,
+            ):
+                continue
+            if found.text.strip():
+                return found
+        return None
+
+    async def codex_transcript_boundary_for_agent(
+        self,
+        agent_id: str,
+    ) -> CodexTranscriptBoundary | None:
+        for session_id in self.codex_session_ids_for_agent(agent_id):
+            boundary = await asyncio.to_thread(
+                codex_session_transcript_boundary,
+                session_id,
+                codex_home=self.codex_home_dir(),
+                path_cache=self.codex_session_path_cache,
+            )
+            if boundary is not None:
+                return boundary
+        return None
+
+    def transcript_after_boundary(
+        self,
+        result: CodexTranscriptResult,
+        boundary: CodexTranscriptBoundary,
+    ) -> bool:
+        return (
+            result.session_id == boundary.session_id
+            and result.path == boundary.path
+            and result.line_index > boundary.line_index
+        )
+
+    def format_codex_transcript_source(self, result: CodexTranscriptResult) -> str:
+        modified = (
+            datetime.fromtimestamp(result.mtime, tz=timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+        )
+        session_id = result.session_id or "-"
+        if len(session_id) > 12:
+            session_id = f"{session_id[:8]}..."
+        phase = result.phase or "-"
+        return (
+            f"Codex transcript {result.path.name} "
+            f"(session {session_id}, phase {phase}, "
+            f"line {result.line_index}, mtime {modified})"
+        )
+
+    async def copy_tmux_response_text(
+        self,
+        agent_id: str,
+        *,
+        transcript_boundary: CodexTranscriptBoundary | None = None,
+        allow_transcript: bool = True,
+    ) -> tuple[str, str] | None:
+        if allow_transcript:
+            transcript = await self.copy_codex_transcript_response_text(
+                agent_id,
+                after_boundary=transcript_boundary,
+            )
+            if transcript is not None:
+                return (
+                    transcript.text,
+                    self.format_codex_transcript_source(transcript),
+                )
         try:
             previous_clipboard, _previous_source = await asyncio.to_thread(
                 read_clipboard_text
@@ -20160,20 +20479,46 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return None
+        copy_error: Exception | None = None
         try:
-            return await self.read_copied_tmux_response(
-                previous_clipboard
-            )
+            return await self.read_copied_tmux_response(previous_clipboard)
         except Exception as exc:
-            captured = await self.capture_tmux_display_for_agent(agent_id)
-            if captured and captured.strip():
+            copy_error = exc
+        captured = await self.capture_tmux_display_for_agent(agent_id)
+        if captured and contains_codex_copy_selector(captured):
+            if await self.send_key_to_tmux(agent_id, "Escape"):
                 self.notify(
-                    f"Joplin /copy failed; using visible tmux capture: {exc}",
+                    "Codex /copy opened an interactive selector; canceled it and "
+                    "continued with transcript/tmux fallback.",
                     severity="warning",
                 )
-                return captured, "tmux capture fallback"
-            self.notify(f"Joplin copy failed: {exc}", severity="error")
-            return None
+                await asyncio.sleep(0.2)
+                captured = await self.capture_tmux_display_for_agent(agent_id)
+        if allow_transcript:
+            transcript = await self.copy_codex_transcript_response_text(
+                agent_id,
+                after_boundary=transcript_boundary,
+            )
+            if transcript is not None:
+                if copy_error is not None:
+                    self.notify(
+                        f"Joplin /copy failed; using Codex transcript: {copy_error}",
+                        severity="warning",
+                    )
+                return (
+                    transcript.text,
+                    self.format_codex_transcript_source(transcript),
+                )
+        if captured and captured.strip() and not contains_codex_copy_selector(captured):
+            if copy_error is not None:
+                self.notify(
+                    f"Joplin /copy failed; using visible tmux capture: {copy_error}",
+                    severity="warning",
+                )
+            return captured, "tmux capture fallback"
+        error_text = str(copy_error or "no transcript, clipboard, or tmux capture available")
+        self.notify(f"Joplin copy failed: {error_text}", severity="error")
+        return None
 
     async def copy_tmux_response_to_joplin(self, agent_id: str) -> None:
         if not await self.ensure_joplin_available():
@@ -20238,6 +20583,11 @@ class AgentPBXTUI(App[None]):
         )
         if not active:
             return
+        boundary = await self.codex_transcript_boundary_for_agent(agent_id)
+        if boundary is not None:
+            self.joplin_log_transcript_boundary_by_agent[agent_id] = boundary
+        else:
+            self.joplin_log_transcript_boundary_by_agent.pop(agent_id, None)
         self.run_worker(
             self.capture_tmux_joplin_log_response(agent_id),
             name=f"joplin-tmux-log-{slugify(agent_id)}",
@@ -20298,7 +20648,12 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return
-        copied = await self.copy_tmux_response_text(agent_id)
+        boundary = self.joplin_log_transcript_boundary_by_agent.pop(agent_id, None)
+        copied = await self.copy_tmux_response_text(
+            agent_id,
+            transcript_boundary=boundary,
+            allow_transcript=boundary is not None,
+        )
         if copied is None:
             return
         response_text, clipboard_source = copied
@@ -21844,7 +22199,7 @@ class AgentPBXTUI(App[None]):
         )
         events_title.styles.display = "block" if show_events or not tiny_home else "none"
         events.styles.display = "block" if show_events or not tiny_home else "none"
-        events.styles.height = "1fr" if show_events else 12
+        events.styles.height = "1fr" if show_events else EVENTS_PANEL_DEFAULT_HEIGHT
         if show_operators and tiny_home:
             operators.styles.height = "1fr"
         elif show_operators:

@@ -518,6 +518,7 @@ agent-pbx uat operator-kb-flow --ci --server http://127.0.0.1:8765 --token dev-t
 agent-pbx uat operator-kb-flow --from-stage 6 --ci \
   --server http://127.0.0.1:8765 --token dev-token
 agent-pbx uat compare --run kb-sim-old --run kb-sim-new
+agent-pbx uat codex-operator-flow --codex-cli-version 0.158.0 --model gpt-5.6-sol
 ```
 
 The tmux profile preflights server health, controlled cwd, tmux binary, and the
@@ -547,6 +548,14 @@ Successful cleanup is followed by an audit that checks for visible synthetic
 agents, active UAT KB leaks, non-terminal UAT handoffs, and live UAT tmux
 panes. `agent-pbx uat compare --run A --run B` reads persisted manifests and
 reports check, failure, warning, duration, cleanup, and report-drift deltas.
+
+The `codex-operator-flow` matrix is a live-operator checklist for Codex CLI and
+model compatibility. For the 0.158.0 update, run it with the selected GPT-5.6
+slug and use the cases to exercise caller-to-root operator spawn, default/edit
+fork launch, review fork transcript continuation, review fork fresh-context
+fallback, resume/restart session rebinding, native plan selector choices,
+Escape/Ctrl+C hard-stop verification, and Joplin `/copy -> transcript -> tmux`
+capture behavior.
 
 The TUI handoff list shows the latest recorded delivery preflight age/warnings
 and a lightweight ack monitor for sent handoffs. Approving a pending handoff
@@ -703,14 +712,15 @@ The Joplin tab buttons show their shortcut key directly, such as `New n` and
 `Copy c`. Press `Ctrl+G` then that key; when focus is outside an editable note
 body, `j` can be used instead of `Ctrl+G`.
 
-In tmux direct mode, `/joplin copy` sends Codex `/copy` to the selected pane,
-reads the copied response with a local clipboard helper such as `wl-paste`,
-`xclip`, `xsel`, `pbpaste`, `termux-clipboard-get`, or `tmux show-buffer`, then
-creates a Markdown COPY note with the last prompt recorded by the TUI and the
-copied response. If no clipboard reader is available, use `/joplin copy report`
-or configure clipboard integration for the terminal/tmux session. The tmux LOG
-path uses the same `/copy` and clipboard helper flow; it does not append guessed
-screen text when clipboard capture fails.
+In tmux direct mode, `/joplin copy` first reads the active Codex transcript when
+Agent PBX knows the session id. If transcript capture is unavailable, it uses
+Codex `/copy` and a local clipboard helper such as `wl-paste`, `xclip`, `xsel`,
+`pbpaste`, `termux-clipboard-get`, or `tmux show-buffer`, then falls back to
+visible tmux capture only as a last resort. If Codex opens an interactive
+numbered `/copy` selector, Agent PBX sends Escape before continuing with the
+fallback path so the pane is not left blocked. The tmux LOG path records a
+transcript boundary before the operator prompt and only accepts transcript output
+written after that boundary.
 
 Agents can call `pbx_joplin_status` and `pbx_joplin_create_document` when the
 operator asks for a Markdown note or document. Mermaid diagrams should be passed
@@ -949,7 +959,7 @@ commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
 `/operator kb`, `/operator kb detail`, `/operator kb proposed`,
 `/operator kb proposed detail`, `/operator kb seed`, `/operator kb compile`,
 `/operator kb reindex`, `/operator kb promote`, `/operator kb reject`,
-`/operator kb retire`, `/operator project spawn`, `/pr`, `/pr refresh`,
+`/operator kb retire`, `/operator project spawn`, `/codex update`, `/pr`, `/pr refresh`,
 `/pr review`, `/pr validate`, `/pr url`, `/pr merge`, `/issue`, `/issue refresh`, `/issue mitigate`,
 `/issue url`, `/issue clear`, configured `/joplin`, `/joplin new`,
 `/joplin rename`, `/joplin delete`, `/joplin copy`,
@@ -965,11 +975,13 @@ nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
 `tmux send-keys C-c` to the selected Codex pane, for example to back out of a
 `/side` chat. Use `/restart` or `/codex restart` in tmux direct mode to send
 Codex `/q`, wait briefly for the pane to exit, then relaunch Codex with the
-known session when Agent PBX can recover the launch metadata. Use this after a
-global Codex CLI package update to move long-lived caller, root-operator, and
-fork panes onto the updated executable. TUI-owned operators and forks can be
-relaunched automatically; caller panes require a known Codex session and
-recoverable Codex launch command.
+known session when Agent PBX can recover the session metadata. Use `/codex
+update` to ask the Agent PBX daemon to run the allowlisted npm update for
+`@openai/codex`, then use `/restart` or `/codex restart` to move long-lived
+caller, root-operator, and fork panes onto the updated executable. TUI-owned
+operators and forks can be relaunched automatically; caller panes require a known
+Codex session id and restart through the current configured shell `codex` command
+when no pinned command is stored.
 
 In the Latest input, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete project paths. Type `@joplin:` and

@@ -40,6 +40,8 @@ from .tui import run_tui
 from .uat import (
     cleanup_operator_kb_flow_uat,
     compare_operator_kb_flow_uat_runs,
+    codex_operator_flow_uat_matrix,
+    codex_operator_flow_uat_markdown,
     operator_kb_flow_markdown,
     run_operator_kb_flow_uat,
     uat_compare_markdown,
@@ -266,6 +268,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write the full JSON result or Markdown summary to this path.",
     )
     operator_kb_flow.add_argument("--json", action="store_true")
+    codex_operator_flow = uat_subcommands.add_parser(
+        "codex-operator-flow",
+        help="Print the Codex CLI/model operator spawn, fork, and review UAT matrix.",
+    )
+    codex_operator_flow.add_argument("--model", default="gpt-5.6-sol")
+    codex_operator_flow.add_argument("--codex-cli-version", default="0.158.0")
+    codex_operator_flow.add_argument("--json", action="store_true")
+    codex_operator_flow.add_argument("--output", type=Path, default=None)
     uat_cleanup = uat_subcommands.add_parser(
         "cleanup", help="Retry cleanup for a persisted operator KB flow UAT run."
     )
@@ -446,6 +456,19 @@ def main(argv: list[str] | None = None) -> int:
                 _write_cli_output(args.output, _render_cli_output(args.output, result, rendered))
             print(rendered)
             return 0 if not result.get("failures") else 1
+        if args.uat_command == "codex-operator-flow":
+            result = codex_operator_flow_uat_matrix(
+                model_slug=args.model,
+                codex_cli_version=args.codex_cli_version,
+            )
+            if args.json:
+                rendered = json.dumps(result, indent=2, sort_keys=True)
+            else:
+                rendered = codex_operator_flow_uat_markdown(result)
+            if args.output is not None:
+                _write_cli_output(args.output, _render_cli_output(args.output, result, rendered))
+            print(rendered)
+            return 0
         if args.uat_command == "cleanup":
             result = cleanup_operator_kb_flow_uat(
                 server=args.server,

@@ -116,6 +116,25 @@ CommandType = Literal[
 ]
 
 
+class CodexCliUpdateRequest(BaseModel):
+    target: str = Field(default="latest", min_length=1, max_length=80)
+    timeout_seconds: float = Field(default=180.0, ge=30.0, le=600.0)
+
+
+class CodexCliUpdateResponse(BaseModel):
+    ok: bool
+    target: str
+    package_spec: str
+    command: list[str]
+    returncode: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    error: str | None = None
+    duration_seconds: float
+    before: dict[str, Any] = Field(default_factory=dict)
+    after: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentRegisterRequest(BaseModel):
     agent_id: str = Field(min_length=1, max_length=120)
     project: str = Field(min_length=1, max_length=240)

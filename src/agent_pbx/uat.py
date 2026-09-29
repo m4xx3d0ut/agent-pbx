@@ -39,6 +39,102 @@ UAT_STAGE_DEPENDENCIES = {
     "8": {"0", "1", "2"},
     "9": {"0", "1", "2"},
 }
+CODEX_OPERATOR_FLOW_UAT_FORMAT = "agent-pbx-codex-operator-flow-matrix-v1"
+DEFAULT_CODEX_OPERATOR_FLOW_MODEL = "gpt-5.6-sol"
+
+
+def codex_operator_flow_uat_matrix(
+    *,
+    model_slug: str = DEFAULT_CODEX_OPERATOR_FLOW_MODEL,
+    codex_cli_version: str = "0.158.0",
+) -> dict[str, Any]:
+    model = str(model_slug or "").strip() or DEFAULT_CODEX_OPERATOR_FLOW_MODEL
+    cli_version = str(codex_cli_version or "").strip() or "0.158.0"
+    cases = [
+        {
+            "id": "root-operator-spawn",
+            "flow": "caller -> root operator",
+            "action": "Start Operator from a caller with metadata.codex_session_id",
+            "expected": "root operator registers in report mode and reaches a ready Codex prompt",
+        },
+        {
+            "id": "default-fork-spawn",
+            "flow": "root operator -> default/edit fork",
+            "action": "Create or resume the caller-scoped default fork",
+            "expected": "fork binds to the caller source session and records fork_codex_session_id",
+        },
+        {
+            "id": "review-fork-transcript",
+            "flow": "operator/default fork -> review fork",
+            "action": "Launch a read-only review fork with transcript continuation enabled",
+            "expected": "review fork starts with review_readonly access and inherits usable context",
+        },
+        {
+            "id": "review-fork-fresh-context",
+            "flow": "operator/default fork -> review fork fallback",
+            "action": "Force or simulate invalid_encrypted_content during review fork launch",
+            "expected": "fresh-context review fork keeps fork identity, source metadata, and work_root",
+        },
+        {
+            "id": "review-fork-resume-restart",
+            "flow": "review fork lifecycle",
+            "action": "Resume and restart an existing review fork pane",
+            "expected": "current/fork session ids are preferred over source session ids after restart",
+        },
+        {
+            "id": "native-plan-selector",
+            "flow": "root/default/review selector handling",
+            "action": "Enter /plan and choose each visible native selector option",
+            "expected": "TUI detects current selector text and routes numeric selections to the active pane",
+        },
+        {
+            "id": "hard-stop",
+            "flow": "tmux direct hard stop",
+            "action": "Send Escape, then Ctrl+C when needed, during active Codex work",
+            "expected": "TUI refreshes pane evidence and reports stable versus still-changing state",
+        },
+        {
+            "id": "joplin-transcript-copy",
+            "flow": "Joplin copy/log capture",
+            "action": "Copy latest response and run LOG auto-capture when clipboard copy fails",
+            "expected": "/copy falls back to transcript before tmux capture; LOG uses only post-prompt transcript lines",
+        },
+    ]
+    return {
+        "format": CODEX_OPERATOR_FLOW_UAT_FORMAT,
+        "codex_cli_version": cli_version,
+        "model_slug": model,
+        "cases": cases,
+    }
+
+
+def codex_operator_flow_uat_markdown(matrix: dict[str, Any]) -> str:
+    lines = [
+        "# Codex Operator Flow UAT Matrix",
+        "",
+        f"- Codex CLI: `{matrix.get('codex_cli_version') or '-'}`",
+        f"- Model slug: `{matrix.get('model_slug') or '-'}`",
+        "",
+        "| Case | Flow | Action | Expected |",
+        "| --- | --- | --- | --- |",
+    ]
+    cases = matrix.get("cases") if isinstance(matrix.get("cases"), list) else []
+    for item in cases:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            "| "
+            + " | ".join(
+                markdown_table_cell(str(item.get(key) or ""))
+                for key in ("id", "flow", "action", "expected")
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def markdown_table_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ")
 
 
 def normalize_uat_stage(value: str | int | None, *, flag_name: str) -> str | None:
