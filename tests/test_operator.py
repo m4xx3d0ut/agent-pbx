@@ -1687,6 +1687,49 @@ def test_operator_pending_fork_can_be_activated_after_tui_launch(tmp_path: Path)
     assert activated_agent["metadata"]["tmux_pane_id"] == "%42"
 
 
+def test_operator_existing_fork_registration_refreshes_agent_pane_metadata(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        tmux_pane_id="%33",
+        status="running",
+        metadata={"pbx_mode": "report", "tmux_pane_id": "%33"},
+    )
+    canceled = store.update_operator_fork(
+        fork["operator_fork_id"],
+        status="canceled",
+        tmux_pane_id="",
+        complete=True,
+    )
+    assert canceled is not None
+    assert canceled["completed_at"] is not None
+
+    refreshed = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id=fork["fork_agent_id"],
+        tmux_pane_id="%44",
+        status="running",
+        metadata={"pbx_mode": "report", "tmux_pane_id": "%33"},
+    )
+    refreshed_agent = store.get_agent(fork["fork_agent_id"])
+
+    assert refreshed["operator_fork_id"] == fork["operator_fork_id"]
+    assert refreshed["status"] == "running"
+    assert refreshed["tmux_pane_id"] == "%44"
+    assert refreshed["completed_at"] is None
+    assert refreshed_agent is not None
+    assert refreshed_agent["metadata"]["tmux_pane_id"] == "%44"
+
+
 def test_operator_campaign_tmux_delivery_prefers_repaired_fork_pane(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

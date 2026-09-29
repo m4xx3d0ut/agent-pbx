@@ -574,8 +574,39 @@ class OperatorService:
                     work_root=resolved_work_root,
                     metadata=merged_metadata,
                     touch=True,
+                    complete=False if launching and not blocked_reason else None,
                 ) or existing
                 if launching and not blocked_reason:
+                    updated_metadata = dict(merged_metadata)
+                    for key in (
+                        "cwd",
+                        "source_cwd",
+                        "work_root",
+                        "fork_codex_session_id",
+                        "tmux_pane_id",
+                    ):
+                        value = str(updated.get(key) or "").strip()
+                        if value:
+                            updated_metadata[key] = value
+                    fork_agent = self.store.get_agent(resolved_fork_agent_id) or {}
+                    self.store.register_agent(
+                        AgentRegisterRequest(
+                            agent_id=resolved_fork_agent_id,
+                            project=str(
+                                fork_agent.get("project")
+                                or operator.get("project")
+                                or "agent-pbx-operator"
+                            ),
+                            name=(
+                                str(fork_agent["name"])
+                                if fork_agent.get("name")
+                                else resolved_fork_agent_id
+                            ),
+                            agent_type=OPERATOR_AGENT_TYPE,
+                            metadata=updated_metadata,
+                            pbx_active=True,
+                        )
+                    )
                     self.store.append_event(
                         "operator_fork_ensured",
                         {
