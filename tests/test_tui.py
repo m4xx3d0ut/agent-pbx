@@ -9,6 +9,11 @@ import pytest
 from rich.text import Text
 
 from agent_pbx import tmux as tmux_support
+from agent_pbx.codex_cli import (
+    CODEX_MODEL_ENV,
+    CODEX_REASONING_EFFORT_ENV,
+    CODEX_SERVICE_TIER_ENV,
+)
 from agent_pbx.tui import (
     AgentPBXTUI,
     CustomSlashCommand,
@@ -17,6 +22,7 @@ from agent_pbx.tui import (
     OperatorSessionCandidate,
     PLAN_PBX_CONTEXT_PROMPT,
     PlanSelection,
+    OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     TMUX_LIVENESS_IDLE_SECONDS,
     DEFAULT_SPLIT_PERCENT,
@@ -40,6 +46,7 @@ from agent_pbx.tui import (
     is_follow_up_newline_key,
     load_codex_mcp_server_configs,
     load_custom_slash_commands,
+    operator_agent_config_overrides,
     operator_panel_height,
     parse_git_push_slash_command,
     parse_custom_slash_commands,
@@ -7639,6 +7646,8 @@ async def test_tui_joplin_copy_tmux_response_uses_codex_copy_clipboard(
     assert "Codex response markdown" in str(payload["body"])
 
 
+
+
 async def test_tui_tmux_joplin_log_response_appends_copied_response() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     calls: list[tuple[str, str, str]] = []
@@ -9250,7 +9259,10 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
 
     assert killed == ["%152"]
     launch_argv = shlex.split(str(launches[0]["command"]))
-    assert launch_argv == ["codex", "resume", "--cd", str(Path.cwd()), "old-session"]
+    assert launch_argv[:4] == ["codex", "resume", "--cd", str(Path.cwd())]
+    assert launch_argv[-1] == "old-session"
+    assert "-c" in launch_argv
+    assert any(item.startswith("mcp_servers.agent-pbx=") for item in launch_argv)
     assert launches[0]["window_name"] == "operator-0"
     launch_env = launches[0]["env"]
     assert isinstance(launch_env, dict)
@@ -9761,7 +9773,10 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     assert launches[0]["session_name"] == "agent-pbx-operators"
     assert launches[0]["window_name"] == "operator-0"
     launch_argv = shlex.split(str(launches[0]["command"]))
-    assert launch_argv == ["codex", "resume", "--cd", str(Path.cwd()), "current-session"]
+    assert launch_argv[:4] == ["codex", "resume", "--cd", str(Path.cwd())]
+    assert launch_argv[-1] == "current-session"
+    assert "-c" in launch_argv
+    assert any(item.startswith("mcp_servers.agent-pbx=") for item in launch_argv)
     assert launches[0]["env"]["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "current-session"
     assert launches[0]["env"]["AGENT_PBX_REPORTING_AGENT_ID"] == "operator-0"
     assert posts[-1]["path"] == "/v1/agents/register"
@@ -10639,10 +10654,18 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     assert posts[2]["path"] == "/v1/operator/forks/ensure"
     assert posts[2]["json"]["metadata"]["operator_role"] == "fork"  # type: ignore[index]
     assert launches[0]["window_name"] == "operator-0"
-    assert launches[0]["command"] == "codex"
+    root_argv = shlex.split(str(launches[0]["command"]))
+    assert root_argv[0] == "codex"
+    assert "--cd" in root_argv
+    assert "-c" in root_argv
+    assert any(item.startswith("mcp_servers.agent-pbx=") for item in root_argv)
     assert launches[0]["env"]["AGENT_PBX_OPERATOR_ROLE"] == "root"
     assert launches[1]["cwd"] == str(Path.cwd())
-    assert "codex fork session-caller-1" in launches[1]["command"]  # type: ignore[operator]
+    fork_argv = shlex.split(str(launches[1]["command"]))
+    assert fork_argv[:2] == ["codex", "fork"]
+    assert "session-caller-1" in fork_argv
+    assert "-c" in fork_argv
+    assert any(item.startswith("mcp_servers.agent-pbx=") for item in fork_argv)
     assert launches[1]["env"]["AGENT_PBX_OPERATOR_ID"] == posts[2]["json"]["fork_agent_id"]  # type: ignore[index]
     assert launches[1]["env"]["AGENT_PBX_AGENT_ID"] == posts[2]["json"]["fork_agent_id"]  # type: ignore[index]
     assert launches[1]["env"]["AGENT_PBX_OPERATOR_ROLE"] == "fork"
@@ -14572,6 +14595,27 @@ def test_tui_codex_start_command_supports_project_spawn_options() -> None:
     assert argv[-1] == "bootstrap prompt"
 
 
+def test_tui_codex_interactive_command_supports_operator_options() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    command = app.codex_interactive_command(
+        "codex --search",
+        cd="/tmp/operator root",
+        config_overrides=[
+            'mcp_servers.agent-pbx.default_tools_approval_mode="approve"',
+        ],
+    )
+
+    argv = shlex.split(command)
+    assert argv[:2] == ["codex", "--search"]
+    assert argv[2:4] == ["--cd", "/tmp/operator root"]
+    assert "-c" in argv
+    assert (
+        'mcp_servers.agent-pbx.default_tools_approval_mode="approve"'
+        in argv
+    )
+
+
 def test_tui_operator_resume_command_supports_restart_options() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -14709,6 +14753,68 @@ def test_tui_caller_agent_config_overrides_allowlist_report_tools() -> None:
     assert "pbx_operator_list_handoffs" not in agent_pbx_config
     assert "pbx_operator_send_knowledge_turn" not in agent_pbx_config
     assert 'projects={"/tmp/new project" = {trust_level = "trusted"}}' in overrides
+
+
+def test_tui_operator_agent_config_overrides_follow_operator_server_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(OPERATOR_MCP_APPROVAL_SERVERS_ENV, "agent-pbx,workerbee")
+    monkeypatch.setenv(REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV, "agent-pbx")
+
+    overrides = operator_agent_config_overrides(
+        mcp_url="http://127.0.0.1:8767/mcp",
+        work_root="/tmp/operator root",
+        server_configs={"workerbee": {"url": "http://127.0.0.1:8765/mcp"}},
+    )
+
+    agent_pbx_config = next(
+        item
+        for item in overrides
+        if item.startswith("mcp_servers.agent-pbx=")
+    )
+    workerbee_config = next(
+        item
+        for item in overrides
+        if item.startswith("mcp_servers.workerbee=")
+    )
+    assert 'default_tools_approval_mode = "approve"' in agent_pbx_config
+    assert "pbx_register_agent" in agent_pbx_config
+    assert "pbx_operator_runbook" in agent_pbx_config
+    assert "pbx_operator_kb_search" in agent_pbx_config
+    assert "pbx_queue_command" not in agent_pbx_config
+    assert 'default_tools_approval_mode = "approve"' in workerbee_config
+    assert "workerbee_v1_project_status" in workerbee_config
+    assert "workerbee_v1_exec" not in workerbee_config
+    assert 'projects={"/tmp/operator root" = {trust_level = "trusted"}}' in overrides
+
+
+def test_tui_operator_agent_config_overrides_fallback_to_review_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(OPERATOR_MCP_APPROVAL_SERVERS_ENV, raising=False)
+    monkeypatch.setenv(REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV, "agent-pbx,workerbee")
+
+    overrides = operator_agent_config_overrides(
+        mcp_url="http://127.0.0.1:8767/mcp",
+        server_configs={"workerbee": {"url": "http://127.0.0.1:8765/mcp"}},
+    )
+
+    assert any(item.startswith("mcp_servers.agent-pbx=") for item in overrides)
+    assert any(item.startswith("mcp_servers.workerbee=") for item in overrides)
+
+
+def test_tui_agent_config_overrides_include_codex_model_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(CODEX_MODEL_ENV, "gpt-6-sol")
+    monkeypatch.setenv(CODEX_REASONING_EFFORT_ENV, "high")
+    monkeypatch.setenv(CODEX_SERVICE_TIER_ENV, "priority")
+
+    overrides = operator_agent_config_overrides(mcp_url="http://127.0.0.1:8767/mcp")
+
+    assert 'model="gpt-6-sol"' in overrides
+    assert 'model_reasoning_effort="high"' in overrides
+    assert 'service_tier="priority"' in overrides
 
 
 def test_tui_loads_codex_mcp_server_transport_config(tmp_path: Path) -> None:

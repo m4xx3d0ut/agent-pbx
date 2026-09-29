@@ -45,6 +45,12 @@ from textual.widgets import (
 )
 
 from .client import auth_headers
+from .codex_cli import (
+    CODEX_MODEL_ENV,
+    CODEX_REASONING_EFFORT_ENV,
+    CODEX_SERVICE_TIER_ENV,
+    codex_model_config_overrides,
+)
 from . import tmux as tmux_support
 from .project_spawn import (
     PROJECT_SPAWN_MODES,
@@ -135,6 +141,7 @@ CODEX_INVALID_ENCRYPTED_CONTENT_MARKERS = (
 REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV = (
     "AGENT_PBX_TUI_REVIEW_MCP_APPROVAL_SERVERS"
 )
+OPERATOR_MCP_APPROVAL_SERVERS_ENV = "AGENT_PBX_TUI_OPERATOR_MCP_APPROVAL_SERVERS"
 DEFAULT_REVIEW_OPERATOR_MCP_APPROVAL_SERVERS = ("agent-pbx",)
 DEFAULT_REVIEW_OPERATOR_MCP_SERVER_CONFIGS = {
     "workerbee": {"url": "http://127.0.0.1:8765/mcp"},
@@ -1001,6 +1008,14 @@ def codex_config_override(key: str, value: object) -> str:
     return f"{key}={toml_literal(value)}"
 
 
+def codex_model_launch_config_overrides() -> list[str]:
+    return codex_model_config_overrides(
+        model=os.getenv(CODEX_MODEL_ENV),
+        reasoning_effort=os.getenv(CODEX_REASONING_EFFORT_ENV),
+        service_tier=os.getenv(CODEX_SERVICE_TIER_ENV),
+    )
+
+
 def codex_project_trust_config_override(cwd: str | None) -> str | None:
     path = str(cwd or "").strip()
     if not path:
@@ -1107,7 +1122,30 @@ def load_codex_mcp_server_configs(
 
 
 def review_operator_mcp_approval_server_names() -> tuple[str, ...]:
-    configured = os.getenv(REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV, "").strip()
+    return mcp_approval_server_names(
+        REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,
+        fallback_env_names=(),
+    )
+
+
+def operator_mcp_approval_server_names() -> tuple[str, ...]:
+    return mcp_approval_server_names(
+        OPERATOR_MCP_APPROVAL_SERVERS_ENV,
+        fallback_env_names=(REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,),
+    )
+
+
+def mcp_approval_server_names(
+    env_name: str,
+    *,
+    fallback_env_names: Iterable[str] = (),
+) -> tuple[str, ...]:
+    configured = os.getenv(env_name, "").strip()
+    if not configured:
+        for fallback_name in fallback_env_names:
+            configured = os.getenv(fallback_name, "").strip()
+            if configured:
+                break
     if configured:
         names = tuple(
             name.strip()
@@ -1208,6 +1246,7 @@ def caller_agent_config_overrides(
     trust_override = codex_project_trust_config_override(work_root)
     if trust_override:
         overrides.append(trust_override)
+    overrides.extend(codex_model_launch_config_overrides())
     return overrides
 
 
@@ -1228,6 +1267,28 @@ def review_operator_config_overrides(
     trust_override = codex_project_trust_config_override(work_root)
     if trust_override:
         overrides.append(trust_override)
+    overrides.extend(codex_model_launch_config_overrides())
+    return overrides
+
+
+def operator_agent_config_overrides(
+    server_names: Iterable[str] | None = None,
+    *,
+    mcp_url: str | None = None,
+    codex_home: Path | None = None,
+    work_root: str | None = None,
+    server_configs: Mapping[str, Mapping[str, object]] | None = None,
+) -> list[str]:
+    overrides = review_operator_mcp_config_overrides(
+        server_names or operator_mcp_approval_server_names(),
+        mcp_url=mcp_url,
+        codex_home=codex_home,
+        server_configs=server_configs,
+    )
+    trust_override = codex_project_trust_config_override(work_root)
+    if trust_override:
+        overrides.append(trust_override)
+    overrides.extend(codex_model_launch_config_overrides())
     return overrides
 
 
@@ -10953,6 +11014,11 @@ class AgentPBXTUI(App[None]):
                     codex_command,
                     target.session_id,
                     cd=cwd,
+                    config_overrides=operator_agent_config_overrides(
+                        mcp_url=mcp_url,
+                        codex_home=self.codex_home_dir(),
+                        work_root=cwd,
+                    ),
                 ),
                 label=agent_id,
                 cwd=cwd,
@@ -11063,7 +11129,7 @@ class AgentPBXTUI(App[None]):
         )
         if not review_servers and fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
             review_servers = review_operator_mcp_approval_server_names()
-        review_config_overrides = (
+        launch_config_overrides = (
             review_operator_config_overrides(
                 review_servers,
                 mcp_url=mcp_url,
@@ -11071,7 +11137,11 @@ class AgentPBXTUI(App[None]):
                 work_root=work_root,
             )
             if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
-            else ()
+            else operator_agent_config_overrides(
+                mcp_url=mcp_url,
+                codex_home=self.codex_home_dir(),
+                work_root=work_root,
+            )
         )
         sandbox = (
             "workspace-write"
@@ -11105,7 +11175,7 @@ class AgentPBXTUI(App[None]):
                     resume_target.session_id,
                     cd=work_root if work_root and work_root != source_cwd else None,
                     sandbox=sandbox,
-                    config_overrides=review_config_overrides,
+                    config_overrides=launch_config_overrides,
                 )
             if (
                 fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
@@ -11116,7 +11186,7 @@ class AgentPBXTUI(App[None]):
                     bootstrap_prompt,
                     cd=work_root if work_root and work_root != source_cwd else None,
                     sandbox=sandbox,
-                    config_overrides=review_config_overrides,
+                    config_overrides=launch_config_overrides,
                 )
             return self.operator_fork_command(
                 codex_command,
@@ -11124,7 +11194,7 @@ class AgentPBXTUI(App[None]):
                 bootstrap_prompt,
                 cd=work_root if work_root and work_root != source_cwd else None,
                 sandbox=sandbox,
-                config_overrides=review_config_overrides,
+                config_overrides=launch_config_overrides,
             )
 
         def build_env(
@@ -12832,6 +12902,24 @@ class AgentPBXTUI(App[None]):
         start_parts.append(prompt)
         return shlex.join(start_parts)
 
+    def codex_interactive_command(
+        self,
+        codex_command: str,
+        *,
+        cd: str | None = None,
+        sandbox: str | None = None,
+        config_overrides: Iterable[str] = (),
+    ) -> str:
+        command_parts = shlex.split(codex_command) if codex_command.strip() else ["codex"]
+        start_parts = list(command_parts)
+        if cd:
+            start_parts.extend(["--cd", cd])
+        if sandbox:
+            start_parts.extend(["--sandbox", sandbox])
+        for override in config_overrides:
+            start_parts.extend(["-c", override])
+        return shlex.join(start_parts)
+
     def spawned_project_agent_id(self, project_slug: str) -> str:
         base = f"codex-{normalize_project_slug(project_slug, default='project')}"[:96]
         if base not in self.agents:
@@ -13848,7 +13936,15 @@ class AgentPBXTUI(App[None]):
             tmux_support.launch_pane,
             session_name=session_name,
             window_name=agent_id,
-            command=codex_command,
+            command=self.codex_interactive_command(
+                codex_command,
+                cd=cwd,
+                config_overrides=operator_agent_config_overrides(
+                    mcp_url=mcp_url,
+                    codex_home=self.codex_home_dir(),
+                    work_root=cwd,
+                ),
+            ),
             cwd=cwd,
             env=self.operator_launch_env(
                 agent_id=agent_id,
@@ -14184,7 +14280,7 @@ class AgentPBXTUI(App[None]):
                 "starting review fork with fresh context.",
                 severity="warning",
             )
-        review_config_overrides = (
+        launch_config_overrides = (
             review_operator_config_overrides(
                 review_mcp_approval_servers,
                 mcp_url=mcp_url,
@@ -14192,7 +14288,11 @@ class AgentPBXTUI(App[None]):
                 work_root=launch_cwd,
             )
             if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
-            else ()
+            else operator_agent_config_overrides(
+                mcp_url=mcp_url,
+                codex_home=self.codex_home_dir(),
+                work_root=launch_cwd,
+            )
         )
         sandbox = (
             "workspace-write"
@@ -14226,7 +14326,7 @@ class AgentPBXTUI(App[None]):
                     bootstrap_prompt,
                     cd=launch_cwd if launch_cwd and launch_cwd != caller_cwd else None,
                     sandbox=sandbox,
-                    config_overrides=review_config_overrides,
+                    config_overrides=launch_config_overrides,
                 )
             return self.operator_fork_command(
                 codex_command,
@@ -14234,7 +14334,7 @@ class AgentPBXTUI(App[None]):
                 bootstrap_prompt,
                 cd=launch_cwd if launch_cwd and launch_cwd != caller_cwd else None,
                 sandbox=sandbox,
-                config_overrides=review_config_overrides,
+                config_overrides=launch_config_overrides,
             )
 
         def build_env(mode: str) -> dict[str, str]:
@@ -17423,6 +17523,11 @@ class AgentPBXTUI(App[None]):
             codex_command,
             target.session_id,
             cd=cwd,
+            config_overrides=operator_agent_config_overrides(
+                mcp_url=mcp_url,
+                codex_home=self.codex_home_dir(),
+                work_root=cwd,
+            ),
         )
         env = self.operator_launch_env(
             agent_id=agent_id,
@@ -20040,6 +20145,7 @@ class AgentPBXTUI(App[None]):
             return
         await self.copy_latest_report_to_joplin(agent_id)
 
+
     async def copy_tmux_response_text(self, agent_id: str) -> tuple[str, str] | None:
         try:
             previous_clipboard, _previous_source = await asyncio.to_thread(
@@ -20056,7 +20162,7 @@ class AgentPBXTUI(App[None]):
             )
         except Exception as exc:
             self.notify(f"Joplin copy failed: {exc}", severity="error")
-            return
+            return None
 
     async def copy_tmux_response_to_joplin(self, agent_id: str) -> None:
         if not await self.ensure_joplin_available():
