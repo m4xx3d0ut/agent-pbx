@@ -7646,6 +7646,75 @@ async def test_tui_joplin_copy_tmux_response_uses_codex_copy_clipboard(
     assert "Codex response markdown" in str(payload["body"])
 
 
+async def test_tui_joplin_copy_tmux_response_prefers_live_tmux_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_features_available = True
+    app.tmux_direct_enabled = True
+    posts: list[dict[str, object]] = []
+    sent: list[tuple[str, str]] = []
+    clipboard_reads = iter(
+        [
+            ("old clipboard", "fake-clipboard"),
+            ("Live tmux response markdown", "fake-clipboard"),
+        ]
+    )
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            return Response({"id": "note-1"})
+
+    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_ensure_joplin_available() -> bool:
+        return True
+
+    async def fake_load_joplin_notes(agent_id: str) -> None:
+        return None
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_clipboard_text",
+        lambda: next(clipboard_reads),
+    )
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
+    app.ensure_joplin_available = fake_ensure_joplin_available  # type: ignore[method-assign]
+    app.load_joplin_notes = fake_load_joplin_notes  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.joplin_configured = True
+        app.agents["agent-1"] = {
+            "agent_id": "agent-1",
+            "project": "demo",
+            "status": "online",
+            "metadata": {"codex_session_id": "session-1"},
+        }
+        app.sent_message_history_by_agent["agent-1"] = ["last useful prompt"]
+        await app.copy_latest_to_joplin("agent-1")
+
+    assert sent == [("agent-1", "/copy")]
+    assert posts[0]["path"] == "/v1/agents/agent-1/joplin/copy"
+    payload = posts[0]["json"]
+    assert isinstance(payload, dict)
+    assert "Live tmux response markdown" in str(payload["body"])
 
 
 async def test_tui_tmux_joplin_log_response_appends_copied_response() -> None:

@@ -20155,12 +20155,23 @@ class AgentPBXTUI(App[None]):
             previous_clipboard = ""
         sent = await self.send_keys_to_tmux(agent_id, "/copy")
         if not sent:
+            self.notify(
+                f"Joplin copy needs a live tmux pane for {agent_id}.",
+                severity="warning",
+            )
             return None
         try:
             return await self.read_copied_tmux_response(
                 previous_clipboard
             )
         except Exception as exc:
+            captured = await self.capture_tmux_display_for_agent(agent_id)
+            if captured and captured.strip():
+                self.notify(
+                    f"Joplin /copy failed; using visible tmux capture: {exc}",
+                    severity="warning",
+                )
+                return captured, "tmux capture fallback"
             self.notify(f"Joplin copy failed: {exc}", severity="error")
             return None
 
