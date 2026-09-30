@@ -21136,8 +21136,6 @@ class AgentPBXTUI(App[None]):
             if text.strip() and text != previous_clipboard:
                 return text, source
             if time.monotonic() >= deadline:
-                if text.strip():
-                    return text, source
                 break
             await asyncio.sleep(CLIPBOARD_COPY_POLL_SECONDS)
         raise RuntimeError(

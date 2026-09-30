@@ -7899,6 +7899,20 @@ async def test_tui_joplin_copy_cancels_interactive_copy_selector(
     assert keys == [("agent-1", "Escape")]
 
 
+async def test_tui_tmux_copy_rejects_unchanged_clipboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    monkeypatch.setattr("agent_pbx.tui.CLIPBOARD_COPY_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_clipboard_text",
+        lambda: ("old clipboard", "fake-clipboard"),
+    )
+
+    with pytest.raises(RuntimeError, match="did not produce readable clipboard"):
+        await app.read_copied_tmux_response("old clipboard")
+
+
 def test_tui_codex_session_ids_prefer_fork_and_current_before_source() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     app.agents["agent-1"] = {
