@@ -260,6 +260,9 @@ LOW_POWER_ATTENTION_BLINK_SECONDS = 3.0
 MIN_ATTENTION_BLINK_SECONDS = 0.5
 CLIPBOARD_COPY_WAIT_SECONDS = 3.0
 CLIPBOARD_COPY_POLL_SECONDS = 0.2
+# A clipboard change can race ahead of Codex drawing its native /copy picker.
+# Give that picker a short chance to appear before accepting the clipboard value.
+CODEX_COPY_SELECTOR_SETTLE_SECONDS = 1.0
 JOPLIN_COPY_MODE_COPY_FIRST = "copy_first"
 JOPLIN_COPY_MODE_TRANSCRIPT_FIRST = "transcript_first"
 JOPLIN_COPY_MODE_TMUX_CAPTURE = "tmux_capture"
@@ -1790,9 +1793,22 @@ def contains_codex_copy_selector(text: str) -> bool:
     clean = str(text or "")
     lower = clean.casefold()
     numbered_options = re.findall(
-        r"(?m)^\s*(?:[>❯▸➜*]\s*)?\d+[.)]\s+\S",
+        r"(?m)^\s*(?:[>›❯▸➜*]\s*)?\d+[.)]\s+\S",
         clean,
     )
+    # Codex 0.159 renders this exact native picker shape.  It may have only
+    # one option when the response has no extractable code or quote blocks.
+    current_whole_option = re.search(
+        r"(?mi)^\s*(?:[>›❯▸➜*]\s*)?1[.)]\s+whole\s+"
+        r"(?:response|status|prompt)\b",
+        clean,
+    )
+    if (
+        "copy to clipboard" in lower
+        and current_whole_option is not None
+        and ("enter select" in lower or "esc back" in lower)
+    ):
+        return True
     if len(numbered_options) < 2:
         return False
     if "/copy" in lower:
@@ -21676,9 +21692,19 @@ class AgentPBXTUI(App[None]):
             f"line {result.line_index}, mtime {modified})"
         )
 
-    async def wait_for_codex_copy_selector(self, agent_id: str) -> str | None:
+    async def wait_for_codex_copy_selector(
+        self,
+        agent_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> str | None:
         """Watch for a native /copy picker while clipboard copy is pending."""
-        deadline = time.monotonic() + CLIPBOARD_COPY_WAIT_SECONDS
+        wait_seconds = (
+            CLIPBOARD_COPY_WAIT_SECONDS
+            if timeout_seconds is None
+            else max(0.0, timeout_seconds)
+        )
+        deadline = time.monotonic() + wait_seconds
         while True:
             captured = await self.capture_tmux_display_for_agent(agent_id)
             if captured and contains_codex_copy_selector(captured):
@@ -21687,22 +21713,28 @@ class AgentPBXTUI(App[None]):
                 return None
             await asyncio.sleep(CLIPBOARD_COPY_POLL_SECONDS)
 
-    async def dismiss_codex_copy_selector(
+    async def select_codex_copy_selector(
         self,
         agent_id: str,
         captured: str | None,
-    ) -> str | None:
+    ) -> tuple[tuple[str, str] | None, Exception | None]:
+        """Select Codex's first native /copy result and await its clipboard write."""
         if not captured or not contains_codex_copy_selector(captured):
-            return captured
-        if await self.send_key_to_tmux(agent_id, "Escape"):
-            self.notify(
-                "Codex /copy opened an interactive selector; canceled it and "
-                "continued with transcript/tmux fallback.",
-                severity="warning",
+            return None, None
+        try:
+            previous_clipboard, _previous_source = await asyncio.to_thread(
+                read_clipboard_text
             )
-            await asyncio.sleep(0.2)
-            return await self.capture_tmux_display_for_agent(agent_id)
-        return captured
+        except Exception:
+            previous_clipboard = ""
+        if not await self.send_key_to_tmux(agent_id, "1"):
+            return None, RuntimeError(
+                "Unable to select Whole response in Codex /copy picker"
+            )
+        try:
+            return await self.read_copied_tmux_response(previous_clipboard), None
+        except Exception as exc:
+            return None, exc
 
     async def await_copied_tmux_response_or_selector(
         self,
@@ -21755,6 +21787,22 @@ class AgentPBXTUI(App[None]):
                     RuntimeError("Codex /copy opened an interactive selector"),
                 )
             return None, captured, exc
+        # A prior or unrelated clipboard update can win this race before the
+        # native picker has been painted.  Let the picker settle briefly so a
+        # later Whole response selection is not left open in the Codex TUI.
+        if not selector_task.done():
+            await asyncio.wait(
+                {selector_task},
+                timeout=CODEX_COPY_SELECTOR_SETTLE_SECONDS,
+            )
+        if selector_task.done():
+            selector = selector_task.result()
+            if selector is not None:
+                return (
+                    None,
+                    selector,
+                    RuntimeError("Codex /copy opened an interactive selector"),
+                )
         if not selector_task.done():
             selector_task.cancel()
         await asyncio.gather(selector_task, return_exceptions=True)
@@ -21803,10 +21851,18 @@ class AgentPBXTUI(App[None]):
         )
         if copied is not None:
             return copied
-        captured = await self.dismiss_codex_copy_selector(agent_id, captured)
         if captured is None:
             captured = await self.capture_tmux_display_for_agent(agent_id)
-        captured = await self.dismiss_codex_copy_selector(agent_id, captured)
+        if captured and contains_codex_copy_selector(captured):
+            copied, selection_error = await self.select_codex_copy_selector(
+                agent_id,
+                captured,
+            )
+            if copied is not None:
+                return copied
+            if selection_error is not None:
+                copy_error = selection_error
+            captured = await self.capture_tmux_display_for_agent(agent_id)
         if allow_transcript:
             transcript = await self.copy_codex_transcript_response_text(
                 agent_id,

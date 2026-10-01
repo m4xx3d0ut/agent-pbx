@@ -7970,6 +7970,12 @@ async def test_tui_joplin_copy_default_tries_copy_before_transcript(
 
 def test_tui_detects_codex_copy_selector() -> None:
     assert contains_codex_copy_selector(
+        "Copy to clipboard\n\n"
+        "› 1. Whole response  Here is the command:\n"
+        "  2. sh code         echo current\n\n"
+        "  enter select · esc back"
+    )
+    assert contains_codex_copy_selector(
         "Choose what to copy for /copy:\n"
         "  1. Latest response\n"
         "  2. Current conversation\n"
@@ -7977,15 +7983,18 @@ def test_tui_detects_codex_copy_selector() -> None:
     assert not contains_codex_copy_selector("1. unrelated\n2. still unrelated")
 
 
-async def test_tui_joplin_copy_cancels_interactive_copy_selector(
+async def test_tui_joplin_copy_selects_whole_response_from_interactive_picker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     sent: list[tuple[str, str]] = []
     keys: list[tuple[str, str]] = []
     captures = iter([
-        "Choose what to copy for /copy:\n  1. Latest response\n  2. Full transcript",
-        "Visible fallback after selector closed",
+        "Copy to clipboard\n\n"
+        "› 1. Whole response  Response preview\n"
+        "  2. sh code         echo current\n\n"
+        "  enter select · esc back",
+        "Visible fallback after Whole response selection",
     ])
 
     async def fake_copy_codex_transcript_response_text(
@@ -8024,21 +8033,27 @@ async def test_tui_joplin_copy_cancels_interactive_copy_selector(
     async with app.run_test():
         copied = await app.copy_tmux_response_text("agent-1")
 
-    assert copied == ("Visible fallback after selector closed", "tmux capture fallback")
+    assert copied == (
+        "Visible fallback after Whole response selection",
+        "tmux capture fallback",
+    )
     assert sent == [("agent-1", "/copy")]
-    assert keys == [("agent-1", "Escape")]
+    assert keys == [("agent-1", "1")]
 
 
-async def test_tui_joplin_copy_cancels_selector_while_clipboard_waits(
+async def test_tui_joplin_copy_selects_picker_while_clipboard_waits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     sent: list[tuple[str, str]] = []
     keys: list[tuple[str, str]] = []
+    read_calls = 0
     captures = iter(
         [
-            "Choose what to copy for /copy:\n  1. Latest response\n  2. Full transcript",
-            "Visible fallback after selector closed",
+            "Copy to clipboard\n\n"
+            "› 1. Whole response  Response preview\n"
+            "  2. sh code         echo current\n\n"
+            "  enter select · esc back",
         ]
     )
 
@@ -8056,8 +8071,12 @@ async def test_tui_joplin_copy_cancels_selector_while_clipboard_waits(
     async def fake_read_copied_tmux_response(
         previous_clipboard: str,
     ) -> tuple[str, str]:
-        await asyncio.sleep(60)
-        raise AssertionError("selector detection should cancel clipboard waiting")
+        nonlocal read_calls
+        read_calls += 1
+        if read_calls == 1:
+            await asyncio.sleep(60)
+            raise AssertionError("selector detection should cancel clipboard waiting")
+        return "Whole response markdown", "fake-clipboard"
 
     async def fake_capture_tmux_display_for_agent(agent_id: str) -> str | None:
         return next(captures)
@@ -8082,9 +8101,66 @@ async def test_tui_joplin_copy_cancels_selector_while_clipboard_waits(
             timeout=1.0,
         )
 
-    assert copied == ("Visible fallback after selector closed", "tmux capture fallback")
+    assert copied == ("Whole response markdown", "fake-clipboard")
     assert sent == [("agent-1", "/copy")]
-    assert keys == [("agent-1", "Escape")]
+    assert keys == [("agent-1", "1")]
+    assert read_calls == 2
+
+
+async def test_tui_joplin_copy_waits_for_late_native_picker_after_clipboard_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    keys: list[tuple[str, str]] = []
+    read_previous_values: list[str] = []
+    clipboard_values = iter(
+        [
+            ("old clipboard", "fake-clipboard"),
+            ("early clipboard", "fake-clipboard"),
+        ]
+    )
+
+    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_read_copied_tmux_response(
+        previous_clipboard: str,
+    ) -> tuple[str, str]:
+        read_previous_values.append(previous_clipboard)
+        if len(read_previous_values) == 1:
+            return "early clipboard", "fake-clipboard"
+        return "Whole response markdown", "fake-clipboard"
+
+    async def fake_capture_tmux_display_for_agent(agent_id: str) -> str | None:
+        await asyncio.sleep(0.01)
+        return (
+            "Copy to clipboard\n\n"
+            "› 1. Whole response  Response preview\n"
+            "  2. sh code         echo current\n\n"
+            "  enter select · esc back"
+        )
+
+    async def fake_send_key_to_tmux(agent_id: str, key: str) -> bool:
+        keys.append((agent_id, key))
+        return True
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_clipboard_text",
+        lambda: next(clipboard_values),
+    )
+    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
+    app.read_copied_tmux_response = fake_read_copied_tmux_response  # type: ignore[method-assign]
+    app.capture_tmux_display_for_agent = fake_capture_tmux_display_for_agent  # type: ignore[method-assign]
+    app.send_key_to_tmux = fake_send_key_to_tmux  # type: ignore[method-assign]
+
+    copied = await app.copy_tmux_response_text("agent-1")
+
+    assert copied == ("Whole response markdown", "fake-clipboard")
+    assert sent == [("agent-1", "/copy")]
+    assert keys == [("agent-1", "1")]
+    assert read_previous_values == ["old clipboard", "early clipboard"]
 
 
 async def test_tui_joplin_transcript_read_error_falls_back_to_tmux(
