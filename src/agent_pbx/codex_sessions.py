@@ -258,6 +258,8 @@ def latest_assistant_transcript_from_session_file(
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(record, dict):
+                continue
             if record.get("type") == "session_meta":
                 session = record.get("payload")
                 if isinstance(session, dict) and not file_session_id:
@@ -366,6 +368,8 @@ def _read_session_meta(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(first_line)
     except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
         return {}
     if payload.get("type") != "session_meta":
         return {}

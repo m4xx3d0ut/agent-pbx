@@ -30,6 +30,10 @@ SAFE_GLOBAL_FIELDS: dict[str, dict[str, str]] = {
         "label": "Reasoning effort",
         "description": "Reasoning effort advertised to the selected model.",
     },
+    "model_verbosity": {
+        "label": "Response verbosity",
+        "description": "Requested response detail for models that support it.",
+    },
     "model_reasoning_summary": {
         "label": "Reasoning summary",
         "description": "Reasoning summary detail mode.",

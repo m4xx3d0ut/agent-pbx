@@ -67,17 +67,26 @@ def test_codex_config_patch_updates_safe_fields_and_preserves_unknown(tmp_path: 
 
     result = patch_codex_config(
         config_path=config,
-        updates={"model": "gpt-5.6-sol", "service_tier": "priority"},
+        updates={
+            "model": "gpt-5.6-sol",
+            "model_verbosity": "high",
+            "service_tier": "priority",
+        },
     )
 
     text = config.read_text(encoding="utf-8")
     assert 'model = "gpt-5.6-sol"  # keep comment' in text
+    assert 'model_verbosity = "high"' in text
     assert 'service_tier = "priority"' in text
     assert "[custom_table]" in text
     assert 'value = "preserve"' in text
     assert result.backup_path is not None
     assert Path(result.backup_path).exists()
-    assert set(result.changed_paths) == {"model", "service_tier"}
+    assert set(result.changed_paths) == {
+        "model",
+        "model_verbosity",
+        "service_tier",
+    }
 
 
 def test_codex_config_patch_blocks_model_providers(tmp_path: Path) -> None:

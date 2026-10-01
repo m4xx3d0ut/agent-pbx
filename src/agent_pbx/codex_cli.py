@@ -11,6 +11,7 @@ from typing import Any
 
 CODEX_MODEL_ENV = "AGENT_PBX_TUI_CODEX_MODEL"
 CODEX_REASONING_EFFORT_ENV = "AGENT_PBX_TUI_CODEX_REASONING_EFFORT"
+CODEX_VERBOSITY_ENV = "AGENT_PBX_TUI_CODEX_VERBOSITY"
 CODEX_SERVICE_TIER_ENV = "AGENT_PBX_TUI_CODEX_SERVICE_TIER"
 
 _COMMAND_LINE_RE = re.compile(r"^\s{2}([a-z][a-z0-9-]*)\s{2,}")
@@ -51,6 +52,8 @@ class CodexModelOption:
     visibility: str
     shell_type: str
     supported_in_api: bool
+    supports_verbosity: bool | None = None
+    default_verbosity: str = ""
 
     @property
     def hidden(self) -> bool:
@@ -75,6 +78,7 @@ def codex_model_config_overrides(
     *,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    verbosity: str | None = None,
     service_tier: str | None = None,
 ) -> list[str]:
     overrides: list[str] = []
@@ -82,6 +86,8 @@ def codex_model_config_overrides(
         overrides.append(f"model={json.dumps(cleaned_model)}")
     if cleaned_reasoning := _clean_optional_value(reasoning_effort):
         overrides.append(f"model_reasoning_effort={json.dumps(cleaned_reasoning)}")
+    if cleaned_verbosity := _clean_optional_value(verbosity):
+        overrides.append(f"model_verbosity={json.dumps(cleaned_verbosity)}")
     if cleaned_service_tier := _clean_optional_value(service_tier):
         overrides.append(f"service_tier={json.dumps(cleaned_service_tier)}")
     return overrides
@@ -160,6 +166,10 @@ def parse_codex_model_catalog_json(catalog_json: str) -> tuple[CodexModelOption,
         slug = str(item.get("slug") or item.get("id") or "").strip()
         if not slug:
             continue
+        raw_supports_verbosity = item.get(
+            "supportVerbosity",
+            item.get("support_verbosity"),
+        )
         models.append(
             CodexModelOption(
                 slug=slug,
@@ -190,6 +200,16 @@ def parse_codex_model_catalog_json(catalog_json: str) -> tuple[CodexModelOption,
                 shell_type=str(item.get("shellType") or item.get("shell_type") or ""),
                 supported_in_api=bool(
                     item.get("supportedInApi") or item.get("supported_in_api")
+                ),
+                supports_verbosity=(
+                    raw_supports_verbosity
+                    if isinstance(raw_supports_verbosity, bool)
+                    else None
+                ),
+                default_verbosity=str(
+                    item.get("defaultVerbosity")
+                    or item.get("default_verbosity")
+                    or ""
                 ),
             )
         )

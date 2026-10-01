@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ from agent_pbx.codex_cli import (
     CODEX_MODEL_ENV,
     CODEX_REASONING_EFFORT_ENV,
     CODEX_SERVICE_TIER_ENV,
+    CODEX_VERBOSITY_ENV,
     CodexCliPosture,
 )
 from agent_pbx.codex_sessions import CodexTranscriptBoundary, CodexTranscriptResult
@@ -28,10 +30,14 @@ from agent_pbx.tui import (
     REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     TMUX_LIVENESS_IDLE_SECONDS,
     DEFAULT_SPLIT_PERCENT,
+    JOPLIN_COPY_MODE_COPY_FIRST,
+    JOPLIN_COPY_MODE_TRANSCRIPT_FIRST,
+    JOPLIN_COPY_MODE_TMUX_CAPTURE,
     agent_pbx_mcp_url,
     built_in_palette_command_names,
     caller_agent_config_overrides,
     codex_mcp_add_command,
+    codex_model_preset_for,
     review_operator_config_overrides,
     review_operator_mcp_config_overrides,
     configure_codex_mcp,
@@ -405,6 +411,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "theme": "1337",
                 "layout": "compact",
                 "split_percent": 61,
+                "joplin_copy_mode": "transcript_first",
                 "show_hidden_agents": True,
                 "tmux_direct": True,
                 "tmux_direct_agent_modes": {"agent-1": True, "agent-2": False},
@@ -438,6 +445,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.ui_theme == "1337"
     assert app.layout_mode == "compact"
     assert app.split_percent == 61
+    assert app.joplin_copy_mode == JOPLIN_COPY_MODE_TRANSCRIPT_FIRST
     assert app.show_hidden_agents is True
     assert app.tmux_direct_enabled is True
     assert app.tmux_direct_agent_modes == {"agent-1": True, "agent-2": False}
@@ -671,6 +679,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     app.starred_agent_ids = {"agent-2", "agent-1"}
     app.layout_mode = "compact"
     app.split_percent = 57
+    app.joplin_copy_mode = JOPLIN_COPY_MODE_TMUX_CAPTURE
     app.show_hidden_agents = True
     app.latest_viewed_at_by_agent = {"agent-1": 123.0}
     app.last_seen_event_id = 42
@@ -694,6 +703,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["theme"] == "1337"
     assert saved["layout"] == "compact"
     assert saved["split_percent"] == 57
+    assert saved["joplin_copy_mode"] == JOPLIN_COPY_MODE_TMUX_CAPTURE
     assert saved["show_hidden_agents"] is True
     assert saved["latest_viewed_at_by_agent"] == {"agent-1": 123.0}
     assert saved["last_seen_event_id"] == 42
@@ -1436,7 +1446,7 @@ async def test_tui_tmux_prepare_clears_stale_visible_stream() -> None:
     assert stream.text == "Loading tmux pane %76 (agent-pbx:0.2)..."
 
 
-async def test_tui_tmux_stream_focus_snaps_to_newest_line() -> None:
+async def test_tui_tmux_stream_focus_preserves_manual_scroll() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
 
     async with app.run_test() as pilot:
@@ -1451,10 +1461,7 @@ async def test_tui_tmux_stream_focus_snaps_to_newest_line() -> None:
         stream.focus()
         await pilot.pause()
 
-    assert stream.cursor_location == (39, len("line 39"))
-    assert stream.scroll_x == 0
-    assert stream.scroll_target_x == 0
-    assert stream.is_vertical_scroll_end
+    assert stream.cursor_location == (0, 0)
 
 
 async def test_tui_tmux_prepare_starts_stream_at_bottom() -> None:
@@ -1600,7 +1607,7 @@ async def test_tui_mouse_down_focuses_tapped_sections() -> None:
         assert app.focused is message
 
 
-async def test_tui_mouse_down_on_tmux_stream_only_snaps_when_focus_enters() -> None:
+async def test_tui_mouse_down_on_tmux_stream_preserves_manual_scroll() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
 
     async with app.run_test() as pilot:
@@ -1622,7 +1629,7 @@ async def test_tui_mouse_down_on_tmux_stream_only_snaps_when_focus_enters() -> N
         await pilot.pause()
         second_tap_location = stream.cursor_location
 
-    assert first_tap_location == (39, len("line 39"))
+    assert first_tap_location == (0, 0)
     assert second_tap_location == (0, 0)
 
 
@@ -6622,6 +6629,11 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/codex config save" in titles
     assert "/codex mcp wire" in titles
     assert "/codex update" in titles
+    assert "/codex model" in titles
+    assert "/codex model plan" in titles
+    assert "/codex model cleanup plan" in titles
+    assert "/codex model terra-max" in titles
+    assert "/codex model default terra-max" in titles
     assert "/tmux" in titles
     assert "/latest" in titles
     assert "/thread" in titles
@@ -6769,6 +6781,9 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/joplin delete",
         "/joplin copy",
         "/joplin copy report",
+        "/joplin copy mode copy-first",
+        "/joplin copy mode transcript-first",
+        "/joplin copy mode tmux-capture",
         "/joplin log start",
         "/joplin log stop",
         "/joplin save",
@@ -6779,6 +6794,9 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/codex config save",
         "/codex mcp wire",
         "/codex update",
+        "/codex model",
+        "/codex model terra-max",
+        "/codex model default terra-max",
     } <= names
     assert {
         "/agents prune",
@@ -7087,6 +7105,66 @@ async def test_tui_palette_agent_commands_use_selected_agent() -> None:
         await pilot.pause()
 
     assert calls == ["agent-1"]
+
+
+async def test_tui_model_actions_bind_selected_operator_not_stale_caller_cursor() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    restarts: list[tuple[str | None, str | None]] = []
+
+    async def fake_restart(
+        agent_id: str | None = None,
+        *,
+        model_preset=None,
+    ) -> None:
+        restarts.append(
+            (
+                agent_id,
+                model_preset.key if model_preset is not None else None,
+            )
+        )
+
+    app.restart_tmux_codex_session = fake_restart  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "codex-agent-pbx": {
+                "agent_id": "codex-agent-pbx",
+                "agent_type": "caller",
+                "status": "working",
+                "project": "agent-pbx",
+                "last_seen_at": 125.0,
+            },
+            "operator-5": {
+                "agent_id": "operator-5",
+                "agent_type": "operator",
+                "status": "working",
+                "project": "agent-pbx-operator",
+                "metadata": {"agent_type": "operator"},
+                "last_seen_at": 124.0,
+            },
+        }
+        app.render_agents()
+        callers = app.query_one("#agents", DataTable)
+        operators = app.query_one("#operators", DataTable)
+        callers.move_cursor(row=0, animate=False, scroll=False)
+        operators.move_cursor(row=0, animate=False, scroll=False)
+        app.selected_agent_id = "operator-5"
+        app.query_one("#agent-id", Input).value = "codex-agent-pbx"
+
+        assert app.codex_model_target_agent_id() == "operator-5"
+        app.palette_codex_model_restart("terra-max")
+        await pilot.pause()
+        await app.restart_selected_with_codex_model_preset()
+
+        app.selected_agent_id = None
+        assert app.codex_model_target_agent_id() is None
+
+    assert restarts == [
+        ("operator-5", "terra-5.6-max"),
+        ("operator-5", "terra-5.6-max"),
+    ]
 
 
 async def test_tui_palette_escape_uses_selected_agent() -> None:
@@ -7785,6 +7863,7 @@ async def test_tui_joplin_copy_falls_back_to_transcript_before_tmux_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.joplin_copy_mode = JOPLIN_COPY_MODE_TRANSCRIPT_FIRST
     sent: list[tuple[str, str]] = []
     captured: list[str] = []
     transcript_result = CodexTranscriptResult(
@@ -7836,6 +7915,57 @@ async def test_tui_joplin_copy_falls_back_to_transcript_before_tmux_capture(
     assert "line 12" in copied[1]
     assert sent == []
     assert captured == []
+
+
+async def test_tui_joplin_copy_default_tries_copy_before_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    assert app.joplin_copy_mode == JOPLIN_COPY_MODE_COPY_FIRST
+    sent: list[tuple[str, str]] = []
+    transcript_result = CodexTranscriptResult(
+        text="Transcript response markdown",
+        session_id="session-1",
+        path=tmp_path / "rollout-session-1.jsonl",
+        phase="final_answer",
+        line_index=7,
+        mtime=1_790_000_000.0,
+    )
+
+    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_read_copied_tmux_response(
+        previous_clipboard: str,
+    ) -> tuple[str, str]:
+        raise RuntimeError("clipboard unavailable")
+
+    async def fake_capture_tmux_display_for_agent(agent_id: str) -> str | None:
+        return "visible fallback"
+
+    async def fake_copy_codex_transcript_response_text(
+        agent_id: str,
+        *,
+        after_boundary: CodexTranscriptBoundary | None = None,
+    ) -> CodexTranscriptResult | None:
+        return transcript_result
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_clipboard_text",
+        lambda: ("old clipboard", "fake-clipboard"),
+    )
+    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
+    app.read_copied_tmux_response = fake_read_copied_tmux_response  # type: ignore[method-assign]
+    app.capture_tmux_display_for_agent = fake_capture_tmux_display_for_agent  # type: ignore[method-assign]
+    app.copy_codex_transcript_response_text = fake_copy_codex_transcript_response_text  # type: ignore[method-assign]
+
+    copied = await app.copy_tmux_response_text("agent-1")
+
+    assert copied is not None
+    assert copied[0] == "Transcript response markdown"
+    assert sent == [("agent-1", "/copy")]
 
 
 def test_tui_detects_codex_copy_selector() -> None:
@@ -7897,6 +8027,106 @@ async def test_tui_joplin_copy_cancels_interactive_copy_selector(
     assert copied == ("Visible fallback after selector closed", "tmux capture fallback")
     assert sent == [("agent-1", "/copy")]
     assert keys == [("agent-1", "Escape")]
+
+
+async def test_tui_joplin_copy_cancels_selector_while_clipboard_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    keys: list[tuple[str, str]] = []
+    captures = iter(
+        [
+            "Choose what to copy for /copy:\n  1. Latest response\n  2. Full transcript",
+            "Visible fallback after selector closed",
+        ]
+    )
+
+    async def fake_copy_codex_transcript_response_text(
+        agent_id: str,
+        *,
+        after_boundary: CodexTranscriptBoundary | None = None,
+    ) -> CodexTranscriptResult | None:
+        return None
+
+    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_read_copied_tmux_response(
+        previous_clipboard: str,
+    ) -> tuple[str, str]:
+        await asyncio.sleep(60)
+        raise AssertionError("selector detection should cancel clipboard waiting")
+
+    async def fake_capture_tmux_display_for_agent(agent_id: str) -> str | None:
+        return next(captures)
+
+    async def fake_send_key_to_tmux(agent_id: str, key: str) -> bool:
+        keys.append((agent_id, key))
+        return True
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_clipboard_text",
+        lambda: ("old clipboard", "fake-clipboard"),
+    )
+    app.copy_codex_transcript_response_text = fake_copy_codex_transcript_response_text  # type: ignore[method-assign]
+    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
+    app.read_copied_tmux_response = fake_read_copied_tmux_response  # type: ignore[method-assign]
+    app.capture_tmux_display_for_agent = fake_capture_tmux_display_for_agent  # type: ignore[method-assign]
+    app.send_key_to_tmux = fake_send_key_to_tmux  # type: ignore[method-assign]
+
+    async with app.run_test():
+        copied = await asyncio.wait_for(
+            app.copy_tmux_response_text("agent-1"),
+            timeout=1.0,
+        )
+
+    assert copied == ("Visible fallback after selector closed", "tmux capture fallback")
+    assert sent == [("agent-1", "/copy")]
+    assert keys == [("agent-1", "Escape")]
+
+
+async def test_tui_joplin_transcript_read_error_falls_back_to_tmux(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.joplin_copy_mode = JOPLIN_COPY_MODE_TRANSCRIPT_FIRST
+
+    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
+        return True
+
+    async def fake_read_copied_tmux_response(
+        previous_clipboard: str,
+    ) -> tuple[str, str]:
+        raise RuntimeError("clipboard unavailable")
+
+    async def fake_capture_tmux_display_for_agent(agent_id: str) -> str | None:
+        return "visible tmux fallback"
+
+    def raise_decode_error(*args: object, **kwargs: object) -> CodexTranscriptResult:
+        raise UnicodeDecodeError("utf-8", b"\\xff", 0, 1, "invalid byte")
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.latest_assistant_transcript_for_session",
+        raise_decode_error,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_clipboard_text",
+        lambda: ("old clipboard", "fake-clipboard"),
+    )
+    app.agents["agent-1"] = {
+        "agent_id": "agent-1",
+        "project": "demo",
+        "metadata": {"codex_session_id": "session-1"},
+    }
+    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
+    app.read_copied_tmux_response = fake_read_copied_tmux_response  # type: ignore[method-assign]
+    app.capture_tmux_display_for_agent = fake_capture_tmux_display_for_agent  # type: ignore[method-assign]
+
+    copied = await app.copy_tmux_response_text("agent-1")
+
+    assert copied == ("visible tmux fallback", "tmux capture fallback")
 
 
 async def test_tui_tmux_copy_rejects_unchanged_clipboard(
@@ -9981,6 +10211,7 @@ async def test_tui_restart_tmux_requires_tmux_direct(monkeypatch) -> None:
 
 
 async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) -> None:
+    monkeypatch.setenv(OPERATOR_MCP_APPROVAL_SERVERS_ENV, "agent-pbx,workerbee")
     app = AgentPBXTUI(
         server="http://127.0.0.1:8765",
         token="secret",
@@ -10086,6 +10317,9 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     async def fake_load_tmux_capture(agent_id: str) -> None:
         captures.append(agent_id)
 
+    async def fake_ensure_codex_model_preset_valid(*_: object) -> bool:
+        return True
+
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
     app.operator_session_candidates = fake_operator_session_candidates  # type: ignore[method-assign]
     app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
@@ -10093,6 +10327,9 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.ensure_codex_model_preset_valid = (  # type: ignore[method-assign]
+        fake_ensure_codex_model_preset_valid
+    )
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_ATTEMPTS", 1)
@@ -10120,7 +10357,10 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
             }
         }
         app.selected_agent_id = "operator-0"
-        await app.restart_tmux_codex_session("operator-0")
+        await app.restart_tmux_codex_session(
+            "operator-0",
+            model_preset=codex_model_preset_for("terra-max"),
+        )
 
     assert quit_calls == ["%30"]
     assert launches[0]["session_name"] == "agent-pbx-operators"
@@ -10130,11 +10370,20 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     assert launch_argv[-1] == "current-session"
     assert "-c" in launch_argv
     assert any(item.startswith("mcp_servers.agent-pbx=") for item in launch_argv)
+    assert any(item.startswith("mcp_servers.workerbee=") for item in launch_argv)
+    assert 'model="gpt-5.6-terra"' in launch_argv
+    assert 'model_reasoning_effort="max"' in launch_argv
+    assert 'model_verbosity="high"' in launch_argv
     assert launches[0]["env"]["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "current-session"
     assert launches[0]["env"]["AGENT_PBX_REPORTING_AGENT_ID"] == "operator-0"
+    assert launches[0]["env"]["AGENT_PBX_CODEX_MODEL"] == "gpt-5.6-terra"
+    assert launches[0]["env"]["AGENT_PBX_CODEX_REASONING_EFFORT"] == "max"
+    assert launches[0]["env"]["AGENT_PBX_CODEX_VERBOSITY"] == "high"
     assert posts[-1]["path"] == "/v1/agents/register"
     metadata = posts[-1]["json"]["metadata"]  # type: ignore[index]
     assert metadata["last_resume_codex_session_id"] == "current-session"
+    assert metadata["codex_model_preset"] == "terra-5.6-max"
+    assert metadata["codex_model_verbosity"] == "high"
     assert sent[0][0] == "%31"
     assert "agent_id: operator-0" in sent[0][1]
     assert app.tmux_agent_targets["operator-0"] == "%31"
@@ -14919,6 +15168,39 @@ def test_tui_operator_root_metadata_omits_source_keys_without_binding() -> None:
     assert "default_source_codex_session_id" not in metadata
 
 
+def test_tui_codex_model_preset_metadata_and_overrides() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    preset = codex_model_preset_for("terra-max")
+
+    assert preset is not None
+    command = app.operator_resume_command(
+        "codex",
+        "session-1",
+        config_overrides=[
+            'model="gpt-5.6-terra"',
+            'model_reasoning_effort="max"',
+            'model_verbosity="high"',
+        ],
+    )
+    metadata = app.operator_root_metadata(
+        "operator-5",
+        cwd="/tmp/agent-pbx",
+        codex_command="codex",
+        mcp_url="http://127.0.0.1:8765/mcp",
+        session_name="agent-pbx-operators",
+        model_preset=preset,
+    )
+
+    argv = shlex.split(command)
+    assert 'model="gpt-5.6-terra"' in argv
+    assert 'model_reasoning_effort="max"' in argv
+    assert 'model_verbosity="high"' in argv
+    assert metadata["codex_model_preset"] == "terra-5.6-max"
+    assert metadata["codex_model"] == "gpt-5.6-terra"
+    assert metadata["codex_model_reasoning_effort"] == "max"
+    assert metadata["codex_model_verbosity"] == "high"
+
+
 def test_tui_operator_fork_command_supports_cd_and_sandbox() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -15192,12 +15474,14 @@ def test_tui_agent_config_overrides_include_codex_model_env(
 ) -> None:
     monkeypatch.setenv(CODEX_MODEL_ENV, "gpt-6-sol")
     monkeypatch.setenv(CODEX_REASONING_EFFORT_ENV, "high")
+    monkeypatch.setenv(CODEX_VERBOSITY_ENV, "high")
     monkeypatch.setenv(CODEX_SERVICE_TIER_ENV, "priority")
 
     overrides = operator_agent_config_overrides(mcp_url="http://127.0.0.1:8767/mcp")
 
     assert 'model="gpt-6-sol"' in overrides
     assert 'model_reasoning_effort="high"' in overrides
+    assert 'model_verbosity="high"' in overrides
     assert 'service_tier="priority"' in overrides
 
 

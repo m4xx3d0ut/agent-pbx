@@ -51,7 +51,9 @@ def test_parse_codex_model_catalog_json() -> None:
       "defaultServiceTier": "auto",
       "visibility": "show",
       "shellType": "unified_exec",
-      "supportedInApi": true
+      "supportedInApi": true,
+      "supportVerbosity": true,
+      "defaultVerbosity": "low"
     }
   ]
 }
@@ -62,6 +64,8 @@ def test_parse_codex_model_catalog_json() -> None:
     assert models[0].slug == "gpt-6-astra"
     assert models[0].supported_reasoning_levels == ("low", "xhigh")
     assert models[0].service_tiers == ("auto", "priority")
+    assert models[0].supports_verbosity is True
+    assert models[0].default_verbosity == "low"
     assert not models[0].hidden
 
 
@@ -79,7 +83,9 @@ def test_parse_codex_model_catalog_json_accepts_current_snake_case() -> None:
       "default_service_tier": "priority",
       "visibility": "list",
       "shell_type": "unified_exec",
-      "supported_in_api": true
+      "supported_in_api": true,
+      "support_verbosity": true,
+      "default_verbosity": "low"
     }
   ]
 }
@@ -90,6 +96,8 @@ def test_parse_codex_model_catalog_json_accepts_current_snake_case() -> None:
     assert models[0].slug == "gpt-5.6-sol"
     assert models[0].display_name == "GPT-5.6 Sol"
     assert models[0].service_tiers == ("priority",)
+    assert models[0].supports_verbosity is True
+    assert models[0].default_verbosity == "low"
 
 
 def test_parse_codex_doctor_posture() -> None:
@@ -138,13 +146,20 @@ def test_codex_model_config_overrides_skips_empty_values() -> None:
     assert codex_model_config_overrides(
         model="gpt-6-sol",
         reasoning_effort="high",
+        verbosity="high",
         service_tier="priority",
     ) == [
         'model="gpt-6-sol"',
         'model_reasoning_effort="high"',
+        'model_verbosity="high"',
         'service_tier="priority"',
     ]
-    assert codex_model_config_overrides(model="", reasoning_effort=" ", service_tier=None) == []
+    assert codex_model_config_overrides(
+        model="",
+        reasoning_effort=" ",
+        verbosity=" ",
+        service_tier=None,
+    ) == []
 
 
 def test_validate_codex_update_target_rejects_shell_text() -> None:

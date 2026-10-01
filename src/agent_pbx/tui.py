@@ -49,8 +49,11 @@ from .codex_cli import (
     CODEX_MODEL_ENV,
     CODEX_REASONING_EFFORT_ENV,
     CODEX_SERVICE_TIER_ENV,
+    CODEX_VERBOSITY_ENV,
     CodexCliPosture,
+    CodexModelOption,
     codex_model_config_overrides,
+    inspect_codex_model_catalog,
     inspect_codex_posture,
 )
 from .codex_sessions import (
@@ -257,6 +260,15 @@ LOW_POWER_ATTENTION_BLINK_SECONDS = 3.0
 MIN_ATTENTION_BLINK_SECONDS = 0.5
 CLIPBOARD_COPY_WAIT_SECONDS = 3.0
 CLIPBOARD_COPY_POLL_SECONDS = 0.2
+JOPLIN_COPY_MODE_COPY_FIRST = "copy_first"
+JOPLIN_COPY_MODE_TRANSCRIPT_FIRST = "transcript_first"
+JOPLIN_COPY_MODE_TMUX_CAPTURE = "tmux_capture"
+DEFAULT_JOPLIN_COPY_MODE = JOPLIN_COPY_MODE_COPY_FIRST
+JOPLIN_COPY_MODE_CHOICES = (
+    ("Fast: /copy → transcript → tmux", JOPLIN_COPY_MODE_COPY_FIRST),
+    ("Clean: transcript first", JOPLIN_COPY_MODE_TRANSCRIPT_FIRST),
+    ("Visible tmux capture only", JOPLIN_COPY_MODE_TMUX_CAPTURE),
+)
 JOPLIN_TMUX_LOG_MIN_WAIT_SECONDS = 2.0
 JOPLIN_TMUX_LOG_IDLE_SECONDS = 4.0
 JOPLIN_TMUX_LOG_TIMEOUT_SECONDS = 90.0
@@ -463,6 +475,17 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/codex config save",
     "/codex mcp wire",
     "/codex update",
+    "/codex model",
+    "/codex model plan",
+    "/codex model cleanup plan",
+    "/codex model terra-max",
+    "/codex model terra-xhigh",
+    "/codex model sol-xhigh",
+    "/codex model legacy-5.5",
+    "/codex model default terra-max",
+    "/codex model default terra-xhigh",
+    "/codex model default sol-xhigh",
+    "/codex model default legacy-5.5",
     "/tmux",
     "/latest",
     "/thread",
@@ -490,6 +513,9 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/joplin delete",
     "/joplin copy",
     "/joplin copy report",
+    "/joplin copy mode copy-first",
+    "/joplin copy mode transcript-first",
+    "/joplin copy mode tmux-capture",
     "/joplin log start",
     "/joplin log stop",
     "/joplin save",
@@ -598,6 +624,85 @@ JOPLIN_SHORTCUT_HINT = (
     "Joplin keys: Ctrl+G, or j outside note body, then the button key"
 )
 WidgetType = TypeVar("WidgetType")
+
+
+@dataclass(frozen=True)
+class CodexModelPreset:
+    key: str
+    label: str
+    model: str
+    reasoning_effort: str
+    description: str
+    verbosity: str | None = None
+    aliases: tuple[str, ...] = ()
+    eol: str = ""
+    recommended: bool = False
+
+    @property
+    def display_label(self) -> str:
+        suffix = " recommended" if self.recommended else ""
+        eol = f" EOL {self.eol}" if self.eol else ""
+        return f"{self.label}{suffix}{eol}"
+
+    def metadata(self) -> dict[str, str]:
+        data = {
+            "codex_model_preset": self.key,
+            "codex_model_label": self.label,
+            "codex_model": self.model,
+            "codex_model_reasoning_effort": self.reasoning_effort,
+        }
+        if self.verbosity:
+            data["codex_model_verbosity"] = self.verbosity
+        if self.eol:
+            data["codex_model_eol"] = self.eol
+        return data
+
+
+CODEX_MODEL_PRESETS: tuple[CodexModelPreset, ...] = (
+    CodexModelPreset(
+        key="legacy-5.5-xhigh",
+        label="codex-5.5/xhigh",
+        model="gpt-5.5",
+        reasoning_effort="xhigh",
+        description="Legacy Codex 5.5 posture; retires from Codex on 2026-10-14.",
+        aliases=("codex-5.5", "gpt-5.5", "5.5", "legacy", "codex55"),
+        eol="2026-10-14",
+    ),
+    CodexModelPreset(
+        key="terra-5.6-xhigh",
+        label="terra-5.6/xhigh",
+        model="gpt-5.6-terra",
+        reasoning_effort="xhigh",
+        description="Terra 5.6 with xhigh reasoning for continuity from 5.5/xhigh.",
+        verbosity="high",
+        aliases=("terra-xhigh", "terra", "gpt-5.6-terra-xhigh"),
+    ),
+    CodexModelPreset(
+        key="terra-5.6-max",
+        label="terra-5.6/max",
+        model="gpt-5.6-terra",
+        reasoning_effort="max",
+        description="Recommended daily-work migration target.",
+        verbosity="high",
+        aliases=("terra-max", "terra5.6-max", "gpt-5.6-terra-max"),
+        recommended=True,
+    ),
+    CodexModelPreset(
+        key="sol-5.6-xhigh",
+        label="sol-5.6/xhigh",
+        model="gpt-5.6-sol",
+        reasoning_effort="xhigh",
+        description="Higher-intelligence Sol 5.6 option with xhigh reasoning.",
+        verbosity="high",
+        aliases=("sol-xhigh", "sol", "gpt-5.6-sol-xhigh"),
+    ),
+)
+CODEX_MODEL_PRESET_BY_KEY = {preset.key: preset for preset in CODEX_MODEL_PRESETS}
+CODEX_MODEL_PRESET_ALIASES = {
+    alias.casefold(): preset
+    for preset in CODEX_MODEL_PRESETS
+    for alias in (preset.key, preset.label, *preset.aliases)
+}
 
 
 @dataclass
@@ -1029,6 +1134,7 @@ def codex_model_launch_config_overrides() -> list[str]:
     return codex_model_config_overrides(
         model=os.getenv(CODEX_MODEL_ENV),
         reasoning_effort=os.getenv(CODEX_REASONING_EFFORT_ENV),
+        verbosity=os.getenv(CODEX_VERBOSITY_ENV),
         service_tier=os.getenv(CODEX_SERVICE_TIER_ENV),
     )
 
@@ -1445,6 +1551,54 @@ def load_tui_settings(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def normalize_joplin_copy_mode(value: object) -> str:
+    mode = str(value or "").strip().casefold().replace("-", "_")
+    if mode in {
+        JOPLIN_COPY_MODE_COPY_FIRST,
+        "copy",
+        "clipboard",
+        "clipboard_first",
+        "legacy",
+        "legacy_clipboard",
+        "fast",
+    }:
+        return JOPLIN_COPY_MODE_COPY_FIRST
+    if mode in {
+        JOPLIN_COPY_MODE_TRANSCRIPT_FIRST,
+        "transcript",
+        "export",
+        "clean",
+    }:
+        return JOPLIN_COPY_MODE_TRANSCRIPT_FIRST
+    if mode in {
+        JOPLIN_COPY_MODE_TMUX_CAPTURE,
+        "tmux",
+        "capture",
+        "visible",
+    }:
+        return JOPLIN_COPY_MODE_TMUX_CAPTURE
+    return DEFAULT_JOPLIN_COPY_MODE
+
+
+def codex_model_preset_for(value: object) -> CodexModelPreset | None:
+    key = str(value or "").strip().casefold()
+    if not key:
+        return None
+    return CODEX_MODEL_PRESET_ALIASES.get(key)
+
+
+def codex_model_preset_config_overrides(
+    preset: CodexModelPreset | None,
+) -> list[str]:
+    if preset is None:
+        return []
+    return codex_model_config_overrides(
+        model=preset.model,
+        reasoning_effort=preset.reasoning_effort,
+        verbosity=preset.verbosity,
+    )
 
 
 def env_slash_commands_file() -> Path:
@@ -2294,9 +2448,9 @@ class NavigationTextArea(TextArea):
 class TmuxStreamTextArea(NavigationTextArea):
     def _on_focus(self, event: Focus) -> None:
         super()._on_focus(event)
-        snap = getattr(self.app, "snap_tmux_stream_to_bottom", None)
-        if snap is not None:
-            snap(self)
+        handle_focus = getattr(self.app, "handle_tmux_stream_focus", None)
+        if handle_focus is not None:
+            handle_focus(self)
 
 
 class GitDiffScreen(ModalScreen[None]):
@@ -2977,6 +3131,7 @@ class SettingsScreen(ModalScreen[None]):
         low_power_enabled: bool,
         layout_mode: str,
         split_percent: int,
+        joplin_copy_mode: str,
         tmux_direct_enabled: bool,
         tmux_features_available: bool,
         custom_theme_name: str,
@@ -2989,6 +3144,7 @@ class SettingsScreen(ModalScreen[None]):
         self.low_power_enabled = low_power_enabled
         self.layout_mode = layout_mode
         self.split_percent = split_percent
+        self.joplin_copy_mode = normalize_joplin_copy_mode(joplin_copy_mode)
         self.tmux_direct_enabled = tmux_direct_enabled
         self.tmux_features_available = tmux_features_available
         self.custom_theme_name = custom_theme_name
@@ -3033,6 +3189,13 @@ class SettingsScreen(ModalScreen[None]):
                     yield Button("Narrow", id="split-narrow")
                     yield Button("Reset", id="split-reset")
                     yield Button("Widen", id="split-widen")
+                yield Static("Joplin response copy", id="joplin-copy-mode-label")
+                yield Select(
+                    JOPLIN_COPY_MODE_CHOICES,
+                    value=self.joplin_copy_mode,
+                    allow_blank=False,
+                    id="joplin-copy-mode",
+                )
                 tmux_direct = Checkbox(
                     "Tmux direct default",
                     value=self.tmux_direct_enabled,
@@ -3080,6 +3243,9 @@ class SettingsScreen(ModalScreen[None]):
         elif event.select.id == "theme-mode":
             event.stop()
             self.app.set_ui_theme(str(event.value))  # type: ignore[attr-defined]
+        elif event.select.id == "joplin-copy-mode":
+            event.stop()
+            self.app.set_joplin_copy_mode(str(event.value))  # type: ignore[attr-defined]
 
 
 class AgentPBXTUI(App[None]):
@@ -3414,12 +3580,14 @@ class AgentPBXTUI(App[None]):
         height: 3;
     }
 
-    #theme-mode {
+    #theme-mode,
+    #joplin-copy-mode {
         height: 3;
     }
 
     #layout-mode-label,
-    #theme-label {
+    #theme-label,
+    #joplin-copy-mode-label {
         height: 1;
         color: $secondary;
         content-align: center middle;
@@ -3518,6 +3686,25 @@ class AgentPBXTUI(App[None]):
     #codex-config-status {
         height: auto;
         color: $secondary;
+    }
+
+    #codex-model-status {
+        height: auto;
+        color: $secondary;
+    }
+
+    #codex-model-actions {
+        height: 3;
+    }
+
+    #codex-model-preset {
+        height: 3;
+        width: 2fr;
+    }
+
+    #codex-model-actions Button {
+        width: 1fr;
+        min-width: 10;
     }
 
     #codex-config-fields {
@@ -4235,6 +4422,9 @@ class AgentPBXTUI(App[None]):
             if split_percent_env is not None
             else clamp_split_percent(split_percent_setting)
         )
+        self.joplin_copy_mode = normalize_joplin_copy_mode(
+            self.settings.get("joplin_copy_mode", DEFAULT_JOPLIN_COPY_MODE)
+        )
         self.rendered_agent_columns: tuple[str, ...] = ()
         self.rendered_operator_columns: tuple[str, ...] = ()
         self.rendered_agents_signature: tuple[Any, ...] | None = None
@@ -4426,6 +4616,326 @@ class AgentPBXTUI(App[None]):
         await self.refresh_codex_posture()
         await self.load_codex_config()
 
+    def selected_codex_model_preset(self) -> CodexModelPreset:
+        selector = self.query_one_or_none("#codex-model-preset", Select)
+        if selector is not None:
+            preset = codex_model_preset_for(selector.value)
+            if preset is not None:
+                return preset
+        return CODEX_MODEL_PRESET_BY_KEY["terra-5.6-max"]
+
+    def codex_model_target_agent_id(self) -> str | None:
+        """Return the explicit right-pane target for model-affecting actions.
+
+        A command-palette invocation moves focus away from the Agents or
+        Operators table.  The tables retain independent cursors, so using a
+        cursor after that focus change can restart an unrelated pane.  Model
+        changes are intentionally bound to the agent currently displayed in
+        the right pane instead.
+        """
+        agent_id = str(self.selected_agent_id or "").strip()
+        if agent_id and agent_id in self.agents:
+            return agent_id
+        self.notify(
+            "Select the target agent or operator before changing its Codex model.",
+            severity="warning",
+        )
+        return None
+
+    def set_codex_model_preset_selector(self, preset: CodexModelPreset) -> None:
+        selector = self.query_one_or_none("#codex-model-preset", Select)
+        if selector is not None:
+            selector.value = preset.key
+        self.update_codex_model_status(preset)
+
+    def update_codex_model_status(self, preset: CodexModelPreset | None = None) -> None:
+        preset = preset or self.selected_codex_model_preset()
+        status = self.query_one_or_none("#codex-model-status", Static)
+        if status is not None:
+            target = str(self.selected_agent_id or "").strip() or "select an agent"
+            verbosity = (
+                f", verbosity {preset.verbosity}" if preset.verbosity else ""
+            )
+            status.update(
+                f"Target: {target}\n"
+                "Model preset: "
+                f"{preset.label} -> {preset.model}/{preset.reasoning_effort}"
+                f"{verbosity}. "
+                f"{preset.description}"
+            )
+
+    async def validate_codex_model_preset(
+        self,
+        preset: CodexModelPreset,
+    ) -> tuple[bool, str]:
+        catalog = await asyncio.to_thread(
+            inspect_codex_model_catalog,
+            self.operator_codex_command(),
+        )
+        if not catalog:
+            return (
+                False,
+                "Codex model catalog is unavailable from `codex debug models`.",
+            )
+        by_slug: dict[str, CodexModelOption] = {
+            item.slug: item for item in catalog if not item.hidden
+        }
+        model = by_slug.get(preset.model)
+        if model is None:
+            return (
+                False,
+                f"{preset.model!r} is not in `codex debug models`.",
+            )
+        supported_efforts = {
+            str(level).strip().casefold()
+            for level in model.supported_reasoning_levels
+        }
+        if (
+            supported_efforts
+            and preset.reasoning_effort.casefold() not in supported_efforts
+        ):
+            return (
+                False,
+                f"{preset.model!r} does not advertise reasoning effort "
+                f"{preset.reasoning_effort!r}.",
+            )
+        if preset.verbosity and model.supports_verbosity is False:
+            return (
+                False,
+                f"{preset.model!r} does not advertise response verbosity support.",
+            )
+        return True, ""
+
+    async def ensure_codex_model_preset_valid(
+        self,
+        preset: CodexModelPreset,
+    ) -> bool:
+        ok, warning = await self.validate_codex_model_preset(preset)
+        if ok:
+            return True
+        self.notify(f"Codex model preset unavailable: {warning}", severity="error")
+        return False
+
+    def codex_model_preset_plan_lines(
+        self,
+        agent_id: str,
+        preset: CodexModelPreset,
+    ) -> list[str]:
+        agent = self.agents.get(agent_id) or {}
+        metadata = (
+            agent.get("metadata")
+            if isinstance(agent.get("metadata"), dict)
+            else {}
+        )
+        pane_id = str(
+            self.tmux_agent_targets.get(agent_id)
+            or metadata.get("tmux_pane_id")
+            or ""
+        ).strip()
+        session_id = str(
+            metadata.get("fork_codex_session_id")
+            or metadata.get("last_resume_codex_session_id")
+            or metadata.get("codex_session_id")
+            or metadata.get("codex_thread_id")
+            or metadata.get("source_codex_session_id")
+            or ""
+        ).strip()
+        cwd = str(metadata.get("work_root") or metadata.get("cwd") or "").strip()
+        role = self.operator_role(agent) if isinstance(agent, dict) else CALLER_AGENT_TYPE
+        preset_lines = [
+            f"- {preset.label}",
+            f"- model = {preset.model}",
+            f"- model_reasoning_effort = {preset.reasoning_effort}",
+        ]
+        if preset.verbosity:
+            preset_lines.append(f"- model_verbosity = {preset.verbosity}")
+        preset_lines.append(f"- description: {preset.description}")
+        lines = [
+            "Codex Model Migration Plan",
+            "",
+            f"Target: {agent_id}",
+            f"Type: {self.agent_type(agent) if isinstance(agent, dict) else '-'}",
+            f"Role: {role}",
+            f"Pane: {pane_id or '-'}",
+            f"CWD: {cwd or '-'}",
+            f"Current session: {session_id or '-'}",
+            "",
+            "Preset:",
+            *preset_lines,
+            "",
+            "Safe switch path:",
+            "1. Snapshot Agent PBX metadata, pane id, cwd, session id, and transcript boundary.",
+            "2. Ask for or capture a compact handoff if the pane is not idle.",
+            "3. Launch a replacement Codex process with explicit `-c` model overrides.",
+            "4. Resume the fork/current session id first; avoid falling back to source session ids unless this is a fresh fork launch.",
+            "5. Register the replacement pane under the same Agent PBX id and patch metadata with the selected preset.",
+            "6. Verify latest transcript/session mapping and Joplin copy before retiring backups.",
+            "",
+            "Current TUI restart action:",
+            "- Uses the existing restart/resume path for the selected pane and applies the preset overrides to the replacement Codex command.",
+            "- For maximum rollback safety during bulk cleanup, run a dry plan first and migrate in small batches.",
+        ]
+        if preset.eol:
+            lines.extend(["", f"Warning: this preset has EOL date {preset.eol}."])
+        return lines
+
+    async def show_selected_codex_model_plan(self) -> None:
+        preset = self.selected_codex_model_preset()
+        agent_id = self.codex_model_target_agent_id()
+        if agent_id is None:
+            return
+        detail = self.query_one_or_none("#codex-config-detail", TextArea)
+        if detail is None:
+            detail = self.query_one_or_none("#detail", TextArea)
+        ok, warning = await self.validate_codex_model_preset(preset)
+        lines = self.codex_model_preset_plan_lines(agent_id, preset)
+        lines.extend(
+            [
+                "",
+                "Local validation:",
+                f"- {'ok' if ok else 'blocked'}"
+                + (f": {warning}" if warning else ""),
+            ]
+        )
+        if detail is not None:
+            detail.text = "\n".join(lines)
+        self.activate_agent_tab("codex-tab")
+
+    async def restart_selected_with_codex_model_preset(self) -> None:
+        preset = self.selected_codex_model_preset()
+        agent_id = self.codex_model_target_agent_id()
+        if agent_id is None:
+            return
+        self.notify(f"Restarting {agent_id} with Codex model preset {preset.label}.")
+        await self.restart_tmux_codex_session(agent_id, model_preset=preset)
+
+    async def save_selected_codex_model_preset_as_default(self) -> None:
+        await self.save_codex_model_preset_as_default(self.selected_codex_model_preset())
+
+    async def save_codex_model_preset_as_default(self, preset: CodexModelPreset) -> None:
+        if not await self.ensure_codex_model_preset_valid(preset):
+            return
+        updates: dict[str, str] = {
+            "model": preset.model,
+            "model_reasoning_effort": preset.reasoning_effort,
+        }
+        if preset.verbosity:
+            updates["model_verbosity"] = preset.verbosity
+        try:
+            response = await self.api_client().patch(
+                "/v1/codex/config",
+                json={"updates": updates},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Codex model default save failed: {exc}", severity="error")
+            return
+        config = result.get("config") if isinstance(result, dict) else None
+        self.codex_config = config if isinstance(config, dict) else self.codex_config
+        self.render_codex_config(self.codex_config)
+        self.notify(f"Saved Codex default model preset {preset.label}.")
+        await self.refresh_codex_posture()
+
+    def codex_model_cleanup_targets(self) -> list[dict[str, Any]]:
+        roots = {"operator-0", "operator-2", "operator-5"}
+        targets: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for agent_id, agent in sorted(self.agents.items()):
+            metadata = (
+                agent.get("metadata")
+                if isinstance(agent.get("metadata"), dict)
+                else {}
+            )
+            logical_operator_id = self.logical_operator_id_for_agent(agent)
+            include = False
+            reason = ""
+            if agent_id in self.starred_agent_ids:
+                include = True
+                reason = "starred"
+            if agent_id in roots:
+                include = True
+                reason = "operator cleanup root"
+            if logical_operator_id in roots and self.operator_role(agent) == OPERATOR_ROLE_FORK:
+                include = True
+                reason = f"{logical_operator_id} fork/review"
+            if not include or agent_id in seen:
+                continue
+            seen.add(agent_id)
+            hidden = self.is_hidden_agent(agent)
+            active = bool(agent.get("pbx_active", True))
+            targets.append(
+                {
+                    "agent_id": agent_id,
+                    "reason": reason,
+                    "hidden": hidden,
+                    "pbx_active": active,
+                    "status": agent.get("effective_status") or agent.get("status") or "",
+                    "pane": self.tmux_agent_targets.get(agent_id)
+                    or metadata.get("tmux_pane_id")
+                    or "",
+                    "cwd": metadata.get("work_root") or metadata.get("cwd") or "",
+                    "session": metadata.get("fork_codex_session_id")
+                    or metadata.get("last_resume_codex_session_id")
+                    or metadata.get("codex_session_id")
+                    or metadata.get("codex_thread_id")
+                    or "",
+                }
+            )
+        return targets
+
+    async def show_codex_model_cleanup_plan(self) -> None:
+        preset = self.selected_codex_model_preset()
+        ok, warning = await self.validate_codex_model_preset(preset)
+        targets = self.codex_model_cleanup_targets()
+        lines = [
+            "Codex Model Cleanup Dry Run",
+            "",
+            "Preset: "
+            f"{preset.label} -> {preset.model}/{preset.reasoning_effort}"
+            + (f", verbosity {preset.verbosity}" if preset.verbosity else ""),
+            f"Validation: {'ok' if ok else 'blocked'}"
+            + (f" ({warning})" if warning else ""),
+            "",
+            "Target policy:",
+            "- Include visible starred agents.",
+            "- Include Operators 0, 2, and 5.",
+            "- Include active forks/review forks whose logical operator is 0, 2, or 5.",
+            "- Skip hidden/inactive targets during execution unless explicitly selected.",
+            "",
+            "Backup/rollback before execution:",
+            "- Copy Agent PBX SQLite state and TUI settings JSON with a timestamp.",
+            "- Export target metadata, tmux pane ids, cwd, session ids, and transcript boundaries.",
+            "- Keep old panes until replacement panes register and pass transcript/Joplin checks.",
+            "",
+            "Targets:",
+        ]
+        if not targets:
+            lines.append("- none loaded")
+        for item in targets:
+            skip = " skip-hidden" if item["hidden"] else ""
+            if not item["pbx_active"]:
+                skip += " skip-inactive"
+            lines.append(
+                "- {agent_id} [{reason}] status={status} pane={pane} "
+                "session={session} cwd={cwd}{skip}".format(
+                    agent_id=item["agent_id"],
+                    reason=item["reason"],
+                    status=item["status"] or "-",
+                    pane=item["pane"] or "-",
+                    session=item["session"] or "-",
+                    cwd=item["cwd"] or "-",
+                    skip=skip,
+                )
+            )
+        detail = self.query_one_or_none("#codex-config-detail", TextArea)
+        if detail is None:
+            detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = "\n".join(lines)
+        self.activate_agent_tab("codex-tab")
+
     async def load_codex_config(self) -> None:
         status = self.query_one_or_none("#codex-config-status", Static)
         if status is not None:
@@ -4459,6 +4969,7 @@ class AgentPBXTUI(App[None]):
             )
         table = self.query_one_or_none("#codex-config-fields", DataTable)
         if table is not None:
+            position = self.data_table_position(table)
             table.clear()
             for field in config.get("fields") or []:
                 if not isinstance(field, dict):
@@ -4480,6 +4991,7 @@ class AgentPBXTUI(App[None]):
                 value = str(item.get("value_preview") or "")
                 status_text = str(item.get("policy") or "read_only")
                 table.add_row(key, value or "-", status_text, key=f"hidden:{key}")
+            self.restore_data_table_position(table, position)
         detail = self.query_one_or_none("#codex-config-detail", TextArea)
         if detail is not None:
             detail.text = self.format_codex_config_detail(config)
@@ -4915,6 +5427,34 @@ class AgentPBXTUI(App[None]):
                             )
                     with TabPane("Codex", id="codex-tab"):
                         yield Static("Codex config: checking...", id="codex-config-status")
+                        yield Static("Model preset: Terra 5.6/max recommended", id="codex-model-status")
+                        with Horizontal(id="codex-model-actions"):
+                            yield Select(
+                                [
+                                    (preset.display_label, preset.key)
+                                    for preset in CODEX_MODEL_PRESETS
+                                ],
+                                value="terra-5.6-max",
+                                allow_blank=False,
+                                id="codex-model-preset",
+                            )
+                            yield Button(
+                                "Plan",
+                                id="codex-model-plan",
+                            )
+                            yield Button(
+                                "Restart Selected",
+                                id="codex-model-restart",
+                                variant="warning",
+                            )
+                            yield Button(
+                                "Save Default",
+                                id="codex-model-save-default",
+                            )
+                            yield Button(
+                                "Cleanup Plan",
+                                id="codex-model-cleanup-plan",
+                            )
                         yield DataTable(
                             id="codex-config-fields",
                             cursor_type="row",
@@ -5260,6 +5800,17 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/codex config save", "Save the Codex config key/value editor", self.palette_codex_config_save)
         yield SystemCommand("/codex mcp wire", "Write Agent PBX MCP config to global Codex config", self.palette_codex_mcp_wire)
         yield SystemCommand("/codex update", "Update host Codex CLI via the Agent PBX daemon", self.palette_codex_update)
+        yield SystemCommand("/codex model", "Open Codex model presets", self.palette_codex_model)
+        yield SystemCommand("/codex model plan", "Plan model migration for the selected agent", self.palette_codex_model_plan)
+        yield SystemCommand("/codex model cleanup plan", "Plan one-time starred/operator model cleanup", self.palette_codex_model_cleanup_plan)
+        yield SystemCommand("/codex model terra-max", "Restart selected Codex pane on Terra 5.6/max", lambda: self.palette_codex_model_restart("terra-5.6-max"))
+        yield SystemCommand("/codex model terra-xhigh", "Restart selected Codex pane on Terra 5.6/xhigh", lambda: self.palette_codex_model_restart("terra-5.6-xhigh"))
+        yield SystemCommand("/codex model sol-xhigh", "Restart selected Codex pane on Sol 5.6/xhigh", lambda: self.palette_codex_model_restart("sol-5.6-xhigh"))
+        yield SystemCommand("/codex model legacy-5.5", "Restart selected Codex pane on Codex 5.5/xhigh", lambda: self.palette_codex_model_restart("legacy-5.5-xhigh"))
+        yield SystemCommand("/codex model default terra-max", "Save Terra 5.6/max as global Codex default", lambda: self.palette_codex_model_default("terra-5.6-max"))
+        yield SystemCommand("/codex model default terra-xhigh", "Save Terra 5.6/xhigh as global Codex default", lambda: self.palette_codex_model_default("terra-5.6-xhigh"))
+        yield SystemCommand("/codex model default sol-xhigh", "Save Sol 5.6/xhigh as global Codex default", lambda: self.palette_codex_model_default("sol-5.6-xhigh"))
+        yield SystemCommand("/codex model default legacy-5.5", "Save Codex 5.5/xhigh as global Codex default", lambda: self.palette_codex_model_default("legacy-5.5-xhigh"))
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/latest", "Open the Latest tab", self.palette_latest)
         yield SystemCommand("/thread", "Open the Thread tab", self.palette_thread)
@@ -5306,6 +5857,9 @@ class AgentPBXTUI(App[None]):
             yield SystemCommand("/joplin delete", "Delete the selected Joplin note", self.palette_joplin_delete)
             yield SystemCommand("/joplin copy", "Copy latest tmux response or report to Joplin", self.palette_joplin_copy)
             yield SystemCommand("/joplin copy report", "Copy latest PBX report to Joplin", self.palette_joplin_copy_report)
+            yield SystemCommand("/joplin copy mode copy-first", "Use /copy before transcript for Joplin copies", lambda: self.palette_joplin_copy_mode(JOPLIN_COPY_MODE_COPY_FIRST))
+            yield SystemCommand("/joplin copy mode transcript-first", "Use transcript before /copy for Joplin copies", lambda: self.palette_joplin_copy_mode(JOPLIN_COPY_MODE_TRANSCRIPT_FIRST))
+            yield SystemCommand("/joplin copy mode tmux-capture", "Use visible tmux capture for Joplin copies", lambda: self.palette_joplin_copy_mode(JOPLIN_COPY_MODE_TMUX_CAPTURE))
             yield SystemCommand("/joplin log start", "Start Joplin LOG for the selected agent", self.palette_joplin_log_start)
             yield SystemCommand("/joplin log stop", "Stop Joplin LOG for the selected agent", self.palette_joplin_log_stop)
             yield SystemCommand("/joplin save", "Save the selected Joplin note body", self.palette_joplin_save)
@@ -5466,6 +6020,55 @@ class AgentPBXTUI(App[None]):
             name="codex-mcp-wire",
             exclusive=True,
         )
+
+    def palette_codex_model(self) -> None:
+        self.activate_agent_tab("codex-tab")
+        self.update_codex_model_status(self.selected_codex_model_preset())
+
+    def palette_codex_model_plan(self) -> None:
+        self.run_worker(
+            self.show_selected_codex_model_plan(),
+            name="codex-model-plan",
+            exclusive=True,
+        )
+
+    def palette_codex_model_cleanup_plan(self) -> None:
+        self.run_worker(
+            self.show_codex_model_cleanup_plan(),
+            name="codex-model-cleanup-plan",
+            exclusive=True,
+        )
+
+    def palette_codex_model_restart(self, preset_key: str) -> None:
+        preset = codex_model_preset_for(preset_key)
+        if preset is None:
+            self.notify(f"Unknown Codex model preset {preset_key}.", severity="error")
+            return
+        agent_id = self.codex_model_target_agent_id()
+        if agent_id is None:
+            return
+        self.set_codex_model_preset_selector(preset)
+        self.notify(f"Restarting {agent_id} with Codex model preset {preset.label}.")
+        self.run_worker(
+            self.restart_tmux_codex_session(agent_id, model_preset=preset),
+            name=f"codex-model-restart-{slugify(agent_id)}",
+            exclusive=True,
+        )
+
+    def palette_codex_model_default(self, preset_key: str) -> None:
+        preset = codex_model_preset_for(preset_key)
+        if preset is None:
+            self.notify(f"Unknown Codex model preset {preset_key}.", severity="error")
+            return
+        self.set_codex_model_preset_selector(preset)
+        self.run_worker(
+            self.save_codex_model_preset_as_default(preset),
+            name="codex-model-default",
+            exclusive=True,
+        )
+
+    def palette_joplin_copy_mode(self, mode: str) -> None:
+        self.set_joplin_copy_mode(mode)
 
     def palette_toggle_tmux(self) -> None:
         self.run_worker(self.action_toggle_tmux_direct(), name="palette-tmux", exclusive=True)
@@ -6714,6 +7317,7 @@ class AgentPBXTUI(App[None]):
                 low_power_enabled=self.low_power_enabled,
                 layout_mode=self.layout_mode,
                 split_percent=self.split_percent,
+                joplin_copy_mode=self.joplin_copy_mode,
                 tmux_direct_enabled=self.tmux_direct_enabled,
                 tmux_features_available=self.tmux_features_available,
                 custom_theme_name=self.custom_theme_name,
@@ -7240,6 +7844,54 @@ class AgentPBXTUI(App[None]):
         table.clear(columns=True)
         table.add_columns(*columns)
         self.rendered_operator_columns = columns
+
+    def data_table_position(self, table: DataTable) -> dict[str, Any]:
+        row_key = ""
+        if table.row_count and table.is_valid_row_index(table.cursor_row):
+            try:
+                row_key = str(
+                    table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+                )
+            except Exception:
+                row_key = ""
+        return {
+            "row_key": row_key,
+            "row": table.cursor_row,
+            "scroll_x": table.scroll_x,
+            "scroll_target_x": table.scroll_target_x,
+            "scroll_y": table.scroll_y,
+            "scroll_target_y": table.scroll_target_y,
+        }
+
+    def restore_data_table_position(
+        self,
+        table: DataTable,
+        state: Mapping[str, Any],
+    ) -> None:
+        if table.row_count:
+            row = int_value(state.get("row"))
+            row_key = str(state.get("row_key") or "")
+            restored = False
+            if row_key:
+                try:
+                    table.move_cursor(
+                        row=table.get_row_index(row_key),
+                        animate=False,
+                        scroll=False,
+                    )
+                    restored = True
+                except Exception:
+                    restored = False
+            if not restored and row is not None:
+                table.move_cursor(
+                    row=min(max(0, row), table.row_count - 1),
+                    animate=False,
+                    scroll=False,
+                )
+        table.scroll_x = float_value(state.get("scroll_x")) or 0
+        table.scroll_target_x = float_value(state.get("scroll_target_x")) or 0
+        table.scroll_y = float_value(state.get("scroll_y")) or 0
+        table.scroll_target_y = float_value(state.get("scroll_target_y")) or 0
 
     def agent_row_values(
         self,
@@ -9771,6 +10423,7 @@ class AgentPBXTUI(App[None]):
         if agent_id != previous_agent_id:
             self.restore_agent_pane_state(agent_id)
         self.update_agent_title()
+        self.update_codex_model_status()
         self.apply_tmux_class()
         if self.is_compact_layout():
             self.show_compact_agent()
@@ -10333,6 +10986,10 @@ class AgentPBXTUI(App[None]):
         if stream is None or not stream.text:
             return False
         return self.tmux_stream_is_at_bottom(stream)
+
+    def handle_tmux_stream_focus(self, stream: TextArea) -> None:
+        if self.tmux_stream_is_at_bottom(stream):
+            self.snap_tmux_stream_to_bottom(stream)
 
     def snap_tmux_stream_to_bottom(self, stream: TextArea | None = None) -> None:
         if stream is None:
@@ -10933,6 +11590,18 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "codex-update":
             await self.update_codex_cli_from_host()
             return
+        if event.button.id == "codex-model-plan":
+            await self.show_selected_codex_model_plan()
+            return
+        if event.button.id == "codex-model-restart":
+            await self.restart_selected_with_codex_model_preset()
+            return
+        if event.button.id == "codex-model-save-default":
+            await self.save_selected_codex_model_preset_as_default()
+            return
+        if event.button.id == "codex-model-cleanup-plan":
+            await self.show_codex_model_cleanup_plan()
+            return
         if event.button.id == "codex-config-refresh":
             await self.load_codex_config()
             return
@@ -11001,6 +11670,12 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "purge-agent":
             await self.dismiss_selected_agent(delete_thread=True)
             return
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "codex-model-preset":
+            preset = codex_model_preset_for(event.value)
+            if preset is not None:
+                self.update_codex_model_status(preset)
 
     async def send_input(self) -> None:
         if self.is_tmux_direct_enabled():
@@ -11607,6 +12282,7 @@ class AgentPBXTUI(App[None]):
         pane_id: str,
         cwd: str,
         codex_command: str,
+        model_preset: CodexModelPreset | None = None,
     ) -> dict[str, Any] | None:
         agent = self.agents.get(agent_id)
         if not isinstance(agent, dict):
@@ -11619,6 +12295,8 @@ class AgentPBXTUI(App[None]):
             "codex_command": codex_command,
             "last_tmux_restart_at": time.time(),
         }
+        if model_preset is not None:
+            updated_metadata.update(model_preset.metadata())
         response = await self.api_client().post(
             "/v1/agents/register",
             json={
@@ -11642,6 +12320,8 @@ class AgentPBXTUI(App[None]):
         self,
         agent_id: str,
         pane: tmux_support.TmuxPane,
+        *,
+        model_preset: CodexModelPreset | None = None,
     ) -> bool:
         pane_id = pane.pane_id
         agent = self.agents.get(agent_id)
@@ -11679,7 +12359,20 @@ class AgentPBXTUI(App[None]):
             return False
         if not await self.quit_or_kill_tmux_pane(pane_id, label=agent_id):
             return False
-        env = self.operator_launch_env(agent_id=agent_id, cwd=cwd, mcp_url=mcp_url)
+        launch_config_overrides = operator_agent_config_overrides(
+            mcp_url=mcp_url,
+            codex_home=self.codex_home_dir(),
+            work_root=cwd,
+        )
+        launch_config_overrides.extend(
+            codex_model_preset_config_overrides(model_preset)
+        )
+        env = self.operator_launch_env(
+            agent_id=agent_id,
+            cwd=cwd,
+            mcp_url=mcp_url,
+            model_preset=model_preset,
+        )
         env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
         try:
             new_pane_id = await self.launch_restart_pane(
@@ -11689,11 +12382,7 @@ class AgentPBXTUI(App[None]):
                     codex_command,
                     target.session_id,
                     cd=cwd,
-                    config_overrides=operator_agent_config_overrides(
-                        mcp_url=mcp_url,
-                        codex_home=self.codex_home_dir(),
-                        work_root=cwd,
-                    ),
+                    config_overrides=launch_config_overrides,
                 ),
                 label=agent_id,
                 cwd=cwd,
@@ -11708,6 +12397,7 @@ class AgentPBXTUI(App[None]):
                 tmux_pane_id=new_pane_id,
                 resumed_codex_session_id=target.session_id,
                 operator_session_history=history,
+                model_preset=model_preset,
             )
         except Exception as exc:
             self.notify(f"Unable to relaunch {agent_id}: {exc}", severity="error")
@@ -11729,6 +12419,8 @@ class AgentPBXTUI(App[None]):
         self,
         agent_id: str,
         pane: tmux_support.TmuxPane,
+        *,
+        model_preset: CodexModelPreset | None = None,
     ) -> bool:
         agent = self.agents.get(agent_id)
         metadata = self.agent_metadata(agent)
@@ -11818,6 +12510,9 @@ class AgentPBXTUI(App[None]):
                 work_root=work_root,
             )
         )
+        launch_config_overrides.extend(
+            codex_model_preset_config_overrides(model_preset)
+        )
         sandbox = (
             "workspace-write"
             if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
@@ -11880,6 +12575,7 @@ class AgentPBXTUI(App[None]):
                 agent_id=agent_id,
                 cwd=work_root,
                 mcp_url=mcp_url,
+                model_preset=model_preset,
                 operator_role=OPERATOR_ROLE_FORK,
                 logical_operator_id=logical_operator_id,
                 source_caller_agent_id=source_caller_agent_id,
@@ -11948,6 +12644,8 @@ class AgentPBXTUI(App[None]):
             "tmux_pane_id": new_pane_id,
             "last_tmux_restart_at": time.time(),
         }
+        if model_preset is not None:
+            fork_metadata.update(model_preset.metadata())
         if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
             fork_metadata["review_launch_mode"] = review_launch_mode
         if target_invalid_encrypted_content:
@@ -11997,6 +12695,8 @@ class AgentPBXTUI(App[None]):
         self,
         agent_id: str,
         pane: tmux_support.TmuxPane,
+        *,
+        model_preset: CodexModelPreset | None = None,
     ) -> bool:
         agent = self.agents.get(agent_id)
         if not isinstance(agent, dict):
@@ -12024,7 +12724,12 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return False
-        command = self.operator_resume_command(codex_command, session_id, cd=cwd)
+        command = self.operator_resume_command(
+            codex_command,
+            session_id,
+            cd=cwd,
+            config_overrides=codex_model_preset_config_overrides(model_preset),
+        )
         if not await self.quit_or_kill_tmux_pane(pane.pane_id, label=agent_id):
             return False
         try:
@@ -12048,6 +12753,7 @@ class AgentPBXTUI(App[None]):
                 pane_id=new_pane_id,
                 cwd=cwd,
                 codex_command=codex_command,
+                model_preset=model_preset,
             )
         except Exception as exc:
             self.notify(
@@ -12058,10 +12764,19 @@ class AgentPBXTUI(App[None]):
         self.notify(f"Restarted {agent_id} on Codex session {session_id}.")
         return True
 
-    async def restart_tmux_codex_session(self, agent_id: str | None = None) -> None:
+    async def restart_tmux_codex_session(
+        self,
+        agent_id: str | None = None,
+        *,
+        model_preset: CodexModelPreset | None = None,
+    ) -> None:
         agent_id = agent_id or self.query_one("#agent-id", Input).value.strip()
         if not agent_id:
             self.notify("Select an agent before restarting Codex.", severity="warning")
+            return
+        if model_preset is not None and not await self.ensure_codex_model_preset_valid(
+            model_preset
+        ):
             return
         if not self.tmux_features_available:
             self.notify("Tmux is required to restart a Codex pane.", severity="warning")
@@ -12083,11 +12798,23 @@ class AgentPBXTUI(App[None]):
             return
         if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
             if self.operator_role(agent) == OPERATOR_ROLE_FORK:
-                restarted = await self.relaunch_operator_fork_codex(agent_id, pane)
+                restarted = await self.relaunch_operator_fork_codex(
+                    agent_id,
+                    pane,
+                    model_preset=model_preset,
+                )
             else:
-                restarted = await self.relaunch_operator_root_codex(agent_id, pane)
+                restarted = await self.relaunch_operator_root_codex(
+                    agent_id,
+                    pane,
+                    model_preset=model_preset,
+                )
         else:
-            restarted = await self.relaunch_caller_codex(agent_id, pane)
+            restarted = await self.relaunch_caller_codex(
+                agent_id,
+                pane,
+                model_preset=model_preset,
+            )
         if not restarted:
             return
         await self.refresh_agents()
@@ -13412,6 +14139,7 @@ class AgentPBXTUI(App[None]):
         agent_id: str,
         cwd: str,
         mcp_url: str,
+        model_preset: CodexModelPreset | None = None,
         operator_role: str = OPERATOR_ROLE_ROOT,
         logical_operator_id: str | None = None,
         source_caller_agent_id: str | None = None,
@@ -13474,6 +14202,12 @@ class AgentPBXTUI(App[None]):
             env["AGENT_PBX_SOURCE_CWD"] = source_cwd
         if work_root:
             env["AGENT_PBX_OPERATOR_WORK_ROOT"] = work_root
+        if model_preset is not None:
+            env["AGENT_PBX_CODEX_MODEL_PRESET"] = model_preset.key
+            env["AGENT_PBX_CODEX_MODEL"] = model_preset.model
+            env["AGENT_PBX_CODEX_REASONING_EFFORT"] = model_preset.reasoning_effort
+            if model_preset.verbosity:
+                env["AGENT_PBX_CODEX_VERBOSITY"] = model_preset.verbosity
         if self.token:
             env[AGENT_PBX_TOKEN_ENV] = self.token
         return env
@@ -13787,6 +14521,7 @@ class AgentPBXTUI(App[None]):
         tmux_pane_id: str | None = None,
         resumed_codex_session_id: str | None = None,
         operator_session_history: list[dict[str, Any]] | None = None,
+        model_preset: CodexModelPreset | None = None,
         default_source_caller_agent_id: str | None = None,
         default_source_caller_project: str | None = None,
         default_source_codex_session_id: str | None = None,
@@ -13826,6 +14561,8 @@ class AgentPBXTUI(App[None]):
             metadata["last_resume_codex_session_id"] = resumed_codex_session_id
         if operator_session_history is not None:
             metadata["operator_session_history"] = operator_session_history
+        if model_preset is not None:
+            metadata.update(model_preset.metadata())
         return metadata
 
     async def register_operator_root(
@@ -13839,6 +14576,7 @@ class AgentPBXTUI(App[None]):
         tmux_pane_id: str | None = None,
         resumed_codex_session_id: str | None = None,
         operator_session_history: list[dict[str, Any]] | None = None,
+        model_preset: CodexModelPreset | None = None,
         default_source_caller_agent_id: str | None = None,
         default_source_caller_project: str | None = None,
         default_source_codex_session_id: str | None = None,
@@ -13860,6 +14598,7 @@ class AgentPBXTUI(App[None]):
                     tmux_pane_id=tmux_pane_id,
                     resumed_codex_session_id=resumed_codex_session_id,
                     operator_session_history=operator_session_history,
+                    model_preset=model_preset,
                     default_source_caller_agent_id=default_source_caller_agent_id,
                     default_source_caller_project=default_source_caller_project,
                     default_source_codex_session_id=default_source_codex_session_id,
@@ -16426,6 +17165,7 @@ class AgentPBXTUI(App[None]):
         table = self.query_one_or_none("#operator-kb", DataTable)
         if table is None:
             return
+        position = self.data_table_position(table)
         table.clear(columns=True)
         if status == "search":
             table.add_columns("Mode", "Score", "Feedback", "Project", "Title", "Tags", "Updated")
@@ -16480,10 +17220,11 @@ class AgentPBXTUI(App[None]):
                 table.move_cursor(
                     row=table.get_row_index(selected),
                     animate=False,
-                    scroll=True,
+                    scroll=False,
                 )
             except Exception:
                 pass
+        self.restore_data_table_position(table, position)
 
     def render_operator_kb_queries(
         self,
@@ -16495,6 +17236,7 @@ class AgentPBXTUI(App[None]):
         table = self.query_one_or_none("#operator-kb", DataTable)
         if table is None:
             return
+        position = self.data_table_position(table)
         table.clear(columns=True)
         table.add_columns("When", "Matches", "Feedback", "Mode", "Query", "Project", "Source")
         for query in queries:
@@ -16536,10 +17278,11 @@ class AgentPBXTUI(App[None]):
                 table.move_cursor(
                     row=table.get_row_index(f"query:{selected}"),
                     animate=False,
-                    scroll=True,
+                    scroll=False,
                 )
             except Exception:
                 pass
+        self.restore_data_table_position(table, position)
 
     def select_operator_kb_entry(
         self,
@@ -18424,6 +19167,7 @@ class AgentPBXTUI(App[None]):
         table = self.query_one_or_none("#campaigns", DataTable)
         if table is None:
             return
+        position = self.data_table_position(table)
         table.clear()
         for campaign in campaigns:
             campaign_id = str(campaign.get("campaign_id") or "")
@@ -18454,10 +19198,11 @@ class AgentPBXTUI(App[None]):
                 table.move_cursor(
                     row=table.get_row_index(selected),
                     animate=False,
-                    scroll=True,
+                    scroll=False,
                 )
             except Exception:
                 pass
+        self.restore_data_table_position(table, position)
 
     def select_campaign(self, campaign_id: str) -> None:
         operator_id = self.selected_agent_id
@@ -19084,6 +19829,7 @@ class AgentPBXTUI(App[None]):
         agent_id = str(payload.get("agent_id") or self.selected_agent_id or "")
         results = payload.get("results") if isinstance(payload.get("results"), list) else []
         table = self.query_one("#file-search-results", DataTable)
+        position = self.data_table_position(table)
         table.clear()
         result_map: dict[str, dict[str, Any]] = {}
         for index, result in enumerate(results):
@@ -19114,6 +19860,7 @@ class AgentPBXTUI(App[None]):
                 status.update(
                     f"Search: {len(result_map)} match(es) via {payload.get('backend') or 'none'}{suffix}"
                 )
+        self.restore_data_table_position(table, position)
 
     async def select_file_search_result(self, row_key: str) -> None:
         agent_id = self.selected_agent_id
@@ -19644,8 +20391,10 @@ class AgentPBXTUI(App[None]):
 
     def render_file_error(self, agent_id: str, message: str) -> None:
         table = self.query_one("#files", DataTable)
+        position = self.data_table_position(table)
         table.clear()
         self.file_entries_by_agent[agent_id] = {}
+        self.restore_data_table_position(table, position)
         self.set_file_preview_text(message)
 
     def cache_file_listing(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -19679,6 +20428,7 @@ class AgentPBXTUI(App[None]):
         entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
         entry_map = self.cache_file_listing(payload)
         table = self.query_one("#files", DataTable)
+        position = self.data_table_position(table)
         table.clear()
         self.query_one("#file-path", Static).update(f"Path: {path}")
         if ".." in entry_map:
@@ -19708,6 +20458,7 @@ class AgentPBXTUI(App[None]):
                 f"Entries: {len(entries)}\n\n"
                 "Select a directory to browse it or a file to preview it."
             )
+        self.restore_data_table_position(table, position)
 
     def set_file_preview_text(self, text: str) -> None:
         preview = self.query_one("#file-preview", RichLog)
@@ -20586,6 +21337,7 @@ class AgentPBXTUI(App[None]):
         notes: list[dict[str, Any]],
     ) -> None:
         table = self.query_one("#joplin-notes", DataTable)
+        position = self.data_table_position(table)
         table.clear()
         note_map: dict[str, dict[str, Any]] = {}
         for note in notes:
@@ -20602,6 +21354,17 @@ class AgentPBXTUI(App[None]):
         self.joplin_notes_by_agent[cache_agent_id] = note_map
         if cache_agent_id != agent_id:
             self.joplin_notes_by_agent[agent_id] = note_map
+        selected = self.selected_joplin_note_for_agent(agent_id)
+        if selected and selected in note_map:
+            try:
+                table.move_cursor(
+                    row=table.get_row_index(selected),
+                    animate=False,
+                    scroll=False,
+                )
+            except Exception:
+                pass
+        self.restore_data_table_position(table, position)
 
     def joplin_selection_key(self, agent_id: str) -> str:
         return self.joplin_note_cache_agent_id(agent_id)
@@ -20848,12 +21611,18 @@ class AgentPBXTUI(App[None]):
         after_boundary: CodexTranscriptBoundary | None = None,
     ) -> CodexTranscriptResult | None:
         for session_id in self.codex_session_ids_for_agent(agent_id):
-            found = await asyncio.to_thread(
-                latest_assistant_transcript_for_session,
-                session_id,
-                codex_home=self.codex_home_dir(),
-                path_cache=self.codex_session_path_cache,
-            )
+            try:
+                found = await asyncio.to_thread(
+                    latest_assistant_transcript_for_session,
+                    session_id,
+                    codex_home=self.codex_home_dir(),
+                    path_cache=self.codex_session_path_cache,
+                )
+            except (OSError, UnicodeError, ValueError):
+                # A live rollout can be rotated or mid-write while it is read.
+                # Let the normal fallback chain continue without surfacing a
+                # transient transcript read as a failed Joplin copy.
+                continue
             if found is None:
                 continue
             if after_boundary is not None and not self.transcript_after_boundary(
@@ -20907,6 +21676,90 @@ class AgentPBXTUI(App[None]):
             f"line {result.line_index}, mtime {modified})"
         )
 
+    async def wait_for_codex_copy_selector(self, agent_id: str) -> str | None:
+        """Watch for a native /copy picker while clipboard copy is pending."""
+        deadline = time.monotonic() + CLIPBOARD_COPY_WAIT_SECONDS
+        while True:
+            captured = await self.capture_tmux_display_for_agent(agent_id)
+            if captured and contains_codex_copy_selector(captured):
+                return captured
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(CLIPBOARD_COPY_POLL_SECONDS)
+
+    async def dismiss_codex_copy_selector(
+        self,
+        agent_id: str,
+        captured: str | None,
+    ) -> str | None:
+        if not captured or not contains_codex_copy_selector(captured):
+            return captured
+        if await self.send_key_to_tmux(agent_id, "Escape"):
+            self.notify(
+                "Codex /copy opened an interactive selector; canceled it and "
+                "continued with transcript/tmux fallback.",
+                severity="warning",
+            )
+            await asyncio.sleep(0.2)
+            return await self.capture_tmux_display_for_agent(agent_id)
+        return captured
+
+    async def await_copied_tmux_response_or_selector(
+        self,
+        agent_id: str,
+        previous_clipboard: str,
+    ) -> tuple[tuple[str, str] | None, str | None, Exception | None]:
+        """Prefer clipboard output, but abandon it promptly for a /copy picker."""
+        copy_task = asyncio.create_task(
+            self.read_copied_tmux_response(previous_clipboard)
+        )
+        selector_task = asyncio.create_task(
+            self.wait_for_codex_copy_selector(agent_id)
+        )
+        done, _pending = await asyncio.wait(
+            {copy_task, selector_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if selector_task in done:
+            selector = selector_task.result()
+            if selector is not None:
+                if not copy_task.done():
+                    copy_task.cancel()
+                await asyncio.gather(copy_task, return_exceptions=True)
+                return (
+                    None,
+                    selector,
+                    RuntimeError("Codex /copy opened an interactive selector"),
+                )
+            if copy_task.done():
+                try:
+                    return copy_task.result(), None, None
+                except Exception as exc:
+                    return None, None, exc
+            try:
+                return await copy_task, None, None
+            except Exception as exc:
+                return None, None, exc
+
+        try:
+            copied = copy_task.result()
+        except Exception as exc:
+            if not selector_task.done():
+                selector_task.cancel()
+            await asyncio.gather(selector_task, return_exceptions=True)
+            captured = await self.capture_tmux_display_for_agent(agent_id)
+            if captured and contains_codex_copy_selector(captured):
+                return (
+                    None,
+                    captured,
+                    RuntimeError("Codex /copy opened an interactive selector"),
+                )
+            return None, captured, exc
+        if not selector_task.done():
+            selector_task.cancel()
+        await asyncio.gather(selector_task, return_exceptions=True)
+        return copied, None, None
+
     async def copy_tmux_response_text(
         self,
         agent_id: str,
@@ -20914,7 +21767,14 @@ class AgentPBXTUI(App[None]):
         transcript_boundary: CodexTranscriptBoundary | None = None,
         allow_transcript: bool = True,
     ) -> tuple[str, str] | None:
-        if allow_transcript:
+        copy_mode = normalize_joplin_copy_mode(self.joplin_copy_mode)
+        if copy_mode == JOPLIN_COPY_MODE_TMUX_CAPTURE:
+            captured = await self.capture_tmux_display_for_agent(agent_id)
+            if captured and captured.strip() and not contains_codex_copy_selector(captured):
+                return captured, "tmux capture"
+            self.notify("Joplin tmux capture mode found no visible response.", severity="error")
+            return None
+        if allow_transcript and copy_mode == JOPLIN_COPY_MODE_TRANSCRIPT_FIRST:
             transcript = await self.copy_codex_transcript_response_text(
                 agent_id,
                 after_boundary=transcript_boundary,
@@ -20937,21 +21797,16 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return None
-        copy_error: Exception | None = None
-        try:
-            return await self.read_copied_tmux_response(previous_clipboard)
-        except Exception as exc:
-            copy_error = exc
-        captured = await self.capture_tmux_display_for_agent(agent_id)
-        if captured and contains_codex_copy_selector(captured):
-            if await self.send_key_to_tmux(agent_id, "Escape"):
-                self.notify(
-                    "Codex /copy opened an interactive selector; canceled it and "
-                    "continued with transcript/tmux fallback.",
-                    severity="warning",
-                )
-                await asyncio.sleep(0.2)
-                captured = await self.capture_tmux_display_for_agent(agent_id)
+        copied, captured, copy_error = await self.await_copied_tmux_response_or_selector(
+            agent_id,
+            previous_clipboard,
+        )
+        if copied is not None:
+            return copied
+        captured = await self.dismiss_codex_copy_selector(agent_id, captured)
+        if captured is None:
+            captured = await self.capture_tmux_display_for_agent(agent_id)
+        captured = await self.dismiss_codex_copy_selector(agent_id, captured)
         if allow_transcript:
             transcript = await self.copy_codex_transcript_response_text(
                 agent_id,
@@ -21447,6 +22302,7 @@ class AgentPBXTUI(App[None]):
         pulls: list[dict[str, Any]],
     ) -> None:
         table = self.query_one("#pull-requests", DataTable)
+        position = self.data_table_position(table)
         table.clear()
         pull_map: dict[int, dict[str, Any]] = {}
         for item in pulls:
@@ -21463,6 +22319,17 @@ class AgentPBXTUI(App[None]):
                 key=str(number),
             )
         self.pull_requests_by_agent[agent_id] = pull_map
+        selected = self.selected_pull_request_number_by_agent.get(agent_id)
+        if selected in pull_map:
+            try:
+                table.move_cursor(
+                    row=table.get_row_index(str(selected)),
+                    animate=False,
+                    scroll=False,
+                )
+            except Exception:
+                pass
+        self.restore_data_table_position(table, position)
 
     async def select_pull_request(self, number_text: str) -> None:
         agent_id = self.selected_agent_id
@@ -21852,6 +22719,7 @@ class AgentPBXTUI(App[None]):
         issues: list[dict[str, Any]],
     ) -> None:
         table = self.query_one("#issues", DataTable)
+        position = self.data_table_position(table)
         table.clear()
         issue_map: dict[int, dict[str, Any]] = {}
         for item in issues:
@@ -21869,6 +22737,17 @@ class AgentPBXTUI(App[None]):
                 key=str(number),
             )
         self.issues_by_agent[agent_id] = issue_map
+        selected = self.selected_issue_number_by_agent.get(agent_id)
+        if selected in issue_map:
+            try:
+                table.move_cursor(
+                    row=table.get_row_index(str(selected)),
+                    animate=False,
+                    scroll=False,
+                )
+            except Exception:
+                pass
+        self.restore_data_table_position(table, position)
 
     async def select_issue(self, number_text: str) -> None:
         agent_id = self.selected_agent_id
@@ -22530,6 +23409,15 @@ class AgentPBXTUI(App[None]):
         self.save_settings()
         self.apply_theme_class()
 
+    def set_joplin_copy_mode(self, mode: str) -> None:
+        self.joplin_copy_mode = normalize_joplin_copy_mode(mode)
+        self.save_settings()
+        label = dict((value, label) for label, value in JOPLIN_COPY_MODE_CHOICES).get(
+            self.joplin_copy_mode,
+            self.joplin_copy_mode,
+        )
+        self.notify(f"Joplin copy mode set to {label}.")
+
     def apply_theme_class(self) -> None:
         use_custom_theme = self.ui_theme == self.custom_theme_name
         try:
@@ -22765,6 +23653,7 @@ class AgentPBXTUI(App[None]):
             "theme": self.ui_theme,
             "layout": self.layout_mode,
             "split_percent": self.split_percent,
+            "joplin_copy_mode": self.joplin_copy_mode,
             "show_hidden_agents": self.show_hidden_agents,
             "export_dir": str(self.export_dir),
             "tmux_direct": self.tmux_direct_enabled,
@@ -23075,6 +23964,7 @@ class AgentPBXTUI(App[None]):
         table = self.query_one_or_none("#events", DataTable)
         if table is None:
             return
+        position = self.data_table_position(table)
         table.clear()
         for event in self.events[-50:]:
             table.add_row(
@@ -23083,9 +23973,11 @@ class AgentPBXTUI(App[None]):
                 event.get("subject_id") or "",
                 key=str(event["event_id"]),
             )
+        self.restore_data_table_position(table, position)
 
     def render_thread(self, thread: list[dict[str, Any]]) -> None:
         table = self.query_one("#thread", DataTable)
+        position = self.data_table_position(table)
         table.clear()
         for item in thread:
             table.add_row(
@@ -23103,6 +23995,7 @@ class AgentPBXTUI(App[None]):
                 animate=False,
                 scroll=False,
             )
+        self.restore_data_table_position(table, position)
 
     def select_thread_item(self, item_id: str) -> None:
         item = self.thread_items.get(item_id)
