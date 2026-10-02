@@ -30,6 +30,13 @@ DEFAULT_QUIT_WAIT_SECONDS = 5.0
 PANE_EXIT_POLL_SECONDS = 0.1
 FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PANE_CLIPBOARD_ENV_KEYS = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XAUTHORITY",
+)
 AGENT_PATH_METADATA_KEYS = (
     "cwd",
     "repo",
@@ -60,6 +67,15 @@ class TmuxPane:
     @property
     def target_label(self) -> str:
         return f"{self.session_name}:{self.window_index}.{self.pane_index}"
+
+
+@dataclass(frozen=True)
+class TmuxClipboardTransport:
+    """Whether Codex can forward a copy through this pane's tmux client."""
+
+    available: bool
+    reason: str = ""
+    client_name: str = ""
 
 
 def int_or_zero(value: str) -> int:
@@ -171,6 +187,34 @@ def launch_pane(
     return pane_id
 
 
+def respawn_pane(
+    target: str,
+    *,
+    command: str,
+    cwd: str | None = None,
+    env: Mapping[str, str] | None = None,
+    tmux_bin: str = "tmux",
+) -> None:
+    """Replace a pane command without changing its pane, window, or layout."""
+    args = [tmux_bin, "respawn-pane", "-k", "-t", target]
+    if cwd:
+        args.extend(["-c", cwd])
+    if env:
+        for key, value in env.items():
+            if not ENV_KEY_PATTERN.match(key):
+                raise ValueError(f"invalid tmux environment key: {key!r}")
+            args.extend(["-e", f"{key}={value}"])
+    args.append(command)
+    result = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "tmux respawn failed").strip()
+        raise RuntimeError(message)
+
+
 def kill_pane(target: str, *, tmux_bin: str = "tmux") -> None:
     result = subprocess.run(
         [tmux_bin, "kill-pane", "-t", target],
@@ -191,6 +235,16 @@ def pane_exists(target: str, *, tmux_bin: str = "tmux") -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def pane_is_live(target: str, *, tmux_bin: str = "tmux") -> bool:
+    """Return whether a pane still exists and is not a remain-on-exit pane."""
+    result = subprocess.run(
+        [tmux_bin, "display-message", "-p", "-t", target, "#{pane_dead}"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() != "1"
+
+
 def pane_start_command(target: str, *, tmux_bin: str = "tmux") -> str:
     result = subprocess.run(
         [tmux_bin, "display-message", "-p", "-t", target, "#{pane_start_command}"],
@@ -203,6 +257,168 @@ def pane_start_command(target: str, *, tmux_bin: str = "tmux") -> str:
         ).strip()
         raise RuntimeError(message)
     return result.stdout.strip()
+
+
+def _pane_pid(target: str, *, tmux_bin: str = "tmux") -> int | None:
+    result = subprocess.run(
+        [tmux_bin, "display-message", "-p", "-t", target, "#{pane_pid}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        value = int(result.stdout.strip())
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def pane_clipboard_environment(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+) -> dict[str, str]:
+    """Return only desktop variables needed to read this pane's clipboard.
+
+    The pane environment can contain credentials and launch-only data.  This helper
+    deliberately retains a small desktop-session allowlist and never exposes the
+    rest of it to the TUI, settings, or logs.
+    """
+    pid = _pane_pid(target, tmux_bin=tmux_bin)
+    if pid is None:
+        return {}
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return {}
+    environment: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        try:
+            key_bytes, value_bytes = item.split(b"=", 1)
+            key = key_bytes.decode("ascii")
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if key not in PANE_CLIPBOARD_ENV_KEYS:
+            continue
+        try:
+            environment[key] = value_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    return environment
+
+
+def _tmux_command_prefix(
+    target: str,
+    *,
+    tmux_bin: str,
+) -> list[str]:
+    """Use the pane's server socket when it is safely discoverable."""
+    pid = _pane_pid(target, tmux_bin=tmux_bin)
+    if pid is None:
+        return [tmux_bin]
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return [tmux_bin]
+    for item in raw.split(b"\0"):
+        if not item.startswith(b"TMUX="):
+            continue
+        try:
+            value = item[5:].decode("utf-8")
+        except UnicodeDecodeError:
+            break
+        socket = value.split(",", 1)[0].strip()
+        if socket.startswith("/"):
+            return [tmux_bin, "-S", socket]
+        break
+    return [tmux_bin]
+
+
+def pane_tmux_buffer(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+) -> str:
+    """Read the default paste buffer from the tmux server that owns *target*."""
+    result = subprocess.run(
+        [*_tmux_command_prefix(target, tmux_bin=tmux_bin), "show-buffer"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "tmux show-buffer failed").strip()
+        raise RuntimeError(message)
+    return result.stdout.rstrip("\n")
+
+
+def tmux_clipboard_transport(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+) -> TmuxClipboardTransport:
+    """Mirror the eligibility checks used by Codex's tmux clipboard transport."""
+    prefix = _tmux_command_prefix(target, tmux_bin=tmux_bin)
+
+    def output(args: list[str]) -> str:
+        result = subprocess.run(
+            [*prefix, *args],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "tmux command failed").strip()
+            raise RuntimeError(message)
+        return result.stdout
+
+    try:
+        if output(["show-options", "-gv", "set-clipboard"]).strip() == "off":
+            return TmuxClipboardTransport(False, "tmux clipboard forwarding is disabled")
+        session_id = output(
+            ["display-message", "-p", "-t", target, "#{session_id}"]
+        ).strip()
+        clients = output(
+            [
+                "list-clients",
+                "-t",
+                session_id,
+                "-F",
+                "#{client_activity} #{client_name}",
+            ]
+        )
+    except RuntimeError as exc:
+        return TmuxClipboardTransport(False, str(exc))
+
+    candidates: list[tuple[int, str]] = []
+    for line in clients.splitlines():
+        activity, separator, client_name = line.partition(" ")
+        if not separator or not client_name.strip():
+            continue
+        try:
+            candidates.append((int(activity), client_name.strip()))
+        except ValueError:
+            continue
+    if not candidates:
+        return TmuxClipboardTransport(
+            False,
+            "tmux clipboard forwarding is unavailable: no attached client",
+        )
+    _activity, client_name = max(candidates)
+    try:
+        terminal_info = output(["show-messages", "-T", "-t", client_name])
+    except RuntimeError as exc:
+        return TmuxClipboardTransport(False, str(exc), client_name)
+    has_ms = any(
+        "Ms: (string) " in line and line.split("Ms: (string) ", 1)[1].strip()
+        for line in terminal_info.splitlines()
+    )
+    if not has_ms:
+        return TmuxClipboardTransport(
+            False,
+            "tmux clipboard forwarding is unavailable: missing Ms capability",
+            client_name,
+        )
+    return TmuxClipboardTransport(True, client_name=client_name)
 
 
 def wait_for_pane_exit(

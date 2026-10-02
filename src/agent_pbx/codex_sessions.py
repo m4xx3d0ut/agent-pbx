@@ -32,6 +32,153 @@ class CodexTranscriptBoundary:
     mtime: float
 
 
+@dataclass
+class _TranscriptTailEntry:
+    path: Path
+    inode: int
+    offset: int
+    line_index: int
+    mtime_ns: int
+    session_id: str
+    preferred: CodexTranscriptResult | None
+    fallback: CodexTranscriptResult | None
+
+
+class CodexTranscriptTailCache:
+    """Incrementally retain the latest assistant output for active JSONL files.
+
+    Session-path lookup and transcript parsing have distinct costs.  This cache
+    avoids repeatedly reading an already-known active rollout from byte zero while
+    leaving path discovery to :class:`CodexSessionPathCache`.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[Path, _TranscriptTailEntry] = {}
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries = {}
+
+    def latest(
+        self,
+        path: str | Path,
+        *,
+        session_id: str | None = None,
+        preferred_phases: tuple[str, ...] = ("final_answer",),
+        fallback_to_any: bool = True,
+    ) -> CodexTranscriptResult | None:
+        transcript_path = Path(path)
+        try:
+            stat = transcript_path.stat()
+        except OSError:
+            return None
+        resolved_session_id = str(session_id or "").strip()
+        with self._lock:
+            entry = self._entries.get(transcript_path)
+            requires_full_scan = (
+                entry is None
+                or entry.inode != stat.st_ino
+                or stat.st_size < entry.offset
+                or (
+                    stat.st_size == entry.offset
+                    and stat.st_mtime_ns != entry.mtime_ns
+                )
+            )
+            if requires_full_scan:
+                entry = _scan_transcript_tail(
+                    transcript_path,
+                    stat=stat,
+                    session_id=resolved_session_id,
+                    preferred_phases=preferred_phases,
+                )
+            elif stat.st_size > entry.offset:
+                entry = _scan_transcript_tail(
+                    transcript_path,
+                    stat=stat,
+                    session_id=resolved_session_id or entry.session_id,
+                    preferred_phases=preferred_phases,
+                    entry=entry,
+                )
+            else:
+                entry = replace(entry, mtime_ns=stat.st_mtime_ns)
+            self._entries[transcript_path] = entry
+            result = entry.preferred or (entry.fallback if fallback_to_any else None)
+            if result is None:
+                return None
+            effective_session_id = resolved_session_id or result.session_id
+            return replace(
+                result,
+                session_id=effective_session_id,
+                mtime=stat.st_mtime,
+            )
+
+
+def _scan_transcript_tail(
+    path: Path,
+    *,
+    stat: os.stat_result,
+    session_id: str,
+    preferred_phases: tuple[str, ...],
+    entry: _TranscriptTailEntry | None = None,
+) -> _TranscriptTailEntry:
+    offset = entry.offset if entry is not None else 0
+    line_index = entry.line_index if entry is not None else -1
+    file_session_id = session_id or (entry.session_id if entry is not None else "")
+    preferred = entry.preferred if entry is not None else None
+    fallback = entry.fallback if entry is not None else None
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        while True:
+            line_offset = handle.tell()
+            raw_line = handle.readline()
+            if not raw_line:
+                break
+            # A live Codex rollout may be observed while its final JSONL record is
+            # still being written.  Leave that partial record for the next read.
+            if not raw_line.endswith(b"\n"):
+                offset = line_offset
+                break
+            offset = handle.tell()
+            line_index += 1
+            try:
+                record = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            if record.get("type") == "session_meta":
+                payload = record.get("payload")
+                if isinstance(payload, dict) and not file_session_id:
+                    file_session_id = str(payload.get("id") or "").strip()
+                continue
+            text = _assistant_message_text(record)
+            if not text.strip():
+                continue
+            result = CodexTranscriptResult(
+                text=text,
+                session_id=file_session_id,
+                path=path,
+                phase=_record_phase(record),
+                line_index=line_index,
+                mtime=stat.st_mtime,
+            )
+            if result.phase in preferred_phases:
+                preferred = result
+            else:
+                fallback = result
+    return _TranscriptTailEntry(
+        path=path,
+        inode=stat.st_ino,
+        offset=offset,
+        line_index=line_index,
+        mtime_ns=stat.st_mtime_ns,
+        session_id=file_session_id,
+        preferred=preferred,
+        fallback=fallback,
+    )
+
+
 class CodexSessionPathCache:
     def __init__(
         self,
@@ -239,8 +386,16 @@ def latest_assistant_transcript_from_session_file(
     session_id: str | None = None,
     preferred_phases: tuple[str, ...] = ("final_answer",),
     fallback_to_any: bool = True,
+    tail_cache: CodexTranscriptTailCache | None = None,
 ) -> CodexTranscriptResult | None:
     transcript_path = Path(path)
+    if tail_cache is not None:
+        return tail_cache.latest(
+            transcript_path,
+            session_id=session_id,
+            preferred_phases=preferred_phases,
+            fallback_to_any=fallback_to_any,
+        )
     try:
         mtime = transcript_path.stat().st_mtime
     except OSError:
@@ -309,6 +464,7 @@ def latest_assistant_transcript_for_session(
     *,
     codex_home: str | Path | None = None,
     path_cache: CodexSessionPathCache | None = None,
+    tail_cache: CodexTranscriptTailCache | None = None,
 ) -> CodexTranscriptResult | None:
     path = find_codex_session_file(
         session_id,
@@ -320,6 +476,7 @@ def latest_assistant_transcript_for_session(
     result = latest_assistant_transcript_from_session_file(
         path,
         session_id=session_id,
+        tail_cache=tail_cache,
     )
     if result is None or not result.text.strip():
         return None

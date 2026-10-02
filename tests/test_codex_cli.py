@@ -146,17 +146,20 @@ def test_codex_model_config_overrides_skips_empty_values() -> None:
     assert codex_model_config_overrides(
         model="gpt-6-sol",
         reasoning_effort="high",
+        reasoning_summary="detailed",
         verbosity="high",
         service_tier="priority",
     ) == [
         'model="gpt-6-sol"',
         'model_reasoning_effort="high"',
+        'model_reasoning_summary="detailed"',
         'model_verbosity="high"',
         'service_tier="priority"',
     ]
     assert codex_model_config_overrides(
         model="",
         reasoning_effort=" ",
+        reasoning_summary=" ",
         verbosity=" ",
         service_tier=None,
     ) == []

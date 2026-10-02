@@ -2,6 +2,7 @@ import json
 
 from agent_pbx.codex_sessions import (
     CodexSessionPathCache,
+    CodexTranscriptTailCache,
     codex_session_transcript_boundary,
     find_codex_session_file,
     latest_assistant_output_for_session,
@@ -145,3 +146,115 @@ def test_codex_session_transcript_boundary_counts_last_line(tmp_path) -> None:
     assert boundary.session_id == "session-abc"
     assert boundary.path == session_file
     assert boundary.line_index == 2
+
+
+def test_transcript_tail_cache_reads_only_appended_assistant_records(tmp_path) -> None:
+    session_file = tmp_path / "rollout-session-1.jsonl"
+    write_jsonl(
+        session_file,
+        [
+            {"type": "session_meta", "payload": {"id": "session-1"}},
+            assistant_message("first final"),
+        ],
+    )
+    cache = CodexTranscriptTailCache()
+
+    first = latest_assistant_transcript_from_session_file(
+        session_file,
+        tail_cache=cache,
+    )
+    with session_file.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(assistant_message("second final")) + "\n")
+    second = latest_assistant_transcript_from_session_file(
+        session_file,
+        tail_cache=cache,
+    )
+
+    assert first is not None
+    assert first.text == "first final"
+    assert first.line_index == 1
+    assert second is not None
+    assert second.text == "second final"
+    assert second.session_id == "session-1"
+    assert second.line_index == 2
+
+
+def test_transcript_tail_cache_defers_partial_jsonl_record_until_completed(tmp_path) -> None:
+    session_file = tmp_path / "rollout-session-1.jsonl"
+    write_jsonl(
+        session_file,
+        [
+            {"type": "session_meta", "payload": {"id": "session-1"}},
+            assistant_message("completed final"),
+        ],
+    )
+    cache = CodexTranscriptTailCache()
+    assert latest_assistant_transcript_from_session_file(
+        session_file,
+        tail_cache=cache,
+    ) is not None
+
+    partial = json.dumps(assistant_message("partial final"))
+    with session_file.open("a", encoding="utf-8") as handle:
+        handle.write(partial)
+    before_newline = latest_assistant_transcript_from_session_file(
+        session_file,
+        tail_cache=cache,
+    )
+    with session_file.open("a", encoding="utf-8") as handle:
+        handle.write("\n")
+    after_newline = latest_assistant_transcript_from_session_file(
+        session_file,
+        tail_cache=cache,
+    )
+
+    assert before_newline is not None
+    assert before_newline.text == "completed final"
+    assert after_newline is not None
+    assert after_newline.text == "partial final"
+    assert after_newline.line_index == 2
+
+
+def test_transcript_tail_cache_rescans_replaced_or_truncated_rollout(tmp_path) -> None:
+    session_file = tmp_path / "rollout-session-1.jsonl"
+    write_jsonl(
+        session_file,
+        [
+            {"type": "session_meta", "payload": {"id": "session-1"}},
+            assistant_message("a long old response that will be removed"),
+        ],
+    )
+    cache = CodexTranscriptTailCache()
+    original = latest_assistant_transcript_from_session_file(
+        session_file,
+        tail_cache=cache,
+    )
+    write_jsonl(
+        session_file,
+        [
+            {"type": "session_meta", "payload": {"id": "session-1"}},
+            assistant_message("new"),
+        ],
+    )
+    replaced = latest_assistant_transcript_from_session_file(
+        session_file,
+        tail_cache=cache,
+    )
+
+    assert original is not None
+    assert original.text.startswith("a long old")
+    assert replaced is not None
+    assert replaced.text == "new"
+    assert replaced.line_index == 1
+
+
+def test_transcript_tail_cache_returns_none_for_removed_rollout(tmp_path) -> None:
+    cache = CodexTranscriptTailCache()
+
+    assert (
+        latest_assistant_transcript_from_session_file(
+            tmp_path / "missing.jsonl",
+            tail_cache=cache,
+        )
+        is None
+    )

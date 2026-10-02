@@ -11,6 +11,7 @@ from typing import Any
 
 CODEX_MODEL_ENV = "AGENT_PBX_TUI_CODEX_MODEL"
 CODEX_REASONING_EFFORT_ENV = "AGENT_PBX_TUI_CODEX_REASONING_EFFORT"
+CODEX_REASONING_SUMMARY_ENV = "AGENT_PBX_TUI_CODEX_REASONING_SUMMARY"
 CODEX_VERBOSITY_ENV = "AGENT_PBX_TUI_CODEX_VERBOSITY"
 CODEX_SERVICE_TIER_ENV = "AGENT_PBX_TUI_CODEX_SERVICE_TIER"
 
@@ -78,6 +79,7 @@ def codex_model_config_overrides(
     *,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    reasoning_summary: str | None = None,
     verbosity: str | None = None,
     service_tier: str | None = None,
 ) -> list[str]:
@@ -86,6 +88,8 @@ def codex_model_config_overrides(
         overrides.append(f"model={json.dumps(cleaned_model)}")
     if cleaned_reasoning := _clean_optional_value(reasoning_effort):
         overrides.append(f"model_reasoning_effort={json.dumps(cleaned_reasoning)}")
+    if cleaned_summary := _clean_optional_value(reasoning_summary):
+        overrides.append(f"model_reasoning_summary={json.dumps(cleaned_summary)}")
     if cleaned_verbosity := _clean_optional_value(verbosity):
         overrides.append(f"model_verbosity={json.dumps(cleaned_verbosity)}")
     if cleaned_service_tier := _clean_optional_value(service_tier):

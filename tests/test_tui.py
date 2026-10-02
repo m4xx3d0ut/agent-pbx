@@ -13,6 +13,7 @@ from agent_pbx import tmux as tmux_support
 from agent_pbx.codex_cli import (
     CODEX_MODEL_ENV,
     CODEX_REASONING_EFFORT_ENV,
+    CODEX_REASONING_SUMMARY_ENV,
     CODEX_SERVICE_TIER_ENV,
     CODEX_VERBOSITY_ENV,
     CodexCliPosture,
@@ -20,6 +21,9 @@ from agent_pbx.codex_cli import (
 from agent_pbx.codex_sessions import CodexTranscriptBoundary, CodexTranscriptResult
 from agent_pbx.tui import (
     AgentPBXTUI,
+    ClipboardCandidate,
+    ClipboardSnapshot,
+    CodexCopyCapture,
     CustomSlashCommand,
     EditorCloseConfirmScreen,
     OperatorHistoryScreen,
@@ -36,6 +40,8 @@ from agent_pbx.tui import (
     agent_pbx_mcp_url,
     built_in_palette_command_names,
     caller_agent_config_overrides,
+    clipboard_reader_environment,
+    contains_codex_copy_picker,
     codex_mcp_add_command,
     codex_model_preset_for,
     review_operator_config_overrides,
@@ -131,6 +137,107 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
 
 def mouse_down(widget, *, button: int = 1) -> MouseDown:
     return MouseDown(widget, 0, 0, 0, 0, button, False, False, False)
+
+
+def copy_test_pane() -> tmux_support.TmuxPane:
+    return tmux_support.TmuxPane(
+        "agent-pbx",
+        "0",
+        "1",
+        "%copy",
+        True,
+        "codex",
+        "agent-1",
+        str(Path.cwd()),
+        100,
+        30,
+        200,
+        window_name="agent-1",
+    )
+
+
+def test_tui_pane_clipboard_reader_environment_excludes_process_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("AGENT_PBX_TOKEN", "private-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "private-key")
+
+    environment = clipboard_reader_environment(
+        {"DISPLAY": ":1", "XDG_RUNTIME_DIR": "/run/user/1000"}
+    )
+
+    assert environment is not None
+    assert environment["PATH"] == "/usr/bin"
+    assert environment["DISPLAY"] == ":1"
+    assert environment["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    assert "AGENT_PBX_TOKEN" not in environment
+    assert "OPENAI_API_KEY" not in environment
+
+
+def install_direct_copy_stubs(
+    app: AgentPBXTUI,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    text: str,
+    source: str = "tmux buffer",
+    session_id: str = "session-1",
+) -> list[tuple[str, str]]:
+    """Install a pane-scoped native /copy transaction for TUI tests."""
+    pane = copy_test_pane()
+    sent: list[tuple[str, str]] = []
+
+    async def fake_resolve(
+        agent_id: str,
+        *,
+        status: Static | None,
+    ) -> tmux_support.TmuxPane:
+        assert agent_id == "agent-1"
+        return pane
+
+    async def fake_dismiss(_: tmux_support.TmuxPane) -> bool:
+        return True
+
+    async def fake_snapshot(_: tmux_support.TmuxPane) -> ClipboardSnapshot:
+        return ClipboardSnapshot(
+            values={},
+            pane_environment={},
+            tmux_transport=tmux_support.TmuxClipboardTransport(False),
+        )
+
+    async def fake_await(
+        observed_pane: tmux_support.TmuxPane,
+        _: ClipboardSnapshot,
+    ) -> tuple[ClipboardCandidate, str | None]:
+        assert observed_pane == pane
+        return ClipboardCandidate(source, text), "idle Codex pane"
+
+    async def fake_transcript(
+        agent_id: str,
+        *,
+        after_boundary: CodexTranscriptBoundary | None = None,
+    ) -> CodexTranscriptResult:
+        assert agent_id == "agent-1"
+        assert after_boundary is None
+        return CodexTranscriptResult(
+            text=text,
+            session_id=session_id,
+            path=Path("/tmp/rollout-session.jsonl"),
+            phase="final_answer",
+            line_index=7,
+            mtime=1_790_000_000.0,
+        )
+
+    def fake_send_literal_keys(pane_id: str, command: str, **_: object) -> None:
+        sent.append((pane_id, command))
+
+    app.resolve_tmux_send_pane = fake_resolve  # type: ignore[method-assign]
+    app.dismiss_codex_copy_selector = fake_dismiss  # type: ignore[method-assign]
+    app.copy_clipboard_snapshot_for_pane = fake_snapshot  # type: ignore[method-assign]
+    app.await_codex_copy_candidate = fake_await  # type: ignore[method-assign]
+    app.copy_codex_transcript_response_text = fake_transcript  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "send_literal_keys", fake_send_literal_keys)
+    return sent
 
 
 def test_tui_constructs() -> None:
@@ -6780,6 +6887,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/joplin rename",
         "/joplin delete",
         "/joplin copy",
+        "/joplin copy force",
         "/joplin copy report",
         "/joplin copy mode copy-first",
         "/joplin copy mode transcript-first",
@@ -7368,6 +7476,29 @@ async def test_tui_follow_up_exact_joplin_copy_report_executes_locally() -> None
     assert message.text == ""
 
 
+async def test_tui_follow_up_exact_joplin_copy_force_executes_locally() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_joplin_action_for_agent(agent_id: str, action: str) -> None:
+        calls.append((agent_id, action))
+
+    app.joplin_action_for_agent = fake_joplin_action_for_agent  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.joplin_configured = True
+        app.selected_agent_id = "agent-1"
+        app.query_one("#agent-id", Input).value = "agent-1"
+        message = app.query_one("#message", TextArea)
+        message.text = "/joplin copy force"
+        await app.send_input()
+        await pilot.pause()
+
+    assert calls == [("agent-1", "copy-force")]
+    assert message.text == ""
+
+
 async def test_tui_follow_up_joplin_action_uses_input_agent_not_cursor() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     calls: list[tuple[str, str]] = []
@@ -7717,15 +7848,8 @@ async def test_tui_joplin_copy_tmux_response_uses_codex_copy_clipboard(
     app.tmux_features_available = True
     app.tmux_direct_enabled = True
     posts: list[dict[str, object]] = []
-    sent: list[tuple[str, str]] = []
     captures: list[str] = []
     loaded: list[str] = []
-    clipboard_reads = iter(
-        [
-            ("old clipboard", "fake-clipboard"),
-            ("Codex response markdown", "fake-clipboard"),
-        ]
-    )
 
     class Response:
         def __init__(self, payload: object) -> None:
@@ -7742,10 +7866,6 @@ async def test_tui_joplin_copy_tmux_response_uses_codex_copy_clipboard(
             posts.append({"path": path, **kwargs})
             return Response({"id": "note-1"})
 
-    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
-        sent.append((agent_id, message))
-        return True
-
     async def fake_ensure_joplin_available() -> bool:
         return True
 
@@ -7755,15 +7875,15 @@ async def test_tui_joplin_copy_tmux_response_uses_codex_copy_clipboard(
     async def fake_load_tmux_capture(agent_id: str) -> None:
         captures.append(agent_id)
 
-    monkeypatch.setattr(
-        "agent_pbx.tui.read_clipboard_text",
-        lambda: next(clipboard_reads),
-    )
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
-    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
     app.ensure_joplin_available = fake_ensure_joplin_available  # type: ignore[method-assign]
     app.load_joplin_notes = fake_load_joplin_notes  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    sent = install_direct_copy_stubs(
+        app,
+        monkeypatch,
+        text="Codex response markdown",
+    )
 
     async with app.run_test():
         app.joplin_configured = True
@@ -7774,7 +7894,7 @@ async def test_tui_joplin_copy_tmux_response_uses_codex_copy_clipboard(
         ]
         await app.copy_latest_to_joplin("agent-1")
 
-    assert sent == [("agent-1", "/copy")]
+    assert sent == [("%copy", "/copy")]
     assert captures == ["agent-1"]
     assert loaded == ["agent-1"]
     assert posts[0]["path"] == "/v1/agents/agent-1/joplin/copy"
@@ -7783,6 +7903,8 @@ async def test_tui_joplin_copy_tmux_response_uses_codex_copy_clipboard(
     assert payload["title"] == "Codex Response - last useful prompt"
     assert "## Prompt" in str(payload["body"])
     assert "last useful prompt" in str(payload["body"])
+    assert "## Capture" in str(payload["body"])
+    assert "Codex /copy via tmux buffer" in str(payload["body"])
     assert "## Response" in str(payload["body"])
     assert "Codex response markdown" in str(payload["body"])
 
@@ -7794,13 +7916,6 @@ async def test_tui_joplin_copy_tmux_response_prefers_live_tmux_copy(
     app.tmux_features_available = True
     app.tmux_direct_enabled = True
     posts: list[dict[str, object]] = []
-    sent: list[tuple[str, str]] = []
-    clipboard_reads = iter(
-        [
-            ("old clipboard", "fake-clipboard"),
-            ("Live tmux response markdown", "fake-clipboard"),
-        ]
-    )
 
     class Response:
         def __init__(self, payload: object) -> None:
@@ -7817,10 +7932,6 @@ async def test_tui_joplin_copy_tmux_response_prefers_live_tmux_copy(
             posts.append({"path": path, **kwargs})
             return Response({"id": "note-1"})
 
-    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
-        sent.append((agent_id, message))
-        return True
-
     async def fake_ensure_joplin_available() -> bool:
         return True
 
@@ -7830,15 +7941,16 @@ async def test_tui_joplin_copy_tmux_response_prefers_live_tmux_copy(
     async def fake_load_tmux_capture(agent_id: str) -> None:
         return None
 
-    monkeypatch.setattr(
-        "agent_pbx.tui.read_clipboard_text",
-        lambda: next(clipboard_reads),
-    )
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
-    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
     app.ensure_joplin_available = fake_ensure_joplin_available  # type: ignore[method-assign]
     app.load_joplin_notes = fake_load_joplin_notes  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    sent = install_direct_copy_stubs(
+        app,
+        monkeypatch,
+        text="Live tmux response markdown",
+        source="pane desktop clipboard: wl-paste",
+    )
 
     async with app.run_test():
         app.joplin_configured = True
@@ -7851,11 +7963,113 @@ async def test_tui_joplin_copy_tmux_response_prefers_live_tmux_copy(
         app.sent_message_history_by_agent["agent-1"] = ["last useful prompt"]
         await app.copy_latest_to_joplin("agent-1")
 
-    assert sent == [("agent-1", "/copy")]
+    assert sent == [("%copy", "/copy")]
     assert posts[0]["path"] == "/v1/agents/agent-1/joplin/copy"
     payload = posts[0]["json"]
     assert isinstance(payload, dict)
     assert "Live tmux response markdown" in str(payload["body"])
+
+
+async def test_tui_joplin_copy_replaces_stale_direct_buffer_with_transcript(
+    tmp_path: Path,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.agents["agent-1"] = {
+        "agent_id": "agent-1",
+        "project": "demo",
+        "metadata": {"codex_session_id": "session-1"},
+    }
+    notices: list[str] = []
+    transcript = CodexTranscriptResult(
+        text="Current transcript response",
+        session_id="session-1",
+        path=tmp_path / "rollout-session-1.jsonl",
+        phase="final_answer",
+        line_index=9,
+        mtime=1_790_000_000.0,
+    )
+
+    async def fake_transcript(
+        agent_id: str,
+        *,
+        after_boundary: CodexTranscriptBoundary | None = None,
+    ) -> CodexTranscriptResult:
+        assert agent_id == "agent-1"
+        assert after_boundary is None
+        return transcript
+
+    app.copy_codex_transcript_response_text = fake_transcript  # type: ignore[method-assign]
+    app.notify = lambda message, **_: notices.append(str(message))  # type: ignore[method-assign]
+
+    capture = await app.validate_direct_codex_copy(
+        "agent-1",
+        ClipboardCandidate("tmux buffer", "Stale prior response"),
+        "idle Codex pane",
+    )
+
+    assert capture.text == "Current transcript response"
+    assert "replaced unmatched /copy output" in capture.source
+    assert any("did not match" in notice for notice in notices)
+
+
+async def test_tui_joplin_copy_duplicate_guard_and_force_create_intentional_note() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    capture = CodexCopyCapture(
+        text="Latest response",
+        source="Codex /copy via tmux buffer",
+        session_id="session-1",
+    )
+    app.joplin_copy_fingerprints_by_agent["agent-1"] = {
+        "digest": capture.digest,
+        "session_id": "session-1",
+        "note_id": "prior-note",
+    }
+    posts: list[dict[str, object]] = []
+    notices: list[str] = []
+    loads: list[str] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"id": "forced-note"}
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            return Response()
+
+    async def fake_ensure() -> bool:
+        return True
+
+    async def fake_copy(agent_id: str) -> tuple[str, str]:
+        assert agent_id == "agent-1"
+        app.last_codex_copy_capture_by_agent[agent_id] = capture
+        return capture.text, capture.source
+
+    async def fake_load(agent_id: str) -> None:
+        loads.append(agent_id)
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.ensure_joplin_available = fake_ensure  # type: ignore[method-assign]
+    app.copy_tmux_response_text = fake_copy  # type: ignore[method-assign]
+    app.load_joplin_notes = fake_load  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load  # type: ignore[method-assign]
+    app.notify = lambda message, **_: notices.append(str(message))  # type: ignore[method-assign]
+
+    await app.copy_tmux_response_to_joplin("agent-1")
+
+    assert posts == []
+    assert app.selected_joplin_note_for_agent("agent-1") == "prior-note"
+    assert any("copy force" in notice for notice in notices)
+
+    await app.copy_tmux_response_to_joplin("agent-1", force=True)
+
+    assert posts[0]["path"] == "/v1/agents/agent-1/joplin/copy"
+    assert app.selected_joplin_note_for_agent("agent-1") == "forced-note"
+    assert app.joplin_copy_fingerprints_by_agent["agent-1"]["note_id"] == "forced-note"
+    assert loads == ["agent-1", "agent-1", "agent-1"]
 
 
 async def test_tui_joplin_copy_falls_back_to_transcript_before_tmux_capture(
@@ -7924,6 +8138,8 @@ async def test_tui_joplin_copy_default_tries_copy_before_transcript(
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     assert app.joplin_copy_mode == JOPLIN_COPY_MODE_COPY_FIRST
     sent: list[tuple[str, str]] = []
+    captured: list[str] = []
+    pane = copy_test_pane()
     transcript_result = CodexTranscriptResult(
         text="Transcript response markdown",
         session_id="session-1",
@@ -7933,16 +8149,8 @@ async def test_tui_joplin_copy_default_tries_copy_before_transcript(
         mtime=1_790_000_000.0,
     )
 
-    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
-        sent.append((agent_id, message))
-        return True
-
-    async def fake_read_copied_tmux_response(
-        previous_clipboard: str,
-    ) -> tuple[str, str]:
-        raise RuntimeError("clipboard unavailable")
-
     async def fake_capture_tmux_display_for_agent(agent_id: str) -> str | None:
+        captured.append(agent_id)
         return "visible fallback"
 
     async def fake_copy_codex_transcript_response_text(
@@ -7952,20 +8160,47 @@ async def test_tui_joplin_copy_default_tries_copy_before_transcript(
     ) -> CodexTranscriptResult | None:
         return transcript_result
 
-    monkeypatch.setattr(
-        "agent_pbx.tui.read_clipboard_text",
-        lambda: ("old clipboard", "fake-clipboard"),
-    )
-    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
-    app.read_copied_tmux_response = fake_read_copied_tmux_response  # type: ignore[method-assign]
+    async def fake_resolve(
+        agent_id: str,
+        *,
+        status: Static | None,
+    ) -> tmux_support.TmuxPane:
+        assert agent_id == "agent-1"
+        return pane
+
+    async def fake_dismiss(_: tmux_support.TmuxPane) -> bool:
+        return True
+
+    async def fake_snapshot(_: tmux_support.TmuxPane) -> ClipboardSnapshot:
+        return ClipboardSnapshot(
+            values={},
+            pane_environment={},
+            tmux_transport=tmux_support.TmuxClipboardTransport(False),
+        )
+
+    async def fake_await(
+        _: tmux_support.TmuxPane,
+        __: ClipboardSnapshot,
+    ) -> tuple[ClipboardCandidate, str | None]:
+        raise RuntimeError("clipboard unavailable")
+
+    def fake_send_literal_keys(pane_id: str, command: str, **_: object) -> None:
+        sent.append((pane_id, command))
+
+    app.resolve_tmux_send_pane = fake_resolve  # type: ignore[method-assign]
+    app.dismiss_codex_copy_selector = fake_dismiss  # type: ignore[method-assign]
+    app.copy_clipboard_snapshot_for_pane = fake_snapshot  # type: ignore[method-assign]
+    app.await_codex_copy_candidate = fake_await  # type: ignore[method-assign]
     app.capture_tmux_display_for_agent = fake_capture_tmux_display_for_agent  # type: ignore[method-assign]
     app.copy_codex_transcript_response_text = fake_copy_codex_transcript_response_text  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "send_literal_keys", fake_send_literal_keys)
 
     copied = await app.copy_tmux_response_text("agent-1")
 
     assert copied is not None
     assert copied[0] == "Transcript response markdown"
-    assert sent == [("agent-1", "/copy")]
+    assert sent == [("%copy", "/copy")]
+    assert captured == []
 
 
 def test_tui_detects_codex_copy_selector() -> None:
@@ -7980,187 +8215,247 @@ def test_tui_detects_codex_copy_selector() -> None:
         "  1. Latest response\n"
         "  2. Current conversation\n"
     )
+    assert contains_codex_copy_selector(
+        "Select content to copy\n\n"
+        "› 1. Entire answer\n"
+        "  2. Code block\n\n"
+        "↑↓ navigate · enter to select · esc to cancel"
+    )
+    assert contains_codex_copy_selector(
+        "Copy response\n\n"
+        "  1) Response\n"
+        "  2) Reasoning summary\n\n"
+        "arrow keys to select · enter to select"
+    )
     assert not contains_codex_copy_selector("1. unrelated\n2. still unrelated")
+    assert not contains_codex_copy_selector(
+        "Please choose one:\n1. Restart the worker\n2. Keep investigating\n"
+    )
+    whole_prompt_picker = (
+        "Copy to clipboard\n\n"
+        "› 1. Whole prompt\n"
+        "  2. Latest response\n\n"
+        "↑↓ navigate · enter to select · esc to cancel"
+    )
+    assert contains_codex_copy_picker(whole_prompt_picker)
+    assert not contains_codex_copy_selector(whole_prompt_picker)
 
 
 async def test_tui_joplin_copy_selects_whole_response_from_interactive_picker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
-    sent: list[tuple[str, str]] = []
+    pane = copy_test_pane()
     keys: list[tuple[str, str]] = []
-    captures = iter([
+    raw_captures = iter([
         "Copy to clipboard\n\n"
         "› 1. Whole response  Response preview\n"
         "  2. sh code         echo current\n\n"
         "  enter select · esc back",
-        "Visible fallback after Whole response selection",
+        "Codex response after the picker closed",
     ])
 
-    async def fake_copy_codex_transcript_response_text(
-        agent_id: str,
+    async def fake_capture_tmux_raw_for_pane(pane_id: str) -> str:
+        assert pane_id == "%copy"
+        return next(raw_captures)
+
+    async def fake_candidates(
+        _: tmux_support.TmuxPane,
         *,
-        after_boundary: CodexTranscriptBoundary | None = None,
-    ) -> CodexTranscriptResult | None:
-        return None
+        pane_environment: object,
+        tmux_transport: object,
+    ) -> tuple[ClipboardCandidate, ...]:
+        return (ClipboardCandidate("tmux buffer", "Whole response markdown"),)
 
-    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
-        sent.append((agent_id, message))
+    async def fake_send_key_to_tmux_pane(pane_id: str, key: str) -> bool:
+        keys.append((pane_id, key))
         return True
 
-    async def fake_read_copied_tmux_response(
-        previous_clipboard: str,
-    ) -> tuple[str, str]:
-        raise RuntimeError("clipboard unavailable")
+    monkeypatch.setattr("agent_pbx.tui.CLIPBOARD_COPY_POLL_SECONDS", 0.0)
+    app.capture_tmux_raw_for_pane = fake_capture_tmux_raw_for_pane  # type: ignore[method-assign]
+    app.copy_clipboard_candidates_for_pane = fake_candidates  # type: ignore[method-assign]
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
 
-    async def fake_capture_tmux_display_for_agent(agent_id: str) -> str | None:
-        return next(captures)
+    candidate, raw = await app.await_codex_copy_candidate(
+        pane,
+        ClipboardSnapshot(
+            values={"tmux buffer": "old response"},
+            pane_environment={},
+            tmux_transport=tmux_support.TmuxClipboardTransport(True),
+        ),
+    )
 
-    async def fake_send_key_to_tmux(agent_id: str, key: str) -> bool:
-        keys.append((agent_id, key))
+    assert candidate == ClipboardCandidate("tmux buffer", "Whole response markdown")
+    assert raw == "Codex response after the picker closed"
+    assert keys == [("%copy", "1")]
+
+
+async def test_tui_joplin_copy_dismisses_whole_prompt_picker_without_selecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    pane = copy_test_pane()
+    keys: list[tuple[str, str]] = []
+    raw_captures = iter(
+        [
+            "Copy to clipboard\n\n"
+            "› 1. Whole prompt\n"
+            "  2. Latest response\n\n"
+            "↑↓ navigate · enter to select · esc to cancel",
+            "Copy to clipboard\n\n"
+            "› 1. Whole prompt\n"
+            "  2. Latest response\n\n"
+            "↑↓ navigate · enter to select · esc to cancel",
+            "normal Codex output after cancellation",
+        ]
+    )
+
+    async def fake_capture_tmux_raw_for_pane(pane_id: str) -> str:
+        assert pane_id == "%copy"
+        return next(raw_captures)
+
+    async def fake_send_key_to_tmux_pane(pane_id: str, key: str) -> bool:
+        keys.append((pane_id, key))
         return True
 
-    monkeypatch.setattr(
-        "agent_pbx.tui.read_clipboard_text",
-        lambda: ("old clipboard", "fake-clipboard"),
-    )
-    app.copy_codex_transcript_response_text = fake_copy_codex_transcript_response_text  # type: ignore[method-assign]
-    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
-    app.read_copied_tmux_response = fake_read_copied_tmux_response  # type: ignore[method-assign]
-    app.capture_tmux_display_for_agent = fake_capture_tmux_display_for_agent  # type: ignore[method-assign]
-    app.send_key_to_tmux = fake_send_key_to_tmux  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CLIPBOARD_COPY_POLL_SECONDS", 0.0)
+    app.capture_tmux_raw_for_pane = fake_capture_tmux_raw_for_pane  # type: ignore[method-assign]
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
 
-    async with app.run_test():
-        copied = await app.copy_tmux_response_text("agent-1")
+    with pytest.raises(
+        RuntimeError,
+        match="did not offer Whole response as its first option",
+    ):
+        await app.await_codex_copy_candidate(
+            pane,
+            ClipboardSnapshot(
+                values={},
+                pane_environment={},
+                tmux_transport=tmux_support.TmuxClipboardTransport(False),
+            ),
+        )
 
-    assert copied == (
-        "Visible fallback after Whole response selection",
-        "tmux capture fallback",
-    )
-    assert sent == [("agent-1", "/copy")]
-    assert keys == [("agent-1", "1")]
+    assert keys == [("%copy", "Escape")]
 
 
 async def test_tui_joplin_copy_selects_picker_while_clipboard_waits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
-    sent: list[tuple[str, str]] = []
+    pane = copy_test_pane()
     keys: list[tuple[str, str]] = []
-    read_calls = 0
-    captures = iter(
+    candidate_reads = 0
+    raw_captures = iter(
         [
             "Copy to clipboard\n\n"
             "› 1. Whole response  Response preview\n"
             "  2. sh code         echo current\n\n"
             "  enter select · esc back",
+            "normal Codex output",
         ]
     )
 
-    async def fake_copy_codex_transcript_response_text(
-        agent_id: str,
+    async def fake_capture_tmux_raw_for_pane(pane_id: str) -> str:
+        assert pane_id == "%copy"
+        return next(raw_captures)
+
+    async def fake_candidates(
+        _: tmux_support.TmuxPane,
         *,
-        after_boundary: CodexTranscriptBoundary | None = None,
-    ) -> CodexTranscriptResult | None:
-        return None
-
-    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
-        sent.append((agent_id, message))
-        return True
-
-    async def fake_read_copied_tmux_response(
-        previous_clipboard: str,
-    ) -> tuple[str, str]:
-        nonlocal read_calls
-        read_calls += 1
-        if read_calls == 1:
-            await asyncio.sleep(60)
-            raise AssertionError("selector detection should cancel clipboard waiting")
-        return "Whole response markdown", "fake-clipboard"
-
-    async def fake_capture_tmux_display_for_agent(agent_id: str) -> str | None:
-        return next(captures)
-
-    async def fake_send_key_to_tmux(agent_id: str, key: str) -> bool:
-        keys.append((agent_id, key))
-        return True
-
-    monkeypatch.setattr(
-        "agent_pbx.tui.read_clipboard_text",
-        lambda: ("old clipboard", "fake-clipboard"),
-    )
-    app.copy_codex_transcript_response_text = fake_copy_codex_transcript_response_text  # type: ignore[method-assign]
-    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
-    app.read_copied_tmux_response = fake_read_copied_tmux_response  # type: ignore[method-assign]
-    app.capture_tmux_display_for_agent = fake_capture_tmux_display_for_agent  # type: ignore[method-assign]
-    app.send_key_to_tmux = fake_send_key_to_tmux  # type: ignore[method-assign]
-
-    async with app.run_test():
-        copied = await asyncio.wait_for(
-            app.copy_tmux_response_text("agent-1"),
-            timeout=1.0,
+        pane_environment: object,
+        tmux_transport: object,
+    ) -> tuple[ClipboardCandidate, ...]:
+        nonlocal candidate_reads
+        candidate_reads += 1
+        return (
+            ClipboardCandidate("host clipboard: wl-paste", "stale response"),
+            ClipboardCandidate("tmux buffer", "Whole response markdown"),
         )
 
-    assert copied == ("Whole response markdown", "fake-clipboard")
-    assert sent == [("agent-1", "/copy")]
-    assert keys == [("agent-1", "1")]
-    assert read_calls == 2
+    async def fake_send_key_to_tmux_pane(pane_id: str, key: str) -> bool:
+        keys.append((pane_id, key))
+        return True
+
+    monkeypatch.setattr("agent_pbx.tui.CLIPBOARD_COPY_POLL_SECONDS", 0.0)
+    app.capture_tmux_raw_for_pane = fake_capture_tmux_raw_for_pane  # type: ignore[method-assign]
+    app.copy_clipboard_candidates_for_pane = fake_candidates  # type: ignore[method-assign]
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+
+    candidate, _raw = await app.await_codex_copy_candidate(
+        pane,
+        ClipboardSnapshot(
+            values={
+                "host clipboard: wl-paste": "stale response",
+                "tmux buffer": "old response",
+            },
+            pane_environment={},
+            tmux_transport=tmux_support.TmuxClipboardTransport(True),
+        ),
+    )
+
+    assert candidate == ClipboardCandidate("tmux buffer", "Whole response markdown")
+    assert keys == [("%copy", "1")]
+    assert candidate_reads == 1
 
 
 async def test_tui_joplin_copy_waits_for_late_native_picker_after_clipboard_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
-    sent: list[tuple[str, str]] = []
+    pane = copy_test_pane()
     keys: list[tuple[str, str]] = []
-    read_previous_values: list[str] = []
-    clipboard_values = iter(
+    picker_seen = False
+    raw_captures = iter(
         [
-            ("old clipboard", "fake-clipboard"),
-            ("early clipboard", "fake-clipboard"),
+            "normal Codex output before the /copy picker",
+            (
+                "Copy to clipboard\n\n"
+                "› 1. Whole response  Response preview\n"
+                "  2. sh code         echo current\n\n"
+                "  enter select · esc back"
+            ),
+            "normal Codex output after selection",
         ]
     )
 
-    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
-        sent.append((agent_id, message))
+    async def fake_capture_tmux_raw_for_pane(pane_id: str) -> str:
+        nonlocal picker_seen
+        assert pane_id == "%copy"
+        value = next(raw_captures)
+        picker_seen = picker_seen or contains_codex_copy_selector(value)
+        return value
+
+    async def fake_candidates(
+        _: tmux_support.TmuxPane,
+        *,
+        pane_environment: object,
+        tmux_transport: object,
+    ) -> tuple[ClipboardCandidate, ...]:
+        assert picker_seen, "clipboard candidates must wait for the picker grace window"
+        return (ClipboardCandidate("tmux buffer", "Whole response markdown"),)
+
+    async def fake_send_key_to_tmux_pane(pane_id: str, key: str) -> bool:
+        keys.append((pane_id, key))
         return True
 
-    async def fake_read_copied_tmux_response(
-        previous_clipboard: str,
-    ) -> tuple[str, str]:
-        read_previous_values.append(previous_clipboard)
-        if len(read_previous_values) == 1:
-            return "early clipboard", "fake-clipboard"
-        return "Whole response markdown", "fake-clipboard"
+    monkeypatch.setattr("agent_pbx.tui.CLIPBOARD_COPY_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_COPY_SELECTOR_SETTLE_SECONDS", 0.02)
+    monkeypatch.setattr("agent_pbx.tui.CLIPBOARD_COPY_POLL_SECONDS", 0.001)
+    app.capture_tmux_raw_for_pane = fake_capture_tmux_raw_for_pane  # type: ignore[method-assign]
+    app.copy_clipboard_candidates_for_pane = fake_candidates  # type: ignore[method-assign]
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
 
-    async def fake_capture_tmux_display_for_agent(agent_id: str) -> str | None:
-        await asyncio.sleep(0.01)
-        return (
-            "Copy to clipboard\n\n"
-            "› 1. Whole response  Response preview\n"
-            "  2. sh code         echo current\n\n"
-            "  enter select · esc back"
-        )
-
-    async def fake_send_key_to_tmux(agent_id: str, key: str) -> bool:
-        keys.append((agent_id, key))
-        return True
-
-    monkeypatch.setattr(
-        "agent_pbx.tui.read_clipboard_text",
-        lambda: next(clipboard_values),
+    candidate, _raw = await app.await_codex_copy_candidate(
+        pane,
+        ClipboardSnapshot(
+            values={"tmux buffer": "old response"},
+            pane_environment={},
+            tmux_transport=tmux_support.TmuxClipboardTransport(True),
+        ),
     )
-    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
-    app.read_copied_tmux_response = fake_read_copied_tmux_response  # type: ignore[method-assign]
-    app.capture_tmux_display_for_agent = fake_capture_tmux_display_for_agent  # type: ignore[method-assign]
-    app.send_key_to_tmux = fake_send_key_to_tmux  # type: ignore[method-assign]
 
-    copied = await app.copy_tmux_response_text("agent-1")
-
-    assert copied == ("Whole response markdown", "fake-clipboard")
-    assert sent == [("agent-1", "/copy")]
-    assert keys == [("agent-1", "1")]
-    assert read_previous_values == ["old clipboard", "early clipboard"]
+    assert candidate == ClipboardCandidate("tmux buffer", "Whole response markdown")
+    assert keys == [("%copy", "1")]
 
 
 async def test_tui_joplin_transcript_read_error_falls_back_to_tmux(
@@ -8168,17 +8463,38 @@ async def test_tui_joplin_transcript_read_error_falls_back_to_tmux(
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     app.joplin_copy_mode = JOPLIN_COPY_MODE_TRANSCRIPT_FIRST
+    pane = copy_test_pane()
+    sent: list[tuple[str, str]] = []
 
-    async def fake_send_keys_to_tmux(agent_id: str, message: str) -> bool:
+    async def fake_resolve(
+        agent_id: str,
+        *,
+        status: Static | None,
+    ) -> tmux_support.TmuxPane:
+        assert agent_id == "agent-1"
+        return pane
+
+    async def fake_dismiss(_: tmux_support.TmuxPane) -> bool:
         return True
 
-    async def fake_read_copied_tmux_response(
-        previous_clipboard: str,
-    ) -> tuple[str, str]:
+    async def fake_snapshot(_: tmux_support.TmuxPane) -> ClipboardSnapshot:
+        return ClipboardSnapshot(
+            values={},
+            pane_environment={},
+            tmux_transport=tmux_support.TmuxClipboardTransport(False),
+        )
+
+    async def fake_await(
+        _: tmux_support.TmuxPane,
+        __: ClipboardSnapshot,
+    ) -> tuple[ClipboardCandidate, str | None]:
         raise RuntimeError("clipboard unavailable")
 
     async def fake_capture_tmux_display_for_agent(agent_id: str) -> str | None:
         return "visible tmux fallback"
+
+    def fake_send_literal_keys(pane_id: str, command: str, **_: object) -> None:
+        sent.append((pane_id, command))
 
     def raise_decode_error(*args: object, **kwargs: object) -> CodexTranscriptResult:
         raise UnicodeDecodeError("utf-8", b"\\xff", 0, 1, "invalid byte")
@@ -8187,22 +8503,22 @@ async def test_tui_joplin_transcript_read_error_falls_back_to_tmux(
         "agent_pbx.tui.latest_assistant_transcript_for_session",
         raise_decode_error,
     )
-    monkeypatch.setattr(
-        "agent_pbx.tui.read_clipboard_text",
-        lambda: ("old clipboard", "fake-clipboard"),
-    )
     app.agents["agent-1"] = {
         "agent_id": "agent-1",
         "project": "demo",
         "metadata": {"codex_session_id": "session-1"},
     }
-    app.send_keys_to_tmux = fake_send_keys_to_tmux  # type: ignore[method-assign]
-    app.read_copied_tmux_response = fake_read_copied_tmux_response  # type: ignore[method-assign]
+    app.resolve_tmux_send_pane = fake_resolve  # type: ignore[method-assign]
+    app.dismiss_codex_copy_selector = fake_dismiss  # type: ignore[method-assign]
+    app.copy_clipboard_snapshot_for_pane = fake_snapshot  # type: ignore[method-assign]
+    app.await_codex_copy_candidate = fake_await  # type: ignore[method-assign]
     app.capture_tmux_display_for_agent = fake_capture_tmux_display_for_agent  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "send_literal_keys", fake_send_literal_keys)
 
     copied = await app.copy_tmux_response_text("agent-1")
 
     assert copied == ("visible tmux fallback", "tmux capture fallback")
+    assert sent == [("%copy", "/copy")]
 
 
 async def test_tui_tmux_copy_rejects_unchanged_clipboard(
@@ -10027,8 +10343,7 @@ async def test_tui_operator_history_modal_resumes_highlighted_candidate() -> Non
 async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     app.tmux_features_available = True
-    launches: list[dict[str, object]] = []
-    quit_calls: list[str] = []
+    respawns: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
     captures: list[str] = []
 
@@ -10075,17 +10390,8 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
             )
         ]
 
-    def fake_launch_pane(**kwargs: object) -> str:
-        launches.append(kwargs)
-        return "%11"
-
-    def fake_quit_pane(target: str, **_: object) -> bool:
-        quit_calls.append(target)
-        return True
-
-    async def fake_tmux_pane_start_command(pane_id: str) -> str:
-        assert pane_id == "%10"
-        return "codex --search resume session-1"
+    def fake_respawn_pane(target: str, **kwargs: object) -> None:
+        respawns.append({"target": target, **kwargs})
 
     async def fake_refresh_agents() -> None:
         return None
@@ -10097,7 +10403,6 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
         captures.append(agent_id)
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
-    app.tmux_pane_start_command = fake_tmux_pane_start_command  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
@@ -10106,9 +10411,13 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_ATTEMPTS", 1)
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
-    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%11")
-    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%10")
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_start_command",
+        lambda target: "codex --search resume session-1",
+    )
 
     async with app.run_test():
         app.agents = {
@@ -10129,10 +10438,8 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
         app.tmux_direct_agent_modes["agent-1"] = True
         await app.restart_tmux_codex_session("agent-1")
 
-    assert quit_calls == ["%10"]
-    assert launches[0]["session_name"] == "agent-pbx"
-    assert launches[0]["window_name"] == "agent-1"
-    launch_argv = shlex.split(str(launches[0]["command"]))
+    assert respawns[0]["target"] == "%10"
+    launch_argv = shlex.split(str(respawns[0]["command"]))
     assert launch_argv == [
         "codex",
         "--search",
@@ -10141,11 +10448,12 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
         str(Path.cwd()),
         "session-1",
     ]
-    assert app.tmux_agent_targets["agent-1"] == "%11"
+    assert app.tmux_agent_targets["agent-1"] == "%10"
     assert posts[0]["path"] == "/v1/agents/register"
     metadata = posts[0]["json"]["metadata"]  # type: ignore[index]
-    assert metadata["tmux_pane_id"] == "%11"
+    assert metadata["tmux_pane_id"] == "%10"
     assert metadata["codex_command"] == "codex --search"
+    assert metadata["last_tmux_restart_mode"] == "in_place"
     assert captures == ["agent-1"]
 
 
@@ -10176,13 +10484,47 @@ async def test_tui_launch_restart_pane_retries_dead_replacement(
     assert launches == ["%dead", "%live"]
 
 
+async def test_tui_respawn_restart_pane_rolls_back_in_same_pane_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    respawns: list[dict[str, object]] = []
+
+    def fake_respawn(target: str, **kwargs: object) -> None:
+        respawns.append({"target": target, **kwargs})
+
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 2)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: len(respawns) >= 3)
+
+    with pytest.raises(RuntimeError, match="restored the prior command"):
+        await app.respawn_restart_pane(
+            pane_id="%10",
+            command="codex resume new-session",
+            label="agent-1",
+            cwd="/tmp/project",
+            env={"AGENT_PBX_RESUME_CODEX_SESSION_ID": "new-session"},
+            rollback_command="codex resume prior-session",
+            rollback_cwd="/tmp/project",
+            rollback_env={"AGENT_PBX_RESUME_CODEX_SESSION_ID": "prior-session"},
+        )
+
+    assert [record["target"] for record in respawns] == ["%10", "%10", "%10"]
+    assert [record["command"] for record in respawns] == [
+        "codex resume new-session",
+        "codex resume new-session",
+        "codex resume prior-session",
+    ]
+
+
 async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_command(
     monkeypatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     app.tmux_features_available = True
-    launches: list[dict[str, object]] = []
-    quit_calls: list[str] = []
+    respawns: list[dict[str, object]] = []
     captures: list[str] = []
 
     def fake_list_panes() -> list[tmux_support.TmuxPane]:
@@ -10203,17 +10545,8 @@ async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_com
             )
         ]
 
-    def fake_launch_pane(**kwargs: object) -> str:
-        launches.append(kwargs)
-        return "%11"
-
-    def fake_quit_pane(target: str, **_: object) -> bool:
-        quit_calls.append(target)
-        return True
-
-    async def fake_tmux_pane_start_command(pane_id: str) -> str:
-        assert pane_id == "%10"
-        return "zsh"
+    def fake_respawn_pane(target: str, **kwargs: object) -> None:
+        respawns.append({"target": target, **kwargs})
 
     async def fake_refresh_agents() -> None:
         return None
@@ -10224,13 +10557,13 @@ async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_com
     async def fake_load_tmux_capture(agent_id: str) -> None:
         captures.append(agent_id)
 
-    app.tmux_pane_start_command = fake_tmux_pane_start_command  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
-    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
-    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%10")
+    monkeypatch.setattr(tmux_support, "pane_start_command", lambda target: "zsh")
 
     async with app.run_test():
         app.agents = {
@@ -10249,8 +10582,8 @@ async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_com
         app.tmux_direct_agent_modes["agent-1"] = True
         await app.restart_tmux_codex_session("agent-1")
 
-    assert quit_calls == ["%10"]
-    assert shlex.split(str(launches[0]["command"])) == [
+    assert respawns[0]["target"] == "%10"
+    assert shlex.split(str(respawns[0]["command"])) == [
         "codex",
         "resume",
         "--cd",
@@ -10294,8 +10627,7 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
         tmux_direct=True,
     )
     app.tmux_features_available = True
-    launches: list[dict[str, object]] = []
-    quit_calls: list[str] = []
+    respawns: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
     sent: list[tuple[str, str]] = []
     captures: list[str] = []
@@ -10349,13 +10681,8 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
             )
         ]
 
-    def fake_launch_pane(**kwargs: object) -> str:
-        launches.append(kwargs)
-        return "%31"
-
-    def fake_quit_pane(target: str, **_: object) -> bool:
-        quit_calls.append(target)
-        return True
+    def fake_respawn_pane(target: str, **kwargs: object) -> None:
+        respawns.append({"target": target, **kwargs})
 
     def fake_operator_session_candidates(agent_id: str) -> list[OperatorSessionCandidate]:
         assert agent_id == "operator-0"
@@ -10411,9 +10738,9 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_ATTEMPTS", 1)
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
-    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%31")
-    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%30")
+    monkeypatch.setattr(tmux_support, "pane_start_command", lambda target: "codex resume old")
 
     async with app.run_test():
         app.agents = {
@@ -10438,10 +10765,8 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
             model_preset=codex_model_preset_for("terra-max"),
         )
 
-    assert quit_calls == ["%30"]
-    assert launches[0]["session_name"] == "agent-pbx-operators"
-    assert launches[0]["window_name"] == "operator-0"
-    launch_argv = shlex.split(str(launches[0]["command"]))
+    assert respawns[0]["target"] == "%30"
+    launch_argv = shlex.split(str(respawns[0]["command"]))
     assert launch_argv[:4] == ["codex", "resume", "--cd", str(Path.cwd())]
     assert launch_argv[-1] == "current-session"
     assert "-c" in launch_argv
@@ -10449,20 +10774,24 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     assert any(item.startswith("mcp_servers.workerbee=") for item in launch_argv)
     assert 'model="gpt-5.6-terra"' in launch_argv
     assert 'model_reasoning_effort="max"' in launch_argv
+    assert 'model_reasoning_summary="detailed"' in launch_argv
     assert 'model_verbosity="high"' in launch_argv
-    assert launches[0]["env"]["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "current-session"
-    assert launches[0]["env"]["AGENT_PBX_REPORTING_AGENT_ID"] == "operator-0"
-    assert launches[0]["env"]["AGENT_PBX_CODEX_MODEL"] == "gpt-5.6-terra"
-    assert launches[0]["env"]["AGENT_PBX_CODEX_REASONING_EFFORT"] == "max"
-    assert launches[0]["env"]["AGENT_PBX_CODEX_VERBOSITY"] == "high"
+    assert respawns[0]["env"]["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "current-session"
+    assert respawns[0]["env"]["AGENT_PBX_REPORTING_AGENT_ID"] == "operator-0"
+    assert respawns[0]["env"]["AGENT_PBX_CODEX_MODEL"] == "gpt-5.6-terra"
+    assert respawns[0]["env"]["AGENT_PBX_CODEX_REASONING_EFFORT"] == "max"
+    assert respawns[0]["env"]["AGENT_PBX_CODEX_REASONING_SUMMARY"] == "detailed"
+    assert respawns[0]["env"]["AGENT_PBX_CODEX_VERBOSITY"] == "high"
     assert posts[-1]["path"] == "/v1/agents/register"
     metadata = posts[-1]["json"]["metadata"]  # type: ignore[index]
     assert metadata["last_resume_codex_session_id"] == "current-session"
+    assert metadata["last_tmux_restart_mode"] == "in_place"
     assert metadata["codex_model_preset"] == "terra-5.6-max"
+    assert metadata["codex_model_reasoning_summary"] == "detailed"
     assert metadata["codex_model_verbosity"] == "high"
-    assert sent[0][0] == "%31"
+    assert sent[0][0] == "%30"
     assert "agent_id: operator-0" in sent[0][1]
-    assert app.tmux_agent_targets["operator-0"] == "%31"
+    assert app.tmux_agent_targets["operator-0"] == "%30"
     assert captures == ["operator-0"]
 
 
@@ -10480,8 +10809,7 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
         tmux_direct=True,
     )
     app.tmux_features_available = True
-    launches: list[dict[str, object]] = []
-    quit_calls: list[str] = []
+    respawns: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
     sent: list[tuple[str, str]] = []
     captures: list[str] = []
@@ -10544,13 +10872,8 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
             )
         ]
 
-    def fake_launch_pane(**kwargs: object) -> str:
-        launches.append(kwargs)
-        return "%21"
-
-    def fake_quit_pane(target: str, **_: object) -> bool:
-        quit_calls.append(target)
-        return True
+    def fake_respawn_pane(target: str, **kwargs: object) -> None:
+        respawns.append({"target": target, **kwargs})
 
     async def fake_configure_operator_codex_mcp(**_: object) -> None:
         return None
@@ -10589,9 +10912,9 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
-    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%21")
-    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%20")
+    monkeypatch.setattr(tmux_support, "pane_start_command", lambda target: "codex resume old")
 
     async with app.run_test():
         app.agents = {
@@ -10623,8 +10946,8 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
         app.tmux_direct_agent_modes["operator-0-fork-caller-review-1"] = True
         await app.restart_tmux_codex_session("operator-0-fork-caller-review-1")
 
-    assert quit_calls == ["%20"]
-    argv = shlex.split(str(launches[0]["command"]))
+    assert respawns[0]["target"] == "%20"
+    argv = shlex.split(str(respawns[0]["command"]))
     assert argv[:2] == ["codex", "resume"]
     assert "--sandbox" in argv
     assert "workspace-write" in argv
@@ -10656,11 +10979,11 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
         in config_overrides
     )
     assert argv[-1] == "fork-session"
-    assert launches[0]["env"]["AGENT_PBX_OPERATOR_ROLE"] == "fork"
-    assert launches[0]["env"]["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "fork-session"
+    assert respawns[0]["env"]["AGENT_PBX_OPERATOR_ROLE"] == "fork"
+    assert respawns[0]["env"]["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "fork-session"
     assert posts[0]["path"] == "/v1/operator/forks/ensure"
     assert posts[0]["json"]["fork_codex_session_id"] == "fork-session"  # type: ignore[index]
-    assert sent[0][0] == "%21"
+    assert sent[0][0] == "%20"
     assert "agent_id: operator-0-fork-caller-review-1" in sent[0][1]
     assert captures == ["operator-0-fork-caller-review-1"]
 
@@ -10701,8 +11024,7 @@ async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_
         tmux_direct=True,
     )
     app.tmux_features_available = True
-    launches: list[dict[str, object]] = []
-    quit_calls: list[str] = []
+    respawns: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
     sent: list[tuple[str, str]] = []
     captures: list[str] = []
@@ -10765,13 +11087,8 @@ async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_
             )
         ]
 
-    def fake_launch_pane(**kwargs: object) -> str:
-        launches.append(kwargs)
-        return "%21"
-
-    def fake_quit_pane(target: str, **_: object) -> bool:
-        quit_calls.append(target)
-        return True
+    def fake_respawn_pane(target: str, **kwargs: object) -> None:
+        respawns.append({"target": target, **kwargs})
 
     async def fake_configure_operator_codex_mcp(**_: object) -> None:
         return None
@@ -10811,9 +11128,9 @@ async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
-    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%21")
-    monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%20")
+    monkeypatch.setattr(tmux_support, "pane_start_command", lambda target: "codex resume old")
     monkeypatch.setattr(tmux_support, "capture_pane", lambda *args, **kwargs: "")
 
     async with app.run_test():
@@ -10846,8 +11163,8 @@ async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_
         app.tmux_direct_agent_modes["operator-0-fork-caller-review-1"] = True
         await app.restart_tmux_codex_session("operator-0-fork-caller-review-1")
 
-    assert quit_calls == ["%20"]
-    argv = shlex.split(str(launches[0]["command"]))
+    assert respawns[0]["target"] == "%20"
+    argv = shlex.split(str(respawns[0]["command"]))
     assert argv[0] == "codex"
     assert "resume" not in argv
     assert "fork" not in argv
@@ -10857,8 +11174,8 @@ async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_
     bootstrap_prompt = argv[-1]
     assert "agent_id: operator-0-fork-caller-review-1" in bootstrap_prompt
     assert "fresh Codex session" in bootstrap_prompt
-    assert launches[0]["env"]["AGENT_PBX_OPERATOR_FORK_LAUNCH_MODE"] == "fresh_context"
-    assert "AGENT_PBX_RESUME_CODEX_SESSION_ID" not in launches[0]["env"]
+    assert respawns[0]["env"]["AGENT_PBX_OPERATOR_FORK_LAUNCH_MODE"] == "fresh_context"
+    assert "AGENT_PBX_RESUME_CODEX_SESSION_ID" not in respawns[0]["env"]
     metadata = posts[0]["json"]["metadata"]  # type: ignore[index]
     assert metadata["review_launch_mode"] == "fresh_context"
     assert metadata["source_continuation_disabled_reason"] == "invalid_encrypted_content"
@@ -15247,14 +15564,21 @@ def test_tui_operator_root_metadata_omits_source_keys_without_binding() -> None:
 def test_tui_codex_model_preset_metadata_and_overrides() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     preset = codex_model_preset_for("terra-max")
+    terra_xhigh = codex_model_preset_for("terra-xhigh")
+    sol = codex_model_preset_for("sol-xhigh")
 
     assert preset is not None
+    assert terra_xhigh is not None
+    assert sol is not None
+    assert terra_xhigh.reasoning_summary == "detailed"
+    assert sol.reasoning_summary is None
     command = app.operator_resume_command(
         "codex",
         "session-1",
         config_overrides=[
             'model="gpt-5.6-terra"',
             'model_reasoning_effort="max"',
+            'model_reasoning_summary="detailed"',
             'model_verbosity="high"',
         ],
     )
@@ -15270,11 +15594,75 @@ def test_tui_codex_model_preset_metadata_and_overrides() -> None:
     argv = shlex.split(command)
     assert 'model="gpt-5.6-terra"' in argv
     assert 'model_reasoning_effort="max"' in argv
+    assert 'model_reasoning_summary="detailed"' in argv
     assert 'model_verbosity="high"' in argv
     assert metadata["codex_model_preset"] == "terra-5.6-max"
     assert metadata["codex_model"] == "gpt-5.6-terra"
     assert metadata["codex_model_reasoning_effort"] == "max"
+    assert metadata["codex_model_reasoning_summary"] == "detailed"
     assert metadata["codex_model_verbosity"] == "high"
+
+
+async def test_tui_saving_model_default_scopes_detailed_summary_to_terra() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    requests: list[dict[str, object]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"config": {"fields": []}}
+
+    class Client:
+        async def patch(self, path: str, **kwargs: object) -> Response:
+            requests.append({"path": path, **kwargs})
+            return Response()
+
+    async def fake_validate(_: object) -> bool:
+        return True
+
+    async def fake_refresh() -> None:
+        return None
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.ensure_codex_model_preset_valid = fake_validate  # type: ignore[method-assign]
+    app.render_codex_config = lambda _config: None  # type: ignore[method-assign]
+    app.refresh_codex_posture = fake_refresh  # type: ignore[method-assign]
+    app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    terra = codex_model_preset_for("terra-max")
+    sol = codex_model_preset_for("sol-xhigh")
+    assert terra is not None
+    assert sol is not None
+
+    await app.save_codex_model_preset_as_default(terra)
+    await app.save_codex_model_preset_as_default(sol)
+
+    assert requests[0] == {
+        "path": "/v1/codex/config",
+        "json": {
+            "updates": {
+                "model": "gpt-5.6-terra",
+                "model_reasoning_effort": "max",
+                "model_verbosity": "high",
+                "model_reasoning_summary": "detailed",
+            }
+        },
+        "headers": {},
+    }
+    assert requests[1] == {
+        "path": "/v1/codex/config",
+        "json": {
+            "updates": {
+                "model": "gpt-5.6-sol",
+                "model_reasoning_effort": "xhigh",
+                "model_verbosity": "high",
+            },
+            "remove": ["model_reasoning_summary"],
+        },
+        "headers": {},
+    }
 
 
 def test_tui_operator_fork_command_supports_cd_and_sandbox() -> None:
@@ -15550,6 +15938,7 @@ def test_tui_agent_config_overrides_include_codex_model_env(
 ) -> None:
     monkeypatch.setenv(CODEX_MODEL_ENV, "gpt-6-sol")
     monkeypatch.setenv(CODEX_REASONING_EFFORT_ENV, "high")
+    monkeypatch.setenv(CODEX_REASONING_SUMMARY_ENV, "detailed")
     monkeypatch.setenv(CODEX_VERBOSITY_ENV, "high")
     monkeypatch.setenv(CODEX_SERVICE_TIER_ENV, "priority")
 
@@ -15557,6 +15946,7 @@ def test_tui_agent_config_overrides_include_codex_model_env(
 
     assert 'model="gpt-6-sol"' in overrides
     assert 'model_reasoning_effort="high"' in overrides
+    assert 'model_reasoning_summary="detailed"' in overrides
     assert 'model_verbosity="high"' in overrides
     assert 'service_tier="priority"' in overrides
 

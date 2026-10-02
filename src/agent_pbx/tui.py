@@ -48,6 +48,7 @@ from .client import auth_headers
 from .codex_cli import (
     CODEX_MODEL_ENV,
     CODEX_REASONING_EFFORT_ENV,
+    CODEX_REASONING_SUMMARY_ENV,
     CODEX_SERVICE_TIER_ENV,
     CODEX_VERBOSITY_ENV,
     CodexCliPosture,
@@ -58,6 +59,7 @@ from .codex_cli import (
 )
 from .codex_sessions import (
     CodexSessionPathCache,
+    CodexTranscriptTailCache,
     CodexTranscriptBoundary,
     CodexTranscriptResult,
     codex_session_transcript_boundary,
@@ -282,6 +284,18 @@ CLIPBOARD_READ_COMMANDS = (
     ("pbpaste", ("pbpaste",)),
     ("termux-clipboard-get", ("termux-clipboard-get",)),
     ("tmux buffer", ("tmux", "show-buffer")),
+)
+CLIPBOARD_DESKTOP_READ_COMMANDS = tuple(
+    item for item in CLIPBOARD_READ_COMMANDS if item[0] != "tmux buffer"
+)
+CLIPBOARD_READ_TIMEOUT_SECONDS = 1.0
+CLIPBOARD_READER_BASE_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
 )
 CLIPBOARD_WRITE_COMMANDS = (
     ("wl-copy", ("wl-copy",)),
@@ -515,6 +529,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/joplin rename",
     "/joplin delete",
     "/joplin copy",
+    "/joplin copy force",
     "/joplin copy report",
     "/joplin copy mode copy-first",
     "/joplin copy mode transcript-first",
@@ -606,6 +621,7 @@ JOPLIN_SLASH_ACTIONS = {
     "/joplin rename": "rename",
     "/joplin delete": "delete",
     "/joplin copy": "copy",
+    "/joplin copy force": "copy-force",
     "/joplin copy report": "copy-report",
     "/joplin log start": "log-start",
     "/joplin log stop": "log-stop",
@@ -636,6 +652,7 @@ class CodexModelPreset:
     model: str
     reasoning_effort: str
     description: str
+    reasoning_summary: str | None = None
     verbosity: str | None = None
     aliases: tuple[str, ...] = ()
     eol: str = ""
@@ -656,6 +673,8 @@ class CodexModelPreset:
         }
         if self.verbosity:
             data["codex_model_verbosity"] = self.verbosity
+        if self.reasoning_summary:
+            data["codex_model_reasoning_summary"] = self.reasoning_summary
         if self.eol:
             data["codex_model_eol"] = self.eol
         return data
@@ -677,6 +696,7 @@ CODEX_MODEL_PRESETS: tuple[CodexModelPreset, ...] = (
         model="gpt-5.6-terra",
         reasoning_effort="xhigh",
         description="Terra 5.6 with xhigh reasoning for continuity from 5.5/xhigh.",
+        reasoning_summary="detailed",
         verbosity="high",
         aliases=("terra-xhigh", "terra", "gpt-5.6-terra-xhigh"),
     ),
@@ -686,6 +706,7 @@ CODEX_MODEL_PRESETS: tuple[CodexModelPreset, ...] = (
         model="gpt-5.6-terra",
         reasoning_effort="max",
         description="Recommended daily-work migration target.",
+        reasoning_summary="detailed",
         verbosity="high",
         aliases=("terra-max", "terra5.6-max", "gpt-5.6-terra-max"),
         recommended=True,
@@ -715,6 +736,36 @@ class TmuxLiveness:
     last_capture_at: float | None = None
     last_changed_at: float | None = None
     state: str = "unknown"
+
+
+@dataclass(frozen=True)
+class ClipboardCandidate:
+    source: str
+    text: str
+
+    @property
+    def digest(self) -> str:
+        return response_text_digest(self.text)
+
+
+@dataclass(frozen=True)
+class ClipboardSnapshot:
+    values: dict[str, str]
+    pane_environment: dict[str, str]
+    tmux_transport: tmux_support.TmuxClipboardTransport
+
+
+@dataclass(frozen=True)
+class CodexCopyCapture:
+    text: str
+    source: str
+    session_id: str = ""
+    phase: str = ""
+    line_index: int | None = None
+
+    @property
+    def digest(self) -> str:
+        return response_text_digest(self.text)
 
 
 @dataclass(frozen=True)
@@ -1137,6 +1188,7 @@ def codex_model_launch_config_overrides() -> list[str]:
     return codex_model_config_overrides(
         model=os.getenv(CODEX_MODEL_ENV),
         reasoning_effort=os.getenv(CODEX_REASONING_EFFORT_ENV),
+        reasoning_summary=os.getenv(CODEX_REASONING_SUMMARY_ENV),
         verbosity=os.getenv(CODEX_VERBOSITY_ENV),
         service_tier=os.getenv(CODEX_SERVICE_TIER_ENV),
     )
@@ -1592,6 +1644,30 @@ def codex_model_preset_for(value: object) -> CodexModelPreset | None:
     return CODEX_MODEL_PRESET_ALIASES.get(key)
 
 
+def codex_model_preset_from_metadata(
+    metadata: Mapping[str, Any] | None,
+) -> CodexModelPreset | None:
+    """Recover the last selected harness preset without trusting free-form text."""
+    if not isinstance(metadata, Mapping):
+        return None
+    preset = codex_model_preset_for(metadata.get("codex_model_preset"))
+    if preset is not None:
+        return preset
+    model = str(metadata.get("codex_model") or "").strip()
+    effort = str(metadata.get("codex_model_reasoning_effort") or "").strip()
+    summary = str(metadata.get("codex_model_reasoning_summary") or "").strip()
+    verbosity = str(metadata.get("codex_model_verbosity") or "").strip()
+    for candidate in CODEX_MODEL_PRESETS:
+        if candidate.model != model or candidate.reasoning_effort != effort:
+            continue
+        if summary and candidate.reasoning_summary != summary:
+            continue
+        if candidate.verbosity and candidate.verbosity != verbosity:
+            continue
+        return candidate
+    return None
+
+
 def codex_model_preset_config_overrides(
     preset: CodexModelPreset | None,
 ) -> list[str]:
@@ -1600,6 +1676,7 @@ def codex_model_preset_config_overrides(
     return codex_model_config_overrides(
         model=preset.model,
         reasoning_effort=preset.reasoning_effort,
+        reasoning_summary=preset.reasoning_summary,
         verbosity=preset.verbosity,
     )
 
@@ -1789,34 +1866,50 @@ def contains_codex_native_plan_selector(text: str) -> bool:
     return bool(codex_native_plan_selector_indices(text))
 
 
-def contains_codex_copy_selector(text: str) -> bool:
+def contains_codex_copy_picker(text: str) -> bool:
     clean = str(text or "")
     lower = clean.casefold()
     numbered_options = re.findall(
         r"(?m)^\s*(?:[>›❯▸➜*]\s*)?\d+[.)]\s+\S",
         clean,
     )
-    # Codex 0.159 renders this exact native picker shape.  It may have only
-    # one option when the response has no extractable code or quote blocks.
-    current_whole_option = re.search(
-        r"(?mi)^\s*(?:[>›❯▸➜*]\s*)?1[.)]\s+whole\s+"
-        r"(?:response|status|prompt)\b",
-        clean,
-    )
-    if (
-        "copy to clipboard" in lower
-        and current_whole_option is not None
-        and ("enter select" in lower or "esc back" in lower)
-    ):
-        return True
     if len(numbered_options) < 2:
         return False
-    if "/copy" in lower:
-        return True
-    copy_context = "copy" in lower or "clipboard" in lower
-    selector_context = "select" in lower or "choose" in lower or "which" in lower
-    response_context = "response" in lower or "message" in lower or "transcript" in lower
-    return copy_context and selector_context and response_context
+    # Native Codex picker text has changed between CLI releases. Require menu
+    # evidence specific to /copy before acting on it so arbitrary numbered
+    # agent questions are never treated as a local selection dialog.
+    native_controls = bool(
+        re.search(
+            r"(?i)(?:enter\s+(?:to\s+)?select|esc\s+(?:to\s+)?(?:back|cancel)|"
+            r"arrow\s+keys|[↑↓]\s*(?:move|navigate|select))",
+            clean,
+        )
+    )
+    copy_heading = bool(
+        re.search(
+            r"(?i)(?:copy\s+(?:to\s+)?clipboard|"
+            r"(?:choose|select|what)\b[^\n]{0,48}\bcopy\b|"
+            r"copy\s+(?:response|content|selection))",
+            clean,
+        )
+    )
+    return copy_heading and (native_controls or "/copy" in lower)
+
+
+def contains_codex_copy_selector(text: str) -> bool:
+    """Return whether a native picker safely offers Whole response first."""
+    clean = str(text or "")
+    if not contains_codex_copy_picker(clean):
+        return False
+    response_first_option = re.search(
+        r"(?mi)^\s*(?:[>›❯▸➜*]\s*)?1[.)]\s+"
+        r"(?:whole|entire|full|latest|current)\s+"
+        r"(?:response|answer|message|status)\b"
+        r"|^\s*(?:[>›❯▸➜*]\s*)?1[.)]\s+"
+        r"(?:response|answer|message|status)\b",
+        clean,
+    )
+    return response_first_option is not None
 
 
 def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME_NAME) -> set[str]:
@@ -1825,9 +1918,53 @@ def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME
     return names
 
 
-def read_clipboard_text() -> tuple[str, str]:
-    errors: list[str] = []
-    for label, command in CLIPBOARD_READ_COMMANDS:
+def normalize_response_text(text: str) -> str:
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def response_text_digest(text: str) -> str:
+    return hashlib.sha256(
+        normalize_response_text(text).encode("utf-8", errors="replace")
+    ).hexdigest()
+
+
+def clipboard_reader_environment(
+    pane_environment: Mapping[str, str] | None,
+) -> dict[str, str] | None:
+    """Build a reader environment from a fixed pane desktop-session allowlist."""
+    if not pane_environment:
+        return None
+    # Clipboard readers do not need the TUI's full environment.  In particular,
+    # do not pass PBX, provider, or Codex credentials to a desktop helper just
+    # because the helper must run in a pane's graphical session.
+    environment = {
+        key: value
+        for key in CLIPBOARD_READER_BASE_ENV_KEYS
+        if (value := os.environ.get(key))
+    }
+    for key in tmux_support.PANE_CLIPBOARD_ENV_KEYS:
+        value = pane_environment.get(key)
+        if value:
+            environment[key] = value
+    return environment
+
+
+def read_clipboard_candidates(
+    *,
+    environment: Mapping[str, str] | None = None,
+    source_prefix: str = "",
+    include_tmux_buffer: bool = True,
+    timeout_seconds: float = CLIPBOARD_READ_TIMEOUT_SECONDS,
+) -> tuple[ClipboardCandidate, ...]:
+    """Read every non-empty clipboard source instead of accepting the first one."""
+    commands = (
+        CLIPBOARD_READ_COMMANDS
+        if include_tmux_buffer
+        else CLIPBOARD_DESKTOP_READ_COMMANDS
+    )
+    candidates: list[ClipboardCandidate] = []
+    prefix = source_prefix.strip()
+    for label, command in commands:
         executable = command[0]
         if shutil.which(executable) is None:
             continue
@@ -1836,19 +1973,27 @@ def read_clipboard_text() -> tuple[str, str]:
                 list(command),
                 capture_output=True,
                 text=True,
-                timeout=2,
+                timeout=timeout_seconds,
                 check=False,
+                env=dict(environment) if environment is not None else None,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
-            errors.append(f"{label}: {exc}")
+        except (OSError, subprocess.SubprocessError):
             continue
-        if result.returncode == 0:
-            return result.stdout.rstrip("\n"), label
-        message = (result.stderr or result.stdout).strip()
-        if message:
-            errors.append(f"{label}: {message}")
-    if errors:
-        raise RuntimeError("; ".join(errors))
+        if result.returncode != 0:
+            continue
+        text = result.stdout.rstrip("\n")
+        if not text.strip():
+            continue
+        source = f"{prefix}: {label}" if prefix else label
+        candidates.append(ClipboardCandidate(source, text))
+    return tuple(candidates)
+
+
+def read_clipboard_text() -> tuple[str, str]:
+    candidates = read_clipboard_candidates()
+    if candidates:
+        first = candidates[0]
+        return first.text, first.source
     raise RuntimeError(
         "no clipboard reader found; install wl-paste, xclip, xsel, pbpaste, "
         "termux-clipboard-get, or run inside tmux with a readable tmux buffer"
@@ -1910,24 +2055,28 @@ def joplin_tmux_copy_title(prompt: str) -> str:
     return f"Codex Response - {first_line}"
 
 
-def format_joplin_tmux_response_copy_body(prompt: str, response: str) -> str:
+def format_joplin_tmux_response_copy_body(
+    prompt: str,
+    response: str,
+    *,
+    capture_source: str = "",
+) -> str:
     clean_prompt = prompt.strip()
     clean_response = response.strip()
     prompt_body = clean_prompt or "_No prompt was recorded by the Agent PBX TUI._"
     response_body = clean_response or "_No copied response text was available._"
-    return "\n".join(
-        [
-            "## Prompt",
-            "",
-            "```text",
-            prompt_body,
-            "```",
-            "",
-            "## Response",
-            "",
-            response_body,
-        ]
-    )
+    lines = [
+        "## Prompt",
+        "",
+        "```text",
+        prompt_body,
+        "```",
+        "",
+    ]
+    if capture_source.strip():
+        lines.extend(["## Capture", "", capture_source.strip(), ""])
+    lines.extend(["## Response", "", response_body])
+    return "\n".join(lines)
 
 
 def bool_setting(settings: dict[str, Any], key: str, default: bool) -> bool:
@@ -2299,6 +2448,27 @@ def bool_map_setting(settings: dict[str, Any], key: str) -> dict[str, bool]:
             if parsed is not None:
                 result[item_key] = parsed
     return result
+
+
+def string_record_map_setting(
+    settings: dict[str, Any],
+    key: str,
+) -> dict[str, dict[str, str]]:
+    value = settings.get(key)
+    if not isinstance(value, dict):
+        return {}
+    records: dict[str, dict[str, str]] = {}
+    for record_key, record_value in value.items():
+        if not isinstance(record_key, str) or not isinstance(record_value, dict):
+            continue
+        record = {
+            field: field_value
+            for field, field_value in record_value.items()
+            if isinstance(field, str) and isinstance(field_value, str)
+        }
+        if record:
+            records[record_key] = record
+    return records
 
 
 def str_set_setting(settings: dict[str, Any], key: str) -> set[str]:
@@ -4496,6 +4666,12 @@ class AgentPBXTUI(App[None]):
         self.selected_joplin_note_id: str | None = None
         self.selected_joplin_note_id_by_agent: dict[str, str] = {}
         self.codex_session_path_cache = CodexSessionPathCache()
+        self.codex_transcript_tail_cache = CodexTranscriptTailCache()
+        self.last_codex_copy_capture_by_agent: dict[str, CodexCopyCapture] = {}
+        self.joplin_copy_fingerprints_by_agent = string_record_map_setting(
+            self.settings,
+            "joplin_copy_fingerprints_by_agent",
+        )
         self.joplin_log_transcript_boundary_by_agent: dict[
             str,
             CodexTranscriptBoundary,
@@ -4672,11 +4848,16 @@ class AgentPBXTUI(App[None]):
             verbosity = (
                 f", verbosity {preset.verbosity}" if preset.verbosity else ""
             )
+            reasoning_summary = (
+                f", reasoning summary {preset.reasoning_summary}"
+                if preset.reasoning_summary
+                else ""
+            )
             status.update(
                 f"Target: {target}\n"
                 "Model preset: "
                 f"{preset.label} -> {preset.model}/{preset.reasoning_effort}"
-                f"{verbosity}. "
+                f"{verbosity}{reasoning_summary}. "
                 f"{preset.description}"
             )
 
@@ -4765,6 +4946,10 @@ class AgentPBXTUI(App[None]):
         ]
         if preset.verbosity:
             preset_lines.append(f"- model_verbosity = {preset.verbosity}")
+        if preset.reasoning_summary:
+            preset_lines.append(
+                f"- model_reasoning_summary = {preset.reasoning_summary}"
+            )
         preset_lines.append(f"- description: {preset.description}")
         lines = [
             "Codex Model Migration Plan",
@@ -4782,13 +4967,13 @@ class AgentPBXTUI(App[None]):
             "Safe switch path:",
             "1. Snapshot Agent PBX metadata, pane id, cwd, session id, and transcript boundary.",
             "2. Ask for or capture a compact handoff if the pane is not idle.",
-            "3. Launch a replacement Codex process with explicit `-c` model overrides.",
+            "3. Respawn the current tmux pane with explicit `-c` model overrides.",
             "4. Resume the fork/current session id first; avoid falling back to source session ids unless this is a fresh fork launch.",
-            "5. Register the replacement pane under the same Agent PBX id and patch metadata with the selected preset.",
+            "5. Keep the same pane id under the same Agent PBX id and patch metadata with the selected preset.",
             "6. Verify latest transcript/session mapping and Joplin copy before retiring backups.",
             "",
             "Current TUI restart action:",
-            "- Uses the existing restart/resume path for the selected pane and applies the preset overrides to the replacement Codex command.",
+            "- Restarts and resumes in the selected tmux pane, then applies the preset overrides to the Codex command.",
             "- For maximum rollback safety during bulk cleanup, run a dry plan first and migrate in small batches.",
         ]
         if preset.eol:
@@ -4837,10 +5022,15 @@ class AgentPBXTUI(App[None]):
         }
         if preset.verbosity:
             updates["model_verbosity"] = preset.verbosity
+        if preset.reasoning_summary:
+            updates["model_reasoning_summary"] = preset.reasoning_summary
+        payload: dict[str, object] = {"updates": updates}
+        if not preset.reasoning_summary:
+            payload["remove"] = ["model_reasoning_summary"]
         try:
             response = await self.api_client().patch(
                 "/v1/codex/config",
-                json={"updates": updates},
+                json=payload,
                 headers=auth_headers(self.token),
             )
             response.raise_for_status()
@@ -5872,6 +6062,7 @@ class AgentPBXTUI(App[None]):
             yield SystemCommand("/joplin rename", "Rename the selected Joplin note", self.palette_joplin_rename)
             yield SystemCommand("/joplin delete", "Delete the selected Joplin note", self.palette_joplin_delete)
             yield SystemCommand("/joplin copy", "Copy latest tmux response or report to Joplin", self.palette_joplin_copy)
+            yield SystemCommand("/joplin copy force", "Copy even when the latest response was already saved", self.palette_joplin_copy_force)
             yield SystemCommand("/joplin copy report", "Copy latest PBX report to Joplin", self.palette_joplin_copy_report)
             yield SystemCommand("/joplin copy mode copy-first", "Use /copy before transcript for Joplin copies", lambda: self.palette_joplin_copy_mode(JOPLIN_COPY_MODE_COPY_FIRST))
             yield SystemCommand("/joplin copy mode transcript-first", "Use transcript before /copy for Joplin copies", lambda: self.palette_joplin_copy_mode(JOPLIN_COPY_MODE_TRANSCRIPT_FIRST))
@@ -6682,6 +6873,16 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_joplin_copy_force(self) -> None:
+        agent_id = self.palette_joplin_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "copy-force"),
+            name="palette-joplin-copy-force",
+            exclusive=True,
+        )
+
     def palette_joplin_copy_report(self) -> None:
         agent_id = self.palette_joplin_agent_id()
         if agent_id is None:
@@ -7294,6 +7495,11 @@ class AgentPBXTUI(App[None]):
             self.confirm_delete_joplin_note(agent_id)
         elif action == "copy":
             await self.copy_latest_to_joplin(agent_id)
+        elif action == "copy-force":
+            if self.is_tmux_direct_enabled(agent_id):
+                await self.copy_tmux_response_to_joplin(agent_id, force=True)
+            else:
+                await self.copy_latest_report_to_joplin(agent_id)
         elif action == "copy-report":
             await self.copy_latest_report_to_joplin(agent_id)
         elif action == "log-start":
@@ -12291,6 +12497,91 @@ class AgentPBXTUI(App[None]):
         detail = "; ".join(failures[-3:]) or "replacement pane did not stay running"
         raise RuntimeError(f"{label} relaunch failed after {attempts} attempt(s): {detail}")
 
+    async def respawn_restart_pane(
+        self,
+        *,
+        pane_id: str,
+        command: str,
+        label: str,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        rollback_command: str = "",
+        rollback_cwd: str | None = None,
+        rollback_env: Mapping[str, str] | None = None,
+    ) -> str:
+        """Restart Codex in place and restore the prior launch if it cannot live."""
+        failures: list[str] = []
+        attempts = max(1, CODEX_RESTART_LAUNCH_ATTEMPTS)
+        for attempt in range(1, attempts + 1):
+            try:
+                await asyncio.to_thread(
+                    tmux_support.respawn_pane,
+                    pane_id,
+                    command=command,
+                    cwd=cwd,
+                    env=env,
+                )
+            except Exception as exc:
+                failures.append(str(exc))
+            else:
+                if CODEX_RESTART_STABILIZE_SECONDS > 0:
+                    await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
+                try:
+                    pane_alive = await asyncio.to_thread(
+                        tmux_support.pane_is_live,
+                        pane_id,
+                    )
+                except Exception as exc:
+                    failures.append(f"{pane_id} liveness check failed: {exc}")
+                else:
+                    if pane_alive:
+                        return pane_id
+                    failures.append(f"{pane_id} exited before Codex restart stabilized")
+            if attempt < attempts and CODEX_RESTART_RETRY_SECONDS > 0:
+                await asyncio.sleep(CODEX_RESTART_RETRY_SECONDS)
+
+        rollback_detail = ""
+        if rollback_command:
+            try:
+                await asyncio.to_thread(
+                    tmux_support.respawn_pane,
+                    pane_id,
+                    command=rollback_command,
+                    cwd=rollback_cwd,
+                    env=rollback_env,
+                )
+                if CODEX_RESTART_STABILIZE_SECONDS > 0:
+                    await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
+                restored = await asyncio.to_thread(tmux_support.pane_is_live, pane_id)
+            except Exception as exc:
+                rollback_detail = f"; rollback failed: {exc}"
+            else:
+                rollback_detail = (
+                    "; restored the prior command in the original pane"
+                    if restored
+                    else "; rollback command did not stay running"
+                )
+        detail = "; ".join(failures[-3:]) or "replacement pane did not stay running"
+        raise RuntimeError(
+            f"{label} in-place relaunch failed after {attempts} attempt(s): "
+            f"{detail}{rollback_detail}"
+        )
+
+    async def restart_rollback_command(self, pane_id: str) -> str:
+        """Capture a transient rollback command without persisting launch details."""
+        try:
+            return await asyncio.to_thread(tmux_support.pane_start_command, pane_id)
+        except Exception as exc:
+            raise RuntimeError(f"unable to snapshot existing pane command: {exc}") from exc
+
+    def restart_model_preset(
+        self,
+        metadata: Mapping[str, Any],
+        requested: CodexModelPreset | None,
+    ) -> CodexModelPreset | None:
+        """Keep the existing model on ordinary restart unless a new one is selected."""
+        return requested or codex_model_preset_from_metadata(metadata)
+
     async def register_tmux_relaunched_caller(
         self,
         agent_id: str,
@@ -12310,6 +12601,7 @@ class AgentPBXTUI(App[None]):
             "tmux_pane_id": pane_id,
             "codex_command": codex_command,
             "last_tmux_restart_at": time.time(),
+            "last_tmux_restart_mode": "in_place",
         }
         if model_preset is not None:
             updated_metadata.update(model_preset.metadata())
@@ -12342,6 +12634,7 @@ class AgentPBXTUI(App[None]):
         pane_id = pane.pane_id
         agent = self.agents.get(agent_id)
         metadata = self.agent_metadata(agent)
+        effective_model_preset = self.restart_model_preset(metadata, model_preset)
         if metadata.get("launched_by") != "agent-pbx-tui":
             self.notify(
                 f"{agent_id} has a non-TUI-owned tmux pane; detach it before restart.",
@@ -12370,10 +12663,9 @@ class AgentPBXTUI(App[None]):
                 agent_id,
                 include=[*candidates[:3], target],
             )
+            rollback_command = await self.restart_rollback_command(pane_id)
         except Exception as exc:
             self.notify(f"Unable to prepare {agent_id} for restart: {exc}", severity="error")
-            return False
-        if not await self.quit_or_kill_tmux_pane(pane_id, label=agent_id):
             return False
         launch_config_overrides = operator_agent_config_overrides(
             mcp_url=mcp_url,
@@ -12381,19 +12673,25 @@ class AgentPBXTUI(App[None]):
             work_root=cwd,
         )
         launch_config_overrides.extend(
-            codex_model_preset_config_overrides(model_preset)
+            codex_model_preset_config_overrides(effective_model_preset)
         )
         env = self.operator_launch_env(
             agent_id=agent_id,
             cwd=cwd,
             mcp_url=mcp_url,
-            model_preset=model_preset,
+            model_preset=effective_model_preset,
         )
         env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
+        rollback_env = self.operator_launch_env(
+            agent_id=agent_id,
+            cwd=cwd,
+            mcp_url=mcp_url,
+            model_preset=codex_model_preset_from_metadata(metadata),
+        )
+        rollback_env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
         try:
-            new_pane_id = await self.launch_restart_pane(
-                session_name=session_name,
-                window_name=agent_id,
+            new_pane_id = await self.respawn_restart_pane(
+                pane_id=pane_id,
                 command=self.operator_resume_command(
                     codex_command,
                     target.session_id,
@@ -12403,6 +12701,9 @@ class AgentPBXTUI(App[None]):
                 label=agent_id,
                 cwd=cwd,
                 env=env,
+                rollback_command=rollback_command,
+                rollback_cwd=pane.cwd or cwd,
+                rollback_env=rollback_env,
             )
             await self.register_operator_root(
                 agent_id,
@@ -12413,7 +12714,8 @@ class AgentPBXTUI(App[None]):
                 tmux_pane_id=new_pane_id,
                 resumed_codex_session_id=target.session_id,
                 operator_session_history=history,
-                model_preset=model_preset,
+                model_preset=effective_model_preset,
+                restart_mode="in_place",
             )
         except Exception as exc:
             self.notify(f"Unable to relaunch {agent_id}: {exc}", severity="error")
@@ -12428,7 +12730,9 @@ class AgentPBXTUI(App[None]):
             self.operator_bootstrap_prompt(agent_id, cwd),
         )
         self.save_settings()
-        self.notify(f"Restarted {agent_id} on Codex session {target.session_id}.")
+        self.notify(
+            f"Restarted {agent_id} in place on Codex session {target.session_id}."
+        )
         return True
 
     async def relaunch_operator_fork_codex(
@@ -12440,6 +12744,8 @@ class AgentPBXTUI(App[None]):
     ) -> bool:
         agent = self.agents.get(agent_id)
         metadata = self.agent_metadata(agent)
+        effective_model_preset = self.restart_model_preset(metadata, model_preset)
+        rollback_model_preset = codex_model_preset_from_metadata(metadata)
         if metadata.get("launched_by") != "agent-pbx-tui":
             self.notify(
                 f"{agent_id} has a non-TUI-owned tmux pane; detach it before restart.",
@@ -12527,7 +12833,7 @@ class AgentPBXTUI(App[None]):
             )
         )
         launch_config_overrides.extend(
-            codex_model_preset_config_overrides(model_preset)
+            codex_model_preset_config_overrides(effective_model_preset)
         )
         sandbox = (
             "workspace-write"
@@ -12586,12 +12892,14 @@ class AgentPBXTUI(App[None]):
         def build_env(
             mode: str,
             resume_target: OperatorSessionCandidate | None,
+            *,
+            preset: CodexModelPreset | None = effective_model_preset,
         ) -> dict[str, str]:
             launch_env = self.operator_launch_env(
                 agent_id=agent_id,
                 cwd=work_root,
                 mcp_url=mcp_url,
-                model_preset=model_preset,
+                model_preset=preset,
                 operator_role=OPERATOR_ROLE_FORK,
                 logical_operator_id=logical_operator_id,
                 source_caller_agent_id=source_caller_agent_id,
@@ -12615,19 +12923,24 @@ class AgentPBXTUI(App[None]):
                 codex_command=codex_command,
                 mcp_url=mcp_url,
             )
+            rollback_command = await self.restart_rollback_command(pane.pane_id)
         except Exception as exc:
             self.notify(f"Unable to configure Codex MCP: {exc}", severity="error")
             return False
-        if not await self.quit_or_kill_tmux_pane(pane.pane_id, label=agent_id):
-            return False
         try:
-            new_pane_id = await self.launch_restart_pane(
-                session_name=session_name,
-                window_name=agent_id,
+            new_pane_id = await self.respawn_restart_pane(
+                pane_id=pane.pane_id,
                 command=command,
                 label=agent_id,
                 cwd=work_root,
                 env=build_env(review_launch_mode, target),
+                rollback_command=rollback_command,
+                rollback_cwd=pane.cwd or work_root,
+                rollback_env=build_env(
+                    review_launch_mode,
+                    target,
+                    preset=rollback_model_preset,
+                ),
             )
             if (
                 fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
@@ -12640,17 +12953,22 @@ class AgentPBXTUI(App[None]):
                     "restarting review fork with fresh context.",
                     severity="warning",
                 )
-                await self.quit_or_kill_tmux_pane(new_pane_id, label=agent_id)
                 target = None
                 target_invalid_encrypted_content = True
                 review_launch_mode = REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
-                new_pane_id = await self.launch_restart_pane(
-                    session_name=session_name,
-                    window_name=agent_id,
+                new_pane_id = await self.respawn_restart_pane(
+                    pane_id=pane.pane_id,
                     command=build_command(review_launch_mode, target),
                     label=agent_id,
                     cwd=work_root,
                     env=build_env(review_launch_mode, target),
+                    rollback_command=rollback_command,
+                    rollback_cwd=pane.cwd or work_root,
+                    rollback_env=build_env(
+                        review_launch_mode,
+                        target,
+                        preset=rollback_model_preset,
+                    ),
                 )
         except Exception as exc:
             self.notify(f"Unable to relaunch {agent_id}: {exc}", severity="error")
@@ -12659,9 +12977,10 @@ class AgentPBXTUI(App[None]):
             **metadata,
             "tmux_pane_id": new_pane_id,
             "last_tmux_restart_at": time.time(),
+            "last_tmux_restart_mode": "in_place",
         }
-        if model_preset is not None:
-            fork_metadata.update(model_preset.metadata())
+        if effective_model_preset is not None:
+            fork_metadata.update(effective_model_preset.metadata())
         if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
             fork_metadata["review_launch_mode"] = review_launch_mode
         if target_invalid_encrypted_content:
@@ -12704,7 +13023,7 @@ class AgentPBXTUI(App[None]):
             )
         self.save_settings()
         suffix = f" on Codex session {target.session_id}" if target else ""
-        self.notify(f"Restarted {agent_id}{suffix}.")
+        self.notify(f"Restarted {agent_id} in place{suffix}.")
         return True
 
     async def relaunch_caller_codex(
@@ -12719,6 +13038,7 @@ class AgentPBXTUI(App[None]):
             self.notify(f"{agent_id} is not loaded.", severity="warning")
             return False
         metadata = self.agent_metadata(agent)
+        effective_model_preset = self.restart_model_preset(metadata, model_preset)
         session_id = str(
             metadata.get("codex_session_id") or metadata.get("codex_thread_id") or ""
         ).strip()
@@ -12744,17 +13064,17 @@ class AgentPBXTUI(App[None]):
             codex_command,
             session_id,
             cd=cwd,
-            config_overrides=codex_model_preset_config_overrides(model_preset),
+            config_overrides=codex_model_preset_config_overrides(effective_model_preset),
         )
-        if not await self.quit_or_kill_tmux_pane(pane.pane_id, label=agent_id):
-            return False
         try:
-            new_pane_id = await self.launch_restart_pane(
-                session_name=pane.session_name,
-                window_name=pane.window_name or agent_id,
+            rollback_command = await self.restart_rollback_command(pane.pane_id)
+            new_pane_id = await self.respawn_restart_pane(
+                pane_id=pane.pane_id,
                 command=command,
                 label=agent_id,
                 cwd=cwd,
+                rollback_command=rollback_command,
+                rollback_cwd=pane.cwd or cwd,
             )
         except Exception as exc:
             self.notify(f"Unable to relaunch {agent_id}: {exc}", severity="error")
@@ -12769,7 +13089,7 @@ class AgentPBXTUI(App[None]):
                 pane_id=new_pane_id,
                 cwd=cwd,
                 codex_command=codex_command,
-                model_preset=model_preset,
+                model_preset=effective_model_preset,
             )
         except Exception as exc:
             self.notify(
@@ -12777,7 +13097,9 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
         self.save_settings()
-        self.notify(f"Restarted {agent_id} on Codex session {session_id}.")
+        self.notify(
+            f"Restarted {agent_id} in place on Codex session {session_id}."
+        )
         return True
 
     async def restart_tmux_codex_session(
@@ -14222,6 +14544,10 @@ class AgentPBXTUI(App[None]):
             env["AGENT_PBX_CODEX_MODEL_PRESET"] = model_preset.key
             env["AGENT_PBX_CODEX_MODEL"] = model_preset.model
             env["AGENT_PBX_CODEX_REASONING_EFFORT"] = model_preset.reasoning_effort
+            if model_preset.reasoning_summary:
+                env["AGENT_PBX_CODEX_REASONING_SUMMARY"] = (
+                    model_preset.reasoning_summary
+                )
             if model_preset.verbosity:
                 env["AGENT_PBX_CODEX_VERBOSITY"] = model_preset.verbosity
         if self.token:
@@ -14541,6 +14867,7 @@ class AgentPBXTUI(App[None]):
         default_source_caller_agent_id: str | None = None,
         default_source_caller_project: str | None = None,
         default_source_codex_session_id: str | None = None,
+        restart_mode: str | None = None,
     ) -> dict[str, Any]:
         metadata = {
             "agent_type": OPERATOR_AGENT_TYPE,
@@ -14577,6 +14904,9 @@ class AgentPBXTUI(App[None]):
             metadata["last_resume_codex_session_id"] = resumed_codex_session_id
         if operator_session_history is not None:
             metadata["operator_session_history"] = operator_session_history
+        if restart_mode:
+            metadata["last_tmux_restart_at"] = time.time()
+            metadata["last_tmux_restart_mode"] = restart_mode
         if model_preset is not None:
             metadata.update(model_preset.metadata())
         return metadata
@@ -14596,6 +14926,7 @@ class AgentPBXTUI(App[None]):
         default_source_caller_agent_id: str | None = None,
         default_source_caller_project: str | None = None,
         default_source_codex_session_id: str | None = None,
+        restart_mode: str | None = None,
     ) -> dict[str, Any]:
         response = await self.api_client().post(
             "/v1/agents/register",
@@ -14618,6 +14949,7 @@ class AgentPBXTUI(App[None]):
                     default_source_caller_agent_id=default_source_caller_agent_id,
                     default_source_caller_project=default_source_caller_project,
                     default_source_codex_session_id=default_source_codex_session_id,
+                    restart_mode=restart_mode,
                 ),
             },
             headers=auth_headers(self.token),
@@ -21633,6 +21965,7 @@ class AgentPBXTUI(App[None]):
                     session_id,
                     codex_home=self.codex_home_dir(),
                     path_cache=self.codex_session_path_cache,
+                    tail_cache=self.codex_transcript_tail_cache,
                 )
             except (OSError, UnicodeError, ValueError):
                 # A live rollout can be rotated or mid-write while it is read.
@@ -21692,13 +22025,30 @@ class AgentPBXTUI(App[None]):
             f"line {result.line_index}, mtime {modified})"
         )
 
+    async def capture_tmux_raw_for_pane(self, pane_id: str) -> str | None:
+        """Capture a pane without the display crop used by the Latest tab."""
+        try:
+            return await asyncio.to_thread(
+                tmux_support.capture_pane,
+                pane_id,
+                lines=0,
+            )
+        except Exception:
+            return None
+
+    async def capture_tmux_raw_for_agent(self, agent_id: str) -> str | None:
+        pane = await self.resolve_tmux_send_pane(agent_id, status=None)
+        if pane is None:
+            return None
+        return await self.capture_tmux_raw_for_pane(pane.pane_id)
+
     async def wait_for_codex_copy_selector(
         self,
         agent_id: str,
         *,
         timeout_seconds: float | None = None,
     ) -> str | None:
-        """Watch for a native /copy picker while clipboard copy is pending."""
+        """Watch raw terminal output for the current native Codex /copy picker."""
         wait_seconds = (
             CLIPBOARD_COPY_WAIT_SECONDS
             if timeout_seconds is None
@@ -21706,107 +22056,225 @@ class AgentPBXTUI(App[None]):
         )
         deadline = time.monotonic() + wait_seconds
         while True:
-            captured = await self.capture_tmux_display_for_agent(agent_id)
+            captured = await self.capture_tmux_raw_for_agent(agent_id)
             if captured and contains_codex_copy_selector(captured):
                 return captured
             if time.monotonic() >= deadline:
                 return None
             await asyncio.sleep(CLIPBOARD_COPY_POLL_SECONDS)
 
-    async def select_codex_copy_selector(
+    async def copy_clipboard_candidates_for_pane(
         self,
-        agent_id: str,
-        captured: str | None,
-    ) -> tuple[tuple[str, str] | None, Exception | None]:
-        """Select Codex's first native /copy result and await its clipboard write."""
-        if not captured or not contains_codex_copy_selector(captured):
-            return None, None
-        try:
-            previous_clipboard, _previous_source = await asyncio.to_thread(
-                read_clipboard_text
+        pane: tmux_support.TmuxPane,
+        *,
+        pane_environment: Mapping[str, str],
+        tmux_transport: tmux_support.TmuxClipboardTransport,
+    ) -> tuple[ClipboardCandidate, ...]:
+        host_task = asyncio.to_thread(
+            read_clipboard_candidates,
+            source_prefix="host clipboard",
+            include_tmux_buffer=False,
+        )
+        target_environment = clipboard_reader_environment(pane_environment)
+        target_task: Awaitable[tuple[ClipboardCandidate, ...]] | None = None
+        if target_environment is not None:
+            target_task = asyncio.to_thread(
+                read_clipboard_candidates,
+                environment=target_environment,
+                source_prefix="pane desktop clipboard",
+                include_tmux_buffer=False,
             )
-        except Exception:
-            previous_clipboard = ""
-        if not await self.send_key_to_tmux(agent_id, "1"):
-            return None, RuntimeError(
-                "Unable to select Whole response in Codex /copy picker"
-            )
-        try:
-            return await self.read_copied_tmux_response(previous_clipboard), None
-        except Exception as exc:
-            return None, exc
-
-    async def await_copied_tmux_response_or_selector(
-        self,
-        agent_id: str,
-        previous_clipboard: str,
-    ) -> tuple[tuple[str, str] | None, str | None, Exception | None]:
-        """Prefer clipboard output, but abandon it promptly for a /copy picker."""
-        copy_task = asyncio.create_task(
-            self.read_copied_tmux_response(previous_clipboard)
-        )
-        selector_task = asyncio.create_task(
-            self.wait_for_codex_copy_selector(agent_id)
-        )
-        done, _pending = await asyncio.wait(
-            {copy_task, selector_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if selector_task in done:
-            selector = selector_task.result()
-            if selector is not None:
-                if not copy_task.done():
-                    copy_task.cancel()
-                await asyncio.gather(copy_task, return_exceptions=True)
-                return (
-                    None,
-                    selector,
-                    RuntimeError("Codex /copy opened an interactive selector"),
-                )
-            if copy_task.done():
-                try:
-                    return copy_task.result(), None, None
-                except Exception as exc:
-                    return None, None, exc
+        tasks: list[Awaitable[tuple[ClipboardCandidate, ...]]] = [host_task]
+        if target_task is not None:
+            tasks.append(target_task)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        candidates: list[ClipboardCandidate] = []
+        for result in results:
+            if isinstance(result, tuple):
+                candidates.extend(result)
+        if tmux_transport.available:
             try:
-                return await copy_task, None, None
-            except Exception as exc:
-                return None, None, exc
+                buffer_text = await asyncio.to_thread(
+                    tmux_support.pane_tmux_buffer,
+                    pane.pane_id,
+                )
+            except Exception:
+                buffer_text = ""
+            if buffer_text.strip():
+                candidates.append(ClipboardCandidate("tmux buffer", buffer_text))
+        return tuple(candidates)
 
-        try:
-            copied = copy_task.result()
-        except Exception as exc:
-            if not selector_task.done():
-                selector_task.cancel()
-            await asyncio.gather(selector_task, return_exceptions=True)
-            captured = await self.capture_tmux_display_for_agent(agent_id)
-            if captured and contains_codex_copy_selector(captured):
-                return (
-                    None,
-                    captured,
-                    RuntimeError("Codex /copy opened an interactive selector"),
-                )
-            return None, captured, exc
-        # A prior or unrelated clipboard update can win this race before the
-        # native picker has been painted.  Let the picker settle briefly so a
-        # later Whole response selection is not left open in the Codex TUI.
-        if not selector_task.done():
-            await asyncio.wait(
-                {selector_task},
-                timeout=CODEX_COPY_SELECTOR_SETTLE_SECONDS,
+    async def copy_clipboard_snapshot_for_pane(
+        self,
+        pane: tmux_support.TmuxPane,
+    ) -> ClipboardSnapshot:
+        environment_result, transport_result = await asyncio.gather(
+            asyncio.to_thread(tmux_support.pane_clipboard_environment, pane.pane_id),
+            asyncio.to_thread(tmux_support.tmux_clipboard_transport, pane.pane_id),
+            return_exceptions=True,
+        )
+        pane_environment = (
+            environment_result if isinstance(environment_result, dict) else {}
+        )
+        transport = (
+            transport_result
+            if isinstance(transport_result, tmux_support.TmuxClipboardTransport)
+            else tmux_support.TmuxClipboardTransport(False, "tmux clipboard inspection failed")
+        )
+        candidates = await self.copy_clipboard_candidates_for_pane(
+            pane,
+            pane_environment=pane_environment,
+            tmux_transport=transport,
+        )
+        return ClipboardSnapshot(
+            values={candidate.source: candidate.text for candidate in candidates},
+            pane_environment=pane_environment,
+            tmux_transport=transport,
+        )
+
+    async def dismiss_codex_copy_selector(
+        self,
+        pane: tmux_support.TmuxPane,
+    ) -> bool:
+        raw = await self.capture_tmux_raw_for_pane(pane.pane_id)
+        if not raw or not contains_codex_copy_picker(raw):
+            return True
+        sent = await self.send_key_to_tmux_pane(pane.pane_id, "Escape")
+        if not sent:
+            return False
+        await asyncio.sleep(CLIPBOARD_COPY_POLL_SECONDS)
+        raw = await self.capture_tmux_raw_for_pane(pane.pane_id)
+        return not raw or not contains_codex_copy_picker(raw)
+
+    async def await_codex_copy_candidate(
+        self,
+        pane: tmux_support.TmuxPane,
+        snapshot: ClipboardSnapshot,
+    ) -> tuple[ClipboardCandidate, str | None]:
+        """Correlate a native /copy selection with a source-specific change."""
+        deadline = time.monotonic() + CLIPBOARD_COPY_WAIT_SECONDS
+        selector_grace_deadline = time.monotonic() + CODEX_COPY_SELECTOR_SETTLE_SECONDS
+        picker_seen = False
+        picker_selected = False
+        last_raw: str | None = None
+        while True:
+            raw = await self.capture_tmux_raw_for_pane(pane.pane_id)
+            if raw is not None:
+                last_raw = raw
+            picker_visible = bool(raw and contains_codex_copy_picker(raw))
+            selector_visible = bool(raw and contains_codex_copy_selector(raw))
+            if picker_visible:
+                picker_seen = True
+                if not selector_visible:
+                    dismissed = await self.dismiss_codex_copy_selector(pane)
+                    if not dismissed:
+                        raise RuntimeError(
+                            "Codex /copy picker without Whole response could not be dismissed"
+                        )
+                    raise RuntimeError(
+                        "Codex /copy picker did not offer Whole response as its first option"
+                    )
+                if not picker_selected:
+                    if not await self.send_key_to_tmux_pane(pane.pane_id, "1"):
+                        raise RuntimeError(
+                            "Unable to select Whole response in Codex /copy picker"
+                        )
+                    picker_selected = True
+                if time.monotonic() >= deadline:
+                    await self.dismiss_codex_copy_selector(pane)
+                    raise RuntimeError(
+                        "Codex /copy picker did not close after Whole response selection"
+                    )
+                await asyncio.sleep(CLIPBOARD_COPY_POLL_SECONDS)
+                continue
+
+            # Do not let a pre-existing or unrelated clipboard update win before
+            # current Codex has had time to render its native picker.
+            if not picker_seen and time.monotonic() < selector_grace_deadline:
+                await asyncio.sleep(CLIPBOARD_COPY_POLL_SECONDS)
+                continue
+
+            candidates = await self.copy_clipboard_candidates_for_pane(
+                pane,
+                pane_environment=snapshot.pane_environment,
+                tmux_transport=snapshot.tmux_transport,
             )
-        if selector_task.done():
-            selector = selector_task.result()
-            if selector is not None:
-                return (
-                    None,
-                    selector,
-                    RuntimeError("Codex /copy opened an interactive selector"),
-                )
-        if not selector_task.done():
-            selector_task.cancel()
-        await asyncio.gather(selector_task, return_exceptions=True)
-        return copied, None, None
+            for candidate in candidates:
+                if snapshot.values.get(candidate.source) != candidate.text:
+                    return candidate, last_raw
+            if time.monotonic() >= deadline:
+                transport_detail = snapshot.tmux_transport.reason
+                if picker_seen:
+                    detail = "Codex /copy selection produced no readable clipboard delta"
+                else:
+                    detail = "Codex /copy produced no readable clipboard delta"
+                if transport_detail:
+                    detail = f"{detail}; {transport_detail}"
+                raise RuntimeError(detail)
+            await asyncio.sleep(CLIPBOARD_COPY_POLL_SECONDS)
+
+    def copy_capture_from_transcript(
+        self,
+        result: CodexTranscriptResult,
+        *,
+        source_suffix: str = "",
+    ) -> CodexCopyCapture:
+        source = self.format_codex_transcript_source(result)
+        if source_suffix:
+            source = f"{source} {source_suffix}"
+        return CodexCopyCapture(
+            text=result.text,
+            source=source,
+            session_id=result.session_id,
+            phase=result.phase,
+            line_index=result.line_index,
+        )
+
+    def remember_codex_copy_capture(
+        self,
+        agent_id: str,
+        capture: CodexCopyCapture,
+    ) -> tuple[str, str]:
+        self.last_codex_copy_capture_by_agent[agent_id] = capture
+        return capture.text, capture.source
+
+    async def validate_direct_codex_copy(
+        self,
+        agent_id: str,
+        candidate: ClipboardCandidate,
+        raw_capture: str | None,
+    ) -> CodexCopyCapture:
+        session_id = next(iter(self.codex_session_ids_for_agent(agent_id)), "")
+        direct = CodexCopyCapture(
+            text=candidate.text,
+            source=f"Codex /copy via {candidate.source}",
+            session_id=session_id,
+        )
+        # During a live turn, Whole response can legitimately be newer than the
+        # last final-answer JSONL record.  At an idle boundary, use the active
+        # session tail cache to reject a stale unrelated clipboard value.
+        if raw_capture and CODEX_STATUS_LINE_PATTERN.search(raw_capture):
+            return direct
+        transcript = await self.copy_codex_transcript_response_text(agent_id)
+        if transcript is None:
+            return direct
+        if response_text_digest(transcript.text) == direct.digest:
+            return CodexCopyCapture(
+                text=direct.text,
+                source=direct.source,
+                session_id=transcript.session_id or session_id,
+                phase=transcript.phase,
+                line_index=transcript.line_index,
+            )
+        self.notify(
+            "Joplin /copy output did not match the active Codex transcript; "
+            "using the transcript result.",
+            severity="warning",
+        )
+        return self.copy_capture_from_transcript(
+            transcript,
+            source_suffix="(replaced unmatched /copy output)",
+        )
 
     async def copy_tmux_response_text(
         self,
@@ -21815,11 +22283,19 @@ class AgentPBXTUI(App[None]):
         transcript_boundary: CodexTranscriptBoundary | None = None,
         allow_transcript: bool = True,
     ) -> tuple[str, str] | None:
+        self.last_codex_copy_capture_by_agent.pop(agent_id, None)
         copy_mode = normalize_joplin_copy_mode(self.joplin_copy_mode)
         if copy_mode == JOPLIN_COPY_MODE_TMUX_CAPTURE:
             captured = await self.capture_tmux_display_for_agent(agent_id)
-            if captured and captured.strip() and not contains_codex_copy_selector(captured):
-                return captured, "tmux capture"
+            if captured and captured.strip() and not contains_codex_copy_picker(captured):
+                return self.remember_codex_copy_capture(
+                    agent_id,
+                    CodexCopyCapture(
+                        text=captured,
+                        source="tmux capture",
+                        session_id=next(iter(self.codex_session_ids_for_agent(agent_id)), ""),
+                    ),
+                )
             self.notify("Joplin tmux capture mode found no visible response.", severity="error")
             return None
         if allow_transcript and copy_mode == JOPLIN_COPY_MODE_TRANSCRIPT_FIRST:
@@ -21828,41 +22304,35 @@ class AgentPBXTUI(App[None]):
                 after_boundary=transcript_boundary,
             )
             if transcript is not None:
-                return (
-                    transcript.text,
-                    self.format_codex_transcript_source(transcript),
+                return self.remember_codex_copy_capture(
+                    agent_id,
+                    self.copy_capture_from_transcript(transcript),
                 )
-        try:
-            previous_clipboard, _previous_source = await asyncio.to_thread(
-                read_clipboard_text
-            )
-        except Exception:
-            previous_clipboard = ""
-        sent = await self.send_keys_to_tmux(agent_id, "/copy")
-        if not sent:
+        pane = await self.resolve_tmux_send_pane(agent_id, status=None)
+        if pane is None:
             self.notify(
                 f"Joplin copy needs a live tmux pane for {agent_id}.",
                 severity="warning",
             )
             return None
-        copied, captured, copy_error = await self.await_copied_tmux_response_or_selector(
-            agent_id,
-            previous_clipboard,
-        )
-        if copied is not None:
-            return copied
-        if captured is None:
-            captured = await self.capture_tmux_display_for_agent(agent_id)
-        if captured and contains_codex_copy_selector(captured):
-            copied, selection_error = await self.select_codex_copy_selector(
-                agent_id,
-                captured,
+        if not await self.dismiss_codex_copy_selector(pane):
+            self.notify(
+                "An existing Codex /copy picker could not be dismissed safely.",
+                severity="warning",
             )
-            if copied is not None:
-                return copied
-            if selection_error is not None:
-                copy_error = selection_error
-            captured = await self.capture_tmux_display_for_agent(agent_id)
+            return None
+        snapshot = await self.copy_clipboard_snapshot_for_pane(pane)
+        try:
+            await asyncio.to_thread(tmux_support.send_literal_keys, pane.pane_id, "/copy")
+            candidate, raw_capture = await self.await_codex_copy_candidate(pane, snapshot)
+            capture = await self.validate_direct_codex_copy(
+                agent_id,
+                candidate,
+                raw_capture,
+            )
+            return self.remember_codex_copy_capture(agent_id, capture)
+        except Exception as exc:
+            copy_error = exc
         if allow_transcript:
             transcript = await self.copy_codex_transcript_response_text(
                 agent_id,
@@ -21874,37 +22344,81 @@ class AgentPBXTUI(App[None]):
                         f"Joplin /copy failed; using Codex transcript: {copy_error}",
                         severity="warning",
                     )
-                return (
-                    transcript.text,
-                    self.format_codex_transcript_source(transcript),
+                return self.remember_codex_copy_capture(
+                    agent_id,
+                    self.copy_capture_from_transcript(transcript),
                 )
-        if captured and captured.strip() and not contains_codex_copy_selector(captured):
+        captured = await self.capture_tmux_display_for_agent(agent_id)
+        if captured and captured.strip() and not contains_codex_copy_picker(captured):
             if copy_error is not None:
                 self.notify(
                     f"Joplin /copy failed; using visible tmux capture: {copy_error}",
                     severity="warning",
                 )
-            return captured, "tmux capture fallback"
+            return self.remember_codex_copy_capture(
+                agent_id,
+                CodexCopyCapture(
+                    text=captured,
+                    source="tmux capture fallback",
+                    session_id=next(iter(self.codex_session_ids_for_agent(agent_id)), ""),
+                ),
+            )
         error_text = str(copy_error or "no transcript, clipboard, or tmux capture available")
         self.notify(f"Joplin copy failed: {error_text}", severity="error")
         return None
 
-    async def copy_tmux_response_to_joplin(self, agent_id: str) -> None:
+    async def copy_tmux_response_to_joplin(
+        self,
+        agent_id: str,
+        *,
+        force: bool = False,
+    ) -> None:
         if not await self.ensure_joplin_available():
             return
         copied = await self.copy_tmux_response_text(agent_id)
         if copied is None:
             return
         response_text, clipboard_source = copied
+        capture = self.last_codex_copy_capture_by_agent.get(agent_id) or CodexCopyCapture(
+            text=response_text,
+            source=clipboard_source,
+            session_id=next(iter(self.codex_session_ids_for_agent(agent_id)), ""),
+        )
+        previous = self.joplin_copy_fingerprints_by_agent.get(agent_id, {})
+        if (
+            not force
+            and previous.get("digest") == capture.digest
+            and previous.get("session_id", "") == capture.session_id
+        ):
+            existing_note_id = previous.get("note_id", "")
+            self.set_selected_joplin_note_for_agent(agent_id, existing_note_id or None)
+            self.notify(
+                "The latest Codex response is already saved to Joplin. "
+                "Use /joplin copy force to create an intentional duplicate."
+            )
+            await self.load_joplin_notes(agent_id)
+            return
         prompt = self.latest_joplin_prompt_for_agent(agent_id)
-        body = format_joplin_tmux_response_copy_body(prompt, response_text)
+        body = format_joplin_tmux_response_copy_body(
+            prompt,
+            response_text,
+            capture_source=clipboard_source,
+        )
         title = joplin_tmux_copy_title(prompt)
-        await self.create_manual_joplin_copy(
+        note = await self.create_manual_joplin_copy(
             agent_id,
             title=title,
             body=body,
             success_message=f"Copied Codex response to Joplin via {clipboard_source}.",
         )
+        if isinstance(note, Mapping):
+            self.joplin_copy_fingerprints_by_agent[agent_id] = {
+                "digest": capture.digest,
+                "session_id": capture.session_id,
+                "note_id": str(note.get("id") or "").strip(),
+                "source": capture.source,
+            }
+            self.save_settings()
         await self.load_tmux_capture(agent_id)
 
     async def append_joplin_log_section(
@@ -22069,9 +22583,9 @@ class AgentPBXTUI(App[None]):
         title: str,
         body: str,
         success_message: str,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         if not await self.ensure_joplin_available():
-            return
+            return None
         try:
             response = await self.api_client().post(
                 f"/v1/agents/{agent_id}/joplin/copy",
@@ -22083,13 +22597,17 @@ class AgentPBXTUI(App[None]):
             note = response.json()
         except Exception as exc:
             self.notify(f"Joplin copy failed: {exc}", severity="error")
-            return
+            return None
+        if not isinstance(note, dict):
+            self.notify("Joplin copy returned an invalid note record.", severity="error")
+            return None
         self.set_selected_joplin_note_for_agent(
             agent_id,
             str(note.get("id") or "").strip() or None,
         )
         self.notify(success_message)
         await self.load_joplin_notes(agent_id)
+        return note
 
     async def copy_latest_report_to_joplin(self, agent_id: str) -> None:
         if not await self.ensure_joplin_available():
@@ -23710,6 +24228,7 @@ class AgentPBXTUI(App[None]):
             "layout": self.layout_mode,
             "split_percent": self.split_percent,
             "joplin_copy_mode": self.joplin_copy_mode,
+            "joplin_copy_fingerprints_by_agent": self.joplin_copy_fingerprints_by_agent,
             "show_hidden_agents": self.show_hidden_agents,
             "export_dir": str(self.export_dir),
             "tmux_direct": self.tmux_direct_enabled,

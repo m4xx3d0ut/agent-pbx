@@ -248,6 +248,130 @@ def test_tmux_kill_pane_uses_target(monkeypatch) -> None:
     assert calls == [["tmux", "kill-pane", "-t", "%42"]]
 
 
+def test_tmux_respawn_pane_preserves_target_and_injects_environment(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    tmux.respawn_pane(
+        "%42",
+        command="codex resume session-1",
+        cwd="/tmp/project",
+        env={"AGENT_PBX_TOKEN": "secret"},
+    )
+
+    assert calls == [
+        [
+            "tmux",
+            "respawn-pane",
+            "-k",
+            "-t",
+            "%42",
+            "-c",
+            "/tmp/project",
+            "-e",
+            "AGENT_PBX_TOKEN=secret",
+            "codex resume session-1",
+        ]
+    ]
+
+
+def test_tmux_respawn_pane_rejects_invalid_environment_key(monkeypatch) -> None:
+    monkeypatch.setattr(tmux.subprocess, "run", lambda *args, **kwargs: None)
+
+    try:
+        tmux.respawn_pane("%42", command="codex", env={"bad-key": "value"})
+    except ValueError as exc:
+        assert "invalid tmux environment key" in str(exc)
+    else:
+        raise AssertionError("invalid tmux environment key was accepted")
+
+
+def test_tmux_pane_is_live_checks_remain_on_exit_state(monkeypatch) -> None:
+    outputs = iter(["0\n", "1\n"])
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, next(outputs), "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.pane_is_live("%42") is True
+    assert tmux.pane_is_live("%42") is False
+
+
+def test_tmux_pane_clipboard_environment_only_returns_desktop_allowlist(monkeypatch) -> None:
+    monkeypatch.setattr(tmux, "_pane_pid", lambda *args, **kwargs: 123)
+    monkeypatch.setattr(
+        tmux.Path,
+        "read_bytes",
+        lambda _path: (
+            b"DISPLAY=:1\0XDG_RUNTIME_DIR=/run/user/1000\0"
+            b"AGENT_PBX_TOKEN=secret\0CODEX_HOME=/private\0"
+            b"WAYLAND_DISPLAY=wayland-1\0"
+        ),
+    )
+
+    assert tmux.pane_clipboard_environment("%42") == {
+        "DISPLAY": ":1",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "WAYLAND_DISPLAY": "wayland-1",
+    }
+
+
+def test_tmux_clipboard_transport_requires_an_attached_ms_client(monkeypatch) -> None:
+    monkeypatch.setattr(tmux, "_tmux_command_prefix", lambda *args, **kwargs: ["tmux"])
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[1:] == ["show-options", "-gv", "set-clipboard"]:
+            return subprocess.CompletedProcess(args, 0, "on\n", "")
+        if args[1:] == ["display-message", "-p", "-t", "%42", "#{session_id}"]:
+            return subprocess.CompletedProcess(args, 0, "$1\n", "")
+        if args[1:] == ["list-clients", "-t", "$1", "-F", "#{client_activity} #{client_name}"]:
+            return subprocess.CompletedProcess(args, 0, "12 /dev/pts/5\n", "")
+        if args[1:] == ["show-messages", "-T", "-t", "/dev/pts/5"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                "terminal features:\nMs: (string) \\033]52;%p1%s;%p2%s\\007\n",
+                "",
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    transport = tmux.tmux_clipboard_transport("%42")
+
+    assert transport.available is True
+    assert transport.client_name == "/dev/pts/5"
+    assert calls[-1][1:] == ["show-messages", "-T", "-t", "/dev/pts/5"]
+
+
+def test_tmux_clipboard_transport_explains_missing_attached_client(monkeypatch) -> None:
+    monkeypatch.setattr(tmux, "_tmux_command_prefix", lambda *args, **kwargs: ["tmux"])
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[1:] == ["show-options", "-gv", "set-clipboard"]:
+            return subprocess.CompletedProcess(args, 0, "on\n", "")
+        if args[1:] == ["display-message", "-p", "-t", "%42", "#{session_id}"]:
+            return subprocess.CompletedProcess(args, 0, "$1\n", "")
+        if args[1:] == ["list-clients", "-t", "$1", "-F", "#{client_activity} #{client_name}"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    transport = tmux.tmux_clipboard_transport("%42")
+
+    assert transport.available is False
+    assert "no attached client" in transport.reason
+
+
 def test_tmux_pane_exists_checks_display_message(monkeypatch) -> None:
     calls: list[list[str]] = []
 
