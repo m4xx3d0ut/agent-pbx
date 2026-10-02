@@ -32,6 +32,7 @@ from .config import ServerConfig
 from .codex_sessions import enrich_codex_session_metadata
 from .codex_config import load_codex_config_view, patch_codex_config
 from .codex_cli import update_codex_cli_package
+from .codex.capabilities import CodexCapabilityProbe
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
 from .events import EventClientRegistry, EventStreamService
@@ -294,6 +295,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.store = store
     app.state.event_stream = EventStreamService(store)
     app.state.event_clients = EventClientRegistry()
+    app.state.codex_capabilities = CodexCapabilityProbe(
+        cache_path=resolved_config.db_path.parent / "codex-capabilities-v2.json"
+    )
     app.state.files = AgentFileService()
     app.state.joplin = joplin
     app.state.workerbee = WorkerBeeStatusService(
@@ -378,6 +382,17 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(exc),
             ) from exc
+
+    @app.get(
+        "/v2/codex/capabilities",
+        dependencies=[Depends(require_token)],
+    )
+    async def get_codex_capabilities(refresh: bool = False) -> dict[str, object]:
+        snapshot = await asyncio.to_thread(
+            app.state.codex_capabilities.inspect,
+            use_cache=not refresh,
+        )
+        return snapshot.as_dict()
 
     @app.post(
         "/v1/agents/register",
