@@ -77,6 +77,12 @@ from .workerbee_mcp import (
     WorkerBeeMcpPreflight,
     inspect_workerbee_mcp,
 )
+from .ui.actions import ActionRegistry
+from .ui.async_jobs import AsyncGenerationGate
+from .ui.focus import FocusGenerationGuard
+from .ui.panels.editor import EditorPanelState
+from .ui.panels.joplin import JoplinPanelState
+from .ui.panels.operators import OperatorPanelState
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
@@ -4820,12 +4826,24 @@ class AgentPBXTUI(App[None]):
         self.issues_by_agent: dict[str, dict[int, dict[str, Any]]] = {}
         self.selected_issue_number: int | None = None
         self.selected_issue_number_by_agent: dict[str, int] = {}
-        self.campaigns_by_operator: dict[str, dict[str, dict[str, Any]]] = {}
+        self.action_registry = ActionRegistry()
+        self.focus_generation = FocusGenerationGuard()
+        self.async_generations = AsyncGenerationGate()
+        self.operator_panel_state = OperatorPanelState()
+        self.campaigns_by_operator = self.operator_panel_state.campaigns_by_operator
         self.selected_campaign_id: str | None = None
-        self.selected_campaign_id_by_operator: dict[str, str] = {}
-        self.selected_campaign_report_id_by_operator: dict[str, str] = {}
-        self.operator_kb_entries_by_operator: dict[str, dict[str, dict[str, Any]]] = {}
-        self.operator_kb_queries_by_operator: dict[str, dict[str, dict[str, Any]]] = {}
+        self.selected_campaign_id_by_operator = (
+            self.operator_panel_state.selected_campaign_by_operator
+        )
+        self.selected_campaign_report_id_by_operator = (
+            self.operator_panel_state.selected_report_by_operator
+        )
+        self.operator_kb_entries_by_operator = (
+            self.operator_panel_state.kb_entries_by_operator
+        )
+        self.operator_kb_queries_by_operator = (
+            self.operator_panel_state.kb_queries_by_operator
+        )
         self.selected_operator_kb_id_by_operator: dict[str, str] = {}
         self.selected_operator_kb_query_id_by_operator: dict[str, str] = {}
         self.operator_kb_status_filter_by_operator: dict[str, str] = {}
@@ -4834,9 +4852,10 @@ class AgentPBXTUI(App[None]):
         self.joplin_configured = False
         self.joplin_available = False
         self.joplin_status: dict[str, Any] = {}
-        self.joplin_notes_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
-        self.selected_joplin_note_id: str | None = None
-        self.selected_joplin_note_id_by_agent: dict[str, str] = {}
+        self.joplin_panel_state = JoplinPanelState()
+        self.joplin_notes_by_agent = self.joplin_panel_state.notes_by_scope
+        self.selected_joplin_note_id = self.joplin_panel_state.selected_note_id
+        self.selected_joplin_note_id_by_agent = self.joplin_panel_state.selected_by_scope
         self.codex_session_path_cache = CodexSessionPathCache()
         self.codex_transcript_tail_cache = CodexTranscriptTailCache()
         self.active_codex_session_by_agent: dict[str, ActiveCodexSession] = {}
@@ -4855,18 +4874,19 @@ class AgentPBXTUI(App[None]):
         self.codex_posture: CodexCliPosture | None = None
         self.codex_config: dict[str, Any] | None = None
         self.selected_codex_config_key: str | None = None
-        self.file_path_by_agent: dict[str, str] = {}
-        self.file_entries_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
+        self.editor_panel_state = EditorPanelState()
+        self.file_path_by_agent = self.editor_panel_state.paths_by_agent
+        self.file_entries_by_agent = self.editor_panel_state.entries_by_agent
         self.file_directory_entries_by_agent: dict[
             str,
             dict[str, dict[str, dict[str, Any]]],
         ] = {}
         self.file_search_results_by_agent: dict[str, dict[str, dict[str, Any]]] = {}
         self.file_search_query_by_agent: dict[str, str] = {}
-        self.selected_file_path_by_agent: dict[str, str] = {}
-        self.selected_file_line_by_agent: dict[str, int] = {}
-        self.editor_documents_by_agent: dict[str, dict[str, Any]] = {}
-        self.editor_dirty_agent_ids: set[str] = set()
+        self.selected_file_path_by_agent = self.editor_panel_state.selected_path_by_agent
+        self.selected_file_line_by_agent = self.editor_panel_state.selected_line_by_agent
+        self.editor_documents_by_agent = self.editor_panel_state.documents_by_agent
+        self.editor_dirty_agent_ids = self.editor_panel_state.dirty_agent_ids
         self.editor_rendering = False
         self.editor_rendered_agent_id: str | None = None
         self.editor_fullscreen = False
@@ -22227,15 +22247,8 @@ class AgentPBXTUI(App[None]):
 
     def selected_joplin_note_for_agent(self, agent_id: str) -> str | None:
         key = self.joplin_selection_key(agent_id)
-        note_id = self.selected_joplin_note_id_by_agent.get(key)
-        if note_id:
-            return note_id
-        if not self.selected_joplin_note_id:
-            return None
-        notes = self.joplin_notes_by_agent.get(key)
-        if notes and self.selected_joplin_note_id not in notes:
-            return None
-        return self.selected_joplin_note_id
+        self.joplin_panel_state.selected_note_id = self.selected_joplin_note_id
+        return self.joplin_panel_state.selected_for(key)
 
     def set_selected_joplin_note_for_agent(
         self,
@@ -22243,11 +22256,8 @@ class AgentPBXTUI(App[None]):
         note_id: str | None,
     ) -> None:
         key = self.joplin_selection_key(agent_id)
-        if note_id:
-            self.selected_joplin_note_id_by_agent[key] = note_id
-        else:
-            self.selected_joplin_note_id_by_agent.pop(key, None)
-        self.selected_joplin_note_id = note_id
+        self.joplin_panel_state.select(key, note_id)
+        self.selected_joplin_note_id = self.joplin_panel_state.selected_note_id
 
     async def select_joplin_note(
         self,
