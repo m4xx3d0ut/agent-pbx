@@ -81,6 +81,7 @@ from agent_pbx.tui import (
     slash_completion_direction,
     tmux_features_available,
 )
+from agent_pbx.terminal import PbxTerminalSurface, function_key_sequence
 from textual.events import Click, Key, MouseDown
 from textual.widgets import (
     Button,
@@ -583,6 +584,8 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "tmux_direct_agent_modes": {"agent-1": True, "agent-2": False},
                 "tmux_capture_lines": 250,
                 "tmux_runtime_server_mode": "outer_if_present",
+                "embedded_terminal_v2": True,
+                "tmux_popout_mode": "switch_client",
                 "tmux_agent_targets": {"agent-1": "%1"},
                 "selected_operator_fork_target_by_operator": {
                     "operator-0": "operator-0-fork-agent-1:%7"
@@ -618,6 +621,8 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.tmux_direct_agent_modes == {"agent-1": True, "agent-2": False}
     assert app.tmux_capture_lines == 250
     assert app.tmux_runtime_server_mode == "outer_if_present"
+    assert app.embedded_terminal_v2_enabled is True
+    assert app.tmux_popout_mode == "switch_client"
     assert app.tmux_agent_targets == {"agent-1": "%1"}
     assert app.selected_operator_fork_target_by_operator == {
         "operator-0": "operator-0-fork-agent-1:%7"
@@ -1870,6 +1875,49 @@ async def test_tui_shift_f2_alias_passes_unmodified_f2_to_focused_terminal() -> 
         await pilot.pause()
 
     assert sent == [("agent-a", "F2")]
+
+
+async def test_tui_shift_f2_writes_directly_to_embedded_terminal() -> None:
+    written: list[bytes] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+
+        def read_available(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return b""
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, _columns: int, _rows: int) -> None:
+            return None
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        app.selected_agent_id = "agent-a"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server:%7"
+        terminal = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        terminal.process = FakeProcess()  # type: ignore[assignment]
+        terminal.target = "server:%7"
+        app.apply_tmux_class()
+        terminal.focus()
+        await pilot.pause()
+
+        app.on_key(Key("f14", None))
+        await pilot.pause()
+        assert written == [function_key_sequence(2)]
+
+        await pilot.press("f2")
+        await pilot.pause()
+        assert app.focused is app.query_one("#events", DataTable)
+
+    assert app.embedded_terminal_agent_id is None
 
 
 async def test_tui_layout_refresh_preserves_visible_events_focus() -> None:

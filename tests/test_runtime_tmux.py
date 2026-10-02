@@ -14,6 +14,9 @@ from agent_pbx.runtime_tmux import (
     assess_runtime_mapping,
     recursive_attachment_reason,
     resolve_runtime_tmux_server,
+    runtime_pop_plan,
+    tmux_client_attach_command,
+    tmux_select_runtime_pane_command,
 )
 from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import Store
@@ -118,6 +121,52 @@ def test_mapping_change_revokes_existing_writer_lease(tmp_path: Path) -> None:
     changed = store.upsert_tmux_runtime_mapping(**{**base, "pane_id": "%2"})
     assert changed["writer_client_id"] is None
     assert changed["writer_lease_active"] is False
+
+
+def test_tmux_client_commands_are_mapping_scoped() -> None:
+    mapping = {
+        "socket_path": "/tmp/pbx.sock",
+        "session_name": "runtime-a",
+        "pane_id": "%7",
+    }
+    assert tmux_client_attach_command(mapping) == (
+        "tmux",
+        "-S",
+        "/tmp/pbx.sock",
+        "attach-session",
+        "-t",
+        "runtime-a",
+    )
+    assert tmux_client_attach_command(mapping, read_only=True)[4] == "-r"
+    assert tmux_select_runtime_pane_command(mapping)[-2:] == ("-t", "%7")
+
+
+def test_integrated_pop_targets_only_recorded_client_and_sessions() -> None:
+    mapping = {
+        "server_mode": "outer_if_present",
+        "socket_path": "/tmp/pbx.sock",
+        "session_name": "runtime-a",
+        "origin_session_name": "agent-pbx",
+        "origin_client_tty": "/dev/pts/9",
+    }
+    pop_out = runtime_pop_plan(mapping, direction="out")
+    pop_in = runtime_pop_plan(mapping, direction="in")
+    assert pop_out.action == "switch_client_out"
+    assert pop_out.command[-4:] == ("-c", "/dev/pts/9", "-t", "runtime-a")
+    assert pop_in.command[-4:] == ("-c", "/dev/pts/9", "-t", "agent-pbx")
+
+
+def test_dedicated_pop_uses_foreground_attach() -> None:
+    plan = runtime_pop_plan(
+        {
+            "server_mode": "dedicated",
+            "socket_path": "/tmp/pbx.sock",
+            "session_name": "runtime-a",
+        },
+        direction="out",
+    )
+    assert plan.action == "suspend_attach"
+    assert plan.command[-2:] == ("-t", "runtime-a")
 
 
 def test_tmux_runtime_api_registers_reconciles_and_leases_writer(

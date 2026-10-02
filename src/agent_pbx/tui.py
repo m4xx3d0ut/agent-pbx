@@ -16,6 +16,7 @@ import subprocess
 import time
 from typing import Any, TypeVar
 from urllib.parse import quote, urlparse
+import uuid
 
 import httpx
 from websockets.asyncio.client import connect as websocket_connect
@@ -79,14 +80,19 @@ from .workerbee_mcp import (
     inspect_workerbee_mcp,
 )
 from .contracts import ActionDefinition
-from .terminal.keys import FunctionKeyPassthroughMap
+from .terminal import FunctionKeyPassthroughMap, PbxTerminalSurface
 from .runtime_tmux import (
+    RuntimePopPlan,
     RuntimeServerMode,
+    execute_runtime_pop_plan,
     normalize_runtime_server_mode,
     process_start_ticks as runtime_process_start_ticks,
     read_outer_tmux_context,
     recursive_attachment_reason,
     resolve_runtime_tmux_server,
+    runtime_pop_plan,
+    tmux_client_attach_command,
+    tmux_select_runtime_pane_command,
 )
 from .ui.actions import ActionRegistry
 from .ui.async_jobs import AsyncGenerationGate
@@ -297,6 +303,14 @@ DEFAULT_DETACHED_TMUX_WIDTH = 160
 DEFAULT_DETACHED_TMUX_HEIGHT = 48
 DEFAULT_TMUX_REFRESH_SECONDS = 1.5
 DEFAULT_TMUX_RUNTIME_SERVER_MODE = RuntimeServerMode.DEDICATED.value
+DEFAULT_TMUX_POPOUT_MODE = "auto"
+TMUX_POPOUT_MODE_CHOICES = (
+    ("Automatic for runtime server", "auto"),
+    ("Switch recorded outer client", "switch_client"),
+    ("Suspend TUI and attach", "suspend_attach"),
+)
+TMUX_WRITER_LEASE_SECONDS = 30.0
+TMUX_WRITER_RENEW_SECONDS = 12.0
 TMUX_RUNTIME_SERVER_MODE_CHOICES = (
     ("Dedicated PBX server", RuntimeServerMode.DEDICATED.value),
     ("Outer server when present", RuntimeServerMode.OUTER_IF_PRESENT.value),
@@ -3562,6 +3576,8 @@ class SettingsScreen(ModalScreen[None]):
         tmux_direct_enabled: bool,
         tmux_features_available: bool,
         tmux_runtime_server_mode: str,
+        embedded_terminal_enabled: bool,
+        tmux_popout_mode: str,
         custom_theme_name: str,
         theme_name: str,
     ) -> None:
@@ -3578,6 +3594,8 @@ class SettingsScreen(ModalScreen[None]):
         self.tmux_runtime_server_mode = normalize_runtime_server_mode(
             tmux_runtime_server_mode
         ).value
+        self.embedded_terminal_enabled = embedded_terminal_enabled
+        self.tmux_popout_mode = tmux_popout_mode
         self.custom_theme_name = custom_theme_name
         self.theme_name = theme_name
 
@@ -3641,6 +3659,20 @@ class SettingsScreen(ModalScreen[None]):
                     allow_blank=False,
                     id="tmux-runtime-mode",
                 )
+                embedded_terminal = Checkbox(
+                    "Embedded native tmux terminal (v2)",
+                    value=self.embedded_terminal_enabled,
+                    id="embedded-terminal-v2",
+                )
+                embedded_terminal.disabled = not self.tmux_features_available
+                yield embedded_terminal
+                yield Static("Tmux pop-out behavior", id="tmux-popout-mode-label")
+                yield Select(
+                    TMUX_POPOUT_MODE_CHOICES,
+                    value=self.tmux_popout_mode,
+                    allow_blank=False,
+                    id="tmux-popout-mode",
+                )
                 yield Static("Theme", id="theme-label")
                 yield Select(
                     [
@@ -3687,6 +3719,9 @@ class SettingsScreen(ModalScreen[None]):
         elif event.select.id == "tmux-runtime-mode":
             event.stop()
             self.app.set_tmux_runtime_server_mode(str(event.value))  # type: ignore[attr-defined]
+        elif event.select.id == "tmux-popout-mode":
+            event.stop()
+            self.app.set_tmux_popout_mode(str(event.value))  # type: ignore[attr-defined]
 
 
 class AgentPBXTUI(App[None]):
@@ -4234,6 +4269,26 @@ class AgentPBXTUI(App[None]):
         scrollbar-color: $accent;
         scrollbar-color-hover: $warning;
         scrollbar-background: $surface;
+    }
+
+    #pbx-terminal-surface {
+        display: none;
+        height: 1fr;
+        min-height: 8;
+        border: tall $accent;
+        background: $surface;
+        overflow: hidden hidden;
+    }
+
+    Screen.embedded-terminal #pbx-terminal-surface {
+        display: block;
+    }
+
+    Screen.embedded-terminal #tmux-stream,
+    Screen.embedded-terminal #tmux-actions,
+    Screen.embedded-terminal #tmux-message,
+    Screen.embedded-terminal #tmux-hotkeys {
+        display: none;
     }
 
     #tmux-actions {
@@ -4819,8 +4874,13 @@ class AgentPBXTUI(App[None]):
             self.settings,
             "tmux_direct_agent_modes",
         )
+        embedded_terminal_requested = bool_setting(
+            self.settings,
+            "embedded_terminal_v2",
+            False,
+        ) or bool(env_flag_value("AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2"))
         self.tmux_features_available = tmux_features_available(
-            tmux_direct_enabled=self.tmux_direct_enabled
+            tmux_direct_enabled=self.tmux_direct_enabled or embedded_terminal_requested
         )
         self.tmux_local_direct_context = (
             self.tmux_features_available and is_local_server_url(self.server)
@@ -4841,6 +4901,23 @@ class AgentPBXTUI(App[None]):
         ).value
         self.tmux_runtime_server = resolve_runtime_tmux_server(
             self.tmux_runtime_server_mode
+        )
+        embedded_terminal_setting = env_flag_value(
+            "AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2"
+        )
+        self.embedded_terminal_v2_enabled = bool_setting(
+            self.settings,
+            "embedded_terminal_v2",
+            False,
+        )
+        if embedded_terminal_setting is not None:
+            self.embedded_terminal_v2_enabled = embedded_terminal_setting
+        if not self.tmux_local_direct_context:
+            self.embedded_terminal_v2_enabled = False
+        self.tmux_popout_mode = str_setting(
+            self.settings,
+            "tmux_popout_mode",
+            DEFAULT_TMUX_POPOUT_MODE,
         )
         capture_lines_setting = int_setting(
             self.settings,
@@ -5056,6 +5133,9 @@ class AgentPBXTUI(App[None]):
             str, tuple[str, str, int | None, str]
         ] = {}
         self.tmux_runtime_mapping_error_by_agent: dict[str, str] = {}
+        self.tmux_terminal_client_id = f"tui-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        self.embedded_terminal_agent_id: str | None = None
+        self.embedded_terminal_target: str | None = None
         self.tmux_panes: list[tmux_support.TmuxPane] = []
         self.tmux_refreshing = False
         self.tmux_plan_selector_pane_by_agent: dict[str, str] = {}
@@ -5086,6 +5166,7 @@ class AgentPBXTUI(App[None]):
         self.agent_refresh_timer: Timer | None = None
         self.tmux_refresh_timer: Timer | None = None
         self.attention_blink_timer: Timer | None = None
+        self.tmux_writer_lease_timer: Timer | None = None
 
     def resolve_agent_refresh_seconds(self) -> float:
         default = (
@@ -6070,6 +6151,7 @@ class AgentPBXTUI(App[None]):
                             )
                         with Vertical(id="tmux-panel"):
                             yield Static("Tmux: -", id="tmux-status")
+                            yield PbxTerminalSurface(id="pbx-terminal-surface")
                             yield TmuxStreamTextArea(id="tmux-stream", read_only=True)
                             with Horizontal(id="tmux-actions"):
                                 yield Button("Auto", id="tmux-auto")
@@ -6404,6 +6486,10 @@ class AgentPBXTUI(App[None]):
         )
         self.notify_custom_slash_command_errors()
         self.restart_refresh_timers()
+        self.tmux_writer_lease_timer = self.set_interval(
+            TMUX_WRITER_RENEW_SECONDS,
+            self.schedule_tmux_writer_lease_renewal,
+        )
         self.run_worker(
             self.stream_events_v2() if self.event_stream_v2_enabled else self.stream_events(),
             name="events",
@@ -6414,6 +6500,10 @@ class AgentPBXTUI(App[None]):
 
     async def on_unmount(self) -> None:
         self.stop_refresh_timers()
+        if self.tmux_writer_lease_timer is not None:
+            self.tmux_writer_lease_timer.stop()
+            self.tmux_writer_lease_timer = None
+        await self.detach_embedded_tmux_terminal(release_lease=True)
         if self.http_client is not None:
             await self.http_client.aclose()
             self.http_client = None
@@ -6498,6 +6588,21 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/codex terminal raw", "Use Codex raw scrollback for managed panes", lambda: self.set_codex_terminal_mode(CODEX_TERMINAL_MODE_RAW))
         yield SystemCommand("/codex terminal default", "Use Codex default terminal behavior for managed panes", lambda: self.set_codex_terminal_mode(CODEX_TERMINAL_MODE_DEFAULT))
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
+        yield SystemCommand(
+            "/tmux terminal",
+            "Toggle the embedded native tmux terminal",
+            self.palette_toggle_embedded_terminal,
+        )
+        yield SystemCommand(
+            "/tmux pop out",
+            "Open the selected runtime in its native tmux client",
+            self.palette_tmux_pop_out,
+        )
+        yield SystemCommand(
+            "/tmux pop in",
+            "Return the recorded outer tmux client to Agent PBX",
+            self.palette_tmux_pop_in,
+        )
         yield SystemCommand("/latest", "Open the Latest tab", self.palette_latest)
         yield SystemCommand("/thread", "Open the Thread tab", self.palette_thread)
         yield SystemCommand("/files", "Open and refresh the Files tab", self.palette_files)
@@ -6670,6 +6775,23 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.restart_tmux_codex_session(agent_id),
             name=f"tmux-restart-{slugify(agent_id)}",
+            exclusive=True,
+        )
+
+    def palette_toggle_embedded_terminal(self) -> None:
+        self.set_embedded_terminal_enabled(not self.embedded_terminal_v2_enabled)
+
+    def palette_tmux_pop_out(self) -> None:
+        self.run_worker(
+            self.pop_runtime("out"),
+            name="tmux-pop-out",
+            exclusive=True,
+        )
+
+    def palette_tmux_pop_in(self) -> None:
+        self.run_worker(
+            self.pop_runtime("in"),
+            name="tmux-pop-in",
             exclusive=True,
         )
 
@@ -8035,6 +8157,8 @@ class AgentPBXTUI(App[None]):
                 tmux_direct_enabled=self.tmux_direct_enabled,
                 tmux_features_available=self.tmux_features_available,
                 tmux_runtime_server_mode=self.tmux_runtime_server_mode,
+                embedded_terminal_enabled=self.embedded_terminal_v2_enabled,
+                tmux_popout_mode=self.tmux_popout_mode,
                 custom_theme_name=self.custom_theme_name,
                 theme_name=self.ui_theme,
             )
@@ -8093,7 +8217,13 @@ class AgentPBXTUI(App[None]):
             return
         self.activate_latest_tab()
         if self.is_tmux_direct_enabled():
-            target = self.query_one_or_none("#tmux-message", TextArea)
+            terminal = self.query_one_or_none(
+                "#pbx-terminal-surface", PbxTerminalSurface
+            )
+            if terminal is not None and terminal.attached:
+                target = terminal
+            else:
+                target = self.query_one_or_none("#tmux-message", TextArea)
         else:
             target = self.query_one_or_none("#message", TextArea)
         if target is not None:
@@ -8120,7 +8250,13 @@ class AgentPBXTUI(App[None]):
         target: Widget | None = None
         if self.active_agent_tab == "latest-tab":
             if self.is_tmux_direct_enabled():
-                target = self.query_one_or_none("#tmux-stream", TextArea)
+                terminal = self.query_one_or_none(
+                    "#pbx-terminal-surface", PbxTerminalSurface
+                )
+                if terminal is not None and terminal.attached:
+                    target = terminal
+                else:
+                    target = self.query_one_or_none("#tmux-stream", TextArea)
             else:
                 target = self.query_one_or_none("#detail", TextArea)
         elif self.active_agent_tab == "thread-tab":
@@ -8422,6 +8558,12 @@ class AgentPBXTUI(App[None]):
             return False
         self.tmux_runtime_server_mode = requested.value
         self.tmux_runtime_server = resolved
+        if self.embedded_terminal_agent_id:
+            self.run_async_worker(
+                lambda: self.detach_embedded_tmux_terminal(release_lease=True),
+                name="tmux-runtime-mode-detach",
+                exclusive=True,
+            )
         self.save_settings()
         if resolved.effective_mode is RuntimeServerMode.DEDICATED:
             detail = "dedicated runtime server"
@@ -8430,6 +8572,17 @@ class AgentPBXTUI(App[None]):
         else:
             detail = f"validated outer server {resolved.server_id}"
         self.notify(f"Runtime tmux mode set to {requested.value}: {detail}.")
+        return True
+
+    def set_tmux_popout_mode(self, mode: str) -> bool:
+        allowed = {value for _label, value in TMUX_POPOUT_MODE_CHOICES}
+        normalized = str(mode or "").strip().casefold().replace("-", "_")
+        if normalized not in allowed:
+            self.notify(f"Unsupported tmux pop-out mode: {mode}", severity="warning")
+            return False
+        self.tmux_popout_mode = normalized
+        self.save_settings()
+        self.notify(f"Tmux pop-out behavior set to {normalized}.")
         return True
 
     def query_one_or_none(
@@ -10019,6 +10172,16 @@ class AgentPBXTUI(App[None]):
             return False
         event.stop()
         event.prevent_default()
+        terminal = self.query_one_or_none(
+            "#pbx-terminal-surface", PbxTerminalSurface
+        )
+        if (
+            focused_id == "pbx-terminal-surface"
+            and terminal is not None
+            and terminal.attached
+            and terminal.write(translated.sequence)
+        ):
+            return True
         self.run_worker(
             self.send_key_to_tmux(
                 self.selected_agent_id,
@@ -11074,6 +11237,12 @@ class AgentPBXTUI(App[None]):
                     name="tmux-capture",
                     exclusive=True,
                 )
+        elif self.embedded_terminal_agent_id:
+            self.run_async_worker(
+                lambda: self.detach_embedded_tmux_terminal(release_lease=True),
+                name="embedded-terminal-tab-detach",
+                exclusive=True,
+            )
         if self.active_agent_tab == "codex-tab":
             self.run_async_worker(
                 self.load_codex_config,
@@ -11185,6 +11354,7 @@ class AgentPBXTUI(App[None]):
     async def select_agent(self, agent_id: str) -> None:
         previous_agent_id = self.selected_agent_id
         if agent_id != previous_agent_id:
+            await self.detach_embedded_tmux_terminal(release_lease=True)
             self.save_current_agent_pane_state(previous_agent_id)
         was_compact_home = self.is_compact_layout() and self.compact_view == "home"
         self.selected_agent_id = agent_id
@@ -11390,6 +11560,12 @@ class AgentPBXTUI(App[None]):
         stream = self.query_one_or_none("#tmux-stream", TextArea)
         if status is None or stream is None:
             return
+        if self.embedded_terminal_v2_enabled:
+            mapping = await self.fetch_tmux_runtime_mapping(agent_id)
+            if mapping is not None and await self.attach_embedded_tmux_terminal(
+                agent_id, mapping
+            ):
+                return
         try:
             panes = await asyncio.to_thread(tmux_support.list_panes)
         except Exception as exc:
@@ -11439,7 +11615,13 @@ class AgentPBXTUI(App[None]):
                 )
             self.render_agents()
             return
-        await self.ensure_tmux_runtime_mapping(agent_id, pane)
+        mapped = await self.ensure_tmux_runtime_mapping(agent_id, pane)
+        if mapped and self.embedded_terminal_v2_enabled:
+            mapping = self.tmux_runtime_mapping_by_agent.get(agent_id)
+            if mapping is not None and await self.attach_embedded_tmux_terminal(
+                agent_id, mapping
+            ):
+                return
         cache_key = f"{agent_id}:{pane.pane_id}"
         self.prepare_tmux_stream_for_capture(stream, cache_key=cache_key, pane=pane)
         try:
@@ -11559,6 +11741,200 @@ class AgentPBXTUI(App[None]):
         self.tmux_runtime_mapping_by_agent[agent_id] = mapping
         self.tmux_runtime_mapping_signature_by_agent[agent_id] = signature
         self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+        return True
+
+    async def fetch_tmux_runtime_mapping(
+        self,
+        agent_id: str,
+    ) -> dict[str, Any] | None:
+        cached = self.tmux_runtime_mapping_by_agent.get(agent_id)
+        if cached is not None and str(cached.get("state") or "") == "ready":
+            return cached
+        try:
+            response = await self.api_client().get(
+                f"/v2/tmux/runtimes/{quote(agent_id, safe='')}",
+                headers=auth_headers(self.token),
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            mapping = response.json()
+        except Exception as exc:
+            self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
+            return None
+        self.tmux_runtime_mapping_by_agent[agent_id] = mapping
+        self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+        return mapping
+
+    async def acquire_tmux_writer_lease(self, agent_id: str) -> dict[str, Any] | None:
+        try:
+            response = await self.api_client().post(
+                f"/v2/tmux/runtimes/{quote(agent_id, safe='')}/writer/acquire",
+                json={
+                    "client_id": self.tmux_terminal_client_id,
+                    "ttl_seconds": TMUX_WRITER_LEASE_SECONDS,
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            mapping = response.json()
+        except Exception as exc:
+            self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
+            return None
+        self.tmux_runtime_mapping_by_agent[agent_id] = mapping
+        self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+        return mapping
+
+    async def release_tmux_writer_lease(self, agent_id: str) -> None:
+        try:
+            response = await self.api_client().post(
+                f"/v2/tmux/runtimes/{quote(agent_id, safe='')}/writer/release",
+                json={
+                    "client_id": self.tmux_terminal_client_id,
+                    "ttl_seconds": TMUX_WRITER_LEASE_SECONDS,
+                },
+                headers=auth_headers(self.token),
+            )
+            if response.status_code not in {404, 409}:
+                response.raise_for_status()
+        except Exception:
+            return
+
+    async def attach_embedded_tmux_terminal(
+        self,
+        agent_id: str,
+        mapping: dict[str, Any],
+    ) -> bool:
+        if (
+            not self.embedded_terminal_v2_enabled
+            or self.active_agent_tab != "latest-tab"
+            or agent_id != self.selected_agent_id
+            or str(mapping.get("state") or "") != "ready"
+        ):
+            return False
+        target = f"{mapping.get('server_id')}:{mapping.get('pane_id')}"
+        surface = self.query_one_or_none(
+            "#pbx-terminal-surface", PbxTerminalSurface
+        )
+        if surface is None:
+            return False
+        if (
+            self.embedded_terminal_agent_id == agent_id
+            and self.embedded_terminal_target == target
+            and surface.attached
+        ):
+            await self.acquire_tmux_writer_lease(agent_id)
+            self.apply_tmux_class()
+            return True
+        await self.detach_embedded_tmux_terminal(release_lease=True)
+        leased = await self.acquire_tmux_writer_lease(agent_id)
+        if leased is None:
+            return False
+        try:
+            select_command = tmux_select_runtime_pane_command(leased)
+            selected = await asyncio.to_thread(
+                subprocess.run,
+                select_command,
+                capture_output=True,
+                text=True,
+            )
+            if selected.returncode != 0:
+                raise RuntimeError(selected.stderr.strip() or "unable to select runtime pane")
+            surface.attach(
+                tmux_client_attach_command(leased),
+                target=target,
+                cwd=str(leased.get("cwd") or Path.home()),
+            )
+        except Exception as exc:
+            await self.release_tmux_writer_lease(agent_id)
+            self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
+            surface.detach()
+            return False
+        self.embedded_terminal_agent_id = agent_id
+        self.embedded_terminal_target = target
+        self.apply_tmux_class()
+        status = self.query_one_or_none("#tmux-status", Static)
+        if status is not None:
+            status.update(
+                f"Tmux: native {leased.get('pane_id')} · F2 Events · Shift+F2 Codex warnings"
+            )
+        surface.focus()
+        return True
+
+    async def detach_embedded_tmux_terminal(self, *, release_lease: bool) -> None:
+        agent_id = self.embedded_terminal_agent_id
+        surface = self.query_one_or_none(
+            "#pbx-terminal-surface", PbxTerminalSurface
+        )
+        if surface is not None:
+            surface.detach()
+        self.embedded_terminal_agent_id = None
+        self.embedded_terminal_target = None
+        self.apply_tmux_class()
+        if release_lease and agent_id:
+            await self.release_tmux_writer_lease(agent_id)
+
+    def schedule_tmux_writer_lease_renewal(self) -> None:
+        if not self.embedded_terminal_agent_id:
+            return
+        self.run_async_worker(
+            self.renew_embedded_tmux_writer_lease_if_active,
+            name="tmux-writer-lease-renew",
+            group="tmux-writer-lease",
+            exclusive=True,
+        )
+
+    async def renew_embedded_tmux_writer_lease_if_active(self) -> None:
+        agent_id = self.embedded_terminal_agent_id
+        if not agent_id:
+            return
+        mapping = await self.acquire_tmux_writer_lease(agent_id)
+        if mapping is None:
+            await self.detach_embedded_tmux_terminal(release_lease=False)
+            self.notify(
+                f"Embedded terminal writer lease was lost for {agent_id}; using capture fallback.",
+                severity="warning",
+            )
+            await self.load_tmux_capture(agent_id)
+
+    async def pop_runtime(self, direction: str) -> bool:
+        agent_id = self.selected_agent_id
+        if not agent_id:
+            self.notify("Select an Agent or Operator first.", severity="warning")
+            return False
+        mapping = await self.fetch_tmux_runtime_mapping(agent_id)
+        if mapping is None:
+            self.notify("No managed tmux runtime mapping is available.", severity="warning")
+            return False
+        try:
+            plan = runtime_pop_plan(mapping, direction=direction)
+            if self.tmux_popout_mode == "switch_client" and plan.action.startswith(
+                "suspend"
+            ):
+                raise ValueError(
+                    "switch-client pop-out requires an integrated outer tmux runtime"
+                )
+            if self.tmux_popout_mode == "suspend_attach" and direction == "out":
+                plan = RuntimePopPlan(
+                    "suspend_attach",
+                    tmux_client_attach_command(mapping),
+                    str(mapping.get("session_name") or ""),
+                )
+        except ValueError as exc:
+            self.notify(str(exc), severity="warning")
+            return False
+        await self.detach_embedded_tmux_terminal(release_lease=True)
+        if plan.action == "suspend_attach":
+            with self.suspend():
+                result = execute_runtime_pop_plan(plan)
+        else:
+            result = await asyncio.to_thread(execute_runtime_pop_plan, plan)
+        if result.returncode != 0:
+            self.notify(result.stderr.strip() or "tmux pop failed", severity="error")
+            await self.load_tmux_capture(agent_id)
+            return False
+        if direction == "in":
+            await self.load_tmux_capture(agent_id)
         return True
 
     async def resolve_tmux_plan_selector_pane(
@@ -25285,6 +25661,44 @@ class AgentPBXTUI(App[None]):
                     exclusive=True,
                 )
             self.render_agents()
+        elif event.checkbox.id == "embedded-terminal-v2":
+            self.set_embedded_terminal_enabled(event.value)
+
+    def set_embedded_terminal_enabled(self, enabled: bool) -> bool:
+        if enabled and (
+            not self.tmux_features_available or not self.tmux_local_direct_context
+        ):
+            self.notify(
+                "The embedded terminal requires a local Agent PBX daemon and tmux access.",
+                severity="warning",
+            )
+            enabled = False
+        self.embedded_terminal_v2_enabled = enabled
+        self.save_settings()
+        self.apply_tmux_class()
+        agent_id = self.selected_agent_id
+        if self.is_running and agent_id and self.is_tmux_direct_enabled(agent_id):
+            if enabled:
+                self.run_async_worker(
+                    lambda agent_id=agent_id: self.load_tmux_capture(agent_id),
+                    name="embedded-terminal-enable",
+                    exclusive=True,
+                )
+            else:
+                self.run_async_worker(
+                    self.disable_embedded_terminal,
+                    name="embedded-terminal-disable",
+                    exclusive=True,
+                )
+        state = "enabled" if enabled else "disabled"
+        self.notify(f"Embedded native tmux terminal {state}.")
+        return enabled
+
+    async def disable_embedded_terminal(self) -> None:
+        agent_id = self.selected_agent_id
+        await self.detach_embedded_tmux_terminal(release_lease=True)
+        if agent_id and self.is_tmux_direct_enabled(agent_id):
+            await self.load_tmux_capture(agent_id)
 
     def set_ui_theme(self, theme_name: str) -> None:
         self.ui_theme = self.resolve_theme(theme_name)
@@ -25531,6 +25945,14 @@ class AgentPBXTUI(App[None]):
             return
         for screen in screens:
             screen.set_class(self.is_tmux_direct_enabled(), "tmux-direct")
+            screen.set_class(
+                bool(
+                    self.embedded_terminal_v2_enabled
+                    and self.embedded_terminal_agent_id == self.selected_agent_id
+                    and self.active_agent_tab == "latest-tab"
+                ),
+                "embedded-terminal",
+            )
 
     def show_compact_home(self) -> None:
         if not self.is_collapsed_layout():
@@ -25586,6 +26008,8 @@ class AgentPBXTUI(App[None]):
             "tmux_direct_agent_modes": self.tmux_direct_agent_modes,
             "tmux_capture_lines": self.tmux_capture_lines,
             "tmux_runtime_server_mode": self.tmux_runtime_server_mode,
+            "embedded_terminal_v2": self.embedded_terminal_v2_enabled,
+            "tmux_popout_mode": self.tmux_popout_mode,
             "tmux_agent_targets": self.tmux_agent_targets,
             "selected_operator_fork_target_by_operator": (
                 self.selected_operator_fork_target_by_operator

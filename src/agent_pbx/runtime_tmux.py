@@ -70,6 +70,21 @@ class RuntimeMappingAssessment:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class RuntimePopPlan:
+    """A reviewable tmux client transition that never moves the runtime pane."""
+
+    action: str
+    command: tuple[str, ...]
+    target_session: str
+    target_client: str | None = None
+
+    def public_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["command"] = list(self.command)
+        return result
+
+
 RUNTIME_PANE_FORMAT = "\t".join(
     (
         "#{session_name}",
@@ -217,6 +232,85 @@ def recursive_attachment_reason(
     if target_pane_id and target_pane_id == outer.pane_id:
         return "runtime target is the Agent PBX TUI pane"
     return None
+
+
+def tmux_client_attach_command(
+    mapping: Mapping[str, Any],
+    *,
+    read_only: bool = False,
+) -> tuple[str, ...]:
+    socket_path = str(mapping.get("socket_path") or "").strip()
+    session_name = str(mapping.get("session_name") or "").strip()
+    if not socket_path or not session_name:
+        raise ValueError("runtime mapping does not identify a tmux socket and session")
+    command = ["tmux", "-S", socket_path, "attach-session"]
+    if read_only:
+        command.append("-r")
+    command.extend(("-t", session_name))
+    return tuple(command)
+
+
+def tmux_select_runtime_pane_command(mapping: Mapping[str, Any]) -> tuple[str, ...]:
+    socket_path = str(mapping.get("socket_path") or "").strip()
+    pane_id = str(mapping.get("pane_id") or "").strip()
+    if not socket_path or not pane_id:
+        raise ValueError("runtime mapping does not identify a tmux socket and pane")
+    return ("tmux", "-S", socket_path, "select-pane", "-t", pane_id)
+
+
+def runtime_pop_plan(
+    mapping: Mapping[str, Any],
+    *,
+    direction: str,
+) -> RuntimePopPlan:
+    """Build a targeted pop transition for one originating tmux client.
+
+    Integrated mode switches exactly the recorded client. Dedicated mode returns
+    a foreground attach command suitable for Textual's suspend context.
+    """
+
+    normalized = direction.strip().casefold().replace("_", "-")
+    if normalized not in {"out", "in"}:
+        raise ValueError("direction must be 'out' or 'in'")
+    socket_path = str(mapping.get("socket_path") or "").strip()
+    runtime_session = str(mapping.get("session_name") or "").strip()
+    origin_session = str(mapping.get("origin_session_name") or "").strip()
+    origin_client = str(mapping.get("origin_client_tty") or "").strip()
+    mode = normalize_runtime_server_mode(mapping.get("server_mode"))
+    if not socket_path or not runtime_session:
+        raise ValueError("runtime mapping is incomplete")
+    if mode is RuntimeServerMode.DEDICATED:
+        if normalized == "in":
+            raise ValueError("dedicated runtime returns when its attached client detaches")
+        return RuntimePopPlan(
+            "suspend_attach",
+            tmux_client_attach_command(mapping),
+            runtime_session,
+        )
+    if not origin_client:
+        raise ValueError("integrated runtime has no recorded originating client")
+    target_session = runtime_session if normalized == "out" else origin_session
+    if not target_session:
+        raise ValueError("integrated runtime has no recorded originating session")
+    return RuntimePopPlan(
+        f"switch_client_{normalized}",
+        (
+            "tmux",
+            "-S",
+            socket_path,
+            "switch-client",
+            "-c",
+            origin_client,
+            "-t",
+            target_session,
+        ),
+        target_session,
+        origin_client,
+    )
+
+
+def execute_runtime_pop_plan(plan: RuntimePopPlan) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(plan.command, capture_output=True, text=True)
 
 
 def parse_runtime_pane_line(line: str) -> RuntimeTmuxPane | None:

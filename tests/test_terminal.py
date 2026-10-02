@@ -5,6 +5,7 @@ import subprocess
 import uuid
 
 import pytest
+from textual.app import App, ComposeResult
 
 from agent_pbx.terminal.conformance import (
     run_dedicated_tmux_conformance,
@@ -13,6 +14,7 @@ from agent_pbx.terminal.conformance import (
 from agent_pbx.terminal.keys import FunctionKeyPassthroughMap, function_key_sequence
 from agent_pbx.terminal.pty import PtyProcess
 from agent_pbx.terminal.screen import VirtualTerminal
+from agent_pbx.terminal.widget import PbxTerminalSurface, terminal_key_bytes
 
 
 @pytest.mark.parametrize("number", range(1, 13))
@@ -30,6 +32,24 @@ def test_plain_function_key_is_not_passthrough() -> None:
     assert FunctionKeyPassthroughMap().translate(["f2"]) is None
 
 
+@pytest.mark.parametrize(
+    ("key", "character", "expected"),
+    [
+        ("enter", None, b"\r"),
+        ("escape", None, b"\x1b"),
+        ("ctrl+c", None, b"\x03"),
+        ("alt+x", None, b"\x1bx"),
+        ("x", "λ", "λ".encode()),
+    ],
+)
+def test_terminal_key_bytes_cover_control_and_unicode_input(
+    key: str,
+    character: str | None,
+    expected: bytes,
+) -> None:
+    assert terminal_key_bytes(key, character) == expected
+
+
 def test_pty_and_virtual_terminal_stream_and_resize() -> None:
     terminal = VirtualTerminal(40, 8)
     with PtyProcess(
@@ -43,6 +63,33 @@ def test_pty_and_virtual_terminal_stream_and_resize() -> None:
         terminal.resize(60, 12)
     assert terminal.snapshot().columns == 60
     assert terminal.snapshot().rows == 12
+
+
+async def test_terminal_surface_streams_input_and_resizes() -> None:
+    class TerminalApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield PbxTerminalSurface(id="terminal", poll_interval=0.01)
+
+    app = TerminalApp()
+    async with app.run_test() as pilot:
+        surface = app.query_one("#terminal", PbxTerminalSurface)
+        surface.attach(
+            [
+                "/bin/sh",
+                "-c",
+                "printf 'READY\\n'; IFS= read -r line; printf 'GOT:%s\\n' \"$line\"; sleep .1",
+            ],
+            target="test-shell",
+        )
+        await pilot.pause(0.1)
+        assert "READY" in surface.render().plain
+        assert surface.write(b"hello\r") is True
+        await pilot.pause(0.15)
+        assert "GOT:hello" in surface.render().plain
+        await pilot.resize_terminal(100, 30)
+        await pilot.pause()
+        assert surface.terminal.columns == surface.size.width
+        assert surface.terminal.rows == surface.size.height
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux unavailable")
