@@ -37,6 +37,44 @@
 - `python -m pytest`
 - `git diff --check`
 
+## v2.0.0a1 - 2026-10-02
+
+### Highlights
+
+- Locks the v2 control-plane, tmux topology, runtime evidence, profile, remote
+  access, compatibility, and embedded-terminal engine decisions in repository
+  ADRs.
+- Introduces stable runtime, capability, lifecycle, and action contracts plus
+  Textual-independent panel, focus, and asynchronous-generation controllers.
+- Adds a Pyte-backed PTY/virtual-terminal adapter and conformance checks for
+  normal tmux clients on dedicated and validated outer servers.
+- Keeps Agent PBX function-key navigation global while translating
+  Shift+F1–F12 and xterm F13–F24 aliases into child F1–F12; F2 remains Events
+  and Shift+F2 reaches Codex warnings.
+- Adds focus-generation and stale-result guards to prevent layout refresh and
+  delayed Joplin operations from snapping or replacing newer UI state.
+- Adds versioned event snapshots, bounded replay, authenticated WebSocket
+  clients, cursor/resync state, and an opt-in v2 TUI event consumer while
+  retaining v1 HTTP/SSE behavior.
+- Adds a versioned Codex runtime adapter with capability/model/feature/schema
+  probing, binary/profile-aware caching, state provenance, verified app-server
+  association, and the locked `/copy → transcript → tmux` capture contract.
+
+### Compatibility
+
+- The captured `Latest` terminal and v1 SSE path remain defaults in alpha 1.
+- `event_stream_v2` is opt-in in local TUI settings.
+- No database schema or user Codex configuration changes are included in this
+  alpha.
+
+### Verification
+
+- Dedicated and detected-outer tmux PTY conformance.
+- Full Python test suite.
+- `python -m compileall -q src/agent_pbx`
+- `git diff --check`
+
+
 ## v0.11.0 - 2026-08-13
 
 ### Highlights
