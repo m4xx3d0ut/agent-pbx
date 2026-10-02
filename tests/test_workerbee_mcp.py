@@ -61,3 +61,19 @@ async def test_workerbee_live_preflight_normalizes_unavailable_endpoint(monkeypa
 
     assert result.ready is False
     assert result.code == "WORKERBEE_ENDPOINT_UNAVAILABLE"
+
+
+def test_workerbee_visibility_diagnostic_reports_mount_mismatch(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    result = workerbee_mcp.diagnose_workerbee_project_visibility(
+        repo,
+        {"data": {"git_root": None, "project_runbook": {"repo_exists": False}}},
+    )
+
+    assert result.ready is False
+    assert result.code == "WORKERBEE_PATH_VISIBILITY_MISMATCH"
+    assert result.host_git_root == str(repo)

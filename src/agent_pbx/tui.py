@@ -698,6 +698,7 @@ class CodexModelPreset:
     aliases: tuple[str, ...] = ()
     eol: str = ""
     recommended: bool = False
+    elevated: bool = False
 
     @property
     def display_label(self) -> str:
@@ -771,6 +772,7 @@ CODEX_MODEL_PRESETS: tuple[CodexModelPreset, ...] = (
         reasoning_summary="detailed",
         verbosity="high",
         aliases=("sol-max", "sol5.6-max", "gpt-5.6-sol-max"),
+        elevated=True,
     ),
 )
 CODEX_MODEL_PRESET_BY_KEY = {preset.key: preset for preset in CODEX_MODEL_PRESETS}
@@ -2950,6 +2952,61 @@ class CustomSlashCommandArgScreen(ModalScreen[None]):
             self.submit()
 
 
+class ModelElevationScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, *, agent_id: str, preset: CodexModelPreset) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.preset = preset
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="model-elevation-panel"):
+            yield Static("Approve Elevated Codex Model", id="model-elevation-title")
+            yield Static(
+                f"{self.agent_id} requests {self.preset.label}. "
+                "Approval is bounded and audited. Enter the reason for this task.",
+                id="model-elevation-help",
+            )
+            yield Input(
+                placeholder="Justification (at least 8 characters)",
+                id="model-elevation-justification",
+            )
+            with Horizontal(id="model-elevation-actions"):
+                yield Button("Approve & Restart", id="model-elevation-approve", variant="warning")
+                yield Button("Cancel", id="model-elevation-cancel")
+
+    def submit(self) -> None:
+        justification = self.query_one("#model-elevation-justification", Input).value.strip()
+        if len(justification) < 8:
+            self.notify("A specific justification is required.", severity="warning")
+            return
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.approve_and_restart_model_elevation(  # type: ignore[attr-defined]
+                self.agent_id,
+                self.preset,
+                justification,
+            ),
+            name=f"model-elevation-{slugify(self.agent_id)}",
+            exclusive=True,
+        )
+        self.dismiss()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "model-elevation-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "model-elevation-approve":
+            event.stop()
+            self.submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "model-elevation-justification":
+            event.stop()
+            self.submit()
+
+
 class JoplinNoteTitleScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Close")]
 
@@ -3786,6 +3843,7 @@ class AgentPBXTUI(App[None]):
     }
 
     JoplinNoteTitleScreen,
+    ModelElevationScreen,
     JoplinDeleteConfirmScreen,
     EditorCloseConfirmScreen,
     OperatorKillConfirmScreen,
@@ -3796,6 +3854,7 @@ class AgentPBXTUI(App[None]):
     }
 
     #joplin-title-panel,
+    #model-elevation-panel,
     #joplin-delete-panel,
     #editor-close-panel,
     #operator-kill-panel,
@@ -3808,6 +3867,24 @@ class AgentPBXTUI(App[None]):
         border: tall $accent;
         background: $panel;
         padding: 1 2;
+    }
+
+    #model-elevation-panel {
+        width: 72;
+    }
+
+    #model-elevation-help {
+        height: auto;
+        color: $secondary;
+        margin-bottom: 1;
+    }
+
+    #model-elevation-actions {
+        height: 3;
+    }
+
+    #model-elevation-actions Button {
+        width: 1fr;
     }
 
     #operator-history-panel {
@@ -5026,7 +5103,7 @@ class AgentPBXTUI(App[None]):
             preset = codex_model_preset_for(selector.value)
             if preset is not None:
                 return preset
-        return CODEX_MODEL_PRESET_BY_KEY["terra-5.6-max"]
+        return CODEX_MODEL_PRESET_BY_KEY["sol-5.6-xhigh"]
 
     def codex_model_target_agent_id(self) -> str | None:
         """Return the explicit right-pane target for model-affecting actions.
@@ -5219,13 +5296,124 @@ class AgentPBXTUI(App[None]):
         agent_id = self.codex_model_target_agent_id()
         if agent_id is None:
             return
+        if preset.elevated:
+            self.push_screen(ModelElevationScreen(agent_id=agent_id, preset=preset))
+            return
         self.notify(f"Restarting {agent_id} with Codex model preset {preset.label}.")
         await self.restart_tmux_codex_session(agent_id, model_preset=preset)
+
+    async def approve_and_restart_model_elevation(
+        self,
+        agent_id: str,
+        preset: CodexModelPreset,
+        justification: str,
+    ) -> None:
+        if not preset.elevated:
+            self.notify(f"{preset.label} does not require elevation.", severity="warning")
+            return
+        if not await self.ensure_codex_model_preset_valid(preset):
+            return
+        agent = self.agents.get(agent_id) or {}
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        prior_profile = str(metadata.get("codex_model_preset") or "").strip() or None
+        headers = auth_headers(self.token)
+        try:
+            requested = await self.api_client().post(
+                "/v2/codex/elevations",
+                json={
+                    "agent_id": agent_id,
+                    "requested_profile": "sol-max",
+                    "prior_profile": prior_profile,
+                    "justification": justification,
+                    "scope": "one_task",
+                },
+                headers=headers,
+            )
+            requested.raise_for_status()
+            lease = requested.json()
+            decided = await self.api_client().post(
+                f"/v2/codex/elevations/{lease['lease_id']}/decision",
+                json={
+                    "approved": True,
+                    "approved_by": "agent-pbx-tui-user",
+                    "duration_seconds": 3600,
+                },
+                headers=headers,
+            )
+            decided.raise_for_status()
+        except Exception as exc:
+            self.notify(f"Sol max approval failed: {exc}", severity="error")
+            return
+        self.notify(
+            f"Approved bounded Sol max elevation for {agent_id}; restarting at the safe boundary."
+        )
+        await self.restart_tmux_codex_session(
+            agent_id,
+            model_preset=preset,
+            model_elevation_lease_id=str(lease["lease_id"]),
+        )
+
+    async def activate_model_elevation_lease(
+        self,
+        lease_id: str,
+        *,
+        agent_id: str,
+        preset: CodexModelPreset,
+    ) -> bool:
+        try:
+            response = await self.api_client().post(
+                f"/v2/codex/elevations/{lease_id}/activate",
+                json={
+                    "transition": {
+                        "phase": "safe_boundary",
+                        "requested_model": preset.model,
+                        "requested_reasoning_effort": preset.reasoning_effort,
+                    }
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            lease = response.json()
+        except Exception as exc:
+            self.notify(f"Model elevation activation failed: {exc}", severity="error")
+            return False
+        if (
+            str(lease.get("agent_id") or "") != agent_id
+            or str(lease.get("requested_profile") or "") != "sol-max"
+            or str(lease.get("status") or "") != "active"
+            or bool(lease.get("expired"))
+        ):
+            self.notify("Model elevation lease did not match the target session.", severity="error")
+            return False
+        return True
+
+    async def finish_model_elevation_lease(
+        self,
+        lease_id: str,
+        *,
+        status: str,
+        transition: dict[str, object] | None = None,
+    ) -> None:
+        try:
+            response = await self.api_client().post(
+                f"/v2/codex/elevations/{lease_id}/finish",
+                json={"status": status, "transition": transition or {}},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"Unable to update model elevation lease: {exc}", severity="warning")
 
     async def save_selected_codex_model_preset_as_default(self) -> None:
         await self.save_codex_model_preset_as_default(self.selected_codex_model_preset())
 
     async def save_codex_model_preset_as_default(self, preset: CodexModelPreset) -> None:
+        if preset.elevated:
+            self.notify(
+                "Sol max is a bounded elevation and cannot be saved as the global default.",
+                severity="warning",
+            )
+            return
         if not await self.ensure_codex_model_preset_valid(preset):
             return
         updates: dict[str, str] = {
@@ -5872,14 +6060,14 @@ class AgentPBXTUI(App[None]):
                             )
                     with TabPane("Codex", id="codex-tab"):
                         yield Static("Codex config: checking...", id="codex-config-status")
-                        yield Static("Model preset: Terra 5.6/max recommended", id="codex-model-status")
+                        yield Static("Model preset: Sol 5.6/xhigh standard", id="codex-model-status")
                         with Horizontal(id="codex-model-actions"):
                             yield Select(
                                 [
                                     (preset.display_label, preset.key)
                                     for preset in CODEX_MODEL_PRESETS
                                 ],
-                                value="terra-5.6-max",
+                                value="sol-5.6-xhigh",
                                 allow_blank=False,
                                 id="codex-model-preset",
                             )
@@ -6500,6 +6688,9 @@ class AgentPBXTUI(App[None]):
         if agent_id is None:
             return
         self.set_codex_model_preset_selector(preset)
+        if preset.elevated:
+            self.push_screen(ModelElevationScreen(agent_id=agent_id, preset=preset))
+            return
         self.notify(f"Restarting {agent_id} with Codex model preset {preset.label}.")
         self.run_worker(
             self.restart_tmux_codex_session(agent_id, model_preset=preset),
@@ -13654,33 +13845,48 @@ class AgentPBXTUI(App[None]):
         agent_id: str | None = None,
         *,
         model_preset: CodexModelPreset | None = None,
-    ) -> None:
+        model_elevation_lease_id: str | None = None,
+    ) -> bool:
         agent_id = agent_id or self.query_one("#agent-id", Input).value.strip()
         if not agent_id:
             self.notify("Select an agent before restarting Codex.", severity="warning")
-            return
+            return False
+        if model_preset is not None and model_preset.elevated and not model_elevation_lease_id:
+            self.notify(
+                "Sol max requires explicit user approval and a justification.",
+                severity="warning",
+            )
+            return False
         if model_preset is not None and not await self.ensure_codex_model_preset_valid(
             model_preset
         ):
-            return
+            return False
         if not self.tmux_features_available:
             self.notify("Tmux is required to restart a Codex pane.", severity="warning")
-            return
+            return False
         if not self.is_tmux_direct_enabled(agent_id):
             self.notify(
                 f"Enable tmux direct mode for {agent_id} before restarting Codex.",
                 severity="warning",
             )
-            return
+            return False
         status = self.query_one_or_none("#tmux-status", Static)
         pane = await self.resolve_tmux_send_pane(agent_id, status=status)
         if pane is None:
             self.notify(f"No tmux pane found for {agent_id}.", severity="warning")
-            return
+            return False
         agent = self.agents.get(agent_id)
         if not isinstance(agent, dict):
             self.notify(f"{agent_id} is not loaded.", severity="warning")
-            return
+            return False
+        if model_elevation_lease_id and model_preset is not None:
+            activated = await self.activate_model_elevation_lease(
+                model_elevation_lease_id,
+                agent_id=agent_id,
+                preset=model_preset,
+            )
+            if not activated:
+                return False
         if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
             if self.operator_role(agent) == OPERATOR_ROLE_FORK:
                 restarted = await self.relaunch_operator_fork_codex(
@@ -13701,10 +13907,17 @@ class AgentPBXTUI(App[None]):
                 model_preset=model_preset,
             )
         if not restarted:
-            return
+            if model_elevation_lease_id:
+                await self.finish_model_elevation_lease(
+                    model_elevation_lease_id,
+                    status="failed",
+                    transition={"reason": "restart_failed"},
+                )
+            return False
         await self.refresh_agents()
         await self.refresh_events()
         await self.load_tmux_capture(agent_id)
+        return True
 
     async def resolve_tmux_send_pane(
         self,

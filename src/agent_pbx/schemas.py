@@ -135,6 +135,52 @@ class CodexCliUpdateResponse(BaseModel):
     after: dict[str, Any] = Field(default_factory=dict)
 
 
+class ModelElevationRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=120)
+    requested_profile: str = Field(min_length=1, max_length=80)
+    prior_profile: str | None = Field(default=None, max_length=80)
+    justification: str = Field(min_length=8, max_length=4000)
+    scope: str = Field(default="one_task", min_length=1, max_length=120)
+
+
+class ModelElevationDecisionRequest(BaseModel):
+    approved: bool
+    approved_by: str = Field(min_length=1, max_length=120)
+    duration_seconds: float = Field(default=3600.0, ge=60.0, le=86400.0)
+
+
+class ModelElevationActivateRequest(BaseModel):
+    transition: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelElevationFinishRequest(BaseModel):
+    status: Literal["expired", "failed", "reverted"]
+    transition: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelElevationResponse(BaseModel):
+    lease_id: str
+    agent_id: str
+    requested_profile: str
+    prior_profile: str | None = None
+    justification: str
+    scope: str
+    status: str
+    requested_at: float
+    approved_at: float | None = None
+    activated_at: float | None = None
+    expires_at: float | None = None
+    finished_at: float | None = None
+    approved_by: str | None = None
+    transition: dict[str, Any] = Field(default_factory=dict)
+    expired: bool = False
+
+
+class ManagedSkillApplyRequest(BaseModel):
+    pack_names: list[str] = Field(default_factory=list, max_length=20)
+    max_estimated_tokens: int = Field(default=12_000, ge=256, le=100_000)
+
+
 class CodexConfigMcpPatchRequest(BaseModel):
     url: str | None = Field(default=None, max_length=2000)
     bearer_token_env_var: str | None = Field(default=None, max_length=120)

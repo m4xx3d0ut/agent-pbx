@@ -47,6 +47,9 @@ version = {attr = "agent_pbx.__version__"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+agent_pbx = ["skill_packs/*/SKILL.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

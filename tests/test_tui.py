@@ -31,6 +31,7 @@ from agent_pbx.tui import (
     CODEX_TERMINAL_MODE_SCROLLBACK,
     CustomSlashCommand,
     EditorCloseConfirmScreen,
+    ModelElevationScreen,
     OperatorHistoryScreen,
     OperatorSessionCandidate,
     PLAN_PBX_CONTEXT_PROMPT,
@@ -7409,7 +7410,7 @@ async def test_tui_model_actions_bind_selected_operator_not_stale_caller_cursor(
         app.query_one("#agent-id", Input).value = "codex-agent-pbx"
 
         assert app.codex_model_target_agent_id() == "operator-5"
-        app.palette_codex_model_restart("sol-max")
+        app.palette_codex_model_restart("terra-max")
         await pilot.pause()
         await app.restart_selected_with_codex_model_preset()
 
@@ -7417,9 +7418,38 @@ async def test_tui_model_actions_bind_selected_operator_not_stale_caller_cursor(
         assert app.codex_model_target_agent_id() is None
 
     assert restarts == [
-        ("operator-5", "sol-5.6-max"),
-        ("operator-5", "sol-5.6-max"),
+        ("operator-5", "terra-5.6-max"),
+        ("operator-5", "terra-5.6-max"),
     ]
+
+
+async def test_tui_sol_max_requires_explicit_justification_modal() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    restarts: list[str] = []
+
+    async def fake_restart(*_args: object, **_kwargs: object) -> bool:
+        restarts.append("restarted")
+        return True
+
+    app.restart_tmux_codex_session = fake_restart  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.agents = {
+            "operator-5": {
+                "agent_id": "operator-5",
+                "agent_type": "operator",
+                "status": "working",
+                "project": "agent-pbx-operator",
+                "metadata": {"agent_type": "operator"},
+                "last_seen_at": 124.0,
+            }
+        }
+        app.selected_agent_id = "operator-5"
+        app.palette_codex_model_restart("sol-max")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ModelElevationScreen)
+        assert restarts == []
 
 
 async def test_tui_palette_escape_uses_selected_agent() -> None:
@@ -16477,7 +16507,7 @@ def test_tui_codex_model_preset_metadata_and_overrides() -> None:
         assert sol_env["AGENT_PBX_CODEX_VERBOSITY"] == "high"
 
 
-async def test_tui_saving_model_default_preserves_detailed_summary_for_5_6_presets() -> None:
+async def test_tui_saving_model_default_preserves_summary_and_refuses_sol_max() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     requests: list[dict[str, object]] = []
 
@@ -16540,18 +16570,7 @@ async def test_tui_saving_model_default_preserves_detailed_summary_for_5_6_prese
         },
         "headers": {},
     }
-    assert requests[2] == {
-        "path": "/v1/codex/config",
-        "json": {
-            "updates": {
-                "model": "gpt-5.6-sol",
-                "model_reasoning_effort": "max",
-                "model_verbosity": "high",
-                "model_reasoning_summary": "detailed",
-            }
-        },
-        "headers": {},
-    }
+    assert len(requests) == 2
 
 
 def test_tui_operator_fork_command_supports_cd_and_sandbox() -> None:

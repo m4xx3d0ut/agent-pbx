@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from fastapi import (
@@ -31,8 +33,10 @@ from .auth import get_store, require_token
 from .config import ServerConfig
 from .codex_sessions import enrich_codex_session_metadata
 from .codex_config import load_codex_config_view, patch_codex_config
-from .codex_cli import update_codex_cli_package
+from .codex_cli import inspect_codex_model_catalog, update_codex_cli_package
 from .codex.capabilities import CodexCapabilityProbe
+from .codex.profiles import MANAGED_CODEX_PROFILES, managed_profile_view
+from .codex.skills import ManagedSkillPackService, PersonalityOverlay
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
 from .events import EventClientRegistry, EventStreamService
@@ -97,6 +101,12 @@ from .schemas import (
     JoplinStatusResponse,
     JoplinSyncJobResponse,
     JoplinSyncStatusResponse,
+    ManagedSkillApplyRequest,
+    ModelElevationActivateRequest,
+    ModelElevationDecisionRequest,
+    ModelElevationFinishRequest,
+    ModelElevationRequest,
+    ModelElevationResponse,
     OperatorCampaignAssignmentResponse,
     OperatorCampaignFinishRequest,
     OperatorCampaignListResponse,
@@ -393,6 +403,185 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             use_cache=not refresh,
         )
         return snapshot.as_dict()
+
+    @app.get(
+        "/v2/codex/profiles",
+        dependencies=[Depends(require_token)],
+    )
+    async def get_codex_profiles() -> dict[str, object]:
+        catalog = await asyncio.to_thread(inspect_codex_model_catalog)
+        overlay_path = Path(
+            os.getenv("AGENT_PBX_PERSONALITY_OVERLAY")
+            or "~/.config/agent-pbx/personality.local.md"
+        ).expanduser()
+        overlay = await asyncio.to_thread(PersonalityOverlay.load, overlay_path)
+        return {
+            "api_version": "agent-pbx.codex-profiles/v2",
+            "default_profile": "sol-xhigh",
+            "profiles": managed_profile_view(catalog),
+            "personality": {
+                "committed": "roses-architect",
+                "local_overlay": overlay.public_dict(),
+            },
+        }
+
+    @app.get(
+        "/v2/agents/{agent_id}/skills/preview",
+        dependencies=[Depends(require_token)],
+    )
+    async def preview_managed_skills(
+        agent_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        service = _managed_skill_service(store, agent_id)
+        previews = await asyncio.to_thread(service.preview)
+        return {
+            "agent_id": agent_id,
+            "project_root": str(service.project_root),
+            "packs": [item.__dict__ for item in previews],
+            "estimated_tokens": sum(item.estimated_tokens for item in previews),
+        }
+
+    @app.post(
+        "/v2/agents/{agent_id}/skills/apply",
+        dependencies=[Depends(require_token)],
+    )
+    async def apply_managed_skills(
+        agent_id: str,
+        payload: ManagedSkillApplyRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        service = _managed_skill_service(store, agent_id, payload.pack_names)
+        try:
+            result = await asyncio.to_thread(
+                service.apply,
+                max_estimated_tokens=payload.max_estimated_tokens,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        store.append_event(
+            "managed_skills_applied",
+            {
+                "agent_id": agent_id,
+                "project_root": str(service.project_root),
+                "changed": result["changed"],
+                "estimated_tokens": result["manifest"]["estimated_tokens"],
+            },
+            agent_id,
+        )
+        return {"agent_id": agent_id, **result}
+
+    @app.post(
+        "/v2/agents/{agent_id}/skills/rollback",
+        dependencies=[Depends(require_token)],
+    )
+    async def rollback_managed_skills(
+        agent_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        service = _managed_skill_service(store, agent_id)
+        try:
+            result = await asyncio.to_thread(service.rollback)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        store.append_event(
+            "managed_skills_rolled_back",
+            {"agent_id": agent_id, "project_root": str(service.project_root), **result},
+            agent_id,
+        )
+        return {"agent_id": agent_id, **result}
+
+    @app.post(
+        "/v2/codex/elevations",
+        response_model=ModelElevationResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def request_model_elevation(
+        payload: ModelElevationRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        profile = MANAGED_CODEX_PROFILES.get(payload.requested_profile)
+        if profile is None or not profile.elevated:
+            raise HTTPException(status_code=400, detail="requested profile is not elevated")
+        try:
+            lease = store.request_model_elevation(**payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        store.append_event("model_elevation_requested", lease, payload.agent_id)
+        return lease
+
+    @app.post(
+        "/v2/codex/elevations/{lease_id}/decision",
+        response_model=ModelElevationResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def decide_model_elevation(
+        lease_id: str,
+        payload: ModelElevationDecisionRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        existing = store.get_model_elevation(lease_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="model elevation lease not found")
+        if payload.approved and payload.approved_by == existing["agent_id"]:
+            raise HTTPException(status_code=409, detail="an agent cannot approve its own elevation")
+        try:
+            lease = store.decide_model_elevation(lease_id, **payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        store.append_event("model_elevation_decided", lease, str(lease["agent_id"]))
+        return lease
+
+    @app.post(
+        "/v2/codex/elevations/{lease_id}/activate",
+        response_model=ModelElevationResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def activate_model_elevation(
+        lease_id: str,
+        payload: ModelElevationActivateRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        try:
+            lease = store.activate_model_elevation(lease_id, transition=payload.transition)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        store.append_event("model_elevation_activated", lease, str(lease["agent_id"]))
+        return lease
+
+    @app.post(
+        "/v2/codex/elevations/{lease_id}/finish",
+        response_model=ModelElevationResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def finish_model_elevation(
+        lease_id: str,
+        payload: ModelElevationFinishRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        try:
+            lease = store.finish_model_elevation(
+                lease_id,
+                status=payload.status,
+                transition=payload.transition,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        store.append_event("model_elevation_finished", lease, str(lease["agent_id"]))
+        return lease
+
+    @app.get(
+        "/v2/codex/elevations",
+        response_model=list[ModelElevationResponse],
+        dependencies=[Depends(require_token)],
+    )
+    async def list_model_elevations(
+        agent_id: str | None = None,
+        limit: int = Query(default=100, ge=1, le=500),
+        store: Store = Depends(get_store),
+    ) -> list[dict[str, object]]:
+        store.expire_model_elevations()
+        return store.list_model_elevations(agent_id=agent_id, limit=limit)
 
     @app.post(
         "/v1/agents/register",
@@ -3191,6 +3380,46 @@ def joplin_copy_source(
             "created_at": report["created_at"],
         },
     )
+
+
+def _managed_skill_service(
+    store: Store,
+    agent_id: str,
+    pack_names: list[str] | None = None,
+) -> ManagedSkillPackService:
+    agent = store.get_agent(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    metadata = agent.get("metadata")
+    cwd = metadata.get("cwd") if isinstance(metadata, dict) else None
+    if not isinstance(cwd, str) or not cwd.strip():
+        raise HTTPException(status_code=409, detail="agent metadata.cwd is unavailable")
+    path = Path(cwd).expanduser()
+    if not path.is_absolute():
+        raise HTTPException(status_code=409, detail="agent metadata.cwd must be absolute")
+    try:
+        root = path.resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail="agent project root is unavailable") from exc
+    if not root.is_dir():
+        raise HTTPException(status_code=409, detail="agent project root is not a directory")
+    try:
+        if pack_names:
+            return ManagedSkillPackService(root, pack_names=pack_names)
+        defaults = ["agent-pbx-base", "roses-architect"]
+        if str(agent.get("agent_type") or "caller") == "operator":
+            defaults.append("operator-role")
+            metadata = agent.get("metadata")
+            if isinstance(metadata, dict) and (
+                metadata.get("fork_purpose") == "review"
+                or metadata.get("access_mode") == "review_readonly"
+            ):
+                defaults.append("review-role")
+        else:
+            defaults.append("agent-role")
+        return ManagedSkillPackService(root, pack_names=defaults)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 async def append_joplin_command_log(

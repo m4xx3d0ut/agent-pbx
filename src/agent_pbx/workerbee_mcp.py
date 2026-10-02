@@ -4,6 +4,8 @@ import asyncio
 from dataclasses import asdict, dataclass
 import json
 import re
+import subprocess
+from pathlib import Path
 from typing import Any, Iterable
 
 from mcp import ClientSession
@@ -30,6 +32,86 @@ class WorkerBeeMcpPreflight:
 
     def public_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class WorkerBeeProjectVisibilityDiagnostic:
+    code: str
+    ready: bool
+    host_cwd: str
+    host_git_root: str | None
+    workerbee_git_root: str | None
+    workerbee_repo_exists: bool | None
+    message: str
+    remediation: str
+
+    def public_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def diagnose_workerbee_project_visibility(
+    cwd: str | Path,
+    session_payload: dict[str, Any],
+) -> WorkerBeeProjectVisibilityDiagnostic:
+    host_cwd = str(Path(cwd).expanduser().resolve())
+    result = subprocess.run(
+        ["git", "-C", host_cwd, "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    host_git_root = result.stdout.strip() if result.returncode == 0 else None
+    data = (
+        session_payload.get("data")
+        if isinstance(session_payload.get("data"), dict)
+        else session_payload
+    )
+    workerbee_git_root = str(data.get("git_root") or "").strip() or None
+    runbook = data.get("project_runbook")
+    repo_exists = (
+        runbook.get("repo_exists")
+        if isinstance(runbook, dict) and isinstance(runbook.get("repo_exists"), bool)
+        else None
+    )
+    if host_git_root and (not workerbee_git_root or repo_exists is False):
+        return WorkerBeeProjectVisibilityDiagnostic(
+            code="WORKERBEE_PATH_VISIBILITY_MISMATCH",
+            ready=False,
+            host_cwd=host_cwd,
+            host_git_root=host_git_root,
+            workerbee_git_root=workerbee_git_root,
+            workerbee_repo_exists=repo_exists,
+            message="The host sees a Git checkout that WorkerBee did not resolve.",
+            remediation=(
+                "Compare the PBX host path with WorkerBee container/mount path mapping; "
+                "keep project injection manual until both roots agree."
+            ),
+        )
+    if host_git_root and workerbee_git_root:
+        same_root = Path(host_git_root).resolve() == Path(workerbee_git_root).resolve()
+        return WorkerBeeProjectVisibilityDiagnostic(
+            code="WORKERBEE_PATH_VISIBLE" if same_root else "WORKERBEE_PATH_TRANSLATED",
+            ready=True,
+            host_cwd=host_cwd,
+            host_git_root=host_git_root,
+            workerbee_git_root=workerbee_git_root,
+            workerbee_repo_exists=repo_exists,
+            message=(
+                "WorkerBee resolves the host repository."
+                if same_root
+                else "WorkerBee resolves the repository through a translated path."
+            ),
+            remediation="",
+        )
+    return WorkerBeeProjectVisibilityDiagnostic(
+        code="WORKERBEE_HOST_NOT_GIT",
+        ready=False,
+        host_cwd=host_cwd,
+        host_git_root=host_git_root,
+        workerbee_git_root=workerbee_git_root,
+        workerbee_repo_exists=repo_exists,
+        message="The supplied host path is not a visible Git checkout.",
+        remediation="Select a repository checkout and retry WorkerBee session discovery.",
+    )
 
 
 def workerbee_policy_preflight(

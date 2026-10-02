@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -150,6 +150,15 @@ OPERATOR_KB_FEEDBACK_TYPES = {
     "wrong_scope",
     "unsafe",
     "miss",
+}
+MODEL_ELEVATION_STATUSES = {
+    "pending",
+    "approved",
+    "rejected",
+    "active",
+    "expired",
+    "failed",
+    "reverted",
 }
 OPERATOR_KB_RETRIEVAL_PROVIDER = "sqlite"
 OPERATOR_KB_RETRIEVAL_INDEX_VERSION = "sqlite-hybrid-v1"
@@ -360,6 +369,27 @@ class Store:
                     payload_json TEXT NOT NULL,
                     created_at REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS model_elevation_leases (
+                    lease_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    requested_profile TEXT NOT NULL,
+                    prior_profile TEXT,
+                    justification TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    requested_at REAL NOT NULL,
+                    approved_at REAL,
+                    activated_at REAL,
+                    expires_at REAL,
+                    finished_at REAL,
+                    approved_by TEXT,
+                    transition_json TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_model_elevation_agent_status
+                    ON model_elevation_leases(agent_id, status, requested_at DESC);
 
                 CREATE TABLE IF NOT EXISTS joplin_logs (
                     log_id TEXT PRIMARY KEY,
@@ -1283,6 +1313,180 @@ class Store:
             else None,
             "event_count": int(row["event_count"]) if row else 0,
         }
+
+    def request_model_elevation(
+        self,
+        *,
+        agent_id: str,
+        requested_profile: str,
+        justification: str,
+        scope: str,
+        prior_profile: str | None = None,
+    ) -> dict[str, Any]:
+        if self.get_agent(agent_id) is None:
+            raise ValueError(f"agent {agent_id!r} is not registered")
+        lease_id = str(uuid.uuid4())
+        requested_at = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO model_elevation_leases(
+                    lease_id, agent_id, requested_profile, prior_profile,
+                    justification, scope, status, requested_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    lease_id,
+                    agent_id,
+                    requested_profile,
+                    prior_profile,
+                    justification,
+                    scope,
+                    requested_at,
+                ),
+            )
+        lease = self.get_model_elevation(lease_id)
+        assert lease is not None
+        return lease
+
+    def decide_model_elevation(
+        self,
+        lease_id: str,
+        *,
+        approved: bool,
+        approved_by: str,
+        duration_seconds: float,
+    ) -> dict[str, Any]:
+        lease = self.get_model_elevation(lease_id)
+        if lease is None:
+            raise ValueError("model elevation lease not found")
+        if lease["status"] != "pending":
+            raise ValueError("model elevation lease is no longer pending")
+        decided_at = now_ts()
+        status_value = "approved" if approved else "rejected"
+        expires_at = decided_at + max(1.0, duration_seconds) if approved else None
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE model_elevation_leases
+                SET status = ?, approved_at = ?, approved_by = ?,
+                    expires_at = ?, finished_at = ?
+                WHERE lease_id = ? AND status = 'pending'
+                """,
+                (
+                    status_value,
+                    decided_at,
+                    approved_by,
+                    expires_at,
+                    None if approved else decided_at,
+                    lease_id,
+                ),
+            )
+        decided = self.get_model_elevation(lease_id)
+        assert decided is not None
+        return decided
+
+    def activate_model_elevation(
+        self,
+        lease_id: str,
+        *,
+        transition: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        lease = self.get_model_elevation(lease_id)
+        if lease is None:
+            raise ValueError("model elevation lease not found")
+        current = now_ts()
+        if lease["status"] != "approved":
+            raise ValueError("model elevation lease is not approved")
+        if lease.get("expires_at") is not None and float(lease["expires_at"]) <= current:
+            self.finish_model_elevation(lease_id, status="expired")
+            raise ValueError("model elevation lease has expired")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE model_elevation_leases
+                SET status = 'active', activated_at = ?, transition_json = ?
+                WHERE lease_id = ? AND status = 'approved'
+                """,
+                (current, json.dumps(transition or {}), lease_id),
+            )
+        activated = self.get_model_elevation(lease_id)
+        assert activated is not None
+        return activated
+
+    def finish_model_elevation(
+        self,
+        lease_id: str,
+        *,
+        status: str,
+        transition: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"expired", "failed", "reverted"}:
+            raise ValueError(f"invalid terminal elevation status {status!r}")
+        lease = self.get_model_elevation(lease_id)
+        if lease is None:
+            raise ValueError("model elevation lease not found")
+        merged = dict(lease.get("transition") or {})
+        merged.update(transition or {})
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE model_elevation_leases
+                SET status = ?, finished_at = ?, transition_json = ?
+                WHERE lease_id = ?
+                """,
+                (status, now_ts(), json.dumps(merged), lease_id),
+            )
+        finished = self.get_model_elevation(lease_id)
+        assert finished is not None
+        return finished
+
+    def expire_model_elevations(self, *, current_time: float | None = None) -> int:
+        current = now_ts() if current_time is None else float(current_time)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE model_elevation_leases
+                SET status = 'expired', finished_at = ?
+                WHERE status IN ('approved', 'active')
+                  AND expires_at IS NOT NULL AND expires_at <= ?
+                """,
+                (current, current),
+            )
+        return int(cursor.rowcount)
+
+    def get_model_elevation(self, lease_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM model_elevation_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+        return self._model_elevation_from_row(row) if row is not None else None
+
+    def list_model_elevations(
+        self,
+        *,
+        agent_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            if agent_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM model_elevation_leases
+                    WHERE agent_id = ? ORDER BY requested_at DESC LIMIT ?
+                    """,
+                    (agent_id, max(1, min(500, limit))),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM model_elevation_leases
+                    ORDER BY requested_at DESC LIMIT ?
+                    """,
+                    (max(1, min(500, limit)),),
+                ).fetchall()
+        return [self._model_elevation_from_row(row) for row in rows]
 
     def register_agent(self, request: AgentRegisterRequest) -> dict[str, Any]:
         current = now_ts()
@@ -7295,6 +7499,22 @@ class Store:
         except json.JSONDecodeError:
             metadata = {}
         data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return data
+
+    @staticmethod
+    def _model_elevation_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        raw_transition = data.pop("transition_json", "{}")
+        try:
+            transition = json.loads(raw_transition)
+        except json.JSONDecodeError:
+            transition = {}
+        data["transition"] = transition if isinstance(transition, dict) else {}
+        expires_at = data.get("expires_at")
+        data["expired"] = bool(
+            data.get("status") == "expired"
+            or (expires_at is not None and float(expires_at) <= now_ts())
+        )
         return data
 
     @staticmethod
