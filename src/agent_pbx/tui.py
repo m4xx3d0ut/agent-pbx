@@ -24,7 +24,7 @@ from textual.app import App, ComposeResult, ScreenStackError, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.events import Click, Focus, Key, MouseDown, Resize
+from textual.events import Click, DescendantFocus, Focus, Key, MouseDown, Resize
 from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.timer import Timer
@@ -77,6 +77,8 @@ from .workerbee_mcp import (
     WorkerBeeMcpPreflight,
     inspect_workerbee_mcp,
 )
+from .contracts import ActionDefinition
+from .terminal.keys import FunctionKeyPassthroughMap
 from .ui.actions import ActionRegistry
 from .ui.async_jobs import AsyncGenerationGate
 from .ui.focus import FocusGenerationGuard
@@ -4829,6 +4831,14 @@ class AgentPBXTUI(App[None]):
         self.action_registry = ActionRegistry()
         self.focus_generation = FocusGenerationGuard()
         self.async_generations = AsyncGenerationGate()
+        self.function_key_passthrough = FunctionKeyPassthroughMap(
+            modifier=str_setting(
+                self.settings,
+                "fkey_passthrough_modifier",
+                "shift",
+            )
+        )
+        self.register_core_actions()
         self.operator_panel_state = OperatorPanelState()
         self.campaigns_by_operator = self.operator_panel_state.campaigns_by_operator
         self.selected_campaign_id: str | None = None
@@ -5704,17 +5714,20 @@ class AgentPBXTUI(App[None]):
             if self.is_tiny_layout() or self.low_power_enabled
             else "F1 Agents | F2 Events | F3 View | F4 Input"
         )
-        text = f"{nav} | Enter send | Ctrl+J newline | Ctrl+W word"
+        text = f"{nav} | Shift+F2 Codex warnings | Enter send | Ctrl+J newline | Ctrl+W word"
         if self.tmux_features_available:
             text += " | Ctrl+T/F8 tmux"
         return text
 
     def tmux_hotkeys_text(self) -> str:
         if self.is_tiny_layout() or self.low_power_enabled:
-            return "a Agt | e Evt | v View | i In | Enter send | C-J nl | C-W word | C-T/F8 PBX"
+            return (
+                "a Agt | e Evt | v View | i In | Shift+F2 Codex warnings | "
+                "Enter send | C-J nl | C-W word | C-T/F8 PBX"
+            )
         return (
-            "F1 Agents | F2 Events | F3 View | F4 Input | Enter send | "
-            "Ctrl+J newline | Ctrl+W word | Ctrl+T/F8 PBX"
+            "F1 Agents | F2 Events | Shift+F2 Codex warnings | F3 View | "
+            "F4 Input | Enter send | Ctrl+J newline | Ctrl+W word | Ctrl+T/F8 PBX"
         )
 
     def editor_hotkeys_text(self) -> str:
@@ -5724,6 +5737,30 @@ class AgentPBXTUI(App[None]):
 
     def joplin_hotkeys_text(self) -> str:
         return JOPLIN_SHORTCUT_HINT
+
+    def register_core_actions(self) -> None:
+        """Describe global navigation once for keys, help, and the palette."""
+
+        self.action_registry.extend(
+            (
+                ActionDefinition("focus.agents", "Agents", "f1"),
+                ActionDefinition("focus.events", "Events", "f2"),
+                ActionDefinition("focus.view", "View", "f3"),
+                ActionDefinition("focus.input", "Input", "f4"),
+                ActionDefinition("focus.operators", "Operators", "f5"),
+                ActionDefinition("operator.previous_fork", "Previous Fork", "f6"),
+                ActionDefinition("operator.next_fork", "Next Fork", "f7"),
+                ActionDefinition("terminal.toggle", "Tmux", "f8"),
+                ActionDefinition("editor.fullscreen", "Editor Full", "f9"),
+                ActionDefinition(
+                    "terminal.function_key_passthrough",
+                    "Codex function key",
+                    f"{self.function_key_passthrough.modifier}+f1..f12",
+                    focus_scope="terminal",
+                    capability="terminal_input",
+                ),
+            )
+        )
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -9669,6 +9706,8 @@ class AgentPBXTUI(App[None]):
             focused = self.focused
         except ScreenStackError:
             focused = None
+        if self.handle_function_key_passthrough(event, focused=focused):
+            return
         if self.handle_joplin_shortcut_key(event, focused=focused):
             return
         if event.key == "space" and thread is not None and focused is thread:
@@ -9694,6 +9733,37 @@ class AgentPBXTUI(App[None]):
             return
         if self.handle_focus_shortcut_key(event):
             return
+
+    def handle_function_key_passthrough(
+        self,
+        event: Key,
+        *,
+        focused: Widget | None = None,
+    ) -> bool:
+        if self.active_agent_tab != "latest-tab" or not self.selected_agent_id:
+            return False
+        focused_id = str(getattr(focused, "id", "") or "")
+        if focused_id not in {"tmux-stream", "pbx-terminal-surface"}:
+            return False
+        translated = self.function_key_passthrough.translate(
+            [event.key, getattr(event, "name", ""), *(event.aliases or [])]
+        )
+        if translated is None:
+            return False
+        event.stop()
+        event.prevent_default()
+        self.run_worker(
+            self.send_key_to_tmux(
+                self.selected_agent_id,
+                translated.child_key.upper(),
+            ),
+            name=f"terminal-{translated.child_key}-passthrough",
+            exclusive=False,
+        )
+        return True
+
+    def on_descendant_focus(self, _: DescendantFocus) -> None:
+        self.focus_generation.changed()
 
     def handle_joplin_shortcut_key(
         self,
@@ -22169,6 +22239,8 @@ class AgentPBXTUI(App[None]):
         if table is None or body is None:
             return
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        generation_resource = f"joplin-notes:{cache_agent_id}"
+        generation = self.async_generations.start(generation_resource)
         if not self.joplin_configured:
             table.clear()
             body.text = self.format_joplin_unavailable(self.joplin_status)
@@ -22187,11 +22259,15 @@ class AgentPBXTUI(App[None]):
             response.raise_for_status()
             notes = response.json()
         except Exception as exc:
+            if not self.async_generations.current(generation_resource, generation):
+                return
             table.clear()
             body.text = (
                 f"Unable to load Joplin notes for "
                 f"{self.joplin_scope_label_for_agent(agent_id)}: {exc}"
             )
+            return
+        if not self.async_generations.current(generation_resource, generation):
             return
         self.render_joplin_notes(agent_id, notes)
         if notes:
@@ -22269,6 +22345,8 @@ class AgentPBXTUI(App[None]):
         if not agent_id:
             return
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        generation_resource = f"joplin-note:{cache_agent_id}"
+        generation = self.async_generations.start(generation_resource)
         body = self.query_one("#joplin-body", TextArea)
         body.text = f"Loading Joplin note {note_id}..."
         try:
@@ -22280,7 +22358,11 @@ class AgentPBXTUI(App[None]):
             response.raise_for_status()
             note = response.json()
         except Exception as exc:
+            if not self.async_generations.current(generation_resource, generation):
+                return
             body.text = f"Unable to load Joplin note {note_id}: {exc}"
+            return
+        if not self.async_generations.current(generation_resource, generation):
             return
         self.set_selected_joplin_note_for_agent(agent_id, note_id)
         self.joplin_notes_by_agent.setdefault(cache_agent_id, {})[note_id] = note
@@ -25036,12 +25118,43 @@ class AgentPBXTUI(App[None]):
     def restore_layout_focus(self) -> None:
         if not self.is_collapsed_layout():
             return
+        try:
+            focused = self.focused
+        except ScreenStackError:
+            focused = None
+        focused_id = str(getattr(focused, "id", "") or "")
         if self.compact_view == "home":
+            visible_home_focus_ids = {
+                "agents",
+                "operators",
+                "events",
+                "start-operator",
+                "star-agent",
+                "toggle-hidden-agents",
+                "unhide-agent",
+                "hide-agent",
+                "agents-prune",
+                "purge-agent",
+            }
+            if focused_id in visible_home_focus_ids:
+                if not self.is_tiny_layout():
+                    return
+                panel_focus_ids = {
+                    TINY_HOME_AGENTS: {"agents"},
+                    TINY_HOME_OPERATORS: {"operators"},
+                    TINY_HOME_EVENTS: {"events"},
+                }
+                if focused_id in panel_focus_ids.get(self.tiny_home_panel, set()):
+                    return
             agents = self.query_one_or_none("#agents", DataTable)
             if agents is not None:
                 agents.focus()
         else:
-            if isinstance(self.focused, (Input, TextArea)):
+            if focused is not None and focused_id not in {
+                "agents",
+                "operators",
+                "events",
+            }:
                 return
             if self.is_tmux_direct_enabled() and self.active_agent_tab == "latest-tab":
                 tmux_message = self.query_one_or_none("#tmux-message", TextArea)

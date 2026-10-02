@@ -1801,6 +1801,45 @@ async def test_tui_function_keys_focus_split_sections() -> None:
         assert app.focused is message
 
 
+async def test_tui_shift_f2_alias_passes_unmodified_f2_to_focused_terminal() -> None:
+    sent: list[tuple[str, str]] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async def fake_send_key(agent_id: str, key: str) -> bool:
+        sent.append((agent_id, key))
+        return True
+
+    app.send_key_to_tmux = fake_send_key  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.selected_agent_id = "agent-a"
+        stream = app.query_one("#tmux-stream", TextArea)
+        stream.focus()
+        await pilot.pause()
+        app.on_key(Key("f14", None))
+        await pilot.pause()
+
+    assert sent == [("agent-a", "F2")]
+
+
+async def test_tui_layout_refresh_preserves_visible_events_focus() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(65, 20)
+        await pilot.pause()
+        app.action_focus_events()
+        await pilot.pause()
+        events = app.query_one("#events", DataTable)
+        assert app.focused is events
+        generation = app.focus_generation.snapshot()
+        app.apply_layout_class()
+        await pilot.pause()
+        assert app.focused is events
+        assert app.focus_generation.snapshot() >= generation
+
+
 async def test_tui_plain_keys_focus_split_sections_for_tiny_terminals() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
 
