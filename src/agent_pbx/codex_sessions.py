@@ -191,6 +191,7 @@ class CodexSessionPathCache:
         self._max_files = 0
         self._scanned_at = 0.0
         self._paths_by_session_id: dict[str, Path] = {}
+        self._pinned_paths_by_session_id: dict[str, Path] = {}
         self._files: list[tuple[float, Path]] = []
 
     def find(
@@ -209,6 +210,11 @@ class CodexSessionPathCache:
             return None
         now = time.monotonic()
         with self._lock:
+            pinned = self._pinned_paths_by_session_id.get(cleaned)
+            if pinned is not None:
+                if pinned.is_file():
+                    return pinned
+                self._pinned_paths_by_session_id.pop(cleaned, None)
             if self._cache_stale(root, max_files, now):
                 self._refresh(sessions_dir, root=root, max_files=max_files, now=now)
             path = self._paths_by_session_id.get(cleaned)
@@ -226,12 +232,31 @@ class CodexSessionPathCache:
                     return candidate
         return None
 
+    def pin(self, session_id: str, path: str | Path) -> bool:
+        """Pin a live session path so steady-state reads avoid global discovery."""
+        cleaned = str(session_id or "").strip()
+        candidate = Path(path).expanduser()
+        if not cleaned or not candidate.is_file():
+            return False
+        with self._lock:
+            self._pinned_paths_by_session_id[cleaned] = candidate
+            self._paths_by_session_id[cleaned] = candidate
+        return True
+
+    def unpin(self, session_id: str) -> None:
+        cleaned = str(session_id or "").strip()
+        if not cleaned:
+            return
+        with self._lock:
+            self._pinned_paths_by_session_id.pop(cleaned, None)
+
     def clear(self) -> None:
         with self._lock:
             self._root = None
             self._max_files = 0
             self._scanned_at = 0.0
             self._paths_by_session_id = {}
+            self._pinned_paths_by_session_id = {}
             self._files = []
 
     def _cache_stale(self, root: Path, max_files: int, now: float) -> bool:
@@ -532,6 +557,15 @@ def _read_session_meta(path: Path) -> dict[str, Any]:
         return {}
     session = payload.get("payload")
     return session if isinstance(session, dict) else {}
+
+
+def codex_session_metadata_from_file(path: str | Path) -> dict[str, Any]:
+    """Return the rollout's session metadata without reading response content."""
+    return dict(_read_session_meta(Path(path)))
+
+
+def codex_session_id_from_file(path: str | Path) -> str:
+    return str(codex_session_metadata_from_file(path).get("id") or "").strip()
 
 
 def _record_phase(record: dict[str, Any]) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from agent_pbx import tmux
 
@@ -29,6 +30,17 @@ def test_tmux_parse_pane_line_keeps_legacy_output_compatible() -> None:
 
     assert pane is not None
     assert pane.window_name == ""
+
+
+def test_tmux_parse_pane_line_includes_terminal_and_attachment_state() -> None:
+    pane = tmux.parse_pane_line(
+        "operators\t2\t0\t%88\t1\tcodex\toperator-5\t/tmp/project\t160\t48\t900\toperator-5\t1\t0"
+    )
+
+    assert pane is not None
+    assert pane.window_name == "operator-5"
+    assert pane.alternate_on is True
+    assert pane.session_attached == 0
 
 
 def test_tmux_choose_pane_for_agent_prefers_matching_codex_pane() -> None:
@@ -232,6 +244,127 @@ def test_tmux_launch_pane_injects_environment(monkeypatch) -> None:
         "AGENT_PBX_MCP_URL=http://pbx/mcp",
         "codex",
     ]
+
+
+def test_tmux_launch_pane_sets_initial_detached_geometry(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[1] == "has-session":
+            return subprocess.CompletedProcess(args, 1, "", "")
+        if args[1] == "new-session":
+            return subprocess.CompletedProcess(args, 0, "%42\n", "")
+        if args[1] == "display-message":
+            return subprocess.CompletedProcess(args, 0, "0\n", "")
+        if args[1] == "resize-window":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.launch_pane(
+        session_name="operators",
+        window_name="operator-5",
+        command="codex",
+        width=160,
+        height=48,
+    ) == "%42"
+    assert calls[1][-5:] == ["-x", "160", "-y", "48", "codex"]
+    assert calls[-1] == [
+        "tmux",
+        "resize-window",
+        "-t",
+        "%42",
+        "-x",
+        "160",
+        "-y",
+        "48",
+    ]
+
+
+def test_tmux_launch_pane_resizes_existing_detached_session(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[1] == "has-session":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[1] == "new-window":
+            return subprocess.CompletedProcess(args, 0, "%43\n", "")
+        if args[1] == "display-message":
+            return subprocess.CompletedProcess(args, 0, "0\n", "")
+        if args[1] == "resize-window":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.launch_pane(
+        session_name="operators",
+        window_name="operator-6",
+        command="codex",
+        width=160,
+        height=48,
+    ) == "%43"
+    assert calls[-1] == [
+        "tmux",
+        "resize-window",
+        "-t",
+        "%43",
+        "-x",
+        "160",
+        "-y",
+        "48",
+    ]
+
+
+def test_tmux_launch_pane_does_not_resize_attached_session(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[1] == "has-session":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[1] == "new-window":
+            return subprocess.CompletedProcess(args, 0, "%44\n", "")
+        if args[1] == "display-message":
+            return subprocess.CompletedProcess(args, 0, "1\n", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.launch_pane(
+        session_name="operators",
+        window_name="operator-7",
+        command="codex",
+        width=160,
+        height=48,
+    ) == "%44"
+    assert all(call[1] != "resize-window" for call in calls)
+
+
+def test_tmux_pane_open_rollout_paths_follows_process_tree(tmp_path, monkeypatch) -> None:
+    proc_root = tmp_path / "proc"
+    codex_home = tmp_path / "codex"
+    rollout = codex_home / "sessions" / "2026" / "10" / "02" / "rollout.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n", encoding="utf-8")
+    unrelated = tmp_path / "other.jsonl"
+    unrelated.write_text("{}\n", encoding="utf-8")
+    for pid, parent in ((100, 1), (101, 100), (102, 9)):
+        root = proc_root / str(pid)
+        (root / "fd").mkdir(parents=True)
+        (root / "status").write_text(f"Name:\ttest\nPPid:\t{parent}\n", encoding="utf-8")
+    (proc_root / "101" / "fd" / "3").symlink_to(rollout)
+    (proc_root / "101" / "fd" / "4").symlink_to(unrelated)
+    monkeypatch.setattr(tmux, "pane_root_pid", lambda *args, **kwargs: 100)
+
+    assert tmux.pane_open_rollout_paths(
+        "%42",
+        codex_home=codex_home,
+        proc_root=proc_root,
+    ) == (Path(rollout),)
 
 
 def test_tmux_kill_pane_uses_target(monkeypatch) -> None:

@@ -125,6 +125,32 @@ def test_codex_session_path_cache_reuses_index(tmp_path, monkeypatch) -> None:
     assert calls == ["*.jsonl"]
 
 
+def test_codex_session_path_cache_pin_avoids_global_scan(tmp_path, monkeypatch) -> None:
+    session_file = tmp_path / "sessions" / "2026" / "10" / "02" / "rollout.jsonl"
+    write_jsonl(
+        session_file,
+        [
+            {"type": "session_meta", "payload": {"id": "session-live"}},
+            assistant_message("live response"),
+        ],
+    )
+    cache = CodexSessionPathCache(ttl_seconds=0)
+    assert cache.pin("session-live", session_file) is True
+
+    def fail_rglob(path, pattern):
+        raise AssertionError(f"unexpected global scan of {path} for {pattern}")
+
+    monkeypatch.setattr(type(tmp_path / "sessions"), "rglob", fail_rglob)
+
+    assert cache.find("session-live", codex_home=tmp_path) == session_file
+
+
+def test_codex_session_path_cache_rejects_missing_pin(tmp_path) -> None:
+    cache = CodexSessionPathCache()
+
+    assert cache.pin("session-missing", tmp_path / "missing.jsonl") is False
+
+
 def test_codex_session_transcript_boundary_counts_last_line(tmp_path) -> None:
     sessions_dir = tmp_path / "sessions" / "2026" / "09" / "26"
     session_file = sessions_dir / "rollout-2026-09-26T00-00-00-session-abc.jsonl"

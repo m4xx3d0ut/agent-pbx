@@ -62,14 +62,20 @@ from .codex_sessions import (
     CodexTranscriptTailCache,
     CodexTranscriptBoundary,
     CodexTranscriptResult,
+    codex_session_id_from_file,
     codex_session_transcript_boundary,
     latest_assistant_transcript_for_session,
+    latest_assistant_transcript_from_session_file,
 )
 from . import tmux as tmux_support
 from .project_spawn import (
     PROJECT_SPAWN_MODES,
     normalize_project_slug,
     validate_sibling_project_target,
+)
+from .workerbee_mcp import (
+    WorkerBeeMcpPreflight,
+    inspect_workerbee_mcp,
 )
 
 
@@ -242,6 +248,8 @@ CALLER_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_joplin_create_document",
 )
 REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS = (
+    "workerbee_v1_capabilities",
+    "workerbee_v1_session_start",
     "workerbee_v1_project_runbook_status",
     "workerbee_v1_project_status",
     "workerbee_v1_secret_policy_status",
@@ -268,6 +276,8 @@ DEFAULT_EXPORT_DIR = Path("artifacts/thread-exports")
 DEFAULT_SETTINGS_FILE = Path("agent-pbx/tui-settings.json")
 DEFAULT_SLASH_COMMANDS_FILE = Path("agent-pbx/slash-commands.json")
 DEFAULT_TMUX_CAPTURE_LINES = 0
+DEFAULT_DETACHED_TMUX_WIDTH = 160
+DEFAULT_DETACHED_TMUX_HEIGHT = 48
 DEFAULT_TMUX_REFRESH_SECONDS = 1.5
 MIN_TMUX_REFRESH_SECONDS = 0.25
 DEFAULT_AGENT_REFRESH_SECONDS = 2.0
@@ -290,6 +300,10 @@ JOPLIN_COPY_MODE_CHOICES = (
     ("Clean: transcript first", JOPLIN_COPY_MODE_TRANSCRIPT_FIRST),
     ("Visible tmux capture only", JOPLIN_COPY_MODE_TMUX_CAPTURE),
 )
+CODEX_TERMINAL_MODE_SCROLLBACK = "scrollback"
+CODEX_TERMINAL_MODE_RAW = "raw"
+CODEX_TERMINAL_MODE_DEFAULT = "default"
+DEFAULT_CODEX_TERMINAL_MODE = CODEX_TERMINAL_MODE_SCROLLBACK
 JOPLIN_TMUX_LOG_MIN_WAIT_SECONDS = 2.0
 JOPLIN_TMUX_LOG_IDLE_SECONDS = 4.0
 JOPLIN_TMUX_LOG_TIMEOUT_SECONDS = 90.0
@@ -789,12 +803,32 @@ class CodexCopyCapture:
     text: str
     source: str
     session_id: str = ""
+    path: str = ""
     phase: str = ""
     line_index: int | None = None
+    mtime: float | None = None
 
     @property
     def digest(self) -> str:
         return response_text_digest(self.text)
+
+
+@dataclass(frozen=True)
+class ActiveCodexSession:
+    agent_id: str
+    pane_id: str
+    session_id: str
+    path: Path
+    source: str
+    confidence: str
+    conflicts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CodexCopyOption:
+    index: int
+    label: str
+    selected: bool = False
 
 
 @dataclass(frozen=True)
@@ -1469,6 +1503,7 @@ def caller_agent_config_overrides(
     *,
     mcp_url: str | None = None,
     work_root: str | None = None,
+    terminal_mode: str = CODEX_TERMINAL_MODE_DEFAULT,
 ) -> list[str]:
     overrides = [
         agent_pbx_mcp_config_override(
@@ -1480,6 +1515,7 @@ def caller_agent_config_overrides(
     if trust_override:
         overrides.append(trust_override)
     overrides.extend(codex_model_launch_config_overrides())
+    overrides.extend(codex_terminal_config_overrides(terminal_mode))
     return overrides
 
 
@@ -1490,6 +1526,7 @@ def review_operator_config_overrides(
     codex_home: Path | None = None,
     work_root: str | None = None,
     server_configs: Mapping[str, Mapping[str, object]] | None = None,
+    terminal_mode: str = CODEX_TERMINAL_MODE_DEFAULT,
 ) -> list[str]:
     overrides = review_operator_mcp_config_overrides(
         server_names,
@@ -1501,6 +1538,7 @@ def review_operator_config_overrides(
     if trust_override:
         overrides.append(trust_override)
     overrides.extend(codex_model_launch_config_overrides())
+    overrides.extend(codex_terminal_config_overrides(terminal_mode))
     return overrides
 
 
@@ -1512,6 +1550,7 @@ def operator_agent_config_overrides(
     work_root: str | None = None,
     server_configs: Mapping[str, Mapping[str, object]] | None = None,
     include_campaign_lifecycle: bool = False,
+    terminal_mode: str = CODEX_TERMINAL_MODE_DEFAULT,
 ) -> list[str]:
     """Build a least-privilege operator MCP allowlist for a launch.
 
@@ -1533,6 +1572,7 @@ def operator_agent_config_overrides(
     if trust_override:
         overrides.append(trust_override)
     overrides.extend(codex_model_launch_config_overrides())
+    overrides.extend(codex_terminal_config_overrides(terminal_mode))
     return overrides
 
 
@@ -1701,6 +1741,27 @@ def normalize_joplin_copy_mode(value: object) -> str:
     }:
         return JOPLIN_COPY_MODE_TMUX_CAPTURE
     return DEFAULT_JOPLIN_COPY_MODE
+
+
+def normalize_codex_terminal_mode(value: object) -> str:
+    mode = str(value or "").strip().casefold().replace("-", "_")
+    if mode in {"scrollback", "normal", "pbx", "compatible"}:
+        return CODEX_TERMINAL_MODE_SCROLLBACK
+    if mode in {"raw", "raw_output", "raw_scrollback"}:
+        return CODEX_TERMINAL_MODE_RAW
+    if mode in {"default", "codex", "auto"}:
+        return CODEX_TERMINAL_MODE_DEFAULT
+    return DEFAULT_CODEX_TERMINAL_MODE
+
+
+def codex_terminal_config_overrides(mode: object) -> list[str]:
+    normalized = normalize_codex_terminal_mode(mode)
+    if normalized == CODEX_TERMINAL_MODE_DEFAULT:
+        return []
+    overrides = [codex_config_override("tui.alternate_screen", "never")]
+    if normalized == CODEX_TERMINAL_MODE_RAW:
+        overrides.append(codex_config_override("tui.raw_output_mode", True))
+    return overrides
 
 
 def codex_model_preset_for(value: object) -> CodexModelPreset | None:
@@ -1962,20 +2023,54 @@ def contains_codex_copy_picker(text: str) -> bool:
     return copy_heading and (native_controls or "/copy" in lower)
 
 
+def codex_copy_options(text: str) -> tuple[CodexCopyOption, ...]:
+    if not contains_codex_copy_picker(text):
+        return ()
+    options: list[CodexCopyOption] = []
+    for line in str(text or "").splitlines():
+        match = re.match(
+            r"^\s*(?P<marker>[>›❯▸➜*])?\s*(?P<index>\d+)[.)]\s+(?P<label>\S.*)$",
+            line,
+        )
+        if match is None:
+            continue
+        label = re.split(r"\s{2,}", match.group("label").strip(), maxsplit=1)[0]
+        options.append(
+            CodexCopyOption(
+                index=int(match.group("index")),
+                label=label,
+                selected=bool(match.group("marker")),
+            )
+        )
+    return tuple(options)
+
+
+def codex_copy_response_option(text: str) -> CodexCopyOption | None:
+    preferred: list[tuple[int, CodexCopyOption]] = []
+    for option in codex_copy_options(text):
+        label = " ".join(option.label.casefold().split())
+        if any(term in label for term in ("prompt", "reasoning", "code block", "command")):
+            continue
+        score = 0
+        if any(term in label for term in ("whole response", "entire response", "full response")):
+            score = 40
+        elif any(term in label for term in ("latest response", "current response")):
+            score = 35
+        elif any(term in label for term in ("entire answer", "whole answer", "full answer")):
+            score = 30
+        elif re.search(r"\b(response|answer|message|status)\b", label):
+            score = 20
+        if score:
+            preferred.append((score, option))
+    if not preferred:
+        return None
+    preferred.sort(key=lambda item: (-item[0], item[1].index))
+    return preferred[0][1]
+
+
 def contains_codex_copy_selector(text: str) -> bool:
-    """Return whether a native picker safely offers Whole response first."""
-    clean = str(text or "")
-    if not contains_codex_copy_picker(clean):
-        return False
-    response_first_option = re.search(
-        r"(?mi)^\s*(?:[>›❯▸➜*]\s*)?1[.)]\s+"
-        r"(?:whole|entire|full|latest|current)\s+"
-        r"(?:response|answer|message|status)\b"
-        r"|^\s*(?:[>›❯▸➜*]\s*)?1[.)]\s+"
-        r"(?:response|answer|message|status)\b",
-        clean,
-    )
-    return response_first_option is not None
+    """Return whether a native picker offers a response-safe choice."""
+    return codex_copy_response_option(text) is not None
 
 
 def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME_NAME) -> set[str]:
@@ -4677,6 +4772,17 @@ class AgentPBXTUI(App[None]):
         self.joplin_copy_mode = normalize_joplin_copy_mode(
             self.settings.get("joplin_copy_mode", DEFAULT_JOPLIN_COPY_MODE)
         )
+        self.codex_terminal_mode = normalize_codex_terminal_mode(
+            self.settings.get("codex_terminal_mode", DEFAULT_CODEX_TERMINAL_MODE)
+        )
+        self.detached_tmux_width = max(
+            80,
+            min(240, int_setting(self.settings, "detached_tmux_width", DEFAULT_DETACHED_TMUX_WIDTH)),
+        )
+        self.detached_tmux_height = max(
+            24,
+            min(80, int_setting(self.settings, "detached_tmux_height", DEFAULT_DETACHED_TMUX_HEIGHT)),
+        )
         self.rendered_agent_columns: tuple[str, ...] = ()
         self.rendered_operator_columns: tuple[str, ...] = ()
         self.rendered_agents_signature: tuple[Any, ...] | None = None
@@ -4733,7 +4839,11 @@ class AgentPBXTUI(App[None]):
         self.selected_joplin_note_id_by_agent: dict[str, str] = {}
         self.codex_session_path_cache = CodexSessionPathCache()
         self.codex_transcript_tail_cache = CodexTranscriptTailCache()
+        self.active_codex_session_by_agent: dict[str, ActiveCodexSession] = {}
         self.last_codex_copy_capture_by_agent: dict[str, CodexCopyCapture] = {}
+        self.joplin_copy_locks: dict[str, asyncio.Lock] = {}
+        self.codex_session_repairs_in_flight: set[tuple[str, str]] = set()
+        self.workerbee_mcp_preflight: WorkerBeeMcpPreflight | None = None
         self.joplin_copy_fingerprints_by_agent = string_record_map_setting(
             self.settings,
             "joplin_copy_fingerprints_by_agent",
@@ -6085,6 +6195,9 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/codex model default sol-max", "Save Sol 5.6/max as global Codex default", lambda: self.palette_codex_model_default("sol-5.6-max"))
         yield SystemCommand("/codex model default sol-xhigh", "Save Sol 5.6/xhigh as global Codex default", lambda: self.palette_codex_model_default("sol-5.6-xhigh"))
         yield SystemCommand("/codex model default legacy-5.5", "Save Codex 5.5/xhigh as global Codex default", lambda: self.palette_codex_model_default("legacy-5.5-xhigh"))
+        yield SystemCommand("/codex terminal scrollback", "Use PBX-compatible Codex scrollback for managed panes", lambda: self.set_codex_terminal_mode(CODEX_TERMINAL_MODE_SCROLLBACK))
+        yield SystemCommand("/codex terminal raw", "Use Codex raw scrollback for managed panes", lambda: self.set_codex_terminal_mode(CODEX_TERMINAL_MODE_RAW))
+        yield SystemCommand("/codex terminal default", "Use Codex default terminal behavior for managed panes", lambda: self.set_codex_terminal_mode(CODEX_TERMINAL_MODE_DEFAULT))
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
         yield SystemCommand("/latest", "Open the Latest tab", self.palette_latest)
         yield SystemCommand("/thread", "Open the Thread tab", self.palette_thread)
@@ -6108,6 +6221,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/editor focus", "Focus the Editor tab", self.palette_editor_focus)
         yield SystemCommand("/editor reveal", "Reveal the current editor file in Files", self.palette_editor_reveal)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
+        yield SystemCommand("/workerbee preflight", "Check WorkerBee MCP bootstrap capability", self.palette_workerbee_preflight)
         yield SystemCommand("/campaigns", "Open and refresh operator campaigns", self.palette_campaigns)
         yield SystemCommand("/campaign monitor", "Ask the root operator to monitor selected campaign", self.palette_campaign_monitor)
         yield SystemCommand("/campaign report", "View the selected campaign report", self.palette_campaign_report)
@@ -6530,6 +6644,14 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.open_workerbee_for_agent(agent_id),
             name="palette-workerbee",
+            exclusive=True,
+        )
+
+    def palette_workerbee_preflight(self) -> None:
+        self.activate_agent_tab("workerbee-tab")
+        self.run_worker(
+            self.refresh_workerbee_mcp_preflight(),
+            name="workerbee-mcp-preflight",
             exclusive=True,
         )
 
@@ -11003,7 +11125,9 @@ class AgentPBXTUI(App[None]):
                 f"{pane.pane_id} {pane.target_label} {mode} "
                 f"{self.tmux_capture_mode_label()} "
                 "cropped "
-                f"{pane.current_command} {pane.width}x{pane.height}"
+                f"{pane.current_command} {pane.width}x{pane.height} "
+                f"{'alternate screen; history unavailable' if pane.alternate_on else 'normal screen'} "
+                f"history {pane.history_size}"
                 f"{selector_note}"
             ),
             cache_key=agent_id,
@@ -11253,13 +11377,57 @@ class AgentPBXTUI(App[None]):
         at_bottom = self.tmux_stream_is_at_bottom(stream)
         scroll_y = stream.scroll_y
         scroll_target_y = stream.scroll_target_y
+        anchor = self.tmux_stream_content_anchor(stream.text, scroll_y)
         stream.text = captured
         if at_bottom:
             self.snap_tmux_stream_to_bottom(stream)
         else:
-            stream.scroll_y = scroll_y
-            stream.scroll_target_y = scroll_target_y
+            anchored_y = self.tmux_stream_anchored_scroll_y(
+                captured,
+                anchor,
+                fallback=scroll_y,
+            )
+            target_delta = scroll_target_y - scroll_y
+            stream.scroll_y = anchored_y
+            stream.scroll_target_y = max(0.0, anchored_y + target_delta)
         return True
+
+    def tmux_stream_content_anchor(
+        self,
+        text: str,
+        scroll_y: float,
+    ) -> tuple[tuple[str, ...], int, float] | None:
+        lines = text.splitlines()
+        if not lines:
+            return None
+        index = min(max(0, int(scroll_y)), len(lines) - 1)
+        start = max(0, index - 1)
+        end = min(len(lines), index + 2)
+        return tuple(lines[start:end]), start, float(scroll_y)
+
+    def tmux_stream_anchored_scroll_y(
+        self,
+        text: str,
+        anchor: tuple[tuple[str, ...], int, float] | None,
+        *,
+        fallback: float,
+    ) -> float:
+        if anchor is None:
+            return fallback
+        context, old_start, old_scroll = anchor
+        if not context:
+            return fallback
+        lines = text.splitlines()
+        width = len(context)
+        matches = [
+            index
+            for index in range(0, max(0, len(lines) - width + 1))
+            if tuple(lines[index : index + width]) == context
+        ]
+        if not matches:
+            return fallback
+        new_start = min(matches, key=lambda index: abs(index - old_start))
+        return max(0.0, old_scroll + (new_start - old_start))
 
     def tmux_stream_is_at_bottom(self, stream: TextArea) -> bool:
         max_scroll_y = float(getattr(stream, "max_scroll_y", 0) or 0)
@@ -12709,6 +12877,8 @@ class AgentPBXTUI(App[None]):
                     command=command,
                     cwd=cwd,
                     env=env,
+                    width=self.detached_tmux_width,
+                    height=self.detached_tmux_height,
                 )
             except Exception as exc:
                 failures.append(str(exc))
@@ -12919,6 +13089,7 @@ class AgentPBXTUI(App[None]):
             codex_home=self.codex_home_dir(),
             work_root=cwd,
             include_campaign_lifecycle=True,
+            terminal_mode=self.codex_terminal_mode,
         )
         launch_config_overrides.extend(
             codex_model_preset_config_overrides(effective_model_preset)
@@ -13083,12 +13254,14 @@ class AgentPBXTUI(App[None]):
                 mcp_url=mcp_url,
                 codex_home=self.codex_home_dir(),
                 work_root=work_root,
+                terminal_mode=self.codex_terminal_mode,
             )
             if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
             else operator_agent_config_overrides(
                 mcp_url=mcp_url,
                 codex_home=self.codex_home_dir(),
                 work_root=work_root,
+                terminal_mode=self.codex_terminal_mode,
             )
         )
         launch_config_overrides.extend(
@@ -15986,6 +16159,7 @@ class AgentPBXTUI(App[None]):
                     codex_home=self.codex_home_dir(),
                     work_root=cwd,
                     include_campaign_lifecycle=True,
+                    terminal_mode=self.codex_terminal_mode,
                 ),
             ),
             cwd=cwd,
@@ -15994,6 +16168,8 @@ class AgentPBXTUI(App[None]):
                 cwd=cwd,
                 mcp_url=mcp_url,
             ),
+            width=self.detached_tmux_width,
+            height=self.detached_tmux_height,
         )
         self.tmux_agent_targets[agent_id] = pane_id
         self.tmux_manual_override_agent_ids.add(agent_id)
@@ -16331,12 +16507,14 @@ class AgentPBXTUI(App[None]):
                 mcp_url=mcp_url,
                 codex_home=self.codex_home_dir(),
                 work_root=launch_cwd,
+                terminal_mode=self.codex_terminal_mode,
             )
             if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
             else operator_agent_config_overrides(
                 mcp_url=mcp_url,
                 codex_home=self.codex_home_dir(),
                 work_root=launch_cwd,
+                terminal_mode=self.codex_terminal_mode,
             )
         )
         sandbox = (
@@ -18830,6 +19008,7 @@ class AgentPBXTUI(App[None]):
                 config_overrides=caller_agent_config_overrides(
                     mcp_url=mcp_url,
                     work_root=str(target_path),
+                    terminal_mode=self.codex_terminal_mode,
                 ),
             )
             pane_id = await self.launch_restart_pane(
@@ -19591,6 +19770,7 @@ class AgentPBXTUI(App[None]):
                 codex_home=self.codex_home_dir(),
                 work_root=cwd,
                 include_campaign_lifecycle=True,
+                terminal_mode=self.codex_terminal_mode,
             ),
         )
         env = self.operator_launch_env(
@@ -19607,6 +19787,8 @@ class AgentPBXTUI(App[None]):
                 command=command,
                 cwd=cwd,
                 env=env,
+                width=self.detached_tmux_width,
+                height=self.detached_tmux_height,
             )
         except Exception as exc:
             self.notify(f"Unable to launch resumed operator pane: {exc}", severity="error")
@@ -22259,11 +22441,14 @@ class AgentPBXTUI(App[None]):
         await self.copy_latest_report_to_joplin(agent_id)
 
     def codex_session_ids_for_agent(self, agent_id: str) -> tuple[str, ...]:
+        return tuple(session_id for _key, session_id in self.codex_session_entries_for_agent(agent_id))
+
+    def codex_session_entries_for_agent(self, agent_id: str) -> tuple[tuple[str, str], ...]:
         agent = self.agents.get(agent_id) or {}
         metadata = agent.get("metadata")
         if not isinstance(metadata, Mapping):
             metadata = {}
-        values: list[str] = []
+        values: list[tuple[str, str]] = []
         for key in (
             "fork_codex_session_id",
             "last_resume_codex_session_id",
@@ -22274,9 +22459,197 @@ class AgentPBXTUI(App[None]):
             "default_source_codex_session_id",
         ):
             value = str(metadata.get(key) or "").strip()
-            if value and value not in values:
-                values.append(value)
+            if value and value not in {item[1] for item in values}:
+                values.append((key, value))
         return tuple(values)
+
+    def codex_transcript_fallback_ids_for_agent(self, agent_id: str) -> tuple[str, ...]:
+        agent = self.agents.get(agent_id) or {}
+        metadata = self.agent_metadata(agent)
+        is_fork = str(metadata.get("operator_role") or "").strip() == OPERATOR_ROLE_FORK
+        if not is_fork:
+            return self.codex_session_ids_for_agent(agent_id)
+        source_ids = {
+            str(metadata.get(key) or "").strip()
+            for key in (
+                "active_source_codex_session_id",
+                "source_codex_session_id",
+                "default_source_codex_session_id",
+            )
+            if str(metadata.get(key) or "").strip()
+        }
+        return tuple(
+            session_id
+            for session_id in self.codex_session_ids_for_agent(agent_id)
+            if session_id not in source_ids
+        )
+
+    async def active_codex_session_for_agent(
+        self,
+        agent_id: str,
+        *,
+        pane: tmux_support.TmuxPane | None = None,
+        repair_metadata: bool = False,
+    ) -> ActiveCodexSession | None:
+        if pane is None:
+            pane = await self.resolve_tmux_send_pane(agent_id, status=None)
+        if pane is not None:
+            try:
+                open_paths = await asyncio.to_thread(
+                    tmux_support.pane_open_rollout_paths,
+                    pane.pane_id,
+                    codex_home=self.codex_home_dir(),
+                )
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                open_paths = ()
+            live: list[tuple[float, str, Path]] = []
+            for path in open_paths:
+                session_id = codex_session_id_from_file(path)
+                if not session_id:
+                    continue
+                try:
+                    modified = path.stat().st_mtime
+                except OSError:
+                    continue
+                live.append((modified, session_id, path))
+            if live:
+                live.sort(reverse=True)
+                _modified, session_id, path = live[0]
+                conflicts = tuple(item[1] for item in live[1:] if item[1] != session_id)
+                resolved = ActiveCodexSession(
+                    agent_id=agent_id,
+                    pane_id=pane.pane_id,
+                    session_id=session_id,
+                    path=path,
+                    source="pane-open-rollout",
+                    confidence="high" if not conflicts else "medium",
+                    conflicts=conflicts,
+                )
+                self.codex_session_path_cache.pin(session_id, path)
+                self.active_codex_session_by_agent[agent_id] = resolved
+                if repair_metadata and not conflicts:
+                    await self.repair_active_codex_session_metadata(resolved)
+                return resolved
+
+        candidates: list[tuple[int, float, str, Path, str]] = []
+        agent = self.agents.get(agent_id) or {}
+        metadata = self.agent_metadata(agent)
+        is_fork = str(metadata.get("operator_role") or "").strip() == OPERATOR_ROLE_FORK
+        source_ids = {
+            str(metadata.get(key) or "").strip()
+            for key in (
+                "active_source_codex_session_id",
+                "source_codex_session_id",
+                "default_source_codex_session_id",
+            )
+            if str(metadata.get(key) or "").strip()
+        }
+        for rank, (key, session_id) in enumerate(self.codex_session_entries_for_agent(agent_id)):
+            if is_fork and session_id in source_ids:
+                continue
+            try:
+                result = await asyncio.to_thread(
+                    latest_assistant_transcript_for_session,
+                    session_id,
+                    codex_home=self.codex_home_dir(),
+                    path_cache=self.codex_session_path_cache,
+                    tail_cache=self.codex_transcript_tail_cache,
+                )
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if result is None:
+                continue
+            candidates.append((rank, result.mtime, session_id, result.path, key))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (-item[1], item[0]))
+        rank, _mtime, session_id, path, key = candidates[0]
+        resolved = ActiveCodexSession(
+            agent_id=agent_id,
+            pane_id=pane.pane_id if pane is not None else "",
+            session_id=session_id,
+            path=path,
+            source=f"metadata.{key}",
+            confidence="medium" if rank <= 2 else "low",
+            conflicts=tuple(item[2] for item in candidates[1:] if item[2] != session_id),
+        )
+        self.codex_session_path_cache.pin(session_id, path)
+        self.active_codex_session_by_agent[agent_id] = resolved
+        return resolved
+
+    async def repair_active_codex_session_metadata(
+        self,
+        resolved: ActiveCodexSession,
+    ) -> None:
+        agent = self.agents.get(resolved.agent_id)
+        if not isinstance(agent, dict):
+            return
+        metadata = self.agent_metadata(agent)
+        if str(metadata.get("launched_by") or "") != "agent-pbx-tui":
+            return
+        current_id = str(metadata.get("codex_session_id") or "").strip()
+        fork_id = str(metadata.get("fork_codex_session_id") or "").strip()
+        is_fork = str(metadata.get("operator_role") or "").strip() == OPERATOR_ROLE_FORK
+        if current_id == resolved.session_id and (not is_fork or fork_id == resolved.session_id):
+            return
+        repair_key = (resolved.agent_id, resolved.session_id)
+        if repair_key in self.codex_session_repairs_in_flight:
+            return
+        self.codex_session_repairs_in_flight.add(repair_key)
+        previous_id = fork_id or current_id
+        updated = dict(metadata)
+        updated["codex_session_id"] = resolved.session_id
+        updated["codex_thread_id"] = resolved.session_id
+        updated["active_codex_session_source"] = resolved.source
+        updated["active_codex_session_path"] = str(resolved.path)
+        updated["active_codex_session_repaired_at"] = time.time()
+        if previous_id and previous_id != resolved.session_id:
+            updated["previous_codex_session_id"] = previous_id
+        if is_fork:
+            updated["fork_codex_session_id"] = resolved.session_id
+        try:
+            if is_fork:
+                await self.record_operator_fork(
+                    logical_operator_id=str(updated.get("logical_operator_id") or ""),
+                    source_caller_agent_id=str(updated.get("source_caller_agent_id") or ""),
+                    fork_agent_id=resolved.agent_id,
+                    tmux_pane_id=resolved.pane_id,
+                    metadata=updated,
+                    fork_track_id=str(updated.get("fork_track_id") or "") or None,
+                    fork_purpose=str(updated.get("fork_purpose") or "") or None,
+                    access_mode=str(updated.get("access_mode") or "") or None,
+                    source_cwd=str(updated.get("source_cwd") or "") or None,
+                    work_root=str(updated.get("work_root") or "") or None,
+                    fork_codex_session_id=resolved.session_id,
+                )
+            else:
+                response = await self.api_client().post(
+                    "/v1/agents/register",
+                    json={
+                        "agent_id": resolved.agent_id,
+                        "project": str(agent.get("project") or "unknown"),
+                        "name": agent.get("name") or resolved.agent_id,
+                        "agent_type": str(agent.get("agent_type") or "caller"),
+                        "pbx_active": bool(agent.get("pbx_active", True)),
+                        "metadata": updated,
+                    },
+                    headers=auth_headers(self.token),
+                )
+                response.raise_for_status()
+            agent["metadata"] = updated
+            self.notify(
+                f"Reconciled {resolved.agent_id} with live Codex session "
+                f"{resolved.session_id[:8]}….",
+                severity="information",
+            )
+        except Exception as exc:  # noqa: BLE001 - capture remains usable without repair
+            self.notify(
+                f"Found live Codex session {resolved.session_id[:8]}… but could not "
+                f"persist its mapping: {exc}",
+                severity="warning",
+            )
+        finally:
+            self.codex_session_repairs_in_flight.discard(repair_key)
 
     async def copy_codex_transcript_response_text(
         self,
@@ -22284,7 +22657,33 @@ class AgentPBXTUI(App[None]):
         *,
         after_boundary: CodexTranscriptBoundary | None = None,
     ) -> CodexTranscriptResult | None:
-        for session_id in self.codex_session_ids_for_agent(agent_id):
+        active = await self.active_codex_session_for_agent(
+            agent_id,
+            repair_metadata=True,
+        )
+        if active is not None:
+            try:
+                found = await asyncio.to_thread(
+                    latest_assistant_transcript_from_session_file,
+                    active.path,
+                    session_id=active.session_id,
+                    tail_cache=self.codex_transcript_tail_cache,
+                )
+            except (OSError, UnicodeError, ValueError):
+                found = None
+            if (
+                found is not None
+                and found.text.strip()
+                and (
+                    after_boundary is None
+                    or self.transcript_after_boundary(found, after_boundary)
+                )
+            ):
+                return found
+        candidates: list[CodexTranscriptResult] = []
+        for session_id in self.codex_transcript_fallback_ids_for_agent(agent_id):
+            if active is not None and session_id == active.session_id:
+                continue
             try:
                 found = await asyncio.to_thread(
                     latest_assistant_transcript_for_session,
@@ -22294,26 +22693,33 @@ class AgentPBXTUI(App[None]):
                     tail_cache=self.codex_transcript_tail_cache,
                 )
             except (OSError, UnicodeError, ValueError):
-                # A live rollout can be rotated or mid-write while it is read.
-                # Let the normal fallback chain continue without surfacing a
-                # transient transcript read as a failed Joplin copy.
                 continue
-            if found is None:
+            if found is None or not found.text.strip():
                 continue
-            if after_boundary is not None and not self.transcript_after_boundary(
-                found,
-                after_boundary,
-            ):
+            if after_boundary is not None and not self.transcript_after_boundary(found, after_boundary):
                 continue
-            if found.text.strip():
-                return found
+            candidates.append(found)
+        if candidates:
+            return max(candidates, key=lambda item: (item.mtime, item.line_index))
         return None
 
     async def codex_transcript_boundary_for_agent(
         self,
         agent_id: str,
     ) -> CodexTranscriptBoundary | None:
-        for session_id in self.codex_session_ids_for_agent(agent_id):
+        active = await self.active_codex_session_for_agent(agent_id)
+        if active is not None:
+            boundary = await asyncio.to_thread(
+                codex_session_transcript_boundary,
+                active.session_id,
+                codex_home=self.codex_home_dir(),
+                path_cache=self.codex_session_path_cache,
+            )
+            if boundary is not None:
+                return boundary
+        for session_id in self.codex_transcript_fallback_ids_for_agent(agent_id):
+            if active is not None and session_id == active.session_id:
+                continue
             boundary = await asyncio.to_thread(
                 codex_session_transcript_boundary,
                 session_id,
@@ -22476,6 +22882,8 @@ class AgentPBXTUI(App[None]):
         self,
         pane: tmux_support.TmuxPane,
         snapshot: ClipboardSnapshot,
+        *,
+        expected_digest: str = "",
     ) -> tuple[ClipboardCandidate, str | None]:
         """Correlate a native /copy selection with a source-specific change."""
         deadline = time.monotonic() + CLIPBOARD_COPY_WAIT_SECONDS
@@ -22491,19 +22899,23 @@ class AgentPBXTUI(App[None]):
             selector_visible = bool(raw and contains_codex_copy_selector(raw))
             if picker_visible:
                 picker_seen = True
-                if not selector_visible:
+                response_option = codex_copy_response_option(raw or "")
+                if not selector_visible or response_option is None:
                     dismissed = await self.dismiss_codex_copy_selector(pane)
                     if not dismissed:
                         raise RuntimeError(
                             "Codex /copy picker without Whole response could not be dismissed"
                         )
                     raise RuntimeError(
-                        "Codex /copy picker did not offer Whole response as its first option"
+                        "Codex /copy picker did not offer a response-safe option"
                     )
                 if not picker_selected:
-                    if not await self.send_key_to_tmux_pane(pane.pane_id, "1"):
+                    if not await self.send_key_to_tmux_pane(
+                        pane.pane_id,
+                        str(response_option.index),
+                    ):
                         raise RuntimeError(
-                            "Unable to select Whole response in Codex /copy picker"
+                            "Unable to select the response in Codex /copy picker"
                         )
                     picker_selected = True
                 if time.monotonic() >= deadline:
@@ -22528,6 +22940,17 @@ class AgentPBXTUI(App[None]):
             for candidate in candidates:
                 if snapshot.values.get(candidate.source) != candidate.text:
                     return candidate, last_raw
+            if picker_seen and picker_selected and expected_digest:
+                matching = next(
+                    (
+                        candidate
+                        for candidate in candidates
+                        if candidate.digest == expected_digest
+                    ),
+                    None,
+                )
+                if matching is not None:
+                    return matching, last_raw
             if time.monotonic() >= deadline:
                 transport_detail = snapshot.tmux_transport.reason
                 if picker_seen:
@@ -22552,8 +22975,10 @@ class AgentPBXTUI(App[None]):
             text=result.text,
             source=source,
             session_id=result.session_id,
+            path=str(result.path),
             phase=result.phase,
             line_index=result.line_index,
+            mtime=result.mtime,
         )
 
     def remember_codex_copy_capture(
@@ -22569,6 +22994,7 @@ class AgentPBXTUI(App[None]):
         agent_id: str,
         candidate: ClipboardCandidate,
         raw_capture: str | None,
+        transcript: CodexTranscriptResult | None = None,
     ) -> CodexCopyCapture:
         session_id = next(iter(self.codex_session_ids_for_agent(agent_id)), "")
         direct = CodexCopyCapture(
@@ -22581,7 +23007,8 @@ class AgentPBXTUI(App[None]):
         # session tail cache to reject a stale unrelated clipboard value.
         if raw_capture and CODEX_STATUS_LINE_PATTERN.search(raw_capture):
             return direct
-        transcript = await self.copy_codex_transcript_response_text(agent_id)
+        if transcript is None:
+            transcript = await self.copy_codex_transcript_response_text(agent_id)
         if transcript is None:
             return direct
         if response_text_digest(transcript.text) == direct.digest:
@@ -22589,8 +23016,10 @@ class AgentPBXTUI(App[None]):
                 text=direct.text,
                 source=direct.source,
                 session_id=transcript.session_id or session_id,
+                path=str(transcript.path),
                 phase=transcript.phase,
                 line_index=transcript.line_index,
+                mtime=transcript.mtime,
             )
         self.notify(
             "Joplin /copy output did not match the active Codex transcript; "
@@ -22634,6 +23063,15 @@ class AgentPBXTUI(App[None]):
                     agent_id,
                     self.copy_capture_from_transcript(transcript),
                 )
+        else:
+            transcript = (
+                await self.copy_codex_transcript_response_text(
+                    agent_id,
+                    after_boundary=transcript_boundary,
+                )
+                if allow_transcript
+                else None
+            )
         pane = await self.resolve_tmux_send_pane(agent_id, status=None)
         if pane is None:
             self.notify(
@@ -22647,23 +23085,53 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return None
+        raw_before_copy = await self.capture_tmux_raw_for_pane(pane.pane_id)
+        if (
+            transcript_boundary is None
+            and raw_before_copy
+            and CODEX_STATUS_LINE_PATTERN.search(raw_before_copy)
+        ):
+            self.notify(
+                "Codex is still producing the response; wait for the completed turn "
+                "before copying it to Joplin.",
+                severity="warning",
+            )
+            return None
         snapshot = await self.copy_clipboard_snapshot_for_pane(pane)
+        if (
+            transcript is not None
+            and not snapshot.values
+            and not snapshot.tmux_transport.available
+        ):
+            return self.remember_codex_copy_capture(
+                agent_id,
+                self.copy_capture_from_transcript(
+                    transcript,
+                    source_suffix="(native clipboard transport unavailable)",
+                ),
+            )
         try:
             await asyncio.to_thread(tmux_support.send_literal_keys, pane.pane_id, "/copy")
-            candidate, raw_capture = await self.await_codex_copy_candidate(pane, snapshot)
+            candidate, raw_capture = await self.await_codex_copy_candidate(
+                pane,
+                snapshot,
+                expected_digest=response_text_digest(transcript.text) if transcript else "",
+            )
             capture = await self.validate_direct_codex_copy(
                 agent_id,
                 candidate,
                 raw_capture,
+                transcript,
             )
             return self.remember_codex_copy_capture(agent_id, capture)
         except Exception as exc:
             copy_error = exc
+        finally:
+            try:
+                await self.dismiss_codex_copy_selector(pane)
+            except Exception:
+                pass
         if allow_transcript:
-            transcript = await self.copy_codex_transcript_response_text(
-                agent_id,
-                after_boundary=transcript_boundary,
-            )
             if transcript is not None:
                 if copy_error is not None:
                     self.notify(
@@ -22699,53 +23167,64 @@ class AgentPBXTUI(App[None]):
         *,
         force: bool = False,
     ) -> None:
-        if not await self.ensure_joplin_available():
-            return
-        copied = await self.copy_tmux_response_text(agent_id)
-        if copied is None:
-            return
-        response_text, clipboard_source = copied
-        capture = self.last_codex_copy_capture_by_agent.get(agent_id) or CodexCopyCapture(
-            text=response_text,
-            source=clipboard_source,
-            session_id=next(iter(self.codex_session_ids_for_agent(agent_id)), ""),
-        )
-        previous = self.joplin_copy_fingerprints_by_agent.get(agent_id, {})
-        if (
-            not force
-            and previous.get("digest") == capture.digest
-            and previous.get("session_id", "") == capture.session_id
-        ):
-            existing_note_id = previous.get("note_id", "")
-            self.set_selected_joplin_note_for_agent(agent_id, existing_note_id or None)
-            self.notify(
-                "The latest Codex response is already saved to Joplin. "
-                "Use /joplin copy force to create an intentional duplicate."
+        lock = self.joplin_copy_locks.setdefault(agent_id, asyncio.Lock())
+        async with lock:
+            if not await self.ensure_joplin_available():
+                return
+            copied = await self.copy_tmux_response_text(agent_id)
+            if copied is None:
+                return
+            response_text, clipboard_source = copied
+            capture = self.last_codex_copy_capture_by_agent.get(agent_id) or CodexCopyCapture(
+                text=response_text,
+                source=clipboard_source,
+                session_id=next(iter(self.codex_session_ids_for_agent(agent_id)), ""),
             )
-            await self.load_joplin_notes(agent_id)
-            return
-        prompt = self.latest_joplin_prompt_for_agent(agent_id)
-        body = format_joplin_tmux_response_copy_body(
-            prompt,
-            response_text,
-            capture_source=clipboard_source,
-        )
-        title = joplin_tmux_copy_title(prompt)
-        note = await self.create_manual_joplin_copy(
-            agent_id,
-            title=title,
-            body=body,
-            success_message=f"Copied Codex response to Joplin via {clipboard_source}.",
-        )
-        if isinstance(note, Mapping):
-            self.joplin_copy_fingerprints_by_agent[agent_id] = {
-                "digest": capture.digest,
-                "session_id": capture.session_id,
-                "note_id": str(note.get("id") or "").strip(),
-                "source": capture.source,
-            }
-            self.save_settings()
-        await self.load_tmux_capture(agent_id)
+            previous = self.joplin_copy_fingerprints_by_agent.get(agent_id, {})
+            if (
+                not force
+                and previous.get("digest") == capture.digest
+                and previous.get("session_id", "") == capture.session_id
+                and previous.get("path", "") == capture.path
+                and previous.get("line_index", "")
+                == ("" if capture.line_index is None else str(capture.line_index))
+            ):
+                existing_note_id = previous.get("note_id", "")
+                self.set_selected_joplin_note_for_agent(agent_id, existing_note_id or None)
+                self.notify(
+                    "The latest Codex response is already saved to Joplin. "
+                    "Use /joplin copy force to create an intentional duplicate."
+                )
+                await self.load_joplin_notes(agent_id)
+                return
+            prompt = self.latest_joplin_prompt_for_agent(agent_id)
+            body = format_joplin_tmux_response_copy_body(
+                prompt,
+                response_text,
+                capture_source=clipboard_source,
+            )
+            title = joplin_tmux_copy_title(prompt)
+            note = await self.create_manual_joplin_copy(
+                agent_id,
+                title=title,
+                body=body,
+                success_message=f"Copied Codex response to Joplin via {clipboard_source}.",
+            )
+            if isinstance(note, Mapping):
+                self.joplin_copy_fingerprints_by_agent[agent_id] = {
+                    "digest": capture.digest,
+                    "session_id": capture.session_id,
+                    "path": capture.path,
+                    "phase": capture.phase,
+                    "line_index": (
+                        "" if capture.line_index is None else str(capture.line_index)
+                    ),
+                    "mtime": str(capture.mtime or ""),
+                    "note_id": str(note.get("id") or "").strip(),
+                    "source": capture.source,
+                }
+                self.save_settings()
+            await self.load_tmux_capture(agent_id)
 
     async def append_joplin_log_section(
         self,
@@ -24081,7 +24560,60 @@ class AgentPBXTUI(App[None]):
             detail.text = f"Unable to load WorkerBee status for {agent_id}: {exc}"
             return
         self.workerbee_status_by_agent[agent_id] = status
-        detail.text = self.format_workerbee_status(status)
+        rendered = self.format_workerbee_status(status)
+        if self.workerbee_mcp_preflight is not None:
+            rendered = f"{rendered}\n\n{self.format_workerbee_mcp_preflight(self.workerbee_mcp_preflight)}"
+        detail.text = rendered
+
+    def workerbee_mcp_endpoint(self) -> str:
+        config = dict(DEFAULT_REVIEW_OPERATOR_MCP_SERVER_CONFIGS.get("workerbee", {}))
+        config.update(
+            load_codex_mcp_server_configs(
+                self.codex_home_dir(),
+                ("workerbee",),
+            ).get("workerbee", {})
+        )
+        return str(config.get("url") or "http://127.0.0.1:8765/mcp").strip()
+
+    async def refresh_workerbee_mcp_preflight(self) -> WorkerBeeMcpPreflight:
+        endpoint = self.workerbee_mcp_endpoint()
+        result = await inspect_workerbee_mcp(
+            endpoint,
+            enabled_tools=REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS,
+        )
+        self.workerbee_mcp_preflight = result
+        detail = self.query_one_or_none("#workerbee-detail", TextArea)
+        if detail is not None:
+            agent_id = self.selected_agent_id
+            status = self.workerbee_status_by_agent.get(agent_id or "")
+            base = self.format_workerbee_status(status) if isinstance(status, dict) else ""
+            detail.text = "\n\n".join(
+                item
+                for item in (base, self.format_workerbee_mcp_preflight(result))
+                if item
+            )
+        self.notify(
+            f"WorkerBee MCP preflight: {result.code}.",
+            severity="information" if result.ready else "warning",
+        )
+        return result
+
+    def format_workerbee_mcp_preflight(self, result: WorkerBeeMcpPreflight) -> str:
+        parsed = urlparse(result.endpoint)
+        safe_endpoint = f"{parsed.scheme}://{parsed.netloc}{parsed.path}" if parsed.scheme else result.endpoint
+        lines = [
+            "WorkerBee MCP Preflight",
+            f"Code: {result.code}",
+            f"Ready: {'yes' if result.ready else 'no'}",
+            f"Endpoint: {safe_endpoint or '-'}",
+            f"Version: {result.workerbee_version or '-'}",
+            f"Detail: {result.message}",
+        ]
+        if result.missing_tools:
+            lines.append("Missing: " + ", ".join(result.missing_tools))
+        if result.remediation:
+            lines.append(f"Remediation: {result.remediation}")
+        return "\n".join(lines)
 
     def format_workerbee_status(self, status: dict[str, Any]) -> str:
         agent_id = str(status.get("agent_id") or "-")
@@ -24317,6 +24849,14 @@ class AgentPBXTUI(App[None]):
             self.joplin_copy_mode,
         )
         self.notify(f"Joplin copy mode set to {label}.")
+
+    def set_codex_terminal_mode(self, mode: str) -> None:
+        self.codex_terminal_mode = normalize_codex_terminal_mode(mode)
+        self.save_settings()
+        self.notify(
+            "Managed Codex terminal mode set to "
+            f"{self.codex_terminal_mode}; restart a pane in place to apply it."
+        )
 
     def apply_theme_class(self) -> None:
         use_custom_theme = self.ui_theme == self.custom_theme_name
@@ -24554,6 +25094,9 @@ class AgentPBXTUI(App[None]):
             "layout": self.layout_mode,
             "split_percent": self.split_percent,
             "joplin_copy_mode": self.joplin_copy_mode,
+            "codex_terminal_mode": self.codex_terminal_mode,
+            "detached_tmux_width": self.detached_tmux_width,
+            "detached_tmux_height": self.detached_tmux_height,
             "joplin_copy_fingerprints_by_agent": self.joplin_copy_fingerprints_by_agent,
             "show_hidden_agents": self.show_hidden_agents,
             "export_dir": str(self.export_dir),

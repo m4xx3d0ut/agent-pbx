@@ -23,6 +23,8 @@ TMUX_PANE_FORMAT = "\t".join(
         "#{pane_height}",
         "#{history_size}",
         "#{window_name}",
+        "#{alternate_on}",
+        "#{session_attached}",
     ]
 )
 DEFAULT_SUBMIT_DELAY_SECONDS = 0.08
@@ -63,6 +65,8 @@ class TmuxPane:
     height: int
     history_size: int
     window_name: str = ""
+    alternate_on: bool = False
+    session_attached: int = 0
 
     @property
     def target_label(self) -> str:
@@ -87,7 +91,7 @@ def int_or_zero(value: str) -> int:
 
 def parse_pane_line(line: str) -> TmuxPane | None:
     parts = line.rstrip("\n").split("\t")
-    if len(parts) not in {11, 12}:
+    if len(parts) not in {11, 12, 14}:
         return None
     return TmuxPane(
         session_name=parts[0],
@@ -101,7 +105,9 @@ def parse_pane_line(line: str) -> TmuxPane | None:
         width=int_or_zero(parts[8]),
         height=int_or_zero(parts[9]),
         history_size=int_or_zero(parts[10]),
-        window_name=parts[11] if len(parts) == 12 else "",
+        window_name=parts[11] if len(parts) >= 12 else "",
+        alternate_on=parts[12] == "1" if len(parts) == 14 else False,
+        session_attached=int_or_zero(parts[13]) if len(parts) == 14 else 0,
     )
 
 
@@ -136,10 +142,13 @@ def launch_pane(
     command: str,
     cwd: str | None = None,
     env: Mapping[str, str] | None = None,
+    width: int | None = None,
+    height: int | None = None,
     tmux_bin: str = "tmux",
 ) -> str:
     args: list[str]
-    if session_exists(session_name, tmux_bin=tmux_bin):
+    existing_session = session_exists(session_name, tmux_bin=tmux_bin)
+    if existing_session:
         args = [
             tmux_bin,
             "new-window",
@@ -165,6 +174,10 @@ def launch_pane(
             "-n",
             window_name,
         ]
+        if width is not None and int(width) > 0:
+            args.extend(["-x", str(int(width))])
+        if height is not None and int(height) > 0:
+            args.extend(["-y", str(int(height))])
     if cwd:
         args.extend(["-c", cwd])
     if env:
@@ -184,7 +197,131 @@ def launch_pane(
     pane_id = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
     if not pane_id:
         raise RuntimeError("tmux did not return a launched pane id")
+    if (width or height) and pane_session_attached(
+        pane_id,
+        tmux_bin=tmux_bin,
+    ) == 0:
+        resize_window(
+            pane_id,
+            width=width,
+            height=height,
+            tmux_bin=tmux_bin,
+        )
     return pane_id
+
+
+def pane_session_attached(target: str, *, tmux_bin: str = "tmux") -> int:
+    result = subprocess.run(
+        [tmux_bin, "display-message", "-p", "-t", target, "#{session_attached}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return 0
+    return int_or_zero(result.stdout.strip())
+
+
+def resize_window(
+    target: str,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    tmux_bin: str = "tmux",
+) -> None:
+    args = [tmux_bin, "resize-window", "-t", target]
+    if width is not None and int(width) > 0:
+        args.extend(["-x", str(int(width))])
+    if height is not None and int(height) > 0:
+        args.extend(["-y", str(int(height))])
+    if len(args) == 4:
+        return
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "tmux resize failed").strip()
+        raise RuntimeError(message)
+
+
+def pane_root_pid(target: str, *, tmux_bin: str = "tmux") -> int | None:
+    result = subprocess.run(
+        [tmux_bin, "display-message", "-p", "-t", target, "#{pane_pid}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    value = int_or_zero(result.stdout.strip())
+    return value or None
+
+
+def process_tree_ids(root_pid: int, *, proc_root: str | Path = "/proc") -> set[int]:
+    """Return a Linux process tree without depending on psutil or shell parsing."""
+    root = Path(proc_root)
+    children: dict[int, list[int]] = {}
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return {root_pid}
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            status = (entry / "status").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        match = re.search(r"(?m)^PPid:\s+(\d+)\s*$", status)
+        if match is None:
+            continue
+        children.setdefault(int(match.group(1)), []).append(int(entry.name))
+    found = {root_pid}
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        for child in children.get(parent, []):
+            if child in found:
+                continue
+            found.add(child)
+            pending.append(child)
+    return found
+
+
+def pane_open_rollout_paths(
+    target: str,
+    *,
+    codex_home: str | Path | None = None,
+    tmux_bin: str = "tmux",
+    proc_root: str | Path = "/proc",
+) -> tuple[Path, ...]:
+    """Find Codex rollout JSONL files held open by a pane's process tree."""
+    pid = pane_root_pid(target, tmux_bin=tmux_bin)
+    if pid is None:
+        return ()
+    home = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+    sessions_root = (home / "sessions").resolve(strict=False)
+    found: dict[Path, float] = {}
+    proc = Path(proc_root)
+    for process_id in process_tree_ids(pid, proc_root=proc):
+        fd_root = proc / str(process_id) / "fd"
+        try:
+            descriptors = list(fd_root.iterdir())
+        except OSError:
+            continue
+        for descriptor in descriptors:
+            try:
+                target_path = Path(os.readlink(descriptor))
+            except OSError:
+                continue
+            if target_path.suffix != ".jsonl":
+                continue
+            resolved = target_path.resolve(strict=False)
+            try:
+                resolved.relative_to(sessions_root)
+            except ValueError:
+                continue
+            try:
+                found[resolved] = resolved.stat().st_mtime
+            except OSError:
+                continue
+    return tuple(path for path, _ in sorted(found.items(), key=lambda item: item[1], reverse=True))
 
 
 def respawn_pane(

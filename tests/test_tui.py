@@ -20,11 +20,15 @@ from agent_pbx.codex_cli import (
 )
 from agent_pbx.codex_sessions import CodexTranscriptBoundary, CodexTranscriptResult
 from agent_pbx.tui import (
+    ActiveCodexSession,
     AgentPBXTUI,
     ClipboardCandidate,
     ClipboardSnapshot,
     CodexCopyCapture,
     CodexSessionLeaseConflictError,
+    CODEX_TERMINAL_MODE_DEFAULT,
+    CODEX_TERMINAL_MODE_RAW,
+    CODEX_TERMINAL_MODE_SCROLLBACK,
     CustomSlashCommand,
     EditorCloseConfirmScreen,
     OperatorHistoryScreen,
@@ -43,6 +47,8 @@ from agent_pbx.tui import (
     caller_agent_config_overrides,
     clipboard_reader_environment,
     contains_codex_copy_picker,
+    codex_copy_response_option,
+    codex_terminal_config_overrides,
     codex_mcp_add_command,
     codex_model_preset_config_overrides,
     codex_model_preset_for,
@@ -69,6 +75,7 @@ from agent_pbx.tui import (
     parse_custom_slash_commands,
     render_plan_prompt,
     render_custom_slash_prompt,
+    response_text_digest,
     resolve_layout,
     slash_completion_direction,
     tmux_features_available,
@@ -186,6 +193,7 @@ def install_direct_copy_stubs(
     session_id: str = "session-1",
 ) -> list[tuple[str, str]]:
     """Install a pane-scoped native /copy transaction for TUI tests."""
+    app.joplin_copy_mode = JOPLIN_COPY_MODE_COPY_FIRST
     pane = copy_test_pane()
     sent: list[tuple[str, str]] = []
 
@@ -204,15 +212,22 @@ def install_direct_copy_stubs(
         return ClipboardSnapshot(
             values={},
             pane_environment={},
-            tmux_transport=tmux_support.TmuxClipboardTransport(False),
+            tmux_transport=tmux_support.TmuxClipboardTransport(True),
         )
 
     async def fake_await(
         observed_pane: tmux_support.TmuxPane,
         _: ClipboardSnapshot,
+        *,
+        expected_digest: str = "",
     ) -> tuple[ClipboardCandidate, str | None]:
         assert observed_pane == pane
+        assert expected_digest == response_text_digest(text)
         return ClipboardCandidate(source, text), "idle Codex pane"
+
+    async def fake_capture_raw(pane_id: str) -> str:
+        assert pane_id == pane.pane_id
+        return "idle Codex pane"
 
     async def fake_transcript(
         agent_id: str,
@@ -238,6 +253,7 @@ def install_direct_copy_stubs(
     app.copy_clipboard_snapshot_for_pane = fake_snapshot  # type: ignore[method-assign]
     app.await_codex_copy_candidate = fake_await  # type: ignore[method-assign]
     app.copy_codex_transcript_response_text = fake_transcript  # type: ignore[method-assign]
+    app.capture_tmux_raw_for_pane = fake_capture_raw  # type: ignore[method-assign]
     monkeypatch.setattr(tmux_support, "send_literal_keys", fake_send_literal_keys)
     return sent
 
@@ -1630,6 +1646,21 @@ async def test_tui_tmux_update_preserves_manual_scroll_when_not_at_bottom() -> N
     assert stream.scroll_y == scroll_y
     assert stream.scroll_target_y == scroll_target_y
     assert stream.cursor_location == (0, 0)
+
+
+def test_tui_tmux_stream_anchor_tracks_content_after_prefix_is_dropped() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    old_text = "\n".join(f"line {index}" for index in range(100))
+    new_text = "\n".join(f"line {index}" for index in range(40, 120))
+
+    anchor = app.tmux_stream_content_anchor(old_text, 50.0)
+    anchored_y = app.tmux_stream_anchored_scroll_y(
+        new_text,
+        anchor,
+        fallback=50.0,
+    )
+
+    assert anchored_y == 10.0
 
 
 async def test_tui_resize_restores_tmux_stream_tail_when_at_bottom() -> None:
@@ -8169,7 +8200,7 @@ async def test_tui_joplin_copy_falls_back_to_transcript_before_tmux_capture(
     assert captured == []
 
 
-async def test_tui_joplin_copy_default_tries_copy_before_transcript(
+async def test_tui_joplin_copy_default_skips_unobservable_copy_transport(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8237,7 +8268,7 @@ async def test_tui_joplin_copy_default_tries_copy_before_transcript(
 
     assert copied is not None
     assert copied[0] == "Transcript response markdown"
-    assert sent == [("%copy", "/copy")]
+    assert sent == []
     assert captured == []
 
 
@@ -8276,7 +8307,10 @@ def test_tui_detects_codex_copy_selector() -> None:
         "↑↓ navigate · enter to select · esc to cancel"
     )
     assert contains_codex_copy_picker(whole_prompt_picker)
-    assert not contains_codex_copy_selector(whole_prompt_picker)
+    assert contains_codex_copy_selector(whole_prompt_picker)
+    response_option = codex_copy_response_option(whole_prompt_picker)
+    assert response_option is not None
+    assert response_option.index == 2
 
 
 async def test_tui_joplin_copy_selects_whole_response_from_interactive_picker(
@@ -8328,7 +8362,7 @@ async def test_tui_joplin_copy_selects_whole_response_from_interactive_picker(
     assert keys == [("%copy", "1")]
 
 
-async def test_tui_joplin_copy_dismisses_whole_prompt_picker_without_selecting(
+async def test_tui_joplin_copy_selects_latest_response_when_whole_prompt_is_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
@@ -8340,9 +8374,75 @@ async def test_tui_joplin_copy_dismisses_whole_prompt_picker_without_selecting(
             "› 1. Whole prompt\n"
             "  2. Latest response\n\n"
             "↑↓ navigate · enter to select · esc to cancel",
+            "normal Codex output after selection",
+        ]
+    )
+
+    async def fake_capture_tmux_raw_for_pane(pane_id: str) -> str:
+        assert pane_id == "%copy"
+        return next(raw_captures)
+
+    async def fake_send_key_to_tmux_pane(pane_id: str, key: str) -> bool:
+        keys.append((pane_id, key))
+        return True
+
+    async def fake_candidates(
+        _: tmux_support.TmuxPane,
+        *,
+        pane_environment: object,
+        tmux_transport: object,
+    ) -> tuple[ClipboardCandidate, ...]:
+        return (ClipboardCandidate("tmux buffer", "Latest response markdown"),)
+
+    monkeypatch.setattr("agent_pbx.tui.CLIPBOARD_COPY_POLL_SECONDS", 0.0)
+    app.capture_tmux_raw_for_pane = fake_capture_tmux_raw_for_pane  # type: ignore[method-assign]
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+    app.copy_clipboard_candidates_for_pane = fake_candidates  # type: ignore[method-assign]
+
+    candidate, raw = await app.await_codex_copy_candidate(
+        pane,
+        ClipboardSnapshot(
+            values={},
+            pane_environment={},
+            tmux_transport=tmux_support.TmuxClipboardTransport(True),
+        ),
+    )
+
+    assert candidate == ClipboardCandidate("tmux buffer", "Latest response markdown")
+    assert raw == "normal Codex output after selection"
+    assert keys == [("%copy", "2")]
+
+
+def test_tui_codex_copy_response_option_ignores_prompt_and_code_choices() -> None:
+    option = codex_copy_response_option(
+        "Copy to clipboard\n\n"
+        "› 1. Whole prompt\n"
+        "  2. Reasoning summary\n"
+        "  3. Latest response\n"
+        "  4. Code block\n\n"
+        "↑↓ navigate · enter to select · esc to cancel"
+    )
+
+    assert option is not None
+    assert option.index == 3
+    assert option.label == "Latest response"
+
+
+async def test_tui_joplin_copy_dismisses_picker_without_response_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    pane = copy_test_pane()
+    keys: list[tuple[str, str]] = []
+    raw_captures = iter(
+        [
             "Copy to clipboard\n\n"
             "› 1. Whole prompt\n"
-            "  2. Latest response\n\n"
+            "  2. Reasoning summary\n\n"
+            "↑↓ navigate · enter to select · esc to cancel",
+            "Copy to clipboard\n\n"
+            "› 1. Whole prompt\n"
+            "  2. Reasoning summary\n\n"
             "↑↓ navigate · enter to select · esc to cancel",
             "normal Codex output after cancellation",
         ]
@@ -8360,10 +8460,7 @@ async def test_tui_joplin_copy_dismisses_whole_prompt_picker_without_selecting(
     app.capture_tmux_raw_for_pane = fake_capture_tmux_raw_for_pane  # type: ignore[method-assign]
     app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
 
-    with pytest.raises(
-        RuntimeError,
-        match="did not offer Whole response as its first option",
-    ):
+    with pytest.raises(RuntimeError, match="did not offer a response-safe option"):
         await app.await_codex_copy_candidate(
             pane,
             ClipboardSnapshot(
@@ -8434,6 +8531,54 @@ async def test_tui_joplin_copy_selects_picker_while_clipboard_waits(
     assert candidate == ClipboardCandidate("tmux buffer", "Whole response markdown")
     assert keys == [("%copy", "1")]
     assert candidate_reads == 1
+
+
+async def test_tui_joplin_copy_accepts_matching_unchanged_buffer_after_picker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    pane = copy_test_pane()
+    response = "Current complete response"
+    raw_captures = iter(
+        [
+            "Copy to clipboard\n\n"
+            "› 1. Whole response\n"
+            "  2. Whole prompt\n\n"
+            "enter to select · esc to cancel",
+            "normal Codex output",
+        ]
+    )
+
+    async def fake_capture_tmux_raw_for_pane(_pane_id: str) -> str:
+        return next(raw_captures)
+
+    async def fake_candidates(
+        _: tmux_support.TmuxPane,
+        *,
+        pane_environment: object,
+        tmux_transport: object,
+    ) -> tuple[ClipboardCandidate, ...]:
+        return (ClipboardCandidate("tmux buffer", response),)
+
+    async def fake_send_key_to_tmux_pane(_pane_id: str, _key: str) -> bool:
+        return True
+
+    monkeypatch.setattr("agent_pbx.tui.CLIPBOARD_COPY_POLL_SECONDS", 0.0)
+    app.capture_tmux_raw_for_pane = fake_capture_tmux_raw_for_pane  # type: ignore[method-assign]
+    app.copy_clipboard_candidates_for_pane = fake_candidates  # type: ignore[method-assign]
+    app.send_key_to_tmux_pane = fake_send_key_to_tmux_pane  # type: ignore[method-assign]
+
+    candidate, _raw = await app.await_codex_copy_candidate(
+        pane,
+        ClipboardSnapshot(
+            values={"tmux buffer": response},
+            pane_environment={},
+            tmux_transport=tmux_support.TmuxClipboardTransport(True),
+        ),
+        expected_digest=response_text_digest(response),
+    )
+
+    assert candidate == ClipboardCandidate("tmux buffer", response)
 
 
 async def test_tui_joplin_copy_waits_for_late_native_picker_after_clipboard_change(
@@ -8595,6 +8740,140 @@ def test_tui_codex_session_ids_prefer_fork_and_current_before_source() -> None:
         "source-session",
         "default-source",
     )
+
+
+async def test_tui_active_codex_session_prefers_rollout_open_in_target_pane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    pane = copy_test_pane()
+    rollout = tmp_path / "sessions" / "2026" / "10" / "02" / "rollout-live.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": "session-live"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    app.agents["agent-1"] = {
+        "agent_id": "agent-1",
+        "metadata": {"codex_session_id": "session-stale"},
+    }
+    app.codex_home_dir = lambda: tmp_path  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_open_rollout_paths",
+        lambda *args, **kwargs: (rollout,),
+    )
+
+    active = await app.active_codex_session_for_agent("agent-1", pane=pane)
+
+    assert active is not None
+    assert active.session_id == "session-live"
+    assert active.path == rollout
+    assert active.source == "pane-open-rollout"
+    assert active.confidence == "high"
+
+
+async def test_tui_fork_transcript_fallback_excludes_source_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    pane = copy_test_pane()
+    sessions = tmp_path / "sessions" / "2026" / "10" / "02"
+    sessions.mkdir(parents=True)
+
+    def write_rollout(session_id: str, response: str) -> Path:
+        path = sessions / f"rollout-{session_id}.jsonl"
+        records = [
+            {"type": "session_meta", "payload": {"id": session_id}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": response}],
+                },
+            },
+        ]
+        path.write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    write_rollout("source-session", "source response")
+    current_path = write_rollout("fork-session", "fork response")
+    app.agents["agent-1"] = {
+        "agent_id": "agent-1",
+        "metadata": {
+            "operator_role": "fork",
+            "codex_session_id": "fork-session",
+            "fork_codex_session_id": "fork-session",
+            "source_codex_session_id": "source-session",
+        },
+    }
+    app.codex_home_dir = lambda: tmp_path  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_open_rollout_paths",
+        lambda *args, **kwargs: (),
+    )
+
+    assert app.codex_transcript_fallback_ids_for_agent("agent-1") == (
+        "fork-session",
+    )
+    active = await app.active_codex_session_for_agent("agent-1", pane=pane)
+
+    assert active is not None
+    assert active.session_id == "fork-session"
+    assert active.path == current_path
+
+
+async def test_tui_repairs_tui_owned_fork_session_without_overwriting_source(
+    tmp_path: Path,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    recorded: list[dict[str, object]] = []
+    app.agents["fork-1"] = {
+        "agent_id": "fork-1",
+        "project": "demo",
+        "metadata": {
+            "launched_by": "agent-pbx-tui",
+            "operator_role": "fork",
+            "logical_operator_id": "operator-0",
+            "source_caller_agent_id": "caller-1",
+            "source_codex_session_id": "source-session",
+            "codex_session_id": "stale-session",
+            "fork_codex_session_id": "stale-session",
+        },
+    }
+
+    async def fake_record_operator_fork(**kwargs: object) -> None:
+        recorded.append(kwargs)
+
+    app.record_operator_fork = fake_record_operator_fork  # type: ignore[method-assign]
+    resolved = ActiveCodexSession(
+        agent_id="fork-1",
+        pane_id="%42",
+        session_id="live-session",
+        path=tmp_path / "rollout-live.jsonl",
+        source="pane-open-rollout",
+        confidence="high",
+    )
+
+    await app.repair_active_codex_session_metadata(resolved)
+
+    assert len(recorded) == 1
+    assert recorded[0]["fork_codex_session_id"] == "live-session"
+    metadata = recorded[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["codex_session_id"] == "live-session"
+    assert metadata["fork_codex_session_id"] == "live-session"
+    assert metadata["source_codex_session_id"] == "source-session"
+    assert metadata["previous_codex_session_id"] == "stale-session"
 
 
 async def test_tui_tmux_joplin_log_response_appends_copied_response() -> None:
@@ -16377,11 +16656,76 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert "pbx_queue_command" not in agent_pbx_config
     assert 'url = "http://127.0.0.1:8765/mcp"' in workerbee_config
     assert 'default_tools_approval_mode = "approve"' in workerbee_config
+    assert "workerbee_v1_capabilities" in workerbee_config
+    assert "workerbee_v1_session_start" in workerbee_config
     assert "workerbee_v1_project_status" in workerbee_config
     assert "workerbee_v1_logs" in workerbee_config
     assert "workerbee_v1_workload_restart" not in workerbee_config
     assert "workerbee_v1_exec" not in workerbee_config
     assert not any(".enabled_tools=" in item for item in overrides)
+
+
+def test_tui_codex_terminal_mode_overrides_are_explicit_and_bounded() -> None:
+    assert codex_terminal_config_overrides(CODEX_TERMINAL_MODE_DEFAULT) == []
+    assert codex_terminal_config_overrides(CODEX_TERMINAL_MODE_SCROLLBACK) == [
+        'tui.alternate_screen="never"'
+    ]
+    assert codex_terminal_config_overrides(CODEX_TERMINAL_MODE_RAW) == [
+        'tui.alternate_screen="never"',
+        "tui.raw_output_mode=true",
+    ]
+
+
+def test_tui_managed_launch_config_enables_scrollback_mode() -> None:
+    overrides = review_operator_config_overrides(
+        ("agent-pbx",),
+        mcp_url="http://127.0.0.1:8767/mcp",
+        terminal_mode=CODEX_TERMINAL_MODE_SCROLLBACK,
+    )
+
+    assert 'tui.alternate_screen="never"' in overrides
+    assert "tui.raw_output_mode=true" not in overrides
+
+
+def test_tui_workerbee_bootstrap_policy_covers_all_operator_roles() -> None:
+    kwargs = {
+        "mcp_url": "http://127.0.0.1:8767/mcp",
+        "server_configs": {
+            "workerbee": {"url": "http://127.0.0.1:8765/mcp"},
+        },
+    }
+    role_overrides = {
+        "root": operator_agent_config_overrides(
+            ("workerbee",),
+            include_campaign_lifecycle=True,
+            **kwargs,
+        ),
+        "edit-fork": operator_agent_config_overrides(
+            ("workerbee",),
+            **kwargs,
+        ),
+        "review-fork": review_operator_config_overrides(
+            ("workerbee",),
+            **kwargs,
+        ),
+    }
+
+    for role, overrides in role_overrides.items():
+        workerbee_config = next(
+            item for item in overrides if item.startswith("mcp_servers.workerbee=")
+        )
+        assert "workerbee_v1_capabilities" in workerbee_config, role
+        assert "workerbee_v1_session_start" in workerbee_config, role
+        assert "workerbee_v1_workload_restart" not in workerbee_config, role
+        assert "workerbee_v1_exec" not in workerbee_config, role
+
+
+def test_tui_direct_caller_launch_preserves_global_workerbee_config() -> None:
+    overrides = caller_agent_config_overrides(
+        mcp_url="http://127.0.0.1:8767/mcp",
+    )
+
+    assert not any(item.startswith("mcp_servers.workerbee=") for item in overrides)
 
 
 def test_tui_review_operator_config_overrides_trusts_scratch_work_root() -> None:
