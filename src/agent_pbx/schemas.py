@@ -226,6 +226,27 @@ class TmuxRuntimeMappingResponse(BaseModel):
     updated_at: float
 
 
+class ManagedAgentLaunchRequest(BaseModel):
+    project_path: str = Field(min_length=1, max_length=4096)
+    agent_id: str = Field(default="", max_length=120)
+    profile_id: str = Field(default="sol-xhigh", min_length=1, max_length=120)
+    runtime_server_mode: Literal[
+        "dedicated", "outer_if_present", "outer_required"
+    ] = "dedicated"
+
+
+class RuntimeMigrationPreviewRequest(BaseModel):
+    agent_ids: list[str] = Field(default_factory=list, max_length=500)
+    include_starred: bool = True
+    include_operators: bool = True
+    target_cli_version: str = Field(default="", max_length=120)
+    retention_days: float = Field(default=7.0, ge=1.0, le=90.0)
+
+
+class RuntimeMigrationResultsRequest(BaseModel):
+    results: list[dict[str, Any]] = Field(default_factory=list, max_length=500)
+
+
 class CodexConfigMcpPatchRequest(BaseModel):
     url: str | None = Field(default=None, max_length=2000)
     bearer_token_env_var: str | None = Field(default=None, max_length=120)

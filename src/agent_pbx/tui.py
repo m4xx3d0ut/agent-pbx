@@ -3724,6 +3724,142 @@ class SettingsScreen(ModalScreen[None]):
             self.app.set_tmux_popout_mode(str(event.value))  # type: ignore[attr-defined]
 
 
+class ManagedProjectPickerScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, projects: list[dict[str, Any]], roots: list[str]) -> None:
+        super().__init__()
+        self.projects = projects
+        self.roots = roots
+        self.selected_path = ""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="managed-project-picker"):
+            yield Static("Launch Managed Agent", id="managed-project-picker-title")
+            yield Static(
+                "Approved roots: " + (", ".join(self.roots) or "none"),
+                id="managed-project-roots",
+            )
+            yield DataTable(id="managed-projects", cursor_type="row", show_row_labels=False)
+            yield Input(placeholder="Optional Agent ID", id="managed-agent-id")
+            yield Select(
+                (
+                    ("Sol 5.6 / xhigh", "sol-xhigh"),
+                    ("Terra 5.6 / xhigh", "terra-xhigh"),
+                    ("Terra 5.6 / max", "terra-max"),
+                ),
+                value="sol-xhigh",
+                allow_blank=False,
+                id="managed-agent-profile",
+            )
+            yield Select(
+                TMUX_RUNTIME_SERVER_MODE_CHOICES,
+                value=self.app.tmux_runtime_server_mode,  # type: ignore[attr-defined]
+                allow_blank=False,
+                id="managed-agent-runtime-mode",
+            )
+            with Horizontal(id="managed-project-actions"):
+                yield Button("Launch", id="managed-project-launch", variant="primary")
+                yield Button("Close", id="managed-project-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#managed-projects", DataTable)
+        table.add_columns("Available", "Project", "Branch", "Path", "Owner")
+        for item in self.projects:
+            path = str(item.get("path") or "")
+            owners = item.get("owned_by") if isinstance(item.get("owned_by"), list) else []
+            table.add_row(
+                "yes" if item.get("available") else "no",
+                str(item.get("name") or "-"),
+                str(item.get("branch") or "-"),
+                path,
+                ", ".join(str(owner) for owner in owners) or "-",
+                key=path,
+            )
+        if self.projects:
+            first = str(self.projects[0].get("path") or "")
+            if first:
+                self.selected_path = first
+                table.move_cursor(row=0)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "managed-projects":
+            self.selected_path = str(event.row_key.value)
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "managed-project-close":
+            self.dismiss()
+            return
+        if event.button.id != "managed-project-launch":
+            return
+        if not self.selected_path:
+            self.app.notify("Select a Git project first.", severity="warning")
+            return
+        launched = await self.app.launch_managed_agent_from_picker(  # type: ignore[attr-defined]
+            project_path=self.selected_path,
+            agent_id=self.query_one("#managed-agent-id", Input).value,
+            profile_id=str(self.query_one("#managed-agent-profile", Select).value),
+            runtime_server_mode=str(
+                self.query_one("#managed-agent-runtime-mode", Select).value
+            ),
+        )
+        if launched:
+            self.dismiss()
+
+
+class RuntimeMigrationScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, batch: dict[str, Any]) -> None:
+        super().__init__()
+        self.batch = batch
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="runtime-migration-screen"):
+            yield Static(
+                f"Runtime Migration {self.batch.get('batch_id', '-')}",
+                id="runtime-migration-title",
+            )
+            yield Static(
+                f"Eligible {self.batch.get('eligible_count', 0)} · "
+                f"Blocked {self.batch.get('blocked_count', 0)} · "
+                f"Rollback retained until {self.batch.get('retention_until', '-')}",
+                id="runtime-migration-summary",
+            )
+            yield DataTable(id="runtime-migration-candidates", cursor_type="row")
+            with Horizontal(id="runtime-migration-actions"):
+                yield Button("Apply Eligible", id="runtime-migration-apply", variant="primary")
+                yield Button("Restore Mappings", id="runtime-migration-rollback")
+                yield Button("Close", id="runtime-migration-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#runtime-migration-candidates", DataTable)
+        table.add_columns("Agent", "Type", "Session", "Eligible", "Blockers")
+        candidates = self.batch.get("candidates")
+        for item in candidates if isinstance(candidates, list) else []:
+            if not isinstance(item, dict):
+                continue
+            table.add_row(
+                str(item.get("agent_id") or "-"),
+                str(item.get("agent_type") or "-"),
+                str(item.get("session_id") or "-"),
+                "yes" if item.get("eligible") else "no",
+                "; ".join(str(value) for value in item.get("blockers", [])) or "-",
+            )
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "runtime-migration-close":
+            self.dismiss()
+        elif event.button.id == "runtime-migration-apply":
+            await self.app.apply_runtime_migration_batch(self.batch)  # type: ignore[attr-defined]
+            self.dismiss()
+        elif event.button.id == "runtime-migration-rollback":
+            await self.app.rollback_runtime_migration_batch(  # type: ignore[attr-defined]
+                str(self.batch.get("batch_id") or "")
+            )
+            self.dismiss()
+
+
 class AgentPBXTUI(App[None]):
     TITLE = "Agent PBX"
     CSS = """
@@ -4049,6 +4185,37 @@ class AgentPBXTUI(App[None]):
         align: center middle;
     }
 
+    ManagedProjectPickerScreen,
+    RuntimeMigrationScreen {
+        align: center middle;
+    }
+
+    #managed-project-picker,
+    #runtime-migration-screen {
+        width: 92%;
+        height: 88%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #managed-projects,
+    #runtime-migration-candidates {
+        height: 1fr;
+        border: tall $accent;
+    }
+
+    #managed-project-actions,
+    #runtime-migration-actions {
+        height: 3;
+        margin-top: 1;
+    }
+
+    #managed-project-actions Button,
+    #runtime-migration-actions Button {
+        width: 1fr;
+    }
+
     #settings-panel {
         width: 72;
         max-width: 90%;
@@ -4078,7 +4245,10 @@ class AgentPBXTUI(App[None]):
 
     #theme-mode,
     #joplin-copy-mode,
-    #tmux-runtime-mode {
+    #tmux-runtime-mode,
+    #tmux-popout-mode,
+    #managed-agent-profile,
+    #managed-agent-runtime-mode {
         height: 3;
     }
 
@@ -5133,6 +5303,7 @@ class AgentPBXTUI(App[None]):
             str, tuple[str, str, int | None, str]
         ] = {}
         self.tmux_runtime_mapping_error_by_agent: dict[str, str] = {}
+        self.latest_runtime_migration_batch: dict[str, Any] | None = None
         self.tmux_terminal_client_id = f"tui-{os.getpid()}-{uuid.uuid4().hex[:12]}"
         self.embedded_terminal_agent_id: str | None = None
         self.embedded_terminal_target: str | None = None
@@ -6705,6 +6876,26 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/agents prune stale", "Preview stale nonterminal caller pruning", self.palette_agents_prune_stale)
         yield SystemCommand("/agents prune forks", "Preview safe operator-fork pruning", self.palette_agents_prune_forks)
         yield SystemCommand("/agents prune undo", "Undo the latest agent prune batch", self.palette_agents_prune_undo)
+        yield SystemCommand(
+            "/agent launch",
+            "Choose a Git project and launch a managed Agent",
+            self.palette_managed_agent_launch,
+        )
+        yield SystemCommand(
+            "/agents migrate preview",
+            "Preview restart/resume migration for starred Agents and Operators",
+            self.palette_runtime_migration_preview,
+        )
+        yield SystemCommand(
+            "/agents migrate apply",
+            "Apply the latest eligible runtime migration preview",
+            self.palette_runtime_migration_apply,
+        )
+        yield SystemCommand(
+            "/agents migrate rollback",
+            "Restore mappings from the latest runtime migration snapshot",
+            self.palette_runtime_migration_rollback,
+        )
         yield from self.palette_native_plan_selector_commands()
         yield from self.palette_dynamic_plan_commands()
         if self.is_tmux_direct_enabled():
@@ -6794,6 +6985,235 @@ class AgentPBXTUI(App[None]):
             name="tmux-pop-in",
             exclusive=True,
         )
+
+    def palette_managed_agent_launch(self) -> None:
+        self.run_worker(
+            self.open_managed_project_picker(),
+            name="managed-project-picker",
+            exclusive=True,
+        )
+
+    def palette_runtime_migration_preview(self) -> None:
+        self.run_worker(
+            self.preview_runtime_migration(),
+            name="runtime-migration-preview",
+            exclusive=True,
+        )
+
+    def palette_runtime_migration_apply(self) -> None:
+        if self.latest_runtime_migration_batch is None:
+            self.notify("Create a runtime migration preview first.", severity="warning")
+            return
+        self.run_worker(
+            self.apply_runtime_migration_batch(self.latest_runtime_migration_batch),
+            name="runtime-migration-apply",
+            exclusive=True,
+        )
+
+    def palette_runtime_migration_rollback(self) -> None:
+        batch = self.latest_runtime_migration_batch or {}
+        batch_id = str(batch.get("batch_id") or "")
+        if not batch_id:
+            self.notify("No runtime migration snapshot is selected.", severity="warning")
+            return
+        self.run_worker(
+            self.rollback_runtime_migration_batch(batch_id),
+            name="runtime-migration-rollback",
+            exclusive=True,
+        )
+
+    async def open_managed_project_picker(self) -> None:
+        try:
+            response = await self.api_client().get(
+                "/v2/projects/discover",
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self.notify(f"Unable to discover managed projects: {exc}", severity="error")
+            return
+        projects = payload.get("projects") if isinstance(payload, dict) else []
+        roots = payload.get("roots") if isinstance(payload, dict) else []
+        if not isinstance(projects, list) or not projects:
+            self.notify("No Git projects were found in approved roots.", severity="warning")
+            return
+        self.push_screen(
+            ManagedProjectPickerScreen(
+                [item for item in projects if isinstance(item, dict)],
+                [str(item) for item in roots] if isinstance(roots, list) else [],
+            )
+        )
+
+    async def launch_managed_agent_from_picker(
+        self,
+        *,
+        project_path: str,
+        agent_id: str,
+        profile_id: str,
+        runtime_server_mode: str,
+    ) -> bool:
+        request = {
+            "project_path": project_path,
+            "agent_id": agent_id.strip(),
+            "profile_id": profile_id,
+            "runtime_server_mode": runtime_server_mode,
+        }
+        try:
+            preview = await self.api_client().post(
+                "/v2/agents/managed-launch/preview",
+                json=request,
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            preview.raise_for_status()
+            launched = await self.api_client().post(
+                "/v2/agents/managed-launch",
+                json=request,
+                headers=auth_headers(self.token),
+                timeout=45,
+            )
+            launched.raise_for_status()
+            payload = launched.json()
+        except Exception as exc:
+            self.notify(f"Managed Agent launch failed: {exc}", severity="error")
+            return False
+        launched_agent = payload.get("agent") if isinstance(payload, dict) else None
+        mapping = payload.get("runtime_mapping") if isinstance(payload, dict) else None
+        if not isinstance(launched_agent, dict) or not isinstance(mapping, dict):
+            self.notify("Managed launch returned incomplete identity data.", severity="error")
+            return False
+        launched_id = str(launched_agent.get("agent_id") or "")
+        self.agents[launched_id] = launched_agent
+        self.tmux_runtime_mapping_by_agent[launched_id] = mapping
+        self.tmux_agent_targets[launched_id] = str(mapping.get("pane_id") or "")
+        self.tmux_direct_agent_modes[launched_id] = True
+        self.tmux_detached_agent_ids.discard(launched_id)
+        self.save_settings()
+        await self.refresh_agents()
+        await self.select_agent(launched_id)
+        self.notify(
+            f"Launched {launched_id} on {payload.get('model')} in {project_path}."
+        )
+        return True
+
+    async def preview_runtime_migration(self) -> dict[str, Any] | None:
+        target_version = self.codex_posture.shell_version if self.codex_posture else ""
+        await self.prepare_runtime_migration_mappings()
+        try:
+            response = await self.api_client().post(
+                "/v2/runtime-migrations/preview",
+                json={
+                    "include_starred": True,
+                    "include_operators": True,
+                    "target_cli_version": target_version,
+                    "retention_days": 7,
+                },
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            batch = response.json()
+        except Exception as exc:
+            self.notify(f"Runtime migration preview failed: {exc}", severity="error")
+            return None
+        self.latest_runtime_migration_batch = batch
+        self.push_screen(RuntimeMigrationScreen(batch))
+        return batch
+
+    async def prepare_runtime_migration_mappings(self) -> None:
+        """Refresh legacy outer-server mappings before asking the daemon to preview."""
+
+        await self.refresh_agents()
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes)
+        except Exception:
+            return
+        self.tmux_panes = panes
+        for agent_id, agent in self.agents.items():
+            if not (
+                bool(agent.get("starred"))
+                or self.agent_type(agent) == OPERATOR_AGENT_TYPE
+            ):
+                continue
+            pane, _mode = self.resolve_tmux_pane(agent_id, panes)
+            if pane is not None:
+                await self.ensure_tmux_runtime_mapping(agent_id, pane)
+
+    async def apply_runtime_migration_batch(
+        self,
+        batch: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        candidates = batch.get("candidates")
+        results: list[dict[str, Any]] = []
+        await self.detach_embedded_tmux_terminal(release_lease=True)
+        for item in candidates if isinstance(candidates, list) else []:
+            if not isinstance(item, dict):
+                continue
+            agent_id = str(item.get("agent_id") or "")
+            if not item.get("eligible"):
+                results.append(
+                    {
+                        "agent_id": agent_id,
+                        "status": "skipped",
+                        "reason": "; ".join(str(value) for value in item.get("blockers", [])),
+                    }
+                )
+                continue
+            self.tmux_direct_agent_modes[agent_id] = True
+            mapping = item.get("mapping")
+            if isinstance(mapping, dict):
+                self.tmux_runtime_mapping_by_agent[agent_id] = mapping
+                self.tmux_agent_targets[agent_id] = str(mapping.get("pane_id") or "")
+            try:
+                restarted = await self.restart_tmux_codex_session(agent_id)
+            except Exception as exc:
+                results.append({"agent_id": agent_id, "status": "failed", "error": str(exc)})
+            else:
+                results.append(
+                    {
+                        "agent_id": agent_id,
+                        "status": "complete" if restarted else "failed",
+                    }
+                )
+        batch_id = str(batch.get("batch_id") or "")
+        try:
+            response = await self.api_client().post(
+                f"/v2/runtime-migrations/{quote(batch_id, safe='')}/results",
+                json={"results": results},
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            self.latest_runtime_migration_batch = response.json()
+        except Exception as exc:
+            self.notify(f"Migration results could not be recorded: {exc}", severity="error")
+            return results
+        completed = sum(item.get("status") == "complete" for item in results)
+        failed = sum(item.get("status") == "failed" for item in results)
+        self.save_settings()
+        self.notify(f"Runtime migration finished: {completed} complete, {failed} failed.")
+        return results
+
+    async def rollback_runtime_migration_batch(self, batch_id: str) -> bool:
+        try:
+            response = await self.api_client().post(
+                f"/v2/runtime-migrations/{quote(batch_id, safe='')}/rollback",
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self.notify(f"Runtime mapping restore failed: {exc}", severity="error")
+            return False
+        restored = payload.get("restored") if isinstance(payload, dict) else []
+        self.tmux_runtime_mapping_by_agent.clear()
+        self.tmux_runtime_mapping_signature_by_agent.clear()
+        await self.refresh_agents()
+        self.notify(f"Restored {len(restored) if isinstance(restored, list) else 0} runtime snapshots.")
+        return True
 
     def palette_codex_update(self) -> None:
         self.run_worker(

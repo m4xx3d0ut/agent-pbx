@@ -56,6 +56,7 @@ from .issues import (
     IssueService,
 )
 from .mcp_tools import create_mcp_asgi_app
+from .managed_runtime import ManagedRuntimeService
 from .operator import OperatorService, operator_runbook_payload
 from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .polling import poll_commands as poll_commands_until
@@ -113,6 +114,7 @@ from .schemas import (
     JoplinStatusResponse,
     JoplinSyncJobResponse,
     JoplinSyncStatusResponse,
+    ManagedAgentLaunchRequest,
     ManagedSkillApplyRequest,
     ModelElevationActivateRequest,
     ModelElevationDecisionRequest,
@@ -200,6 +202,8 @@ from .schemas import (
     PullRequestStatusResponse,
     ReportCreateRequest,
     ReportResponse,
+    RuntimeMigrationPreviewRequest,
+    RuntimeMigrationResultsRequest,
     ThreadItemResponse,
     TmuxRuntimeMappingRequest,
     TmuxRuntimeMappingResponse,
@@ -333,6 +337,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.pull_requests = pull_requests
     app.state.issues = issues
     app.state.operator_service = OperatorService(store)
+    app.state.managed_runtime = ManagedRuntimeService(store)
     if resolved_config.debug:
         app.add_middleware(DebugRequestLogMiddleware)
     app.mount("/mcp", mcp_asgi_app)
@@ -833,6 +838,146 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         deleted = store.delete_tmux_runtime_mapping(entity_id)
         store.append_event("tmux_runtime_mapping_deleted", {"entity_id": entity_id}, entity_id)
         return {"deleted": deleted, "entity_id": entity_id}
+
+    @app.get(
+        "/v2/projects/discover",
+        dependencies=[Depends(require_token)],
+    )
+    async def discover_managed_projects(
+        request: Request,
+        root: str | None = Query(default=None, max_length=4096),
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> dict[str, object]:
+        service: ManagedRuntimeService = request.app.state.managed_runtime
+        try:
+            projects = await asyncio.to_thread(
+                service.discover_projects,
+                root=root,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"roots": service.public_roots(), "projects": projects}
+
+    @app.post(
+        "/v2/agents/managed-launch/preview",
+        dependencies=[Depends(require_token)],
+    )
+    async def preview_managed_agent_launch(
+        payload: ManagedAgentLaunchRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        service: ManagedRuntimeService = request.app.state.managed_runtime
+        try:
+            return await asyncio.to_thread(
+                service.preview_launch,
+                project_path=payload.project_path,
+                agent_id=payload.agent_id,
+                profile_id=payload.profile_id,
+                runtime_server_mode=payload.runtime_server_mode,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/agents/managed-launch",
+        dependencies=[Depends(require_token)],
+    )
+    async def launch_managed_agent(
+        payload: ManagedAgentLaunchRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        service: ManagedRuntimeService = request.app.state.managed_runtime
+        local_server = f"http://127.0.0.1:{resolved_config.port}"
+        try:
+            return await asyncio.to_thread(
+                service.launch,
+                project_path=payload.project_path,
+                agent_id=payload.agent_id,
+                profile_id=payload.profile_id,
+                runtime_server_mode=payload.runtime_server_mode,
+                server_url=local_server,
+                token=resolved_config.token,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/runtime-migrations/preview",
+        dependencies=[Depends(require_token)],
+    )
+    async def preview_runtime_migration(
+        payload: RuntimeMigrationPreviewRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        service: ManagedRuntimeService = request.app.state.managed_runtime
+        try:
+            return await asyncio.to_thread(
+                service.preview_migration,
+                agent_ids=payload.agent_ids,
+                include_starred=payload.include_starred,
+                include_operators=payload.include_operators,
+                target_cli_version=payload.target_cli_version,
+                retention_days=payload.retention_days,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get(
+        "/v2/runtime-migrations",
+        dependencies=[Depends(require_token)],
+    )
+    async def list_runtime_migrations(
+        limit: int = Query(default=100, ge=1, le=1000),
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        return {"batches": store.list_runtime_migration_batches(limit=limit)}
+
+    @app.get(
+        "/v2/runtime-migrations/{batch_id}",
+        dependencies=[Depends(require_token)],
+    )
+    async def get_runtime_migration(
+        batch_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        batch = store.get_runtime_migration_batch(batch_id)
+        if batch is None:
+            raise HTTPException(status_code=404, detail="runtime migration batch not found")
+        return batch
+
+    @app.post(
+        "/v2/runtime-migrations/{batch_id}/results",
+        dependencies=[Depends(require_token)],
+    )
+    async def record_runtime_migration_results(
+        batch_id: str,
+        payload: RuntimeMigrationResultsRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        service: ManagedRuntimeService = request.app.state.managed_runtime
+        try:
+            return await asyncio.to_thread(
+                service.record_migration_results,
+                batch_id,
+                payload.results,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/runtime-migrations/{batch_id}/rollback",
+        dependencies=[Depends(require_token)],
+    )
+    async def rollback_runtime_migration(
+        batch_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        service: ManagedRuntimeService = request.app.state.managed_runtime
+        try:
+            return await asyncio.to_thread(service.rollback_migration, batch_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post(
         "/v1/agents/register",

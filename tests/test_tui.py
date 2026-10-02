@@ -135,6 +135,7 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_TMUX_CAPTURE_LINES",
         "AGENT_PBX_TUI_TMUX_REFRESH_SECONDS",
         "AGENT_PBX_TUI_TMUX_RUNTIME_SERVER_MODE",
+        "AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2",
         "AGENT_PBX_TUI_MOUSE_DEBUG",
         "AGENT_PBX_TUI_COMMANDS_FILE",
     ]:
@@ -1918,6 +1919,106 @@ async def test_tui_shift_f2_writes_directly_to_embedded_terminal() -> None:
         assert app.focused is app.query_one("#events", DataTable)
 
     assert app.embedded_terminal_agent_id is None
+
+
+async def test_tui_managed_project_picker_loads_api_projects() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # type: ignore[no-untyped-def]
+            return {
+                "roots": ["/home/me/git"],
+                "projects": [
+                    {
+                        "name": "demo",
+                        "path": "/home/me/git/demo",
+                        "branch": "dev",
+                        "owned_by": [],
+                        "available": True,
+                    }
+                ],
+            }
+
+    class Client:
+        async def get(self, path, **_kwargs):  # type: ignore[no-untyped-def]
+            assert path == "/v2/projects/discover"
+            return Response()
+
+        async def aclose(self) -> None:
+            return None
+
+    async with app.run_test() as pilot:
+        if app.http_client is not None:
+            await app.http_client.aclose()
+            app.http_client = None
+        app.api_client = lambda: Client()  # type: ignore[method-assign]
+        await app.open_managed_project_picker()
+        await pilot.pause()
+        table = app.screen.query_one("#managed-projects", DataTable)
+        assert table.row_count == 1
+        assert app.screen.query_one("#managed-agent-profile", Select).value == "sol-xhigh"
+
+
+async def test_tui_runtime_migration_applies_only_eligible_candidates() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    restarted: list[str] = []
+    posted: list[dict[str, object]] = []
+
+    async def fake_restart(agent_id: str, **_kwargs) -> bool:  # type: ignore[no-untyped-def]
+        restarted.append(agent_id)
+        return True
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # type: ignore[no-untyped-def]
+            return {"batch_id": "batch-1", "status": "complete"}
+
+    class Client:
+        async def post(self, path, **kwargs):  # type: ignore[no-untyped-def]
+            posted.append({"path": path, **kwargs})
+            return Response()
+
+        async def aclose(self) -> None:
+            return None
+
+    app.restart_tmux_codex_session = fake_restart  # type: ignore[method-assign]
+    batch = {
+        "batch_id": "batch-1",
+        "candidates": [
+            {
+                "agent_id": "agent-a",
+                "eligible": True,
+                "mapping": {"pane_id": "%1"},
+                "blockers": [],
+            },
+            {
+                "agent_id": "agent-b",
+                "eligible": False,
+                "mapping": None,
+                "blockers": ["no mapping"],
+            },
+        ],
+    }
+    async with app.run_test():
+        if app.http_client is not None:
+            await app.http_client.aclose()
+            app.http_client = None
+        app.api_client = lambda: Client()  # type: ignore[method-assign]
+        results = await app.apply_runtime_migration_batch(batch)
+
+    assert restarted == ["agent-a"]
+    assert results == [
+        {"agent_id": "agent-a", "status": "complete"},
+        {"agent_id": "agent-b", "status": "skipped", "reason": "no mapping"},
+    ]
+    assert posted[0]["path"] == "/v2/runtime-migrations/batch-1/results"
 
 
 async def test_tui_layout_refresh_preserves_visible_events_focus() -> None:

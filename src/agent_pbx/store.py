@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -408,6 +408,21 @@ class Store:
 
                 CREATE INDEX IF NOT EXISTS idx_tmux_runtime_server_pane
                     ON tmux_runtime_mappings(server_id, pane_id);
+
+                CREATE TABLE IF NOT EXISTS runtime_migration_batches (
+                    batch_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT 'previewed',
+                    target_cli_version TEXT,
+                    retention_until REAL NOT NULL,
+                    snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    results_json TEXT NOT NULL DEFAULT '[]',
+                    created_at REAL NOT NULL,
+                    applied_at REAL,
+                    rolled_back_at REAL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_runtime_migration_retention
+                    ON runtime_migration_batches(retention_until, status);
 
                 CREATE TABLE IF NOT EXISTS joplin_logs (
                     log_id TEXT PRIMARY KEY,
@@ -1697,6 +1712,239 @@ class Store:
                 (entity_id,),
             )
         return bool(cursor.rowcount)
+
+    def create_runtime_migration_batch(
+        self,
+        *,
+        target_cli_version: str,
+        retention_until: float,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        batch_id = f"runtime-migration-{uuid.uuid4().hex}"
+        created_at = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO runtime_migration_batches
+                    (batch_id, status, target_cli_version, retention_until,
+                     snapshot_json, results_json, created_at)
+                VALUES (?, 'previewed', ?, ?, ?, '[]', ?)
+                """,
+                (
+                    batch_id,
+                    target_cli_version or None,
+                    float(retention_until),
+                    json.dumps(snapshot),
+                    created_at,
+                ),
+            )
+        batch = self.get_runtime_migration_batch(batch_id)
+        assert batch is not None
+        return batch
+
+    def get_runtime_migration_batch(self, batch_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM runtime_migration_batches WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+        return self._runtime_migration_batch_from_row(row) if row else None
+
+    def list_runtime_migration_batches(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM runtime_migration_batches
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (max(1, min(1000, int(limit))),),
+            ).fetchall()
+        return [self._runtime_migration_batch_from_row(row) for row in rows]
+
+    def update_runtime_migration_batch(
+        self,
+        batch_id: str,
+        *,
+        status: str,
+        results: list[dict[str, Any]],
+        applied: bool = False,
+        rolled_back: bool = False,
+    ) -> dict[str, Any]:
+        if self.get_runtime_migration_batch(batch_id) is None:
+            raise ValueError("runtime migration batch not found")
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE runtime_migration_batches
+                SET status = ?, results_json = ?,
+                    applied_at = CASE WHEN ? THEN COALESCE(applied_at, ?) ELSE applied_at END,
+                    rolled_back_at = CASE WHEN ? THEN COALESCE(rolled_back_at, ?) ELSE rolled_back_at END
+                WHERE batch_id = ?
+                """,
+                (
+                    status,
+                    json.dumps(results),
+                    int(applied),
+                    current,
+                    int(rolled_back),
+                    current,
+                    batch_id,
+                ),
+            )
+        updated = self.get_runtime_migration_batch(batch_id)
+        assert updated is not None
+        return updated
+
+    def restore_runtime_migration_batch(self, batch_id: str) -> dict[str, Any]:
+        batch = self.get_runtime_migration_batch(batch_id)
+        if batch is None:
+            raise ValueError("runtime migration batch not found")
+        if batch.get("rolled_back_at") is not None:
+            raise ValueError("runtime migration batch was already rolled back")
+        if float(batch.get("retention_until") or 0) < now_ts():
+            raise ValueError("runtime migration rollback retention has expired")
+        candidates = dict(batch.get("snapshot") or {}).get("candidates", [])
+        restored: list[dict[str, Any]] = []
+        for candidate in candidates if isinstance(candidates, list) else []:
+            if not isinstance(candidate, dict):
+                continue
+            snapshot = candidate.get("snapshot")
+            if not isinstance(snapshot, dict):
+                continue
+            agent = snapshot.get("agent")
+            mapping = snapshot.get("runtime_mapping")
+            if not isinstance(agent, dict):
+                continue
+            agent_id = str(agent.get("agent_id") or "").strip()
+            if not agent_id or self.get_agent(agent_id) is None:
+                restored.append({"agent_id": agent_id, "status": "missing"})
+                continue
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE agents
+                    SET project = ?, name = ?, agent_type = ?, pbx_active = ?,
+                        metadata_json = ?, last_seen_at = ?
+                    WHERE agent_id = ?
+                    """,
+                    (
+                        str(agent.get("project") or "agent-pbx"),
+                        agent.get("name"),
+                        str(agent.get("agent_type") or "caller"),
+                        int(bool(agent.get("pbx_active", True))),
+                        json.dumps(agent.get("metadata") or {}),
+                        now_ts(),
+                        agent_id,
+                    ),
+                )
+            if isinstance(mapping, dict):
+                self.upsert_tmux_runtime_mapping(
+                    entity_id=agent_id,
+                    server_mode=str(mapping.get("server_mode") or "dedicated"),
+                    server_id=str(mapping.get("server_id") or ""),
+                    socket_path=str(mapping.get("socket_path") or ""),
+                    session_name=str(mapping.get("session_name") or ""),
+                    window_id=mapping.get("window_id"),
+                    window_name=mapping.get("window_name"),
+                    pane_id=str(mapping.get("pane_id") or ""),
+                    pane_pid=mapping.get("pane_pid"),
+                    process_start_ticks=mapping.get("process_start_ticks"),
+                    codex_session_id=mapping.get("codex_session_id"),
+                    cwd=mapping.get("cwd"),
+                    origin_client_tty=mapping.get("origin_client_tty"),
+                    origin_session_name=mapping.get("origin_session_name"),
+                    state=str(mapping.get("state") or "registered"),
+                    metadata=dict(mapping.get("metadata") or {}),
+                )
+            restored.append({"agent_id": agent_id, "status": "restored"})
+        updated = self.update_runtime_migration_batch(
+            batch_id,
+            status="rolled_back",
+            results=restored,
+            rolled_back=True,
+        )
+        return {"batch": updated, "restored": restored}
+
+    def prune_expired_runtime_migration_batches(self, *, now: float | None = None) -> int:
+        current = now_ts() if now is None else float(now)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM runtime_migration_batches WHERE retention_until < ?",
+                (current,),
+            )
+        return int(cursor.rowcount)
+
+    def create_managed_agent_runtime(
+        self,
+        request: AgentRegisterRequest,
+        *,
+        runtime_mapping: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Atomically create a new caller and its initial runtime mapping."""
+
+        if request.agent_type != "caller":
+            raise ValueError("managed project launch creates caller agents only")
+        current = now_ts()
+        entity_id = request.agent_id
+        with self.connect() as conn:
+            if conn.execute(
+                "SELECT 1 FROM agents WHERE agent_id = ?", (entity_id,)
+            ).fetchone():
+                raise ValueError(f"agent {entity_id!r} already exists")
+            conn.execute(
+                """
+                INSERT INTO agents(
+                    agent_id, agent_type, project, name, status, pbx_active,
+                    metadata_json, created_at, last_seen_at
+                ) VALUES (?, 'caller', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entity_id,
+                    request.project,
+                    request.name,
+                    "online",
+                    int(request.pbx_active),
+                    json.dumps(request.metadata),
+                    current,
+                    current,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO tmux_runtime_mappings(
+                    entity_id, server_mode, server_id, socket_path,
+                    session_name, window_id, window_name, pane_id, pane_pid,
+                    process_start_ticks, codex_session_id, cwd,
+                    origin_client_tty, origin_session_name, state,
+                    metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entity_id,
+                    str(runtime_mapping["server_mode"]),
+                    str(runtime_mapping["server_id"]),
+                    str(runtime_mapping["socket_path"]),
+                    str(runtime_mapping["session_name"]),
+                    runtime_mapping.get("window_id"),
+                    runtime_mapping.get("window_name"),
+                    str(runtime_mapping["pane_id"]),
+                    runtime_mapping.get("pane_pid"),
+                    runtime_mapping.get("process_start_ticks"),
+                    runtime_mapping.get("codex_session_id"),
+                    runtime_mapping.get("cwd"),
+                    runtime_mapping.get("origin_client_tty"),
+                    runtime_mapping.get("origin_session_name"),
+                    str(runtime_mapping.get("state") or "ready"),
+                    json.dumps(runtime_mapping.get("metadata") or {}),
+                    current,
+                    current,
+                ),
+            )
+        agent = self.get_agent(entity_id)
+        mapping = self.get_tmux_runtime_mapping(entity_id)
+        assert agent is not None and mapping is not None
+        return agent, mapping
 
     def register_agent(self, request: AgentRegisterRequest) -> dict[str, Any]:
         current = now_ts()
@@ -7742,6 +7990,22 @@ class Store:
             and expires_at is not None
             and float(expires_at) > now_ts()
         )
+        return data
+
+    @staticmethod
+    def _runtime_migration_batch_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        for source, target, expected, default in (
+            ("snapshot_json", "snapshot", dict, {}),
+            ("results_json", "results", list, []),
+        ):
+            raw = data.pop(source, json.dumps(default))
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                decoded = default
+            data[target] = decoded if isinstance(decoded, expected) else default
+        data["retained"] = float(data.get("retention_until") or 0) >= now_ts()
         return data
 
     @staticmethod
