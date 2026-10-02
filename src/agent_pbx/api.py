@@ -64,6 +64,18 @@ from .pull_requests import (
     PullRequestError,
     PullRequestService,
 )
+from .runtime_tmux import (
+    OuterTmuxContext,
+    RuntimeServerMode,
+    TmuxServerIdentity,
+    assess_runtime_mapping,
+    list_runtime_panes,
+    normalize_runtime_server_mode,
+    process_start_ticks,
+    recursive_attachment_reason,
+    runtime_server_id,
+    validate_tmux_socket,
+)
 from .schemas import (
     AgentActiveRequest,
     AgentPruneApplyResponse,
@@ -189,6 +201,9 @@ from .schemas import (
     ReportCreateRequest,
     ReportResponse,
     ThreadItemResponse,
+    TmuxRuntimeMappingRequest,
+    TmuxRuntimeMappingResponse,
+    TmuxWriterLeaseRequest,
     WorkerBeeStatusResponse,
 )
 from .security import generate_pairing_code
@@ -582,6 +597,242 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     ) -> list[dict[str, object]]:
         store.expire_model_elevations()
         return store.list_model_elevations(agent_id=agent_id, limit=limit)
+
+    @app.post(
+        "/v2/tmux/runtimes/{entity_id}",
+        response_model=TmuxRuntimeMappingResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def register_tmux_runtime(
+        entity_id: str,
+        payload: TmuxRuntimeMappingRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        if store.get_agent(entity_id) is None:
+            raise HTTPException(status_code=404, detail="agent not found")
+        socket_path = Path(payload.socket_path).expanduser()
+        if not socket_path.is_absolute():
+            raise HTTPException(status_code=400, detail="tmux socket path must be absolute")
+        ready, message = await asyncio.to_thread(validate_tmux_socket, socket_path)
+        if not ready:
+            raise HTTPException(status_code=409, detail=message)
+        reason = recursive_attachment_reason(
+            target_session=payload.session_name,
+            target_pane_id=payload.pane_id,
+            outer=(
+                None
+                if not payload.origin_session_name
+                else OuterTmuxContext(
+                    payload.origin_session_name,
+                    "",
+                    "",
+                    payload.origin_client_tty or "",
+                )
+            ),
+        )
+        if reason:
+            raise HTTPException(status_code=409, detail=reason)
+        mode = normalize_runtime_server_mode(payload.server_mode)
+        identity = TmuxServerIdentity(
+            mode,
+            mode,
+            runtime_server_id(socket_path),
+            str(socket_path.resolve(strict=True)),
+            True,
+            mode is not RuntimeServerMode.DEDICATED,
+        )
+        panes = await asyncio.to_thread(list_runtime_panes, identity)
+        pane = next((item for item in panes if item.pane_id == payload.pane_id), None)
+        if pane is None:
+            raise HTTPException(status_code=409, detail="tmux pane is absent from the selected server")
+        if pane.session_name != payload.session_name:
+            raise HTTPException(status_code=409, detail="tmux pane belongs to another session")
+        observed_ticks = await asyncio.to_thread(process_start_ticks, pane.pane_pid)
+        if payload.pane_pid and pane.pane_pid and payload.pane_pid != pane.pane_pid:
+            raise HTTPException(status_code=409, detail="tmux pane process identity changed")
+        if (
+            payload.process_start_ticks
+            and observed_ticks
+            and payload.process_start_ticks != observed_ticks
+        ):
+            raise HTTPException(status_code=409, detail="tmux pane process start evidence changed")
+        mapping = store.upsert_tmux_runtime_mapping(
+            entity_id=entity_id,
+            server_mode=mode.value,
+            server_id=identity.server_id,
+            socket_path=identity.socket_path,
+            session_name=pane.session_name,
+            window_id=pane.window_id,
+            window_name=pane.window_name,
+            pane_id=pane.pane_id,
+            pane_pid=pane.pane_pid,
+            process_start_ticks=observed_ticks,
+            codex_session_id=payload.codex_session_id,
+            cwd=pane.cwd,
+            origin_client_tty=payload.origin_client_tty,
+            origin_session_name=payload.origin_session_name,
+            state="ready",
+            metadata=payload.metadata,
+        )
+        store.append_event("tmux_runtime_registered", mapping, entity_id)
+        return mapping
+
+    @app.get(
+        "/v2/tmux/runtimes",
+        response_model=list[TmuxRuntimeMappingResponse],
+        dependencies=[Depends(require_token)],
+    )
+    async def list_tmux_runtimes(
+        store: Store = Depends(get_store),
+    ) -> list[dict[str, object]]:
+        return store.list_tmux_runtime_mappings()
+
+    @app.get(
+        "/v2/tmux/runtimes/{entity_id}",
+        response_model=TmuxRuntimeMappingResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_tmux_runtime(
+        entity_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        mapping = store.get_tmux_runtime_mapping(entity_id)
+        if mapping is None:
+            raise HTTPException(status_code=404, detail="tmux runtime mapping not found")
+        return mapping
+
+    @app.post(
+        "/v2/tmux/reconcile",
+        dependencies=[Depends(require_token)],
+    )
+    async def reconcile_tmux_runtimes(
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        results: list[dict[str, object]] = []
+        panes_by_server: dict[str, tuple[object, ...]] = {}
+        for mapping in store.list_tmux_runtime_mappings():
+            socket_path = Path(str(mapping["socket_path"]))
+            ready, message = await asyncio.to_thread(validate_tmux_socket, socket_path)
+            if not ready:
+                assessment = {
+                    "state": "server_lost",
+                    "safe": False,
+                    "message": message,
+                    "repair_pane_id": None,
+                }
+            else:
+                server_id = str(mapping["server_id"])
+                if server_id not in panes_by_server:
+                    mode = normalize_runtime_server_mode(mapping["server_mode"])
+                    identity = TmuxServerIdentity(
+                        mode,
+                        mode,
+                        server_id,
+                        str(socket_path),
+                        True,
+                        mode is not RuntimeServerMode.DEDICATED,
+                    )
+                    panes_by_server[server_id] = await asyncio.to_thread(
+                        list_runtime_panes,
+                        identity,
+                    )
+                panes = panes_by_server[server_id]
+                selected = next(
+                    (
+                        pane
+                        for pane in panes
+                        if getattr(pane, "pane_id", None) == mapping["pane_id"]
+                    ),
+                    None,
+                )
+                ticks = await asyncio.to_thread(
+                    process_start_ticks,
+                    getattr(selected, "pane_pid", None),
+                )
+                assessment = assess_runtime_mapping(
+                    mapping,
+                    panes,  # type: ignore[arg-type]
+                    observed_start_ticks=ticks,
+                ).public_dict()
+            updated = store.set_tmux_runtime_state(
+                str(mapping["entity_id"]),
+                state=str(assessment["state"]),
+                metadata={"last_reconciliation": assessment, "reconciled_at": time.time()},
+            )
+            results.append({"mapping": updated, "assessment": assessment})
+            if not assessment["safe"]:
+                store.append_event(
+                    "tmux_runtime_reconciliation_required",
+                    assessment,
+                    str(mapping["entity_id"]),
+                )
+        return {"count": len(results), "results": results}
+
+    @app.post(
+        "/v2/tmux/runtimes/{entity_id}/writer/acquire",
+        response_model=TmuxRuntimeMappingResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def acquire_tmux_runtime_writer(
+        entity_id: str,
+        payload: TmuxWriterLeaseRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        try:
+            mapping = store.acquire_tmux_writer_lease(
+                entity_id,
+                client_id=payload.client_id,
+                ttl_seconds=payload.ttl_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        store.append_event(
+            "tmux_runtime_writer_acquired",
+            {"entity_id": entity_id, "client_id": payload.client_id},
+            entity_id,
+        )
+        return mapping
+
+    @app.post(
+        "/v2/tmux/runtimes/{entity_id}/writer/release",
+        response_model=TmuxRuntimeMappingResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def release_tmux_runtime_writer(
+        entity_id: str,
+        payload: TmuxWriterLeaseRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        try:
+            mapping = store.release_tmux_writer_lease(
+                entity_id,
+                client_id=payload.client_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        store.append_event(
+            "tmux_runtime_writer_released",
+            {"entity_id": entity_id, "client_id": payload.client_id},
+            entity_id,
+        )
+        return mapping
+
+    @app.delete(
+        "/v2/tmux/runtimes/{entity_id}",
+        dependencies=[Depends(require_token)],
+    )
+    async def delete_tmux_runtime(
+        entity_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        mapping = store.get_tmux_runtime_mapping(entity_id)
+        if mapping is None:
+            raise HTTPException(status_code=404, detail="tmux runtime mapping not found")
+        if mapping.get("writer_lease_active"):
+            raise HTTPException(status_code=409, detail="release the active writer lease first")
+        deleted = store.delete_tmux_runtime_mapping(entity_id)
+        store.append_event("tmux_runtime_mapping_deleted", {"entity_id": entity_id}, entity_id)
+        return {"deleted": deleted, "entity_id": entity_id}
 
     @app.post(
         "/v1/agents/register",

@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+from pathlib import Path
+import socket
+
+from fastapi.testclient import TestClient
+
+from agent_pbx.api import create_app
+from agent_pbx.config import ServerConfig
+from agent_pbx.runtime_tmux import (
+    OuterTmuxContext,
+    RuntimeServerMode,
+    RuntimeTmuxPane,
+    assess_runtime_mapping,
+    recursive_attachment_reason,
+    resolve_runtime_tmux_server,
+)
+from agent_pbx.schemas import AgentRegisterRequest
+from agent_pbx.store import Store
+
+
+def bind_socket(path: Path) -> socket.socket:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    return server
+
+
+def pane(*, pane_id: str = "%7", pane_pid: int = 100) -> RuntimeTmuxPane:
+    return RuntimeTmuxPane(
+        session_name="agent-pbx-runtime-agent-a",
+        window_id="@4",
+        window_name="agent-a",
+        pane_id=pane_id,
+        pane_pid=pane_pid,
+        cwd="/tmp/demo",
+        current_command="codex",
+        title="agent-a",
+    )
+
+
+def test_runtime_server_outer_if_present_uses_owned_socket(tmp_path: Path) -> None:
+    socket_path = tmp_path / "tmux.sock"
+    server = bind_socket(socket_path)
+    try:
+        identity = resolve_runtime_tmux_server(
+            "outer_if_present",
+            environ={"TMUX": f"{socket_path},123,0"},
+        )
+    finally:
+        server.close()
+    assert identity.ready is True
+    assert identity.outer_detected is True
+    assert identity.effective_mode is RuntimeServerMode.OUTER_IF_PRESENT
+    assert identity.socket_path == str(socket_path)
+
+
+def test_runtime_server_outer_if_present_falls_back_without_outer(tmp_path: Path) -> None:
+    identity = resolve_runtime_tmux_server(
+        "outer_if_present",
+        environ={},
+        runtime_dir=tmp_path,
+    )
+    assert identity.ready is True
+    assert identity.effective_mode is RuntimeServerMode.DEDICATED
+    assert identity.socket_path.endswith("agent-pbx/runtime-tmux.sock")
+
+
+def test_outer_required_reports_missing_tmux() -> None:
+    identity = resolve_runtime_tmux_server("outer_required", environ={})
+    assert identity.ready is False
+    assert "TMUX" in identity.message
+
+
+def test_recursive_attachment_rejects_outer_tui_session() -> None:
+    outer = OuterTmuxContext("workspace", "@1", "%2", "/dev/pts/3")
+    assert recursive_attachment_reason(
+        target_session="workspace", target_pane_id="%8", outer=outer
+    )
+    assert (
+        recursive_attachment_reason(
+            target_session="agent-pbx-runtime", target_pane_id="%8", outer=outer
+        )
+        is None
+    )
+
+
+def test_mapping_assessment_detects_ready_moved_and_reused() -> None:
+    mapping = {
+        "session_name": "agent-pbx-runtime-agent-a",
+        "window_name": "agent-a",
+        "pane_id": "%7",
+        "pane_pid": 100,
+        "process_start_ticks": 200,
+        "cwd": "/tmp/demo",
+    }
+    assert assess_runtime_mapping(mapping, (pane(),), observed_start_ticks=200).state == "ready"
+    moved = assess_runtime_mapping(mapping, (pane(pane_id="%9"),))
+    assert moved.state == "moved"
+    assert moved.repair_pane_id == "%9"
+    assert assess_runtime_mapping(mapping, (pane(pane_pid=101),)).state == "reused"
+
+
+def test_mapping_change_revokes_existing_writer_lease(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(AgentRegisterRequest(agent_id="agent-a", project="demo"))
+    base = {
+        "entity_id": "agent-a",
+        "server_mode": "dedicated",
+        "server_id": "server-a",
+        "socket_path": "/tmp/server-a.sock",
+        "session_name": "runtime-a",
+        "pane_id": "%1",
+    }
+    store.upsert_tmux_runtime_mapping(**base)
+    store.acquire_tmux_writer_lease("agent-a", client_id="tui-a", ttl_seconds=30)
+    changed = store.upsert_tmux_runtime_mapping(**{**base, "pane_id": "%2"})
+    assert changed["writer_client_id"] is None
+    assert changed["writer_lease_active"] is False
+
+
+def test_tmux_runtime_api_registers_reconciles_and_leases_writer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    socket_path = tmp_path / "tmux.sock"
+    server = bind_socket(socket_path)
+    observed = pane()
+    monkeypatch.setattr("agent_pbx.api.list_runtime_panes", lambda _identity: (observed,))
+    monkeypatch.setattr("agent_pbx.api.process_start_ticks", lambda _pid: 900)
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer secret"}
+    try:
+        registered = client.post(
+            "/v1/agents/register",
+            headers=headers,
+            json={
+                "agent_id": "agent-a",
+                "project": "demo",
+                "metadata": {"cwd": "/tmp/demo", "codex_session_id": "thread-a"},
+            },
+        )
+        assert registered.status_code == 200
+        mapping = client.post(
+            "/v2/tmux/runtimes/agent-a",
+            headers=headers,
+            json={
+                "server_mode": "outer_if_present",
+                "socket_path": str(socket_path),
+                "session_name": observed.session_name,
+                "window_name": observed.window_name,
+                "pane_id": observed.pane_id,
+                "pane_pid": observed.pane_pid,
+                "codex_session_id": "thread-a",
+                "cwd": observed.cwd,
+                "origin_session_name": "workspace",
+                "origin_client_tty": "/dev/pts/3",
+            },
+        )
+        assert mapping.status_code == 200
+        assert mapping.json()["process_start_ticks"] == 900
+        first = client.post(
+            "/v2/tmux/runtimes/agent-a/writer/acquire",
+            headers=headers,
+            json={"client_id": "tui-a", "ttl_seconds": 30},
+        )
+        assert first.status_code == 200
+        collision = client.post(
+            "/v2/tmux/runtimes/agent-a/writer/acquire",
+            headers=headers,
+            json={"client_id": "tui-b", "ttl_seconds": 30},
+        )
+        assert collision.status_code == 409
+        released = client.post(
+            "/v2/tmux/runtimes/agent-a/writer/release",
+            headers=headers,
+            json={"client_id": "tui-a"},
+        )
+        assert released.status_code == 200
+        reconciled = client.post("/v2/tmux/reconcile", headers=headers)
+        assert reconciled.status_code == 200
+        assert reconciled.json()["results"][0]["assessment"]["state"] == "ready"
+    finally:
+        server.close()
+
+
+def test_tmux_runtime_api_rejects_recursive_session(tmp_path: Path, monkeypatch) -> None:
+    socket_path = tmp_path / "tmux.sock"
+    server = bind_socket(socket_path)
+    observed = pane()
+    monkeypatch.setattr("agent_pbx.api.list_runtime_panes", lambda _identity: (observed,))
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer secret"}
+    try:
+        client.post(
+            "/v1/agents/register",
+            headers=headers,
+            json={"agent_id": "agent-a", "project": "demo", "metadata": {}},
+        )
+        response = client.post(
+            "/v2/tmux/runtimes/agent-a",
+            headers=headers,
+            json={
+                "server_mode": "outer_if_present",
+                "socket_path": str(socket_path),
+                "session_name": observed.session_name,
+                "pane_id": observed.pane_id,
+                "origin_session_name": observed.session_name,
+            },
+        )
+    finally:
+        server.close()
+    assert response.status_code == 409
+    assert "Agent PBX TUI" in response.json()["detail"]

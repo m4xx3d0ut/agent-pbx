@@ -181,6 +181,51 @@ class ManagedSkillApplyRequest(BaseModel):
     max_estimated_tokens: int = Field(default=12_000, ge=256, le=100_000)
 
 
+class TmuxRuntimeMappingRequest(BaseModel):
+    server_mode: Literal["dedicated", "outer_if_present", "outer_required"]
+    socket_path: str = Field(min_length=1, max_length=4096)
+    session_name: str = Field(min_length=1, max_length=240)
+    window_id: str | None = Field(default=None, max_length=120)
+    window_name: str | None = Field(default=None, max_length=240)
+    pane_id: str = Field(min_length=1, max_length=120)
+    pane_pid: int | None = Field(default=None, ge=1)
+    process_start_ticks: int | None = Field(default=None, ge=1)
+    codex_session_id: str | None = Field(default=None, max_length=240)
+    cwd: str | None = Field(default=None, max_length=4096)
+    origin_client_tty: str | None = Field(default=None, max_length=4096)
+    origin_session_name: str | None = Field(default=None, max_length=240)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TmuxWriterLeaseRequest(BaseModel):
+    client_id: str = Field(min_length=1, max_length=240)
+    ttl_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
+
+
+class TmuxRuntimeMappingResponse(BaseModel):
+    entity_id: str
+    server_mode: str
+    server_id: str
+    socket_path: str
+    session_name: str
+    window_id: str | None = None
+    window_name: str | None = None
+    pane_id: str
+    pane_pid: int | None = None
+    process_start_ticks: int | None = None
+    codex_session_id: str | None = None
+    cwd: str | None = None
+    origin_client_tty: str | None = None
+    origin_session_name: str | None = None
+    state: str
+    writer_client_id: str | None = None
+    writer_lease_expires_at: float | None = None
+    writer_lease_active: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: float
+    updated_at: float
+
+
 class CodexConfigMcpPatchRequest(BaseModel):
     url: str | None = Field(default=None, max_length=2000)
     bearer_token_env_var: str | None = Field(default=None, max_length=120)

@@ -80,6 +80,14 @@ from .workerbee_mcp import (
 )
 from .contracts import ActionDefinition
 from .terminal.keys import FunctionKeyPassthroughMap
+from .runtime_tmux import (
+    RuntimeServerMode,
+    normalize_runtime_server_mode,
+    process_start_ticks as runtime_process_start_ticks,
+    read_outer_tmux_context,
+    recursive_attachment_reason,
+    resolve_runtime_tmux_server,
+)
 from .ui.actions import ActionRegistry
 from .ui.async_jobs import AsyncGenerationGate
 from .ui.focus import FocusGenerationGuard
@@ -288,6 +296,12 @@ DEFAULT_TMUX_CAPTURE_LINES = 0
 DEFAULT_DETACHED_TMUX_WIDTH = 160
 DEFAULT_DETACHED_TMUX_HEIGHT = 48
 DEFAULT_TMUX_REFRESH_SECONDS = 1.5
+DEFAULT_TMUX_RUNTIME_SERVER_MODE = RuntimeServerMode.DEDICATED.value
+TMUX_RUNTIME_SERVER_MODE_CHOICES = (
+    ("Dedicated PBX server", RuntimeServerMode.DEDICATED.value),
+    ("Outer server when present", RuntimeServerMode.OUTER_IF_PRESENT.value),
+    ("Require outer server", RuntimeServerMode.OUTER_REQUIRED.value),
+)
 MIN_TMUX_REFRESH_SECONDS = 0.25
 DEFAULT_AGENT_REFRESH_SECONDS = 2.0
 LOW_POWER_AGENT_REFRESH_SECONDS = 15.0
@@ -3547,6 +3561,7 @@ class SettingsScreen(ModalScreen[None]):
         joplin_copy_mode: str,
         tmux_direct_enabled: bool,
         tmux_features_available: bool,
+        tmux_runtime_server_mode: str,
         custom_theme_name: str,
         theme_name: str,
     ) -> None:
@@ -3560,6 +3575,9 @@ class SettingsScreen(ModalScreen[None]):
         self.joplin_copy_mode = normalize_joplin_copy_mode(joplin_copy_mode)
         self.tmux_direct_enabled = tmux_direct_enabled
         self.tmux_features_available = tmux_features_available
+        self.tmux_runtime_server_mode = normalize_runtime_server_mode(
+            tmux_runtime_server_mode
+        ).value
         self.custom_theme_name = custom_theme_name
         self.theme_name = theme_name
 
@@ -3616,6 +3634,13 @@ class SettingsScreen(ModalScreen[None]):
                 )
                 tmux_direct.disabled = not self.tmux_features_available
                 yield tmux_direct
+                yield Static("Runtime tmux server", id="tmux-runtime-mode-label")
+                yield Select(
+                    TMUX_RUNTIME_SERVER_MODE_CHOICES,
+                    value=self.tmux_runtime_server_mode,
+                    allow_blank=False,
+                    id="tmux-runtime-mode",
+                )
                 yield Static("Theme", id="theme-label")
                 yield Select(
                     [
@@ -3659,6 +3684,9 @@ class SettingsScreen(ModalScreen[None]):
         elif event.select.id == "joplin-copy-mode":
             event.stop()
             self.app.set_joplin_copy_mode(str(event.value))  # type: ignore[attr-defined]
+        elif event.select.id == "tmux-runtime-mode":
+            event.stop()
+            self.app.set_tmux_runtime_server_mode(str(event.value))  # type: ignore[attr-defined]
 
 
 class AgentPBXTUI(App[None]):
@@ -4014,13 +4042,15 @@ class AgentPBXTUI(App[None]):
     }
 
     #theme-mode,
-    #joplin-copy-mode {
+    #joplin-copy-mode,
+    #tmux-runtime-mode {
         height: 3;
     }
 
     #layout-mode-label,
     #theme-label,
-    #joplin-copy-mode-label {
+    #joplin-copy-mode-label,
+    #tmux-runtime-mode-label {
         height: 1;
         color: $secondary;
         content-align: center middle;
@@ -4799,6 +4829,19 @@ class AgentPBXTUI(App[None]):
             self.tmux_direct_enabled = False
         if not self.tmux_features_available:
             self.tmux_direct_agent_modes = {}
+        runtime_mode_value = (
+            os.getenv("AGENT_PBX_TUI_TMUX_RUNTIME_SERVER_MODE")
+            or self.settings.get(
+                "tmux_runtime_server_mode",
+                DEFAULT_TMUX_RUNTIME_SERVER_MODE,
+            )
+        )
+        self.tmux_runtime_server_mode = normalize_runtime_server_mode(
+            runtime_mode_value
+        ).value
+        self.tmux_runtime_server = resolve_runtime_tmux_server(
+            self.tmux_runtime_server_mode
+        )
         capture_lines_setting = int_setting(
             self.settings,
             "tmux_capture_lines",
@@ -5008,6 +5051,11 @@ class AgentPBXTUI(App[None]):
         self.tmux_last_status_by_agent: dict[str, str] = {}
         self.tmux_visible_capture_key: str | None = None
         self.tmux_liveness_by_agent: dict[str, TmuxLiveness] = {}
+        self.tmux_runtime_mapping_by_agent: dict[str, dict[str, Any]] = {}
+        self.tmux_runtime_mapping_signature_by_agent: dict[
+            str, tuple[str, str, int | None, str]
+        ] = {}
+        self.tmux_runtime_mapping_error_by_agent: dict[str, str] = {}
         self.tmux_panes: list[tmux_support.TmuxPane] = []
         self.tmux_refreshing = False
         self.tmux_plan_selector_pane_by_agent: dict[str, str] = {}
@@ -7986,6 +8034,7 @@ class AgentPBXTUI(App[None]):
                 joplin_copy_mode=self.joplin_copy_mode,
                 tmux_direct_enabled=self.tmux_direct_enabled,
                 tmux_features_available=self.tmux_features_available,
+                tmux_runtime_server_mode=self.tmux_runtime_server_mode,
                 custom_theme_name=self.custom_theme_name,
                 theme_name=self.ui_theme,
             )
@@ -8361,6 +8410,27 @@ class AgentPBXTUI(App[None]):
         self.update_agent_title()
         self.save_settings()
         return enabled
+
+    def set_tmux_runtime_server_mode(self, mode: str) -> bool:
+        requested = normalize_runtime_server_mode(mode)
+        resolved = resolve_runtime_tmux_server(requested)
+        if requested is RuntimeServerMode.OUTER_REQUIRED and not resolved.ready:
+            self.notify(
+                f"Outer tmux server is required but unavailable: {resolved.message}",
+                severity="error",
+            )
+            return False
+        self.tmux_runtime_server_mode = requested.value
+        self.tmux_runtime_server = resolved
+        self.save_settings()
+        if resolved.effective_mode is RuntimeServerMode.DEDICATED:
+            detail = "dedicated runtime server"
+            if requested is RuntimeServerMode.OUTER_IF_PRESENT and resolved.message:
+                detail = f"{detail}; {resolved.message}"
+        else:
+            detail = f"validated outer server {resolved.server_id}"
+        self.notify(f"Runtime tmux mode set to {requested.value}: {detail}.")
+        return True
 
     def query_one_or_none(
         self, selector: str, widget_type: type[WidgetType]
@@ -11369,6 +11439,7 @@ class AgentPBXTUI(App[None]):
                 )
             self.render_agents()
             return
+        await self.ensure_tmux_runtime_mapping(agent_id, pane)
         cache_key = f"{agent_id}:{pane.pane_id}"
         self.prepare_tmux_stream_for_capture(stream, cache_key=cache_key, pane=pane)
         try:
@@ -11420,6 +11491,75 @@ class AgentPBXTUI(App[None]):
             cache_key=agent_id,
         )
         self.render_agents()
+
+    async def ensure_tmux_runtime_mapping(
+        self,
+        agent_id: str,
+        pane: tmux_support.TmuxPane,
+    ) -> bool:
+        identity = self.tmux_runtime_server
+        if (
+            identity.effective_mode is RuntimeServerMode.DEDICATED
+            or not identity.ready
+            or not self.tmux_local_direct_context
+        ):
+            return False
+        outer = await asyncio.to_thread(read_outer_tmux_context, identity)
+        reason = recursive_attachment_reason(
+            target_session=pane.session_name,
+            target_pane_id=pane.pane_id,
+            outer=outer,
+        )
+        if reason:
+            self.tmux_runtime_mapping_error_by_agent[agent_id] = reason
+            return False
+        pane_pid = await asyncio.to_thread(
+            tmux_support.pane_root_pid,
+            pane.pane_id,
+        )
+        agent = self.agents.get(agent_id) or {}
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        session_id = str(
+            metadata.get("fork_codex_session_id")
+            or metadata.get("last_resume_codex_session_id")
+            or metadata.get("codex_session_id")
+            or metadata.get("codex_thread_id")
+            or ""
+        ).strip()
+        signature = (identity.server_id, pane.pane_id, pane_pid, session_id)
+        if self.tmux_runtime_mapping_signature_by_agent.get(agent_id) == signature:
+            return True
+        ticks = await asyncio.to_thread(runtime_process_start_ticks, pane_pid)
+        payload = {
+            "server_mode": identity.effective_mode.value,
+            "socket_path": identity.socket_path,
+            "session_name": pane.session_name,
+            "window_id": pane.window_index,
+            "window_name": pane.window_name,
+            "pane_id": pane.pane_id,
+            "pane_pid": pane_pid,
+            "process_start_ticks": ticks,
+            "codex_session_id": session_id or None,
+            "cwd": pane.cwd,
+            "origin_client_tty": outer.client_tty if outer else None,
+            "origin_session_name": outer.session_name if outer else None,
+            "metadata": {"managed_by": "agent-pbx-tui", "mapping_source": "latest"},
+        }
+        try:
+            response = await self.api_client().post(
+                f"/v2/tmux/runtimes/{quote(agent_id, safe='')}",
+                json=payload,
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            mapping = response.json()
+        except Exception as exc:
+            self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
+            return False
+        self.tmux_runtime_mapping_by_agent[agent_id] = mapping
+        self.tmux_runtime_mapping_signature_by_agent[agent_id] = signature
+        self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+        return True
 
     async def resolve_tmux_plan_selector_pane(
         self,
@@ -25445,6 +25585,7 @@ class AgentPBXTUI(App[None]):
             "tmux_direct": self.tmux_direct_enabled,
             "tmux_direct_agent_modes": self.tmux_direct_agent_modes,
             "tmux_capture_lines": self.tmux_capture_lines,
+            "tmux_runtime_server_mode": self.tmux_runtime_server_mode,
             "tmux_agent_targets": self.tmux_agent_targets,
             "selected_operator_fork_target_by_operator": (
                 self.selected_operator_fork_target_by_operator

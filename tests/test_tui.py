@@ -133,6 +133,7 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_TMUX_SHOW",
         "AGENT_PBX_TUI_TMUX_CAPTURE_LINES",
         "AGENT_PBX_TUI_TMUX_REFRESH_SECONDS",
+        "AGENT_PBX_TUI_TMUX_RUNTIME_SERVER_MODE",
         "AGENT_PBX_TUI_MOUSE_DEBUG",
         "AGENT_PBX_TUI_COMMANDS_FILE",
     ]:
@@ -581,6 +582,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "tmux_direct": True,
                 "tmux_direct_agent_modes": {"agent-1": True, "agent-2": False},
                 "tmux_capture_lines": 250,
+                "tmux_runtime_server_mode": "outer_if_present",
                 "tmux_agent_targets": {"agent-1": "%1"},
                 "selected_operator_fork_target_by_operator": {
                     "operator-0": "operator-0-fork-agent-1:%7"
@@ -615,6 +617,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.tmux_direct_enabled is True
     assert app.tmux_direct_agent_modes == {"agent-1": True, "agent-2": False}
     assert app.tmux_capture_lines == 250
+    assert app.tmux_runtime_server_mode == "outer_if_present"
     assert app.tmux_agent_targets == {"agent-1": "%1"}
     assert app.selected_operator_fork_target_by_operator == {
         "operator-0": "operator-0-fork-agent-1:%7"
@@ -651,6 +654,7 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_PBX_TUI_TMUX", "1")
     monkeypatch.setenv("AGENT_PBX_TUI_TMUX_CAPTURE_LINES", "750")
     monkeypatch.setenv("AGENT_PBX_TUI_TMUX_REFRESH_SECONDS", "2.75")
+    monkeypatch.setenv("AGENT_PBX_TUI_TMUX_RUNTIME_SERVER_MODE", "outer_if_present")
     monkeypatch.setenv("AGENT_PBX_TUI_THEME", "cyberpunk")
     monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "compact")
     monkeypatch.setenv("AGENT_PBX_TUI_SPLIT_PERCENT", "72")
@@ -668,6 +672,7 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     assert app.tmux_direct_enabled is True
     assert app.tmux_capture_lines == 750
     assert app.tmux_refresh_seconds == 2.75
+    assert app.tmux_runtime_server_mode == "outer_if_present"
     assert app.ui_theme == "cyberpunk"
     assert app.layout_mode == "compact"
     assert app.split_percent == 72
@@ -835,6 +840,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     app.tmux_direct_enabled = True
     app.tmux_direct_agent_modes = {"agent-1": True, "agent-2": False}
     app.tmux_capture_lines = 333
+    app.tmux_runtime_server_mode = "outer_if_present"
     app.tmux_agent_targets = {"agent-1": "%2"}
     app.selected_operator_fork_target_by_operator = {
         "operator-0": "operator-0-fork-agent-1:%7"
@@ -858,6 +864,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["tmux_direct"] is True
     assert saved["tmux_direct_agent_modes"] == {"agent-1": True, "agent-2": False}
     assert saved["tmux_capture_lines"] == 333
+    assert saved["tmux_runtime_server_mode"] == "outer_if_present"
     assert saved["tmux_agent_targets"] == {"agent-1": "%2"}
     assert saved["selected_operator_fork_target_by_operator"] == {
         "operator-0": "operator-0-fork-agent-1:%7"
@@ -1293,6 +1300,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         split_reset = app.screen.query_one("#split-reset", Button)
         split_widen = app.screen.query_one("#split-widen", Button)
         tmux_direct = app.screen.query_one("#tmux-direct", Checkbox)
+        tmux_runtime_mode = app.screen.query_one("#tmux-runtime-mode", Select)
         theme = app.screen.query_one("#theme-mode", Select)
         close = app.screen.query_one("#settings-close", Button)
 
@@ -1306,6 +1314,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert split_reset.label.plain == "Reset"
         assert split_widen.label.plain == "Widen"
         assert tmux_direct.value is False
+        assert tmux_runtime_mode.value == "dedicated"
         assert theme.value == "cyberpunk"
         assert close.label.plain == "Close"
 
