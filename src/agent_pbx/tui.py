@@ -143,6 +143,16 @@ CODEX_RESTART_WAIT_SECONDS = 5.0
 CODEX_RESTART_LAUNCH_ATTEMPTS = 3
 CODEX_RESTART_STABILIZE_SECONDS = 2.0
 CODEX_RESTART_RETRY_SECONDS = 1.0
+CODEX_SESSION_LEASE_CONFLICT_MARKERS = (
+    "this conversation is open in another app",
+    "close it there and press r to continue here",
+)
+FORK_RESUME_IDENTITY_METADATA_KEYS = (
+    "fork_codex_session_id",
+    "codex_session_id",
+    "codex_thread_id",
+    "last_resume_codex_session_id",
+)
 OPERATOR_SESSION_IDENTITY_SCAN_BYTES = 512_000
 OPERATOR_SESSION_HEALTH_SCAN_BYTES = 512_000
 REVIEW_FORK_HEALTH_CAPTURE_LINES = 80
@@ -214,6 +224,12 @@ REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_issue_context",
     "pbx_joplin_status",
     "pbx_joplin_create_document",
+)
+OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
+    *REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS,
+    "pbx_operator_start_campaign",
+    "pbx_operator_send_followup",
+    "pbx_operator_finish_campaign",
 )
 CALLER_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_agent_runbook",
@@ -497,10 +513,12 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/codex model cleanup plan",
     "/codex model terra-max",
     "/codex model terra-xhigh",
+    "/codex model sol-max",
     "/codex model sol-xhigh",
     "/codex model legacy-5.5",
     "/codex model default terra-max",
     "/codex model default terra-xhigh",
+    "/codex model default sol-max",
     "/codex model default sol-xhigh",
     "/codex model default legacy-5.5",
     "/tmux",
@@ -717,8 +735,19 @@ CODEX_MODEL_PRESETS: tuple[CodexModelPreset, ...] = (
         model="gpt-5.6-sol",
         reasoning_effort="xhigh",
         description="Higher-intelligence Sol 5.6 option with xhigh reasoning.",
+        reasoning_summary="detailed",
         verbosity="high",
         aliases=("sol-xhigh", "sol", "gpt-5.6-sol-xhigh"),
+    ),
+    CodexModelPreset(
+        key="sol-5.6-max",
+        label="sol-5.6/max",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        description="Higher-intelligence Sol 5.6 option with max reasoning.",
+        reasoning_summary="detailed",
+        verbosity="high",
+        aliases=("sol-max", "sol5.6-max", "gpt-5.6-sol-max"),
     ),
 )
 CODEX_MODEL_PRESET_BY_KEY = {preset.key: preset for preset in CODEX_MODEL_PRESETS}
@@ -813,6 +842,26 @@ class OperatorSessionCandidate:
     source: str
     path: str = ""
     summary: str = ""
+
+
+class CodexSessionLeaseConflictError(RuntimeError):
+    """A resumed Codex session is still leased by another client."""
+
+
+@dataclass(frozen=True)
+class CodexResumeSessionOwner:
+    pane_id: str
+    target_label: str
+    title: str = ""
+    agent_ids: tuple[str, ...] = ()
+
+    @property
+    def display_label(self) -> str:
+        if self.agent_ids:
+            return f"{', '.join(self.agent_ids)} ({self.target_label})"
+        if self.title:
+            return f"{self.title} ({self.target_label})"
+        return f"{self.target_label} ({self.pane_id})"
 
 
 @dataclass(frozen=True)
@@ -1343,6 +1392,7 @@ def review_operator_mcp_config_overrides(
     mcp_url: str | None = None,
     codex_home: Path | None = None,
     server_configs: Mapping[str, Mapping[str, object]] | None = None,
+    agent_pbx_approved_tools: Iterable[str] | None = None,
 ) -> list[str]:
     overrides: list[str] = []
     names = server_names or review_operator_mcp_approval_server_names()
@@ -1358,8 +1408,13 @@ def review_operator_mcp_config_overrides(
                 for server_name, config in server_configs.items()
             }
         )
+    resolved_agent_pbx_tools = tuple(agent_pbx_approved_tools or ())
     for server_name in names:
-        approved_tools = REVIEW_OPERATOR_MCP_APPROVED_TOOLS.get(server_name)
+        approved_tools = (
+            resolved_agent_pbx_tools
+            if server_name == "agent-pbx" and resolved_agent_pbx_tools
+            else REVIEW_OPERATOR_MCP_APPROVED_TOOLS.get(server_name)
+        )
         if not approved_tools:
             continue
         transport_config = dict(configured_servers.get(server_name, {}))
@@ -1456,12 +1511,23 @@ def operator_agent_config_overrides(
     codex_home: Path | None = None,
     work_root: str | None = None,
     server_configs: Mapping[str, Mapping[str, object]] | None = None,
+    include_campaign_lifecycle: bool = False,
 ) -> list[str]:
+    """Build a least-privilege operator MCP allowlist for a launch.
+
+    Root operator panes receive the campaign lifecycle tools. Edit and review
+    forks remain unable to create, follow up, or finish campaigns directly.
+    """
     overrides = review_operator_mcp_config_overrides(
         server_names or operator_mcp_approval_server_names(),
         mcp_url=mcp_url,
         codex_home=codex_home,
         server_configs=server_configs,
+        agent_pbx_approved_tools=(
+            OPERATOR_AGENT_PBX_APPROVED_TOOLS
+            if include_campaign_lifecycle
+            else None
+        ),
     )
     trust_override = codex_project_trust_config_override(work_root)
     if trust_override:
@@ -6011,10 +6077,12 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/codex model cleanup plan", "Plan one-time starred/operator model cleanup", self.palette_codex_model_cleanup_plan)
         yield SystemCommand("/codex model terra-max", "Restart selected Codex pane on Terra 5.6/max", lambda: self.palette_codex_model_restart("terra-5.6-max"))
         yield SystemCommand("/codex model terra-xhigh", "Restart selected Codex pane on Terra 5.6/xhigh", lambda: self.palette_codex_model_restart("terra-5.6-xhigh"))
+        yield SystemCommand("/codex model sol-max", "Restart selected Codex pane on Sol 5.6/max", lambda: self.palette_codex_model_restart("sol-5.6-max"))
         yield SystemCommand("/codex model sol-xhigh", "Restart selected Codex pane on Sol 5.6/xhigh", lambda: self.palette_codex_model_restart("sol-5.6-xhigh"))
         yield SystemCommand("/codex model legacy-5.5", "Restart selected Codex pane on Codex 5.5/xhigh", lambda: self.palette_codex_model_restart("legacy-5.5-xhigh"))
         yield SystemCommand("/codex model default terra-max", "Save Terra 5.6/max as global Codex default", lambda: self.palette_codex_model_default("terra-5.6-max"))
         yield SystemCommand("/codex model default terra-xhigh", "Save Terra 5.6/xhigh as global Codex default", lambda: self.palette_codex_model_default("terra-5.6-xhigh"))
+        yield SystemCommand("/codex model default sol-max", "Save Sol 5.6/max as global Codex default", lambda: self.palette_codex_model_default("sol-5.6-max"))
         yield SystemCommand("/codex model default sol-xhigh", "Save Sol 5.6/xhigh as global Codex default", lambda: self.palette_codex_model_default("sol-5.6-xhigh"))
         yield SystemCommand("/codex model default legacy-5.5", "Save Codex 5.5/xhigh as global Codex default", lambda: self.palette_codex_model_default("legacy-5.5-xhigh"))
         yield SystemCommand("/tmux", "Toggle tmux direct mode", self.palette_toggle_tmux)
@@ -12427,11 +12495,174 @@ class AgentPBXTUI(App[None]):
         shell_parts = shlex.split(self.operator_codex_command())
         return shlex.join([*shell_parts, *argv[1:]])
 
+    @staticmethod
+    def codex_resume_session_id_from_command(command: str) -> str | None:
+        """Return the session passed to a real ``codex ... resume`` command.
+
+        ``pane_start_command`` is intentionally used only as a best-effort
+        ownership signal.  Restricting this parser to a Codex resume invocation
+        prevents a bootstrap prompt containing the word ``resume`` from being
+        mistaken for a session lease.
+        """
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            return None
+        if len(argv) < 3:
+            return None
+        try:
+            resume_index = argv.index("resume")
+        except ValueError:
+            return None
+        if resume_index <= 0 or "fork" in argv[:resume_index]:
+            return None
+        command_prefix = argv[:resume_index]
+        if not any("codex" in token.lower() for token in command_prefix):
+            return None
+        session_id = argv[-1].strip()
+        if not session_id or session_id.startswith("-"):
+            return None
+        return session_id
+
+    @staticmethod
+    def tmux_pane_current_process_may_be_codex(pane: tmux_support.TmuxPane) -> bool:
+        """Avoid treating an exited Codex pane's historical start command as live."""
+        command = Path(pane.current_command.strip()).name.lower()
+        return command in {"bun", "codex", "deno", "node", "nodejs"} or "codex" in command
+
+    def agent_ids_for_tmux_pane(self, pane_id: str) -> tuple[str, ...]:
+        agent_ids = {
+            agent_id
+            for agent_id, target_pane_id in self.tmux_agent_targets.items()
+            if target_pane_id == pane_id
+        }
+        for agent_id, agent in self.agents.items():
+            if not isinstance(agent, dict):
+                continue
+            metadata = self.agent_metadata(agent)
+            if str(metadata.get("tmux_pane_id") or "").strip() == pane_id:
+                agent_ids.add(agent_id)
+        return tuple(sorted(agent_ids))
+
+    async def codex_resume_session_owners(
+        self,
+        session_id: str,
+        *,
+        excluding_pane_id: str | None = None,
+    ) -> list[CodexResumeSessionOwner]:
+        """Find live tmux panes that are actively resuming ``session_id``.
+
+        The foreground-process check matters because tmux keeps a pane's start
+        command after Codex has exited back to a shell.  A shell with an old
+        ``codex resume`` start command must not block a safe restart.
+        """
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes)
+        except Exception as exc:
+            raise RuntimeError(f"unable to inspect tmux panes: {exc}") from exc
+        owners: list[CodexResumeSessionOwner] = []
+        for pane in panes:
+            if pane.pane_id == excluding_pane_id:
+                continue
+            if not self.tmux_pane_current_process_may_be_codex(pane):
+                continue
+            try:
+                if not await asyncio.to_thread(tmux_support.pane_is_live, pane.pane_id):
+                    continue
+                start_command = await asyncio.to_thread(
+                    tmux_support.pane_start_command,
+                    pane.pane_id,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"unable to inspect live pane {pane.pane_id}: {exc}"
+                ) from exc
+            if self.codex_resume_session_id_from_command(start_command) != session_id:
+                continue
+            owners.append(
+                CodexResumeSessionOwner(
+                    pane_id=pane.pane_id,
+                    target_label=pane.target_label,
+                    title=pane.title or pane.window_name,
+                    agent_ids=self.agent_ids_for_tmux_pane(pane.pane_id),
+                )
+            )
+        return owners
+
+    async def ensure_codex_resume_session_available(
+        self,
+        agent_id: str,
+        session_id: str,
+        *,
+        replacing_pane_id: str | None = None,
+    ) -> bool:
+        """Refuse an in-place replacement that would enter Codex's lease dialog."""
+        try:
+            owners = await self.codex_resume_session_owners(
+                session_id,
+                excluding_pane_id=replacing_pane_id,
+            )
+        except Exception as exc:
+            self.notify(
+                f"Unable to verify whether {agent_id}'s Codex session is already open; "
+                f"no pane was replaced. {exc}",
+                severity="warning",
+            )
+            return False
+        if not owners:
+            return True
+        owner_labels = ", ".join(owner.display_label for owner in owners)
+        self.notify(
+            f"Refused to resume {agent_id}: its Codex conversation is active in "
+            f"{owner_labels}. Close or wait for that owner, then retry; to branch "
+            "intentionally, use Codex's explicit fork action. Agent PBX will not "
+            "fork automatically.",
+            severity="warning",
+        )
+        return False
+
+    def codex_session_lease_conflict_detected(self, text: str) -> bool:
+        normalized = text.lower()
+        return any(marker in normalized for marker in CODEX_SESSION_LEASE_CONFLICT_MARKERS)
+
+    async def tmux_pane_has_codex_session_lease_conflict(self, pane_id: str) -> bool:
+        try:
+            captured = await asyncio.to_thread(
+                tmux_support.capture_pane,
+                pane_id,
+                lines=0,
+            )
+        except Exception:
+            return False
+        return self.codex_session_lease_conflict_detected(captured)
+
+    def operator_session_can_resume(self, agent_id: str, session_id: str) -> bool:
+        """A fork must never resume its caller/root source conversation."""
+        metadata = self.operator_metadata_for(agent_id)
+        source_session_id = str(metadata.get("source_codex_session_id") or "").strip()
+        agent = self.agents.get(agent_id)
+        is_fork = (
+            isinstance(agent, dict)
+            and self.operator_role(agent) == OPERATOR_ROLE_FORK
+        )
+        return not (
+            is_fork
+            and bool(source_session_id)
+            and session_id == source_session_id
+        )
+
     def operator_restart_target(
         self,
         agent_id: str,
         candidates: list[OperatorSessionCandidate],
     ) -> OperatorSessionCandidate | None:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if self.operator_session_can_resume(agent_id, candidate.session_id)
+        ]
+        if not candidates:
+            return None
         current_session_ids = self.current_operator_session_ids(agent_id)
         for candidate in candidates:
             if candidate.session_id in current_session_ids:
@@ -12511,6 +12742,7 @@ class AgentPBXTUI(App[None]):
     ) -> str:
         """Restart Codex in place and restore the prior launch if it cannot live."""
         failures: list[str] = []
+        lease_conflict = False
         attempts = max(1, CODEX_RESTART_LAUNCH_ATTEMPTS)
         for attempt in range(1, attempts + 1):
             try:
@@ -12535,6 +12767,14 @@ class AgentPBXTUI(App[None]):
                     failures.append(f"{pane_id} liveness check failed: {exc}")
                 else:
                     if pane_alive:
+                        if await self.tmux_pane_has_codex_session_lease_conflict(
+                            pane_id
+                        ):
+                            lease_conflict = True
+                            failures.append(
+                                f"{pane_id} opened Codex's conversation lease dialog"
+                            )
+                            break
                         return pane_id
                     failures.append(f"{pane_id} exited before Codex restart stabilized")
             if attempt < attempts and CODEX_RESTART_RETRY_SECONDS > 0:
@@ -12562,7 +12802,8 @@ class AgentPBXTUI(App[None]):
                     else "; rollback command did not stay running"
                 )
         detail = "; ".join(failures[-3:]) or "replacement pane did not stay running"
-        raise RuntimeError(
+        error_type = CodexSessionLeaseConflictError if lease_conflict else RuntimeError
+        raise error_type(
             f"{label} in-place relaunch failed after {attempts} attempt(s): "
             f"{detail}{rollback_detail}"
         )
@@ -12648,20 +12889,26 @@ class AgentPBXTUI(App[None]):
             self.notify(f"No resumable Codex session found for {agent_id}.", severity="warning")
             await self.show_selected_operator_history()
             return False
+        if not await self.ensure_codex_resume_session_available(
+            agent_id,
+            target.session_id,
+            replacing_pane_id=pane_id,
+        ):
+            return False
         if not await self.ensure_operator_auth_ready():
             return False
         cwd = str(metadata.get("cwd") or self.operator_cwd()).strip() or os.getcwd()
         codex_command = self.operator_codex_command()
         session_name = self.operator_tmux_session_name()
         mcp_url = agent_pbx_mcp_url(self.server)
+        history = self.operator_session_history_metadata(
+            agent_id,
+            include=[*candidates[:3], target],
+        )
         try:
             await self.configure_operator_codex_mcp(
                 codex_command=codex_command,
                 mcp_url=mcp_url,
-            )
-            history = await self.record_operator_session_history(
-                agent_id,
-                include=[*candidates[:3], target],
             )
             rollback_command = await self.restart_rollback_command(pane_id)
         except Exception as exc:
@@ -12671,6 +12918,7 @@ class AgentPBXTUI(App[None]):
             mcp_url=mcp_url,
             codex_home=self.codex_home_dir(),
             work_root=cwd,
+            include_campaign_lifecycle=True,
         )
         launch_config_overrides.extend(
             codex_model_preset_config_overrides(effective_model_preset)
@@ -12784,8 +13032,17 @@ class AgentPBXTUI(App[None]):
         )
         source_cwd = str(metadata.get("source_cwd") or "").strip()
         work_root = str(metadata.get("work_root") or metadata.get("cwd") or pane.cwd).strip()
+        unsafe_persisted_fork_session = (
+            str(metadata.get("fork_codex_session_id") or "").strip()
+            == source_session_id
+        )
+        source_session_resume_rejected = False
         candidates = await asyncio.to_thread(self.operator_session_candidates, agent_id)
         target = self.operator_restart_target(agent_id, candidates)
+        if target is not None and target.session_id == source_session_id:
+            # Defensive backstop for metadata produced before the candidate filter.
+            target = None
+            source_session_resume_rejected = True
         target_invalid_encrypted_content = (
             target is not None
             and self.operator_session_has_invalid_encrypted_content(target)
@@ -12798,6 +13055,8 @@ class AgentPBXTUI(App[None]):
             target_invalid_encrypted_content = True
         if target_invalid_encrypted_content:
             target = None
+        if target is None and unsafe_persisted_fork_session:
+            source_session_resume_rejected = True
         review_launch_mode = self.normalize_review_operator_fork_launch_mode(
             str(metadata.get("review_launch_mode") or "")
         )
@@ -12918,6 +13177,12 @@ class AgentPBXTUI(App[None]):
             return launch_env
 
         command = build_command(review_launch_mode, target)
+        if target is not None and not await self.ensure_codex_resume_session_available(
+            agent_id,
+            target.session_id,
+            replacing_pane_id=pane.pane_id,
+        ):
+            return False
         try:
             await self.configure_operator_codex_mcp(
                 codex_command=codex_command,
@@ -12988,6 +13253,12 @@ class AgentPBXTUI(App[None]):
                 "invalid_encrypted_content"
             )
             fork_metadata.pop("fork_codex_session_id", None)
+        if source_session_resume_rejected:
+            for key in FORK_RESUME_IDENTITY_METADATA_KEYS:
+                fork_metadata.pop(key, None)
+            fork_metadata["fork_resume_disabled_reason"] = (
+                "source_session_collision"
+            )
         if target is not None:
             fork_metadata["fork_codex_session_id"] = target.session_id
         try:
@@ -13003,6 +13274,7 @@ class AgentPBXTUI(App[None]):
                 source_cwd=source_cwd or work_root,
                 work_root=work_root,
                 fork_codex_session_id=target.session_id if target is not None else None,
+                clear_fork_codex_session_id=source_session_resume_rejected,
             )
             if isinstance(fork, dict):
                 self.agents[agent_id] = self.operator_fork_record_agent(fork)
@@ -13059,6 +13331,12 @@ class AgentPBXTUI(App[None]):
                 f"{agent_id} has no recoverable Codex launch command; send /q manually.",
                 severity="warning",
             )
+            return False
+        if not await self.ensure_codex_resume_session_available(
+            agent_id,
+            session_id,
+            replacing_pane_id=pane.pane_id,
+        ):
             return False
         command = self.operator_resume_command(
             codex_command,
@@ -15459,6 +15737,7 @@ class AgentPBXTUI(App[None]):
                     candidate,
                 )
                 and not self.operator_session_has_invalid_encrypted_content(candidate)
+                and self.operator_session_can_resume(agent_id, candidate.session_id)
             )
         ]
         if not safe_candidates:
@@ -15706,6 +15985,7 @@ class AgentPBXTUI(App[None]):
                     mcp_url=mcp_url,
                     codex_home=self.codex_home_dir(),
                     work_root=cwd,
+                    include_campaign_lifecycle=True,
                 ),
             ),
             cwd=cwd,
@@ -15759,6 +16039,7 @@ class AgentPBXTUI(App[None]):
         source_cwd: str | None = None,
         work_root: str | None = None,
         fork_codex_session_id: str | None = None,
+        clear_fork_codex_session_id: bool = False,
     ) -> dict[str, Any]:
         response = await self.api_client().post(
             "/v1/operator/forks/ensure",
@@ -15772,6 +16053,7 @@ class AgentPBXTUI(App[None]):
                 "source_cwd": source_cwd,
                 "work_root": work_root,
                 "fork_codex_session_id": fork_codex_session_id,
+                "clear_fork_codex_session_id": clear_fork_codex_session_id,
                 "tmux_pane_id": tmux_pane_id,
                 "status": "running",
                 "summary": "Fork launched from Agent PBX TUI.",
@@ -18893,6 +19175,13 @@ class AgentPBXTUI(App[None]):
         fork_agent_id = str(fork.get("fork_agent_id") or fork.get("agent_id") or "").strip()
         metadata = fork.get("metadata") if isinstance(fork.get("metadata"), dict) else {}
         hydrated_metadata = dict(metadata)
+        clear_resume_identity = (
+            hydrated_metadata.get("fork_resume_disabled_reason")
+            == "source_session_collision"
+        )
+        if clear_resume_identity:
+            for key in FORK_RESUME_IDENTITY_METADATA_KEYS:
+                hydrated_metadata.pop(key, None)
         identity = {
             "agent_type": OPERATOR_AGENT_TYPE,
             "operator_role": OPERATOR_ROLE_FORK,
@@ -18935,6 +19224,10 @@ class AgentPBXTUI(App[None]):
             agent_metadata = (
                 agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
             )
+            agent_metadata = dict(agent_metadata)
+            if clear_resume_identity:
+                for key in FORK_RESUME_IDENTITY_METADATA_KEYS:
+                    agent_metadata.pop(key, None)
             agent["metadata"] = {**agent_metadata, **hydrated_metadata}
             agent["agent_type"] = OPERATOR_AGENT_TYPE
             agent.setdefault("created_at", created_at)
@@ -19249,12 +19542,25 @@ class AgentPBXTUI(App[None]):
             self.notify(f"No resumable Codex session found for {agent_id}.", severity="warning")
             await self.show_selected_operator_history()
             return
+        if not self.operator_session_can_resume(agent_id, target.session_id):
+            self.notify(
+                f"Refused to resume {agent_id} from its source Codex session. "
+                "Restart this fork to create or continue a distinct Codex fork instead.",
+                severity="warning",
+            )
+            return
         pane_id = self.tmux_agent_targets.get(agent_id)
         if pane_id and self.tui_owned_operator_pane_id(agent_id) != pane_id:
             self.notify(
                 f"{agent_id} has a non-TUI-owned tmux pane; detach it before resume.",
                 severity="warning",
             )
+            return
+        if not await self.ensure_codex_resume_session_available(
+            agent_id,
+            target.session_id,
+            replacing_pane_id=pane_id,
+        ):
             return
         if not await self.ensure_operator_auth_ready():
             return
@@ -19270,20 +19576,10 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             self.notify(f"Unable to configure Codex MCP: {exc}", severity="error")
             return
-        try:
-            history = await self.record_operator_session_history(
-                agent_id,
-                include=[*candidates[:3], target],
-            )
-        except Exception as exc:
-            self.notify(
-                f"Unable to record operator session history before resume: {exc}",
-                severity="warning",
-            )
-            history = self.operator_session_history_metadata(
-                agent_id,
-                include=[*candidates[:3], target],
-            )
+        history = self.operator_session_history_metadata(
+            agent_id,
+            include=[*candidates[:3], target],
+        )
         if not await self.kill_tui_owned_operator_pane(agent_id):
             return
         command = self.operator_resume_command(
@@ -19294,6 +19590,7 @@ class AgentPBXTUI(App[None]):
                 mcp_url=mcp_url,
                 codex_home=self.codex_home_dir(),
                 work_root=cwd,
+                include_campaign_lifecycle=True,
             ),
         )
         env = self.operator_launch_env(
@@ -19314,10 +19611,39 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             self.notify(f"Unable to launch resumed operator pane: {exc}", severity="error")
             return
+        if CODEX_RESTART_STABILIZE_SECONDS > 0:
+            await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
+        try:
+            pane_alive = await asyncio.to_thread(
+                tmux_support.pane_is_live,
+                resumed_pane_id,
+            )
+        except Exception as exc:
+            self.notify(
+                f"Unable to verify resumed operator pane {resumed_pane_id}: {exc}",
+                severity="error",
+            )
+            return
+        if not pane_alive:
+            self.notify(
+                f"Resumed operator pane {resumed_pane_id} exited before Codex stabilized.",
+                severity="error",
+            )
+            return
         self.tmux_agent_targets[agent_id] = resumed_pane_id
         self.tmux_manual_override_agent_ids.add(agent_id)
         self.tmux_detached_agent_ids.discard(agent_id)
         self.tmux_direct_agent_modes[agent_id] = True
+        if await self.tmux_pane_has_codex_session_lease_conflict(resumed_pane_id):
+            self.notify(
+                f"Codex opened a conversation-lease dialog for {agent_id}. The pane "
+                "was left unregistered and without a bootstrap paste; close or wait "
+                "for the existing owner and use r, or use Codex's explicit f fork "
+                "option to branch intentionally.",
+                severity="warning",
+            )
+            self.save_settings()
+            return
         try:
             await self.register_operator_root(
                 agent_id,

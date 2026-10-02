@@ -393,6 +393,7 @@ class OperatorForkEnsureRequest(BaseModel):
     campaign_id: str | None = Field(default=None, max_length=120)
     tmux_pane_id: str | None = Field(default=None, max_length=120)
     fork_codex_session_id: str | None = Field(default=None, max_length=120)
+    clear_fork_codex_session_id: bool = False
     status: str | None = Field(default=None, max_length=40)
     summary: str | None = Field(default=None, max_length=4000)
     metadata: dict[str, Any] = Field(default_factory=dict)

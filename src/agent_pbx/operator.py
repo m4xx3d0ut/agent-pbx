@@ -50,6 +50,12 @@ FORK_READY_STATUSES = {"starting", "running", "ready"}
 DEFAULT_FORK_TRACK_ID = "default"
 DEFAULT_FORK_PURPOSE = "edit"
 DEFAULT_FORK_ACCESS_MODE = "edit"
+FORK_RESUME_IDENTITY_METADATA_KEYS = (
+    "fork_codex_session_id",
+    "codex_session_id",
+    "codex_thread_id",
+    "last_resume_codex_session_id",
+)
 REVIEW_FORK_PURPOSE = "review"
 REVIEW_FORK_ACCESS_MODE = "review_readonly"
 REVIEW_ESCALATION_ROUTES = {
@@ -188,7 +194,7 @@ def operator_runbook_payload() -> dict[str, Any]:
             "Keep the root operator turn active while assignments are running; periodically recheck campaign state.",
             "Inspect caller reports and threads with pbx_operator_get_thread.",
             "Mark each assignment complete, blocked, or needing follow-up with pbx_operator_report_assignment.",
-            "Finish the campaign only after every assignment is complete or explicitly blocked.",
+            "Finish the campaign with pbx_operator_finish_campaign only after every assignment is complete or explicitly blocked.",
         ],
         "delivery": [
             "Operator work is routed only to the per-caller Agent PBX forked operator session.",
@@ -446,10 +452,20 @@ class OperatorService:
         campaign_id: str | None = None,
         tmux_pane_id: str | None = None,
         fork_codex_session_id: str | None = None,
+        clear_fork_codex_session_id: bool = False,
         status: str | None = None,
         summary: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if clear_fork_codex_session_id and str(fork_codex_session_id or "").strip():
+            raise ValueError(
+                "clear_fork_codex_session_id cannot be combined with "
+                "fork_codex_session_id"
+            )
+        requested_metadata = dict(metadata or {})
+        if clear_fork_codex_session_id:
+            for key in FORK_RESUME_IDENTITY_METADATA_KEYS:
+                requested_metadata.pop(key, None)
         operator = self._require_operator(operator_agent_id)
         caller = self._require_caller(source_caller_agent_id)
         logical_operator_id = self._logical_operator_agent_id(operator)
@@ -499,6 +515,10 @@ class OperatorService:
                 existing_metadata = (
                     existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
                 )
+                existing_metadata = dict(existing_metadata)
+                if clear_fork_codex_session_id:
+                    for key in FORK_RESUME_IDENTITY_METADATA_KEYS:
+                        existing_metadata.pop(key, None)
                 fork_metadata = {
                     **existing_metadata,
                     "agent_type": OPERATOR_AGENT_TYPE,
@@ -517,7 +537,7 @@ class OperatorService:
                     fork_metadata["tmux_pane_id"] = tmux_pane_id
                 if fork_codex_session_id:
                     fork_metadata["fork_codex_session_id"] = fork_codex_session_id
-                merged_metadata = {**fork_metadata, **(metadata or {})}
+                merged_metadata = {**fork_metadata, **requested_metadata}
                 merged_metadata.update(
                     {
                         "agent_type": OPERATOR_AGENT_TYPE,
@@ -537,6 +557,10 @@ class OperatorService:
                     merged_metadata["tmux_pane_id"] = tmux_pane_id
                 if fork_codex_session_id:
                     merged_metadata["fork_codex_session_id"] = fork_codex_session_id
+                if clear_fork_codex_session_id:
+                    for key in FORK_RESUME_IDENTITY_METADATA_KEYS:
+                        fork_metadata.pop(key, None)
+                        merged_metadata.pop(key, None)
                 if launching and not blocked_reason:
                     fork_metadata["operator_fork_pending"] = False
                     merged_metadata["operator_fork_pending"] = False
@@ -565,6 +589,7 @@ class OperatorService:
                     campaign_id=campaign_id,
                     tmux_pane_id=tmux_pane_id,
                     fork_codex_session_id=fork_codex_session_id,
+                    clear_fork_codex_session_id=clear_fork_codex_session_id,
                     status=status,
                     summary=summary,
                     cwd=resolved_cwd,
@@ -653,7 +678,7 @@ class OperatorService:
             fork_metadata["operator_fork_blocked_reason"] = blocked_reason
         if unlaunchable_block:
             fork_metadata["operator_fork_launchable"] = False
-        fork_metadata.update(metadata or {})
+        fork_metadata.update(requested_metadata)
         fork_metadata.update(
             {
                 "agent_type": OPERATOR_AGENT_TYPE,
@@ -673,6 +698,9 @@ class OperatorService:
             fork_metadata["tmux_pane_id"] = tmux_pane_id
         if fork_codex_session_id:
             fork_metadata["fork_codex_session_id"] = fork_codex_session_id
+        if clear_fork_codex_session_id:
+            for key in FORK_RESUME_IDENTITY_METADATA_KEYS:
+                fork_metadata.pop(key, None)
         self.store.register_agent(
             AgentRegisterRequest(
                 agent_id=resolved_fork_agent_id,

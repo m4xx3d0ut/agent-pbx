@@ -604,6 +604,19 @@ async def test_mcp_operator_campaign_tools_queue_delivery(tmp_path: Path) -> Non
         )
     )
     assignment = campaign["assignments"][0]
+    followup = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_send_followup",
+            {
+                "operator_agent_id": "operator-0",
+                "campaign_id": campaign["campaign_id"],
+                "target_agent_id": "caller-1",
+                "assignment_id": assignment["assignment_id"],
+                "message": "Please include the test result in your next report.",
+                "delivery": "queue",
+            },
+        )
+    )
     reported = tool_json(
         await mcp.call_tool(
             "pbx_operator_report_assignment",
@@ -617,11 +630,26 @@ async def test_mcp_operator_campaign_tools_queue_delivery(tmp_path: Path) -> Non
             },
         )
     )
+    finished = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_finish_campaign",
+            {
+                "operator_agent_id": "operator-0",
+                "campaign_id": campaign["campaign_id"],
+                "status": "complete",
+                "summary": "Campaign complete",
+                "detail": "The caller assignment completed after follow-up.",
+            },
+        )
+    )
 
     assert status[0]["campaign_id"] == campaign["campaign_id"]
     assert assignment["state"] == "waiting"
     assert assignment["operator_fork_id"] == fork["operator_fork_id"]
+    assert followup["payload"]["campaign_id"] == campaign["campaign_id"]
+    assert followup["payload"]["assignment_id"] == assignment["assignment_id"]
     assert reported["state"] == "complete"
+    assert finished["status"] == "complete"
 
 
 @pytest.mark.asyncio
@@ -1728,6 +1756,69 @@ def test_operator_existing_fork_registration_refreshes_agent_pane_metadata(
     assert refreshed["completed_at"] is None
     assert refreshed_agent is not None
     assert refreshed_agent["metadata"]["tmux_pane_id"] == "%44"
+
+
+def test_operator_ensure_fork_clears_unsafe_source_session_binding(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        tmux_pane_id="%33",
+        fork_codex_session_id="session-caller-1",
+        status="running",
+        metadata={
+            "pbx_mode": "report",
+            "fork_codex_session_id": "session-caller-1",
+            "codex_session_id": "session-caller-1",
+            "codex_thread_id": "session-caller-1",
+            "last_resume_codex_session_id": "session-caller-1",
+        },
+    )
+    assert fork["fork_codex_session_id"] == "session-caller-1"
+
+    repaired = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id=fork["fork_agent_id"],
+        tmux_pane_id="%44",
+        clear_fork_codex_session_id=True,
+        status="running",
+        metadata={
+            "pbx_mode": "report",
+            "fork_resume_disabled_reason": "source_session_collision",
+            "fork_codex_session_id": "session-caller-1",
+            "codex_session_id": "session-caller-1",
+            "codex_thread_id": "session-caller-1",
+            "last_resume_codex_session_id": "session-caller-1",
+        },
+    )
+
+    assert repaired["fork_codex_session_id"] is None
+    for key in (
+        "fork_codex_session_id",
+        "codex_session_id",
+        "codex_thread_id",
+        "last_resume_codex_session_id",
+    ):
+        assert key not in repaired["metadata"]
+    assert repaired["metadata"]["source_codex_session_id"] == "session-caller-1"
+    assert repaired["metadata"]["fork_resume_disabled_reason"] == "source_session_collision"
+    repaired_agent = store.get_agent(fork["fork_agent_id"])
+    assert repaired_agent is not None
+    for key in (
+        "fork_codex_session_id",
+        "codex_session_id",
+        "codex_thread_id",
+        "last_resume_codex_session_id",
+    ):
+        assert key not in repaired_agent["metadata"]
 
 
 def test_operator_campaign_tmux_delivery_prefers_repaired_fork_pane(

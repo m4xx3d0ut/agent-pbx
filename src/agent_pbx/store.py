@@ -32,6 +32,12 @@ OPERATOR_AGENT_TYPE = "operator"
 OPERATOR_PROJECT = "agent-pbx-operator"
 OPERATOR_ROLE_ROOT = "root"
 OPERATOR_ROLE_FORK = "fork"
+FORK_RESUME_IDENTITY_METADATA_KEYS = (
+    "fork_codex_session_id",
+    "codex_session_id",
+    "codex_thread_id",
+    "last_resume_codex_session_id",
+)
 ROOT_OPERATOR_SOURCE_KEYS = (
     "default_source_caller_agent_id",
     "default_source_caller_project",
@@ -1386,6 +1392,10 @@ class Store:
                     "active_tmux_pane_id",
                 ):
                     request_metadata.pop(key, None)
+            clear_fork_resume_identity = (
+                request_metadata.get("fork_resume_disabled_reason")
+                == "source_session_collision"
+            )
             metadata = self._merged_agent_metadata(
                 existing["metadata_json"] if existing else None,
                 request_metadata,
@@ -1394,6 +1404,9 @@ class Store:
                 metadata.update(existing_fork_identity)
             elif is_root_operator_registration:
                 metadata["operator_role"] = OPERATOR_ROLE_ROOT
+            if clear_fork_resume_identity:
+                for key in FORK_RESUME_IDENTITY_METADATA_KEYS:
+                    metadata.pop(key, None)
             metadata_json = json.dumps(metadata)
             name = request.name
             project = request.project
@@ -3171,6 +3184,7 @@ class Store:
         *,
         fork_agent_id: str | None = None,
         fork_codex_session_id: str | None = None,
+        clear_fork_codex_session_id: bool = False,
         campaign_id: str | None = None,
         cwd: str | None = None,
         fork_purpose: str | None = None,
@@ -3200,12 +3214,18 @@ class Store:
         merged_metadata = dict(fork.get("metadata") or {})
         if metadata:
             merged_metadata.update(metadata)
+        if clear_fork_codex_session_id:
+            for key in FORK_RESUME_IDENTITY_METADATA_KEYS:
+                merged_metadata.pop(key, None)
         with self.connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE operator_forks
                 SET fork_agent_id = COALESCE(?, fork_agent_id),
-                    fork_codex_session_id = COALESCE(?, fork_codex_session_id),
+                    fork_codex_session_id = CASE
+                        WHEN ? THEN NULL
+                        ELSE COALESCE(?, fork_codex_session_id)
+                    END,
                     campaign_id = COALESCE(?, campaign_id),
                     cwd = COALESCE(?, cwd),
                     fork_purpose = COALESCE(?, fork_purpose),
@@ -3225,6 +3245,7 @@ class Store:
                 """,
                 (
                     fork_agent_id,
+                    int(clear_fork_codex_session_id),
                     fork_codex_session_id,
                     campaign_id,
                     cwd,

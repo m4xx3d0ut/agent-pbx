@@ -1658,6 +1658,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             campaign_id=payload.campaign_id,
             tmux_pane_id=payload.tmux_pane_id,
             fork_codex_session_id=payload.fork_codex_session_id,
+            clear_fork_codex_session_id=payload.clear_fork_codex_session_id,
             status=payload.status,
             summary=payload.summary,
             metadata=payload.metadata,

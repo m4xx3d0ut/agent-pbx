@@ -24,6 +24,7 @@ from agent_pbx.tui import (
     ClipboardCandidate,
     ClipboardSnapshot,
     CodexCopyCapture,
+    CodexSessionLeaseConflictError,
     CustomSlashCommand,
     EditorCloseConfirmScreen,
     OperatorHistoryScreen,
@@ -43,6 +44,7 @@ from agent_pbx.tui import (
     clipboard_reader_environment,
     contains_codex_copy_picker,
     codex_mcp_add_command,
+    codex_model_preset_config_overrides,
     codex_model_preset_for,
     review_operator_config_overrides,
     review_operator_mcp_config_overrides,
@@ -6741,6 +6743,10 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/codex model cleanup plan" in titles
     assert "/codex model terra-max" in titles
     assert "/codex model default terra-max" in titles
+    assert "/codex model sol-max" in titles
+    assert "/codex model sol-xhigh" in titles
+    assert "/codex model default sol-max" in titles
+    assert "/codex model default sol-xhigh" in titles
     assert "/tmux" in titles
     assert "/latest" in titles
     assert "/thread" in titles
@@ -6801,6 +6807,34 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/gitdiff" not in titles
     assert "/gitpush" not in titles
     assert "/gitstageandcommit" not in titles
+
+
+async def test_tui_codex_model_selector_displays_sol_postures() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    sol_xhigh = codex_model_preset_for("sol-xhigh")
+    sol_max = codex_model_preset_for("sol-max")
+
+    assert sol_xhigh is not None
+    assert sol_max is not None
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        selector = app.query_one("#codex-model-preset", Select)
+        status = app.query_one("#codex-model-status", Static)
+
+        app.set_codex_model_preset_selector(sol_xhigh)
+        assert selector.value == "sol-5.6-xhigh"
+        assert (
+            "Model preset: sol-5.6/xhigh -> gpt-5.6-sol/xhigh, verbosity high, "
+            "reasoning summary detailed."
+        ) in str(status.renderable)
+
+        app.set_codex_model_preset_selector(sol_max)
+        assert selector.value == "sol-5.6-max"
+        assert (
+            "Model preset: sol-5.6/max -> gpt-5.6-sol/max, verbosity high, "
+            "reasoning summary detailed."
+        ) in str(status.renderable)
 
 
 def test_tui_custom_slash_commands_env_path(monkeypatch, tmp_path: Path) -> None:
@@ -6905,6 +6939,10 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/codex model",
         "/codex model terra-max",
         "/codex model default terra-max",
+        "/codex model sol-max",
+        "/codex model sol-xhigh",
+        "/codex model default sol-max",
+        "/codex model default sol-xhigh",
     } <= names
     assert {
         "/agents prune",
@@ -7262,7 +7300,7 @@ async def test_tui_model_actions_bind_selected_operator_not_stale_caller_cursor(
         app.query_one("#agent-id", Input).value = "codex-agent-pbx"
 
         assert app.codex_model_target_agent_id() == "operator-5"
-        app.palette_codex_model_restart("terra-max")
+        app.palette_codex_model_restart("sol-max")
         await pilot.pause()
         await app.restart_selected_with_codex_model_preset()
 
@@ -7270,8 +7308,8 @@ async def test_tui_model_actions_bind_selected_operator_not_stale_caller_cursor(
         assert app.codex_model_target_agent_id() is None
 
     assert restarts == [
-        ("operator-5", "terra-5.6-max"),
-        ("operator-5", "terra-5.6-max"),
+        ("operator-5", "sol-5.6-max"),
+        ("operator-5", "sol-5.6-max"),
     ]
 
 
@@ -10180,6 +10218,24 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
     def fake_kill_pane(pane_id: str) -> None:
         killed.append(pane_id)
 
+    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+        return [
+            tmux_support.TmuxPane(
+                "agent-pbx-operators",
+                "0",
+                "0",
+                "%152",
+                True,
+                "node",
+                "operator-0",
+                str(Path.cwd()),
+                100,
+                30,
+                200,
+                window_name="operator-0",
+            )
+        ]
+
     def fake_operator_session_candidates(agent_id: str) -> list[OperatorSessionCandidate]:
         assert agent_id == "operator-0"
         return [
@@ -10203,8 +10259,12 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
     app.operator_session_candidates = fake_operator_session_candidates  # type: ignore[method-assign]
     app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
     monkeypatch.setattr(tmux_support, "kill_pane", fake_kill_pane)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    monkeypatch.setattr(tmux_support, "capture_pane", lambda *_args, **_kwargs: "")
 
     async with app.run_test():
         app.agents = {
@@ -10519,6 +10579,68 @@ async def test_tui_respawn_restart_pane_rolls_back_in_same_pane_after_failure(
     ]
 
 
+def test_tui_identifies_real_codex_resume_session_commands() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert app.codex_resume_session_id_from_command("codex resume session-1") == "session-1"
+    assert (
+        app.codex_resume_session_id_from_command(
+            "codex --search resume --cd /tmp/project session-2"
+        )
+        == "session-2"
+    )
+    assert (
+        app.codex_resume_session_id_from_command(
+            "node /opt/codex/bin/codex resume session-3"
+        )
+        == "session-3"
+    )
+    assert (
+        app.codex_resume_session_id_from_command(
+            "codex fork source-session 'please resume after checking the diff'"
+        )
+        is None
+    )
+    assert app.codex_resume_session_id_from_command("zsh -lc 'echo resume session-4'") is None
+
+
+async def test_tui_respawn_restart_pane_rolls_back_on_codex_lease_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    respawns: list[dict[str, object]] = []
+
+    def fake_respawn(target: str, **kwargs: object) -> None:
+        respawns.append({"target": target, **kwargs})
+
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 1)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "capture_pane",
+        lambda *_args, **_kwargs: (
+            "This conversation is open in another app.\n"
+            "Close it there and press r to continue here."
+        ),
+    )
+
+    with pytest.raises(CodexSessionLeaseConflictError, match="lease dialog"):
+        await app.respawn_restart_pane(
+            pane_id="%10",
+            command="codex resume new-session",
+            label="agent-1",
+            rollback_command="codex resume prior-session",
+        )
+
+    assert [record["command"] for record in respawns] == [
+        "codex resume new-session",
+        "codex resume prior-session",
+    ]
+
+
 async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_command(
     monkeypatch,
 ) -> None:
@@ -10793,6 +10915,366 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     assert "agent_id: operator-0" in sent[0][1]
     assert app.tmux_agent_targets["operator-0"] == "%30"
     assert captures == ["operator-0"]
+
+
+async def test_tui_refuses_sol_restart_when_another_pane_owns_the_resume_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    notifications: list[str] = []
+    respawns: list[dict[str, object]] = []
+    root_pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "0",
+        "0",
+        "%30",
+        True,
+        "node",
+        "operator-0",
+        str(Path.cwd()),
+        100,
+        30,
+        200,
+        window_name="operator-0",
+    )
+    stale_owner_pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "1",
+        "0",
+        "%31",
+        True,
+        "node",
+        "stale-fork",
+        str(Path.cwd()),
+        100,
+        30,
+        200,
+        window_name="stale-fork",
+    )
+
+    async def fake_auth_ready() -> bool:
+        return True
+
+    async def fail_configure(**_: object) -> None:
+        raise AssertionError("a conflicting resume must not alter Codex configuration")
+
+    def fake_respawn(_target: str, **kwargs: object) -> None:
+        respawns.append(kwargs)
+
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+    app.ensure_operator_auth_ready = fake_auth_ready  # type: ignore[method-assign]
+    app.configure_operator_codex_mcp = fail_configure  # type: ignore[method-assign]
+    app.operator_session_candidates = lambda _agent_id: [  # type: ignore[method-assign]
+        OperatorSessionCandidate(
+            session_id="current-session",
+            timestamp=1.0,
+            source="metadata.codex_session_id",
+        )
+    ]
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "launched_by": "agent-pbx-tui",
+                "cwd": str(Path.cwd()),
+                "codex_session_id": "current-session",
+                "codex_model_preset": "terra-5.6-max",
+            },
+        }
+    }
+    app.tmux_agent_targets["operator-0"] = "%30"
+    monkeypatch.setattr(tmux_support, "list_panes", lambda: [root_pane, stale_owner_pane])
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_start_command",
+        lambda _target: "codex resume current-session",
+    )
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
+
+    restarted = await app.relaunch_operator_root_codex(
+        "operator-0",
+        root_pane,
+        model_preset=codex_model_preset_for("sol-xhigh"),
+    )
+
+    assert restarted is False
+    assert respawns == []
+    assert app.agents["operator-0"]["metadata"]["codex_model_preset"] == "terra-5.6-max"
+    assert any("stale-fork" in message for message in notifications)
+    assert any("will not fork automatically" in message for message in notifications)
+
+
+async def test_tui_sol_restart_rolls_back_when_codex_reports_external_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    notifications: list[str] = []
+    respawns: list[dict[str, object]] = []
+    configured: list[dict[str, object]] = []
+    root_pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "0",
+        "0",
+        "%30",
+        True,
+        "node",
+        "operator-0",
+        str(Path.cwd()),
+        100,
+        30,
+        200,
+        window_name="operator-0",
+    )
+
+    async def fake_auth_ready() -> bool:
+        return True
+
+    async def fake_configure(**kwargs: object) -> None:
+        configured.append(kwargs)
+
+    def fake_respawn(target: str, **kwargs: object) -> None:
+        respawns.append({"target": target, **kwargs})
+
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+    app.ensure_operator_auth_ready = fake_auth_ready  # type: ignore[method-assign]
+    app.configure_operator_codex_mcp = fake_configure  # type: ignore[method-assign]
+    app.operator_session_candidates = lambda _agent_id: [  # type: ignore[method-assign]
+        OperatorSessionCandidate(
+            session_id="current-session",
+            timestamp=1.0,
+            source="metadata.codex_session_id",
+        )
+    ]
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "launched_by": "agent-pbx-tui",
+                "cwd": str(Path.cwd()),
+                "codex_session_id": "current-session",
+                "codex_model_preset": "terra-5.6-max",
+            },
+        }
+    }
+    app.tmux_agent_targets["operator-0"] = "%30"
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 1)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "list_panes", lambda: [root_pane])
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_start_command",
+        lambda _target: "codex resume current-session",
+    )
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
+    monkeypatch.setattr(
+        tmux_support,
+        "capture_pane",
+        lambda *_args, **_kwargs: "This conversation is open in another app.",
+    )
+
+    restarted = await app.relaunch_operator_root_codex(
+        "operator-0",
+        root_pane,
+        model_preset=codex_model_preset_for("sol-xhigh"),
+    )
+
+    assert restarted is False
+    assert len(configured) == 1
+    assert len(respawns) == 2
+    assert respawns[1]["command"] == "codex resume current-session"
+    assert 'model="gpt-5.6-sol"' in shlex.split(str(respawns[0]["command"]))
+    assert app.agents["operator-0"]["metadata"]["codex_model_preset"] == "terra-5.6-max"
+    assert any("lease dialog" in message for message in notifications)
+
+
+async def test_tui_fork_restart_replaces_stale_source_resume_with_codex_fork(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    work_root = tmp_path / "fork"
+    work_root.mkdir()
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    respawns: list[dict[str, object]] = []
+    records: list[dict[str, object]] = []
+    fork_pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "1",
+        "0",
+        "%20",
+        True,
+        "node",
+        "operator-0-fork-caller-1",
+        str(work_root),
+        100,
+        30,
+        200,
+        window_name="operator-0-fork-caller-1",
+    )
+
+    async def fake_auth_ready() -> bool:
+        return True
+
+    async def fake_configure(**_: object) -> None:
+        return None
+
+    async def fake_record_operator_fork(**kwargs: object) -> dict[str, object]:
+        records.append(dict(kwargs))
+        return {
+            "operator_fork_id": "fork-1",
+            "logical_operator_agent_id": "operator-0",
+            "fork_agent_id": kwargs["fork_agent_id"],
+            "source_caller_agent_id": "caller-1",
+            "source_codex_session_id": "source-session",
+            "fork_track_id": "default",
+            "fork_purpose": "edit",
+            "access_mode": "edit",
+            "tmux_pane_id": kwargs["tmux_pane_id"],
+            "fork_codex_session_id": None,
+            "metadata": kwargs["metadata"],
+        }
+
+    def fake_respawn(target: str, **kwargs: object) -> None:
+        respawns.append({"target": target, **kwargs})
+
+    app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    app.ensure_operator_auth_ready = fake_auth_ready  # type: ignore[method-assign]
+    app.configure_operator_codex_mcp = fake_configure  # type: ignore[method-assign]
+    app.record_operator_fork = fake_record_operator_fork  # type: ignore[method-assign]
+    app.operator_session_candidates = lambda _agent_id: [  # type: ignore[method-assign]
+        OperatorSessionCandidate(
+            session_id="source-session",
+            timestamp=1.0,
+            source="metadata.fork_codex_session_id",
+        )
+    ]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    app.agents = {
+        "operator-0-fork-caller-1": {
+            "agent_id": "operator-0-fork-caller-1",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "launched_by": "agent-pbx-tui",
+                "logical_operator_id": "operator-0",
+                "source_caller_agent_id": "caller-1",
+                "source_codex_session_id": "source-session",
+                "fork_codex_session_id": "source-session",
+                "codex_session_id": "source-session",
+                "codex_thread_id": "source-session",
+                "last_resume_codex_session_id": "source-session",
+                "fork_track_id": "default",
+                "fork_purpose": "edit",
+                "access_mode": "edit",
+                "source_cwd": str(work_root),
+                "work_root": str(work_root),
+                "cwd": str(work_root),
+            },
+        }
+    }
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    monkeypatch.setattr(tmux_support, "pane_start_command", lambda _target: "codex resume old")
+    monkeypatch.setattr(tmux_support, "capture_pane", lambda *_args, **_kwargs: "")
+
+    restarted = await app.relaunch_operator_fork_codex(
+        "operator-0-fork-caller-1",
+        fork_pane,
+        model_preset=codex_model_preset_for("sol-xhigh"),
+    )
+
+    assert restarted is True
+    argv = shlex.split(str(respawns[0]["command"]))
+    assert argv[0] == "codex"
+    assert "fork" in argv
+    assert "resume" not in argv
+    assert 'model="gpt-5.6-sol"' in argv
+    assert records[0]["fork_codex_session_id"] is None
+    assert records[0]["clear_fork_codex_session_id"] is True
+    record_metadata = records[0]["metadata"]
+    assert isinstance(record_metadata, dict)
+    for key in (
+        "fork_codex_session_id",
+        "codex_session_id",
+        "codex_thread_id",
+        "last_resume_codex_session_id",
+    ):
+        assert key not in record_metadata
+    assert record_metadata["source_codex_session_id"] == "source-session"
+    assert record_metadata["fork_resume_disabled_reason"] == "source_session_collision"
+
+
+async def test_tui_resume_leaves_external_lease_dialog_unregistered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_features_available = True
+    notifications: list[str] = []
+    sent: list[tuple[str, str]] = []
+
+    async def fake_auth_ready() -> bool:
+        return True
+
+    async def fake_configure(**_: object) -> None:
+        return None
+
+    async def fake_send(pane_id: str, message: str, **_: object) -> bool:
+        sent.append((pane_id, message))
+        return True
+
+    def fake_launch(**_: object) -> str:
+        return "%153"
+
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+    app.ensure_operator_auth_ready = fake_auth_ready  # type: ignore[method-assign]
+    app.configure_operator_codex_mcp = fake_configure  # type: ignore[method-assign]
+    app.send_text_to_tmux_pane = fake_send  # type: ignore[method-assign]
+    app.operator_session_candidates = lambda _agent_id: [  # type: ignore[method-assign]
+        OperatorSessionCandidate(
+            session_id="old-session",
+            timestamp=1.0,
+            source="codex.sessions",
+        )
+    ]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "launched_by": "agent-pbx-tui",
+                "cwd": str(Path.cwd()),
+            },
+        }
+    }
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "list_panes", lambda: [])
+    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "capture_pane",
+        lambda *_args, **_kwargs: "This conversation is open in another app.",
+    )
+
+    await app.resume_selected_operator(agent_id="operator-0")
+
+    assert app.tmux_agent_targets["operator-0"] == "%153"
+    assert sent == []
+    assert any("left unregistered" in message for message in notifications)
 
 
 async def test_tui_restart_review_fork_resumes_with_approval_overrides(
@@ -15565,13 +16047,16 @@ def test_tui_codex_model_preset_metadata_and_overrides() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     preset = codex_model_preset_for("terra-max")
     terra_xhigh = codex_model_preset_for("terra-xhigh")
-    sol = codex_model_preset_for("sol-xhigh")
+    sol_xhigh = codex_model_preset_for("sol-xhigh")
+    sol_max = codex_model_preset_for("sol-max")
 
     assert preset is not None
     assert terra_xhigh is not None
-    assert sol is not None
+    assert sol_xhigh is not None
+    assert sol_max is not None
     assert terra_xhigh.reasoning_summary == "detailed"
-    assert sol.reasoning_summary is None
+    assert sol_xhigh.reasoning_summary == "detailed"
+    assert sol_max.reasoning_summary == "detailed"
     command = app.operator_resume_command(
         "codex",
         "session-1",
@@ -15602,8 +16087,40 @@ def test_tui_codex_model_preset_metadata_and_overrides() -> None:
     assert metadata["codex_model_reasoning_summary"] == "detailed"
     assert metadata["codex_model_verbosity"] == "high"
 
+    for sol in (sol_xhigh, sol_max):
+        assert codex_model_preset_config_overrides(sol) == [
+            'model="gpt-5.6-sol"',
+            f'model_reasoning_effort="{sol.reasoning_effort}"',
+            'model_reasoning_summary="detailed"',
+            'model_verbosity="high"',
+        ]
+        sol_metadata = app.operator_root_metadata(
+            "operator-5",
+            cwd="/tmp/agent-pbx",
+            codex_command="codex",
+            mcp_url="http://127.0.0.1:8765/mcp",
+            session_name="agent-pbx-operators",
+            model_preset=sol,
+        )
+        sol_env = app.operator_launch_env(
+            agent_id="operator-5",
+            cwd="/tmp/agent-pbx",
+            mcp_url="http://127.0.0.1:8765/mcp",
+            model_preset=sol,
+        )
+        assert sol_metadata["codex_model_preset"] == sol.key
+        assert sol_metadata["codex_model"] == "gpt-5.6-sol"
+        assert sol_metadata["codex_model_reasoning_effort"] == sol.reasoning_effort
+        assert sol_metadata["codex_model_reasoning_summary"] == "detailed"
+        assert sol_metadata["codex_model_verbosity"] == "high"
+        assert sol_env["AGENT_PBX_CODEX_MODEL_PRESET"] == sol.key
+        assert sol_env["AGENT_PBX_CODEX_MODEL"] == "gpt-5.6-sol"
+        assert sol_env["AGENT_PBX_CODEX_REASONING_EFFORT"] == sol.reasoning_effort
+        assert sol_env["AGENT_PBX_CODEX_REASONING_SUMMARY"] == "detailed"
+        assert sol_env["AGENT_PBX_CODEX_VERBOSITY"] == "high"
 
-async def test_tui_saving_model_default_scopes_detailed_summary_to_terra() -> None:
+
+async def test_tui_saving_model_default_preserves_detailed_summary_for_5_6_presets() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     requests: list[dict[str, object]] = []
 
@@ -15632,12 +16149,15 @@ async def test_tui_saving_model_default_scopes_detailed_summary_to_terra() -> No
     app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
 
     terra = codex_model_preset_for("terra-max")
-    sol = codex_model_preset_for("sol-xhigh")
+    sol_xhigh = codex_model_preset_for("sol-xhigh")
+    sol_max = codex_model_preset_for("sol-max")
     assert terra is not None
-    assert sol is not None
+    assert sol_xhigh is not None
+    assert sol_max is not None
 
     await app.save_codex_model_preset_as_default(terra)
-    await app.save_codex_model_preset_as_default(sol)
+    await app.save_codex_model_preset_as_default(sol_xhigh)
+    await app.save_codex_model_preset_as_default(sol_max)
 
     assert requests[0] == {
         "path": "/v1/codex/config",
@@ -15658,8 +16178,20 @@ async def test_tui_saving_model_default_scopes_detailed_summary_to_terra() -> No
                 "model": "gpt-5.6-sol",
                 "model_reasoning_effort": "xhigh",
                 "model_verbosity": "high",
-            },
-            "remove": ["model_reasoning_summary"],
+                "model_reasoning_summary": "detailed",
+            }
+        },
+        "headers": {},
+    }
+    assert requests[2] == {
+        "path": "/v1/codex/config",
+        "json": {
+            "updates": {
+                "model": "gpt-5.6-sol",
+                "model_reasoning_effort": "max",
+                "model_verbosity": "high",
+                "model_reasoning_summary": "detailed",
+            }
         },
         "headers": {},
     }
@@ -15912,10 +16444,33 @@ def test_tui_operator_agent_config_overrides_follow_operator_server_env(
     assert "pbx_operator_runbook" in agent_pbx_config
     assert "pbx_operator_kb_search" in agent_pbx_config
     assert "pbx_queue_command" not in agent_pbx_config
+    assert "pbx_operator_start_campaign" not in agent_pbx_config
+    assert "pbx_operator_send_followup" not in agent_pbx_config
+    assert "pbx_operator_finish_campaign" not in agent_pbx_config
     assert 'default_tools_approval_mode = "approve"' in workerbee_config
     assert "workerbee_v1_project_status" in workerbee_config
     assert "workerbee_v1_exec" not in workerbee_config
     assert 'projects={"/tmp/operator root" = {trust_level = "trusted"}}' in overrides
+
+
+def test_tui_root_operator_config_includes_campaign_lifecycle_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(OPERATOR_MCP_APPROVAL_SERVERS_ENV, "agent-pbx")
+
+    overrides = operator_agent_config_overrides(
+        mcp_url="http://127.0.0.1:8767/mcp",
+        include_campaign_lifecycle=True,
+    )
+
+    agent_pbx_config = next(
+        item
+        for item in overrides
+        if item.startswith("mcp_servers.agent-pbx=")
+    )
+    assert "pbx_operator_start_campaign" in agent_pbx_config
+    assert "pbx_operator_send_followup" in agent_pbx_config
+    assert "pbx_operator_finish_campaign" in agent_pbx_config
 
 
 def test_tui_operator_agent_config_overrides_fallback_to_review_env(
