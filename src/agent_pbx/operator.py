@@ -211,7 +211,7 @@ def operator_runbook_payload() -> dict[str, Any]:
             "Promote durable operator knowledge into the PBX-managed KB only from the root operator; forks may propose entries, compile explicit report candidates, update their seed-run status, and read active entries.",
             "Knowledge links and handoffs do not create fork edges, campaign assignments, or source-session ownership.",
             "The root operator coordinates campaigns and reviews evidence; it must not implement caller repo changes directly.",
-            "Do not spawn or use Codex internal subagents for caller work; do not call multi_agent_v1.",
+            "Native Codex children may perform bounded local decomposition for this Operator, but they inherit the Operator/fork workspace and tool restrictions; they must not poll or acknowledge PBX commands as another identity, become campaign assignees, route work to PBX peers, or perform durable cross-project work. Do not call the legacy multi_agent_v1 control path.",
             "delivery='queue' creates normal PBX send_input commands for nohup fork sessions.",
             "delivery='tmux' sends directly to a uniquely matched local tmux Codex pane for the fork.",
             "delivery='auto' queues nohup forks and uses tmux for report-mode forks.",

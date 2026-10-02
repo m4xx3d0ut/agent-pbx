@@ -11,3 +11,4 @@ cycle is `next-cycle-baseline-2026-10-02` (`70978b2`).
 - [0005 — Remote access boundary](0005-remote-access.md)
 - [0006 — Legacy polling and terminal compatibility](0006-legacy-compatibility.md)
 - [0007 — Embedded terminal engine](0007-terminal-engine.md)
+- [0008 — Runtime presentation and child topology](0008-runtime-presentation.md)

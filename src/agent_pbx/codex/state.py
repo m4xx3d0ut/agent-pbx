@@ -18,6 +18,25 @@ APP_SERVER_STATE_EVENTS: dict[str, CodexRuntimeState] = {
     "server/error": CodexRuntimeState.ERROR,
 }
 
+THREAD_STATUS_STATES: dict[str, CodexRuntimeState] = {
+    "notLoaded": CodexRuntimeState.STARTING,
+    "idle": CodexRuntimeState.READY,
+    "systemError": CodexRuntimeState.ERROR,
+    "active": CodexRuntimeState.THINKING,
+}
+
+TOOL_ITEM_TYPES = {
+    "dynamicToolCall",
+    "imageGeneration",
+    "mcpToolCall",
+    "webSearch",
+}
+
+EXECUTION_ITEM_TYPES = {
+    "commandExecution",
+    "fileChange",
+}
+
 
 @dataclass
 class RuntimeStateReducer:
@@ -41,7 +60,7 @@ class RuntimeStateReducer:
         observed_at: float,
         detail: dict[str, object] | None = None,
     ) -> RuntimeEvidence | None:
-        state = APP_SERVER_STATE_EVENTS.get(method)
+        state = app_server_event_state(method, detail or {})
         if state is None:
             return None
         return self.add(
@@ -54,3 +73,60 @@ class RuntimeStateReducer:
             )
         )
 
+
+def app_server_event_state(
+    method: str,
+    params: dict[str, object],
+) -> CodexRuntimeState | None:
+    """Normalize current and compatibility app-server event shapes.
+
+    The app-server protocol intentionally remains behind capability probing.
+    Keep protocol spelling in this module so the UI only consumes PBX states.
+    """
+
+    if method == "thread/status/changed":
+        status = params.get("status")
+        if not isinstance(status, dict):
+            return None
+        status_type = str(status.get("type") or "")
+        active_flags = {
+            str(value) for value in status.get("activeFlags", []) if value
+        }
+        if active_flags & {"waitingOnApproval", "waitingOnUserInput"}:
+            return CodexRuntimeState.WAITING_USER
+        return THREAD_STATUS_STATES.get(status_type)
+
+    if method in {"item/started", "item/completed"}:
+        item = params.get("item")
+        if not isinstance(item, dict):
+            return None
+        item_type = str(item.get("type") or "")
+        if item_type == "collabAgentToolCall":
+            return (
+                CodexRuntimeState.DELEGATING
+                if method == "item/started"
+                else CodexRuntimeState.THINKING
+            )
+        if item_type in EXECUTION_ITEM_TYPES:
+            if method == "item/completed" and str(item.get("status") or "") in {
+                "failed",
+                "declined",
+            }:
+                return CodexRuntimeState.ERROR
+            return (
+                CodexRuntimeState.EXECUTING
+                if method == "item/started"
+                else CodexRuntimeState.THINKING
+            )
+        if item_type in TOOL_ITEM_TYPES:
+            if method == "item/completed" and str(item.get("status") or "") == "failed":
+                return CodexRuntimeState.ERROR
+            return (
+                CodexRuntimeState.WAITING_TOOL
+                if method == "item/started"
+                else CodexRuntimeState.THINKING
+            )
+        if item_type == "agentMessage":
+            return CodexRuntimeState.THINKING
+
+    return APP_SERVER_STATE_EVENTS.get(method)

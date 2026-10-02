@@ -17,6 +17,7 @@ from agent_pbx.codex.capabilities import (
 )
 from agent_pbx.codex.protocol import parse_protocol_message
 from agent_pbx.codex.state import RuntimeStateReducer
+from agent_pbx.codex.state import app_server_event_state
 from agent_pbx.codex_cli import CodexCliCapabilities, CodexModelOption
 from agent_pbx.config import ServerConfig
 from agent_pbx.contracts import (
@@ -128,6 +129,21 @@ def test_state_reducer_keeps_structured_evidence_over_newer_heuristic() -> None:
         )
     )
     assert reducer.current().state is CodexRuntimeState.COMPLETE
+
+
+def test_current_app_server_event_shapes_normalize_without_ansi_parsing() -> None:
+    assert app_server_event_state(
+        "thread/status/changed",
+        {"status": {"type": "active", "activeFlags": ["waitingOnApproval"]}},
+    ) is CodexRuntimeState.WAITING_USER
+    assert app_server_event_state(
+        "item/started",
+        {"item": {"type": "commandExecution", "status": "inProgress"}},
+    ) is CodexRuntimeState.EXECUTING
+    assert app_server_event_state(
+        "item/started",
+        {"item": {"type": "collabAgentToolCall", "status": "inProgress"}},
+    ) is CodexRuntimeState.DELEGATING
 
 
 def test_adapter_rejects_unrelated_app_server_thread() -> None:

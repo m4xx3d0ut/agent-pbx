@@ -40,6 +40,7 @@ from .codex.skills import ManagedSkillPackService, PersonalityOverlay
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
 from .events import EventClientRegistry, EventStreamService
+from .codex.runtime import CodexRuntimeService
 from .joplin import (
     JoplinApiError,
     JoplinConfig,
@@ -88,6 +89,7 @@ from .schemas import (
     AgentResponse,
     CodexCliUpdateRequest,
     CodexCliUpdateResponse,
+    CodexRuntimeEventRequest,
     CodexConfigPatchRequest,
     CodexConfigPatchResponse,
     CodexConfigViewResponse,
@@ -327,6 +329,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.codex_capabilities = CodexCapabilityProbe(
         cache_path=resolved_config.db_path.parent / "codex-capabilities-v2.json"
     )
+    app.state.codex_runtime = CodexRuntimeService(store)
     app.state.files = AgentFileService()
     app.state.joplin = joplin
     app.state.workerbee = WorkerBeeStatusService(
@@ -423,6 +426,49 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             use_cache=not refresh,
         )
         return snapshot.as_dict()
+
+    @app.get(
+        "/v2/agents/{agent_id}/codex-runtime",
+        dependencies=[Depends(require_token)],
+    )
+    async def get_agent_codex_runtime(
+        agent_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.codex_runtime.snapshot,
+                agent_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="agent not registered") from exc
+
+    @app.post(
+        "/v2/agents/{agent_id}/codex-runtime/events",
+        dependencies=[Depends(require_token)],
+    )
+    async def observe_agent_codex_runtime(
+        agent_id: str,
+        payload: CodexRuntimeEventRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        # The projection is deliberately bounded before it reaches the event
+        # journal. The service itself keeps only known public protocol fields.
+        if len(json.dumps(payload.params, separators=(",", ":"))) > 1_000_000:
+            raise HTTPException(status_code=413, detail="runtime event payload is too large")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.codex_runtime.observe_protocol,
+                agent_id,
+                thread_id=payload.thread_id,
+                method=payload.method,
+                params=payload.params,
+                observed_at=payload.observed_at,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="agent not registered") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get(
         "/v2/codex/profiles",
@@ -1182,6 +1228,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             store.append_event("report_identity_violation", violation, agent_id)
             raise HTTPException(status_code=409, detail=violation["reason"])
         report = store.create_report(agent_id, request)
+        http_request.app.state.codex_runtime.observe_report(
+            agent_id,
+            status=request.status,
+            observed_at=float(report["created_at"]),
+        )
         store.append_event(
             "report_created",
                 {

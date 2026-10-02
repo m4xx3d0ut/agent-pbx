@@ -100,6 +100,8 @@ from .ui.focus import FocusGenerationGuard
 from .ui.panels.editor import EditorPanelState
 from .ui.panels.joplin import JoplinPanelState
 from .ui.panels.operators import OperatorPanelState
+from .ui.runtime import runtime_header, runtime_topology
+from .ui.theme import terminal_color_depth, textual_palette
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
@@ -1034,19 +1036,7 @@ class PlanSelection:
     notes: str = ""
 
 
-CYBERPUNK_PALETTE = {
-    "primary": "#00e5ff",
-    "secondary": "#9b5cff",
-    "warning": "#fcee09",
-    "error": "#ff2e88",
-    "success": "#38ff9c",
-    "accent": "#ff3df2",
-    "foreground": "#f2f7ff",
-    "background": "#070b16",
-    "surface": "#101826",
-    "panel": "#1a102a",
-    "boost": "#2b174b",
-}
+CYBERPUNK_PALETTE = textual_palette()
 MINIMAL_PALETTE = {
     "primary": "#ffffff",
     "secondary": "#c0c0c0",
@@ -4351,6 +4341,26 @@ class AgentPBXTUI(App[None]):
         height: auto;
     }
 
+    #codex-runtime-status {
+        height: 1;
+        content-align: left middle;
+        background: $surface;
+        padding: 0 1;
+    }
+
+    #codex-runtime-topology {
+        display: none;
+        height: auto;
+        max-height: 8;
+        background: $surface;
+        padding: 0 1;
+        color: $foreground;
+    }
+
+    #codex-runtime-topology.has-subagents {
+        display: block;
+    }
+
     #codex-config-status {
         height: auto;
         color: $secondary;
@@ -4406,6 +4416,11 @@ class AgentPBXTUI(App[None]):
     }
 
     Screen.tiny-agent #codex-posture {
+        display: none;
+    }
+
+    Screen.tiny-agent #codex-runtime-status,
+    Screen.tiny-agent #codex-runtime-topology {
         display: none;
     }
 
@@ -5255,6 +5270,9 @@ class AgentPBXTUI(App[None]):
             CodexTranscriptBoundary,
         ] = {}
         self.codex_posture: CodexCliPosture | None = None
+        self.codex_runtime_by_agent: dict[str, dict[str, Any]] = {}
+        self.codex_runtime_animation_frame = 0
+        self.terminal_color_depth = terminal_color_depth()
         self.codex_config: dict[str, Any] | None = None
         self.selected_codex_config_key: str | None = None
         self.editor_panel_state = EditorPanelState()
@@ -6305,6 +6323,8 @@ class AgentPBXTUI(App[None]):
                 with TabbedContent(initial="latest-tab", id="agent-tabs"):
                     with TabPane("Latest", id="latest-tab"):
                         yield Static("Codex: checking...", id="codex-posture")
+                        yield Static("? UNKNOWN │ WB ?", id="codex-runtime-status")
+                        yield Static("", id="codex-runtime-topology")
                         yield NavigationTextArea(id="detail", read_only=True)
                         with Vertical(id="latest-plan-choice-panel"):
                             yield Static(
@@ -10317,6 +10337,8 @@ class AgentPBXTUI(App[None]):
         return f"{prefix}{format_count(tokens)}t p{polls} r{reports} g{pings}"
 
     def toggle_unseen_attention(self) -> None:
+        self.codex_runtime_animation_frame += 1
+        self.render_codex_runtime_surface()
         has_attention_target = bool(
             self.unseen_latest_agent_ids or self.tmux_plan_selector_agent_ids
         )
@@ -11783,6 +11805,11 @@ class AgentPBXTUI(App[None]):
             self.restore_agent_pane_state(agent_id)
         self.update_agent_title()
         self.update_codex_model_status()
+        if agent_id not in self.codex_runtime_by_agent and agent_id in self.agents:
+            self.codex_runtime_by_agent[agent_id] = self.local_runtime_snapshot(
+                self.agents[agent_id]
+            )
+        self.render_codex_runtime_surface()
         self.apply_tmux_class()
         if self.is_compact_layout():
             self.show_compact_agent()
@@ -11791,6 +11818,13 @@ class AgentPBXTUI(App[None]):
                 self.active_agent_tab_by_agent.get(agent_id, "latest-tab")
             )
         await self.refresh_selected_agent(self.selected_agent_id)
+        self.run_async_worker(
+            lambda: self.load_codex_runtime_status(agent_id),
+            name=f"codex-runtime-{agent_id}",
+            group="codex-runtime",
+            exclusive=True,
+            exit_on_error=False,
+        )
         if self.active_agent_tab == "latest-tab":
             self.mark_latest_seen(agent_id)
 
@@ -11816,6 +11850,87 @@ class AgentPBXTUI(App[None]):
         state = self.plan_mode_state(agent_id)
         view = "tmux" if self.is_tmux_direct_enabled(agent_id) else "pbx"
         title.update(f"Agent: {agent_id} | View: {view} | Plan: {state}")
+
+    async def load_codex_runtime_status(self, agent_id: str) -> None:
+        try:
+            response = await self.api_client().get(
+                f"/v2/agents/{quote(agent_id, safe='')}/codex-runtime",
+                headers=auth_headers(self.token),
+                timeout=8,
+            )
+            response.raise_for_status()
+            snapshot = response.json()
+            if isinstance(snapshot, dict):
+                self.codex_runtime_by_agent[agent_id] = snapshot
+        except Exception:
+            agent = self.agents.get(agent_id)
+            if agent is not None:
+                self.codex_runtime_by_agent[agent_id] = self.local_runtime_snapshot(agent)
+        if self.selected_agent_id == agent_id:
+            self.render_codex_runtime_surface()
+
+    def local_runtime_snapshot(self, agent: Mapping[str, Any]) -> dict[str, Any]:
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        status = str(agent.get("effective_status") or agent.get("status") or "").lower()
+        state = {
+            "working": "thinking",
+            "running": "thinking",
+            "blocked": "waiting_user",
+            "waiting": "waiting_user",
+            "done": "complete",
+            "complete": "complete",
+            "completed": "complete",
+            "failed": "error",
+            "error": "error",
+            "canceled": "interrupted",
+            "cancelled": "interrupted",
+            "registered": "ready",
+        }.get(status, "unknown")
+        model = str(metadata.get("codex_model") or metadata.get("model") or "")
+        profile = None
+        if model:
+            profile = {
+                "model": model,
+                "reasoning_effort": str(
+                    metadata.get("codex_model_reasoning_effort")
+                    or metadata.get("model_reasoning_effort")
+                    or ""
+                ),
+            }
+        return {
+            "api_version": "agent-pbx.codex-runtime/fallback",
+            "agent_id": str(agent.get("agent_id") or ""),
+            "state": state,
+            "profile": profile,
+            "context": {},
+            "branch": metadata.get("branch") or metadata.get("git_branch"),
+            "capabilities": {"native_subagents": "unsupported"},
+            "children": [],
+            "evidence": {"source": "pbx_report"},
+        }
+
+    def render_codex_runtime_surface(self) -> None:
+        status_widget = self.query_one_or_none("#codex-runtime-status", Static)
+        topology_widget = self.query_one_or_none("#codex-runtime-topology", Static)
+        if status_widget is None or topology_widget is None:
+            return
+        agent_id = self.selected_agent_id
+        snapshot = self.codex_runtime_by_agent.get(agent_id or "")
+        workerbee = self.workerbee_status_by_agent.get(agent_id or "")
+        rendered = runtime_header(
+            snapshot,
+            workerbee,
+            frame=self.codex_runtime_animation_frame,
+            color_depth=self.terminal_color_depth,
+        )
+        status_widget.update(rendered.text)
+        topology = runtime_topology(
+            snapshot,
+            frame=self.codex_runtime_animation_frame,
+            color_depth=self.terminal_color_depth,
+        )
+        topology_widget.update(topology)
+        topology_widget.set_class(bool(topology.plain), "has-subagents")
 
     def activate_latest_tab(self) -> None:
         self.activate_agent_tab("latest-tab")
@@ -13454,7 +13569,9 @@ class AgentPBXTUI(App[None]):
         await self.load_thread(agent_id)
 
     def resize_message_input(self) -> None:
-        message_input = self.query_one("#message", TextArea)
+        message_input = self.query_one_or_none("#message", TextArea)
+        if message_input is None:
+            return
         if self.is_tiny_layout():
             message_input.styles.height = 1
             message_input.styles.min_height = 1
@@ -15835,6 +15952,7 @@ class AgentPBXTUI(App[None]):
 
         self.unseen_latest_agent_ids.discard(agent_id)
         self.latest_report_by_agent.pop(agent_id, None)
+        self.codex_runtime_by_agent.pop(agent_id, None)
         self.workerbee_status_by_agent.pop(agent_id, None)
         self.pull_request_status_by_agent.pop(agent_id, None)
         self.pull_requests_by_agent.pop(agent_id, None)
@@ -16059,9 +16177,12 @@ class AgentPBXTUI(App[None]):
                     "caller source and Codex session. "
                     "Keep work for this caller isolated in this fork and report "
                     "through Agent PBX for the logical operator to review. "
-                    "This visible Agent PBX tmux pane is the fork; do not spawn "
-                    "or use Codex internal subagents such as multi_agent_v1 for "
-                    "caller work. Register with Agent PBX, then wait at the "
+                    "This visible Agent PBX tmux pane is the fork. Native Codex "
+                    "children may perform bounded local decomposition and inherit "
+                    "this fork's workspace and tool restrictions, but may not act "
+                    "as PBX identities, campaign assignees, or cross-project workers; "
+                    "do not use the legacy multi_agent_v1 path. Register with Agent "
+                    "PBX, then wait at the "
                     "Codex prompt for operator instructions. Do not begin "
                     "review or caller work until the operator sends a task.",
                     "",
@@ -16108,8 +16229,10 @@ class AgentPBXTUI(App[None]):
                     "operator; use @caller references and operator campaign tools "
                     "to target one or more forks without abandoning this root "
                     "session. The root operator must not implement caller repo "
-                    "changes directly. Do not spawn or use Codex internal subagents such as "
-                    "multi_agent_v1 for caller work; if PBX fork delivery is "
+                    "changes directly. Native Codex children may perform bounded "
+                    "operator-local decomposition but inherit this session's policy "
+                    "and may not become PBX assignees or route to peers; do not use "
+                    "the legacy multi_agent_v1 path. If PBX fork delivery is "
                     "unavailable, mark the assignment blocked instead. Keep the root "
                     "turn active while campaign assignments are running and "
                     "periodically recheck campaign state until terminal.",
@@ -21562,7 +21685,7 @@ class AgentPBXTUI(App[None]):
                 "- Recheck with `pbx_operator_campaign_status` at natural milestones and about every 60 seconds while work is active.",
                 "- Inspect assignment reports/thread state before deciding whether follow-up is needed.",
                 "- Use `pbx_operator_send_followup` only for the campaign/fork targets in this campaign. Do not dispatch to regular caller tmux panes.",
-                "- Do not spawn or use Codex internal subagents such as `multi_agent_v1`; caller work must stay in visible Agent PBX fork panes.",
+                "- Native Codex children may perform bounded operator-local decomposition, but inherit session restrictions and may not become PBX identities, campaign assignees, or peer routers. Do not use legacy `multi_agent_v1`; durable caller work stays in visible Agent PBX fork panes.",
                 "- Report assignment state changes with `pbx_operator_report_assignment`.",
                 "- When all assignments are terminal, use `pbx_operator_finish_campaign` and report the final campaign result.",
             ]
@@ -25792,9 +25915,15 @@ class AgentPBXTUI(App[None]):
             return f"{success} ok/{unknown} unk/{total}"
         return f"{success} ok/{total}"
 
-    async def load_workerbee_status(self, agent_id: str) -> None:
-        detail = self.query_one("#workerbee-detail", TextArea)
-        detail.text = f"Loading WorkerBee status for {agent_id}..."
+    async def load_workerbee_status(
+        self,
+        agent_id: str,
+        *,
+        render_detail: bool = True,
+    ) -> None:
+        detail = self.query_one_or_none("#workerbee-detail", TextArea)
+        if render_detail and detail is not None:
+            detail.text = f"Loading WorkerBee status for {agent_id}..."
         try:
             response = await self.api_client().get(
                 f"/v1/agents/{agent_id}/workerbee",
@@ -25804,13 +25933,17 @@ class AgentPBXTUI(App[None]):
             response.raise_for_status()
             status = response.json()
         except Exception as exc:
-            detail.text = f"Unable to load WorkerBee status for {agent_id}: {exc}"
+            if render_detail and detail is not None:
+                detail.text = f"Unable to load WorkerBee status for {agent_id}: {exc}"
             return
         self.workerbee_status_by_agent[agent_id] = status
-        rendered = self.format_workerbee_status(status)
-        if self.workerbee_mcp_preflight is not None:
-            rendered = f"{rendered}\n\n{self.format_workerbee_mcp_preflight(self.workerbee_mcp_preflight)}"
-        detail.text = rendered
+        if render_detail and detail is not None:
+            rendered = self.format_workerbee_status(status)
+            if self.workerbee_mcp_preflight is not None:
+                rendered = f"{rendered}\n\n{self.format_workerbee_mcp_preflight(self.workerbee_mcp_preflight)}"
+            detail.text = rendered
+        if self.selected_agent_id == agent_id:
+            self.render_codex_runtime_surface()
 
     def workerbee_mcp_endpoint(self) -> str:
         config = dict(DEFAULT_REVIEW_OPERATOR_MCP_SERVER_CONFIGS.get("workerbee", {}))
@@ -26642,6 +26775,13 @@ class AgentPBXTUI(App[None]):
             self.handle_operator_campaign_event(campaign_operator_id)
         if event_type.startswith("operator_kb_") and operator_kb_operator_id:
             self.handle_operator_kb_event(operator_kb_operator_id)
+        if event_type == "codex_runtime_observed" and agent_id:
+            payload = event.get("payload")
+            snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
+            if isinstance(snapshot, dict):
+                self.codex_runtime_by_agent[agent_id] = snapshot
+                if agent_id == selected_agent_id:
+                    self.render_codex_runtime_surface()
         if selected_agent_id and selected_detail_visible:
             if event_type == "report_created":
                 self.run_worker(

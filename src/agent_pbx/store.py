@@ -1310,6 +1310,35 @@ class Store:
             ).fetchall()
         return [self._event_from_row(row) for row in rows]
 
+    def list_subject_events(
+        self,
+        subject_id: str,
+        *,
+        event_type: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return the newest events for one subject in chronological order."""
+
+        bounded_limit = max(1, min(int(limit), 1000))
+        clauses = ["subject_id = ?"]
+        values: list[object] = [subject_id]
+        if event_type:
+            clauses.append("type = ?")
+            values.append(event_type)
+        values.append(bounded_limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT event_id, type, subject_id, payload_json, created_at
+                FROM events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY event_id DESC
+                LIMIT ?
+                """,
+                values,
+            ).fetchall()
+        return [self._event_from_row(row) for row in reversed(rows)]
+
     def list_recent_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(

@@ -181,6 +181,13 @@ class ManagedSkillApplyRequest(BaseModel):
     max_estimated_tokens: int = Field(default=12_000, ge=256, le=100_000)
 
 
+class CodexRuntimeEventRequest(BaseModel):
+    thread_id: str = Field(min_length=1, max_length=240)
+    method: str = Field(min_length=1, max_length=160)
+    params: dict[str, Any] = Field(default_factory=dict)
+    observed_at: float | None = Field(default=None, ge=0)
+
+
 class TmuxRuntimeMappingRequest(BaseModel):
     server_mode: Literal["dedicated", "outer_if_present", "outer_required"]
     socket_path: str = Field(min_length=1, max_length=4096)

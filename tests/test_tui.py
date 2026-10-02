@@ -12729,7 +12729,8 @@ def test_tui_operator_prompts_require_visible_pbx_forks() -> None:
     for prompt in (root_prompt, fork_prompt, monitor_prompt):
         assert "Agent PBX" in prompt
         assert "multi_agent_v1" in prompt
-        assert "spawn or use Codex internal subagents" in prompt
+        assert "Native Codex children may perform bounded" in prompt
+        assert "may not" in prompt
     assert "must not implement caller repo changes directly" in root_prompt
     assert "metadata.reporting_agent_id: operator-0" in root_prompt
     assert "`agent_id=operator-0`" in root_prompt
