@@ -1264,6 +1264,26 @@ class Store:
             ).fetchall()
         return [self._event_from_row(row) for row in rows]
 
+    def event_bounds(self) -> dict[str, int | None]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT MIN(event_id) AS oldest_event_id,
+                       MAX(event_id) AS latest_event_id,
+                       COUNT(*) AS event_count
+                FROM events
+                """
+            ).fetchone()
+        return {
+            "oldest_event_id": int(row["oldest_event_id"])
+            if row and row["oldest_event_id"] is not None
+            else None,
+            "latest_event_id": int(row["latest_event_id"])
+            if row and row["latest_event_id"] is not None
+            else None,
+            "event_count": int(row["event_count"]) if row else 0,
+        }
+
     def register_agent(self, request: AgentRegisterRequest) -> dict[str, Any]:
         current = now_ts()
         with self.connect() as conn:

@@ -1152,6 +1152,19 @@ class EventResponse(BaseModel):
     created_at: float
 
 
+class EventStreamEnvelope(BaseModel):
+    api_version: Literal["agent-pbx.events/v2"]
+    kind: Literal["snapshot", "events"]
+    cursor: int
+    oldest_event_id: int | None = None
+    latest_event_id: int | None = None
+    reset_required: bool = False
+    more_available: bool = False
+    events: list[EventResponse] = Field(default_factory=list)
+    state: dict[str, Any] | None = None
+    server_time: float
+
+
 class ThreadItemResponse(BaseModel):
     item_id: str
     kind: Literal["report", "command"]

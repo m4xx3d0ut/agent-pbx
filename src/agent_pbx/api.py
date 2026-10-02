@@ -18,6 +18,8 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    WebSocket,
+    WebSocketDisconnect,
     status,
 )
 from fastapi.responses import StreamingResponse
@@ -32,6 +34,7 @@ from .codex_config import load_codex_config_view, patch_codex_config
 from .codex_cli import update_codex_cli_package
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
+from .events import EventClientRegistry, EventStreamService
 from .joplin import (
     JoplinApiError,
     JoplinConfig,
@@ -74,6 +77,7 @@ from .schemas import (
     CommandCreateRequest,
     CommandResponse,
     EventResponse,
+    EventStreamEnvelope,
     FileDiagnosticsRequest,
     FileDiagnosticsResponse,
     FileDocumentResponse,
@@ -179,6 +183,7 @@ from .schemas import (
 from .security import generate_pairing_code
 from .store import Store
 from .workerbee import WorkerBeeStatusService
+from .security import constant_time_equal
 
 
 logger = logging.getLogger("agent_pbx.api")
@@ -287,6 +292,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     )
     app.state.config = resolved_config
     app.state.store = store
+    app.state.event_stream = EventStreamService(store)
+    app.state.event_clients = EventClientRegistry()
     app.state.files = AgentFileService()
     app.state.joplin = joplin
     app.state.workerbee = WorkerBeeStatusService(
@@ -2856,7 +2863,141 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
+    @app.get(
+        "/v2/events/snapshot",
+        response_model=EventStreamEnvelope,
+        dependencies=[Depends(require_token)],
+    )
+    async def event_snapshot_v2(
+        after_id: int = 0,
+        limit: int = 100,
+        include_state: bool = True,
+    ) -> dict[str, object]:
+        return await asyncio.to_thread(
+            app.state.event_stream.envelope,
+            after_id=after_id,
+            limit=limit,
+            include_state=include_state,
+        )
+
+    @app.websocket("/v2/events/ws")
+    async def event_websocket_v2(websocket: WebSocket) -> None:
+        role = _websocket_event_role(websocket, store, resolved_config)
+        if role is None:
+            await websocket.close(code=4401, reason="bearer token required or invalid")
+            return
+        try:
+            after_id = max(0, int(websocket.query_params.get("after_id", "0")))
+        except ValueError:
+            await websocket.close(code=4400, reason="after_id must be an integer")
+            return
+        try:
+            limit = min(
+                500,
+                max(1, int(websocket.query_params.get("limit", "100"))),
+            )
+        except ValueError:
+            await websocket.close(code=4400, reason="limit must be an integer")
+            return
+        requested_client_id = websocket.query_params.get("client_id") or None
+        client = app.state.event_clients.register(
+            role=role,
+            cursor=after_id,
+            client_id=requested_client_id,
+        )
+        await websocket.accept()
+        try:
+            initial = await asyncio.to_thread(
+                app.state.event_stream.envelope,
+                after_id=after_id,
+                limit=limit,
+                include_state=True,
+            )
+            initial["client_id"] = client.client_id
+            initial["role"] = role
+            await websocket.send_json(initial)
+            cursor = int(initial["cursor"])
+            app.state.event_clients.update(client.client_id, cursor)
+            while True:
+                message: dict[str, Any] | None = None
+                try:
+                    incoming = await asyncio.wait_for(
+                        websocket.receive_json(),
+                        timeout=0.5,
+                    )
+                    if isinstance(incoming, dict):
+                        message = incoming
+                except asyncio.TimeoutError:
+                    pass
+                if message is not None:
+                    message_type = str(message.get("type") or "").strip().lower()
+                    if message_type == "ping":
+                        await websocket.send_json(
+                            {
+                                "api_version": "agent-pbx.events/v2",
+                                "kind": "pong",
+                                "cursor": cursor,
+                                "server_time": time.time(),
+                            }
+                        )
+                    elif message_type in {"resume", "resync"}:
+                        try:
+                            cursor = max(0, int(message.get("after_id", cursor)))
+                        except (TypeError, ValueError):
+                            await websocket.send_json(
+                                {
+                                    "api_version": "agent-pbx.events/v2",
+                                    "kind": "error",
+                                    "code": "INVALID_CURSOR",
+                                    "cursor": cursor,
+                                }
+                            )
+                            continue
+                envelope = await asyncio.to_thread(
+                    app.state.event_stream.envelope,
+                    after_id=cursor,
+                    limit=limit,
+                    include_state=bool(
+                        message is not None
+                        and str(message.get("type") or "").strip().lower() == "resync"
+                    ),
+                )
+                if envelope["events"] or envelope["reset_required"]:
+                    envelope["client_id"] = client.client_id
+                    envelope["role"] = role
+                    await websocket.send_json(envelope)
+                    cursor = int(envelope["cursor"])
+                app.state.event_clients.update(client.client_id, cursor)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            app.state.event_clients.unregister(client.client_id)
+
     return app
+
+
+def _websocket_event_role(
+    websocket: WebSocket,
+    store: Store,
+    config: ServerConfig,
+) -> str | None:
+    auth_is_required = bool(
+        (config.lan_bound and not config.allow_insecure_lan)
+        or config.token
+        or store.has_tokens()
+    )
+    if not auth_is_required:
+        return "local"
+    authorization = websocket.headers.get("authorization", "")
+    scheme, _, raw_token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not raw_token:
+        return None
+    if config.token and constant_time_equal(raw_token, config.token):
+        return "controller"
+    record = store.verify_token(raw_token)
+    if record is None:
+        return None
+    return str(record.kind or "observer")
 
 
 def require_agent(store: Store, agent_id: str) -> dict[str, object]:

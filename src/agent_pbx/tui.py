@@ -18,6 +18,7 @@ from typing import Any, TypeVar
 from urllib.parse import quote, urlparse
 
 import httpx
+from websockets.asyncio.client import connect as websocket_connect
 from rich.color import Color, ColorParseError
 from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError, SystemCommand
@@ -4831,6 +4832,11 @@ class AgentPBXTUI(App[None]):
         self.action_registry = ActionRegistry()
         self.focus_generation = FocusGenerationGuard()
         self.async_generations = AsyncGenerationGate()
+        self.event_stream_v2_enabled = bool_setting(
+            self.settings,
+            "event_stream_v2",
+            False,
+        )
         self.function_key_passthrough = FunctionKeyPassthroughMap(
             modifier=str_setting(
                 self.settings,
@@ -6163,7 +6169,7 @@ class AgentPBXTUI(App[None]):
         self.notify_custom_slash_command_errors()
         self.restart_refresh_timers()
         self.run_worker(
-            self.stream_events(),
+            self.stream_events_v2() if self.event_stream_v2_enabled else self.stream_events(),
             name="events",
             group="event-stream",
             exclusive=True,
@@ -25286,6 +25292,83 @@ class AgentPBXTUI(App[None]):
                     if not self.low_power_enabled:
                         self.call_later(self.notify_stream_disconnected)
                 await asyncio.sleep(2)
+
+    async def stream_events_v2(self) -> None:
+        websocket_url = self.server.rstrip("/") + "/v2/events/ws"
+        if websocket_url.startswith("https://"):
+            websocket_url = "wss://" + websocket_url.removeprefix("https://")
+        elif websocket_url.startswith("http://"):
+            websocket_url = "ws://" + websocket_url.removeprefix("http://")
+        while True:
+            try:
+                headers = auth_headers(self.token)
+                uri = f"{websocket_url}?after_id={self.last_seen_event_id}&limit=100"
+                async with websocket_connect(
+                    uri,
+                    additional_headers=headers,
+                    open_timeout=10,
+                    ping_interval=20,
+                    max_queue=32,
+                ) as websocket:
+                    if self.event_stream_disconnected:
+                        self.event_stream_disconnected = False
+                        if not self.low_power_enabled:
+                            self.call_later(self.notify_stream_reconnected)
+                    self.event_stream_error_count = 0
+                    self.event_stream_last_error = ""
+                    async for raw_message in websocket:
+                        if not isinstance(raw_message, str):
+                            continue
+                        try:
+                            envelope = json.loads(raw_message)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(envelope, dict):
+                            continue
+                        self.apply_event_stream_v2_envelope(envelope)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.event_stream_error_count += 1
+                self.event_stream_last_error = f"{type(exc).__name__}: {exc}"
+                if not self.event_stream_disconnected:
+                    self.event_stream_disconnected = True
+                    if not self.low_power_enabled:
+                        self.call_later(self.notify_stream_disconnected)
+                await asyncio.sleep(2)
+
+    def apply_event_stream_v2_envelope(self, envelope: dict[str, Any]) -> None:
+        if envelope.get("api_version") != "agent-pbx.events/v2":
+            return
+        state = envelope.get("state")
+        if isinstance(state, dict) and isinstance(state.get("agents"), list):
+            agents = [item for item in state["agents"] if isinstance(item, dict)]
+            self.agents = {
+                str(agent["agent_id"]): agent
+                for agent in agents
+                if agent.get("agent_id")
+            }
+            self.render_agents()
+        raw_events = envelope.get("events")
+        if not isinstance(raw_events, list):
+            return
+        changed = False
+        for raw_event in raw_events:
+            if not isinstance(raw_event, dict):
+                continue
+            try:
+                event_id = int(raw_event["event_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if event_id <= self.last_seen_event_id:
+                continue
+            self.last_seen_event_id = event_id
+            self.events.append(raw_event)
+            self.events = self.events[-50:]
+            self.call_later(self.handle_event, raw_event)
+            changed = True
+        if changed:
+            self.save_settings()
 
     def event_from_sse_line(self, line: str) -> dict[str, Any] | None:
         if not line.startswith("data:"):

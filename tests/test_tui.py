@@ -341,6 +341,45 @@ def test_tui_constructs() -> None:
     assert ("b", "back", "Back") in app.BINDINGS
 
 
+def test_tui_v2_event_envelope_applies_snapshot_and_new_events() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="test")
+    handled: list[int] = []
+    saved: list[bool] = []
+    app.render_agents = lambda **_: None  # type: ignore[method-assign]
+    app.call_later = lambda callback, event: handled.append(  # type: ignore[method-assign]
+        int(event["event_id"])
+    )
+    app.save_settings = lambda: saved.append(True)  # type: ignore[method-assign]
+    app.apply_event_stream_v2_envelope(
+        {
+            "api_version": "agent-pbx.events/v2",
+            "kind": "snapshot",
+            "cursor": 4,
+            "state": {
+                "agents": [
+                    {"agent_id": "agent-a", "project": "demo"},
+                ]
+            },
+            "events": [
+                {"event_id": 3, "type": "old"},
+                {"event_id": 4, "type": "new"},
+            ],
+        }
+    )
+    assert set(app.agents) == {"agent-a"}
+    assert app.last_seen_event_id == 4
+    assert handled == [3, 4]
+    assert saved == [True]
+
+    app.apply_event_stream_v2_envelope(
+        {
+            "api_version": "agent-pbx.events/v2",
+            "events": [{"event_id": 4, "type": "duplicate"}],
+        }
+    )
+    assert handled == [3, 4]
+
+
 def test_tui_formats_codex_posture_warning() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     posture = CodexCliPosture(
