@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +17,9 @@ from agent_pbx.mcp_tools import build_mcp_server
 from agent_pbx.joplin import (
     JoplinApiError,
     JoplinConfig,
+    JoplinConflictError,
     JoplinGateway,
+    JoplinSyncLockError,
     JoplinScopeError,
     JoplinService,
 )
@@ -123,6 +126,169 @@ def make_service(fake: FakeJoplinApi) -> JoplinService:
         client=fake.client(),
         clock=lambda: 123.0,
     )
+
+
+def test_joplin_note_revision_rejects_stale_update_and_preserves_markdown() -> None:
+    fake = FakeJoplinApi()
+    service = make_service(fake)
+    body = "# Heading 🐝\n\n```python\nprint('ok')\n```\n\n```mermaid\ngraph TD\n```"
+    created = service.create_note_for_project("demo", title="Architecture", body=body)
+    base = service.get_note_for_project("demo", str(created["id"]))
+
+    fake.notes[str(created["id"])]["body"] = "External edit"
+    fake.notes[str(created["id"])]["updated_time"] = 1_700_000_020_000
+
+    with pytest.raises(JoplinConflictError) as caught:
+        service.update_note_for_project(
+            "demo",
+            str(created["id"]),
+            body=body + "\nlocal",
+            base_revision=str(base["revision"]),
+            base_title=str(base["title"]),
+            base_body=str(base["body"]),
+        )
+
+    assert caught.value.current["body"] == "External edit"
+    assert caught.value.as_error()["code"] == "JOPLIN_NOTE_CONFLICT"
+    assert fake.notes[str(created["id"])]["body"] == "External edit"
+
+
+def test_joplin_gateway_records_two_client_conflict_and_rebases_merge(
+    tmp_path: Path,
+) -> None:
+    fake = FakeJoplinApi()
+    store = make_store(tmp_path)
+    gateway = JoplinGateway(store, make_service(fake))
+    agent = store.get_agent("agent-1")
+    assert agent is not None
+    created = gateway.create_note_for_agent(
+        agent,
+        event_type="NOTE",
+        title="Shared",
+        body="base",
+    )
+    note_id = str(created["id"])
+    first = gateway.begin_edit_for_agent(agent, note_id, client_id="client-a")
+    second = gateway.begin_edit_for_agent(agent, note_id, client_id="client-b")
+
+    gateway.update_note_for_agent(
+        agent,
+        note_id,
+        body="client a",
+        edit_id=str(first["edit"]["edit_id"]),
+    )
+    with pytest.raises(JoplinConflictError) as caught:
+        gateway.update_note_for_agent(
+            agent,
+            note_id,
+            body="client b",
+            edit_id=str(second["edit"]["edit_id"]),
+        )
+
+    conflict_id = caught.value.conflict_id
+    assert conflict_id
+    resolution = gateway.resolve_edit_conflict(
+        conflict_id,
+        resolution="review_merge",
+        agent=agent,
+    )
+    assert "<<<<<<< LOCAL DRAFT" in resolution["draft"]["body"]
+    assert resolution["edit"]["status"] == "editing"
+    assert resolution["edit"]["base_body"] == "client a"
+
+
+def test_joplin_sync_jobs_coalesce_only_redundant_work(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    first = store.enqueue_joplin_sync(
+        reason="note_update",
+        agent_id="agent-1",
+        note_id="note-1",
+        profile_key="profile-a",
+    )
+    second = store.enqueue_joplin_sync(
+        reason="note_update",
+        agent_id="agent-1",
+        note_id="note-2",
+        profile_key="profile-a",
+    )
+    manual = store.enqueue_joplin_sync(
+        reason="manual",
+        profile_key="profile-a",
+    )
+
+    assert second["sync_id"] == first["sync_id"]
+    assert second["coalesced"] is True
+    assert set(second["note_ids"]) == {"note-1", "note-2"}
+    assert manual["sync_id"] != first["sync_id"]
+
+
+def test_joplin_sync_profile_lock_reports_actionable_error(tmp_path: Path) -> None:
+    fake = FakeJoplinApi()
+    store = make_store(tmp_path)
+    gateway = JoplinGateway(store, make_service(fake))
+    gateway.sync_lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with gateway.sync_lock_path.open("a+", encoding="utf-8") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(JoplinSyncLockError) as caught:
+            gateway.run_sync_job({"sync_id": "sync-1"})
+    assert caught.value.code == "JOPLIN_SYNC_LOCKED"
+
+
+def test_joplin_api_two_client_conflict_has_recovery_actions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeJoplinApi()
+
+    def service_factory(config: JoplinConfig) -> JoplinService:
+        return JoplinService(config, client=fake.client(), clock=lambda: 123.0)
+
+    monkeypatch.setattr("agent_pbx.api.JoplinService", service_factory)
+    app = create_app(
+        ServerConfig(
+            db_path=tmp_path / "pbx.sqlite",
+            joplin_api_url="http://joplin.local",
+            joplin_token="secret",
+        )
+    )
+    with TestClient(app) as client:
+        client.post(
+            "/v1/agents/register",
+            json={"agent_id": "agent-1", "project": "demo", "metadata": {}},
+        )
+        created = client.post(
+            "/v1/agents/agent-1/joplin/notes",
+            json={"title": "Shared", "body": "base"},
+        ).json()
+        note_id = created["id"]
+        edit_a = client.post(
+            f"/v1/agents/agent-1/joplin/notes/{note_id}/edit",
+            json={"client_id": "client-a"},
+        ).json()
+        edit_b = client.post(
+            f"/v1/agents/agent-1/joplin/notes/{note_id}/edit",
+            json={"client_id": "client-b"},
+        ).json()
+        saved = client.put(
+            f"/v1/agents/agent-1/joplin/notes/{note_id}",
+            json={"body": "from a", "edit_id": edit_a["edit"]["edit_id"]},
+        )
+        conflicted = client.put(
+            f"/v1/agents/agent-1/joplin/notes/{note_id}",
+            json={"body": "from b", "edit_id": edit_b["edit"]["edit_id"]},
+        )
+        detail = conflicted.json()["detail"]
+        resolved = client.post(
+            f"/v1/agents/agent-1/joplin/conflicts/{detail['conflict_id']}/resolve",
+            json={"resolution": "save_conflict_copy"},
+        )
+
+    assert saved.status_code == 200
+    assert conflicted.status_code == 409
+    assert detail["code"] == "JOPLIN_NOTE_CONFLICT"
+    assert "<<<<<<< LOCAL DRAFT" in detail["merged"]["body"]
+    assert resolved.status_code == 200
+    assert resolved.json()["conflict_copy"]["body"] == "from b"
 
 
 class FakeJoplinService:

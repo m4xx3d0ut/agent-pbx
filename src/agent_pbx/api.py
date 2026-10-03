@@ -44,6 +44,7 @@ from .codex.runtime import CodexRuntimeService
 from .joplin import (
     JoplinApiError,
     JoplinConfig,
+    JoplinConflictError,
     JoplinGateway,
     JoplinScopeError,
     JoplinService,
@@ -106,7 +107,11 @@ from .schemas import (
     FilePreviewResponse,
     FileSearchResponse,
     JoplinCopyRequest,
+    JoplinConflictResolveRequest,
     JoplinDocumentRequest,
+    JoplinEditDraftRequest,
+    JoplinEditSessionResponse,
+    JoplinEditStartRequest,
     JoplinLogAppendRequest,
     JoplinLogResponse,
     JoplinNoteCreateRequest,
@@ -1837,6 +1842,26 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         joplin = require_joplin(request)
         return await run_joplin_call(joplin.request_sync, reason="manual")
 
+    @app.put(
+        "/v1/joplin/edits/{edit_id}/draft",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_token)],
+    )
+    async def update_joplin_edit_draft(
+        edit_id: str,
+        payload: JoplinEditDraftRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        edit = await asyncio.to_thread(
+            store.update_joplin_edit_draft,
+            edit_id,
+            title=payload.title,
+            body=payload.body,
+        )
+        if edit is None:
+            raise HTTPException(status_code=404, detail="Joplin edit session not found")
+        return edit
+
     @app.get(
         "/v1/projects/{project}/joplin/notes",
         response_model=list[JoplinNoteSummary],
@@ -1880,6 +1905,25 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         joplin = require_joplin(request)
         return await run_joplin_call(joplin.get_note_for_project, project, note_id)
 
+    @app.post(
+        "/v1/projects/{project}/joplin/notes/{note_id}/edit",
+        response_model=JoplinEditSessionResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def begin_project_joplin_edit(
+        project: str,
+        note_id: str,
+        payload: JoplinEditStartRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        joplin = require_joplin(request)
+        return await run_joplin_call(
+            joplin.begin_edit_for_project,
+            project,
+            note_id,
+            client_id=payload.client_id,
+        )
+
     @app.put(
         "/v1/projects/{project}/joplin/notes/{note_id}",
         response_model=JoplinNoteResponse,
@@ -1898,6 +1942,30 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             note_id,
             title=payload.title,
             body=payload.body,
+            base_revision=payload.base_revision,
+            base_title=payload.base_title,
+            base_body=payload.base_body,
+            edit_id=payload.edit_id,
+            force=payload.force,
+        )
+
+    @app.post(
+        "/v1/projects/{project}/joplin/conflicts/{conflict_id}/resolve",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_token)],
+    )
+    async def resolve_project_joplin_conflict(
+        project: str,
+        conflict_id: str,
+        payload: JoplinConflictResolveRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        joplin = require_joplin(request)
+        return await run_joplin_call(
+            joplin.resolve_edit_conflict,
+            conflict_id,
+            resolution=payload.resolution,
+            project=project,
         )
 
     @app.delete(
@@ -1963,6 +2031,27 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         joplin = require_joplin(request)
         return await run_joplin_call(joplin.get_note_for_agent, agent, note_id)
 
+    @app.post(
+        "/v1/agents/{agent_id}/joplin/notes/{note_id}/edit",
+        response_model=JoplinEditSessionResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def begin_agent_joplin_edit(
+        agent_id: str,
+        note_id: str,
+        payload: JoplinEditStartRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        return await run_joplin_call(
+            joplin.begin_edit_for_agent,
+            agent,
+            note_id,
+            client_id=payload.client_id,
+        )
+
     @app.put(
         "/v1/agents/{agent_id}/joplin/notes/{note_id}",
         response_model=JoplinNoteResponse,
@@ -1983,6 +2072,32 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             note_id,
             title=payload.title,
             body=payload.body,
+            base_revision=payload.base_revision,
+            base_title=payload.base_title,
+            base_body=payload.base_body,
+            edit_id=payload.edit_id,
+            force=payload.force,
+        )
+
+    @app.post(
+        "/v1/agents/{agent_id}/joplin/conflicts/{conflict_id}/resolve",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_token)],
+    )
+    async def resolve_agent_joplin_conflict(
+        agent_id: str,
+        conflict_id: str,
+        payload: JoplinConflictResolveRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        return await run_joplin_call(
+            joplin.resolve_edit_conflict,
+            conflict_id,
+            resolution=payload.resolution,
+            agent=agent,
         )
 
     @app.delete(
@@ -3678,6 +3793,11 @@ async def run_joplin_call(
 ) -> Any:
     try:
         return await asyncio.to_thread(func, *args, **kwargs)
+    except JoplinConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.as_error(),
+        ) from exc
     except JoplinScopeError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -3691,14 +3811,27 @@ async def run_joplin_call(
         response_status = (
             status.HTTP_404_NOT_FOUND
             if exc.status_code == status.HTTP_404_NOT_FOUND
+            else status.HTTP_401_UNAUTHORIZED
+            if exc.code == "JOPLIN_AUTH_ERROR"
+            else status.HTTP_429_TOO_MANY_REQUESTS
+            if exc.code == "JOPLIN_RATE_LIMITED"
             else status.HTTP_503_SERVICE_UNAVAILABLE
         )
         raise HTTPException(
             status_code=response_status,
             detail={
-                "code": "JOPLIN_API_ERROR",
+                "code": exc.code,
                 "message": str(exc),
-                "retryable": response_status != status.HTTP_404_NOT_FOUND,
+                "retryable": exc.retryable,
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "JOPLIN_EDIT_INVALID",
+                "message": str(exc),
+                "retryable": False,
             },
         ) from exc
 
@@ -3931,6 +4064,7 @@ async def run_joplin_sync_worker(
                 str(job["sync_id"]),
                 success=False,
                 error=str(exc),
+                error_code=str(getattr(exc, "code", "JOPLIN_SYNC_ERROR")),
             )
             store.append_event(
                 "joplin_sync_failed",
@@ -3940,6 +4074,9 @@ async def run_joplin_sync_worker(
                     "agent_id": job.get("agent_id"),
                     "note_id": job.get("note_id"),
                     "message": str(exc),
+                    "error_code": str(
+                        getattr(exc, "code", "JOPLIN_SYNC_ERROR")
+                    ),
                 },
                 str(job["sync_id"]),
             )

@@ -41,3 +41,27 @@ def test_joplin_panel_selection_is_scoped_and_validated() -> None:
     state.select("agent-b", "note-b")
     assert state.selected_for("agent-a") == "note-a"
     assert state.selected_for("agent-b") == "note-b"
+
+
+def test_joplin_panel_tracks_explicit_edit_preview_and_dirty_draft() -> None:
+    state = JoplinPanelState()
+    draft = state.begin_edit(
+        "project:demo",
+        edit={"edit_id": "edit-1", "dirty": False},
+        note={
+            "id": "note-1",
+            "title": "Plan",
+            "body": "base",
+            "revision": "rev-1",
+        },
+    )
+
+    assert state.mode_for("project:demo") == "edit"
+    assert draft.dirty is False
+    state.update_draft("project:demo", "changed")
+    state.set_mode("project:demo", "preview")
+    assert state.mode_for("project:demo") == "preview"
+    assert state.has_dirty_draft("project:demo") is True
+    state.finish_edit("project:demo")
+    assert state.mode_for("project:demo") == "read"
+    assert state.has_dirty_draft("project:demo") is False

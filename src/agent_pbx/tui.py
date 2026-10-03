@@ -38,6 +38,7 @@ from textual.widgets import (
     Footer,
     Header,
     Input,
+    Markdown,
     RichLog,
     Select,
     Static,
@@ -697,6 +698,8 @@ JOPLIN_SLASH_ACTIONS = {
     "/joplin log start": "log-start",
     "/joplin log stop": "log-stop",
     "/joplin save": "save",
+    "/joplin edit": "edit",
+    "/joplin preview": "preview",
     "/joplin sync": "sync",
 }
 JOPLIN_SHORTCUT_ACTIONS = {
@@ -704,6 +707,8 @@ JOPLIN_SHORTCUT_ACTIONS = {
     "m": ("rename", "rename"),
     "d": ("delete", "delete"),
     "s": ("save", "save"),
+    "e": ("edit", "edit"),
+    "p": ("preview", "preview"),
     "r": ("refresh", "refresh"),
     "c": ("copy", "copy"),
     "l": ("log-start", "log on"),
@@ -4722,17 +4727,37 @@ class AgentPBXTUI(App[None]):
         scrollbar-background: $surface;
     }
 
+    #joplin-reader {
+        height: 1fr;
+        min-height: 12;
+        border: tall $accent;
+        background: $surface;
+        padding: 0 1;
+        overflow-y: auto;
+        scrollbar-size: 0 1;
+        scrollbar-color: $accent;
+        scrollbar-color-hover: $warning;
+        scrollbar-background: $surface;
+    }
+
+    #joplin-body,
+    #joplin-conflict-actions {
+        display: none;
+    }
+
     #joplin-actions {
-        height: 7;
+        height: 10;
     }
 
     #joplin-crud-actions,
-    #joplin-log-actions {
+    #joplin-log-actions,
+    #joplin-conflict-actions {
         height: 3;
     }
 
     #joplin-crud-actions Button,
-    #joplin-log-actions Button {
+    #joplin-log-actions Button,
+    #joplin-conflict-actions Button {
         width: 1fr;
         min-width: 1;
     }
@@ -5254,6 +5279,10 @@ class AgentPBXTUI(App[None]):
         self.joplin_notes_by_agent = self.joplin_panel_state.notes_by_scope
         self.selected_joplin_note_id = self.joplin_panel_state.selected_note_id
         self.selected_joplin_note_id_by_agent = self.joplin_panel_state.selected_by_scope
+        self.joplin_draft_timer: Timer | None = None
+        self.joplin_quit_armed_until = 0.0
+        self.joplin_body_loading = False
+        self.joplin_overwrite_armed_until: dict[str, float] = {}
         self.codex_session_path_cache = CodexSessionPathCache()
         self.codex_transcript_tail_cache = CodexTranscriptTailCache()
         self.active_codex_session_by_agent: dict[str, ActiveCodexSession] = {}
@@ -6603,12 +6632,15 @@ class AgentPBXTUI(App[None]):
                             cursor_type="row",
                             show_row_labels=False,
                         )
+                        yield Markdown("Select a note to read it.", id="joplin-reader")
                         yield NavigationTextArea(id="joplin-body")
                         with Vertical(id="joplin-actions"):
                             with Horizontal(id="joplin-crud-actions"):
                                 yield Button("New n", id="joplin-new")
                                 yield Button("Ren m", id="joplin-rename")
                                 yield Button("Del d", id="joplin-delete")
+                                yield Button("Edit e", id="joplin-edit", variant="primary")
+                                yield Button("Preview p", id="joplin-preview")
                                 yield Button("Save s", id="joplin-save", variant="primary")
                                 yield Button("Ref r", id="joplin-refresh")
                             with Horizontal(id="joplin-log-actions"):
@@ -6616,6 +6648,15 @@ class AgentPBXTUI(App[None]):
                                 yield Button("LOG+ l", id="joplin-log-start")
                                 yield Button("LOG- x", id="joplin-log-stop")
                                 yield Button("Sync u", id="joplin-sync")
+                            with Horizontal(id="joplin-conflict-actions"):
+                                yield Button("Review merge", id="joplin-conflict-merge")
+                                yield Button("Keep Joplin", id="joplin-conflict-keep")
+                                yield Button("Save copy", id="joplin-conflict-copy")
+                                yield Button(
+                                    "Overwrite",
+                                    id="joplin-conflict-overwrite",
+                                    variant="error",
+                                )
                             yield Static(self.joplin_hotkeys_text(), id="joplin-hotkeys")
         yield Footer()
 
@@ -6847,6 +6888,8 @@ class AgentPBXTUI(App[None]):
             yield SystemCommand("/joplin log start", "Start Joplin LOG for the selected agent", self.palette_joplin_log_start)
             yield SystemCommand("/joplin log stop", "Stop Joplin LOG for the selected agent", self.palette_joplin_log_stop)
             yield SystemCommand("/joplin save", "Save the selected Joplin note body", self.palette_joplin_save)
+            yield SystemCommand("/joplin edit", "Edit the selected Joplin note", self.palette_joplin_edit)
+            yield SystemCommand("/joplin preview", "Preview the current Joplin draft", self.palette_joplin_preview)
             yield SystemCommand("/joplin sync", "Queue a Joplin sync job", self.palette_joplin_sync)
         yield SystemCommand("/plan", "Toggle plan mode for the selected agent", self.palette_toggle_plan_mode)
         yield SystemCommand("/plan latest", "Show latest report plan options", self.palette_plan_latest)
@@ -7977,6 +8020,26 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_joplin_edit(self) -> None:
+        agent_id = self.palette_joplin_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "edit"),
+            name="palette-joplin-edit",
+            exclusive=True,
+        )
+
+    def palette_joplin_preview(self) -> None:
+        agent_id = self.palette_joplin_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "preview"),
+            name="palette-joplin-preview",
+            exclusive=True,
+        )
+
     def palette_joplin_sync(self) -> None:
         agent_id = self.palette_joplin_agent_id()
         if agent_id is None:
@@ -8562,6 +8625,10 @@ class AgentPBXTUI(App[None]):
             await self.stop_joplin_log(agent_id)
         elif action == "save":
             await self.save_joplin_note(agent_id)
+        elif action == "edit":
+            await self.begin_joplin_edit(agent_id)
+        elif action == "preview":
+            await self.preview_joplin_draft(agent_id)
         elif action == "sync":
             await self.sync_joplin_now(agent_id)
         else:
@@ -8583,6 +8650,36 @@ class AgentPBXTUI(App[None]):
                 await self.load_operator_kb(self.selected_agent_id)
             elif self.active_agent_tab == "joplin-tab":
                 await self.load_joplin_notes(self.selected_agent_id)
+
+    async def action_quit(self) -> None:
+        if self.joplin_panel_state.has_dirty_draft():
+            now = time.monotonic()
+            if now > self.joplin_quit_armed_until:
+                self.joplin_quit_armed_until = now + 5.0
+                self.notify(
+                    "Unsaved Joplin drafts are protected. Press q again within 5 seconds to exit; drafts remain in daemon recovery state.",
+                    severity="warning",
+                )
+                return
+            for draft in tuple(self.joplin_panel_state.drafts_by_scope.values()):
+                if not draft.dirty:
+                    continue
+                try:
+                    response = await self.api_client().put(
+                        f"/v1/joplin/edits/{quote(draft.edit_id, safe='')}/draft",
+                        json={"title": draft.title, "body": draft.body},
+                        headers=auth_headers(self.token),
+                        timeout=10,
+                    )
+                    response.raise_for_status()
+                except Exception as exc:
+                    self.notify(
+                        f"Unable to persist Joplin draft before exit: {exc}",
+                        severity="error",
+                    )
+                    self.joplin_quit_armed_until = 0.0
+                    return
+        await super().action_quit()
 
     def action_settings(self) -> None:
         self.push_screen(
@@ -10799,6 +10896,15 @@ class AgentPBXTUI(App[None]):
             )
         if self.selected_agent_id and event.text_area.id == "editor":
             self.update_editor_dirty_state(self.selected_agent_id)
+        if (
+            self.selected_agent_id
+            and event.text_area.id == "joplin-body"
+            and not self.joplin_body_loading
+        ):
+            scope = self.joplin_selection_key(self.selected_agent_id)
+            draft = self.joplin_panel_state.update_draft(scope, event.text_area.text)
+            if draft is not None:
+                self.schedule_joplin_draft_persist(self.selected_agent_id)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "files-search-query":
@@ -11087,6 +11193,25 @@ class AgentPBXTUI(App[None]):
         return self.project_joplin_notes_url(
             self.joplin_project_for_agent(agent_id),
             note_id,
+        )
+
+    def joplin_edit_url_for_agent(self, agent_id: str, note_id: str) -> str:
+        return f"{self.joplin_notes_url_for_agent(agent_id, note_id)}/edit"
+
+    def joplin_conflict_url_for_agent(
+        self,
+        agent_id: str,
+        conflict_id: str,
+    ) -> str:
+        if self.use_agent_joplin_note_scope(agent_id):
+            return (
+                f"/v1/agents/{quote(agent_id, safe='')}/joplin/conflicts/"
+                f"{quote(conflict_id, safe='')}/resolve"
+            )
+        project = quote(self.joplin_project_for_agent(agent_id), safe="")
+        return (
+            f"/v1/projects/{project}/joplin/conflicts/"
+            f"{quote(conflict_id, safe='')}/resolve"
         )
 
     def joplin_scope_label_for_agent(self, agent_id: str) -> str:
@@ -13288,12 +13413,26 @@ class AgentPBXTUI(App[None]):
             "joplin-log-stop": "log-stop",
             "joplin-sync": "sync",
             "joplin-save": "save",
+            "joplin-edit": "edit",
+            "joplin-preview": "preview",
         }
         joplin_action = joplin_button_actions.get(str(event.button.id or ""))
         if joplin_action is not None:
             agent_id = self.joplin_target_agent_id()
             if agent_id:
                 await self.joplin_action_for_agent(agent_id, joplin_action)
+            return
+        joplin_conflict_actions = {
+            "joplin-conflict-merge": "review_merge",
+            "joplin-conflict-keep": "keep_joplin",
+            "joplin-conflict-copy": "save_conflict_copy",
+            "joplin-conflict-overwrite": "overwrite",
+        }
+        conflict_resolution = joplin_conflict_actions.get(str(event.button.id or ""))
+        if conflict_resolution is not None:
+            agent_id = self.joplin_target_agent_id()
+            if agent_id:
+                await self.resolve_joplin_conflict(agent_id, conflict_resolution)
             return
         if event.button.id == "campaign-refresh":
             if self.selected_agent_id:
@@ -14409,8 +14548,8 @@ class AgentPBXTUI(App[None]):
             return False
         cwd = str(metadata.get("cwd") or self.operator_cwd()).strip() or os.getcwd()
         codex_command = self.operator_codex_command()
-        session_name = self.operator_tmux_session_name()
         mcp_url = agent_pbx_mcp_url(self.server)
+        session_name = self.operator_tmux_session_name()
         history = self.operator_session_history_metadata(
             agent_id,
             include=[*candidates[:3], target],
@@ -14521,7 +14660,6 @@ class AgentPBXTUI(App[None]):
             return False
         codex_command = self.operator_codex_command()
         mcp_url = agent_pbx_mcp_url(self.server)
-        session_name = self.operator_tmux_session_name()
         fork_track_id = self.normalize_operator_fork_track_id(
             str(metadata.get("fork_track_id") or DEFAULT_OPERATOR_FORK_TRACK_ID)
         )
@@ -23510,24 +23648,87 @@ class AgentPBXTUI(App[None]):
         _ = message
         return agent_id
 
+    async def update_joplin_reader(self, markdown: str) -> None:
+        reader = self.query_one_or_none("#joplin-reader", Markdown)
+        if reader is None:
+            return
+        setattr(reader, "source_markdown", markdown)
+        await reader.update(markdown)
+
+    async def render_joplin_mode(
+        self,
+        agent_id: str,
+        *,
+        note: dict[str, Any] | None = None,
+    ) -> None:
+        scope = self.joplin_selection_key(agent_id)
+        mode = self.joplin_panel_state.mode_for(scope)
+        draft = self.joplin_panel_state.draft_for(scope)
+        reader = self.query_one_or_none("#joplin-reader", Markdown)
+        body = self.query_one_or_none("#joplin-body", TextArea)
+        conflict_actions = self.query_one_or_none("#joplin-conflict-actions", Horizontal)
+        if reader is None or body is None:
+            return
+        active_note = note
+        if active_note is None:
+            note_id = self.selected_joplin_note_for_agent(agent_id)
+            active_note = self.joplin_notes_by_agent.get(scope, {}).get(note_id or "")
+        if mode in {"edit", "conflict"} and draft is not None:
+            reader.styles.display = "none"
+            body.styles.display = "block"
+            if body.text != draft.body:
+                self.joplin_body_loading = True
+                body.text = draft.body
+                self.joplin_body_loading = False
+            body.read_only = False
+            body.focus()
+        else:
+            body.styles.display = "none"
+            reader.styles.display = "block"
+            markdown = (
+                draft.body
+                if mode == "preview" and draft is not None
+                else str((active_note or {}).get("body") or "")
+            )
+            await self.update_joplin_reader(markdown or "_Empty Joplin note._")
+        if conflict_actions is not None:
+            conflict_actions.styles.display = (
+                "block" if draft is not None and draft.conflict_id else "none"
+            )
+        status = self.query_one_or_none("#joplin-status", Static)
+        if status is not None and active_note is not None:
+            dirty = " · dirty draft" if draft and draft.dirty else ""
+            status.update(
+                f"Joplin {mode}: {active_note.get('title') or active_note.get('id')}{dirty}"
+            )
+
     async def load_joplin_notes(self, agent_id: str) -> None:
         await self.refresh_joplin_status()
         table = self.query_one_or_none("#joplin-notes", DataTable)
         body = self.query_one_or_none("#joplin-body", TextArea)
-        if table is None or body is None:
+        reader = self.query_one_or_none("#joplin-reader", Markdown)
+        if table is None or body is None or reader is None:
             return
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        draft = self.joplin_panel_state.draft_for(cache_agent_id)
         generation_resource = f"joplin-notes:{cache_agent_id}"
         generation = self.async_generations.start(generation_resource)
         if not self.joplin_configured:
             table.clear()
-            body.text = self.format_joplin_unavailable(self.joplin_status)
+            await self.update_joplin_reader(
+                self.format_joplin_unavailable(self.joplin_status)
+            )
             return
         if not self.joplin_available:
             table.clear()
-            body.text = self.format_joplin_unavailable(self.joplin_status)
+            await self.update_joplin_reader(
+                self.format_joplin_unavailable(self.joplin_status)
+            )
             return
-        body.text = f"Loading Joplin notes for {self.joplin_scope_label_for_agent(agent_id)}..."
+        if not (draft and draft.dirty):
+            await self.update_joplin_reader(
+                f"Loading Joplin notes for {self.joplin_scope_label_for_agent(agent_id)}..."
+            )
         try:
             response = await self.api_client().get(
                 self.joplin_notes_url_for_agent(agent_id),
@@ -23540,7 +23741,7 @@ class AgentPBXTUI(App[None]):
             if not self.async_generations.current(generation_resource, generation):
                 return
             table.clear()
-            body.text = (
+            await self.update_joplin_reader(
                 f"Unable to load Joplin notes for "
                 f"{self.joplin_scope_label_for_agent(agent_id)}: {exc}"
             )
@@ -23548,6 +23749,9 @@ class AgentPBXTUI(App[None]):
         if not self.async_generations.current(generation_resource, generation):
             return
         self.render_joplin_notes(agent_id, notes)
+        if draft and draft.dirty:
+            await self.render_joplin_mode(agent_id)
+            return
         if notes:
             selected_note_id = self.selected_joplin_note_for_agent(agent_id)
             note_id = (
@@ -23559,7 +23763,7 @@ class AgentPBXTUI(App[None]):
             await self.select_joplin_note(note_id, agent_id=agent_id)
         else:
             self.set_selected_joplin_note_for_agent(agent_id, None)
-            body.text = "No project-scoped Joplin notes yet."
+            await self.update_joplin_reader("No project-scoped Joplin notes yet.")
 
     def render_joplin_notes(
         self,
@@ -23623,10 +23827,16 @@ class AgentPBXTUI(App[None]):
         if not agent_id:
             return
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        draft = self.joplin_panel_state.draft_for(cache_agent_id)
+        if draft is not None and draft.dirty and draft.note_id != note_id:
+            self.notify(
+                "Save or resolve the current Joplin draft before selecting another note.",
+                severity="warning",
+            )
+            return
         generation_resource = f"joplin-note:{cache_agent_id}"
         generation = self.async_generations.start(generation_resource)
-        body = self.query_one("#joplin-body", TextArea)
-        body.text = f"Loading Joplin note {note_id}..."
+        await self.update_joplin_reader(f"Loading Joplin note {note_id}...")
         try:
             response = await self.api_client().get(
                 self.joplin_notes_url_for_agent(agent_id, note_id),
@@ -23638,7 +23848,9 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             if not self.async_generations.current(generation_resource, generation):
                 return
-            body.text = f"Unable to load Joplin note {note_id}: {exc}"
+            await self.update_joplin_reader(
+                f"Unable to load Joplin note {note_id}: {exc}"
+            )
             return
         if not self.async_generations.current(generation_resource, generation):
             return
@@ -23646,7 +23858,9 @@ class AgentPBXTUI(App[None]):
         self.joplin_notes_by_agent.setdefault(cache_agent_id, {})[note_id] = note
         if cache_agent_id != agent_id:
             self.joplin_notes_by_agent.setdefault(agent_id, {})[note_id] = note
-        body.text = str(note.get("body") or "")
+        if draft is None or draft.note_id != note_id:
+            self.joplin_panel_state.set_mode(cache_agent_id, "read")
+        await self.render_joplin_mode(agent_id, note=note)
         table = self.query_one_or_none("#joplin-notes", DataTable)
         if table is not None and note_id in self.joplin_notes_by_agent.get(cache_agent_id, {}):
             try:
@@ -23667,6 +23881,14 @@ class AgentPBXTUI(App[None]):
 
     def open_joplin_title_modal(self, agent_id: str, *, action: str) -> None:
         note_id = self.selected_joplin_note_for_agent(agent_id)
+        scope = self.joplin_selection_key(agent_id)
+        draft = self.joplin_panel_state.draft_for(scope)
+        if action == "rename" and draft is not None and draft.dirty:
+            self.notify(
+                "Save or resolve the current Joplin draft before renaming.",
+                severity="warning",
+            )
+            return
         if action == "rename" and not note_id:
             self.notify("Select a Joplin note before renaming.", severity="warning")
             return
@@ -23737,9 +23959,25 @@ class AgentPBXTUI(App[None]):
             self.notify("Select a Joplin note before renaming.", severity="warning")
             return
         try:
+            edit_response = await self.api_client().post(
+                self.joplin_edit_url_for_agent(agent_id, note_id),
+                json={"client_id": self.tmux_terminal_client_id},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            edit_response.raise_for_status()
+            edit_payload = edit_response.json()
+            edit = edit_payload.get("edit", {})
+            note = edit_payload.get("note", {})
             response = await self.api_client().put(
                 self.joplin_notes_url_for_agent(agent_id, note_id),
-                json={"title": title.strip()},
+                json={
+                    "title": title.strip(),
+                    "base_revision": note.get("revision"),
+                    "base_title": note.get("title"),
+                    "base_body": note.get("body"),
+                    "edit_id": edit.get("edit_id"),
+                },
                 headers=auth_headers(self.token),
                 timeout=20,
             )
@@ -23782,6 +24020,141 @@ class AgentPBXTUI(App[None]):
         self.notify("Joplin note deleted.")
         await self.load_joplin_notes(agent_id)
 
+    async def begin_joplin_edit(self, agent_id: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
+        note_id = self.selected_joplin_note_for_agent(agent_id)
+        if not note_id:
+            self.notify("Select a Joplin note before editing.", severity="warning")
+            return
+        scope = self.joplin_selection_key(agent_id)
+        existing = self.joplin_panel_state.draft_for(scope)
+        if existing is not None and existing.note_id == note_id:
+            self.joplin_panel_state.set_mode(scope, "edit")
+            await self.render_joplin_mode(agent_id)
+            return
+        try:
+            response = await self.api_client().post(
+                self.joplin_edit_url_for_agent(agent_id, note_id),
+                json={"client_id": self.tmux_terminal_client_id},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            edit = payload.get("edit") if isinstance(payload, dict) else None
+            note = payload.get("note") if isinstance(payload, dict) else None
+            conflict = payload.get("conflict") if isinstance(payload, dict) else None
+            if not isinstance(edit, dict) or not isinstance(note, dict):
+                raise ValueError("invalid Joplin edit response")
+        except Exception as exc:
+            self.notify(f"Joplin edit start failed: {exc}", severity="error")
+            return
+        draft = self.joplin_panel_state.begin_edit(scope, edit=edit, note=note)
+        if isinstance(conflict, dict):
+            draft.conflict_id = str(conflict.get("conflict_id") or "") or None
+            draft.merged_title = str(conflict.get("merged_title") or "")
+            draft.merged_body = str(conflict.get("merged_body") or "")
+            self.joplin_panel_state.set_mode(scope, "conflict")
+        self.joplin_notes_by_agent.setdefault(scope, {})[note_id] = note
+        self.joplin_body_loading = True
+        self.query_one("#joplin-body", TextArea).text = draft.body
+        self.joplin_body_loading = False
+        await self.render_joplin_mode(agent_id, note=note)
+
+    async def preview_joplin_draft(self, agent_id: str) -> None:
+        scope = self.joplin_selection_key(agent_id)
+        draft = self.joplin_panel_state.draft_for(scope)
+        if draft is None:
+            self.notify("Start editing a Joplin note before previewing.", severity="warning")
+            return
+        body = self.query_one("#joplin-body", TextArea)
+        self.joplin_panel_state.update_draft(scope, body.text)
+        mode = self.joplin_panel_state.mode_for(scope)
+        self.joplin_panel_state.set_mode(scope, "edit" if mode == "preview" else "preview")
+        await self.render_joplin_mode(agent_id)
+
+    def schedule_joplin_draft_persist(self, agent_id: str) -> None:
+        if self.joplin_draft_timer is not None:
+            self.joplin_draft_timer.stop()
+        self.joplin_draft_timer = self.set_timer(
+            0.5,
+            lambda agent_id=agent_id: self.run_async_worker(
+                lambda agent_id=agent_id: self.persist_joplin_draft(agent_id),
+                name="joplin-draft-persist",
+                exclusive=True,
+            ),
+        )
+
+    async def persist_joplin_draft(self, agent_id: str) -> None:
+        scope = self.joplin_selection_key(agent_id)
+        draft = self.joplin_panel_state.draft_for(scope)
+        if draft is None:
+            return
+        try:
+            response = await self.api_client().put(
+                f"/v1/joplin/edits/{quote(draft.edit_id, safe='')}/draft",
+                json={"title": draft.title, "body": draft.body},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(
+                f"Joplin draft remains local; daemon persistence failed: {exc}",
+                severity="warning",
+            )
+
+    async def resolve_joplin_conflict(
+        self,
+        agent_id: str,
+        resolution: str,
+    ) -> None:
+        scope = self.joplin_selection_key(agent_id)
+        draft = self.joplin_panel_state.draft_for(scope)
+        if draft is None or not draft.conflict_id:
+            self.notify("No open Joplin conflict is selected.", severity="warning")
+            return
+        if resolution == "overwrite":
+            armed_until = self.joplin_overwrite_armed_until.get(draft.conflict_id, 0.0)
+            if time.monotonic() > armed_until:
+                self.joplin_overwrite_armed_until[draft.conflict_id] = time.monotonic() + 5.0
+                self.notify(
+                    "Overwrite will replace the current Joplin note. Select Overwrite again within 5 seconds.",
+                    severity="warning",
+                )
+                return
+        try:
+            response = await self.api_client().post(
+                self.joplin_conflict_url_for_agent(agent_id, draft.conflict_id),
+                json={"resolution": resolution},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self.notify(f"Joplin conflict resolution failed: {exc}", severity="error")
+            return
+        if resolution == "review_merge":
+            edit = payload.get("edit") if isinstance(payload, dict) else None
+            note = payload.get("note") if isinstance(payload, dict) else None
+            merged = payload.get("draft") if isinstance(payload, dict) else None
+            if isinstance(edit, dict) and isinstance(note, dict) and isinstance(merged, dict):
+                rebased = self.joplin_panel_state.begin_edit(scope, edit=edit, note=note)
+                rebased.title = str(merged.get("title") or rebased.title)
+                rebased.body = str(merged.get("body") or rebased.body)
+                rebased.dirty = True
+                self.joplin_body_loading = True
+                self.query_one("#joplin-body", TextArea).text = rebased.body
+                self.joplin_body_loading = False
+                await self.render_joplin_mode(agent_id, note=note)
+                self.notify("Merged draft opened for review. Conflict markers require review.")
+                return
+        self.joplin_panel_state.finish_edit(scope)
+        self.notify(f"Joplin conflict resolved: {resolution.replace('_', ' ')}.")
+        await self.load_joplin_notes(agent_id)
+
     async def save_joplin_note(self, agent_id: str) -> None:
         if not await self.ensure_joplin_available():
             return
@@ -23789,18 +24162,56 @@ class AgentPBXTUI(App[None]):
         if not note_id:
             self.notify("Select a Joplin note before saving.", severity="warning")
             return
+        scope = self.joplin_selection_key(agent_id)
+        draft = self.joplin_panel_state.draft_for(scope)
+        if draft is None or draft.note_id != note_id:
+            self.notify("Choose Edit before saving a Joplin note.", severity="warning")
+            return
         body = self.query_one("#joplin-body", TextArea)
+        self.joplin_panel_state.update_draft(scope, body.text)
         try:
             response = await self.api_client().put(
                 self.joplin_notes_url_for_agent(agent_id, note_id),
-                json={"body": body.text},
+                json={
+                    "title": draft.title,
+                    "body": draft.body,
+                    "base_revision": draft.base_revision,
+                    "base_title": draft.base_title,
+                    "base_body": draft.base_body,
+                    "edit_id": draft.edit_id,
+                },
                 headers=auth_headers(self.token),
                 timeout=20,
             )
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail: dict[str, Any] = {}
+            try:
+                payload = exc.response.json()
+                raw_detail = payload.get("detail") if isinstance(payload, dict) else None
+                if isinstance(raw_detail, dict):
+                    detail = raw_detail
+            except ValueError:
+                pass
+            if detail.get("code") == "JOPLIN_NOTE_CONFLICT":
+                draft.conflict_id = str(detail.get("conflict_id") or "") or None
+                merged = detail.get("merged")
+                if isinstance(merged, dict):
+                    draft.merged_title = str(merged.get("title") or "")
+                    draft.merged_body = str(merged.get("body") or "")
+                self.joplin_panel_state.set_mode(scope, "conflict")
+                await self.render_joplin_mode(agent_id)
+                self.notify(
+                    "Joplin changed externally. Review merge, keep Joplin, save a conflict copy, or explicitly overwrite.",
+                    severity="warning",
+                )
+                return
+            self.notify(f"Joplin save failed: {exc}", severity="error")
+            return
         except Exception as exc:
             self.notify(f"Joplin save failed: {exc}", severity="error")
             return
+        self.joplin_panel_state.finish_edit(scope)
         self.notify("Joplin note saved.")
         await self.load_joplin_notes(agent_id)
 

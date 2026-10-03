@@ -1,4 +1,3 @@
-import asyncio
 import inspect
 import json
 from pathlib import Path
@@ -88,6 +87,7 @@ from textual.widgets import (
     Checkbox,
     DataTable,
     Input,
+    Markdown,
     RichLog,
     Select,
     Static,
@@ -1149,6 +1149,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         joplin_status = app.query_one("#joplin-status", Static)
         joplin_notes = app.query_one("#joplin-notes", DataTable)
         joplin_body = app.query_one("#joplin-body", TextArea)
+        joplin_reader = app.query_one("#joplin-reader", Markdown)
         joplin_new = app.query_one("#joplin-new", Button)
         joplin_rename = app.query_one("#joplin-rename", Button)
         joplin_delete = app.query_one("#joplin-delete", Button)
@@ -1158,6 +1159,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         joplin_log_stop = app.query_one("#joplin-log-stop", Button)
         joplin_sync = app.query_one("#joplin-sync", Button)
         joplin_save = app.query_one("#joplin-save", Button)
+        joplin_edit = app.query_one("#joplin-edit", Button)
+        joplin_preview = app.query_one("#joplin-preview", Button)
         joplin_hotkeys = app.query_one("#joplin-hotkeys", Static)
         composer = app.query_one("#composer")
         agent_id = app.query_one("#agent-id", Input)
@@ -1222,6 +1225,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert str(joplin_status.renderable).startswith("Joplin:")
         assert joplin_notes.cursor_type == "row"
         assert joplin_body.read_only is False
+        assert joplin_reader is not None
         assert joplin_new.label.plain == "New n"
         assert joplin_rename.label.plain == "Ren m"
         assert joplin_delete.label.plain == "Del d"
@@ -1231,6 +1235,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert joplin_log_stop.label.plain == "LOG- x"
         assert joplin_sync.label.plain == "Sync u"
         assert joplin_save.label.plain == "Save s"
+        assert joplin_edit.label.plain == "Edit e"
+        assert joplin_preview.label.plain == "Preview p"
         assert "Ctrl+G" in str(joplin_hotkeys.renderable)
         assert "#thread {\n        height: 7;" in app.CSS
         assert "#thread-detail {\n        height: 1fr;" in app.CSS
@@ -1243,7 +1249,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
         assert "#joplin-notes {\n        height: 8;" in app.CSS
         assert "#joplin-body {\n        height: 1fr;" in app.CSS
-        assert "#joplin-actions {\n        height: 7;" in app.CSS
+        assert "#joplin-actions {\n        height: 10;" in app.CSS
         assert "#tmux-message {\n        height: 8;" in app.CSS
         assert "Notification Options" not in app.CSS
         assert message.soft_wrap is True
@@ -5211,7 +5217,8 @@ async def test_tui_joplin_unavailable_does_not_call_note_endpoints() -> None:
 
         assert app.joplin_configured is True
         assert app.joplin_available is False
-        assert "Connection refused" in app.query_one("#joplin-body", TextArea).text
+        reader = app.query_one("#joplin-reader", Markdown)
+        assert "Connection refused" in str(getattr(reader, "source_markdown", ""))
         assert not any("/joplin/notes" in path for path in calls)
 
 
@@ -8005,6 +8012,7 @@ async def test_tui_joplin_rename_and_save_use_scoped_note_selection() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     puts: list[tuple[str, dict[str, object]]] = []
     loaded: list[str] = []
+    edit_starts: list[str] = []
 
     class Response:
         def __init__(self, payload: object) -> None:
@@ -8021,6 +8029,23 @@ async def test_tui_joplin_rename_and_save_use_scoped_note_selection() -> None:
             if path == "/v1/joplin/status":
                 return Response({"configured": True, "available": True})
             raise AssertionError(f"unexpected GET {path}")
+
+        async def post(self, path: str, **_kwargs: object) -> Response:
+            edit_starts.append(path)
+            index = len(edit_starts)
+            title = "Old alpha" if index == 1 else "Renamed alpha"
+            return Response(
+                {
+                    "edit": {"edit_id": f"edit-{index}", "base_revision": f"rev-{index}"},
+                    "note": {
+                        "id": "note-alpha",
+                        "title": title,
+                        "body": "Base body",
+                        "revision": f"rev-{index}",
+                    },
+                    "conflict": None,
+                }
+            )
 
         async def put(self, path: str, **kwargs: object) -> Response:
             puts.append((path, dict(kwargs.get("json") or {})))
@@ -8044,18 +8069,37 @@ async def test_tui_joplin_rename_and_save_use_scoped_note_selection() -> None:
         app.selected_joplin_note_id = "note-beta"
 
         await app.rename_joplin_note("agent-1", title="Renamed alpha")
+        await app.begin_joplin_edit("agent-1")
         app.query_one("#joplin-body", TextArea).text = "Updated body"
         await app.save_joplin_note("agent-1")
 
-    assert puts == [
+    note_puts = [item for item in puts if "/joplin/notes/" in item[0]]
+    assert note_puts == [
         (
             "/v1/projects/alpha/joplin/notes/note-alpha",
-            {"title": "Renamed alpha"},
+            {
+                "title": "Renamed alpha",
+                "base_revision": "rev-1",
+                "base_title": "Old alpha",
+                "base_body": "Base body",
+                "edit_id": "edit-1",
+            },
         ),
         (
             "/v1/projects/alpha/joplin/notes/note-alpha",
-            {"body": "Updated body"},
+            {
+                "title": "Renamed alpha",
+                "body": "Updated body",
+                "base_revision": "rev-2",
+                "base_title": "Renamed alpha",
+                "base_body": "Base body",
+                "edit_id": "edit-2",
+            },
         ),
+    ]
+    assert edit_starts == [
+        "/v1/projects/alpha/joplin/notes/note-alpha/edit",
+        "/v1/projects/alpha/joplin/notes/note-alpha/edit",
     ]
     assert loaded == ["agent-1", "agent-1"]
 
@@ -8064,6 +8108,7 @@ async def test_tui_root_operator_joplin_save_uses_agent_note_scope() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     puts: list[tuple[str, dict[str, object]]] = []
     loaded: list[str] = []
+    edit_starts: list[str] = []
 
     class Response:
         def __init__(self, payload: object) -> None:
@@ -8080,6 +8125,23 @@ async def test_tui_root_operator_joplin_save_uses_agent_note_scope() -> None:
             if path == "/v1/joplin/status":
                 return Response({"configured": True, "available": True})
             raise AssertionError(f"unexpected GET {path}")
+
+        async def post(self, path: str, **_kwargs: object) -> Response:
+            edit_starts.append(path)
+            index = len(edit_starts)
+            title = "Old operator" if index == 1 else "Operator note"
+            return Response(
+                {
+                    "edit": {"edit_id": f"root-edit-{index}", "base_revision": f"root-rev-{index}"},
+                    "note": {
+                        "id": "note-root",
+                        "title": title,
+                        "body": "Operator base",
+                        "revision": f"root-rev-{index}",
+                    },
+                    "conflict": None,
+                }
+            )
 
         async def put(self, path: str, **kwargs: object) -> Response:
             puts.append((path, dict(kwargs.get("json") or {})))
@@ -8108,18 +8170,37 @@ async def test_tui_root_operator_joplin_save_uses_agent_note_scope() -> None:
         app.set_selected_joplin_note_for_agent("operator-0", "note-root")
 
         await app.rename_joplin_note("operator-0", title="Operator note")
+        await app.begin_joplin_edit("operator-0")
         app.query_one("#joplin-body", TextArea).text = "Operator body"
         await app.save_joplin_note("operator-0")
 
-    assert puts == [
+    note_puts = [item for item in puts if "/joplin/notes/" in item[0]]
+    assert note_puts == [
         (
             "/v1/agents/operator-0/joplin/notes/note-root",
-            {"title": "Operator note"},
+            {
+                "title": "Operator note",
+                "base_revision": "root-rev-1",
+                "base_title": "Old operator",
+                "base_body": "Operator base",
+                "edit_id": "root-edit-1",
+            },
         ),
         (
             "/v1/agents/operator-0/joplin/notes/note-root",
-            {"body": "Operator body"},
+            {
+                "title": "Operator note",
+                "body": "Operator body",
+                "base_revision": "root-rev-2",
+                "base_title": "Operator note",
+                "base_body": "Operator base",
+                "edit_id": "root-edit-2",
+            },
         ),
+    ]
+    assert edit_starts == [
+        "/v1/agents/operator-0/joplin/notes/note-root/edit",
+        "/v1/agents/operator-0/joplin/notes/note-root/edit",
     ]
     assert loaded == ["operator-0", "operator-0"]
 

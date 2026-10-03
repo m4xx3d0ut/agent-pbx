@@ -1499,6 +1499,13 @@ class JoplinSyncJobResponse(BaseModel):
     started_at: float | None = None
     finished_at: float | None = None
     attempts: int = 0
+    profile_key: str = "default"
+    note_ids: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+    generation: int = 1
+    progress: dict[str, Any] = Field(default_factory=dict)
+    error_code: str | None = None
+    coalesced: bool = False
 
 
 class JoplinSyncStatusResponse(BaseModel):
@@ -1519,10 +1526,14 @@ class JoplinNoteSummary(BaseModel):
     title: str
     created_time: int | float | None = None
     updated_time: int | float | None = None
+    user_updated_time: int | float | None = None
 
 
 class JoplinNoteResponse(JoplinNoteSummary):
     body: str = ""
+    revision: str = ""
+    title_hash: str = ""
+    body_hash: str = ""
 
 
 class JoplinCopyRequest(BaseModel):
@@ -1540,6 +1551,35 @@ class JoplinNoteCreateRequest(BaseModel):
 class JoplinNoteUpdateRequest(BaseModel):
     title: str | None = Field(default=None, max_length=240)
     body: str | None = None
+    base_revision: str | None = Field(default=None, max_length=128)
+    base_title: str | None = Field(default=None, max_length=240)
+    base_body: str | None = None
+    edit_id: str | None = Field(default=None, max_length=120)
+    force: bool = False
+
+
+class JoplinEditStartRequest(BaseModel):
+    client_id: str = Field(min_length=1, max_length=160)
+
+
+class JoplinEditDraftRequest(BaseModel):
+    title: str = Field(max_length=240)
+    body: str
+
+
+class JoplinEditSessionResponse(BaseModel):
+    edit: dict[str, Any]
+    note: JoplinNoteResponse
+    conflict: dict[str, Any] | None = None
+
+
+class JoplinConflictResolveRequest(BaseModel):
+    resolution: Literal[
+        "review_merge",
+        "keep_joplin",
+        "save_conflict_copy",
+        "overwrite",
+    ]
 
 
 class JoplinLogAppendRequest(BaseModel):

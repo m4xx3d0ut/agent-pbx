@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import fcntl
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -39,9 +42,18 @@ TERMINAL_LOG_STATUSES = {
 
 
 class JoplinApiError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: str = "JOPLIN_API_ERROR",
+        retryable: bool = True,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.code = code
+        self.retryable = retryable
 
     @classmethod
     def from_response(cls, path: str, response: httpx.Response) -> JoplinApiError:
@@ -54,14 +66,130 @@ class JoplinApiError(RuntimeError):
             raw_error = payload.get("error") or payload.get("message")
             if raw_error:
                 message = str(raw_error)
+        code = (
+            "JOPLIN_AUTH_ERROR"
+            if response.status_code in {401, 403}
+            else "JOPLIN_RATE_LIMITED"
+            if response.status_code == 429
+            else "JOPLIN_NOTE_NOT_FOUND"
+            if response.status_code == 404
+            else "JOPLIN_API_ERROR"
+        )
         return cls(
             f"Joplin API {response.status_code} for {path}: {message}",
             status_code=response.status_code,
+            code=code,
+            retryable=response.status_code not in {401, 403, 404},
         )
 
 
 class JoplinScopeError(ValueError):
     pass
+
+
+class JoplinConflictError(RuntimeError):
+    """Raised when a note changed after the editor loaded its base revision."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        note_id: str,
+        base_revision: str,
+        current: dict[str, Any],
+        local_title: str | None,
+        local_body: str | None,
+        base_title: str | None = None,
+        base_body: str | None = None,
+        conflict_id: str | None = None,
+        merged_title: str | None = None,
+        merged_body: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.note_id = note_id
+        self.base_revision = base_revision
+        self.current = current
+        self.local_title = local_title
+        self.local_body = local_body
+        self.base_title = base_title
+        self.base_body = base_body
+        self.conflict_id = conflict_id
+        self.merged_title = merged_title
+        self.merged_body = merged_body
+
+    def as_error(self) -> dict[str, Any]:
+        return {
+            "code": "JOPLIN_NOTE_CONFLICT",
+            "message": str(self),
+            "retryable": False,
+            "note_id": self.note_id,
+            "base_revision": self.base_revision,
+            "current": self.current,
+            "local": {
+                "title": self.local_title,
+                "body": self.local_body,
+            },
+            "base": {
+                "title": self.base_title,
+                "body": self.base_body,
+            },
+            "conflict_id": self.conflict_id,
+            "merged": {
+                "title": self.merged_title,
+                "body": self.merged_body,
+            },
+        }
+
+
+class JoplinSyncLockError(JoplinApiError):
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            code="JOPLIN_SYNC_LOCKED",
+            retryable=True,
+        )
+
+
+def joplin_note_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def joplin_note_revision(note: dict[str, Any]) -> str:
+    payload = {
+        "id": str(note.get("id") or ""),
+        "title": str(note.get("title") or ""),
+        "body": str(note.get("body") or ""),
+        "updated_time": note.get("updated_time"),
+        "user_updated_time": note.get("user_updated_time"),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def merge_joplin_text(base: str, local: str, current: str) -> tuple[str, bool]:
+    """Return a conservative three-way merge and whether conflicts remain."""
+
+    if local == current:
+        return local, False
+    if local == base:
+        return current, False
+    if current == base:
+        return local, False
+    return (
+        "\n".join(
+            (
+                "<<<<<<< LOCAL DRAFT",
+                local,
+                "||||||| EDIT BASE",
+                base,
+                "=======",
+                current,
+                ">>>>>>> CURRENT JOPLIN",
+            )
+        ),
+        True,
+    )
 
 
 @dataclass(frozen=True)
@@ -150,7 +278,9 @@ class JoplinService:
         notes = self._get_paginated(
             f"/folders/{folder_id}/notes",
             {
-                "fields": "id,parent_id,title,created_time,updated_time",
+                "fields": (
+                    "id,parent_id,title,created_time,updated_time,user_updated_time"
+                ),
                 "order_by": "updated_time",
                 "order_dir": "DESC",
             },
@@ -165,7 +295,10 @@ class JoplinService:
                 self._get_paginated(
                     f"/folders/{folder_id}/notes",
                     {
-                        "fields": "id,parent_id,title,created_time,updated_time",
+                        "fields": (
+                            "id,parent_id,title,created_time,updated_time,"
+                            "user_updated_time"
+                        ),
                         "order_by": "updated_time",
                         "order_dir": "DESC",
                     },
@@ -183,7 +316,12 @@ class JoplinService:
         note = self._request(
             "GET",
             f"/notes/{note_id}",
-            params={"fields": "id,parent_id,title,body,created_time,updated_time"},
+            params={
+                "fields": (
+                    "id,parent_id,title,body,created_time,updated_time,"
+                    "user_updated_time"
+                )
+            },
         )
         if str(note.get("parent_id") or "") != folder_id:
             raise JoplinScopeError("note is outside the selected agent's Joplin scope")
@@ -194,7 +332,12 @@ class JoplinService:
         note = self._request(
             "GET",
             f"/notes/{note_id}",
-            params={"fields": "id,parent_id,title,body,created_time,updated_time"},
+            params={
+                "fields": (
+                    "id,parent_id,title,body,created_time,updated_time,"
+                    "user_updated_time"
+                )
+            },
         )
         if str(note.get("parent_id") or "") not in folder_ids:
             raise JoplinScopeError("note is outside the selected project's Joplin scope")
@@ -228,8 +371,21 @@ class JoplinService:
         *,
         title: str | None = None,
         body: str | None = None,
+        base_revision: str | None = None,
+        base_title: str | None = None,
+        base_body: str | None = None,
+        force: bool = False,
     ) -> dict[str, Any]:
         existing = self.get_note_for_project(project, note_id)
+        self._assert_note_revision(
+            existing,
+            base_revision=base_revision,
+            title=title,
+            body=body,
+            base_title=base_title,
+            base_body=base_body,
+            force=force,
+        )
         payload: dict[str, Any] = {}
         if title is not None:
             payload["title"] = title
@@ -262,8 +418,21 @@ class JoplinService:
         *,
         title: str | None = None,
         body: str | None = None,
+        base_revision: str | None = None,
+        base_title: str | None = None,
+        base_body: str | None = None,
+        force: bool = False,
     ) -> dict[str, Any]:
         existing = self.get_note_for_agent(agent, note_id)
+        self._assert_note_revision(
+            existing,
+            base_revision=base_revision,
+            title=title,
+            body=body,
+            base_title=base_title,
+            base_body=base_body,
+            force=force,
+        )
         payload: dict[str, Any] = {}
         if title is not None:
             payload["title"] = title
@@ -500,16 +669,61 @@ class JoplinService:
                     timeout=timeout,
                     check=False,
                 )
+            except subprocess.TimeoutExpired as exc:
+                raise JoplinApiError(
+                    f"Joplin sync timed out after {timeout:.0f}s",
+                    code="JOPLIN_SYNC_TIMEOUT",
+                    retryable=True,
+                ) from exc
             except (OSError, subprocess.SubprocessError) as exc:
-                raise JoplinApiError(f"Joplin sync failed: {exc}") from exc
+                raise JoplinApiError(
+                    f"Joplin sync failed: {exc}",
+                    code="JOPLIN_SYNC_CLI_ERROR",
+                    retryable=True,
+                ) from exc
         if result.returncode != 0:
             message = (result.stderr or result.stdout).strip()
             raise JoplinApiError(
-                f"Joplin sync failed with exit code {result.returncode}: {message}"
+                f"Joplin sync failed with exit code {result.returncode}: {message}",
+                code="JOPLIN_SYNC_CLI_ERROR",
+                retryable=True,
             )
         sync_error = joplin_sync_error(result.stdout, result.stderr)
         if sync_error:
-            raise JoplinApiError(f"Joplin sync reported an error: {sync_error}")
+            raise JoplinApiError(
+                f"Joplin sync reported an error: {sync_error}",
+                code="JOPLIN_SYNC_CONFLICT"
+                if "conflict" in sync_error.lower()
+                else "JOPLIN_SYNC_CLI_ERROR",
+                retryable=True,
+            )
+
+    @staticmethod
+    def _assert_note_revision(
+        existing: dict[str, Any],
+        *,
+        base_revision: str | None,
+        title: str | None,
+        body: str | None,
+        base_title: str | None,
+        base_body: str | None,
+        force: bool,
+    ) -> None:
+        if force or not base_revision:
+            return
+        current_revision = str(existing.get("revision") or "")
+        if current_revision == base_revision:
+            return
+        raise JoplinConflictError(
+            "Joplin note changed after this edit began",
+            note_id=str(existing.get("id") or ""),
+            base_revision=base_revision,
+            current=existing,
+            local_title=title,
+            local_body=body,
+            base_title=base_title,
+            base_body=base_body,
+        )
 
     def sync_command(self) -> list[str]:
         joplin_bin = self.config.joplin_bin
@@ -556,7 +770,11 @@ class JoplinService:
             data = response.json()
             return data if isinstance(data, dict) else {"items": data}
         except httpx.HTTPError as exc:
-            raise JoplinApiError(f"Joplin API request failed for {path}: {exc}") from exc
+            raise JoplinApiError(
+                f"Joplin API request failed for {path}: {exc}",
+                code="JOPLIN_OFFLINE",
+                retryable=True,
+            ) from exc
         finally:
             if close_client:
                 client.close()
@@ -589,14 +807,19 @@ class JoplinService:
             "title": str(note.get("title") or ""),
             "created_time": note.get("created_time"),
             "updated_time": note.get("updated_time"),
+            "user_updated_time": note.get("user_updated_time"),
         }
 
     @classmethod
     def _note_response(cls, note: dict[str, Any]) -> dict[str, Any]:
-        return {
+        response = {
             **cls._note_summary(note),
             "body": str(note.get("body") or ""),
         }
+        response["title_hash"] = joplin_note_hash(response["title"])
+        response["body_hash"] = joplin_note_hash(response["body"])
+        response["revision"] = joplin_note_revision(response)
+        return response
 
 
 class JoplinGateway:
@@ -617,6 +840,14 @@ class JoplinGateway:
             else bool(getattr(service.config, "sync_on_write", False))
         )
         self.clock = clock
+        profile_source = str(
+            getattr(service.config, "profile", None)
+            or getattr(service.config, "api_url", None)
+            or "default"
+        )
+        self.profile_key = hashlib.sha256(profile_source.encode("utf-8")).hexdigest()[:16]
+        store_path = Path(getattr(store, "path", Path.cwd() / "agent-pbx.sqlite"))
+        self.sync_lock_path = store_path.parent / f"joplin-sync-{self.profile_key}.lock"
 
     @classmethod
     def from_config(
@@ -660,6 +891,7 @@ class JoplinGateway:
             reason=reason,
             agent_id=agent_id,
             note_id=note_id,
+            profile_key=self.profile_key,
         )
         self.store.append_event(
             "joplin_sync_queued",
@@ -674,7 +906,32 @@ class JoplinGateway:
         return job
 
     def run_sync_job(self, job: dict[str, Any]) -> None:
-        self.service.sync()
+        self.sync_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.sync_lock_path.open("a+", encoding="utf-8") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise JoplinSyncLockError(
+                    f"another Joplin sync owns profile {self.profile_key}"
+                ) from exc
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "sync_id": str(job.get("sync_id") or ""),
+                        "profile_key": self.profile_key,
+                        "started_at": self.clock(),
+                    },
+                    sort_keys=True,
+                )
+            )
+            lock_file.flush()
+            try:
+                self.service.sync()
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def list_notes_for_agent(self, agent: dict[str, Any]) -> list[dict[str, Any]]:
         return self.service.list_notes_for_agent(agent)
@@ -687,6 +944,51 @@ class JoplinGateway:
 
     def get_note_for_project(self, project: str, note_id: str) -> dict[str, Any]:
         return self.service.get_note_for_project(project, note_id)
+
+    def begin_edit_for_agent(
+        self,
+        agent: dict[str, Any],
+        note_id: str,
+        *,
+        client_id: str,
+    ) -> dict[str, Any]:
+        note = self.service.get_note_for_agent(agent, note_id)
+        edit = self.store.begin_joplin_edit(
+            client_id=client_id,
+            scope_key=f"agent:{agent.get('agent_id')}",
+            agent_id=str(agent.get("agent_id") or "") or None,
+            project=str(agent.get("project") or "") or None,
+            note=note,
+        )
+        return {
+            "edit": edit,
+            "note": note,
+            "conflict": self.store.get_open_joplin_conflict_for_edit(
+                str(edit["edit_id"])
+            ),
+        }
+
+    def begin_edit_for_project(
+        self,
+        project: str,
+        note_id: str,
+        *,
+        client_id: str,
+    ) -> dict[str, Any]:
+        note = self.service.get_note_for_project(project, note_id)
+        edit = self.store.begin_joplin_edit(
+            client_id=client_id,
+            scope_key=f"project:{project}",
+            project=project,
+            note=note,
+        )
+        return {
+            "edit": edit,
+            "note": note,
+            "conflict": self.store.get_open_joplin_conflict_for_edit(
+                str(edit["edit_id"])
+            ),
+        }
 
     def create_note_for_project(
         self,
@@ -709,15 +1011,42 @@ class JoplinGateway:
         *,
         title: str | None = None,
         body: str | None = None,
+        base_revision: str | None = None,
+        base_title: str | None = None,
+        base_body: str | None = None,
+        force: bool = False,
+        edit_id: str | None = None,
     ) -> dict[str, Any]:
-        note = self.service.update_note_for_project(
-            project,
-            note_id,
+        edit = self._prepare_edit(
+            edit_id,
+            note_id=note_id,
             title=title,
             body=body,
+            base_revision=base_revision,
+            base_title=base_title,
+            base_body=base_body,
         )
+        try:
+            update_kwargs: dict[str, Any] = {"title": title, "body": body}
+            if edit is not None or base_revision is not None or force:
+                update_kwargs.update(
+                    base_revision=str(edit.get("base_revision")) if edit else base_revision,
+                    base_title=str(edit.get("base_title")) if edit else base_title,
+                    base_body=str(edit.get("base_body")) if edit else base_body,
+                    force=force,
+                )
+            note = self.service.update_note_for_project(
+                project,
+                note_id,
+                **update_kwargs,
+            )
+        except JoplinConflictError as exc:
+            self._record_conflict(exc, edit, title=title, body=body)
+            raise
         if title is not None or body is not None:
             self._enqueue_write_sync("project_note_update", note_id=note_id)
+        if edit_id:
+            self.store.complete_joplin_edit(edit_id, status="saved")
         return note
 
     def delete_note_for_project(
@@ -736,16 +1065,193 @@ class JoplinGateway:
         *,
         title: str | None = None,
         body: str | None = None,
+        base_revision: str | None = None,
+        base_title: str | None = None,
+        base_body: str | None = None,
+        force: bool = False,
+        edit_id: str | None = None,
     ) -> dict[str, Any]:
-        note = self.service.update_note_for_agent(
-            agent,
-            note_id,
+        edit = self._prepare_edit(
+            edit_id,
+            note_id=note_id,
             title=title,
             body=body,
+            base_revision=base_revision,
+            base_title=base_title,
+            base_body=base_body,
         )
+        try:
+            update_kwargs = {"title": title, "body": body}
+            if edit is not None or base_revision is not None or force:
+                update_kwargs.update(
+                    base_revision=str(edit.get("base_revision")) if edit else base_revision,
+                    base_title=str(edit.get("base_title")) if edit else base_title,
+                    base_body=str(edit.get("base_body")) if edit else base_body,
+                    force=force,
+                )
+            note = self.service.update_note_for_agent(
+                agent,
+                note_id,
+                **update_kwargs,
+            )
+        except JoplinConflictError as exc:
+            self._record_conflict(exc, edit, title=title, body=body)
+            raise
         if title is not None or body is not None:
             self._enqueue_write_sync("note_update", agent=agent, note_id=note_id)
+        if edit_id:
+            self.store.complete_joplin_edit(edit_id, status="saved")
         return note
+
+    def resolve_edit_conflict(
+        self,
+        conflict_id: str,
+        *,
+        resolution: str,
+        agent: dict[str, Any] | None = None,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        conflict = self.store.get_joplin_conflict(conflict_id)
+        if conflict is None or conflict.get("status") != "open":
+            raise ValueError("Joplin conflict is not open")
+        edit = self.store.get_joplin_edit(str(conflict["edit_id"]))
+        if edit is None:
+            raise ValueError("Joplin edit session does not exist")
+        note_id = str(conflict["note_id"])
+        if agent is not None:
+            current = self.service.get_note_for_agent(agent, note_id)
+        elif project:
+            current = self.service.get_note_for_project(project, note_id)
+        else:
+            raise ValueError("Joplin conflict resolution requires a scope")
+        if resolution == "review_merge":
+            self.store.rebase_joplin_edit(
+                str(edit["edit_id"]),
+                current_note=current,
+                draft_title=str(conflict["merged_title"]),
+                draft_body=str(conflict["merged_body"]),
+            )
+            self.store.resolve_joplin_conflict(conflict_id, resolution=resolution)
+            return {
+                "resolution": resolution,
+                "note": current,
+                "edit": self.store.get_joplin_edit(str(edit["edit_id"])),
+                "draft": {
+                    "title": str(conflict["merged_title"]),
+                    "body": str(conflict["merged_body"]),
+                },
+            }
+        if resolution == "keep_joplin":
+            self.store.complete_joplin_edit(str(edit["edit_id"]), status="discarded")
+            self.store.resolve_joplin_conflict(conflict_id, resolution=resolution)
+            return {"resolution": resolution, "note": current}
+        if resolution == "save_conflict_copy":
+            conflict_title = f"{conflict['local_title']} (conflict copy)"
+            if agent is not None:
+                copy_note = self.create_note_for_agent(
+                    agent,
+                    event_type="CONFLICT",
+                    title=conflict_title,
+                    body=str(conflict["local_body"]),
+                )
+            else:
+                copy_note = self.create_note_for_project(
+                    str(project),
+                    title=conflict_title,
+                    body=str(conflict["local_body"]),
+                )
+            self.store.complete_joplin_edit(str(edit["edit_id"]), status="conflict_copy")
+            self.store.resolve_joplin_conflict(conflict_id, resolution=resolution)
+            return {"resolution": resolution, "note": current, "conflict_copy": copy_note}
+        if resolution == "overwrite":
+            if agent is not None:
+                note = self.service.update_note_for_agent(
+                    agent,
+                    note_id,
+                    title=str(conflict["local_title"]),
+                    body=str(conflict["local_body"]),
+                    force=True,
+                )
+                self._enqueue_write_sync("note_conflict_overwrite", agent=agent, note_id=note_id)
+            else:
+                note = self.service.update_note_for_project(
+                    str(project),
+                    note_id,
+                    title=str(conflict["local_title"]),
+                    body=str(conflict["local_body"]),
+                    force=True,
+                )
+                self._enqueue_write_sync("project_note_conflict_overwrite", note_id=note_id)
+            self.store.complete_joplin_edit(str(edit["edit_id"]), status="overwritten")
+            self.store.resolve_joplin_conflict(conflict_id, resolution=resolution)
+            self.store.append_event(
+                "joplin_conflict_overwritten",
+                {"conflict_id": conflict_id, "note_id": note_id},
+                str(agent.get("agent_id") if agent else project or note_id),
+            )
+            return {"resolution": resolution, "note": note}
+        raise ValueError(f"unsupported Joplin conflict resolution: {resolution}")
+
+    def _prepare_edit(
+        self,
+        edit_id: str | None,
+        *,
+        note_id: str,
+        title: str | None,
+        body: str | None,
+        base_revision: str | None,
+        base_title: str | None,
+        base_body: str | None,
+    ) -> dict[str, Any] | None:
+        if not edit_id:
+            return None
+        edit = self.store.get_joplin_edit(edit_id)
+        if edit is None or str(edit.get("note_id")) != note_id:
+            raise ValueError("Joplin edit session is stale or belongs to another note")
+        if edit.get("status") not in {"editing", "conflict"}:
+            raise ValueError("Joplin edit session is no longer active")
+        local_title = title if title is not None else str(edit.get("draft_title") or "")
+        local_body = body if body is not None else str(edit.get("draft_body") or "")
+        self.store.update_joplin_edit_draft(
+            edit_id,
+            title=local_title,
+            body=local_body,
+        )
+        return self.store.get_joplin_edit(edit_id)
+
+    def _record_conflict(
+        self,
+        exc: JoplinConflictError,
+        edit: dict[str, Any] | None,
+        *,
+        title: str | None,
+        body: str | None,
+    ) -> None:
+        if edit is None:
+            return
+        local_title = title if title is not None else str(edit.get("draft_title") or "")
+        local_body = body if body is not None else str(edit.get("draft_body") or "")
+        merged_title, _ = merge_joplin_text(
+            str(edit.get("base_title") or ""),
+            local_title,
+            str(exc.current.get("title") or ""),
+        )
+        merged_body, _ = merge_joplin_text(
+            str(edit.get("base_body") or ""),
+            local_body,
+            str(exc.current.get("body") or ""),
+        )
+        conflict = self.store.record_joplin_conflict(
+            edit_id=str(edit["edit_id"]),
+            current_note=exc.current,
+            local_title=local_title,
+            local_body=local_body,
+            merged_title=merged_title,
+            merged_body=merged_body,
+        )
+        exc.conflict_id = str(conflict["conflict_id"])
+        exc.merged_title = merged_title
+        exc.merged_body = merged_body
 
     def delete_note_for_agent(
         self,
