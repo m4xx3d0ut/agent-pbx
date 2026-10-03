@@ -82,6 +82,13 @@ class MCPDaemonConfig:
     db_path: Path | None = None
     token: str | None = None
     allow_insecure_lan: bool = False
+    tls_certfile: Path | None = None
+    tls_keyfile: Path | None = None
+    remote_audience: str = "agent-pbx"
+    remote_allowed_origins: tuple[str, ...] = ()
+    remote_max_clients: int = 16
+    remote_message_rate_per_minute: int = 120
+    remote_terminal_snapshots_enabled: bool = False
     debug: bool = False
     debug_smoke: bool = False
     log_level: str | None = None
@@ -133,11 +140,15 @@ class MCPDaemonConfig:
 
     @property
     def mcp_url(self) -> str:
-        return f"http://{self.host}:{self.port}/mcp"
+        return f"{self.url_scheme}://{self.host}:{self.port}/mcp"
 
     @property
     def health_url(self) -> str:
-        return f"http://{self.host}:{self.port}/healthz"
+        return f"{self.url_scheme}://{self.host}:{self.port}/healthz"
+
+    @property
+    def url_scheme(self) -> str:
+        return "https" if self.tls_certfile and self.tls_keyfile else "http"
 
     @property
     def codex_command(self) -> str:
@@ -159,6 +170,13 @@ def config_from_args(
     db_path: Path | None = None,
     token: str | None = None,
     allow_insecure_lan: bool = False,
+    tls_certfile: Path | None = None,
+    tls_keyfile: Path | None = None,
+    remote_audience: str = "agent-pbx",
+    remote_allowed_origins: tuple[str, ...] = (),
+    remote_max_clients: int = 16,
+    remote_message_rate_per_minute: int = 120,
+    remote_terminal_snapshots_enabled: bool = False,
     debug: bool = False,
     debug_smoke: bool = False,
     log_level: str | None = None,
@@ -193,6 +211,13 @@ def config_from_args(
         db_path=db_path,
         token=token,
         allow_insecure_lan=allow_insecure_lan,
+        tls_certfile=Path(tls_certfile).expanduser() if tls_certfile else None,
+        tls_keyfile=Path(tls_keyfile).expanduser() if tls_keyfile else None,
+        remote_audience=remote_audience,
+        remote_allowed_origins=remote_allowed_origins,
+        remote_max_clients=max(1, int(remote_max_clients)),
+        remote_message_rate_per_minute=max(1, int(remote_message_rate_per_minute)),
+        remote_terminal_snapshots_enabled=remote_terminal_snapshots_enabled,
         debug=debug,
         debug_smoke=debug_smoke,
         log_level=log_level,
@@ -273,6 +298,12 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "db_path": str(config.resolved_db_path),
         "token_configured": bool(config.token),
         "allow_insecure_lan": config.allow_insecure_lan,
+        "tls_configured": bool(config.tls_certfile and config.tls_keyfile),
+        "remote_audience": config.remote_audience,
+        "remote_allowed_origins": list(config.remote_allowed_origins),
+        "remote_max_clients": config.remote_max_clients,
+        "remote_message_rate_per_minute": config.remote_message_rate_per_minute,
+        "remote_terminal_snapshots_enabled": config.remote_terminal_snapshots_enabled,
         "debug": config.debug,
         "debug_smoke": config.debug_smoke,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
@@ -474,6 +505,12 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "github_ssh_command_override_count": len(
             config.github_ssh_command_overrides or {}
         ),
+        "tls_configured": bool(config.tls_certfile and config.tls_keyfile),
+        "remote_audience": config.remote_audience,
+        "remote_allowed_origins": list(config.remote_allowed_origins),
+        "remote_max_clients": config.remote_max_clients,
+        "remote_message_rate_per_minute": config.remote_message_rate_per_minute,
+        "remote_terminal_snapshots_enabled": config.remote_terminal_snapshots_enabled,
         "joplin_api_url": config.joplin_api_url,
         "joplin_notebook": config.joplin_notebook,
         "joplin_configured": bool(config.joplin_api_url and config.joplin_token),
@@ -503,6 +540,19 @@ def _serve_argv(config: MCPDaemonConfig) -> list[str]:
     ]
     if config.allow_insecure_lan:
         argv.append("--allow-insecure-lan")
+    if config.tls_certfile:
+        argv.extend(("--tls-certfile", str(config.tls_certfile)))
+    if config.tls_keyfile:
+        argv.extend(("--tls-keyfile", str(config.tls_keyfile)))
+    argv.extend(("--remote-audience", config.remote_audience))
+    for origin in config.remote_allowed_origins:
+        argv.extend(("--remote-allowed-origin", origin))
+    argv.extend(("--remote-max-clients", str(config.remote_max_clients)))
+    argv.extend(
+        ("--remote-message-rate", str(config.remote_message_rate_per_minute))
+    )
+    if config.remote_terminal_snapshots_enabled:
+        argv.append("--remote-terminal-snapshots")
     if config.debug:
         argv.append("--debug")
     if config.debug_smoke:
@@ -515,25 +565,38 @@ def _serve_argv(config: MCPDaemonConfig) -> list[str]:
 def lan_auth_guard(config: MCPDaemonConfig) -> dict[str, Any] | None:
     if not config.lan_bound or config.allow_insecure_lan:
         return None
-    if config.token:
-        return None
-    if config.resolved_db_path.exists():
+    token_available = bool(config.token)
+    if not token_available and config.resolved_db_path.exists():
         store = Store(config.resolved_db_path)
         try:
             if store.has_tokens():
-                return None
+                token_available = True
         except OSError:
             pass
-    return {
-        "code": "LAN_BIND_REQUIRES_TOKEN",
-        "message": "Agent PBX LAN daemon binds require a bearer token",
-        "details": {"host": config.host, "port": config.port},
-        "retryable": True,
-        "remediation": (
-            "Set AGENT_PBX_TOKEN, pass --token, or explicitly pass "
-            "--allow-insecure-lan for a controlled lab-only run."
-        ),
-    }
+    if not token_available:
+        return {
+            "code": "LAN_BIND_REQUIRES_TOKEN",
+            "message": "Agent PBX LAN daemon binds require a bearer token",
+            "details": {"host": config.host, "port": config.port},
+            "retryable": True,
+            "remediation": (
+                "Set AGENT_PBX_TOKEN, pass --token, or explicitly pass "
+                "--allow-insecure-lan for a controlled lab-only run."
+            ),
+        }
+    if not config.tls_certfile or not config.tls_keyfile:
+        return {
+            "code": "LAN_BIND_REQUIRES_TLS",
+            "message": "Agent PBX LAN daemon binds require a TLS certificate and key",
+            "details": {"host": config.host, "port": config.port},
+            "retryable": True,
+            "remediation": (
+                "Pass --tls-certfile and --tls-keyfile, use an SSH tunnel to the "
+                "loopback listener, or explicitly pass --allow-insecure-lan for a "
+                "controlled lab-only run."
+            ),
+        }
+    return None
 
 
 def _mcp_port_available(config: MCPDaemonConfig) -> dict[str, Any]:

@@ -33,6 +33,7 @@ from .mcp_daemon import (
     start_mcp_daemon,
     stop_mcp_daemon,
 )
+from .remote import exec_runtime_attach, local_runtime_attach_command, ssh_attach_plan
 from .sim_agent import run_sim_agent
 from .sim_client import run_sim_client
 from .store import Store
@@ -131,6 +132,40 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--token", default=None)
         command.add_argument("--allow-insecure-lan", action="store_true")
         command.add_argument(
+            "--tls-certfile",
+            type=Path,
+            default=env_text_value("AGENT_PBX_TLS_CERTFILE"),
+        )
+        command.add_argument(
+            "--tls-keyfile",
+            type=Path,
+            default=env_text_value("AGENT_PBX_TLS_KEYFILE"),
+        )
+        command.add_argument(
+            "--remote-audience",
+            default=env_text("AGENT_PBX_REMOTE_AUDIENCE", "agent-pbx"),
+        )
+        command.add_argument(
+            "--remote-allowed-origin",
+            action="append",
+            default=None,
+        )
+        command.add_argument(
+            "--remote-max-clients",
+            type=int,
+            default=env_int("AGENT_PBX_REMOTE_MAX_CLIENTS", 16),
+        )
+        command.add_argument(
+            "--remote-message-rate",
+            type=int,
+            default=env_int("AGENT_PBX_REMOTE_MESSAGE_RATE", 120),
+        )
+        command.add_argument(
+            "--remote-terminal-snapshots",
+            action="store_true",
+            default=env_flag("AGENT_PBX_REMOTE_TERMINAL_SNAPSHOTS"),
+        )
+        command.add_argument(
             "--debug", action="store_true", help="Enable verbose PBX debug logs."
         )
         command.add_argument(
@@ -222,6 +257,29 @@ def build_parser() -> argparse.ArgumentParser:
     tui = subcommands.add_parser("tui", help="Run the Agent PBX TUI.")
     tui.add_argument("--server", default=default_client_server())
     tui.add_argument("--token", default=os.getenv("AGENT_PBX_TOKEN"))
+
+    runtime = subcommands.add_parser("runtime", help="Attach to PBX-managed runtimes.")
+    runtime_subcommands = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_attach = runtime_subcommands.add_parser(
+        "attach",
+        help="Attach this terminal to one local PBX-managed tmux runtime.",
+    )
+    runtime_attach.add_argument("--entity", required=True)
+    runtime_attach.add_argument("--read-only", action="store_true")
+    runtime_attach.add_argument("--state-root", type=Path, default=None)
+    runtime_attach.add_argument("--db", type=Path, default=None)
+
+    remote = subcommands.add_parser("remote", help="Build secure remote-client helpers.")
+    remote_subcommands = remote.add_subparsers(dest="remote_command", required=True)
+    remote_ssh = remote_subcommands.add_parser(
+        "ssh-attach",
+        help="Print an SSH command that attaches natively on the PBX host.",
+    )
+    remote_ssh.add_argument("--host", required=True)
+    remote_ssh.add_argument("--entity", required=True)
+    remote_ssh.add_argument("--read-only", action="store_true")
+    remote_ssh.add_argument("--state-root", type=Path, default=None)
+    remote_ssh.add_argument("--json", action="store_true")
 
     uat = subcommands.add_parser(
         "uat", help="Run operator workflow user-acceptance checks."
@@ -375,6 +433,37 @@ def main(argv: list[str] | None = None) -> int:
         if args.mcp_command == "status":
             _print_mcp_status(mcp_daemon_status(config))
             return 0
+        return 0
+
+    if args.command == "runtime" and args.runtime_command == "attach":
+        config = config_from_args(state_root=args.state_root, db_path=args.db)
+        store = Store(config.resolved_db_path)
+        store.init()
+        try:
+            command = local_runtime_attach_command(
+                store,
+                args.entity,
+                read_only=bool(args.read_only),
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        exec_runtime_attach(command)
+        return 0
+
+    if args.command == "remote" and args.remote_command == "ssh-attach":
+        try:
+            plan = ssh_attach_plan(
+                args.host,
+                args.entity,
+                read_only=bool(args.read_only),
+                state_root=args.state_root,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        payload = plan.public_dict()
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json else payload["shell"])
         return 0
 
     if args.command == "token-helper":
@@ -551,6 +640,27 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         db_path=getattr(args, "db", None),
         token=getattr(args, "token", None) or os.getenv("AGENT_PBX_TOKEN"),
         allow_insecure_lan=bool(getattr(args, "allow_insecure_lan", False)),
+        tls_certfile=getattr(args, "tls_certfile", None),
+        tls_keyfile=getattr(args, "tls_keyfile", None),
+        remote_audience=str(
+            getattr(args, "remote_audience", None)
+            or env_text("AGENT_PBX_REMOTE_AUDIENCE", "agent-pbx")
+        ),
+        remote_allowed_origins=tuple(
+            getattr(args, "remote_allowed_origin", None)
+            or [
+                item.strip()
+                for item in os.getenv("AGENT_PBX_REMOTE_ALLOWED_ORIGINS", "").split(",")
+                if item.strip()
+            ]
+        ),
+        remote_max_clients=int(getattr(args, "remote_max_clients", 16)),
+        remote_message_rate_per_minute=int(
+            getattr(args, "remote_message_rate", 120)
+        ),
+        remote_terminal_snapshots_enabled=bool(
+            getattr(args, "remote_terminal_snapshots", False)
+        ),
         debug=bool(getattr(args, "debug", False)) or env_flag("AGENT_PBX_DEBUG"),
         debug_smoke=bool(getattr(args, "debug_smoke", False))
         or env_flag("AGENT_PBX_DEBUG_SMOKE"),
@@ -653,6 +763,17 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         db_path=daemon_config.resolved_db_path,
         token=daemon_config.token,
         allow_insecure_lan=daemon_config.allow_insecure_lan,
+        tls_certfile=daemon_config.tls_certfile,
+        tls_keyfile=daemon_config.tls_keyfile,
+        remote_audience=daemon_config.remote_audience,
+        remote_allowed_origins=daemon_config.remote_allowed_origins,
+        remote_max_clients=daemon_config.remote_max_clients,
+        remote_message_rate_per_minute=(
+            daemon_config.remote_message_rate_per_minute
+        ),
+        remote_terminal_snapshots_enabled=(
+            daemon_config.remote_terminal_snapshots_enabled
+        ),
         debug=daemon_config.debug,
         debug_smoke=daemon_config.debug_smoke,
         workerbee_bin=daemon_config.workerbee_bin,
@@ -689,6 +810,12 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         host=daemon_config.host,
         port=daemon_config.port,
         log_level=log_level,
+        ssl_certfile=(
+            str(daemon_config.tls_certfile) if daemon_config.tls_certfile else None
+        ),
+        ssl_keyfile=(
+            str(daemon_config.tls_keyfile) if daemon_config.tls_keyfile else None
+        ),
     )
     return 0
 

@@ -11,6 +11,13 @@ class ServerConfig:
     db_path: Path = Path("state/agent-pbx.sqlite")
     token: str | None = None
     allow_insecure_lan: bool = False
+    tls_certfile: Path | None = None
+    tls_keyfile: Path | None = None
+    remote_audience: str = "agent-pbx"
+    remote_allowed_origins: tuple[str, ...] = ()
+    remote_max_clients: int = 16
+    remote_message_rate_per_minute: int = 120
+    remote_terminal_snapshots_enabled: bool = False
     debug: bool = False
     debug_smoke: bool = False
     debug_smoke_duration_seconds: float = 300.0

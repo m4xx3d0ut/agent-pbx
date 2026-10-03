@@ -5482,6 +5482,17 @@ class AgentPBXTUI(App[None]):
             "event_stream_v2",
             False,
         )
+        event_stream_v2_setting = env_flag_value("AGENT_PBX_TUI_EVENT_STREAM_V2")
+        if event_stream_v2_setting is not None:
+            self.event_stream_v2_enabled = event_stream_v2_setting
+        self.remote_client_id = (
+            os.getenv("AGENT_PBX_TUI_REMOTE_CLIENT_ID", "").strip()
+            or str_setting(self.settings, "remote_client_id", "").strip()
+            or f"tui-{uuid.uuid4().hex}"
+        )
+        self.remote_client_role = "local"
+        self.remote_client_state_ready = False
+        self.pending_remote_view_state: dict[str, Any] = {}
         self.function_key_passthrough = FunctionKeyPassthroughMap(
             modifier=str_setting(
                 self.settings,
@@ -6952,17 +6963,22 @@ class AgentPBXTUI(App[None]):
         self.update_hidden_agent_button()
         self.render_latest_plan_choice_panel(None)
         self.render_plan_choice_panel(None)
-        await self.refresh_joplin_status()
-        await self.load_codex_config()
+        if self.event_stream_v2_enabled:
+            await self.initialize_remote_client_state()
+        if self.remote_client_role != "observer":
+            await self.refresh_joplin_status()
+            await self.load_codex_config()
         await self.refresh_agents()
         await self.refresh_events()
-        self.run_worker(
-            self.refresh_codex_posture(),
-            name="codex-posture",
-            group="codex-posture",
-            exclusive=True,
-            exit_on_error=False,
-        )
+        self.apply_pending_remote_view_state()
+        if is_local_server_url(self.server):
+            self.run_worker(
+                self.refresh_codex_posture(),
+                name="codex-posture",
+                group="codex-posture",
+                exclusive=True,
+                exit_on_error=False,
+            )
         self.notify_custom_slash_command_errors()
         self.restart_refresh_timers()
         self.tmux_writer_lease_timer = self.set_interval(
@@ -6982,6 +6998,8 @@ class AgentPBXTUI(App[None]):
         if self.tmux_writer_lease_timer is not None:
             self.tmux_writer_lease_timer.stop()
             self.tmux_writer_lease_timer = None
+        if self.remote_client_state_ready:
+            await self.persist_remote_view_state()
         await self.detach_embedded_tmux_terminal(release_lease=True)
         if self.http_client is not None:
             await self.http_client.aclose()
@@ -9667,13 +9685,25 @@ class AgentPBXTUI(App[None]):
 
     async def refresh_agents(self) -> None:
         try:
-            response = await self.api_client().get(
-                "/v1/agents",
-                params={"include_hidden": "true"} if self.show_hidden_agents else None,
-                headers=auth_headers(self.token),
-            )
+            if self.remote_client_role == "observer":
+                response = await self.api_client().get(
+                    "/v2/events/snapshot",
+                    params={"include_state": "true", "limit": 1},
+                    headers=auth_headers(self.token),
+                )
+            else:
+                response = await self.api_client().get(
+                    "/v1/agents",
+                    params={"include_hidden": "true"} if self.show_hidden_agents else None,
+                    headers=auth_headers(self.token),
+                )
             response.raise_for_status()
-            agents = response.json()
+            payload = response.json()
+            if self.remote_client_role == "observer":
+                state = payload.get("state") if isinstance(payload, dict) else None
+                agents = state.get("agents", []) if isinstance(state, dict) else []
+            else:
+                agents = payload
         except Exception as exc:
             detail = self.query_one_or_none("#detail", TextArea)
             if detail is not None:
@@ -10838,13 +10868,25 @@ class AgentPBXTUI(App[None]):
 
     async def refresh_events(self) -> None:
         try:
-            response = await self.api_client().get(
-                "/v1/events",
-                params={"tail": "true", "limit": 50},
-                headers=auth_headers(self.token),
-            )
+            if self.remote_client_role == "observer":
+                response = await self.api_client().get(
+                    "/v2/events/snapshot",
+                    params={"after_id": 0, "limit": 50, "include_state": "false"},
+                    headers=auth_headers(self.token),
+                )
+            else:
+                response = await self.api_client().get(
+                    "/v1/events",
+                    params={"tail": "true", "limit": 50},
+                    headers=auth_headers(self.token),
+                )
             response.raise_for_status()
-            self.events = response.json()[-50:]
+            payload = response.json()
+            if self.remote_client_role == "observer":
+                raw_events = payload.get("events") if isinstance(payload, dict) else []
+                self.events = list(raw_events or [])[-50:]
+            else:
+                self.events = payload[-50:]
         except Exception:
             return
         previous_last_seen_event_id = self.last_seen_event_id
@@ -12078,6 +12120,7 @@ class AgentPBXTUI(App[None]):
         agent_id = self.selected_agent_id
         if agent_id:
             self.active_agent_tab_by_agent[agent_id] = self.active_agent_tab
+        self.save_settings()
         if self.active_agent_tab == "latest-tab" and agent_id:
             self.mark_latest_seen(agent_id)
             self.apply_tmux_class()
@@ -12235,6 +12278,7 @@ class AgentPBXTUI(App[None]):
         )
         if self.active_agent_tab == "latest-tab":
             self.mark_latest_seen(agent_id)
+        self.save_settings()
 
     def plan_mode_state(self, agent_id: str | None) -> str:
         if not agent_id:
@@ -13216,7 +13260,7 @@ class AgentPBXTUI(App[None]):
         return pane.session_name == self.operator_tmux_session_name()
 
     async def reconcile_operator_tmux_targets(self) -> bool:
-        if not self.tmux_features_available:
+        if not self.tmux_features_available or not self.tmux_local_direct_context:
             return False
         try:
             panes = await asyncio.to_thread(tmux_support.list_panes)
@@ -27773,6 +27817,8 @@ class AgentPBXTUI(App[None]):
             "starred_agent_ids": sorted(self.starred_agent_ids),
             "latest_viewed_at_by_agent": self.latest_viewed_at_by_agent,
             "last_seen_event_id": self.last_seen_event_id,
+            "event_stream_v2": self.event_stream_v2_enabled,
+            "remote_client_id": self.remote_client_id,
         }
         try:
             self.settings_file.parent.mkdir(parents=True, exist_ok=True)
@@ -27782,6 +27828,99 @@ class AgentPBXTUI(App[None]):
             )
         except OSError:
             return
+        if self.remote_client_state_ready:
+            self.run_worker(
+                self.persist_remote_view_state_debounced(),
+                name="remote-view-state",
+                group="remote-view-state",
+                exclusive=True,
+                exit_on_error=False,
+            )
+
+    def remote_view_state(self) -> dict[str, Any]:
+        """Return non-sensitive per-client navigation state for remote persistence."""
+        return {
+            "selected_agent_id": self.selected_agent_id,
+            "active_agent_tab": self.active_agent_tab,
+            "active_agent_tab_by_agent": dict(self.active_agent_tab_by_agent),
+            "show_hidden_agents": self.show_hidden_agents,
+            "layout": self.layout_mode,
+            "compact_view": self.compact_view,
+        }
+
+    async def initialize_remote_client_state(self) -> None:
+        """Resolve token-bound identity and load this client's independent view state."""
+        try:
+            identity_response = await self.api_client().get(
+                "/v2/remote/me",
+                headers=auth_headers(self.token),
+            )
+            identity_response.raise_for_status()
+            identity = identity_response.json()
+            self.remote_client_role = str(identity.get("role") or "local")
+            bound_client_id = str(identity.get("client_id") or "").strip()
+            if bound_client_id:
+                self.remote_client_id = bound_client_id
+            state_response = await self.api_client().get(
+                f"/v2/remote/clients/{quote(self.remote_client_id, safe='')}/view-state",
+                headers=auth_headers(self.token),
+            )
+            state_response.raise_for_status()
+            payload = state_response.json()
+            client = payload.get("client") if isinstance(payload, dict) else None
+            view_state = client.get("view_state") if isinstance(client, dict) else None
+            if isinstance(view_state, dict):
+                self.pending_remote_view_state = view_state
+            self.remote_client_state_ready = True
+        except Exception as exc:
+            self.remote_client_role = "local"
+            self.remote_client_state_ready = False
+            self.event_stream_last_error = f"remote client state unavailable: {exc}"
+
+    def apply_pending_remote_view_state(self) -> None:
+        state = self.pending_remote_view_state
+        self.pending_remote_view_state = {}
+        if not state:
+            return
+        per_agent = state.get("active_agent_tab_by_agent")
+        if isinstance(per_agent, dict):
+            self.active_agent_tab_by_agent.update(
+                {
+                    str(agent_id): str(tab_id)
+                    for agent_id, tab_id in per_agent.items()
+                    if agent_id and tab_id
+                }
+            )
+        selected = str(state.get("selected_agent_id") or "").strip()
+        if selected and selected in self.agents:
+            self.selected_agent_id = selected
+            agent_input = self.query_one_or_none("#agent-id", Input)
+            if agent_input is not None:
+                agent_input.value = selected
+        tab_id = str(state.get("active_agent_tab") or "").strip()
+        if tab_id:
+            self.activate_agent_tab(tab_id)
+        self.save_settings()
+
+    async def persist_remote_view_state_debounced(self) -> None:
+        await asyncio.sleep(0.25)
+        await self.persist_remote_view_state()
+
+    async def persist_remote_view_state(self) -> None:
+        if not self.remote_client_state_ready:
+            return
+        try:
+            response = await self.api_client().put(
+                f"/v2/remote/clients/{quote(self.remote_client_id, safe='')}/view-state",
+                headers=auth_headers(self.token),
+                json={
+                    "view_state": self.remote_view_state(),
+                    "cursor": self.last_seen_event_id,
+                },
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.event_stream_last_error = f"remote view state save failed: {exc}"
 
     async def stream_events(self) -> None:
         while True:
@@ -27834,7 +27973,10 @@ class AgentPBXTUI(App[None]):
         while True:
             try:
                 headers = auth_headers(self.token)
-                uri = f"{websocket_url}?after_id={self.last_seen_event_id}&limit=100"
+                uri = (
+                    f"{websocket_url}?after_id={self.last_seen_event_id}&limit=100"
+                    f"&client_id={quote(self.remote_client_id, safe='')}"
+                )
                 async with websocket_connect(
                     uri,
                     additional_headers=headers,
@@ -27857,6 +27999,9 @@ class AgentPBXTUI(App[None]):
                             continue
                         if not isinstance(envelope, dict):
                             continue
+                        server_client_id = str(envelope.get("client_id") or "").strip()
+                        if server_client_id:
+                            self.remote_client_id = server_client_id
                         self.apply_event_stream_v2_envelope(envelope)
             except asyncio.CancelledError:
                 raise

@@ -121,6 +121,22 @@ TUI operator and tmux launch defaults are configured with
 `AGENT_PBX_TUI_OPERATOR_REVIEW_ROOT`, and
 `AGENT_PBX_TUI_REVIEW_MCP_APPROVAL_SERVERS`.
 
+For remote observer/controller TUIs, enable the v2 event stream and use a
+short-lived, role-scoped credential issued through the authenticated
+`/v2/remote/tokens` API. Non-loopback daemon binds require a bearer token and
+TLS certificate/key pair unless the explicit insecure-LAN override is used.
+Each TUI keeps independent server-side navigation state; prompt and document
+drafts remain local. Full terminal fidelity uses SSH without exposing the tmux
+socket:
+
+```bash
+export AGENT_PBX_TUI_EVENT_STREAM_V2=1
+agent-pbx remote ssh-attach --host user@pbx-host --entity agent-id --read-only
+```
+
+See [Checkpoint 14 remote access](docs/migrations/v2-checkpoint-14-remote.md)
+for the credential, TLS, revocation, snapshot, and rollback model.
+
 For the common local workflow:
 
 ```bash

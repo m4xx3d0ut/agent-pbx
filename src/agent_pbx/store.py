@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -258,11 +258,18 @@ def _agent_prune_status_is_nonterminal_stale(value: Any) -> bool:
 @dataclass(frozen=True)
 class TokenRecord:
     token_hash: str
+    token_id: str
     kind: str
+    role: str
     label: str | None
+    audience: str | None
+    client_id: str | None
+    scopes: tuple[str, ...]
+    allowed_agent_ids: tuple[str, ...]
     created_at: float
     expires_at: float | None
     revoked_at: float | None
+    last_used_at: float | None
 
 
 class Store:
@@ -277,6 +284,10 @@ class Store:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
+    def schema_version(self) -> int:
+        with self.connect() as conn:
+            return self._schema_version(conn)
+
     def init(self) -> None:
         with self.connect() as conn:
             conn.executescript(
@@ -288,11 +299,43 @@ class Store:
 
                 CREATE TABLE IF NOT EXISTS tokens (
                     token_hash TEXT PRIMARY KEY,
+                    token_id TEXT,
                     kind TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'controller',
                     label TEXT,
+                    audience TEXT,
+                    client_id TEXT,
+                    scopes_json TEXT NOT NULL DEFAULT '[]',
+                    allowed_agent_ids_json TEXT NOT NULL DEFAULT '[]',
                     created_at REAL NOT NULL,
                     expires_at REAL,
-                    revoked_at REAL
+                    revoked_at REAL,
+                    last_used_at REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS remote_client_sessions (
+                    client_id TEXT PRIMARY KEY,
+                    token_id TEXT,
+                    role TEXT NOT NULL,
+                    audience TEXT,
+                    allowed_agent_ids_json TEXT NOT NULL DEFAULT '[]',
+                    view_state_json TEXT NOT NULL DEFAULT '{}',
+                    cursor INTEGER NOT NULL DEFAULT 0,
+                    connected_at REAL NOT NULL,
+                    last_seen_at REAL NOT NULL,
+                    disconnected_at REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS remote_audit_events (
+                    audit_id TEXT PRIMARY KEY,
+                    client_id TEXT,
+                    token_id TEXT,
+                    role TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target_agent_id TEXT,
+                    outcome TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS pairing_codes (
@@ -1112,6 +1155,54 @@ class Store:
                 """
             )
             self._ensure_column(conn, "agents", "last_poll_at", "REAL")
+            self._ensure_column(conn, "tokens", "token_id", "TEXT")
+            self._ensure_column(
+                conn,
+                "tokens",
+                "role",
+                "TEXT NOT NULL DEFAULT 'controller'",
+            )
+            self._ensure_column(conn, "tokens", "audience", "TEXT")
+            self._ensure_column(conn, "tokens", "client_id", "TEXT")
+            self._ensure_column(
+                conn,
+                "tokens",
+                "scopes_json",
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
+            self._ensure_column(
+                conn,
+                "tokens",
+                "allowed_agent_ids_json",
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
+            self._ensure_column(conn, "tokens", "last_used_at", "REAL")
+            conn.execute(
+                """
+                UPDATE tokens
+                SET token_id = 'legacy-' || substr(token_hash, 1, 24)
+                WHERE token_id IS NULL OR token_id = ''
+                """
+            )
+            conn.execute(
+                """
+                UPDATE tokens
+                SET role = CASE
+                    WHEN lower(kind) = 'observer' THEN 'observer'
+                    ELSE 'controller'
+                END
+                WHERE role IS NULL OR role = '' OR role = 'controller'
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_token_id ON tokens(token_id)"
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_remote_audit_created
+                    ON remote_audit_events(created_at DESC)
+                """
+            )
             self._ensure_column(
                 conn,
                 "joplin_sync_jobs",
@@ -1337,28 +1428,57 @@ class Store:
         kind: str,
         label: str | None = None,
         ttl_seconds: int | None = None,
+        role: str | None = None,
+        audience: str | None = None,
+        client_id: str | None = None,
+        scopes: list[str] | tuple[str, ...] | None = None,
+        allowed_agent_ids: list[str] | tuple[str, ...] | None = None,
     ) -> TokenRecord:
         created_at = now_ts()
         expires_at = created_at + ttl_seconds if ttl_seconds else None
+        normalized_role = str(role or "").strip().lower()
+        if not normalized_role:
+            normalized_role = "observer" if str(kind).lower() == "observer" else "controller"
+        if normalized_role not in {"observer", "controller"}:
+            raise ValueError("token role must be observer or controller")
+        normalized_scopes = tuple(self._normalize_id_list(list(scopes or [])))
+        normalized_agents = tuple(
+            self._normalize_id_list(list(allowed_agent_ids or []))
+        )
         record = TokenRecord(
             token_hash=hash_secret(raw_token),
+            token_id=str(uuid.uuid4()),
             kind=kind,
+            role=normalized_role,
             label=label,
+            audience=self._none_if_blank(audience),
+            client_id=self._none_if_blank(client_id),
+            scopes=normalized_scopes,
+            allowed_agent_ids=normalized_agents,
             created_at=created_at,
             expires_at=expires_at,
             revoked_at=None,
+            last_used_at=None,
         )
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO tokens
-                    (token_hash, kind, label, created_at, expires_at, revoked_at)
-                VALUES (?, ?, ?, ?, ?, NULL)
+                    (token_hash, token_id, kind, role, label, audience, client_id,
+                     scopes_json, allowed_agent_ids_json, created_at, expires_at,
+                     revoked_at, last_used_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
                 """,
                 (
                     record.token_hash,
+                    record.token_id,
                     record.kind,
+                    record.role,
                     record.label,
+                    record.audience,
+                    record.client_id,
+                    json.dumps(record.scopes),
+                    json.dumps(record.allowed_agent_ids),
                     record.created_at,
                     record.expires_at,
                 ),
@@ -1371,7 +1491,9 @@ class Store:
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT token_hash, kind, label, created_at, expires_at, revoked_at
+                SELECT token_hash, token_id, kind, role, label, audience, client_id,
+                       scopes_json, allowed_agent_ids_json, created_at, expires_at,
+                       revoked_at, last_used_at
                 FROM tokens
                 WHERE token_hash = ? AND revoked_at IS NULL
                 """,
@@ -1379,10 +1501,278 @@ class Store:
             ).fetchone()
         if row is None:
             return None
-        record = TokenRecord(**dict(row))
+        record = self._token_from_row(row)
         if record.expires_at is not None and record.expires_at < current:
             return None
         return record
+
+    def list_tokens(self, *, include_revoked: bool = False) -> list[dict[str, Any]]:
+        where = "" if include_revoked else "WHERE revoked_at IS NULL"
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT token_hash, token_id, kind, role, label, audience, client_id,
+                       scopes_json, allowed_agent_ids_json, created_at, expires_at,
+                       revoked_at, last_used_at
+                FROM tokens
+                {where}
+                ORDER BY created_at DESC, token_id ASC
+                """
+            ).fetchall()
+        return [self._token_public(self._token_from_row(row)) for row in rows]
+
+    def revoke_token(self, token_id: str) -> dict[str, Any] | None:
+        current = now_ts()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE tokens
+                SET revoked_at = COALESCE(revoked_at, ?)
+                WHERE token_id = ?
+                """,
+                (current, token_id),
+            )
+            row = conn.execute(
+                """
+                SELECT token_hash, token_id, kind, role, label, audience, client_id,
+                       scopes_json, allowed_agent_ids_json, created_at, expires_at,
+                       revoked_at, last_used_at
+                FROM tokens
+                WHERE token_id = ?
+                """,
+                (token_id,),
+            ).fetchone()
+        if not cursor.rowcount or row is None:
+            return None
+        return self._token_public(self._token_from_row(row))
+
+    def touch_token(self, token_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE tokens SET last_used_at = ? WHERE token_id = ?",
+                (now_ts(), token_id),
+            )
+
+    @staticmethod
+    def _token_from_row(row: sqlite3.Row) -> TokenRecord:
+        data = dict(row)
+        try:
+            scopes = tuple(json.loads(data.pop("scopes_json") or "[]"))
+        except (TypeError, json.JSONDecodeError):
+            scopes = ()
+        try:
+            allowed = tuple(json.loads(data.pop("allowed_agent_ids_json") or "[]"))
+        except (TypeError, json.JSONDecodeError):
+            allowed = ()
+        data["scopes"] = tuple(str(value) for value in scopes if str(value).strip())
+        data["allowed_agent_ids"] = tuple(
+            str(value) for value in allowed if str(value).strip()
+        )
+        return TokenRecord(**data)
+
+    @staticmethod
+    def _token_public(record: TokenRecord) -> dict[str, Any]:
+        return {
+            "token_id": record.token_id,
+            "kind": record.kind,
+            "role": record.role,
+            "label": record.label,
+            "audience": record.audience,
+            "client_id": record.client_id,
+            "scopes": list(record.scopes),
+            "allowed_agent_ids": list(record.allowed_agent_ids),
+            "created_at": record.created_at,
+            "expires_at": record.expires_at,
+            "revoked_at": record.revoked_at,
+            "last_used_at": record.last_used_at,
+        }
+
+    def upsert_remote_client_session(
+        self,
+        *,
+        client_id: str,
+        token_id: str | None,
+        role: str,
+        audience: str | None,
+        allowed_agent_ids: tuple[str, ...] | list[str],
+        cursor: int = 0,
+        connected: bool = True,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        normalized_agents = self._normalize_id_list(list(allowed_agent_ids))
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO remote_client_sessions
+                    (client_id, token_id, role, audience, allowed_agent_ids_json,
+                     view_state_json, cursor, connected_at, last_seen_at,
+                     disconnected_at)
+                VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?, ?)
+                ON CONFLICT(client_id) DO UPDATE SET
+                    token_id = excluded.token_id,
+                    role = excluded.role,
+                    audience = excluded.audience,
+                    allowed_agent_ids_json = excluded.allowed_agent_ids_json,
+                    cursor = excluded.cursor,
+                    last_seen_at = excluded.last_seen_at,
+                    disconnected_at = excluded.disconnected_at
+                """,
+                (
+                    client_id,
+                    token_id,
+                    role,
+                    audience,
+                    json.dumps(normalized_agents),
+                    max(0, int(cursor)),
+                    current,
+                    current,
+                    None if connected else current,
+                ),
+            )
+        result = self.get_remote_client_session(client_id)
+        if result is None:  # pragma: no cover - insert and read share one local DB.
+            raise RuntimeError("remote client session insert failed")
+        return result
+
+    def get_remote_client_session(self, client_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT client_id, token_id, role, audience, allowed_agent_ids_json,
+                       view_state_json, cursor, connected_at, last_seen_at,
+                       disconnected_at
+                FROM remote_client_sessions
+                WHERE client_id = ?
+                """,
+                (client_id,),
+            ).fetchone()
+        return self._remote_client_from_row(row) if row else None
+
+    def update_remote_client_view_state(
+        self,
+        client_id: str,
+        *,
+        token_id: str | None,
+        view_state: dict[str, Any],
+        cursor: int | None = None,
+    ) -> dict[str, Any] | None:
+        current = now_ts()
+        with self.connect() as conn:
+            cursor_result = conn.execute(
+                """
+                UPDATE remote_client_sessions
+                SET view_state_json = ?,
+                    cursor = COALESCE(?, cursor),
+                    last_seen_at = ?
+                WHERE client_id = ?
+                  AND (token_id = ? OR (token_id IS NULL AND ? IS NULL))
+                """,
+                (
+                    json.dumps(view_state, sort_keys=True),
+                    max(0, int(cursor)) if cursor is not None else None,
+                    current,
+                    client_id,
+                    token_id,
+                    token_id,
+                ),
+            )
+        if not cursor_result.rowcount:
+            return None
+        return self.get_remote_client_session(client_id)
+
+    def disconnect_remote_client_session(self, client_id: str, *, cursor: int) -> None:
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE remote_client_sessions
+                SET cursor = ?, last_seen_at = ?, disconnected_at = ?
+                WHERE client_id = ?
+                """,
+                (max(0, int(cursor)), current, current, client_id),
+            )
+
+    def append_remote_audit(
+        self,
+        *,
+        client_id: str | None,
+        token_id: str | None,
+        role: str,
+        action: str,
+        outcome: str,
+        target_agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        audit_id = str(uuid.uuid4())
+        current = now_ts()
+        safe_metadata = metadata or {}
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO remote_audit_events
+                    (audit_id, client_id, token_id, role, action,
+                     target_agent_id, outcome, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    audit_id,
+                    client_id,
+                    token_id,
+                    role,
+                    action,
+                    target_agent_id,
+                    outcome,
+                    json.dumps(safe_metadata, sort_keys=True),
+                    current,
+                ),
+            )
+        return {
+            "audit_id": audit_id,
+            "client_id": client_id,
+            "token_id": token_id,
+            "role": role,
+            "action": action,
+            "target_agent_id": target_agent_id,
+            "outcome": outcome,
+            "metadata": safe_metadata,
+            "created_at": current,
+        }
+
+    def list_remote_audit(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = min(500, max(1, int(limit)))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT audit_id, client_id, token_id, role, action,
+                       target_agent_id, outcome, metadata_json, created_at
+                FROM remote_audit_events
+                ORDER BY created_at DESC, audit_id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+            except json.JSONDecodeError:
+                item["metadata"] = {}
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _remote_client_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        for source, target, fallback in (
+            ("allowed_agent_ids_json", "allowed_agent_ids", []),
+            ("view_state_json", "view_state", {}),
+        ):
+            try:
+                item[target] = json.loads(item.pop(source) or json.dumps(fallback))
+            except json.JSONDecodeError:
+                item[target] = fallback
+        return item
 
     def create_pairing_code(self, code: str, *, ttl_seconds: int) -> None:
         created_at = now_ts()

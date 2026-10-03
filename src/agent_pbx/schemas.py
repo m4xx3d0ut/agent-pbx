@@ -1289,6 +1289,31 @@ class EventStreamEnvelope(BaseModel):
     server_time: float
 
 
+class RemoteTokenIssueRequest(BaseModel):
+    role: Literal["observer", "controller"] = "observer"
+    label: str = Field(default="remote-tui", min_length=1, max_length=80)
+    ttl_seconds: int = Field(default=3600, ge=60, le=2_592_000)
+    audience: str | None = Field(default=None, min_length=1, max_length=120)
+    client_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        pattern=r"^[A-Za-z0-9_.:-]+$",
+    )
+    scopes: list[str] = Field(default_factory=list, max_length=32)
+    allowed_agent_ids: list[str] = Field(default_factory=list, max_length=200)
+
+
+class RemoteClientStateRequest(BaseModel):
+    view_state: dict[str, Any] = Field(default_factory=dict)
+    cursor: int | None = Field(default=None, ge=0)
+
+
+class RemoteControlRequest(BaseModel):
+    preview_token: str | None = Field(default=None, max_length=128)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ThreadItemResponse(BaseModel):
     item_id: str
     kind: Literal["report", "command"]

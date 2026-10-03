@@ -1346,8 +1346,26 @@ class BearerAuthASGIMiddleware:
         if self.config.token and constant_time_equal(token, self.config.token):
             await self.app(scope, receive, send)
             return
-        if self.store.verify_token(token) is None:
+        record = self.store.verify_token(token)
+        if record is None:
             await JSONResponse({"detail": "invalid bearer token"}, status_code=403)(
+                scope, receive, send
+            )
+            return
+        role = str(record.role or "").strip().lower()
+        if role == "observer" or str(record.kind).strip().lower() == "observer":
+            await JSONResponse({"detail": "controller role required"}, status_code=403)(
+                scope, receive, send
+            )
+            return
+        if record.allowed_agent_ids:
+            await JSONResponse(
+                {"detail": "scoped controller cannot use the global MCP surface"},
+                status_code=403,
+            )(scope, receive, send)
+            return
+        if record.audience and record.audience != self.config.remote_audience:
+            await JSONResponse({"detail": "token audience mismatch"}, status_code=403)(
                 scope, receive, send
             )
             return

@@ -664,6 +664,8 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_PBX_TUI_THEME", "cyberpunk")
     monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "compact")
     monkeypatch.setenv("AGENT_PBX_TUI_SPLIT_PERCENT", "72")
+    monkeypatch.setenv("AGENT_PBX_TUI_EVENT_STREAM_V2", "1")
+    monkeypatch.setenv("AGENT_PBX_TUI_REMOTE_CLIENT_ID", "thin-client-a")
 
     app = AgentPBXTUI(
         server="http://127.0.0.1:8765",
@@ -682,6 +684,8 @@ def test_tui_env_overrides_saved_settings(monkeypatch, tmp_path: Path) -> None:
     assert app.ui_theme == "cyberpunk"
     assert app.layout_mode == "compact"
     assert app.split_percent == 72
+    assert app.event_stream_v2_enabled is True
+    assert app.remote_client_id == "thin-client-a"
 
 
 async def test_tui_event_stream_worker_uses_isolated_group() -> None:
@@ -885,6 +889,109 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["show_hidden_agents"] is True
     assert saved["latest_viewed_at_by_agent"] == {"agent-1": 123.0}
     assert saved["last_seen_event_id"] == 42
+    assert saved["remote_client_id"] == app.remote_client_id
+
+
+def test_tui_remote_view_state_excludes_prompt_and_document_drafts() -> None:
+    app = AgentPBXTUI(server="https://pbx.example.test")
+    app.selected_agent_id = "agent-a"
+    app.active_agent_tab = "joplin-tab"
+    app.active_agent_tab_by_agent = {"agent-a": "joplin-tab"}
+    app.message_draft_by_agent = {"agent-a": "private prompt"}
+    app.tmux_message_draft_by_agent = {"agent-a": "private terminal prompt"}
+    app.editor_documents_by_agent = {
+        "agent-a": {"secret.txt": {"text": "private document"}}
+    }
+
+    state = app.remote_view_state()
+
+    assert state == {
+        "selected_agent_id": "agent-a",
+        "active_agent_tab": "joplin-tab",
+        "active_agent_tab_by_agent": {"agent-a": "joplin-tab"},
+        "show_hidden_agents": False,
+        "layout": "adaptive",
+        "compact_view": "home",
+    }
+    serialized = json.dumps(state)
+    assert "private prompt" not in serialized
+    assert "private document" not in serialized
+
+
+async def test_remote_tui_does_not_reconcile_thin_client_tmux(monkeypatch) -> None:
+    app = AgentPBXTUI(server="https://pbx.example.test", tmux_direct=True)
+    app.tmux_features_available = True
+    app.tmux_local_direct_context = False
+    called = False
+
+    def fail_list_panes():  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+        raise AssertionError("remote TUI must not inspect thin-client tmux panes")
+
+    monkeypatch.setattr(tmux_support, "list_panes", fail_list_panes)
+
+    assert await app.reconcile_operator_tmux_targets() is False
+    assert called is False
+
+
+async def test_tui_remote_identity_uses_token_bound_client_and_persists_view() -> None:
+    app = AgentPBXTUI(server="https://pbx.example.test")
+
+    class FakeResponse:
+        def __init__(self, payload):  # type: ignore[no-untyped-def]
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # type: ignore[no-untyped-def]
+            return self.payload
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.puts: list[dict[str, object]] = []
+
+        async def get(self, path, **_kwargs):  # type: ignore[no-untyped-def]
+            if path == "/v2/remote/me":
+                return FakeResponse(
+                    {"role": "observer", "client_id": "bound-thin-client"}
+                )
+            return FakeResponse(
+                {
+                    "client": {
+                        "view_state": {
+                            "selected_agent_id": "agent-a",
+                            "active_agent_tab": "latest-tab",
+                        }
+                    }
+                }
+            )
+
+        async def put(self, path, **kwargs):  # type: ignore[no-untyped-def]
+            self.puts.append({"path": path, **kwargs})
+            return FakeResponse({"client": {}})
+
+    fake = FakeClient()
+    app.api_client = lambda: fake  # type: ignore[method-assign]
+
+    await app.initialize_remote_client_state()
+    app.last_seen_event_id = 17
+    await app.persist_remote_view_state()
+
+    assert app.remote_client_role == "observer"
+    assert app.remote_client_id == "bound-thin-client"
+    assert app.pending_remote_view_state["selected_agent_id"] == "agent-a"
+    assert fake.puts == [
+        {
+            "path": "/v2/remote/clients/bound-thin-client/view-state",
+            "headers": {},
+            "json": {
+                "view_state": app.remote_view_state(),
+                "cursor": 17,
+            },
+        }
+    ]
 
 
 def test_tui_reads_theme_env(monkeypatch) -> None:
