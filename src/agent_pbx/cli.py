@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -33,6 +34,14 @@ from .mcp_daemon import (
     restart_mcp_daemon,
     start_mcp_daemon,
     stop_mcp_daemon,
+)
+from .migration import (
+    apply_migration,
+    create_migration_backup,
+    migration_dry_run,
+    render_migration_result,
+    rollback_migration,
+    verify_migration,
 )
 from .remote import exec_runtime_attach, local_runtime_attach_command, ssh_attach_plan
 from .sim_agent import run_sim_agent
@@ -265,6 +274,49 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
     doctor.add_argument("--json", action="store_true")
 
+    migrate = subcommands.add_parser(
+        "migrate",
+        help="Back up, simulate, apply, verify, or roll back a v2 state migration.",
+    )
+    migrate_subcommands = migrate.add_subparsers(dest="migrate_command", required=True)
+
+    def add_migration_state_flags(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--state-root", type=Path, default=None)
+        command.add_argument("--db", type=Path, default=None)
+        command.add_argument("--json", action="store_true")
+
+    migrate_dry = migrate_subcommands.add_parser(
+        "dry-run", help="Simulate migration against a temporary database copy."
+    )
+    add_migration_state_flags(migrate_dry)
+    migrate_backup = migrate_subcommands.add_parser(
+        "backup", help="Create a consistent database and local-config backup."
+    )
+    add_migration_state_flags(migrate_backup)
+    migrate_backup.add_argument("--retention-days", type=int, default=7)
+    migrate_backup.add_argument("--database-only", action="store_true")
+    migrate_apply = migrate_subcommands.add_parser(
+        "apply", help="Back up and apply the current additive schema migration."
+    )
+    add_migration_state_flags(migrate_apply)
+    migrate_apply.add_argument("--retention-days", type=int, default=7)
+    migrate_verify = migrate_subcommands.add_parser(
+        "verify", help="Verify schema, integrity, foreign keys, and required tables."
+    )
+    add_migration_state_flags(migrate_verify)
+    migrate_rollback = migrate_subcommands.add_parser(
+        "rollback", help="Restore a verified migration backup while the daemon is stopped."
+    )
+    add_migration_state_flags(migrate_rollback)
+    migrate_rollback.add_argument("--backup", type=Path, required=True)
+    migrate_rollback.add_argument("--restore-config", action="store_true")
+    migrate_rollback.add_argument("--retention-days", type=int, default=7)
+    migrate_rollback.add_argument(
+        "--confirm",
+        required=True,
+        help="Must be exactly RESTORE; a safety backup is created first.",
+    )
+
     tui = subcommands.add_parser("tui", help="Run the Agent PBX TUI.")
     tui.add_argument("--server", default=default_client_server())
     tui.add_argument("--token", default=os.getenv("AGENT_PBX_TOKEN"))
@@ -461,6 +513,46 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         exec_runtime_attach(command)
         return 0
+
+    if args.command == "migrate":
+        config = config_from_args(state_root=args.state_root, db_path=args.db)
+        try:
+            if args.migrate_command == "dry-run":
+                result = migration_dry_run(config)
+            elif args.migrate_command == "backup":
+                result = create_migration_backup(
+                    config,
+                    retention_days=args.retention_days,
+                    include_config=not bool(args.database_only),
+                )
+            elif args.migrate_command == "apply":
+                result = apply_migration(
+                    config,
+                    retention_days=args.retention_days,
+                )
+            elif args.migrate_command == "verify":
+                result = verify_migration(config)
+            elif args.migrate_command == "rollback":
+                if args.confirm != "RESTORE":
+                    print("error: --confirm must be exactly RESTORE", file=sys.stderr)
+                    return 2
+                result = rollback_migration(
+                    config,
+                    args.backup,
+                    restore_config=bool(args.restore_config),
+                    retention_days=args.retention_days,
+                )
+            else:  # pragma: no cover - argparse enforces subcommands
+                raise ValueError("unknown migration command")
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(
+            json.dumps(result, indent=2, sort_keys=True)
+            if args.json
+            else render_migration_result(result)
+        )
+        return 0 if result.get("ok", True) else 1
 
     if args.command == "doctor":
         report = run_platform_doctor(
