@@ -43,10 +43,11 @@ OUT_DIR="${OUT_PARENT}/$(basename "$OUT_DIR")"
 ARCHIVE="${OUT_PARENT}/agent-pbx-wheelhouse.tar.gz"
 INSTALLER="${OUT_PARENT}/install-agent-pbx.sh"
 
-rm -rf "$OUT_DIR" "$ARCHIVE" "$INSTALLER" "${ROOT_DIR}/build"
+rm -rf "$OUT_DIR" "$ARCHIVE" "${ARCHIVE}.sha256" "$INSTALLER" "${ROOT_DIR}/build"
 mkdir -p "$OUT_DIR"
 
 "${PYTHON_BIN}" -m pip wheel --wheel-dir "$OUT_DIR" "$ROOT_DIR"
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/release_manifest.py" generate --wheelhouse "$OUT_DIR" >/dev/null
 
 cat >"${OUT_DIR}/INSTALL.txt" <<EOF
 Install Agent PBX from this wheelhouse:
@@ -62,6 +63,16 @@ EOF
 echo "wheelhouse: ${OUT_DIR}"
 tar -C "$(dirname "$OUT_DIR")" -czf "$ARCHIVE" "$(basename "$OUT_DIR")"
 echo "archive: ${ARCHIVE}"
+"${PYTHON_BIN}" - "$ARCHIVE" <<'PY'
+from pathlib import Path
+import hashlib
+import sys
+
+path = Path(sys.argv[1])
+digest = hashlib.sha256(path.read_bytes()).hexdigest()
+path.with_name(path.name + ".sha256").write_text(f"{digest}  {path.name}\n", encoding="utf-8")
+PY
+echo "archive checksum: ${ARCHIVE}.sha256"
 cp "${ROOT_DIR}/scripts/install-agent-pbx.sh" "$INSTALLER"
 chmod +x "$INSTALLER"
 echo "installer: ${INSTALLER}"

@@ -33,6 +33,7 @@ Download both release assets into the same directory:
 ```text
 install-agent-pbx.sh
 agent-pbx-wheelhouse.tar.gz
+agent-pbx-wheelhouse.tar.gz.sha256
 ```
 
 Then install from that local artifact directory:
@@ -59,13 +60,17 @@ agent-pbx --version
 ```
 
 The build script also writes `dist/agent-pbx-wheelhouse.tar.gz` and
-`dist/install-agent-pbx.sh` for release upload.
+`dist/agent-pbx-wheelhouse.tar.gz.sha256` plus `dist/install-agent-pbx.sh` for
+release upload. The wheelhouse includes `SHA256SUMS`, `DEPENDENCIES.json`, and
+an SPDX 2.3 SBOM. Set `AGENT_PBX_OFFLINE=1` during installation to forbid
+package-index fallback.
 
 Release bundles should include:
 
 ```text
 install-agent-pbx.sh
 agent-pbx-wheelhouse.tar.gz
+agent-pbx-wheelhouse.tar.gz.sha256
 ```
 
 ## Development
@@ -78,11 +83,15 @@ python -m pytest
 agent-pbx mcp serve --host 127.0.0.1 --port 8765
 ```
 
-The server defaults to localhost. LAN binding requires bearer-token
-authentication and explicit operator intent. Runtime tokens and paired tokens
-are admin/operator tokens for the PBX service: a holder can use both API and MCP
-control surfaces. Role-scoped operator and agent tokens are future hardening
-work for less-trusted LAN deployments.
+The server defaults to localhost. LAN binding requires bearer authentication,
+TLS, and explicit operator intent. V2 remote credentials support observer and
+controller roles, audience and expiry, optional client/Agent binding, immediate
+revocation, and audit. Agent-scoped controllers cannot use global legacy API,
+credential-administration, audit, or MCP surfaces.
+
+See [v2 installation and upgrade](docs/install-v2.md) for Linux/macOS host
+requirements, remote clients, verified/offline wheelhouses, migration, and
+rollback.
 
 ## Local Environment
 
