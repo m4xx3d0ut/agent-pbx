@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import sqlite3
 import struct
 import subprocess
@@ -1476,6 +1477,240 @@ def test_agent_files_document_search_and_write_are_scoped(
     assert conflict.status_code == 200
     assert conflict.json()["saved"] is False
     assert conflict.json()["error"]["code"] == "WRITE_CONFLICT"
+
+
+def test_agent_files_crud_rejects_unsafe_paths_and_collisions(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "agent-1",
+            "project": "demo",
+            "metadata": {"cwd": str(repo)},
+        },
+    )
+
+    created_directory = client.post(
+        "/v1/agents/agent-1/files/create",
+        json={"path": "src", "kind": "directory"},
+    )
+    created_file = client.post(
+        "/v1/agents/agent-1/files/create",
+        json={"path": "src/app.py", "kind": "file", "text": "print('ok')\n"},
+    )
+    moved = client.post(
+        "/v1/agents/agent-1/files/move",
+        json={"source": "src/app.py", "destination": "src/main.py"},
+    )
+    collision = client.post(
+        "/v1/agents/agent-1/files/move",
+        json={"source": "src/main.py", "destination": "src"},
+    )
+    traversal = client.post(
+        "/v1/agents/agent-1/files/create",
+        json={"path": "../outside.txt", "kind": "file"},
+    )
+    protected = client.post(
+        "/v1/agents/agent-1/files/create",
+        json={"path": ".git/owned", "kind": "file"},
+    )
+    sensitive = client.post(
+        "/v1/agents/agent-1/files/create",
+        json={"path": "credentials.json", "kind": "file"},
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / "link").symlink_to(outside, target_is_directory=True)
+    symlink_move = client.post(
+        "/v1/agents/agent-1/files/move",
+        json={"source": "link", "destination": "link-moved"},
+    )
+    fifo = repo / "pipe"
+    os.mkfifo(fifo)
+    special_preview = client.get(
+        "/v1/agents/agent-1/files/delete-preview",
+        params={"path": "pipe"},
+    )
+    root_preview = client.get(
+        "/v1/agents/agent-1/files/delete-preview",
+        params={"path": "."},
+    )
+    git_metadata_preview = client.get(
+        "/v1/agents/agent-1/files/delete-preview",
+        params={"path": ".git"},
+    )
+
+    assert created_directory.json()["created"] is True
+    assert created_file.json()["created"] is True
+    assert (repo / "src" / "main.py").read_text(encoding="utf-8") == "print('ok')\n"
+    assert moved.json()["moved"] is True
+    assert collision.json()["error"]["code"] == "MOVE_COLLISION"
+    assert traversal.json()["error"]["code"] == "PATH_OUTSIDE_CWD"
+    assert protected.json()["error"]["code"] == "PROTECTED_PATH"
+    assert sensitive.json()["error"]["code"] == "SENSITIVE_FILE"
+    assert symlink_move.json()["error"]["code"] == "SYMLINK_MUTATION_DENIED"
+    assert special_preview.json()["error"]["code"] == "SPECIAL_FILE_DENIED"
+    assert root_preview.json()["error"]["code"] == "PROJECT_ROOT_PROTECTED"
+    assert git_metadata_preview.json()["error"]["code"] == "PROTECTED_PATH"
+
+
+def test_agent_files_trash_restore_prune_and_tracked_delete(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "agent-pbx@example.test"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Agent PBX Test"],
+        check=True,
+    )
+    tracked = repo / "tracked.txt"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    untracked = repo / "draft.txt"
+    untracked.write_text("draft\n", encoding="utf-8")
+
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "agent-1",
+            "project": "demo",
+            "metadata": {"cwd": str(repo)},
+        },
+    )
+
+    tracked_preview = client.get(
+        "/v1/agents/agent-1/files/delete-preview",
+        params={"path": "tracked.txt"},
+    ).json()
+    tracked_denied = client.post(
+        "/v1/agents/agent-1/files/delete",
+        json={
+            "path": "tracked.txt",
+            "preview_token": tracked_preview["preview_token"],
+            "actor": "test",
+        },
+    ).json()
+    tracked_deleted = client.post(
+        "/v1/agents/agent-1/files/delete",
+        json={
+            "path": "tracked.txt",
+            "preview_token": tracked_preview["preview_token"],
+            "actor": "test",
+            "confirm_tracked": True,
+        },
+    ).json()
+
+    first_preview = client.get(
+        "/v1/agents/agent-1/files/delete-preview",
+        params={"path": "draft.txt"},
+    ).json()
+    untracked.write_text("changed after preview\n", encoding="utf-8")
+    stale = client.post(
+        "/v1/agents/agent-1/files/delete",
+        json={
+            "path": "draft.txt",
+            "preview_token": first_preview["preview_token"],
+            "actor": "test",
+        },
+    ).json()
+    fresh_preview = client.get(
+        "/v1/agents/agent-1/files/delete-preview",
+        params={"path": "draft.txt"},
+    ).json()
+    trashed = client.post(
+        "/v1/agents/agent-1/files/delete",
+        json={
+            "path": "draft.txt",
+            "preview_token": fresh_preview["preview_token"],
+            "actor": "test",
+            "retention_days": 0,
+        },
+    ).json()
+    trash_id = trashed["trash_id"]
+    listing = client.get("/v1/agents/agent-1/files/trash").json()
+
+    assert tracked_preview["delete_mode"] == "git_delete"
+    assert tracked_denied["error"]["code"] == "TRACKED_DELETE_CONFIRMATION_REQUIRED"
+    assert tracked_deleted["deleted"] is True
+    assert tracked_deleted["trashed"] is False
+    assert not tracked.exists()
+    git_status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--short"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert " D tracked.txt" in git_status
+    assert stale["error"]["code"] == "DELETE_PREVIEW_STALE"
+    assert trashed["trashed"] is True
+    assert not untracked.exists()
+    assert listing["entries"][0]["trash_id"] == trash_id
+    assert listing["records"][0]["status"] == "trashed"
+    exclude = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--git-path", "info/exclude"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    exclude_path = Path(exclude)
+    if not exclude_path.is_absolute():
+        exclude_path = repo / exclude_path
+    assert "/.agent-pbx-trash/" in exclude_path.read_text(encoding="utf-8")
+    restored = client.post(
+        "/v1/agents/agent-1/files/trash/restore",
+        json={"trash_id": trash_id},
+    ).json()
+    assert restored["restored"] is True
+    assert untracked.read_text(encoding="utf-8") == "changed after preview\n"
+
+    second_preview = client.get(
+        "/v1/agents/agent-1/files/delete-preview",
+        params={"path": "draft.txt"},
+    ).json()
+    second_trash = client.post(
+        "/v1/agents/agent-1/files/delete",
+        json={
+            "path": "draft.txt",
+            "preview_token": second_preview["preview_token"],
+            "actor": "test",
+            "retention_days": 0,
+        },
+    ).json()
+    cutoff = time.time() + 1
+    prune_preview = client.get(
+        "/v1/agents/agent-1/files/trash/prune-preview",
+        params={"cutoff": cutoff},
+    ).json()
+    pruned = client.post(
+        "/v1/agents/agent-1/files/trash/prune",
+        json={
+            "preview_token": prune_preview["preview_token"],
+            "cutoff": cutoff,
+        },
+    ).json()
+    after_prune = client.get("/v1/agents/agent-1/files/trash").json()
+    undone = client.post(
+        "/v1/agents/agent-1/files/trash/prune-undo",
+        json={"batch_id": pruned["batch_id"]},
+    ).json()
+    after_undo = client.get("/v1/agents/agent-1/files/trash").json()
+
+    assert second_trash["trash_id"] in pruned["trash_ids"]
+    assert pruned["status"] == "applied"
+    assert after_prune["entries"] == []
+    assert undone["status"] == "undone"
+    assert second_trash["trash_id"] in undone["trash_ids"]
+    assert after_undo["entries"][0]["trash_id"] == second_trash["trash_id"]
+    records = {item["trash_id"]: item for item in after_undo["records"]}
+    assert records[second_trash["trash_id"]]["status"] == "trashed"
 
 
 def test_agent_files_diagnostics_are_scoped_and_parsed(

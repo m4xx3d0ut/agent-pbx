@@ -10,9 +10,12 @@ from pathlib import Path
 import mimetypes
 import os
 import shutil
+import stat
 import struct
 import tempfile
+import time
 from typing import Any
+import uuid
 import zlib
 
 
@@ -115,6 +118,10 @@ IMAGE_PREVIEW_MAX_HEIGHT = 24
 IMAGE_PREVIEW_CHARS = ".:-=+*#%@"
 IMAGE_PREVIEW_MAX_SOURCE_PIXELS = 2_000_000
 CHAFA_TIMEOUT_SECONDS = 2.0
+TRASH_DIR_NAME = ".agent-pbx-trash"
+TRASH_PRUNE_DIR_NAME = ".prune"
+DEFAULT_TRASH_RETENTION_DAYS = 7.0
+MAX_MUTATION_TREE_ITEMS = 100_000
 
 
 @dataclass(frozen=True)
@@ -159,7 +166,8 @@ class AgentFileService:
         self.search_file_bytes = max(1, search_file_bytes)
         self.search_timeout_seconds = max(0.1, search_timeout_seconds)
         self.diagnostic_timeout_seconds = max(0.1, diagnostic_timeout_seconds)
-        self.ignored_dirs = ignored_dirs or IGNORED_DIRS
+        self.ignored_dirs = set(ignored_dirs or IGNORED_DIRS)
+        self.ignored_dirs.add(TRASH_DIR_NAME)
 
     def list_for_agent(
         self, agent: dict[str, Any], *, path: str = "."
@@ -578,6 +586,542 @@ class AgentFileService:
         saved = self.document_for_agent(agent, path=display_path)
         return {**saved, "saved": saved.get("error") is None}
 
+    def create_path_for_agent(
+        self,
+        agent: dict[str, Any],
+        *,
+        path: str,
+        kind: str,
+        text: str = "",
+    ) -> dict[str, Any]:
+        resolved = self._resolve_mutation_target(agent, path, allow_missing=True)
+        if isinstance(resolved, FileBrowserError):
+            return self._mutation_error(agent, path, resolved)
+        root, target = resolved
+        display_path = self._display_path(root, target)
+        sensitive = self._mutation_path_error(display_path)
+        if sensitive is not None:
+            return self._mutation_error(agent, path, sensitive, cwd=root)
+        if target.exists() or target.is_symlink():
+            return self._mutation_error(
+                agent,
+                path,
+                FileBrowserError("FILE_EXISTS", f"path already exists: {display_path}"),
+                cwd=root,
+            )
+        parent_error = self._safe_mutation_parent(root, target)
+        if parent_error is not None:
+            return self._mutation_error(agent, path, parent_error, cwd=root)
+        normalized_kind = str(kind or "").strip().lower()
+        try:
+            if normalized_kind == "directory":
+                target.mkdir()
+            elif normalized_kind == "file":
+                encoded = text.encode("utf-8")
+                if len(encoded) > self.document_bytes:
+                    return self._mutation_error(
+                        agent,
+                        path,
+                        FileBrowserError(
+                            "FILE_TOO_LARGE",
+                            f"document is larger than the write limit: {len(encoded)} bytes",
+                        ),
+                        cwd=root,
+                    )
+                with target.open("xb") as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            else:
+                return self._mutation_error(
+                    agent,
+                    path,
+                    FileBrowserError("FILE_KIND_INVALID", "kind must be file or directory"),
+                    cwd=root,
+                )
+        except OSError as exc:
+            return self._mutation_error(
+                agent,
+                path,
+                FileBrowserError("CREATE_FAILED", str(exc)),
+                cwd=root,
+            )
+        return {
+            **self._base_response(agent, path=display_path),
+            "cwd": str(root),
+            "kind": normalized_kind,
+            "created": True,
+            "error": None,
+        }
+
+    def move_path_for_agent(
+        self,
+        agent: dict[str, Any],
+        *,
+        source: str,
+        destination: str,
+        previous_sha256: str | None = None,
+        previous_mtime: float | None = None,
+    ) -> dict[str, Any]:
+        source_result = self._resolve_mutation_target(agent, source, allow_missing=False)
+        if isinstance(source_result, FileBrowserError):
+            return self._mutation_error(agent, source, source_result)
+        root, source_path = source_result
+        destination_result = self._resolve_mutation_path(root, destination, allow_missing=True)
+        if isinstance(destination_result, FileBrowserError):
+            return self._mutation_error(agent, destination, destination_result, cwd=root)
+        destination_path = destination_result
+        source_display = self._display_path(root, source_path)
+        destination_display = self._display_path(root, destination_path)
+        for display_path in (source_display, destination_display):
+            path_error = self._mutation_path_error(display_path)
+            if path_error is not None:
+                return self._mutation_error(agent, display_path, path_error, cwd=root)
+        if source_path == root:
+            return self._mutation_error(
+                agent,
+                source,
+                FileBrowserError("PROJECT_ROOT_PROTECTED", "project root cannot be moved"),
+                cwd=root,
+            )
+        if destination_path.exists() or destination_path.is_symlink():
+            return self._mutation_error(
+                agent,
+                destination,
+                FileBrowserError(
+                    "MOVE_COLLISION",
+                    f"destination already exists: {destination_display}",
+                ),
+                cwd=root,
+            )
+        parent_error = self._safe_mutation_parent(root, destination_path)
+        if parent_error is not None:
+            return self._mutation_error(agent, destination, parent_error, cwd=root)
+        source_state = self._mutation_state(root, source_path)
+        if isinstance(source_state, FileBrowserError):
+            return self._mutation_error(agent, source, source_state, cwd=root)
+        conflict = self._mutation_conflict(
+            source_state,
+            previous_sha256=previous_sha256,
+            previous_mtime=previous_mtime,
+        )
+        if conflict is not None:
+            return self._mutation_error(agent, source, conflict, cwd=root)
+        try:
+            os.rename(source_path, destination_path)
+        except OSError as exc:
+            return self._mutation_error(
+                agent,
+                source,
+                FileBrowserError("MOVE_FAILED", str(exc)),
+                cwd=root,
+            )
+        return {
+            **self._base_response(agent, path=destination_display),
+            "cwd": str(root),
+            "source": source_display,
+            "destination": destination_display,
+            "kind": source_state["kind"],
+            "moved": True,
+            "error": None,
+        }
+
+    def delete_preview_for_agent(
+        self,
+        agent: dict[str, Any],
+        *,
+        path: str,
+    ) -> dict[str, Any]:
+        resolved = self._resolve_mutation_target(agent, path, allow_missing=False)
+        if isinstance(resolved, FileBrowserError):
+            return self._mutation_error(agent, path, resolved)
+        root, target = resolved
+        display_path = self._display_path(root, target)
+        if target == root:
+            return self._mutation_error(
+                agent,
+                path,
+                FileBrowserError("PROJECT_ROOT_PROTECTED", "project root cannot be deleted"),
+                cwd=root,
+            )
+        path_error = self._mutation_path_error(display_path)
+        if path_error is not None:
+            return self._mutation_error(agent, path, path_error, cwd=root)
+        state = self._mutation_state(root, target)
+        if isinstance(state, FileBrowserError):
+            return self._mutation_error(agent, path, state, cwd=root)
+        git_state = self._git_path_state(root, display_path)
+        delete_mode = "git_delete" if git_state == "tracked" else "trash"
+        preview = {
+            **self._base_response(agent, path=display_path),
+            "cwd": str(root),
+            **state,
+            "git_state": git_state,
+            "delete_mode": delete_mode,
+            "requires_confirmation": git_state == "tracked",
+            "error": None,
+        }
+        preview["preview_token"] = self._delete_preview_token(preview)
+        return preview
+
+    def delete_path_for_agent(
+        self,
+        agent: dict[str, Any],
+        *,
+        path: str,
+        preview_token: str,
+        actor: str,
+        confirm_tracked: bool = False,
+        retention_days: float = DEFAULT_TRASH_RETENTION_DAYS,
+    ) -> dict[str, Any]:
+        preview = self.delete_preview_for_agent(agent, path=path)
+        if preview.get("error"):
+            return preview
+        if not preview_token or preview_token != preview.get("preview_token"):
+            return self._mutation_error(
+                agent,
+                path,
+                FileBrowserError(
+                    "DELETE_PREVIEW_STALE",
+                    "file state changed or delete was not previewed",
+                    "Preview the delete again before applying it.",
+                ),
+                cwd=Path(str(preview["cwd"])),
+            )
+        root = Path(str(preview["cwd"]))
+        target = root / str(preview["path"])
+        if preview["delete_mode"] == "git_delete":
+            if not confirm_tracked:
+                return self._mutation_error(
+                    agent,
+                    path,
+                    FileBrowserError(
+                        "TRACKED_DELETE_CONFIRMATION_REQUIRED",
+                        "tracked content requires explicit delete confirmation",
+                    ),
+                    cwd=root,
+                )
+            try:
+                self._remove_path(target)
+            except OSError as exc:
+                return self._mutation_error(
+                    agent,
+                    path,
+                    FileBrowserError("DELETE_FAILED", str(exc)),
+                    cwd=root,
+                )
+            return {
+                **preview,
+                "deleted": True,
+                "trashed": False,
+                "trash_id": None,
+                "actor": actor,
+            }
+        trash_id = str(uuid.uuid4())
+        trash_root = root / TRASH_DIR_NAME
+        entry_root = trash_root / trash_id
+        content = entry_root / "content"
+        manifest_path = entry_root / "manifest.json"
+        created_at = time.time()
+        expires_at = created_at + max(0.0, retention_days) * 86400.0
+        manifest = {
+            "version": 1,
+            "trash_id": trash_id,
+            "agent_id": str(agent.get("agent_id") or ""),
+            "project": str(agent.get("project") or ""),
+            "root": str(root),
+            "original_path": str(preview["path"]),
+            "kind": preview["kind"],
+            "sha256": preview.get("sha256"),
+            "size": preview.get("size"),
+            "item_count": preview.get("item_count"),
+            "git_state": preview["git_state"],
+            "actor": actor,
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "status": "trashed",
+        }
+        try:
+            entry_root.mkdir(parents=True, exist_ok=False)
+            os.rename(target, content)
+            self._atomic_json_write(manifest_path, manifest)
+            self._exclude_project_trash(root)
+        except OSError as exc:
+            if content.exists() and not target.exists():
+                try:
+                    os.rename(content, target)
+                except OSError:
+                    pass
+            shutil.rmtree(entry_root, ignore_errors=True)
+            return self._mutation_error(
+                agent,
+                path,
+                FileBrowserError("TRASH_FAILED", str(exc)),
+                cwd=root,
+            )
+        return {
+            **preview,
+            "deleted": True,
+            "trashed": True,
+            "trash_id": trash_id,
+            "trash_path": self._display_path(root, content),
+            "actor": actor,
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "manifest": manifest,
+        }
+
+    def list_trash_for_agent(self, agent: dict[str, Any]) -> dict[str, Any]:
+        root_result = self._agent_root(agent)
+        if isinstance(root_result, FileBrowserError):
+            return {"entries": [], "error": root_result.as_dict()}
+        root = root_result
+        entries: list[dict[str, Any]] = []
+        trash_root = root / TRASH_DIR_NAME
+        if trash_root.is_dir():
+            for manifest_path in sorted(trash_root.glob("*/manifest.json")):
+                manifest = self._read_json_object(manifest_path)
+                if manifest and manifest.get("status") == "trashed":
+                    entries.append(manifest)
+        entries.sort(key=lambda item: float(item.get("created_at") or 0), reverse=True)
+        return {
+            "agent_id": str(agent.get("agent_id") or ""),
+            "cwd": str(root),
+            "entries": entries,
+            "error": None,
+        }
+
+    def restore_trash_for_agent(
+        self,
+        agent: dict[str, Any],
+        *,
+        trash_id: str,
+    ) -> dict[str, Any]:
+        root_result = self._agent_root(agent)
+        if isinstance(root_result, FileBrowserError):
+            return self._mutation_error(agent, ".", root_result)
+        root = root_result
+        entry_root_result = self._trash_entry_root(root, trash_id)
+        if isinstance(entry_root_result, FileBrowserError):
+            return self._mutation_error(agent, ".", entry_root_result, cwd=root)
+        entry_root = entry_root_result
+        manifest = self._read_json_object(entry_root / "manifest.json")
+        if not manifest or manifest.get("status") != "trashed":
+            return self._mutation_error(
+                agent,
+                ".",
+                FileBrowserError("TRASH_ENTRY_INVALID", "trash manifest is missing or inactive"),
+                cwd=root,
+            )
+        destination_result = self._resolve_mutation_path(
+            root,
+            str(manifest.get("original_path") or ""),
+            allow_missing=True,
+        )
+        if isinstance(destination_result, FileBrowserError):
+            return self._mutation_error(agent, ".", destination_result, cwd=root)
+        destination = destination_result
+        if destination.exists() or destination.is_symlink():
+            return self._mutation_error(
+                agent,
+                str(manifest.get("original_path") or "."),
+                FileBrowserError(
+                    "RESTORE_COLLISION",
+                    "original path now exists; choose a move target before restoring",
+                ),
+                cwd=root,
+            )
+        parent_error = self._safe_mutation_parent(root, destination)
+        if parent_error is not None:
+            return self._mutation_error(agent, ".", parent_error, cwd=root)
+        content = entry_root / "content"
+        if not content.exists():
+            return self._mutation_error(
+                agent,
+                ".",
+                FileBrowserError("TRASH_CONTENT_MISSING", "trash content is missing"),
+                cwd=root,
+            )
+        try:
+            os.rename(content, destination)
+            manifest["status"] = "restored"
+            manifest["restored_at"] = time.time()
+            self._atomic_json_write(entry_root / "manifest.json", manifest)
+        except OSError as exc:
+            return self._mutation_error(
+                agent,
+                ".",
+                FileBrowserError("RESTORE_FAILED", str(exc)),
+                cwd=root,
+            )
+        return {
+            "agent_id": str(agent.get("agent_id") or ""),
+            "cwd": str(root),
+            "trash_id": trash_id,
+            "path": str(manifest["original_path"]),
+            "restored": True,
+            "manifest": manifest,
+            "error": None,
+        }
+
+    def preview_trash_prune_for_agent(
+        self,
+        agent: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        listing = self.list_trash_for_agent(agent)
+        if listing.get("error"):
+            return listing
+        cutoff = float(now if now is not None else time.time())
+        entries = [
+            entry
+            for entry in listing["entries"]
+            if float(entry.get("expires_at") or 0) <= cutoff
+        ]
+        payload = {
+            "agent_id": listing["agent_id"],
+            "cwd": listing["cwd"],
+            "cutoff": cutoff,
+            "entries": entries,
+            "count": len(entries),
+            "bytes": sum(int(item.get("size") or 0) for item in entries),
+            "error": None,
+        }
+        payload["preview_token"] = hashlib.sha256(
+            json.dumps(
+                {
+                    "cutoff": cutoff,
+                    "trash_ids": [item.get("trash_id") for item in entries],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return payload
+
+    def apply_trash_prune_for_agent(
+        self,
+        agent: dict[str, Any],
+        *,
+        preview_token: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        preview = self.preview_trash_prune_for_agent(agent, now=now)
+        if preview.get("error"):
+            return preview
+        if preview_token != preview.get("preview_token"):
+            return {
+                **preview,
+                "error": FileBrowserError(
+                    "TRASH_PRUNE_PREVIEW_STALE",
+                    "trash contents changed after the prune preview",
+                ).as_dict(),
+            }
+        root = Path(str(preview["cwd"]))
+        batch_id = str(uuid.uuid4())
+        quarantine = root / TRASH_DIR_NAME / TRASH_PRUNE_DIR_NAME / batch_id
+        moved: list[str] = []
+        try:
+            quarantine.mkdir(parents=True, exist_ok=False)
+            for entry in preview["entries"]:
+                trash_id = str(entry.get("trash_id") or "")
+                source = root / TRASH_DIR_NAME / trash_id
+                destination = quarantine / trash_id
+                os.rename(source, destination)
+                moved.append(trash_id)
+            self._atomic_json_write(
+                quarantine / "batch.json",
+                {
+                    "version": 1,
+                    "batch_id": batch_id,
+                    "status": "applied",
+                    "trash_ids": moved,
+                    "created_at": time.time(),
+                    "preview": preview,
+                },
+            )
+        except OSError as exc:
+            for trash_id in reversed(moved):
+                source = quarantine / trash_id
+                destination = root / TRASH_DIR_NAME / trash_id
+                if source.exists() and not destination.exists():
+                    try:
+                        os.rename(source, destination)
+                    except OSError:
+                        pass
+            shutil.rmtree(quarantine, ignore_errors=True)
+            return {**preview, "error": FileBrowserError("TRASH_PRUNE_FAILED", str(exc)).as_dict()}
+        return {
+            **preview,
+            "batch_id": batch_id,
+            "status": "applied",
+            "trash_ids": moved,
+            "error": None,
+        }
+
+    def undo_trash_prune_for_agent(
+        self,
+        agent: dict[str, Any],
+        *,
+        batch_id: str,
+    ) -> dict[str, Any]:
+        root_result = self._agent_root(agent)
+        if isinstance(root_result, FileBrowserError):
+            return {"error": root_result.as_dict()}
+        root = root_result
+        if not re.fullmatch(r"[0-9a-f-]{36}", batch_id):
+            return {"error": FileBrowserError("TRASH_BATCH_INVALID", "invalid prune batch id").as_dict()}
+        quarantine = root / TRASH_DIR_NAME / TRASH_PRUNE_DIR_NAME / batch_id
+        batch = self._read_json_object(quarantine / "batch.json")
+        if not batch or batch.get("status") != "applied":
+            return {"error": FileBrowserError("TRASH_BATCH_NOT_FOUND", "active prune batch not found").as_dict()}
+        trash_ids = [str(item) for item in batch.get("trash_ids", []) if str(item)]
+        for trash_id in trash_ids:
+            source = quarantine / trash_id
+            destination = root / TRASH_DIR_NAME / trash_id
+            if not source.is_dir() or source.is_symlink():
+                return {
+                    "error": FileBrowserError(
+                        "TRASH_PRUNE_UNDO_FAILED",
+                        f"quarantined trash entry is unavailable: {trash_id}",
+                    ).as_dict()
+                }
+            if destination.exists() or destination.is_symlink():
+                return {
+                    "error": FileBrowserError(
+                        "TRASH_PRUNE_UNDO_FAILED",
+                        f"trash entry collision: {trash_id}",
+                    ).as_dict()
+                }
+        restored: list[str] = []
+        try:
+            for trash_id in trash_ids:
+                source = quarantine / trash_id
+                destination = root / TRASH_DIR_NAME / trash_id
+                os.rename(source, destination)
+                restored.append(trash_id)
+            batch["status"] = "undone"
+            batch["undone_at"] = time.time()
+            self._atomic_json_write(quarantine / "batch.json", batch)
+        except OSError as exc:
+            for trash_id in reversed(restored):
+                source = root / TRASH_DIR_NAME / trash_id
+                destination = quarantine / trash_id
+                if source.exists() and not destination.exists():
+                    try:
+                        os.rename(source, destination)
+                    except OSError:
+                        pass
+            return {"error": FileBrowserError("TRASH_PRUNE_UNDO_FAILED", str(exc)).as_dict()}
+        return {
+            "agent_id": str(agent.get("agent_id") or ""),
+            "batch_id": batch_id,
+            "status": "undone",
+            "trash_ids": restored,
+            "error": None,
+        }
+
     def search_for_agent(
         self,
         agent: dict[str, Any],
@@ -711,6 +1255,295 @@ class AgentFileService:
             "cwd": str(root),
             "path": display_path,
             "available_tools": available_tools,
+        }
+
+    def _resolve_mutation_target(
+        self,
+        agent: dict[str, Any],
+        requested: str,
+        *,
+        allow_missing: bool,
+    ) -> tuple[Path, Path] | FileBrowserError:
+        root_result = self._agent_root(agent)
+        if isinstance(root_result, FileBrowserError):
+            return root_result
+        target = self._resolve_mutation_path(
+            root_result,
+            requested,
+            allow_missing=allow_missing,
+        )
+        if isinstance(target, FileBrowserError):
+            return target
+        return root_result, target
+
+    def _resolve_mutation_path(
+        self,
+        root: Path,
+        requested: str,
+        *,
+        allow_missing: bool,
+    ) -> Path | FileBrowserError:
+        clean = str(requested or "").strip()
+        if not clean or clean == ".":
+            return root
+        relative = Path(clean)
+        if relative.is_absolute() or any(part == ".." for part in relative.parts):
+            return FileBrowserError("PATH_OUTSIDE_CWD", "path must remain inside the agent cwd")
+        target = root.joinpath(*relative.parts)
+        try:
+            if os.path.commonpath((str(root), str(target))) != str(root):
+                return FileBrowserError("PATH_OUTSIDE_CWD", "path is outside the agent cwd")
+        except ValueError:
+            return FileBrowserError("PATH_OUTSIDE_CWD", "path is outside the agent cwd")
+        current = root
+        for part in relative.parts[:-1]:
+            current = current / part
+            if current.is_symlink():
+                return FileBrowserError("SYMLINK_MUTATION_DENIED", f"symlink path is not mutable: {clean}")
+            if not current.exists() or not current.is_dir():
+                return FileBrowserError("PATH_INVALID", f"parent directory is unavailable: {current}")
+        if target.is_symlink():
+            return FileBrowserError("SYMLINK_MUTATION_DENIED", f"symlink is not mutable: {clean}")
+        if not allow_missing and not target.exists():
+            return FileBrowserError("FILE_NOT_FOUND", f"path does not exist: {clean}")
+        return target
+
+    def _mutation_path_error(self, display_path: str) -> FileBrowserError | None:
+        if display_path == ".":
+            return FileBrowserError("PROTECTED_PATH", f"path is protected: {display_path}")
+        protected_parts = {".git", TRASH_DIR_NAME}
+        if any(part in protected_parts for part in Path(display_path).parts):
+            return FileBrowserError("PROTECTED_PATH", f"path is protected: {display_path}")
+        return self._sensitive_path_error(display_path)
+
+    def _safe_mutation_parent(self, root: Path, target: Path) -> FileBrowserError | None:
+        try:
+            parent = target.parent.resolve(strict=True)
+        except OSError as exc:
+            return FileBrowserError("PATH_INVALID", str(exc))
+        if not parent.is_dir() or not self._is_inside(root, parent):
+            return FileBrowserError("PATH_OUTSIDE_CWD", "target parent is outside the agent cwd")
+        relative = parent.relative_to(root)
+        current = root
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                return FileBrowserError("SYMLINK_MUTATION_DENIED", "symlink parent is not mutable")
+        return None
+
+    def _mutation_state(
+        self,
+        root: Path,
+        target: Path,
+    ) -> dict[str, Any] | FileBrowserError:
+        try:
+            target_stat = target.lstat()
+        except OSError as exc:
+            return FileBrowserError("READ_FAILED", str(exc))
+        if stat.S_ISLNK(target_stat.st_mode):
+            return FileBrowserError("SYMLINK_MUTATION_DENIED", "symlinks cannot be moved or deleted")
+        if stat.S_ISREG(target_stat.st_mode):
+            try:
+                digest = hashlib.sha256()
+                with target.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        digest.update(chunk)
+            except OSError as exc:
+                return FileBrowserError("READ_FAILED", str(exc))
+            return {
+                "kind": "file",
+                "size": target_stat.st_size,
+                "item_count": 1,
+                "mtime": target_stat.st_mtime,
+                "sha256": digest.hexdigest(),
+            }
+        if not stat.S_ISDIR(target_stat.st_mode):
+            return FileBrowserError("SPECIAL_FILE_DENIED", "special files cannot be moved or deleted")
+        total_size = 0
+        item_count = 1
+        digest = hashlib.sha256()
+        for directory, dirnames, filenames in os.walk(target, followlinks=False):
+            current = Path(directory)
+            for name in [*dirnames, *filenames]:
+                item_count += 1
+                if item_count > MAX_MUTATION_TREE_ITEMS:
+                    return FileBrowserError(
+                        "DIRECTORY_TOO_LARGE",
+                        f"directory contains more than {MAX_MUTATION_TREE_ITEMS} entries",
+                    )
+                child = current / name
+                try:
+                    child_stat = child.lstat()
+                except OSError as exc:
+                    return FileBrowserError("READ_FAILED", str(exc))
+                if stat.S_ISLNK(child_stat.st_mode):
+                    return FileBrowserError(
+                        "SYMLINK_MUTATION_DENIED",
+                        f"directory contains a symlink: {self._display_path(root, child)}",
+                    )
+                if not (stat.S_ISREG(child_stat.st_mode) or stat.S_ISDIR(child_stat.st_mode)):
+                    return FileBrowserError(
+                        "SPECIAL_FILE_DENIED",
+                        f"directory contains a special file: {self._display_path(root, child)}",
+                    )
+                if stat.S_ISREG(child_stat.st_mode):
+                    total_size += child_stat.st_size
+                relative = child.relative_to(target).as_posix()
+                digest.update(
+                    f"{relative}\0{child_stat.st_mode}\0{child_stat.st_size}\0{child_stat.st_mtime_ns}\n".encode(
+                        "utf-8"
+                    )
+                )
+        return {
+            "kind": "directory",
+            "size": total_size,
+            "item_count": item_count,
+            "mtime": target_stat.st_mtime,
+            "sha256": digest.hexdigest(),
+        }
+
+    @staticmethod
+    def _mutation_conflict(
+        state: dict[str, Any],
+        *,
+        previous_sha256: str | None,
+        previous_mtime: float | None,
+    ) -> FileBrowserError | None:
+        if previous_sha256 and previous_sha256 != state.get("sha256"):
+            return FileBrowserError("WRITE_CONFLICT", "path changed after it was selected")
+        if previous_mtime is not None and abs(float(previous_mtime) - float(state.get("mtime") or 0)) > 0.001:
+            return FileBrowserError("WRITE_CONFLICT", "path modification time changed")
+        return None
+
+    def _git_path_state(self, root: Path, display_path: str) -> str:
+        try:
+            inside = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "non_git"
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return "non_git"
+        try:
+            tracked = subprocess.run(
+                ["git", "-C", str(root), "ls-files", "--", display_path],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "non_git"
+        if tracked.returncode == 0 and tracked.stdout.strip():
+            return "tracked"
+        try:
+            ignored = subprocess.run(
+                ["git", "-C", str(root), "check-ignore", "-q", "--", display_path],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "untracked"
+        return "ignored" if ignored.returncode == 0 else "untracked"
+
+    @staticmethod
+    def _delete_preview_token(preview: dict[str, Any]) -> str:
+        payload = {
+            key: preview.get(key)
+            for key in (
+                "path",
+                "kind",
+                "size",
+                "item_count",
+                "mtime",
+                "sha256",
+                "git_state",
+                "delete_mode",
+            )
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _remove_path(path: Path) -> None:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    def _exclude_project_trash(self, root: Path) -> None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--git-path", "info/exclude"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
+        if result.returncode != 0 or not result.stdout.strip():
+            return
+        exclude = Path(result.stdout.strip())
+        if not exclude.is_absolute():
+            exclude = root / exclude
+        try:
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+            rule = f"/{TRASH_DIR_NAME}/"
+            if rule not in existing.splitlines():
+                with exclude.open("a", encoding="utf-8") as handle:
+                    if existing and not existing.endswith("\n"):
+                        handle.write("\n")
+                    handle.write(f"{rule}\n")
+        except OSError:
+            return
+
+    @staticmethod
+    def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+
+    @staticmethod
+    def _read_json_object(path: Path) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _trash_entry_root(root: Path, trash_id: str) -> Path | FileBrowserError:
+        if not re.fullmatch(r"[0-9a-f-]{36}", trash_id):
+            return FileBrowserError("TRASH_ID_INVALID", "invalid trash id")
+        entry = root / TRASH_DIR_NAME / trash_id
+        if not entry.is_dir() or entry.is_symlink():
+            return FileBrowserError("TRASH_ENTRY_NOT_FOUND", "trash entry not found")
+        return entry
+
+    def _mutation_error(
+        self,
+        agent: dict[str, Any],
+        path: str,
+        error: FileBrowserError,
+        *,
+        cwd: Path | None = None,
+    ) -> dict[str, Any]:
+        return {
+            **self._base_response(agent, path=path),
+            "cwd": str(cwd) if cwd is not None else None,
+            "error": error.as_dict(),
         }
 
     def _base_response(self, agent: dict[str, Any], *, path: str) -> dict[str, Any]:

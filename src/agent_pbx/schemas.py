@@ -1691,6 +1691,40 @@ class FileDocumentWriteRequest(BaseModel):
     create: bool = False
 
 
+class FileCreateRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=1000)
+    kind: Literal["file", "directory"]
+    text: str = ""
+
+
+class FileMoveRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=1000)
+    destination: str = Field(min_length=1, max_length=1000)
+    previous_sha256: str | None = Field(default=None, max_length=128)
+    previous_mtime: float | None = None
+
+
+class FileDeleteRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=1000)
+    preview_token: str = Field(min_length=1, max_length=128)
+    actor: str = Field(default="operator", min_length=1, max_length=160)
+    confirm_tracked: bool = False
+    retention_days: float = Field(default=7.0, ge=0.0, le=3650.0)
+
+
+class FileTrashRestoreRequest(BaseModel):
+    trash_id: str = Field(min_length=1, max_length=120)
+
+
+class FileTrashPruneApplyRequest(BaseModel):
+    preview_token: str = Field(min_length=1, max_length=128)
+    cutoff: float
+
+
+class FileTrashPruneUndoRequest(BaseModel):
+    batch_id: str = Field(min_length=1, max_length=120)
+
+
 class FileSearchResult(BaseModel):
     path: str
     line: int

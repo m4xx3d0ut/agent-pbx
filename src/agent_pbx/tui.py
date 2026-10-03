@@ -3134,6 +3134,196 @@ class JoplinDeleteConfirmScreen(ModalScreen[None]):
             self.dismiss()
 
 
+class FilePathActionScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        action: str,
+        source: str | None = None,
+        initial_path: str = "",
+    ) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.action = action
+        self.source = source
+        self.initial_path = initial_path
+
+    def compose(self) -> ComposeResult:
+        title = {
+            "create_file": "Create File",
+            "create_directory": "Create Directory",
+            "move": "Move or Rename Path",
+        }.get(self.action, "File Action")
+        with Vertical(id="file-path-action-panel"):
+            yield Static(title, id="file-path-action-title")
+            if self.source:
+                yield Static(f"Source: {self.source}", id="file-path-action-source")
+            yield Input(
+                value=self.initial_path,
+                placeholder="project-relative path",
+                id="file-path-action-input",
+            )
+            with Horizontal(id="file-path-action-actions"):
+                yield Button("Apply", id="file-path-action-apply", variant="primary")
+                yield Button("Cancel", id="file-path-action-cancel")
+
+    def on_mount(self) -> None:
+        target = self.query_one("#file-path-action-input", Input)
+        target.focus()
+        target.cursor_position = len(target.value)
+
+    def submit(self) -> None:
+        path = self.query_one("#file-path-action-input", Input).value.strip()
+        if not path:
+            self.notify("A project-relative path is required.", severity="warning")
+            return
+        self.dismiss()
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.apply_file_path_action(  # type: ignore[attr-defined]
+                self.agent_id,
+                self.action,
+                path,
+                source=self.source,
+            ),
+            name=f"file-{self.action}-{slugify(self.agent_id)}",
+            exclusive=True,
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "file-path-action-cancel":
+            self.dismiss()
+            return
+        if event.button.id == "file-path-action-apply":
+            self.submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "file-path-action-input":
+            self.submit()
+
+
+class FileDeleteConfirmScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(self, *, agent_id: str, preview: dict[str, Any]) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.preview = preview
+
+    def compose(self) -> ComposeResult:
+        tracked = self.preview.get("delete_mode") == "git_delete"
+        mode = "Git-visible deletion" if tracked else "Recoverable project trash"
+        detail = (
+            f"{self.preview.get('path')}\n"
+            f"{self.preview.get('kind')} · {self.preview.get('item_count')} item(s) · "
+            f"{self.preview.get('size')} bytes\n{mode}"
+        )
+        with Vertical(id="file-delete-panel"):
+            yield Static("Delete Path", id="file-delete-title")
+            yield Static(detail, id="file-delete-detail")
+            with Horizontal(id="file-delete-actions"):
+                yield Button("Delete", id="file-delete-confirm", variant="error")
+                yield Button("Cancel", id="file-delete-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "file-delete-cancel":
+            self.dismiss()
+            return
+        if event.button.id == "file-delete-confirm":
+            self.dismiss()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.apply_file_delete(self.agent_id, self.preview),  # type: ignore[attr-defined]
+                name=f"file-delete-{slugify(self.agent_id)}",
+                exclusive=True,
+            )
+
+
+class FileTrashScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, *, agent_id: str, entries: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.entries = entries
+        self.selected_trash_id: str | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="file-trash-panel"):
+            yield Static("Project Trash", id="file-trash-title")
+            yield DataTable(
+                id="file-trash-entries",
+                cursor_type="row",
+                show_row_labels=False,
+            )
+            with Horizontal(id="file-trash-actions"):
+                yield Button("Restore", id="file-trash-restore", variant="primary")
+                yield Button("Prune Expired", id="file-trash-prune")
+                yield Button("Undo Prune", id="file-trash-undo")
+                yield Button("Close", id="file-trash-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#file-trash-entries", DataTable)
+        table.add_columns("Created", "Path", "State")
+        for entry in self.entries:
+            trash_id = str(entry.get("trash_id") or "")
+            if not trash_id:
+                continue
+            table.add_row(
+                (
+                    datetime.fromtimestamp(
+                        float(entry.get("created_at") or 0),
+                        tz=timezone.utc,
+                    ).strftime("%Y-%m-%d %H:%M")
+                    if entry.get("created_at")
+                    else "-"
+                ),
+                str(entry.get("original_path") or ""),
+                str(entry.get("git_state") or ""),
+                key=trash_id,
+            )
+        if self.entries:
+            self.selected_trash_id = str(self.entries[0].get("trash_id") or "") or None
+        table.focus()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "file-trash-entries":
+            self.selected_trash_id = str(event.row_key.value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        action = str(event.button.id or "")
+        if action == "file-trash-close":
+            self.dismiss()
+            return
+        if action == "file-trash-restore":
+            if not self.selected_trash_id:
+                self.notify("Select a trash entry first.", severity="warning")
+                return
+            self.dismiss()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.restore_file_trash(self.agent_id, self.selected_trash_id),  # type: ignore[attr-defined]
+                name=f"file-trash-restore-{slugify(self.agent_id)}",
+                exclusive=True,
+            )
+            return
+        if action == "file-trash-prune":
+            self.dismiss()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.prune_file_trash(self.agent_id),  # type: ignore[attr-defined]
+                name=f"file-trash-prune-{slugify(self.agent_id)}",
+                exclusive=True,
+            )
+            return
+        if action == "file-trash-undo":
+            self.dismiss()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.undo_file_trash_prune(self.agent_id),  # type: ignore[attr-defined]
+                name=f"file-trash-undo-{slugify(self.agent_id)}",
+                exclusive=True,
+            )
+
+
 class EditorCloseConfirmScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Cancel")]
 
@@ -4039,6 +4229,9 @@ class AgentPBXTUI(App[None]):
     JoplinNoteTitleScreen,
     ModelElevationScreen,
     JoplinDeleteConfirmScreen,
+    FilePathActionScreen,
+    FileDeleteConfirmScreen,
+    FileTrashScreen,
     EditorCloseConfirmScreen,
     OperatorKillConfirmScreen,
     OperatorHistoryScreen,
@@ -4050,6 +4243,9 @@ class AgentPBXTUI(App[None]):
     #joplin-title-panel,
     #model-elevation-panel,
     #joplin-delete-panel,
+    #file-path-action-panel,
+    #file-delete-panel,
+    #file-trash-panel,
     #editor-close-panel,
     #operator-kill-panel,
     #operator-history-panel,
@@ -4061,6 +4257,39 @@ class AgentPBXTUI(App[None]):
         border: tall $accent;
         background: $panel;
         padding: 1 2;
+    }
+
+    #file-trash-panel {
+        width: 100;
+        max-width: 94%;
+        height: 28;
+        max-height: 90%;
+    }
+
+    #file-trash-entries {
+        height: 1fr;
+        margin-top: 1;
+    }
+
+    #file-path-action-input,
+    #file-path-action-source,
+    #file-delete-detail {
+        height: auto;
+        min-height: 3;
+        margin-top: 1;
+    }
+
+    #file-path-action-actions,
+    #file-delete-actions,
+    #file-trash-actions {
+        height: 3;
+        margin-top: 1;
+    }
+
+    #file-path-action-actions Button,
+    #file-delete-actions Button,
+    #file-trash-actions Button {
+        width: 1fr;
     }
 
     #model-elevation-panel {
@@ -4090,6 +4319,9 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-modal-title,
     #joplin-delete-title,
+    #file-path-action-title,
+    #file-delete-title,
+    #file-trash-title,
     #editor-close-title,
     #operator-kill-title,
     #operator-history-title,
@@ -4595,10 +4827,16 @@ class AgentPBXTUI(App[None]):
     }
 
     #file-actions {
+        height: 6;
+    }
+
+    #file-navigation-actions,
+    #file-crud-actions {
         height: 3;
     }
 
-    #file-actions Button {
+    #file-navigation-actions Button,
+    #file-crud-actions Button {
         width: 1fr;
         min-width: 1;
     }
@@ -5317,6 +5555,7 @@ class AgentPBXTUI(App[None]):
         self.selected_file_line_by_agent = self.editor_panel_state.selected_line_by_agent
         self.editor_documents_by_agent = self.editor_panel_state.documents_by_agent
         self.editor_dirty_agent_ids = self.editor_panel_state.dirty_agent_ids
+        self.latest_file_trash_prune_batch_by_agent: dict[str, str] = {}
         self.editor_rendering = False
         self.editor_rendered_agent_id: str | None = None
         self.editor_fullscreen = False
@@ -6525,12 +6764,19 @@ class AgentPBXTUI(App[None]):
                             markup=False,
                             auto_scroll=False,
                         )
-                        with Horizontal(id="file-actions"):
-                            yield Button("Refresh Files", id="files-refresh")
-                            yield Button("Up", id="files-up")
-                            yield Button("Copy Path", id="files-copy-path")
-                            yield Button("Copy Text", id="files-copy-text")
-                            yield Button("Open Editor", id="files-open-editor")
+                        with Vertical(id="file-actions"):
+                            with Horizontal(id="file-navigation-actions"):
+                                yield Button("Refresh Files", id="files-refresh")
+                                yield Button("Up", id="files-up")
+                                yield Button("Copy Path", id="files-copy-path")
+                                yield Button("Copy Text", id="files-copy-text")
+                                yield Button("Open Editor", id="files-open-editor")
+                            with Horizontal(id="file-crud-actions"):
+                                yield Button("New File", id="files-create-file")
+                                yield Button("New Dir", id="files-create-directory")
+                                yield Button("Move", id="files-move")
+                                yield Button("Delete", id="files-delete", variant="error")
+                                yield Button("Trash", id="files-trash")
                     with TabPane("Editor", id="editor-tab"):
                         yield Static("Editor: no file", id="editor-status")
                         yield TextArea.code_editor(
@@ -13341,6 +13587,21 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "files-open-editor":
             await self.open_selected_file_in_editor(self.selected_agent_id)
+            return
+        if event.button.id == "files-create-file":
+            self.open_file_path_action("create_file")
+            return
+        if event.button.id == "files-create-directory":
+            self.open_file_path_action("create_directory")
+            return
+        if event.button.id == "files-move":
+            self.open_file_path_action("move")
+            return
+        if event.button.id == "files-delete":
+            await self.request_file_delete(self.selected_agent_id)
+            return
+        if event.button.id == "files-trash":
+            await self.open_file_trash(self.selected_agent_id)
             return
         if event.button.id == "editor-save":
             await self.save_editor_document(self.selected_agent_id)
@@ -22325,6 +22586,310 @@ class AgentPBXTUI(App[None]):
             self.notify(f"Unable to copy text: {exc}")
             return
         self.notify(f"Copied text from {path} via {source}.")
+
+    def open_file_path_action(self, action: str) -> None:
+        agent_id = self.selected_agent_id
+        if not agent_id:
+            self.notify("Select an agent first.", severity="warning")
+            return
+        current = self.file_path_by_agent.get(agent_id, ".")
+        selected = self.selected_file_path(agent_id)
+        source: str | None = None
+        if action == "move":
+            if not selected:
+                self.notify("Select a file or directory to move.", severity="warning")
+                return
+            source = selected
+            initial_path = selected
+        else:
+            suffix = "new-file.txt" if action == "create_file" else "new-directory"
+            initial_path = suffix if current in {"", "."} else f"{current.rstrip('/')}/{suffix}"
+        self.push_screen(
+            FilePathActionScreen(
+                agent_id=agent_id,
+                action=action,
+                initial_path=initial_path,
+                source=source,
+            )
+        )
+
+    async def apply_file_path_action(
+        self,
+        agent_id: str,
+        action: str,
+        path: str,
+        *,
+        source: str | None = None,
+    ) -> None:
+        endpoint = f"/v1/agents/{agent_id}/files/create"
+        payload: dict[str, Any]
+        if action == "move":
+            if not source:
+                self.notify("Move source is missing.", severity="error")
+                return
+            endpoint = f"/v1/agents/{agent_id}/files/move"
+            payload = {"source": source, "destination": path}
+        else:
+            payload = {
+                "path": path,
+                "kind": "directory" if action == "create_directory" else "file",
+                "text": "",
+            }
+        try:
+            response = await self.api_client().post(
+                endpoint,
+                json=payload,
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"File action failed: {exc}", severity="error")
+            return
+        if self.notify_file_mutation_error(result):
+            return
+        if action == "move" and source:
+            self.reconcile_editor_path_move(agent_id, source=source, destination=path)
+            self.selected_file_path_by_agent[agent_id] = path
+            verb = "Moved"
+        else:
+            self.selected_file_path_by_agent[agent_id] = path
+            verb = "Created directory" if action == "create_directory" else "Created file"
+        parent = path.rsplit("/", 1)[0] if "/" in path else "."
+        await self.load_agent_files(agent_id, parent or ".")
+        if action != "create_directory":
+            await self.load_file_preview(agent_id, path)
+        self.notify(f"{verb}: {path}")
+
+    async def request_file_delete(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        path = self.selected_file_path(resolved_agent_id)
+        if not resolved_agent_id or not path:
+            self.notify("Select a file or directory to delete.", severity="warning")
+            return
+        self.capture_editor_buffer(resolved_agent_id)
+        if self.editor_path_within(resolved_agent_id, path) and (
+            resolved_agent_id in self.editor_dirty_agent_ids
+        ):
+            self.notify(
+                "Save or discard the open editor changes before deleting this path.",
+                severity="warning",
+            )
+            return
+        try:
+            response = await self.api_client().get(
+                f"/v1/agents/{resolved_agent_id}/files/delete-preview",
+                params={"path": path},
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            preview = response.json()
+        except Exception as exc:
+            self.notify(f"Delete preview failed: {exc}", severity="error")
+            return
+        if self.notify_file_mutation_error(preview):
+            return
+        self.push_screen(FileDeleteConfirmScreen(agent_id=resolved_agent_id, preview=preview))
+
+    async def apply_file_delete(
+        self,
+        agent_id: str,
+        preview: dict[str, Any],
+    ) -> None:
+        path = str(preview.get("path") or "")
+        payload = {
+            "path": path,
+            "preview_token": str(preview.get("preview_token") or ""),
+            "actor": "tui-operator",
+            "confirm_tracked": preview.get("delete_mode") == "git_delete",
+        }
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/files/delete",
+                json=payload,
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Delete failed: {exc}", severity="error")
+            return
+        if self.notify_file_mutation_error(result):
+            return
+        if self.editor_path_within(agent_id, path):
+            self.close_editor_document(agent_id)
+        self.selected_file_path_by_agent.pop(agent_id, None)
+        self.selected_file_line_by_agent.pop(agent_id, None)
+        parent = path.rsplit("/", 1)[0] if "/" in path else "."
+        await self.load_agent_files(agent_id, parent or ".")
+        if result.get("trashed"):
+            self.notify(f"Moved {path} to recoverable project trash.")
+        else:
+            self.notify(f"Deleted tracked path {path}; Git can restore it.")
+
+    async def open_file_trash(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if not resolved_agent_id:
+            self.notify("Select an agent first.", severity="warning")
+            return
+        try:
+            response = await self.api_client().get(
+                f"/v1/agents/{resolved_agent_id}/files/trash",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self.notify(f"Unable to list project trash: {exc}", severity="error")
+            return
+        if self.notify_file_mutation_error(payload):
+            return
+        entries = payload.get("entries") if isinstance(payload, dict) else []
+        self.push_screen(
+            FileTrashScreen(
+                agent_id=resolved_agent_id,
+                entries=[item for item in entries if isinstance(item, dict)]
+                if isinstance(entries, list)
+                else [],
+            )
+        )
+
+    async def restore_file_trash(self, agent_id: str, trash_id: str) -> None:
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/files/trash/restore",
+                json={"trash_id": trash_id},
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Trash restore failed: {exc}", severity="error")
+            return
+        if self.notify_file_mutation_error(result):
+            return
+        path = str(result.get("path") or "")
+        parent = path.rsplit("/", 1)[0] if "/" in path else "."
+        self.selected_file_path_by_agent[agent_id] = path
+        await self.load_agent_files(agent_id, parent or ".")
+        if path:
+            await self.load_file_preview(agent_id, path)
+        self.notify(f"Restored {path} from project trash.")
+
+    async def prune_file_trash(self, agent_id: str) -> None:
+        try:
+            preview_response = await self.api_client().get(
+                f"/v1/agents/{agent_id}/files/trash/prune-preview",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            preview_response.raise_for_status()
+            preview = preview_response.json()
+        except Exception as exc:
+            self.notify(f"Trash prune preview failed: {exc}", severity="error")
+            return
+        if self.notify_file_mutation_error(preview):
+            return
+        if int(preview.get("count") or 0) == 0:
+            self.notify("No expired project trash entries are eligible for pruning.")
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/files/trash/prune",
+                json={
+                    "preview_token": str(preview.get("preview_token") or ""),
+                    "cutoff": float(preview.get("cutoff") or time.time()),
+                },
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Trash prune failed: {exc}", severity="error")
+            return
+        if self.notify_file_mutation_error(result):
+            return
+        batch_id = str(result.get("batch_id") or "")
+        if batch_id:
+            self.latest_file_trash_prune_batch_by_agent[agent_id] = batch_id
+        self.notify(
+            f"Quarantined {int(result.get('count') or 0)} expired trash entry(s); "
+            "Undo Prune remains available."
+        )
+
+    async def undo_file_trash_prune(self, agent_id: str) -> None:
+        batch_id = self.latest_file_trash_prune_batch_by_agent.get(agent_id, "")
+        if not batch_id:
+            self.notify("No project trash prune batch is available to undo.", severity="warning")
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{agent_id}/files/trash/prune-undo",
+                json={"batch_id": batch_id},
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Trash prune undo failed: {exc}", severity="error")
+            return
+        if self.notify_file_mutation_error(result):
+            return
+        self.latest_file_trash_prune_batch_by_agent.pop(agent_id, None)
+        self.notify(f"Restored {len(result.get('trash_ids') or [])} pruned trash entry(s).")
+
+    def notify_file_mutation_error(self, payload: Any) -> bool:
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if not isinstance(error, dict):
+            return False
+        code = str(error.get("code") or "FILE_ACTION_FAILED")
+        message = str(error.get("message") or "File action failed")
+        remediation = str(error.get("remediation") or "")
+        detail = f"{code}: {message}"
+        if remediation:
+            detail = f"{detail} ({remediation})"
+        self.notify(detail, severity="warning")
+        return True
+
+    def editor_path_within(self, agent_id: str, path: str) -> bool:
+        document = self.editor_documents_by_agent.get(agent_id)
+        editor_path = str(document.get("path") or "") if isinstance(document, dict) else ""
+        normalized = path.rstrip("/")
+        return bool(
+            editor_path
+            and normalized
+            and (editor_path == normalized or editor_path.startswith(f"{normalized}/"))
+        )
+
+    def reconcile_editor_path_move(
+        self,
+        agent_id: str,
+        *,
+        source: str,
+        destination: str,
+    ) -> None:
+        document = self.editor_documents_by_agent.get(agent_id)
+        if not isinstance(document, dict):
+            return
+        editor_path = str(document.get("path") or "")
+        normalized_source = source.rstrip("/")
+        if editor_path == normalized_source:
+            next_path = destination
+        elif editor_path.startswith(f"{normalized_source}/"):
+            next_path = f"{destination.rstrip('/')}{editor_path[len(normalized_source):]}"
+        else:
+            return
+        document["path"] = next_path
+        self.selected_file_path_by_agent[agent_id] = next_path
+        if self.editor_rendered_agent_id == agent_id:
+            self.set_editor_status(self.format_editor_status(agent_id, document))
 
     def capture_editor_buffer(self, agent_id: str | None = None) -> None:
         if self.editor_rendering:

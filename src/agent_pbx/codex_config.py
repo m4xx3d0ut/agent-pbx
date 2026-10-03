@@ -226,11 +226,9 @@ def patch_codex_config(
     path.parent.mkdir(parents=True, exist_ok=True)
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     if text.strip():
-        parsed, parse_error = _parse_toml(text)
+        _, parse_error = _parse_toml(text)
         if parse_error:
             raise ValueError(parse_error)
-    else:
-        parsed = {}
 
     _validate_patch_against_requirements(
         updates or {},

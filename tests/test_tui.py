@@ -1131,6 +1131,11 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         files_copy_path = app.query_one("#files-copy-path", Button)
         files_copy_text = app.query_one("#files-copy-text", Button)
         files_open_editor = app.query_one("#files-open-editor", Button)
+        files_create_file = app.query_one("#files-create-file", Button)
+        files_create_directory = app.query_one("#files-create-directory", Button)
+        files_move = app.query_one("#files-move", Button)
+        files_delete = app.query_one("#files-delete", Button)
+        files_trash = app.query_one("#files-trash", Button)
         editor = app.query_one("#editor", TextArea)
         editor_status = app.query_one("#editor-status", Static)
         editor_diagnostics = app.query_one("#editor-diagnostics", TextArea)
@@ -1206,6 +1211,11 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert files_copy_path.label.plain == "Copy Path"
         assert files_copy_text.label.plain == "Copy Text"
         assert files_open_editor.label.plain == "Open Editor"
+        assert files_create_file.label.plain == "New File"
+        assert files_create_directory.label.plain == "New Dir"
+        assert files_move.label.plain == "Move"
+        assert files_delete.label.plain == "Delete"
+        assert files_trash.label.plain == "Trash"
         assert editor.read_only is False
         assert str(editor_status.renderable) == "Editor: no file"
         assert editor_diagnostics.read_only is True
@@ -1243,6 +1253,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "#files {\n        height: 8;" in app.CSS
         assert "#file-search-results {\n        height: 7;" in app.CSS
         assert "#file-preview {\n        height: 1fr;" in app.CSS
+        assert "#file-actions {\n        height: 6;" in app.CSS
         assert "#editor {\n        height: 1fr;" in app.CSS
         assert "#latest-plan-choice-panel,\n    #plan-choice-panel {" in app.CSS
         assert "#latest-plan-hint,\n    #plan-hint {" in app.CSS
@@ -4797,6 +4808,197 @@ async def test_tui_files_search_copy_and_open_editor(monkeypatch) -> None:
         "/v1/agents/agent-1/files/search",
         {"query": "target", "path": "."},
     ) in calls
+
+
+async def test_tui_file_crud_reconciles_editor_and_trash_prune_state() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    posts: list[tuple[str, dict[str, object]]] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(
+            self,
+            path: str,
+            *,
+            params: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            if path == "/v1/joplin/status":
+                return Response({"configured": False, "available": False})
+            if path == "/v1/codex/config":
+                return Response({"exists": False, "fields": [], "hidden_items": []})
+            if path == "/v1/agents":
+                return Response([])
+            if path == "/v1/events":
+                return Response([])
+            if path.endswith("/files/trash/prune-preview"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "cutoff": 100.0,
+                        "count": 1,
+                        "bytes": 10,
+                        "entries": [{"trash_id": "trash-1"}],
+                        "preview_token": "preview-prune",
+                        "error": None,
+                    }
+                )
+            if path.endswith("/files/preview"):
+                file_path = str((params or {}).get("path") or "")
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": file_path,
+                        "kind": "file",
+                        "size": 0,
+                        "mtime": 1.0,
+                        "extension": ".py",
+                        "mime_type": "text/x-python",
+                        "is_text": True,
+                        "is_image": False,
+                        "is_gif": False,
+                        "text": "",
+                        "truncated": False,
+                        "error": None,
+                    }
+                )
+            if path.endswith("/files"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": str((params or {}).get("path") or "."),
+                        "parent": ".",
+                        "entries": [],
+                        "error": None,
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+        async def post(
+            self,
+            path: str,
+            *,
+            json: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            payload = json or {}
+            posts.append((path, payload))
+            if path.endswith("/files/create"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": payload["path"],
+                        "kind": payload["kind"],
+                        "created": True,
+                        "error": None,
+                    }
+                )
+            if path.endswith("/files/move"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": payload["destination"],
+                        "source": payload["source"],
+                        "destination": payload["destination"],
+                        "kind": "directory",
+                        "moved": True,
+                        "error": None,
+                    }
+                )
+            if path.endswith("/files/delete"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "cwd": "/repo",
+                        "path": payload["path"],
+                        "deleted": True,
+                        "trashed": True,
+                        "trash_id": "trash-1",
+                        "error": None,
+                    }
+                )
+            if path.endswith("/files/trash/prune"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "batch_id": "batch-1",
+                        "status": "applied",
+                        "count": 1,
+                        "trash_ids": ["trash-1"],
+                        "error": None,
+                    }
+                )
+            if path.endswith("/files/trash/prune-undo"):
+                return Response(
+                    {
+                        "agent_id": "agent-1",
+                        "batch_id": "batch-1",
+                        "status": "undone",
+                        "trash_ids": ["trash-1"],
+                        "error": None,
+                    }
+                )
+            raise AssertionError(f"unexpected POST {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.editor_documents_by_agent["agent-1"] = {
+            "path": "src/pkg/app.py",
+            "text": "print('ok')\n",
+            "current_text": "print('ok')\n",
+        }
+        await app.apply_file_path_action(
+            "agent-1",
+            "move",
+            "lib/pkg",
+            source="src/pkg",
+        )
+        assert app.editor_documents_by_agent["agent-1"]["path"] == "lib/pkg/app.py"
+
+        await app.apply_file_path_action("agent-1", "create_file", "lib/new.py")
+        assert app.selected_file_path_by_agent["agent-1"] == "lib/new.py"
+
+        app.editor_documents_by_agent["agent-1"] = {
+            "path": "lib/pkg/app.py",
+            "text": "print('ok')\n",
+            "current_text": "print('ok')\n",
+        }
+        await app.apply_file_delete(
+            "agent-1",
+            {
+                "path": "lib/pkg",
+                "preview_token": "delete-preview",
+                "delete_mode": "trash",
+            },
+        )
+        assert "agent-1" not in app.editor_documents_by_agent
+
+        await app.prune_file_trash("agent-1")
+        assert app.latest_file_trash_prune_batch_by_agent["agent-1"] == "batch-1"
+        await app.undo_file_trash_prune("agent-1")
+        assert "agent-1" not in app.latest_file_trash_prune_batch_by_agent
+
+    assert any(path.endswith("/files/move") for path, _payload in posts)
+    assert any(path.endswith("/files/delete") for path, _payload in posts)
+    assert any(path.endswith("/files/trash/prune") for path, _payload in posts)
+    assert any(path.endswith("/files/trash/prune-undo") for path, _payload in posts)
 
 
 async def test_tui_editor_persists_saves_and_toggles_fullscreen() -> None:

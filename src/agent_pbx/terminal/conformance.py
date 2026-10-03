@@ -64,7 +64,8 @@ def run_dedicated_tmux_conformance(*, timeout: float = 5.0) -> TmuxConformanceRe
         raw=b""
         while time.monotonic()<deadline and marker_a not in "\n".join(terminal.snapshot().lines):
             chunk=process.read_available(timeout=0.1)
-            raw+=chunk; terminal.feed(chunk)
+            raw += chunk
+            terminal.feed(chunk)
         initial=marker_a in "\n".join(terminal.snapshot().lines)
         subprocess.run(
             [tmux, "-L", socket_name, "send-keys", "-t", session, f"printf '{marker_b}\\n'", "Enter"],
@@ -74,7 +75,8 @@ def run_dedicated_tmux_conformance(*, timeout: float = 5.0) -> TmuxConformanceRe
         )
         while time.monotonic()<deadline and marker_b not in "\n".join(terminal.snapshot().lines):
             chunk=process.read_available(timeout=0.1)
-            raw+=chunk; terminal.feed(chunk)
+            raw += chunk
+            terminal.feed(chunk)
         snapshot=terminal.snapshot()
         return TmuxConformanceResult(
             client_alive=process.alive,
