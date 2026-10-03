@@ -2701,6 +2701,7 @@ class OperatorService:
         delivery: str = "auto",
     ) -> dict[str, Any]:
         operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
         assignment_payloads = [
             self._assignment_payload(assignment) for assignment in assignments
         ]
@@ -2710,7 +2711,7 @@ class OperatorService:
             self._require_caller(str(assignment["target_agent_id"]))
 
         campaign = self.store.create_operator_campaign(
-            operator_agent_id=operator_agent_id,
+            operator_agent_id=logical_operator_id,
             title=title,
             objective=objective,
             criteria=criteria,
@@ -2789,11 +2790,11 @@ class OperatorService:
             {
                 "campaign_id": campaign["campaign_id"],
                 "operator_agent_id": operator_agent_id,
+                "logical_operator_agent_id": logical_operator_id,
                 "assignment_count": len(assignment_payloads),
             },
             campaign["campaign_id"],
         )
-        _ = operator
         return self.campaign_status(campaign_id=campaign["campaign_id"])[0]
 
     def send_followup(
@@ -2808,8 +2809,8 @@ class OperatorService:
         fork_track_id: str | None = None,
         delivery: str = "auto",
     ) -> dict[str, Any]:
-        self._require_operator(operator_agent_id)
-        campaign = self._require_campaign(campaign_id)
+        operator = self._require_operator(operator_agent_id)
+        campaign = self._require_campaign_for_operator(campaign_id, operator)
         assignment = self._resolve_assignment(
             campaign_id,
             target_agent_id=target_agent_id,
@@ -2893,7 +2894,7 @@ class OperatorService:
                 "route must be primary_idle_edit_fork, root_operator, or new_write_operator"
             )
         if campaign_id:
-            self._require_campaign(campaign_id)
+            self._require_campaign_for_operator(campaign_id, operator)
         routed_message = self._review_escalation_message(
             review_fork=review_fork,
             message=message,
@@ -2997,7 +2998,7 @@ class OperatorService:
         if resolved_mode not in PROJECT_SPAWN_MODES:
             raise ValueError("mode must be empty or clone_source")
         if campaign_id:
-            self._require_campaign(campaign_id)
+            self._require_campaign_for_operator(campaign_id, operator)
         source_path, target_parent, target_path, resolved_slug = resolve_sibling_project_paths(
             source_cwd,
             project_name,
@@ -3102,15 +3103,31 @@ class OperatorService:
         detail: str,
     ) -> dict[str, Any]:
         operator = self._require_operator(operator_agent_id)
+        campaign = self._require_campaign_for_operator(campaign_id, operator)
         assignment = self.store.get_operator_campaign_assignment(assignment_id)
         if assignment is None or assignment["campaign_id"] != campaign_id:
             raise ValueError("assignment not found for campaign")
-        complete = operator_state_is_terminal(state)
+        normalized_state = str(state or "").strip().lower()
+        if not normalized_state:
+            raise ValueError("assignment state is required")
+        prior_state = str(assignment.get("state") or "").strip().lower()
+        if assignment.get("completed_at") is not None and normalized_state != prior_state:
+            raise ValueError("terminal assignment cannot transition to another state")
+        target = self.store.get_agent(str(assignment.get("target_agent_id") or ""))
+        if (
+            isinstance(target, dict)
+            and target.get("dismissed_at") is not None
+            and not operator_state_is_terminal(normalized_state)
+        ):
+            raise ValueError("archived assignment target accepts terminal reports only")
+        if campaign.get("completed_at") is not None:
+            raise ValueError("campaign is already terminal")
+        complete = operator_state_is_terminal(normalized_state)
         report = self.store.create_report(
             operator_agent_id,
             ReportCreateRequest(
                 project=str(operator["project"]),
-                status=state,
+                status=normalized_state,
                 summary=summary,
                 detail=detail,
                 metadata={
@@ -3119,13 +3136,13 @@ class OperatorService:
                     "assignment_id": assignment_id,
                     "operator_agent_id": operator_agent_id,
                     "target_agent_id": assignment["target_agent_id"],
-                    "completion_state": state,
+                    "completion_state": normalized_state,
                 },
             ),
         )
         updated = self.store.update_operator_assignment(
             assignment_id,
-            state=state,
+            state=normalized_state,
             last_report_id=report["report_id"],
             complete=complete,
         )
@@ -3136,7 +3153,7 @@ class OperatorService:
             target_agent_id=assignment["target_agent_id"],
             event_type="assignment_reported",
             summary=summary,
-            detail={"state": state},
+            detail={"state": normalized_state},
             report_id=report["report_id"],
         )
         return updated or assignment
@@ -3151,35 +3168,53 @@ class OperatorService:
         detail: str,
     ) -> dict[str, Any]:
         operator = self._require_operator(operator_agent_id)
-        self._require_campaign(campaign_id)
-        complete = operator_state_is_terminal(status)
+        campaign = self._require_campaign_for_operator(campaign_id, operator)
+        normalized_status = str(status or "").strip().lower()
+        if not operator_state_is_terminal(normalized_status):
+            raise ValueError("finish status must be terminal")
+        if campaign.get("completed_at") is not None:
+            raise ValueError("campaign is already terminal")
+        assignments = self.store.list_operator_campaign_assignments(
+            campaign_id=campaign_id,
+            limit=500,
+        )
+        unfinished = [
+            str(item.get("assignment_id") or "")
+            for item in assignments
+            if not operator_state_is_terminal(str(item.get("state") or ""))
+            and item.get("completed_at") is None
+        ]
+        if unfinished:
+            raise ValueError(
+                "campaign has nonterminal assignments: " + ", ".join(unfinished)
+            )
         report = self.store.create_report(
             operator_agent_id,
             ReportCreateRequest(
                 project=str(operator["project"]),
-                status=status,
+                status=normalized_status,
                 summary=summary,
                 detail=detail,
                 metadata={
                     "source": "operator_campaign",
                     "campaign_id": campaign_id,
                     "operator_agent_id": operator_agent_id,
-                    "completion_state": status,
+                    "completion_state": normalized_status,
                 },
             ),
         )
         updated = self.store.update_operator_campaign(
             campaign_id,
-            status=status,
+            status=normalized_status,
             summary=summary,
-            complete=complete,
+            complete=True,
         )
         self.store.add_operator_campaign_event(
             campaign_id=campaign_id,
             operator_agent_id=operator_agent_id,
             event_type="campaign_finished",
             summary=summary,
-            detail={"status": status},
+            detail={"status": normalized_status},
             report_id=report["report_id"],
         )
         return updated or self._require_campaign(campaign_id)
@@ -3191,14 +3226,22 @@ class OperatorService:
         campaign_id: str | None = None,
         status: str | None = None,
         limit: int = 50,
+        include_events: bool = True,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
+        operator_family_ids: list[str] | None = None
         if operator_agent_id:
-            self._require_operator(operator_agent_id)
+            operator = self._require_operator(operator_agent_id)
+            operator_family_ids = self._operator_family_agent_ids(
+                self._logical_operator_agent_id(operator)
+            )
         return self.store.list_operator_campaigns(
-            operator_agent_id=operator_agent_id,
+            operator_agent_ids=operator_family_ids,
             campaign_id=campaign_id,
             status=status,
             limit=limit,
+            include_events=include_events,
+            offset=offset,
         )
 
     def _assignment_payload(
@@ -4449,6 +4492,26 @@ class OperatorService:
         if campaign is None:
             raise ValueError("campaign not found")
         return campaign
+
+    def _require_campaign_for_operator(
+        self,
+        campaign_id: str,
+        operator: dict[str, Any],
+    ) -> dict[str, Any]:
+        campaign = self._require_campaign(campaign_id)
+        owner = self._require_operator(str(campaign.get("operator_agent_id") or ""))
+        if self._logical_operator_agent_id(owner) != self._logical_operator_agent_id(operator):
+            raise ValueError("campaign belongs to a different operator")
+        return campaign
+
+    def _operator_family_agent_ids(self, logical_operator_id: str) -> list[str]:
+        family = {logical_operator_id}
+        for agent in self.store.list_agents(include_hidden=True):
+            if agent.get("agent_type") != OPERATOR_AGENT_TYPE:
+                continue
+            if self._logical_operator_agent_id(agent) == logical_operator_id:
+                family.add(str(agent["agent_id"]))
+        return sorted(family)
 
     def _require_knowledge_link(self, link_id: str) -> dict[str, Any]:
         link = self.store.get_operator_knowledge_link(link_id)

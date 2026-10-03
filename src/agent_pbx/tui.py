@@ -5608,6 +5608,7 @@ class AgentPBXTUI(App[None]):
         self.latest_agent_prune_request: dict[str, Any] | None = None
         self.latest_agent_prune_preview: dict[str, Any] | None = None
         self.last_agent_prune_batch_id: str | None = None
+        self.latest_lifecycle_repair_preview_by_agent: dict[str, dict[str, Any]] = {}
         self.agent_cursor_fallback_row: int | None = None
         self.operator_cursor_fallback_row: int | None = None
         self.slash_completion_state: dict[str, SlashCompletionState] = {}
@@ -7039,6 +7040,21 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/unblock", "Mark the selected agent working", self.palette_mark_working)
         yield SystemCommand("/working", "Mark the selected agent working", self.palette_mark_working)
         yield SystemCommand("/cancel", "Mark the selected agent canceled", self.palette_mark_canceled)
+        yield SystemCommand(
+            "/agent inspect",
+            "Inspect reconciled Agent/Operator lifecycle state",
+            self.palette_lifecycle_inspect,
+        )
+        yield SystemCommand(
+            "/agent repair preview",
+            "Preview a stale runtime mapping repair",
+            self.palette_lifecycle_repair_preview,
+        )
+        yield SystemCommand(
+            "/agent repair apply",
+            "Apply the latest reviewed runtime mapping repair",
+            self.palette_lifecycle_repair_apply,
+        )
         yield SystemCommand("/esc", "Send Escape to the selected agent", self.palette_escape)
         yield SystemCommand("/ctrlc", "Send Ctrl+C to the selected tmux pane", self.palette_ctrl_c)
         yield SystemCommand("/restart", "Restart the selected tmux Codex pane", self.palette_tmux_restart)
@@ -8692,6 +8708,27 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.dismiss_selected_agent(delete_thread=True),
             name="palette-purge-agent",
+            exclusive=True,
+        )
+
+    def palette_lifecycle_inspect(self) -> None:
+        self.run_worker(
+            self.inspect_selected_lifecycle(),
+            name="lifecycle-inspect",
+            exclusive=True,
+        )
+
+    def palette_lifecycle_repair_preview(self) -> None:
+        self.run_worker(
+            self.preview_selected_lifecycle_repair(),
+            name="lifecycle-repair-preview",
+            exclusive=True,
+        )
+
+    def palette_lifecycle_repair_apply(self) -> None:
+        self.run_worker(
+            self.apply_selected_lifecycle_repair(),
+            name="lifecycle-repair-apply",
             exclusive=True,
         )
 
@@ -16048,6 +16085,146 @@ class AgentPBXTUI(App[None]):
                 starred_at=float_value(agent.get("starred_at")),
             )
 
+    async def inspect_selected_lifecycle(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        try:
+            response = await self.api_client().get(
+                f"/v2/lifecycle/{agent_id}",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            inspection = response.json()
+        except Exception as exc:
+            self.notify(f"Lifecycle inspection failed: {exc}", severity="error")
+            return
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_lifecycle_inspection(inspection)
+        self.activate_latest_tab()
+        self.notify(f"Inspected lifecycle state for {agent_id}.")
+
+    async def preview_selected_lifecycle_repair(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v2/lifecycle/{agent_id}/actions/repair_mapping/preview",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            preview = response.json()
+        except Exception as exc:
+            self.notify(f"Runtime repair preview failed: {exc}", severity="error")
+            return
+        self.latest_lifecycle_repair_preview_by_agent[agent_id] = preview
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_lifecycle_repair_preview(preview)
+        self.activate_latest_tab()
+        if preview.get("safe"):
+            self.notify("Runtime mapping repair is ready for explicit apply.")
+        else:
+            self.notify(
+                f"Runtime mapping repair is guarded: {preview.get('reason') or 'unavailable'}",
+                severity="warning",
+            )
+
+    async def apply_selected_lifecycle_repair(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        preview = self.latest_lifecycle_repair_preview_by_agent.get(agent_id)
+        if not isinstance(preview, dict) or not preview.get("safe"):
+            self.notify("Create a safe runtime repair preview first.", severity="warning")
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v2/lifecycle/{agent_id}/actions/repair_mapping/apply",
+                json={
+                    "preview_token": str(preview.get("preview_token") or ""),
+                    "metadata": {"source": "agent_pbx_tui"},
+                },
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Runtime mapping repair failed: {exc}", severity="error")
+            return
+        self.latest_lifecycle_repair_preview_by_agent.pop(agent_id, None)
+        mapping = result.get("mapping") if isinstance(result, dict) else None
+        if isinstance(mapping, dict):
+            self.tmux_runtime_mapping_by_agent[agent_id] = mapping
+            pane_id = str(mapping.get("pane_id") or "")
+            if pane_id:
+                self.tmux_agent_targets[agent_id] = pane_id
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_lifecycle_inspection(result.get("after") or {})
+        await self.refresh_events()
+        self.notify(f"Repaired runtime mapping for {agent_id}.")
+
+    @staticmethod
+    def format_lifecycle_inspection(payload: dict[str, Any]) -> str:
+        agent = payload.get("agent") if isinstance(payload.get("agent"), dict) else {}
+        codex = payload.get("codex") if isinstance(payload.get("codex"), dict) else {}
+        workspace = (
+            payload.get("workspace") if isinstance(payload.get("workspace"), dict) else {}
+        )
+        runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+        actions = payload.get("actions") if isinstance(payload.get("actions"), dict) else {}
+        lines = [
+            f"Lifecycle: {payload.get('entity_id') or '-'}",
+            f"Kind: {payload.get('entity_kind') or '-'}",
+            f"State: {payload.get('lifecycle_state') or '-'}",
+            f"PBX active: {agent.get('pbx_active')}",
+            f"Starred: {agent.get('starred')} · Archived: {agent.get('archived')}",
+            f"Codex session: {codex.get('session_id') or '-'}",
+            f"Workspace: {workspace.get('path') or '-'} ({'ready' if workspace.get('available') else 'missing'})",
+            f"Runtime: {runtime.get('state') or '-'} — {runtime.get('message') or ''}",
+            "",
+            "Guards:",
+        ]
+        guards = payload.get("guard_reasons")
+        if guards:
+            lines.extend(f"- {item}" for item in guards)
+        else:
+            lines.append("- none")
+        lines.extend(["", "Actions:"])
+        for action, state in sorted(actions.items()):
+            if not isinstance(state, dict):
+                continue
+            marker = "ready" if state.get("available") else "guarded"
+            reason = f" — {state.get('reason')}" if state.get("reason") else ""
+            lines.append(f"- {action}: {marker}{reason}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_lifecycle_repair_preview(preview: dict[str, Any]) -> str:
+        before = preview.get("before") if isinstance(preview.get("before"), dict) else {}
+        candidate = (
+            preview.get("candidate") if isinstance(preview.get("candidate"), dict) else {}
+        )
+        return "\n".join(
+            [
+                f"Runtime Repair Preview: {preview.get('entity_id') or '-'}",
+                f"Safe: {bool(preview.get('safe'))}",
+                f"Reason: {preview.get('reason') or '-'}",
+                "",
+                f"Recorded: {before.get('session_name') or '-'} {before.get('window_name') or '-'} {before.get('pane_id') or '-'}",
+                f"Candidate: {candidate.get('session_name') or '-'} {candidate.get('window_name') or '-'} {candidate.get('pane_id') or '-'}",
+                f"CWD: {candidate.get('cwd') or before.get('cwd') or '-'}",
+                "",
+                "Apply with /agent repair apply after reviewing this identity change.",
+            ]
+        )
+
     def agent_prune_request(self, preset: str) -> dict[str, Any]:
         return {
             "preset": preset,
@@ -21671,6 +21848,8 @@ class AgentPBXTUI(App[None]):
         await self.load_thread(agent_id)
 
     async def load_operator_campaigns(self, agent_id: str) -> None:
+        generation_resource = f"operator-campaigns:{agent_id}"
+        generation = self.async_generations.start(generation_resource)
         status_label = self.query_one_or_none("#campaign-status", Static)
         detail = self.query_one_or_none("#campaign-detail", TextArea)
         agent = self.agents.get(agent_id)
@@ -21685,8 +21864,8 @@ class AgentPBXTUI(App[None]):
             status_label.update(f"Campaigns: loading for {agent_id}...")
         try:
             response = await self.api_client().get(
-                "/v1/operator/campaigns",
-                params={"operator_agent_id": agent_id, "limit": 50},
+                "/v2/operator/campaigns",
+                params={"operator_agent_id": agent_id, "limit": 25, "cursor": 0},
                 headers=auth_headers(self.token),
             )
             response.raise_for_status()
@@ -21694,13 +21873,16 @@ class AgentPBXTUI(App[None]):
             campaigns = payload.get("campaigns", []) if isinstance(payload, dict) else []
             if not isinstance(campaigns, list):
                 campaigns = []
-            await self.attach_campaign_reports(campaigns)
         except Exception as exc:
+            if not self.async_generations.current(generation_resource, generation):
+                return
             self.render_campaigns(agent_id, [])
             if status_label is not None:
                 status_label.update(f"Campaigns: unable to load ({exc})")
             if detail is not None:
                 detail.text = f"Unable to load campaigns for {agent_id}: {exc}"
+            return
+        if not self.async_generations.current(generation_resource, generation):
             return
         self.campaigns_by_operator[agent_id] = {
             str(campaign.get("campaign_id")): campaign
@@ -21717,6 +21899,38 @@ class AgentPBXTUI(App[None]):
             self.select_campaign(str(campaigns[0]["campaign_id"]))
         elif detail is not None:
             detail.text = f"No operator campaigns for {agent_id}."
+
+    async def load_campaign_detail(self, operator_id: str, campaign_id: str) -> None:
+        generation_resource = f"operator-campaign-detail:{operator_id}"
+        generation = self.async_generations.start(generation_resource)
+        try:
+            response = await self.api_client().get(
+                f"/v2/operator/campaigns/{campaign_id}",
+                params={"operator_agent_id": operator_id},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            campaign = response.json()
+            if not isinstance(campaign, dict):
+                raise RuntimeError("campaign detail response was not an object")
+            await self.attach_campaign_reports([campaign])
+        except Exception as exc:
+            if not self.async_generations.current(generation_resource, generation):
+                return
+            detail = self.query_one_or_none("#campaign-detail", TextArea)
+            if detail is not None and self.selected_campaign_id_by_operator.get(operator_id) == campaign_id:
+                detail.text = f"Unable to load campaign {campaign_id}: {exc}"
+            return
+        if not self.async_generations.current(generation_resource, generation):
+            return
+        self.campaigns_by_operator.setdefault(operator_id, {})[campaign_id] = campaign
+        if (
+            self.selected_agent_id == operator_id
+            and self.selected_campaign_id_by_operator.get(operator_id) == campaign_id
+        ):
+            detail = self.query_one_or_none("#campaign-detail", TextArea)
+            if detail is not None:
+                detail.text = self.format_campaign_detail(campaign)
 
     def campaign_report_ids(self, campaign: dict[str, Any]) -> list[str]:
         report_ids: list[str] = []
@@ -21765,14 +21979,19 @@ class AgentPBXTUI(App[None]):
                     seen.add(report_id)
                     report_ids.append(report_id)
         reports_by_id: dict[str, dict[str, Any]] = {}
-        for report_id in report_ids:
+
+        async def fetch(report_id: str) -> tuple[str, dict[str, Any]]:
             try:
-                reports_by_id[report_id] = await self.fetch_report_by_id(report_id)
+                return report_id, await self.fetch_report_by_id(report_id)
             except Exception as exc:
-                reports_by_id[report_id] = {
+                return report_id, {
                     "report_id": report_id,
                     "error": str(exc),
                 }
+        for report_id, report in await asyncio.gather(
+            *(fetch(report_id) for report_id in report_ids)
+        ):
+            reports_by_id[report_id] = report
         for campaign in campaigns:
             if not isinstance(campaign, dict):
                 continue
@@ -21847,6 +22066,12 @@ class AgentPBXTUI(App[None]):
         detail = self.query_one_or_none("#campaign-detail", TextArea)
         if detail is not None:
             detail.text = self.format_campaign_detail(campaign)
+        self.run_worker(
+            self.load_campaign_detail(operator_id, campaign_id),
+            name=f"campaign-detail-{slugify(operator_id)}",
+            group=f"campaign-detail-{slugify(operator_id)}",
+            exclusive=True,
+        )
 
     def report_summary_line(self, report: dict[str, Any]) -> str:
         if report.get("error"):

@@ -130,6 +130,146 @@ def test_operator_campaign_queue_delivery_and_state(tmp_path: Path) -> None:
     assert report["metadata"]["completion_state"] == "complete"
 
 
+def test_operator_campaign_rejects_nonterminal_finish_and_terminal_regression(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        status="running",
+        metadata={"pbx_mode": "nohup"},
+    )
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Guard state transitions",
+        objective="Keep campaign state monotonic.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Validate."}],
+        delivery="queue",
+    )
+    assignment = campaign["assignments"][0]
+
+    with pytest.raises(ValueError, match="nonterminal assignments"):
+        service.finish_campaign(
+            operator_agent_id="operator-0",
+            campaign_id=campaign["campaign_id"],
+            status="complete",
+            summary="Too early",
+            detail="The assignment is still active.",
+        )
+    with pytest.raises(ValueError, match="finish status must be terminal"):
+        service.finish_campaign(
+            operator_agent_id="operator-0",
+            campaign_id=campaign["campaign_id"],
+            status="running",
+            summary="Invalid finish",
+            detail="A running campaign is not finished.",
+        )
+
+    service.report_assignment(
+        operator_agent_id="operator-0",
+        campaign_id=campaign["campaign_id"],
+        assignment_id=assignment["assignment_id"],
+        state="complete",
+        summary="Complete",
+        detail="Validation passed.",
+    )
+    with pytest.raises(ValueError, match="terminal assignment"):
+        service.report_assignment(
+            operator_agent_id="operator-0",
+            campaign_id=campaign["campaign_id"],
+            assignment_id=assignment["assignment_id"],
+            state="working",
+            summary="Regressed",
+            detail="This must not reopen the assignment.",
+        )
+
+
+def test_operator_campaign_enforces_logical_owner_and_archived_target_policy(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-B",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"pbx_mode": "report", "cwd": str(tmp_path)},
+        )
+    )
+    service = OperatorService(store)
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        status="running",
+        metadata={"pbx_mode": "nohup"},
+    )
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Ownership and archive policy",
+        objective="Keep reports under the owning Operator.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Validate."}],
+        delivery="queue",
+    )
+    assignment = campaign["assignments"][0]
+
+    with pytest.raises(ValueError, match="different operator"):
+        service.report_assignment(
+            operator_agent_id="operator-B",
+            campaign_id=campaign["campaign_id"],
+            assignment_id=assignment["assignment_id"],
+            state="complete",
+            summary="Wrong owner",
+            detail="This Operator does not own the campaign.",
+        )
+    with pytest.raises(ValueError, match="different operator"):
+        service.send_followup(
+            operator_agent_id="operator-B",
+            campaign_id=campaign["campaign_id"],
+            target_agent_id="caller-1",
+            assignment_id=assignment["assignment_id"],
+            message="Cross-operator follow-up must be rejected.",
+            delivery="queue",
+        )
+
+    visible_to_fork = service.campaign_status(
+        operator_agent_id=str(fork["fork_agent_id"]),
+        campaign_id=campaign["campaign_id"],
+    )
+    assert visible_to_fork[0]["operator_agent_id"] == "operator-0"
+
+    store.dismiss_agent("caller-1")
+    with pytest.raises(ValueError, match="archived assignment target"):
+        service.report_assignment(
+            operator_agent_id="operator-0",
+            campaign_id=campaign["campaign_id"],
+            assignment_id=assignment["assignment_id"],
+            state="working",
+            summary="Still working",
+            detail="An archived target cannot report nonterminal work.",
+        )
+    completed = service.report_assignment(
+        operator_agent_id=str(fork["fork_agent_id"]),
+        campaign_id=campaign["campaign_id"],
+        assignment_id=assignment["assignment_id"],
+        state="canceled",
+        summary="Canceled after archive",
+        detail="The archived target closed its assignment.",
+    )
+
+    assert completed["state"] == "canceled"
+    assert completed["completed_at"] is not None
+
+
 def test_operator_knowledge_link_proposal_approval_keeps_fork_graph(
     tmp_path: Path,
 ) -> None:

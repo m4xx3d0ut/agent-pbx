@@ -6686,8 +6686,18 @@ async def test_tui_campaigns_loads_and_views_generated_reports() -> None:
     class Client:
         async def get(self, path: str, **_: object) -> Response:
             calls.append(path)
-            if path == "/v1/operator/campaigns":
-                return Response({"campaigns": [campaign]})
+            if path == "/v2/operator/campaigns":
+                summary = {**campaign, "events": []}
+                return Response(
+                    {
+                        "campaigns": [summary],
+                        "cursor": 0,
+                        "next_cursor": None,
+                        "has_more": False,
+                    }
+                )
+            if path == "/v2/operator/campaigns/campaign-1":
+                return Response(campaign)
             if path == "/v1/reports/report-1":
                 return Response(report)
             raise AssertionError(path)
@@ -6726,9 +6736,18 @@ async def test_tui_campaigns_loads_and_views_generated_reports() -> None:
     relevant_calls = [
         path
         for path in calls
-        if path in {"/v1/operator/campaigns", "/v1/reports/report-1"}
+        if path
+        in {
+            "/v2/operator/campaigns",
+            "/v2/operator/campaigns/campaign-1",
+            "/v1/reports/report-1",
+        }
     ]
-    assert relevant_calls == ["/v1/operator/campaigns", "/v1/reports/report-1"]
+    assert relevant_calls == [
+        "/v2/operator/campaigns",
+        "/v2/operator/campaigns/campaign-1",
+        "/v1/reports/report-1",
+    ]
     assert "Campaign: Release check" in report_detail
     assert "Report: report-1" in report_detail
     assert "Agent: operator-0" in report_detail

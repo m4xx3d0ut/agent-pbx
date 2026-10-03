@@ -52,6 +52,7 @@ from .joplin import (
     format_copy_body,
     scoped_note_title,
 )
+from .lifecycle import LifecycleService
 from .issues import (
     IssueConfig,
     IssueError,
@@ -127,6 +128,7 @@ from .schemas import (
     JoplinStatusResponse,
     JoplinSyncJobResponse,
     JoplinSyncStatusResponse,
+    LifecycleActionRequest,
     ManagedAgentLaunchRequest,
     ManagedSkillApplyRequest,
     ModelElevationActivateRequest,
@@ -352,6 +354,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.issues = issues
     app.state.operator_service = OperatorService(store)
     app.state.managed_runtime = ManagedRuntimeService(store)
+    app.state.lifecycle = LifecycleService(store)
     if resolved_config.debug:
         app.add_middleware(DebugRequestLogMiddleware)
     app.mount("/mcp", mcp_asgi_app)
@@ -895,6 +898,57 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         deleted = store.delete_tmux_runtime_mapping(entity_id)
         store.append_event("tmux_runtime_mapping_deleted", {"entity_id": entity_id}, entity_id)
         return {"deleted": deleted, "entity_id": entity_id}
+
+    @app.get(
+        "/v2/lifecycle/{entity_id}",
+        dependencies=[Depends(require_token)],
+    )
+    async def inspect_lifecycle_entity(
+        entity_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        service: LifecycleService = request.app.state.lifecycle
+        try:
+            return await asyncio.to_thread(service.inspect, entity_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/lifecycle/{entity_id}/actions/{action}/preview",
+        dependencies=[Depends(require_token)],
+    )
+    async def preview_lifecycle_action(
+        entity_id: str,
+        action: str,
+        request: Request,
+    ) -> dict[str, object]:
+        service: LifecycleService = request.app.state.lifecycle
+        try:
+            return await asyncio.to_thread(service.preview_action, entity_id, action)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/lifecycle/{entity_id}/actions/{action}/apply",
+        dependencies=[Depends(require_token)],
+    )
+    async def apply_lifecycle_action(
+        entity_id: str,
+        action: str,
+        payload: LifecycleActionRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        service: LifecycleService = request.app.state.lifecycle
+        try:
+            return await asyncio.to_thread(
+                service.apply_action,
+                entity_id,
+                action,
+                preview_token=payload.preview_token,
+                metadata=payload.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get(
         "/v2/projects/discover",
@@ -3518,6 +3572,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         campaign_id: str | None = None,
         status: str | None = None,
         limit: int = 50,
+        include_events: bool = True,
+        offset: int = 0,
     ) -> dict[str, object]:
         operator_service = request.app.state.operator_service
         campaigns = await asyncio.to_thread(
@@ -3526,8 +3582,62 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             campaign_id=campaign_id,
             status=status,
             limit=limit,
+            include_events=include_events,
+            offset=offset,
         )
         return {"campaigns": campaigns}
+
+    @app.get(
+        "/v2/operator/campaigns",
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_campaigns_paginated(
+        request: Request,
+        operator_agent_id: str | None = None,
+        status: str | None = None,
+        cursor: int = Query(default=0, ge=0),
+        limit: int = Query(default=25, ge=1, le=100),
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        campaigns = await asyncio.to_thread(
+            operator_service.campaign_status,
+            operator_agent_id=operator_agent_id,
+            status=status,
+            limit=limit + 1,
+            include_events=False,
+            offset=cursor,
+        )
+        has_more = len(campaigns) > limit
+        page = campaigns[:limit]
+        return {
+            "campaigns": page,
+            "cursor": cursor,
+            "next_cursor": cursor + limit if has_more else None,
+            "has_more": has_more,
+        }
+
+    @app.get(
+        "/v2/operator/campaigns/{campaign_id}",
+        response_model=OperatorCampaignResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_operator_campaign_detail(
+        campaign_id: str,
+        request: Request,
+        operator_agent_id: str | None = None,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        campaigns = await asyncio.to_thread(
+            operator_service.campaign_status,
+            operator_agent_id=operator_agent_id,
+            campaign_id=campaign_id,
+            limit=1,
+            include_events=True,
+            offset=0,
+        )
+        if not campaigns:
+            raise HTTPException(status_code=404, detail="operator campaign not found")
+        return campaigns[0]
 
     @app.post(
         "/v1/operator/campaigns",

@@ -312,6 +312,11 @@ class AgentActiveRequest(BaseModel):
     active: bool
 
 
+class LifecycleActionRequest(BaseModel):
+    preview_token: str = Field(min_length=1, max_length=128)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentResponse(BaseModel):
     agent_id: str
     agent_type: AgentType = "caller"

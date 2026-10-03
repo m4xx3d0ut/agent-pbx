@@ -3995,15 +3995,29 @@ class Store:
         self,
         *,
         operator_agent_id: str | None = None,
+        operator_agent_ids: list[str] | None = None,
         campaign_id: str | None = None,
         status: str | None = None,
         limit: int = 50,
         include_events: bool = True,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         safe_limit = min(max(limit, 1), 200)
+        safe_offset = max(int(offset), 0)
         where: list[str] = []
         params: list[Any] = []
-        if operator_agent_id:
+        normalized_operator_ids = sorted(
+            {
+                str(value).strip()
+                for value in operator_agent_ids or []
+                if str(value).strip()
+            }
+        )
+        if normalized_operator_ids:
+            placeholders = ", ".join("?" for _ in normalized_operator_ids)
+            where.append(f"operator_agent_id IN ({placeholders})")
+            params.extend(normalized_operator_ids)
+        elif operator_agent_id:
             where.append("operator_agent_id = ?")
             params.append(operator_agent_id)
         if campaign_id:
@@ -4020,9 +4034,9 @@ class Store:
             FROM operator_campaigns
             {clause}
             ORDER BY updated_at DESC, campaign_id ASC
-            LIMIT ?
+            LIMIT ? OFFSET ?
         """
-        params.append(safe_limit)
+        params.extend((safe_limit, safe_offset))
         with self.connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
         campaigns = [self._operator_campaign_from_row(row) for row in rows]
