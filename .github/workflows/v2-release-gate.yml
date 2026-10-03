@@ -1,0 +1,57 @@
+name: v2 release gate
+
+on:
+  push:
+    branches: [dev]
+    tags: ["v2*"]
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install tmux on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install tmux on macOS
+        if: runner.os == 'macOS'
+        run: brew install tmux
+      - name: Install Agent PBX and test dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Compile source and tests
+        run: python -m compileall -q src tests
+      - name: Run full test suite
+        run: python -m pytest -q
+      - name: Check release manifest tests
+        run: python -m pytest -q tests/test_release_packaging.py
+
+  wheelhouse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Install build dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Build checksummed offline wheelhouse
+        run: scripts/build_wheelhouse.sh --out dist/agent-pbx-wheelhouse
+      - name: Verify release manifest
+        run: python scripts/release_manifest.py verify dist/agent-pbx-wheelhouse
+

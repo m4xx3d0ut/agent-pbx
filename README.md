@@ -1110,63 +1110,50 @@ Use `FOREGROUND` and `BACKGROUND` for normal text and the terminal base.
 `Settings -> Theme` or `/theme <name>` from the palette to switch back to your
 custom theme if another theme is selected.
 
-Experimental local-only tmux direct mode is available for workflows where the
-TUI, MCP server, tmux, and Codex pane all run on the same host. Enable it with
-`AGENT_PBX_TUI_TMUX=1` or the `Tmux direct default` setting for agents without
-an explicit override. Press `Ctrl+T` or `F8` from `Latest` to toggle tmux direct
-mode for only the currently selected agent. This lets one agent's `Latest` tab
-show a captured tmux pane while another agent still shows the normal PBX latest
-report and queue buttons.
+Agent PBX v2 enables the native local tmux path by default when the TUI uses a
+loopback daemon and `tmux` is available. `Latest` embeds a PTY-backed normal
+tmux client attached to the selected PBX-managed runtime. Codex keeps its native
+selectors, warning view, approvals, paste, mouse, resize, cursor state, and tmux
+scrollback. The captured pane renderer and separate input remain available as a
+compatibility fallback through the v2.0 line.
 
-Agent PBX still records normal reports in `Thread`, but follow-up input for a
-tmux-enabled agent is pasted directly into the selected tmux pane, so slash
-commands such as `/status` are sent unchanged. The TUI auto-matches panes by
-agent cwd/project/title and provides `Auto`, `Select Pane`, and `Detach`
-controls for manual correction plus `Restart` for relaunching recoverable Codex
-panes after CLI updates. Tmux controls are disabled when `tmux` is not
-available; set `AGENT_PBX_TUI_TMUX_SHOW=1` to show them on a tmux-capable host
-outside an attached tmux client. `F8` is the preferred Android Termux/SSH
-shortcut because Termux can emit it with `Volume Up+8`; `Alt+T` is kept as a
-hidden compatibility binding for terminals that send Meta-T, but Termux maps
-its volume special layer plus `T` to Tab. `AGENT_PBX_TUI_TMUX_CAPTURE_LINES=0`
-captures only the visible pane by default; set a positive value to include
-scrollback when you intentionally need older output. Set
-`AGENT_PBX_TUI_TMUX_REFRESH_SECONDS=1.5` to tune the snapshot refresh cadence;
-larger values reduce redraw pop at the cost of freshness. The tmux view crops
-the Codex `Working` status/input area from captured output, so the main render
-focuses on transcript changes instead of the live prompt buffer.
-On tiny terminals, tmux direct mode hides the pane action button row, shortens
-the editor hotkey text, and focuses the tmux input box so the transcript and
-input both stay visible.
-If touch focus behaves differently over Termux/SSH, set
-`AGENT_PBX_TUI_MOUSE_DEBUG=1` before launching the TUI to log mouse-down and
-click routing details through Textual logging.
-For touchscreen sessions where tap focus is unreliable, use the plain-key
-focus fallbacks: `a` focuses Agents, `e` Events, `v` the selected agent view,
-and `i` the input box. These are ignored while typing in follow-up inputs.
-Function-key shortcuts remain available on terminals that send them: `F1`
-Agents, `F2` Events, `F3` view, `F4` input, and `F8` tmux direct. One compact
-Termux row for those terminals is:
-`extra-keys = [['F1','F2','F3','F4','F8'],['ESC','TAB','CTRL','ALT','LEFT','DOWN','UP','RIGHT']]`.
+The committed runtime-server default is `dedicated`, which works whether or not
+the TUI itself runs in tmux. Set
+`AGENT_PBX_TUI_TMUX_RUNTIME_SERVER_MODE=outer_if_present` in a private
+workstation config to reuse a validated outer tmux server and enable targeted
+`switch-client` pop in/out over local or SSH clients. Same-server mode rejects
+recursive attachment to the PBX TUI session, namespaces managed sessions, and
+targets only the initiating client.
 
-When tmux is available, the Agents table may show a local `Live` hint. `pbx`
-means that agent is using the standard PBX latest report view, `tmux` means
-tmux direct is enabled but has not captured a pane yet, `active` means the
-captured pane text changed recently, `idle 1m` means the pane has not visibly
-changed for the idle threshold, and `stale` means the selected pane target is
-gone or invalid. When tmux direct is enabled for an agent, `Live` is `active`,
-and the last PBX report is a terminal status such as `done` or `completed`, the
-TUI displays `tmux-working` in `Status` to make the local pane activity visible.
-This does not rewrite the stored PBX report.
+`AGENT_PBX_TUI_TMUX=1` and `AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2=1` explicitly
+enable the native local path. Press `Ctrl+T` or `F8` from `Latest` to toggle it
+for the selected entity. Tmux controls are disabled when tmux is unavailable or
+the API URL is remote. Use `agent-pbx remote ssh-attach` for full-fidelity remote
+terminal access; the WSS client is the observer/control path.
 
-The tmux read path is snapshot-based: Agent PBX uses `capture-pane` to show the
-rendered pane state a human would see. Tmux paste buffers are used for sending
-text, not as a live read source. Follow-up text is loaded into a named tmux
-buffer, pasted with bracketed paste, then submitted; set
-`AGENT_PBX_TUI_TMUX_BRACKETED_PASTE=0` only if a target pane mishandles
-bracketed paste. `pipe-pane` and tmux control mode are better fits for future
-debug transcripts or event-driven refresh, but the default UI remains
-`capture-pane` plus periodic resync for now.
+Plain configured function keys remain global PBX navigation even under terminal
+focus: `F1` Agents, `F2` Events, `F3` view, `F4` input, `F6/F7` fork navigation,
+and `F8` tmux. Shift+F1–F12 is translated to unmodified child F1–F12. Thus F2
+always focuses Events while Shift+F2 opens Codex warnings. The input layer also
+recognizes xterm F13–F24 aliases, and the key probe documents terminal-specific
+SSH or Termux sequences.
+
+The runtime tmux server owns scrollback; managed Codex profiles use
+`alternate_screen = "never"`. The embedded client is disposable, and closing or
+restarting the TUI does not stop Codex. Only one client receives the writer
+lease; observers cannot inject input or control authoritative geometry.
+
+The retained capture fallback uses `AGENT_PBX_TUI_TMUX_CAPTURE_LINES` and
+`AGENT_PBX_TUI_TMUX_REFRESH_SECONDS`. Set
+`AGENT_PBX_TUI_COMPAT_TERMINAL_CAPTURE=0` only after native-terminal parity is
+confirmed on that host. `AGENT_PBX_COMPAT_POLLING` and
+`AGENT_PBX_TUI_COMPAT_THREAD` independently gate the other retained v2.0 paths.
+Doctor and `/healthz` report this compatibility posture.
+
+On tiny terminals the existing compact controls remain available. Android
+Termux can emit F8 with `Volume Up+8`; terminals that cannot distinguish shifted
+function keys can use the configured PBX leader fallback. Touch focus debugging
+remains available with `AGENT_PBX_TUI_MOUSE_DEBUG=1`.
 
 For local tmux-direct testing, use report mode unless you specifically need PBX
 queued follow-ups: tell the agent `use Agent PBX`, not `use Agent PBX nohup`.

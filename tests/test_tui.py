@@ -77,6 +77,7 @@ from agent_pbx.tui import (
     render_custom_slash_prompt,
     response_text_digest,
     resolve_layout,
+    run_tui,
     slash_completion_direction,
     tmux_features_available,
 )
@@ -336,9 +337,9 @@ def test_tui_constructs() -> None:
     assert app.visual_flash_enabled is False
     assert app.terminal_bell_enabled is False
     assert app.agent_blink_enabled is True
-    assert app.tmux_direct_enabled is True
-    assert app.embedded_terminal_v2_enabled is True
-    assert app.event_stream_v2_enabled is True
+    assert app.tmux_direct_enabled is False
+    assert app.embedded_terminal_v2_enabled is False
+    assert app.event_stream_v2_enabled is False
     assert app.legacy_thread_enabled is True
     assert app.legacy_terminal_capture_enabled is True
     assert app.tmux_capture_lines == 0
@@ -350,6 +351,49 @@ def test_tui_constructs() -> None:
     assert app.split_percent == DEFAULT_SPLIT_PERCENT
     assert app.compact_view == "home"
     assert ("b", "back", "Back") in app.BINDINGS
+
+
+def test_run_tui_selects_native_default_only_for_local_server(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeApp:
+        def __init__(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def run(self) -> None:
+            calls[-1]["ran"] = True
+
+    monkeypatch.setattr("agent_pbx.tui.AgentPBXTUI", FakeApp)
+
+    run_tui(server="http://127.0.0.1:8765", token="local")
+    run_tui(server="https://pbx.example.test", token="remote")
+
+    assert calls == [
+        {
+            "server": "http://127.0.0.1:8765",
+            "token": "local",
+            "v2_defaults": True,
+            "ran": True,
+        },
+        {
+            "server": "https://pbx.example.test",
+            "token": "remote",
+            "v2_defaults": True,
+            "ran": True,
+        },
+    ]
+
+
+def test_v2_launcher_defaults_enable_local_native_and_all_event_streams() -> None:
+    local = AgentPBXTUI(server="http://127.0.0.1:8765", v2_defaults=True)
+    remote = AgentPBXTUI(server="https://pbx.example.test", v2_defaults=True)
+
+    assert local.tmux_direct_enabled is True
+    assert local.embedded_terminal_v2_enabled is True
+    assert local.event_stream_v2_enabled is True
+    assert remote.tmux_direct_enabled is False
+    assert remote.embedded_terminal_v2_enabled is False
+    assert remote.event_stream_v2_enabled is True
 
 
 def test_tui_v2_event_envelope_applies_snapshot_and_new_events() -> None:
@@ -896,7 +940,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["show_hidden_agents"] is True
     assert saved["latest_viewed_at_by_agent"] == {"agent-1": 123.0}
     assert saved["last_seen_event_id"] == 42
-    assert saved["event_stream_v2"] is True
+    assert saved["event_stream_v2"] is False
     assert saved["legacy_thread_enabled"] is True
     assert saved["legacy_terminal_capture_enabled"] is True
     assert saved["remote_client_id"] == app.remote_client_id
@@ -907,7 +951,7 @@ def test_remote_tui_does_not_enable_local_native_terminal_by_default() -> None:
 
     assert app.tmux_direct_enabled is False
     assert app.embedded_terminal_v2_enabled is False
-    assert app.event_stream_v2_enabled is True
+    assert app.event_stream_v2_enabled is False
 
 
 def test_tui_remote_view_state_excludes_prompt_and_document_drafts() -> None:
@@ -1219,7 +1263,11 @@ async def test_tui_refresh_agents_can_include_hidden() -> None:
 
 
 async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
-    app = AgentPBXTUI(server="http://127.0.0.1:8765", visual_flash=True)
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        visual_flash=True,
+        tmux_direct=False,
+    )
 
     async with app.run_test() as pilot:
         await pilot.resize_terminal(120, 32)
@@ -1524,7 +1572,7 @@ async def test_tui_disables_tmux_controls_when_unavailable(monkeypatch) -> None:
 
 
 async def test_tui_select_agent_updates_composer_and_loads_report() -> None:
-    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=False)
     loaded: list[str] = []
     threads: list[str] = []
 
@@ -2448,7 +2496,7 @@ def test_tui_tmux_crop_hides_codex_status_and_input_region() -> None:
 
 
 async def test_tui_tmux_toggle_hotkey_only_from_latest() -> None:
-    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=False)
     captures: list[str] = []
     reports: list[str] = []
 
@@ -2485,7 +2533,7 @@ async def test_tui_tmux_toggle_hotkey_only_from_latest() -> None:
 
 
 async def test_tui_tmux_direct_is_tracked_per_agent() -> None:
-    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=False)
     captures: list[str] = []
     reports: list[str] = []
     threads: list[str] = []

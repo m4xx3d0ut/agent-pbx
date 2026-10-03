@@ -2,39 +2,60 @@
 
 ## Unreleased
 
+## v2.0.0 - 2026-10-03
+
 ### Highlights
 
-- Adds operator knowledge links for bounded domain handoffs between operators
-  and review forks without changing fork edges, campaign assignments, or
-  source-session ownership.
-- Adds executable operator handoffs with approval, required-fork launch state,
-  delivery evidence, receiver acknowledgement, running/terminal updates,
-  TTL expiry, and redacted artifact summaries.
-- Allows read-only review forks to propose knowledge handoffs and inspect
-  scoped knowledge-link context, while delivery approval remains with the root
-  operator/TUI.
-- Adds TUI commands `/operator handoffs`, `/operator handoff approve`, and
-  `/operator handoff launch` to inspect pending handoffs, approve/retry
-  delivery, and launch the required target fork when a handoff is blocked on
-  fork activation.
-- Adds a PBX-managed SQLite operator KB with proposed/active/retired lifecycle,
-  provenance back to knowledge links, handoffs, and turns, root-only promotion
-  and import of active records, root-only update/reject/retire management,
-  read/propose MCP tools for review forks, and JSON-compatible export/import
-  hooks for portability.
-- Adds a right-pane `KB` tab for operator KB browsing, status filters, row
-  detail review, selected-row promote/reject/retire actions, and live refresh on
-  KB events, alongside `/operator kb` command variants.
-- Adds batch Agent-pane pruning with preview/apply/undo, hide-only semantics,
-  starred/queued/campaign/operator relationship guards, stale/operator-fork
-  presets, and cursor fallback after single-row hide.
-- Advances the SQLite schema to version 18 for knowledge-link, knowledge-turn,
-  operator-handoff, operator-KB, and agent-prune batch persistence.
+- Promotes Agent PBX into a durable Codex runtime control plane while retaining
+  PBX ownership of Agent/Operator identity, lifecycle, policy, routing,
+  campaigns, approvals, and audit.
+- Embeds a PTY-backed normal tmux client in the existing `Latest` tab, keeps the
+  v1 left/right layout and right-side tabs, supports dedicated and validated
+  outer tmux servers, and adds safe pop in/out with one writer lease.
+- Keeps plain F keys as global PBX navigation and translates Shift+F1–F12 into
+  child F1–F12; F2 opens Events and Shift+F2 reaches Codex warnings.
+- Adds a versioned Codex adapter, catalog-driven profiles, provenance-aware
+  runtime state, structured transcript results, safe restart/resume model
+  transitions, managed skill packs, and approved bounded model elevation.
+- Adds sequenced event snapshots, replay/resync WebSockets, role-scoped remote
+  clients, SSH native attach, runtime and child-agent status surfaces, and a
+  unified accessible theme.
+- Adds durable Operator knowledge links and executable handoffs, a managed KB,
+  read-only review-fork proposals, right-pane KB controls, and guarded batch
+  pruning with preview/apply/undo.
+- Adds optimistic Joplin revisions, durable sync jobs, Markdown read/edit modes,
+  safe Editor CRUD and recoverable project trash, unified lifecycle repair and
+  pruning, and hardened campaign/fork transitions.
+- Adds platform doctor, guarded database/config backup and migration commands,
+  verified rollback, safe offline wheelhouses, hashes, dependency manifests,
+  and an SPDX 2.3 SBOM.
+
+### Compatibility
+
+- Native tmux and v2 event streaming are the defaults for local clients.
+- Polling/nohup mode, Thread, HTTP refresh, and terminal capture remain enabled
+  and supported throughout the v2.0 line.
+- Legacy removal requires measured parity, a migration path, published
+  criteria, and a later release.
+
+### Upgrade notes
+
+- Back up and dry-run before applying schema 28.
+- LAN listeners require bearer authentication and TLS unless an explicit
+  controlled-lab override is supplied.
+- Restart the daemon after migration, then restart the TUI. Existing Codex
+  sessions remain resumable through their recorded mappings.
+- See `docs/releases/v2.0.0.md` and `docs/acceptance/v2-uat.md`.
 
 ### Verification
 
-- `python -m compileall src tests`
-- `python -m pytest`
+- Full Linux and macOS CI matrix on Python 3.10 and 3.12.
+- Local RC gate: 790 passed and one expected skip.
+- Isolated daemon, WebSocket, schema 28, Operator KB/handoff, Codex flow-matrix,
+  and cleanup UAT.
+- Checksummed Python 3.10 offline wheelhouse install and command smoke test.
+- `python -m compileall -q src tests`
+- `python -m pytest -q`
 - `git diff --check`
 
 ## v2.0.0a1 - 2026-10-02

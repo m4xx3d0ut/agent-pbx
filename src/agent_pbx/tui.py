@@ -5253,6 +5253,7 @@ class AgentPBXTUI(App[None]):
         tmux_capture_lines: int | None = None,
         export_dir: Path | str | None = None,
         settings_file: Path | str | None = None,
+        v2_defaults: bool = False,
     ) -> None:
         super().__init__()
         self.custom_theme_name = env_custom_theme_name()
@@ -5311,7 +5312,7 @@ class AgentPBXTUI(App[None]):
         self.low_power_enabled = bool_setting(self.settings, "low_power", False)
         if low_power_setting is not None:
             self.low_power_enabled = low_power_setting
-        local_native_default = is_local_server_url(self.server)
+        local_native_default = v2_defaults and is_local_server_url(self.server)
         tmux_direct_setting = env_flag_value("AGENT_PBX_TUI_TMUX")
         self.tmux_direct_enabled = (
             bool_setting(self.settings, "tmux_direct", local_native_default)
@@ -5330,7 +5331,7 @@ class AgentPBXTUI(App[None]):
         embedded_terminal_requested = bool_setting(
             self.settings,
             "embedded_terminal_v2",
-            local_native_default,
+            local_native_default and self.tmux_direct_enabled,
         )
         if embedded_terminal_setting is not None:
             embedded_terminal_requested = embedded_terminal_setting
@@ -5478,7 +5479,7 @@ class AgentPBXTUI(App[None]):
         self.event_stream_v2_enabled = bool_setting(
             self.settings,
             "event_stream_v2",
-            True,
+            v2_defaults,
         )
         event_stream_v2_setting = env_flag_value("AGENT_PBX_TUI_EVENT_STREAM_V2")
         if event_stream_v2_setting is not None:
@@ -28721,4 +28722,8 @@ class AgentPBXTUI(App[None]):
 
 
 def run_tui(*, server: str, token: str | None = None) -> None:
-    AgentPBXTUI(server=server, token=token).run()
+    AgentPBXTUI(
+        server=server,
+        token=token,
+        v2_defaults=True,
+    ).run()
