@@ -20,8 +20,8 @@ jobs:
         python: ["3.10", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -43,8 +43,8 @@ jobs:
   wheelhouse:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
           cache: pip
@@ -53,5 +53,4 @@ jobs:
       - name: Build checksummed offline wheelhouse
         run: scripts/build_wheelhouse.sh --out dist/agent-pbx-wheelhouse
       - name: Verify release manifest
-        run: python scripts/release_manifest.py verify dist/agent-pbx-wheelhouse
-
+        run: python scripts/release_manifest.py --wheelhouse dist/agent-pbx-wheelhouse verify

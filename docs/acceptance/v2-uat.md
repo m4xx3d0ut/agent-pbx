@@ -12,7 +12,8 @@ they cannot be mistaken for portable test evidence.
 - Alpha 2: `05ed799`, tag `v2.0.0a2`
 - Beta 1: `b63b9c3`, tag `v2.0.0b1`
 - Beta 2: `c964ec9`, tag `v2.0.0b2`
-- Release candidate: recorded on tag `v2.0.0rc1`
+- Release candidate 1: `18771a2`, tag `v2.0.0rc1`
+- Release candidate 2: recorded on tag `v2.0.0rc2`
 - Final: recorded on tag `v2.0.0`
 
 ## Checkpoint evidence
@@ -60,6 +61,11 @@ all tests except tests/test_tui.py: 384 passed, 1 skipped in 285.65s
 CI executes the complete suite on Linux and macOS with Python 3.10 and 3.12. A
 separate Linux/Python 3.10 job builds and verifies the checksummed offline
 wheelhouse. GitHub Actions run URLs are added after the RC push completes.
+
+RC1 exposed a release-workflow invocation defect: the manifest verifier's
+global `--wheelhouse` option was placed after the subcommand. RC2 corrects the
+argument order and updates official checkout/setup actions to their Node 24
+generations; the release code and local acceptance result were unchanged.
 
 ### Isolated live control-plane exercise
 
