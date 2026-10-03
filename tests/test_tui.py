@@ -17466,7 +17466,8 @@ def test_tui_review_operator_config_overrides_trusts_scratch_work_root() -> None
         work_root="/tmp/review root",
     )
 
-    assert 'projects={"/tmp/review root" = {trust_level = "trusted"}}' in overrides
+    trusted = str(Path("/tmp/review root").resolve())
+    assert f'projects={{"{trusted}" = {{trust_level = "trusted"}}}}' in overrides
     assert any(item.startswith("mcp_servers.agent-pbx=") for item in overrides)
 
 
@@ -17489,7 +17490,8 @@ def test_tui_caller_agent_config_overrides_allowlist_report_tools() -> None:
     assert "pbx_operator_propose_knowledge_handoff" not in agent_pbx_config
     assert "pbx_operator_list_handoffs" not in agent_pbx_config
     assert "pbx_operator_send_knowledge_turn" not in agent_pbx_config
-    assert 'projects={"/tmp/new project" = {trust_level = "trusted"}}' in overrides
+    trusted = str(Path("/tmp/new project").resolve())
+    assert f'projects={{"{trusted}" = {{trust_level = "trusted"}}}}' in overrides
 
 
 def test_tui_operator_agent_config_overrides_follow_operator_server_env(
@@ -17525,7 +17527,8 @@ def test_tui_operator_agent_config_overrides_follow_operator_server_env(
     assert 'default_tools_approval_mode = "approve"' in workerbee_config
     assert "workerbee_v1_project_status" in workerbee_config
     assert "workerbee_v1_exec" not in workerbee_config
-    assert 'projects={"/tmp/operator root" = {trust_level = "trusted"}}' in overrides
+    trusted = str(Path("/tmp/operator root").resolve())
+    assert f'projects={{"{trusted}" = {{trust_level = "trusted"}}}}' in overrides
 
 
 def test_tui_root_operator_config_includes_campaign_lifecycle_tools(

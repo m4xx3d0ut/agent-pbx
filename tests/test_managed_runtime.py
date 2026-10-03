@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,7 +12,11 @@ from agent_pbx.api import create_app
 from agent_pbx.codex_cli import CodexModelOption
 from agent_pbx.config import ServerConfig
 from agent_pbx.managed_runtime import ManagedRuntimeService
-from agent_pbx.runtime_tmux import RuntimeTmuxPane
+from agent_pbx.runtime_tmux import (
+    MAX_GENERATED_UNIX_SOCKET_PATH_BYTES,
+    RuntimeTmuxPane,
+    resolve_runtime_tmux_server,
+)
 from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import Store
 
@@ -183,7 +188,12 @@ def test_managed_launch_on_real_dedicated_tmux_server(
     mapping = result["runtime_mapping"]
     try:
         assert mapping["state"] == "ready"
-        assert mapping["socket_path"].endswith("agent-pbx/runtime-tmux.sock")
+        expected_socket = resolve_runtime_tmux_server("dedicated").socket_path
+        assert mapping["socket_path"] == expected_socket
+        assert (
+            len(os.fsencode(mapping["socket_path"]))
+            <= MAX_GENERATED_UNIX_SOCKET_PATH_BYTES
+        )
         assert mapping["pane_pid"]
         assert store.get_agent("codex-demo") is not None
     finally:

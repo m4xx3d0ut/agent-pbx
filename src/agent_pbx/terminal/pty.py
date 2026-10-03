@@ -117,6 +117,13 @@ class PtyProcess:
                 os.killpg(process.pid, signal.SIGHUP)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                # macOS can reject process-group signalling for a PTY-attached
+                # tmux client even though the child process itself is ours.
+                try:
+                    process.send_signal(signal.SIGHUP)
+                except (ProcessLookupError, PermissionError):
+                    pass
             try:
                 process.wait(timeout=max(0.1, timeout))
             except subprocess.TimeoutExpired:
@@ -124,7 +131,15 @@ class PtyProcess:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                process.wait(timeout=max(0.1, timeout))
+                except PermissionError:
+                    try:
+                        process.kill()
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                try:
+                    process.wait(timeout=max(0.1, timeout))
+                except subprocess.TimeoutExpired:
+                    pass
         if self.master_fd is not None:
             try:
                 os.close(self.master_fd)
@@ -141,4 +156,3 @@ class PtyProcess:
     @staticmethod
     def _set_winsize(fd: int, columns: int, rows: int) -> None:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
-

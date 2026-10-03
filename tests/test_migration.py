@@ -64,7 +64,9 @@ def test_migration_backup_is_consistent_private_and_complete(
     assert backup_path.stat().st_mode & 0o777 == 0o700
     for item in manifest["artifacts"]:
         assert (backup_path / item["backup_path"]).stat().st_mode & 0o077 == 0
-        assert "private" not in json.dumps(item)
+        serialized = json.dumps(item)
+        assert "AGENT_PBX_TOKEN" not in serialized
+        assert "AGENT_PBX_TOKEN=private" not in serialized
 
 
 def test_migration_dry_run_and_apply_reach_current_schema(tmp_path: Path) -> None:

@@ -14,6 +14,7 @@ import uuid
 from .codex.profiles import MANAGED_CODEX_PROFILES, validate_managed_profile
 from .codex_cli import CodexModelOption, inspect_codex_model_catalog
 from .runtime_tmux import (
+    ensure_runtime_socket_parent,
     RuntimeServerMode,
     TmuxServerIdentity,
     list_runtime_panes,
@@ -199,7 +200,8 @@ class ManagedRuntimeService:
             str(identity_data.get("message") or ""),
         )
         socket_path = Path(identity.socket_path)
-        socket_path.parent.mkdir(parents=True, exist_ok=True)
+        if identity.effective_mode is RuntimeServerMode.DEDICATED:
+            ensure_runtime_socket_parent(socket_path)
         env = {
             "AGENT_PBX_AGENT_ID": str(preview["agent_id"]),
             "AGENT_PBX_SERVER_URL": server_url.rstrip("/"),

@@ -65,6 +65,12 @@ def test_pty_and_virtual_terminal_stream_and_resize() -> None:
     assert terminal.snapshot().rows == 12
 
 
+def test_virtual_terminal_ignores_private_device_status_queries() -> None:
+    terminal = VirtualTerminal(40, 8)
+    terminal.feed(b"before\x1b[?996nafter")
+    assert "beforeafter" in "\n".join(terminal.snapshot().lines)
+
+
 async def test_terminal_surface_streams_input_and_resizes() -> None:
     class TerminalApp(App[None]):
         def compose(self) -> ComposeResult:

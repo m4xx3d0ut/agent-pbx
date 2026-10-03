@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import socket
+import tempfile
 
 from fastapi.testclient import TestClient
+import pytest
 
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
 from agent_pbx.runtime_tmux import (
+    MAX_GENERATED_UNIX_SOCKET_PATH_BYTES,
     OuterTmuxContext,
     RuntimeServerMode,
     RuntimeTmuxPane,
     assess_runtime_mapping,
+    ensure_runtime_socket_parent,
     recursive_attachment_reason,
     resolve_runtime_tmux_server,
     runtime_pop_plan,
@@ -29,6 +34,11 @@ def bind_socket(path: Path) -> socket.socket:
     return server
 
 
+def short_socket_path() -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    directory = tempfile.TemporaryDirectory(prefix="apbx-", dir="/tmp")
+    return directory, Path(directory.name) / "tmux.sock"
+
+
 def pane(*, pane_id: str = "%7", pane_pid: int = 100) -> RuntimeTmuxPane:
     return RuntimeTmuxPane(
         session_name="agent-pbx-runtime-agent-a",
@@ -43,7 +53,7 @@ def pane(*, pane_id: str = "%7", pane_pid: int = 100) -> RuntimeTmuxPane:
 
 
 def test_runtime_server_outer_if_present_uses_owned_socket(tmp_path: Path) -> None:
-    socket_path = tmp_path / "tmux.sock"
+    directory, socket_path = short_socket_path()
     server = bind_socket(socket_path)
     try:
         identity = resolve_runtime_tmux_server(
@@ -52,6 +62,7 @@ def test_runtime_server_outer_if_present_uses_owned_socket(tmp_path: Path) -> No
         )
     finally:
         server.close()
+        directory.cleanup()
     assert identity.ready is True
     assert identity.outer_detected is True
     assert identity.effective_mode is RuntimeServerMode.OUTER_IF_PRESENT
@@ -66,7 +77,33 @@ def test_runtime_server_outer_if_present_falls_back_without_outer(tmp_path: Path
     )
     assert identity.ready is True
     assert identity.effective_mode is RuntimeServerMode.DEDICATED
-    assert identity.socket_path.endswith("agent-pbx/runtime-tmux.sock")
+    assert len(os.fsencode(identity.socket_path)) <= MAX_GENERATED_UNIX_SOCKET_PATH_BYTES
+
+
+def test_generated_dedicated_socket_shortens_long_runtime_root(tmp_path: Path) -> None:
+    long_root = tmp_path / ("runtime-segment-" * 12)
+    identity = resolve_runtime_tmux_server(
+        "dedicated",
+        environ={},
+        runtime_dir=long_root,
+    )
+
+    assert len(os.fsencode(identity.socket_path)) <= MAX_GENERATED_UNIX_SOCKET_PATH_BYTES
+    assert identity.socket_path.startswith("/tmp/agent-pbx-")
+    assert "short user-local path" in identity.message
+
+
+def test_runtime_socket_parent_is_private_and_rejects_symlink(tmp_path: Path) -> None:
+    parent = tmp_path / "runtime"
+    ensure_runtime_socket_parent(parent / "tmux.sock")
+    assert parent.stat().st_mode & 0o777 == 0o700
+
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "runtime-link"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(PermissionError, match="real directory"):
+        ensure_runtime_socket_parent(link / "tmux.sock")
 
 
 def test_outer_required_reports_missing_tmux() -> None:
@@ -173,7 +210,7 @@ def test_tmux_runtime_api_registers_reconciles_and_leases_writer(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    socket_path = tmp_path / "tmux.sock"
+    directory, socket_path = short_socket_path()
     server = bind_socket(socket_path)
     observed = pane()
     monkeypatch.setattr("agent_pbx.api.list_runtime_panes", lambda _identity: (observed,))
@@ -233,10 +270,11 @@ def test_tmux_runtime_api_registers_reconciles_and_leases_writer(
         assert reconciled.json()["results"][0]["assessment"]["state"] == "ready"
     finally:
         server.close()
+        directory.cleanup()
 
 
 def test_tmux_runtime_api_rejects_recursive_session(tmp_path: Path, monkeypatch) -> None:
-    socket_path = tmp_path / "tmux.sock"
+    directory, socket_path = short_socket_path()
     server = bind_socket(socket_path)
     observed = pane()
     monkeypatch.setattr("agent_pbx.api.list_runtime_panes", lambda _identity: (observed,))
@@ -262,5 +300,6 @@ def test_tmux_runtime_api_rejects_recursive_session(tmp_path: Path, monkeypatch)
         )
     finally:
         server.close()
+        directory.cleanup()
     assert response.status_code == 409
     assert "Agent PBX TUI" in response.json()["detail"]

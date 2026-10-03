@@ -264,6 +264,12 @@ def rollback_migration(
     temp = destination.with_name(f".{destination.name}.restore-{uuid.uuid4().hex}.tmp")
     shutil.copy2(source, temp)
     temp.chmod(0o600)
+    # Store connections use WAL mode. A stopped daemon can still leave WAL and
+    # shared-memory sidecars beside the database; if those survive replacement,
+    # SQLite may replay post-backup transactions into the restored main file.
+    # The daemon-running guard above makes it safe to retire those stale files
+    # before atomically installing the verified backup.
+    _remove_sqlite_sidecars(destination)
     os.replace(temp, destination)
 
     restored_config: list[str] = []
@@ -372,6 +378,14 @@ def _sqlite_backup(source: Path, destination: Path) -> None:
     with sqlite3.connect(source) as source_conn, sqlite3.connect(destination) as target_conn:
         source_conn.backup(target_conn)
     destination.chmod(0o600)
+
+
+def _remove_sqlite_sidecars(path: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        try:
+            Path(f"{path}{suffix}").unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _artifact(

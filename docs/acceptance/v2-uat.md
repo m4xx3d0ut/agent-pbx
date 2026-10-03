@@ -13,7 +13,8 @@ they cannot be mistaken for portable test evidence.
 - Beta 1: `b63b9c3`, tag `v2.0.0b1`
 - Beta 2: `c964ec9`, tag `v2.0.0b2`
 - Release candidate 1: `18771a2`, tag `v2.0.0rc1`
-- Release candidate 2: recorded on tag `v2.0.0rc2`
+- Release candidate 2: `29092c8`, tag `v2.0.0rc2`
+- Release candidate 3: recorded on tag `v2.0.0rc3`
 - Final: recorded on tag `v2.0.0`
 
 ## Checkpoint evidence
@@ -50,13 +51,18 @@ python -m pytest -q
 git diff --check
 ```
 
-The RC local gate passed all **790 tests with one expected skip**. It was split
-only to preserve progress while qualifying the launcher-default correction:
+The initial RC local gate passed all **790 tests with one expected skip**. It
+was split only to preserve progress while qualifying the launcher-default
+correction:
 
 ```text
 tests/test_tui.py:                 406 passed in 330.88s
 all tests except tests/test_tui.py: 384 passed, 1 skipped in 285.65s
 ```
+
+After the RC2 portability findings, the RC3 local gate passed **792 tests with
+one expected skip in 627.79s**. The additional regression cases cover modern
+tmux private DSR parsing and generated Unix-socket path shortening.
 
 CI executes the complete suite on Linux and macOS with Python 3.10 and 3.12. A
 separate Linux/Python 3.10 job builds and verifies the checksummed offline
@@ -66,6 +72,14 @@ RC1 exposed a release-workflow invocation defect: the manifest verifier's
 global `--wheelhouse` option was placed after the subcommand. RC2 corrects the
 argument order and updates official checkout/setup actions to their Node 24
 generations; the release code and local acceptance result were unchanged.
+
+[RC2 run 37096413483](https://github.com/m4xx3d0ut/agent-pbx/actions/runs/37096413483)
+proved the wheelhouse gate and Ubuntu/Python 3.10 suite, then exposed portable
+runtime defects on Python 3.12 and macOS: rollback could replay a stale SQLite
+WAL, generated Unix-socket paths could exceed Darwin's limit, pyte rejected a
+private tmux device-status query, macOS could deny process-group signalling for
+a disposable client, and three tests assumed Linux's literal `/tmp` path.
+RC3 addresses those findings and adds direct regression coverage.
 
 ### Isolated live control-plane exercise
 

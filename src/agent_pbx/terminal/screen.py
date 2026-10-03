@@ -6,6 +6,20 @@ from dataclasses import dataclass
 import pyte
 
 
+class PbxHistoryScreen(pyte.HistoryScreen):
+    """History screen tolerant of modern private terminal status queries."""
+
+    def report_device_status(self, mode: int, **kwargs: object) -> None:
+        # Recent tmux versions emit private DSR queries such as CSI ? 996 n.
+        # Pyte dispatches the ``private`` keyword but its Screen method does
+        # not accept it. The embedded renderer has no response channel, so a
+        # private query is safely ignored while standard DSR keeps pyte's
+        # behavior.
+        if kwargs.get("private"):
+            return
+        super().report_device_status(mode)
+
+
 @dataclass(frozen=True)
 class TerminalSnapshot:
     columns: int
@@ -24,7 +38,7 @@ class VirtualTerminal:
         self.columns = max(2, int(columns))
         self.rows = max(2, int(rows))
         self.history = max(0, int(history))
-        self.screen = pyte.HistoryScreen(self.columns, self.rows, history=self.history)
+        self.screen = PbxHistoryScreen(self.columns, self.rows, history=self.history)
         self.stream = pyte.Stream(self.screen)
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
@@ -50,4 +64,3 @@ class VirtualTerminal:
             cursor_hidden=bool(self.screen.cursor.hidden),
             title=str(getattr(self.screen, "title", "") or ""),
         )
-

@@ -98,6 +98,10 @@ RUNTIME_PANE_FORMAT = "\t".join(
     )
 )
 
+# Darwin's sockaddr_un.sun_path is shorter than Linux's. Keep generated paths
+# below both limits, including room for the terminating NUL byte.
+MAX_GENERATED_UNIX_SOCKET_PATH_BYTES = 100
+
 
 def normalize_runtime_server_mode(value: object) -> RuntimeServerMode:
     cleaned = str(value or "").strip().casefold().replace("-", "_")
@@ -185,6 +189,21 @@ def resolve_runtime_tmux_server(
         env.get("XDG_RUNTIME_DIR") or f"/tmp/agent-pbx-{os.getuid()}"
     )
     dedicated_socket = base.expanduser() / "agent-pbx" / "runtime-tmux.sock"
+    shortened = False
+    if len(os.fsencode(str(dedicated_socket))) > MAX_GENERATED_UNIX_SOCKET_PATH_BYTES:
+        owner = os.getuid() if uid is None else int(uid)
+        digest = hashlib.sha256(str(dedicated_socket).encode()).hexdigest()[:16]
+        dedicated_socket = Path("/tmp") / f"agent-pbx-{owner}" / f"rt-{digest}.sock"
+        shortened = True
+    fallback_message = (
+        "outer tmux unavailable; using the dedicated runtime server"
+        if requested is RuntimeServerMode.OUTER_IF_PRESENT
+        else ""
+    )
+    if shortened:
+        fallback_message = (
+            f"{fallback_message}; " if fallback_message else ""
+        ) + "dedicated socket moved to a short user-local path"
     return TmuxServerIdentity(
         requested,
         RuntimeServerMode.DEDICATED,
@@ -192,10 +211,20 @@ def resolve_runtime_tmux_server(
         str(dedicated_socket),
         True,
         False,
-        "outer tmux unavailable; using the dedicated runtime server"
-        if requested is RuntimeServerMode.OUTER_IF_PRESENT
-        else "",
+        fallback_message,
     )
+
+
+def ensure_runtime_socket_parent(path: Path) -> None:
+    """Create a user-private directory for a generated dedicated socket."""
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    info = path.parent.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise PermissionError("runtime tmux socket parent is not a real directory")
+    if info.st_uid != os.getuid():
+        raise PermissionError("runtime tmux socket directory is not user-owned")
+    path.parent.chmod(0o700)
 
 
 def read_outer_tmux_context(identity: TmuxServerIdentity) -> OuterTmuxContext | None:
