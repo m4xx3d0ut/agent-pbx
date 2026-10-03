@@ -133,6 +133,22 @@ async def test_mcp_reporting_and_command_tools(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_polling_can_be_disabled_without_removing_tool(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store, legacy_polling_enabled=False)
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {"agent_id": "agent-1", "project": "demo"},
+    )
+
+    with pytest.raises(Exception, match="Legacy nohup polling is disabled"):
+        await mcp.call_tool(
+            "pbx_poll_commands", {"agent_id": "agent-1", "wait_seconds": 0}
+        )
+
+
+@pytest.mark.asyncio
 async def test_mcp_report_turn_rejects_declared_identity_mismatch(
     tmp_path: Path,
 ) -> None:

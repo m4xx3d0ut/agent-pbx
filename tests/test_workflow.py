@@ -145,6 +145,35 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
     assert events.json()[1]["payload"]["created_at"] == report.json()["created_at"]
 
 
+def test_legacy_poll_endpoint_returns_gone_when_disabled(tmp_path: Path) -> None:
+    client = TestClient(
+        create_app(
+            ServerConfig(
+                db_path=tmp_path / "pbx.sqlite",
+                legacy_polling_enabled=False,
+            )
+        )
+    )
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "agent-1", "project": "demo"},
+    )
+
+    response = client.get("/v1/agents/agent-1/commands?wait_seconds=0")
+
+    assert response.status_code == 410
+    assert "Legacy nohup polling is disabled" in response.json()["detail"]
+
+
+def test_health_reports_machine_readable_compatibility_posture(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    payload = client.get("/healthz").json()
+
+    assert payload["compatibility"]["api_version"] == "agent-pbx.compatibility/v2"
+    assert payload["compatibility"]["polling"] is True
+
+
 def test_report_endpoint_rejects_declared_identity_mismatch(tmp_path: Path) -> None:
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
 

@@ -18,6 +18,7 @@ class ServerConfig:
     remote_max_clients: int = 16
     remote_message_rate_per_minute: int = 120
     remote_terminal_snapshots_enabled: bool = False
+    legacy_polling_enabled: bool = True
     debug: bool = False
     debug_smoke: bool = False
     debug_smoke_duration_seconds: float = 300.0

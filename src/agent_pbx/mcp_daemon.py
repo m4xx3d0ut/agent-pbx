@@ -15,6 +15,7 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 from . import __version__
+from .compat import POLLING_ENV
 from .paths import default_state_root
 from .store import Store
 from .joplin import (
@@ -72,6 +73,7 @@ MANAGED_CHILD_ENV_VARS = {
     JOPLIN_WEBDAV_URL_ENV,
     JOPLIN_WEBDAV_USERNAME_ENV,
     JOPLIN_WEBDAV_PASSWORD_ENV,
+    POLLING_ENV,
 }
 
 
@@ -90,6 +92,7 @@ class MCPDaemonConfig:
     remote_max_clients: int = 16
     remote_message_rate_per_minute: int = 120
     remote_terminal_snapshots_enabled: bool = False
+    legacy_polling_enabled: bool = True
     debug: bool = False
     debug_smoke: bool = False
     log_level: str | None = None
@@ -178,6 +181,7 @@ def config_from_args(
     remote_max_clients: int = 16,
     remote_message_rate_per_minute: int = 120,
     remote_terminal_snapshots_enabled: bool = False,
+    legacy_polling_enabled: bool = True,
     debug: bool = False,
     debug_smoke: bool = False,
     log_level: str | None = None,
@@ -219,6 +223,7 @@ def config_from_args(
         remote_max_clients=max(1, int(remote_max_clients)),
         remote_message_rate_per_minute=max(1, int(remote_message_rate_per_minute)),
         remote_terminal_snapshots_enabled=remote_terminal_snapshots_enabled,
+        legacy_polling_enabled=legacy_polling_enabled,
         debug=debug,
         debug_smoke=debug_smoke,
         log_level=log_level,
@@ -306,6 +311,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "remote_max_clients": config.remote_max_clients,
         "remote_message_rate_per_minute": config.remote_message_rate_per_minute,
         "remote_terminal_snapshots_enabled": config.remote_terminal_snapshots_enabled,
+        "legacy_polling_enabled": config.legacy_polling_enabled,
         "debug": config.debug,
         "debug_smoke": config.debug_smoke,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
@@ -514,6 +520,7 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "remote_max_clients": config.remote_max_clients,
         "remote_message_rate_per_minute": config.remote_message_rate_per_minute,
         "remote_terminal_snapshots_enabled": config.remote_terminal_snapshots_enabled,
+        "legacy_polling_enabled": config.legacy_polling_enabled,
         "joplin_api_url": config.joplin_api_url,
         "joplin_notebook": config.joplin_notebook,
         "joplin_configured": bool(config.joplin_api_url and config.joplin_token),
@@ -556,6 +563,8 @@ def _serve_argv(config: MCPDaemonConfig) -> list[str]:
     )
     if config.remote_terminal_snapshots_enabled:
         argv.append("--remote-terminal-snapshots")
+    if not config.legacy_polling_enabled:
+        argv.append("--disable-legacy-polling")
     if config.debug:
         argv.append("--debug")
     if config.debug_smoke:

@@ -38,6 +38,7 @@ from .auth import (
     require_token,
 )
 from .config import ServerConfig
+from .compat import compatibility_posture
 from .codex_sessions import enrich_codex_session_metadata
 from .codex_config import load_codex_config_view, patch_codex_config
 from .codex_cli import inspect_codex_model_catalog, update_codex_cli_package
@@ -386,7 +387,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
-        return {"ok": True, "service": "agent-pbx", "version": __version__}
+        return {
+            "ok": True,
+            "service": "agent-pbx",
+            "version": __version__,
+            "compatibility": compatibility_posture(
+                polling=resolved_config.legacy_polling_enabled
+            ).public_dict(),
+        }
 
     @app.get("/v1/auth/check", dependencies=[Depends(require_token)])
     async def auth_check() -> dict[str, object]:
@@ -3908,6 +3916,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         limit: int = 10,
         store: Store = Depends(get_store),
     ) -> list[dict[str, object]]:
+        if not resolved_config.legacy_polling_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail=(
+                    "Legacy nohup polling is disabled; use the native tmux/event "
+                    "path or enable AGENT_PBX_COMPAT_POLLING."
+                ),
+            )
         if store.get_agent(agent_id) is None:
             raise HTTPException(status_code=404, detail="agent not registered")
         commands = await poll_commands_until(

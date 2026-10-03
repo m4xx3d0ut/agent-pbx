@@ -16,6 +16,7 @@ import httpx
 
 from . import __version__
 from .codex_cli import inspect_codex_posture
+from .compat import compatibility_posture
 from .mcp_daemon import MCPDaemonConfig, lan_auth_guard, mcp_daemon_status
 from .store import SCHEMA_VERSION
 from .ui.theme import terminal_color_depth
@@ -120,6 +121,7 @@ def run_platform_doctor(
     checks.append(_database_check(config.resolved_db_path))
     checks.append(_daemon_check(config))
     checks.append(_security_check(config))
+    checks.append(_compatibility_check(config))
     checks.append(_codex_check(codex_command, timeout))
     checks.append(_workerbee_check(config, which, timeout))
     checks.append(_joplin_check(config, timeout, probe_services=probe_services))
@@ -308,6 +310,40 @@ def _security_check(config: MCPDaemonConfig) -> DoctorCheck:
             ),
         )
     return DoctorCheck("security", "pass", "loopback-only listener")
+
+
+def _compatibility_check(config: MCPDaemonConfig) -> DoctorCheck:
+    posture = compatibility_posture(polling=config.legacy_polling_enabled)
+    enabled = [
+        name
+        for name, value in (
+            ("polling", posture.polling),
+            ("Thread", posture.thread_tab),
+            ("terminal capture", posture.terminal_capture),
+        )
+        if value
+    ]
+    disabled = [
+        name
+        for name, value in (
+            ("polling", posture.polling),
+            ("Thread", posture.thread_tab),
+            ("terminal capture", posture.terminal_capture),
+        )
+        if not value
+    ]
+    return DoctorCheck(
+        "v2-compatibility",
+        "warn" if disabled else "pass",
+        f"retained paths enabled: {', '.join(enabled) or 'none'}",
+        detail=json.dumps(posture.public_dict(), sort_keys=True),
+        remediation=(
+            "Re-enable retained v2.0 paths until measured parity and migration "
+            "criteria are satisfied: " + ", ".join(disabled) + "."
+            if disabled
+            else ""
+        ),
+    )
 
 
 def _codex_check(command: str, timeout: float) -> DoctorCheck:

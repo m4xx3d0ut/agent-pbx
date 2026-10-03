@@ -9,6 +9,7 @@ from agent_pbx.doctor import (
     DoctorReport,
     _database_check,
     _security_check,
+    _compatibility_check,
     doctor_json,
     doctor_markdown,
     run_platform_doctor,
@@ -74,6 +75,18 @@ def test_doctor_security_rejects_unprotected_lan_and_warns_on_override(
     assert blocked.status == "fail"
     assert overridden.status == "warn"
     assert secure.status == "pass"
+
+
+def test_doctor_reports_v2_compatibility_posture(tmp_path: Path) -> None:
+    retained = _compatibility_check(MCPDaemonConfig(state_root=tmp_path))
+    disabled = _compatibility_check(
+        MCPDaemonConfig(state_root=tmp_path, legacy_polling_enabled=False)
+    )
+
+    assert retained.status == "pass"
+    assert "polling" in retained.summary
+    assert disabled.status == "warn"
+    assert "polling" in disabled.remediation
 
 
 def test_platform_doctor_reports_missing_host_executables(tmp_path: Path) -> None:

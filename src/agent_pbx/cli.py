@@ -19,6 +19,7 @@ from .agent import (
 )
 from .api import create_app, create_token_helper_app
 from .config import ServerConfig
+from .compat import POLLING_ENV, compatibility_flag
 from .doctor import doctor_json, doctor_markdown, run_platform_doctor
 from .envfile import load_user_env_defaults
 from .joplin import (
@@ -174,6 +175,15 @@ def build_parser() -> argparse.ArgumentParser:
             "--remote-terminal-snapshots",
             action="store_true",
             default=env_flag("AGENT_PBX_REMOTE_TERMINAL_SNAPSHOTS"),
+        )
+        command.add_argument(
+            "--disable-legacy-polling",
+            action="store_true",
+            default=None,
+            help=(
+                "Disable the retained v2.0 nohup polling endpoint. Native tmux "
+                "and event streaming remain available."
+            ),
         )
         command.add_argument(
             "--debug", action="store_true", help="Enable verbose PBX debug logs."
@@ -773,6 +783,11 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         remote_terminal_snapshots_enabled=bool(
             getattr(args, "remote_terminal_snapshots", False)
         ),
+        legacy_polling_enabled=(
+            False
+            if getattr(args, "disable_legacy_polling", None)
+            else compatibility_flag(POLLING_ENV)
+        ),
         debug=bool(getattr(args, "debug", False)) or env_flag("AGENT_PBX_DEBUG"),
         debug_smoke=bool(getattr(args, "debug_smoke", False))
         or env_flag("AGENT_PBX_DEBUG_SMOKE"),
@@ -886,6 +901,7 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         remote_terminal_snapshots_enabled=(
             daemon_config.remote_terminal_snapshots_enabled
         ),
+        legacy_polling_enabled=daemon_config.legacy_polling_enabled,
         debug=daemon_config.debug,
         debug_smoke=daemon_config.debug_smoke,
         workerbee_bin=daemon_config.workerbee_bin,

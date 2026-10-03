@@ -48,6 +48,7 @@ from textual.widgets import (
 )
 
 from .client import auth_headers
+from .compat import THREAD_ENV, TERMINAL_CAPTURE_ENV
 from .codex_cli import (
     CODEX_MODEL_ENV,
     CODEX_REASONING_EFFORT_ENV,
@@ -5310,9 +5311,10 @@ class AgentPBXTUI(App[None]):
         self.low_power_enabled = bool_setting(self.settings, "low_power", False)
         if low_power_setting is not None:
             self.low_power_enabled = low_power_setting
+        local_native_default = is_local_server_url(self.server)
         tmux_direct_setting = env_flag_value("AGENT_PBX_TUI_TMUX")
         self.tmux_direct_enabled = (
-            bool_setting(self.settings, "tmux_direct", False)
+            bool_setting(self.settings, "tmux_direct", local_native_default)
             if tmux_direct is None
             else tmux_direct
         )
@@ -5322,11 +5324,16 @@ class AgentPBXTUI(App[None]):
             self.settings,
             "tmux_direct_agent_modes",
         )
+        embedded_terminal_setting = env_flag_value(
+            "AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2"
+        )
         embedded_terminal_requested = bool_setting(
             self.settings,
             "embedded_terminal_v2",
-            False,
-        ) or bool(env_flag_value("AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2"))
+            local_native_default,
+        )
+        if embedded_terminal_setting is not None:
+            embedded_terminal_requested = embedded_terminal_setting
         self.tmux_features_available = tmux_features_available(
             tmux_direct_enabled=self.tmux_direct_enabled or embedded_terminal_requested
         )
@@ -5350,16 +5357,7 @@ class AgentPBXTUI(App[None]):
         self.tmux_runtime_server = resolve_runtime_tmux_server(
             self.tmux_runtime_server_mode
         )
-        embedded_terminal_setting = env_flag_value(
-            "AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2"
-        )
-        self.embedded_terminal_v2_enabled = bool_setting(
-            self.settings,
-            "embedded_terminal_v2",
-            False,
-        )
-        if embedded_terminal_setting is not None:
-            self.embedded_terminal_v2_enabled = embedded_terminal_setting
+        self.embedded_terminal_v2_enabled = embedded_terminal_requested
         if not self.tmux_local_direct_context:
             self.embedded_terminal_v2_enabled = False
         self.tmux_popout_mode = str_setting(
@@ -5480,11 +5478,23 @@ class AgentPBXTUI(App[None]):
         self.event_stream_v2_enabled = bool_setting(
             self.settings,
             "event_stream_v2",
-            False,
+            True,
         )
         event_stream_v2_setting = env_flag_value("AGENT_PBX_TUI_EVENT_STREAM_V2")
         if event_stream_v2_setting is not None:
             self.event_stream_v2_enabled = event_stream_v2_setting
+        thread_compat_setting = env_flag_value(THREAD_ENV)
+        self.legacy_thread_enabled = bool_setting(
+            self.settings, "legacy_thread_enabled", True
+        )
+        if thread_compat_setting is not None:
+            self.legacy_thread_enabled = thread_compat_setting
+        terminal_capture_compat_setting = env_flag_value(TERMINAL_CAPTURE_ENV)
+        self.legacy_terminal_capture_enabled = bool_setting(
+            self.settings, "legacy_terminal_capture_enabled", True
+        )
+        if terminal_capture_compat_setting is not None:
+            self.legacy_terminal_capture_enabled = terminal_capture_compat_setting
         self.remote_client_id = (
             os.getenv("AGENT_PBX_TUI_REMOTE_CLIENT_ID", "").strip()
             or str_setting(self.settings, "remote_client_id", "").strip()
@@ -8768,6 +8778,12 @@ class AgentPBXTUI(App[None]):
         await self.load_thread(agent_id)
 
     async def open_thread_for_agent(self, agent_id: str) -> None:
+        if not self.legacy_thread_enabled:
+            self.notify(
+                "The retained Thread surface is disabled by compatibility policy.",
+                severity="warning",
+            )
+            return
         if agent_id in self.agents:
             await self.select_agent(agent_id)
         else:
@@ -12553,6 +12569,19 @@ class AgentPBXTUI(App[None]):
                 agent_id, mapping
             ):
                 return
+        if not self.legacy_terminal_capture_enabled:
+            self.tmux_visible_capture_key = None
+            self.update_tmux_status(
+                status,
+                "Tmux: native terminal unavailable; capture fallback disabled",
+                cache_key=agent_id,
+            )
+            stream.text = (
+                "The retained tmux capture fallback is disabled by compatibility "
+                "policy. Re-enable AGENT_PBX_TUI_COMPAT_TERMINAL_CAPTURE or repair "
+                "the managed runtime mapping."
+            )
+            return
         try:
             panes = await asyncio.to_thread(tmux_support.list_panes)
         except Exception as exc:
@@ -27818,6 +27847,8 @@ class AgentPBXTUI(App[None]):
             "latest_viewed_at_by_agent": self.latest_viewed_at_by_agent,
             "last_seen_event_id": self.last_seen_event_id,
             "event_stream_v2": self.event_stream_v2_enabled,
+            "legacy_thread_enabled": self.legacy_thread_enabled,
+            "legacy_terminal_capture_enabled": self.legacy_terminal_capture_enabled,
             "remote_client_id": self.remote_client_id,
         }
         try:

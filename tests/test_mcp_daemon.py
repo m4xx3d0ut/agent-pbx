@@ -104,6 +104,7 @@ def test_start_mcp_daemon_writes_detached_agent_pbx_argv(
         token="secret",
         debug=True,
         debug_smoke=True,
+        legacy_polling_enabled=False,
         pull_requests_enabled=True,
         pull_request_merge_enabled=True,
         issues_enabled=True,
@@ -158,10 +159,12 @@ def test_start_mcp_daemon_writes_detached_agent_pbx_argv(
     assert calls["argv"][calls["argv"].index("--port") + 1] == "9876"
     assert "--debug" in calls["argv"]
     assert "--debug-smoke" in calls["argv"]
+    assert "--disable-legacy-polling" in calls["argv"]
 
     metadata = json.loads(config.metadata_file.read_text(encoding="utf-8"))
     assert metadata["pid"] == 4321
     assert metadata["token_configured"] is True
+    assert metadata["legacy_polling_enabled"] is False
     assert metadata["ready_at"] == 123.0
     assert metadata["mcp_url"] == "http://127.0.0.1:9876/mcp"
     assert metadata["pull_requests_enabled"] is True

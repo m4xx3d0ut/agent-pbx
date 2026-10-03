@@ -136,6 +136,9 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_TMUX_REFRESH_SECONDS",
         "AGENT_PBX_TUI_TMUX_RUNTIME_SERVER_MODE",
         "AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2",
+        "AGENT_PBX_TUI_EVENT_STREAM_V2",
+        "AGENT_PBX_TUI_COMPAT_THREAD",
+        "AGENT_PBX_TUI_COMPAT_TERMINAL_CAPTURE",
         "AGENT_PBX_TUI_MOUSE_DEBUG",
         "AGENT_PBX_TUI_COMMANDS_FILE",
     ]:
@@ -333,7 +336,11 @@ def test_tui_constructs() -> None:
     assert app.visual_flash_enabled is False
     assert app.terminal_bell_enabled is False
     assert app.agent_blink_enabled is True
-    assert app.tmux_direct_enabled is False
+    assert app.tmux_direct_enabled is True
+    assert app.embedded_terminal_v2_enabled is True
+    assert app.event_stream_v2_enabled is True
+    assert app.legacy_thread_enabled is True
+    assert app.legacy_terminal_capture_enabled is True
     assert app.tmux_capture_lines == 0
     assert app.tmux_refresh_seconds == 1.5
     assert app.tmux_agent_targets == {}
@@ -889,7 +896,18 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["show_hidden_agents"] is True
     assert saved["latest_viewed_at_by_agent"] == {"agent-1": 123.0}
     assert saved["last_seen_event_id"] == 42
+    assert saved["event_stream_v2"] is True
+    assert saved["legacy_thread_enabled"] is True
+    assert saved["legacy_terminal_capture_enabled"] is True
     assert saved["remote_client_id"] == app.remote_client_id
+
+
+def test_remote_tui_does_not_enable_local_native_terminal_by_default() -> None:
+    app = AgentPBXTUI(server="https://pbx.example.test")
+
+    assert app.tmux_direct_enabled is False
+    assert app.embedded_terminal_v2_enabled is False
+    assert app.event_stream_v2_enabled is True
 
 
 def test_tui_remote_view_state_excludes_prompt_and_document_drafts() -> None:

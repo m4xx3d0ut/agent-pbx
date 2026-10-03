@@ -34,6 +34,7 @@ def build_mcp_server(
     joplin: JoplinService | None = None,
     pull_requests: PullRequestService | None = None,
     issues: IssueService | None = None,
+    legacy_polling_enabled: bool = True,
 ) -> FastMCP:
     mcp = FastMCP(
         "Agent PBX",
@@ -1171,6 +1172,11 @@ def build_mcp_server(
         interval_seconds: float = 5,
     ) -> list[dict[str, Any]]:
         logger.debug("mcp.tool.start name=pbx_poll_commands agent_id=%s", agent_id)
+        if not legacy_polling_enabled:
+            raise ValueError(
+                "Legacy nohup polling is disabled; use the native tmux/event path "
+                "or enable AGENT_PBX_COMPAT_POLLING."
+            )
         if store.get_agent(agent_id) is None:
             raise ValueError("agent not registered")
         commands = await poll_commands_until(
@@ -1322,6 +1328,7 @@ def create_mcp_asgi_app(
         joplin=joplin,
         pull_requests=pull_requests,
         issues=issues,
+        legacy_polling_enabled=config.legacy_polling_enabled,
     )
     return BearerAuthASGIMiddleware(mcp.streamable_http_app(), store, config), mcp
 
