@@ -50,7 +50,8 @@
 ### Verification
 
 - Full Linux and macOS CI matrix on Python 3.10 and 3.12.
-- Final RC local gate: 792 passed and one expected skip.
+- Portable RC gate: 793 passed and one expected skip on Ubuntu and macOS with
+  Python 3.10 and 3.12.
 - Isolated daemon, WebSocket, schema 28, Operator KB/handoff, Codex flow-matrix,
   and cleanup UAT.
 - Checksummed Python 3.10 offline wheelhouse install and command smoke test.

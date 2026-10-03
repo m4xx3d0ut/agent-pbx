@@ -15,7 +15,7 @@ they cannot be mistaken for portable test evidence.
 - Release candidate 1: `18771a2`, tag `v2.0.0rc1`
 - Release candidate 2: `29092c8`, tag `v2.0.0rc2`
 - Release candidate 3: `f440ff2`, tag `v2.0.0rc3`
-- Release candidate 4: recorded on tag `v2.0.0rc4`
+- Release candidate 4: `f3d2b93`, tag `v2.0.0rc4`
 - Final: recorded on tag `v2.0.0`
 
 ## Checkpoint evidence
@@ -67,7 +67,7 @@ tmux private DSR parsing and generated Unix-socket path shortening.
 
 CI executes the complete suite on Linux and macOS with Python 3.10 and 3.12. A
 separate Linux/Python 3.10 job builds and verifies the checksummed offline
-wheelhouse. GitHub Actions run URLs are added after the RC push completes.
+wheelhouse.
 
 RC1 exposed a release-workflow invocation defect: the manifest verifier's
 global `--wheelhouse` option was placed after the subcommand. RC2 corrects the
@@ -89,6 +89,18 @@ could leave the subsequent tmux client unable to attach. RC4 compares canonical
 socket identities and closes the PTY master first so tmux observes a normal
 terminal hangup, retaining bounded signal fallbacks for unresponsive children.
 
+[RC4 run 37098170906](https://github.com/m4xx3d0ut/agent-pbx/actions/runs/37098170906)
+is the portable release gate. All four lanes passed **793 tests with one
+expected skip** and the post-suite release-manifest tests:
+
+```text
+Ubuntu / Python 3.10: pass
+Ubuntu / Python 3.12: pass
+macOS  / Python 3.10: pass
+macOS  / Python 3.12: pass
+Linux checksummed wheelhouse: pass
+```
+
 ### Isolated live control-plane exercise
 
 On 2026-10-03 an isolated loopback daemon was created in a temporary state
@@ -106,7 +118,10 @@ root without touching the workstation daemon. The following passed:
 - A Python 3.10 wheelhouse was built with package hashes, dependency manifest,
   SPDX 2.3 SBOM, archive checksum, and safe extractor checks.
 - A clean virtual environment installed exclusively from that wheelhouse.
-- The installed commands reported the packaged version and executed doctor.
+- The final wheelhouse contains 51 wheels. The installed commands reported
+  `agent-pbx 2.0.0`; `doctor` and `migrate` command discovery succeeded.
+- The final archive SHA-256 is
+  `a264c8004ef9a3eb00d453169447fac6731a9f02adcd0cde0ba07fa02d04b3fb`.
 - The installer rejects traversal, links, devices, and checksum mismatch.
 
 ## Capability and integration findings
