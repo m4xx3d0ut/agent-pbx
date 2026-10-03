@@ -110,42 +110,31 @@ class PtyProcess:
             self._set_winsize(self.master_fd, self.columns, self.rows)
 
     def close(self, *, terminate: bool = True, timeout: float = 2.0) -> None:
-        process = self.process
-        self.process = None
-        if process is not None and terminate and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGHUP)
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                # macOS can reject process-group signalling for a PTY-attached
-                # tmux client even though the child process itself is ours.
-                try:
-                    process.send_signal(signal.SIGHUP)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            try:
-                process.wait(timeout=max(0.1, timeout))
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                except PermissionError:
-                    try:
-                        process.kill()
-                    except (ProcessLookupError, PermissionError):
-                        pass
-                try:
-                    process.wait(timeout=max(0.1, timeout))
-                except subprocess.TimeoutExpired:
-                    pass
+        # Closing the PTY master first lets terminal-aware children (including
+        # tmux clients on macOS) observe a normal hangup and detach cleanly.
+        # Explicit signals remain a bounded fallback for children that ignore
+        # the closed terminal.
         if self.master_fd is not None:
             try:
                 os.close(self.master_fd)
             except OSError:
                 pass
             self.master_fd = None
+        process = self.process
+        self.process = None
+        if process is not None and terminate and process.poll() is None:
+            try:
+                process.wait(timeout=min(0.25, max(0.1, timeout)))
+            except subprocess.TimeoutExpired:
+                self._signal(process, signal.SIGHUP)
+                try:
+                    process.wait(timeout=max(0.1, timeout))
+                except subprocess.TimeoutExpired:
+                    self._signal(process, signal.SIGKILL)
+                    try:
+                        process.wait(timeout=max(0.1, timeout))
+                    except subprocess.TimeoutExpired:
+                        pass
 
     def __enter__(self) -> "PtyProcess":
         return self.start()
@@ -156,3 +145,15 @@ class PtyProcess:
     @staticmethod
     def _set_winsize(fd: int, columns: int, rows: int) -> None:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+
+    @staticmethod
+    def _signal(process: subprocess.Popen[bytes], value: int) -> None:
+        try:
+            os.killpg(process.pid, value)
+            return
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            process.send_signal(value)
+        except (ProcessLookupError, PermissionError):
+            pass

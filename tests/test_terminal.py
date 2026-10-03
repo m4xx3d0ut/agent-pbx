@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import uuid
@@ -117,17 +118,25 @@ def test_disposable_client_restart_keeps_runtime_session_alive() -> None:
     )
     first: PtyProcess | None = None
     second: PtyProcess | None = None
+    env = dict(os.environ)
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    env.setdefault("TERM", "xterm-256color")
     try:
-        first = PtyProcess([*prefix, "attach-session", "-t", "runtime"]).start()
+        first = PtyProcess(
+            [*prefix, "attach-session", "-t", "runtime"], env=env
+        ).start()
         first.read_available(timeout=0.25)
         first.close()
         first = None
         assert subprocess.run(
             [*prefix, "has-session", "-t", "runtime"], capture_output=True
         ).returncode == 0
-        second = PtyProcess([*prefix, "attach-session", "-t", "runtime"]).start()
-        second.read_available(timeout=0.25)
-        assert second.alive
+        second = PtyProcess(
+            [*prefix, "attach-session", "-t", "runtime"], env=env
+        ).start()
+        output = second.read_available(timeout=0.25)
+        assert second.alive, output.decode("utf-8", errors="replace")
     finally:
         if first is not None:
             first.close()

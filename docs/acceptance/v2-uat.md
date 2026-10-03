@@ -14,7 +14,8 @@ they cannot be mistaken for portable test evidence.
 - Beta 2: `c964ec9`, tag `v2.0.0b2`
 - Release candidate 1: `18771a2`, tag `v2.0.0rc1`
 - Release candidate 2: `29092c8`, tag `v2.0.0rc2`
-- Release candidate 3: recorded on tag `v2.0.0rc3`
+- Release candidate 3: `f440ff2`, tag `v2.0.0rc3`
+- Release candidate 4: recorded on tag `v2.0.0rc4`
 - Final: recorded on tag `v2.0.0`
 
 ## Checkpoint evidence
@@ -80,6 +81,13 @@ WAL, generated Unix-socket paths could exceed Darwin's limit, pyte rejected a
 private tmux device-status query, macOS could deny process-group signalling for
 a disposable client, and three tests assumed Linux's literal `/tmp` path.
 RC3 addresses those findings and adds direct regression coverage.
+
+RC3 then reduced macOS/Python 3.12 to two cleanup-test findings: the outer
+socket identity correctly returns a canonical `/private/tmp` path on Darwin,
+and closing a disposable PTY client by signalling it before closing the master
+could leave the subsequent tmux client unable to attach. RC4 compares canonical
+socket identities and closes the PTY master first so tmux observes a normal
+terminal hangup, retaining bounded signal fallbacks for unresponsive children.
 
 ### Isolated live control-plane exercise
 

@@ -66,7 +66,7 @@ def test_runtime_server_outer_if_present_uses_owned_socket(tmp_path: Path) -> No
     assert identity.ready is True
     assert identity.outer_detected is True
     assert identity.effective_mode is RuntimeServerMode.OUTER_IF_PRESENT
-    assert identity.socket_path == str(socket_path)
+    assert identity.socket_path == str(socket_path.resolve())
 
 
 def test_runtime_server_outer_if_present_falls_back_without_outer(tmp_path: Path) -> None:
