@@ -18,6 +18,7 @@ from .agent import (
 )
 from .api import create_app, create_token_helper_app
 from .config import ServerConfig
+from .doctor import doctor_json, doctor_markdown, run_platform_doctor
 from .envfile import load_user_env_defaults
 from .joplin import (
     env_joplin_config,
@@ -254,6 +255,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_server_flags(serve_mcp)
 
+    doctor = subcommands.add_parser(
+        "doctor",
+        help="Inspect platform, package, runtime, integration, and security readiness.",
+    )
+    add_server_flags(doctor)
+    doctor.add_argument("--codex-bin", default=os.getenv("AGENT_PBX_TUI_CODEX_BIN", "codex"))
+    doctor.add_argument("--no-service-probes", action="store_true")
+    doctor.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
+    doctor.add_argument("--json", action="store_true")
+
     tui = subcommands.add_parser("tui", help="Run the Agent PBX TUI.")
     tui.add_argument("--server", default=default_client_server())
     tui.add_argument("--token", default=os.getenv("AGENT_PBX_TOKEN"))
@@ -450,6 +461,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         exec_runtime_attach(command)
         return 0
+
+    if args.command == "doctor":
+        report = run_platform_doctor(
+            _daemon_config(args),
+            codex_command=args.codex_bin,
+            probe_services=not bool(args.no_service_probes),
+        )
+        print(doctor_json(report) if args.json else doctor_markdown(report))
+        return 1 if report.failure_count or (args.strict and report.warning_count) else 0
 
     if args.command == "remote" and args.remote_command == "ssh-attach":
         try:

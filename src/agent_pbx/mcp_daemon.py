@@ -14,6 +14,7 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
 
+from . import __version__
 from .paths import default_state_root
 from .store import Store
 from .joplin import (
@@ -290,6 +291,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         log.close()
 
     metadata = {
+        "daemon_agent_pbx_version": __version__,
         "pid": int(proc.pid),
         "argv": argv,
         "state_root": str(config.resolved_state_root),
@@ -481,6 +483,7 @@ def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
 
 def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
     return {
+        "agent_pbx_version": __version__,
         "host": config.host,
         "port": config.port,
         "mcp_url": config.mcp_url,
