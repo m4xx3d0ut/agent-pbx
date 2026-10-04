@@ -876,6 +876,12 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         payload: TmuxWriterLeaseRequest,
         store: Store = Depends(get_store),
     ) -> dict[str, object]:
+        previous = store.get_tmux_runtime_mapping(entity_id)
+        was_current_owner = bool(
+            previous
+            and previous.get("writer_lease_active")
+            and previous.get("writer_client_id") == payload.client_id
+        )
         try:
             mapping = store.acquire_tmux_writer_lease(
                 entity_id,
@@ -884,11 +890,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        store.append_event(
-            "tmux_runtime_writer_acquired",
-            {"entity_id": entity_id, "client_id": payload.client_id},
-            entity_id,
-        )
+        # Renewals happen frequently while an embedded terminal is visible.
+        # Only ownership transitions belong in the durable event stream.
+        if not was_current_owner:
+            store.append_event(
+                "tmux_runtime_writer_acquired",
+                {"entity_id": entity_id, "client_id": payload.client_id},
+                entity_id,
+            )
         return mapping
 
     @app.post(

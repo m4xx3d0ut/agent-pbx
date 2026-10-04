@@ -12675,11 +12675,18 @@ class AgentPBXTUI(App[None]):
             if agent_id in self.tmux_plan_selector_agent_ids
             else ""
         )
+        native_error = str(
+            self.tmux_runtime_mapping_error_by_agent.get(agent_id) or ""
+        ).strip()
+        native_note = (
+            f" native unavailable: {native_error};" if native_error else ""
+        )
         self.update_tmux_status(
             status,
             (
                 "Tmux: "
                 f"{pane.pane_id} {pane.target_label} {mode} "
+                f"{native_note} capture fallback "
                 f"{self.tmux_capture_mode_label()} "
                 "cropped "
                 f"{pane.current_command} {pane.width}x{pane.height} "
@@ -12840,7 +12847,10 @@ class AgentPBXTUI(App[None]):
             and self.embedded_terminal_target == target
             and surface.attached
         ):
-            await self.acquire_tmux_writer_lease(agent_id)
+            # The renewal timer owns lease refresh. Reacquiring on every pane
+            # refresh caused database writes and event-stream churn while the
+            # same client already held the lease.
+            surface.sync_geometry()
             self.apply_tmux_class()
             return True
         await self.detach_embedded_tmux_terminal(release_lease=True)
@@ -13322,7 +13332,7 @@ class AgentPBXTUI(App[None]):
             saved_pane = self.saved_tmux_target_pane_for_agent(
                 agent_id,
                 agent,
-                matches,
+                panes,
             )
             if saved_pane is not None:
                 if self.tmux_direct_agent_modes.get(agent_id) is not True:
@@ -13360,6 +13370,18 @@ class AgentPBXTUI(App[None]):
             if pane.pane_id != saved and pane.target_label != saved:
                 continue
             if self.tmux_pane_allowed_for_agent(agent, pane):
+                return pane
+            # A stable pane id is stronger ownership evidence than mutable
+            # tmux window/title text. Codex may update those labels while a
+            # long-lived Operator remains in the PBX-owned operator session.
+            # Accept that explicit binding only when no other PBX entity also
+            # claims the pane.
+            if (
+                pane.pane_id == saved
+                and self.agent_type(agent) == OPERATOR_AGENT_TYPE
+                and self.is_operator_tmux_pane(pane)
+                and set(self.agent_ids_for_tmux_pane(pane.pane_id)) <= {agent_id}
+            ):
                 return pane
         return None
 
@@ -14892,6 +14914,7 @@ class AgentPBXTUI(App[None]):
         pane: tmux_support.TmuxPane,
         *,
         model_preset: CodexModelPreset | None = None,
+        resume_candidate: OperatorSessionCandidate | None = None,
     ) -> bool:
         pane_id = pane.pane_id
         agent = self.agents.get(agent_id)
@@ -14905,7 +14928,7 @@ class AgentPBXTUI(App[None]):
             return False
         self.tmux_agent_targets[agent_id] = pane_id
         candidates = await asyncio.to_thread(self.operator_session_candidates, agent_id)
-        target = self.operator_restart_target(agent_id, candidates)
+        target = resume_candidate or self.operator_restart_target(agent_id, candidates)
         if target is None:
             self.notify(f"No resumable Codex session found for {agent_id}.", severity="warning")
             await self.show_selected_operator_history()
@@ -17397,6 +17420,22 @@ class AgentPBXTUI(App[None]):
         default_source_codex_session_id: str | None = None,
         restart_mode: str | None = None,
     ) -> dict[str, Any]:
+        existing_metadata = self.operator_metadata_for(agent_id)
+        generated_metadata = self.operator_root_metadata(
+            agent_id,
+            cwd=cwd,
+            codex_command=codex_command,
+            mcp_url=mcp_url,
+            session_name=session_name,
+            tmux_pane_id=tmux_pane_id,
+            resumed_codex_session_id=resumed_codex_session_id,
+            operator_session_history=operator_session_history,
+            model_preset=model_preset,
+            default_source_caller_agent_id=default_source_caller_agent_id,
+            default_source_caller_project=default_source_caller_project,
+            default_source_codex_session_id=default_source_codex_session_id,
+            restart_mode=restart_mode,
+        )
         response = await self.api_client().post(
             "/v1/agents/register",
             json={
@@ -17405,21 +17444,7 @@ class AgentPBXTUI(App[None]):
                 "name": agent_id,
                 "agent_type": OPERATOR_AGENT_TYPE,
                 "pbx_active": True,
-                "metadata": self.operator_root_metadata(
-                    agent_id,
-                    cwd=cwd,
-                    codex_command=codex_command,
-                    mcp_url=mcp_url,
-                    session_name=session_name,
-                    tmux_pane_id=tmux_pane_id,
-                    resumed_codex_session_id=resumed_codex_session_id,
-                    operator_session_history=operator_session_history,
-                    model_preset=model_preset,
-                    default_source_caller_agent_id=default_source_caller_agent_id,
-                    default_source_caller_project=default_source_caller_project,
-                    default_source_codex_session_id=default_source_codex_session_id,
-                    restart_mode=restart_mode,
-                ),
+                "metadata": {**existing_metadata, **generated_metadata},
             },
             headers=auth_headers(self.token),
         )
@@ -18091,7 +18116,7 @@ class AgentPBXTUI(App[None]):
             for pane in panes
             if self.tmux_pane_allowed_for_agent(agent, pane)
         ]
-        saved = self.saved_tmux_target_pane_for_agent(agent_id, agent, matches)
+        saved = self.saved_tmux_target_pane_for_agent(agent_id, agent, panes)
         if saved is not None:
             return saved.pane_id
         if len(matches) == 1:
@@ -18123,6 +18148,34 @@ class AgentPBXTUI(App[None]):
             and isinstance(source_caller.get("metadata"), dict)
             else {}
         )
+        existing_agent = self.agents.get(agent_id)
+        if isinstance(existing_agent, dict):
+            pane_id = await self.live_operator_root_pane_id(agent_id)
+            if pane_id:
+                existing_metadata = self.operator_metadata_for(agent_id)
+                existing_cwd = str(existing_metadata.get("cwd") or "").strip() or cwd
+                agent = await self.register_operator_root(
+                    agent_id,
+                    cwd=existing_cwd,
+                    codex_command=codex_command,
+                    mcp_url=mcp_url,
+                    session_name=session_name,
+                    tmux_pane_id=pane_id,
+                    default_source_caller_agent_id=source_caller_agent_id,
+                    default_source_caller_project=(
+                        str(source_caller.get("project") or "")
+                        if isinstance(source_caller, dict)
+                        else None
+                    ),
+                    default_source_codex_session_id=str(
+                        source_metadata.get("codex_session_id") or ""
+                    ),
+                )
+                self.tmux_agent_targets[agent_id] = pane_id
+                self.tmux_detached_agent_ids.discard(agent_id)
+                self.tmux_direct_agent_modes[agent_id] = True
+                return agent, pane_id, False
+
         agent = await self.register_operator_root(
             agent_id,
             cwd=cwd,
@@ -21753,6 +21806,28 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return
+        agent = self.agents.get(agent_id) or {}
+        if pane_id and self.operator_role(agent) == OPERATOR_ROLE_ROOT:
+            try:
+                panes = await asyncio.to_thread(tmux_support.list_panes)
+            except Exception as exc:
+                self.notify(
+                    f"Unable to verify {agent_id}'s existing tmux pane; no pane was "
+                    f"replaced. {exc}",
+                    severity="warning",
+                )
+                return
+            pane = self.saved_tmux_target_pane_for_agent(agent_id, agent, panes)
+            if pane is not None:
+                restarted = await self.relaunch_operator_root_codex(
+                    agent_id,
+                    pane,
+                    resume_candidate=target,
+                )
+                if restarted:
+                    await self.refresh_agents()
+                    await self.open_latest_for_agent(agent_id)
+                return
         if not await self.ensure_codex_resume_session_available(
             agent_id,
             target.session_id,
@@ -21761,7 +21836,8 @@ class AgentPBXTUI(App[None]):
             return
         if not await self.ensure_operator_auth_ready():
             return
-        cwd = self.operator_cwd()
+        metadata = self.operator_metadata_for(agent_id)
+        cwd = str(metadata.get("cwd") or self.operator_cwd()).strip() or os.getcwd()
         codex_command = self.operator_codex_command()
         session_name = self.operator_tmux_session_name()
         mcp_url = agent_pbx_mcp_url(self.server)

@@ -2074,6 +2074,8 @@ async def test_tui_shift_f2_writes_directly_to_embedded_terminal() -> None:
 
     class FakeProcess:
         alive = True
+        columns = 80
+        rows = 24
 
         def read_available(self, **_kwargs):  # type: ignore[no-untyped-def]
             return b""
@@ -2084,8 +2086,9 @@ async def test_tui_shift_f2_writes_directly_to_embedded_terminal() -> None:
         def close(self) -> None:
             self.alive = False
 
-        def resize(self, _columns: int, _rows: int) -> None:
-            return None
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
 
     async with app.run_test() as pilot:
         await pilot.resize_terminal(120, 32)
@@ -3606,6 +3609,123 @@ async def test_tui_live_operator_root_pane_rejects_duplicate_without_saved_targe
 
     with pytest.raises(RuntimeError, match="multiple live tmux panes match operator-0"):
         await app.live_operator_root_pane_id("operator-0")
+
+
+def test_tui_saved_operator_pane_survives_mutable_tmux_label_drift() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent = {
+        "agent_id": "operator-0",
+        "agent_type": "operator",
+        "metadata": {"operator_role": "root", "tmux_pane_id": "%167"},
+    }
+    pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "0",
+        "0",
+        "%167",
+        True,
+        "node",
+        "Codex changed this title",
+        "/home/me/agent-pbx",
+        100,
+        30,
+        100,
+        window_name="node",
+    )
+    app.agents = {"operator-0": agent}
+    app.tmux_agent_targets["operator-0"] = "%167"
+
+    assert app.saved_tmux_target_pane_for_agent(
+        "operator-0", agent, [pane]
+    ) == pane
+
+
+async def test_tui_existing_operator_root_is_reused_before_launch_metadata_changes(
+    monkeypatch,
+) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    preserved_cwd = "/home/me/preserved-operator-project"
+    posts: list[dict[str, object]] = []
+    pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "0",
+        "0",
+        "%167",
+        True,
+        "node",
+        "Codex title",
+        preserved_cwd,
+        100,
+        30,
+        100,
+        window_name="node",
+    )
+
+    class Response:
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            assert path == "/v1/agents/register"
+            posts.append({"path": path, **kwargs})
+            body = kwargs["json"]
+            assert isinstance(body, dict)
+            return Response(
+                {
+                    **body,
+                    "status": "working",
+                    "effective_status": "working",
+                    "created_at": 1.0,
+                    "last_seen_at": 1.0,
+                }
+            )
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "project": "agent-pbx-operator",
+            "metadata": {
+                "operator_role": "root",
+                "cwd": preserved_cwd,
+                "tmux_pane_id": "%167",
+                "task_goal": "retain this",
+            },
+        }
+    }
+    app.tmux_agent_targets["operator-0"] = "%167"
+    monkeypatch.setattr(tmux_support, "list_panes", lambda: [pane])
+    monkeypatch.setattr(
+        tmux_support,
+        "launch_pane",
+        lambda **_kwargs: pytest.fail("existing root must not launch a new pane"),
+    )
+
+    agent, pane_id, launched = await app.ensure_operator_root_from_tui(
+        agent_id="operator-0",
+        cwd="/home/me/tui-launch-directory",
+        codex_command="codex",
+        mcp_url="http://127.0.0.1:8765/mcp",
+        session_name="agent-pbx-operators",
+    )
+
+    assert launched is False
+    assert pane_id == "%167"
+    assert agent["metadata"]["cwd"] == preserved_cwd
+    assert agent["metadata"]["task_goal"] == "retain this"
+    assert posts[0]["json"]["metadata"]["tmux_pane_id"] == "%167"  # type: ignore[index]
 
 
 async def test_tui_escape_fans_out_to_operator_root_and_running_forks(
@@ -11168,14 +11288,14 @@ async def test_tui_start_operator_does_not_bind_stale_caller_when_operator_selec
 async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
     monkeypatch,
 ) -> None:
+    preserved_cwd = "/home/me/preserved-operator-project"
     app = AgentPBXTUI(
         server="http://127.0.0.1:8765",
         token="secret",
         tmux_direct=True,
     )
     app.tmux_features_available = True
-    launches: list[dict[str, object]] = []
-    killed: list[str] = []
+    respawns: list[dict[str, object]] = []
     sent: list[tuple[str, str]] = []
     posts: list[dict[str, object]] = []
 
@@ -11231,12 +11351,8 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
     async def fake_open_latest_for_agent(agent_id: str) -> bool:
         return True
 
-    def fake_launch_pane(**kwargs: object) -> str:
-        launches.append(kwargs)
-        return "%153"
-
-    def fake_kill_pane(pane_id: str) -> None:
-        killed.append(pane_id)
+    def fake_respawn_pane(pane_id: str, **kwargs: object) -> None:
+        respawns.append({"pane_id": pane_id, **kwargs})
 
     def fake_list_panes() -> list[tmux_support.TmuxPane]:
         return [
@@ -11248,7 +11364,7 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
                 True,
                 "node",
                 "operator-0",
-                str(Path.cwd()),
+                preserved_cwd,
                 100,
                 30,
                 200,
@@ -11281,8 +11397,12 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
-    monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
-    monkeypatch.setattr(tmux_support, "kill_pane", fake_kill_pane)
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_start_command",
+        lambda _target: "codex resume current-session",
+    )
     monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
     monkeypatch.setattr(tmux_support, "capture_pane", lambda *_args, **_kwargs: "")
 
@@ -11298,7 +11418,7 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
                     "agent_type": "operator",
                     "operator_role": "root",
                     "launched_by": "agent-pbx-tui",
-                    "cwd": str(Path.cwd()),
+                    "cwd": preserved_cwd,
                 },
             }
         }
@@ -11306,19 +11426,19 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
         app.selected_agent_id = "operator-0"
         await app.resume_selected_operator()
 
-    assert killed == ["%152"]
-    launch_argv = shlex.split(str(launches[0]["command"]))
-    assert launch_argv[:4] == ["codex", "resume", "--cd", str(Path.cwd())]
+    assert respawns[0]["pane_id"] == "%152"
+    launch_argv = shlex.split(str(respawns[0]["command"]))
+    assert launch_argv[:4] == ["codex", "resume", "--cd", preserved_cwd]
     assert launch_argv[-1] == "old-session"
     assert "-c" in launch_argv
     assert any(item.startswith("mcp_servers.agent-pbx=") for item in launch_argv)
-    assert launches[0]["window_name"] == "operator-0"
-    launch_env = launches[0]["env"]
+    launch_env = respawns[0]["env"]
     assert isinstance(launch_env, dict)
     assert launch_env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "old-session"
     assert launch_env["AGENT_PBX_REPORTING_AGENT_ID"] == "operator-0"
-    assert sent[0][0] == "%153"
+    assert sent[0][0] == "%152"
     assert "agent_id: operator-0" in sent[0][1]
+    assert app.tmux_agent_targets["operator-0"] == "%152"
     register_body = posts[-1]["json"]
     assert isinstance(register_body, dict)
     register_metadata = register_body["metadata"]

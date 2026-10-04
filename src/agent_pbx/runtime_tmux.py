@@ -272,7 +272,10 @@ def tmux_client_attach_command(
     session_name = str(mapping.get("session_name") or "").strip()
     if not socket_path or not session_name:
         raise ValueError("runtime mapping does not identify a tmux socket and session")
-    command = ["tmux", "-S", socket_path, "attach-session"]
+    # The embedded terminal is always UTF-8 capable. ``-u`` prevents tmux
+    # from inheriting a non-UTF-8 SSH/Termux locale and selecting a degraded
+    # client encoding.
+    command = ["tmux", "-S", socket_path, "-u", "attach-session"]
     if read_only:
         command.append("-r")
     command.extend(("-t", session_name))

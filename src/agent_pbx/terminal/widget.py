@@ -113,7 +113,11 @@ class PbxTerminalSurface(Widget):
         process_env = dict(os.environ if env is None else env)
         process_env.pop("TMUX", None)
         process_env.pop("TMUX_PANE", None)
-        process_env.setdefault("TERM", "xterm-256color")
+        # This PTY is rendered by PbxTerminalSurface rather than the outer
+        # terminal. Advertising an inherited screen/tmux TERM makes a nested
+        # client choose capabilities for the wrong renderer, which is
+        # especially visible through SSH and Termux.
+        process_env["TERM"] = "xterm-256color"
         self.terminal = VirtualTerminal(columns, rows, history=self.history)
         self.process = PtyProcess(
             argv,
@@ -151,6 +155,7 @@ class PbxTerminalSurface(Widget):
         process = self.process
         if process is None:
             return
+        self.sync_geometry()
         chunk = process.read_available(timeout=0.0, limit=262_144)
         if chunk:
             self.total_pty_bytes += len(chunk)
@@ -160,12 +165,43 @@ class PbxTerminalSurface(Widget):
             self._poll_timer.pause()
 
     def on_resize(self, event: events.Resize) -> None:
-        columns = max(2, event.size.width)
-        rows = max(2, event.size.height)
-        self.terminal.resize(columns, rows)
-        if self.process is not None:
-            self.process.resize(columns, rows)
-        self.refresh()
+        if self.sync_geometry(event.size.width, event.size.height):
+            self.refresh()
+
+    def sync_geometry(
+        self,
+        columns: int | None = None,
+        rows: int | None = None,
+    ) -> bool:
+        """Keep the virtual screen and child PTY aligned with the widget.
+
+        Textual normally emits ``Resize`` for layout changes, but hidden-tab
+        activation and rapid pane-ratio changes can coalesce those events. A
+        cheap comparison from the PTY poll closes that gap without issuing a
+        repeated ioctl when the geometry is already current.
+        """
+
+        resolved_columns = max(
+            2,
+            int(columns if columns is not None else self.size.width or 80),
+        )
+        resolved_rows = max(
+            2,
+            int(rows if rows is not None else self.size.height or 24),
+        )
+        changed = (
+            self.terminal.columns != resolved_columns
+            or self.terminal.rows != resolved_rows
+        )
+        if changed:
+            self.terminal.resize(resolved_columns, resolved_rows)
+        process = self.process
+        if process is not None and (
+            process.columns != resolved_columns or process.rows != resolved_rows
+        ):
+            process.resize(resolved_columns, resolved_rows)
+            changed = True
+        return changed
 
     async def _on_key(self, event: events.Key) -> None:
         normalized = event.key.strip().lower().replace("_", "+")

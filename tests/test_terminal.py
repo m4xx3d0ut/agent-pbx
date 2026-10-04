@@ -97,6 +97,31 @@ async def test_terminal_surface_streams_input_and_resizes() -> None:
         await pilot.pause()
         assert surface.terminal.columns == surface.size.width
         assert surface.terminal.rows == surface.size.height
+        assert surface.process is not None
+        surface.terminal.resize(20, 5)
+        surface.process.resize(20, 5)
+        surface.poll_pty()
+        assert surface.terminal.columns == surface.size.width
+        assert surface.terminal.rows == surface.size.height
+        assert surface.process.columns == surface.size.width
+        assert surface.process.rows == surface.size.height
+
+
+async def test_terminal_surface_uses_renderer_term_instead_of_outer_term() -> None:
+    class TerminalApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield PbxTerminalSurface(id="terminal", poll_interval=0.01)
+
+    app = TerminalApp()
+    async with app.run_test() as pilot:
+        surface = app.query_one("#terminal", PbxTerminalSurface)
+        surface.attach(
+            ["/bin/sh", "-c", "printf '%s' \"$TERM\"; sleep .1"],
+            target="test-shell",
+            env={**os.environ, "TERM": "screen-256color"},
+        )
+        await pilot.pause(0.1)
+        assert "xterm-256color" in surface.render().plain
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux unavailable")

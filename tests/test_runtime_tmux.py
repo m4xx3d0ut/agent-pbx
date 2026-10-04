@@ -170,11 +170,12 @@ def test_tmux_client_commands_are_mapping_scoped() -> None:
         "tmux",
         "-S",
         "/tmp/pbx.sock",
+        "-u",
         "attach-session",
         "-t",
         "runtime-a",
     )
-    assert tmux_client_attach_command(mapping, read_only=True)[4] == "-r"
+    assert "-r" in tmux_client_attach_command(mapping, read_only=True)
     assert tmux_select_runtime_pane_command(mapping)[-2:] == ("-t", "%7")
 
 
@@ -253,6 +254,20 @@ def test_tmux_runtime_api_registers_reconciles_and_leases_writer(
             json={"client_id": "tui-a", "ttl_seconds": 30},
         )
         assert first.status_code == 200
+        renewed = client.post(
+            "/v2/tmux/runtimes/agent-a/writer/acquire",
+            headers=headers,
+            json={"client_id": "tui-a", "ttl_seconds": 30},
+        )
+        assert renewed.status_code == 200
+        events = client.get(
+            "/v1/events",
+            headers=headers,
+            params={"limit": 100},
+        ).json()
+        assert sum(
+            event["type"] == "tmux_runtime_writer_acquired" for event in events
+        ) == 1
         collision = client.post(
             "/v2/tmux/runtimes/agent-a/writer/acquire",
             headers=headers,
