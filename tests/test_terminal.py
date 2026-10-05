@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
+import time
 import uuid
 
 import pytest
@@ -16,6 +18,7 @@ from agent_pbx.terminal.keys import FunctionKeyPassthroughMap, function_key_sequ
 from agent_pbx.terminal.pty import PtyProcess
 from agent_pbx.terminal.screen import VirtualTerminal
 from agent_pbx.terminal.widget import PbxTerminalSurface, terminal_key_bytes
+from agent_pbx.runtime_tmux import tmux_client_attach_command
 
 
 @pytest.mark.parametrize("number", range(1, 13))
@@ -64,6 +67,29 @@ def test_pty_and_virtual_terminal_stream_and_resize() -> None:
         terminal.resize(60, 12)
     assert terminal.snapshot().columns == 60
     assert terminal.snapshot().rows == 12
+
+
+def test_pty_resize_notifies_child_process_group() -> None:
+    with PtyProcess(
+        [
+            sys.executable,
+            "-c",
+            "import os, signal\n"
+            "def resized(*_args):\n"
+            "    size = os.get_terminal_size()\n"
+            "    print(f'{size.lines} {size.columns}', flush=True)\n"
+            "    raise SystemExit(0)\n"
+            "signal.signal(signal.SIGWINCH, resized)\n"
+            "print('READY', flush=True)\n"
+            "signal.pause()\n",
+        ],
+        columns=40,
+        rows=8,
+    ) as process:
+        assert b"READY" in process.read_available(timeout=1.0)
+        process.resize(60, 12)
+        output = process.read_available(timeout=1.0)
+    assert b"12 60" in output
 
 
 def test_virtual_terminal_ignores_private_device_status_queries() -> None:
@@ -124,6 +150,41 @@ async def test_terminal_surface_uses_renderer_term_instead_of_outer_term() -> No
         assert "xterm-256color" in surface.render().plain
 
 
+async def test_hidden_terminal_surface_retains_last_live_geometry() -> None:
+    class TerminalApp(App[None]):
+        CSS = """
+        #terminal {
+            display: block;
+            width: 1fr;
+            height: 1fr;
+        }
+        Screen.hidden #terminal {
+            display: none;
+        }
+        """
+
+        def compose(self) -> ComposeResult:
+            yield PbxTerminalSurface(id="terminal", poll_interval=0.01)
+
+    app = TerminalApp()
+    async with app.run_test(size=(120, 32)) as pilot:
+        surface = app.query_one("#terminal", PbxTerminalSurface)
+        surface.attach(["/bin/sh", "-c", "sleep 30"], target="test-shell")
+        await pilot.pause(0.1)
+        assert surface.process is not None
+        live_geometry = (surface.process.columns, surface.process.rows)
+        assert live_geometry == (surface.size.width, surface.size.height)
+
+        app.screen.add_class("hidden")
+        app.refresh(layout=True)
+        await pilot.pause(0.1)
+        assert surface.size.width == 0
+        assert surface.size.height == 0
+
+        surface.poll_pty()
+        assert (surface.process.columns, surface.process.rows) == live_geometry
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux unavailable")
 def test_normal_tmux_client_conformance_on_dedicated_server() -> None:
     result = run_dedicated_tmux_conformance()
@@ -167,6 +228,102 @@ def test_disposable_client_restart_keeps_runtime_session_alive() -> None:
             first.close()
         if second is not None:
             second.close()
+        subprocess.run([*prefix, "kill-server"], capture_output=True)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux unavailable")
+def test_mapped_tmux_client_attaches_to_exact_window_and_pane() -> None:
+    tmux = shutil.which("tmux") or "tmux"
+    socket_path = f"/tmp/agent-pbx-target-{uuid.uuid4().hex[:10]}.sock"
+    prefix = [tmux, "-S", socket_path, "-f", "/dev/null"]
+    process: PtyProcess | None = None
+    try:
+        subprocess.run(
+            [*prefix, "new-session", "-d", "-s", "runtime", "sleep 30"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                *prefix,
+                "new-window",
+                "-d",
+                "-t",
+                "runtime:",
+                "-n",
+                "wanted",
+                "sleep 30",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [*prefix, "split-window", "-d", "-t", "runtime:wanted", "sleep 30"],
+            check=True,
+            capture_output=True,
+        )
+        selected = subprocess.run(
+            [
+                *prefix,
+                "list-panes",
+                "-t",
+                "runtime:wanted",
+                "-F",
+                "#{window_id}\t#{pane_id}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip().splitlines()[-1].split("\t")
+        window_id, pane_id = selected
+        env = dict(os.environ)
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
+        env["TERM"] = "xterm-256color"
+        process = PtyProcess(
+            tmux_client_attach_command(
+                {
+                    "socket_path": socket_path,
+                    "session_name": "runtime",
+                    "window_id": window_id,
+                    "pane_id": pane_id,
+                }
+            ),
+            env=env,
+            columns=111,
+            rows=37,
+        ).start()
+        for _ in range(20):
+            client = subprocess.run(
+                [*prefix, "list-clients", "-F", "#{window_id}\t#{pane_id}"],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            if client:
+                break
+            time.sleep(0.05)
+        assert process.alive
+        assert client == f"{window_id}\t{pane_id}"
+        process.resize(93, 29)
+        resized = ""
+        for _ in range(20):
+            resized = subprocess.run(
+                [
+                    *prefix,
+                    "list-clients",
+                    "-F",
+                    "#{client_width}x#{client_height}",
+                ],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            if resized == "93x29":
+                break
+            time.sleep(0.05)
+        assert resized == "93x29"
+    finally:
+        if process is not None:
+            process.close()
         subprocess.run([*prefix, "kill-server"], capture_output=True)
 
 

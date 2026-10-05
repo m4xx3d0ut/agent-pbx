@@ -181,14 +181,16 @@ class PbxTerminalSurface(Widget):
         repeated ioctl when the geometry is already current.
         """
 
-        resolved_columns = max(
-            2,
-            int(columns if columns is not None else self.size.width or 80),
-        )
-        resolved_rows = max(
-            2,
-            int(rows if rows is not None else self.size.height or 24),
-        )
+        requested_columns = int(columns if columns is not None else self.size.width)
+        requested_rows = int(rows if rows is not None else self.size.height)
+        if requested_columns <= 0 or requested_rows <= 0:
+            # ``display: none`` gives the widget a zero-sized region. Retain
+            # the last authoritative PTY geometry while a tab or selection is
+            # hidden instead of collapsing a still-detaching tmux client to
+            # the 80x24 construction fallback.
+            return False
+        resolved_columns = max(2, requested_columns)
+        resolved_rows = max(2, requested_rows)
         changed = (
             self.terminal.columns != resolved_columns
             or self.terminal.rows != resolved_rows

@@ -2114,6 +2114,141 @@ async def test_tui_shift_f2_writes_directly_to_embedded_terminal() -> None:
     assert app.embedded_terminal_agent_id is None
 
 
+async def test_tui_discards_embedded_terminal_attach_after_selection_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    released: list[str] = []
+
+    async def acquire(agent_id: str) -> dict[str, object]:
+        assert agent_id == "operator-0"
+        app.selected_agent_id = "agent-b"
+        return {
+            "state": "ready",
+            "server_id": "server-a",
+            "socket_path": "/tmp/pbx.sock",
+            "session_name": "runtime-a",
+            "window_id": "@12",
+            "pane_id": "%7",
+        }
+
+    async def release(agent_id: str) -> None:
+        released.append(agent_id)
+
+    async with app.run_test():
+        app.selected_agent_id = "operator-0"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        monkeypatch.setattr(app, "acquire_tmux_writer_lease", acquire)
+        monkeypatch.setattr(app, "release_tmux_writer_lease", release)
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        attached: list[tuple[object, ...]] = []
+        monkeypatch.setattr(
+            surface,
+            "attach",
+            lambda *args, **kwargs: attached.append((args, kwargs)),
+        )
+
+        assert (
+            await app.attach_embedded_tmux_terminal(
+                "operator-0",
+                {
+                    "state": "ready",
+                    "server_id": "server-a",
+                    "pane_id": "%7",
+                },
+            )
+            is False
+        )
+
+    assert released == ["operator-0"]
+    assert attached == []
+    assert app.embedded_terminal_agent_id is None
+
+
+async def test_tui_waits_for_visible_terminal_layout_before_cold_attach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    attached_sizes: list[tuple[int, int]] = []
+
+    class FakeProcess:
+        alive = True
+
+        def __init__(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+        def close(self) -> None:
+            self.alive = False
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+    async def acquire(_agent_id: str) -> dict[str, object]:
+        return {
+            "state": "ready",
+            "server_id": "server-a",
+            "socket_path": "/tmp/pbx.sock",
+            "session_name": "runtime-a",
+            "window_id": "@12",
+            "pane_id": "%7",
+            "cwd": "/tmp",
+        }
+
+    async with app.run_test(size=(120, 32)) as pilot:
+        app.selected_agent_id = "operator-0"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        monkeypatch.setattr(app, "acquire_tmux_writer_lease", acquire)
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        assert surface.size == (0, 0)
+
+        def attach(*_args: object, **kwargs: object) -> None:
+            attached_sizes.append((surface.size.width, surface.size.height))
+            surface.process = FakeProcess(  # type: ignore[assignment]
+                surface.size.width,
+                surface.size.height,
+            )
+            surface.target = str(kwargs["target"])
+
+        monkeypatch.setattr(surface, "attach", attach)
+        assert (
+            await app.attach_embedded_tmux_terminal(
+                "operator-0",
+                {
+                    "state": "ready",
+                    "server_id": "server-a",
+                    "pane_id": "%7",
+                },
+            )
+            is True
+        )
+        await pilot.pause()
+        initial_size = attached_sizes[0]
+        await pilot.resize_terminal(160, 32)
+        await pilot.pause()
+        # A compound Textual layout can emit an intermediate Resize before
+        # borders and sibling widgets settle. The surface's regular PTY poll
+        # closes that final geometry gap without app-level layout callbacks.
+        surface.poll_pty()
+        assert surface.process is not None
+        assert (surface.process.columns, surface.process.rows) == (
+            surface.size.width,
+            surface.size.height,
+        )
+        assert (surface.size.width, surface.size.height) != initial_size
+
+    assert attached_sizes
+    assert attached_sizes[0][0] > 0
+    assert attached_sizes[0][1] > 0
+    assert attached_sizes[0] != (80, 24)
+
+
 async def test_tui_managed_project_picker_loads_api_projects() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 

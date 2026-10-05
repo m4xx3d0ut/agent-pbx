@@ -272,13 +272,23 @@ def tmux_client_attach_command(
     session_name = str(mapping.get("session_name") or "").strip()
     if not socket_path or not session_name:
         raise ValueError("runtime mapping does not identify a tmux socket and session")
+    window_id = str(mapping.get("window_id") or "").strip()
+    pane_id = str(mapping.get("pane_id") or "").strip()
+    target = session_name
+    if window_id:
+        target = f"{target}:{window_id}"
+        if pane_id:
+            target = f"{target}.{pane_id}"
     # The embedded terminal is always UTF-8 capable. ``-u`` prevents tmux
     # from inheriting a non-UTF-8 SSH/Termux locale and selecting a degraded
-    # client encoding.
+    # client encoding. Target the mapped window and pane as part of attach;
+    # selecting a pane before a session-only attach does not change the
+    # session's current window, so the new client can otherwise display an
+    # unrelated Agent or Operator.
     command = ["tmux", "-S", socket_path, "-u", "attach-session"]
     if read_only:
         command.append("-r")
-    command.extend(("-t", session_name))
+    command.extend(("-t", target))
     return tuple(command)
 
 

@@ -164,6 +164,7 @@ def test_tmux_client_commands_are_mapping_scoped() -> None:
     mapping = {
         "socket_path": "/tmp/pbx.sock",
         "session_name": "runtime-a",
+        "window_id": "@12",
         "pane_id": "%7",
     }
     assert tmux_client_attach_command(mapping) == (
@@ -173,10 +174,20 @@ def test_tmux_client_commands_are_mapping_scoped() -> None:
         "-u",
         "attach-session",
         "-t",
-        "runtime-a",
+        "runtime-a:@12.%7",
     )
     assert "-r" in tmux_client_attach_command(mapping, read_only=True)
     assert tmux_select_runtime_pane_command(mapping)[-2:] == ("-t", "%7")
+
+
+def test_tmux_client_attach_falls_back_to_session_for_legacy_mapping() -> None:
+    assert tmux_client_attach_command(
+        {
+            "socket_path": "/tmp/pbx.sock",
+            "session_name": "runtime-a",
+            "pane_id": "%7",
+        }
+    )[-2:] == ("-t", "runtime-a")
 
 
 def test_integrated_pop_targets_only_recorded_client_and_sessions() -> None:

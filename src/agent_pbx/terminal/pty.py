@@ -39,6 +39,13 @@ class PtyProcess:
         if self.process is not None:
             return self
         master_fd, slave_fd = os.openpty()
+
+        def prepare_child_terminal() -> None:
+            os.setsid()
+            tiocsctty = getattr(termios, "TIOCSCTTY", None)
+            if tiocsctty is not None:
+                fcntl.ioctl(slave_fd, tiocsctty, 0)
+
         try:
             self._set_winsize(slave_fd, self.columns, self.rows)
             process = subprocess.Popen(
@@ -49,7 +56,7 @@ class PtyProcess:
                 cwd=self.cwd,
                 env=self.env,
                 close_fds=True,
-                preexec_fn=os.setsid,
+                preexec_fn=prepare_child_terminal,
             )
         except Exception:
             os.close(master_fd)
@@ -108,6 +115,13 @@ class PtyProcess:
         self.rows = max(2, int(rows))
         if self.master_fd is not None:
             self._set_winsize(self.master_fd, self.columns, self.rows)
+        process = self.process
+        if process is not None and process.poll() is None:
+            # A well-formed controlling PTY receives this from TIOCSWINSZ, but
+            # explicitly notifying the child process group also covers tmux
+            # clients on platforms where that propagation is delayed or
+            # omitted.  The child is its own session/process-group leader.
+            self._signal(process, signal.SIGWINCH)
 
     def close(self, *, terminate: bool = True, timeout: float = 2.0) -> None:
         # Closing the PTY master first lets terminal-aware children (including

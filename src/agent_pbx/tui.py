@@ -94,7 +94,6 @@ from .runtime_tmux import (
     resolve_runtime_tmux_server,
     runtime_pop_plan,
     tmux_client_attach_command,
-    tmux_select_runtime_pane_command,
 )
 from .ui.actions import ActionRegistry
 from .ui.async_jobs import AsyncGenerationGate
@@ -12824,6 +12823,35 @@ class AgentPBXTUI(App[None]):
         except Exception:
             return
 
+    async def wait_for_embedded_terminal_layout(
+        self,
+        surface: PbxTerminalSurface,
+        *,
+        attempts: int = 3,
+    ) -> bool:
+        """Wait until a newly revealed terminal has an authoritative rectangle.
+
+        The surface normally has ``display: none`` while capture mode is active.
+        Starting its PTY in the same message turn that adds the
+        ``embedded-terminal`` screen class observes a zero-sized widget and
+        gives the nested tmux client the construction fallback of 80x24.  Ask
+        Textual for a layout pass and wait for the resulting refresh before
+        creating the PTY.
+        """
+
+        for _ in range(max(1, attempts)):
+            if surface.size.width > 0 and surface.size.height > 0:
+                return True
+            ready = asyncio.Event()
+            self.screen.refresh(layout=True)
+            if not surface.call_after_refresh(ready.set):
+                return False
+            try:
+                await asyncio.wait_for(ready.wait(), timeout=0.5)
+            except TimeoutError:
+                continue
+        return surface.size.width > 0 and surface.size.height > 0
+
     async def attach_embedded_tmux_terminal(
         self,
         agent_id: str,
@@ -12857,29 +12885,47 @@ class AgentPBXTUI(App[None]):
         leased = await self.acquire_tmux_writer_lease(agent_id)
         if leased is None:
             return False
+        if (
+            agent_id != self.selected_agent_id
+            or self.active_agent_tab != "latest-tab"
+            or not self.embedded_terminal_v2_enabled
+        ):
+            # Selection can change while the writer lease request is in
+            # flight. Never let that stale worker replace the terminal for the
+            # newly selected entity.
+            await self.release_tmux_writer_lease(agent_id)
+            return False
         try:
-            select_command = tmux_select_runtime_pane_command(leased)
-            selected = await asyncio.to_thread(
-                subprocess.run,
-                select_command,
-                capture_output=True,
-                text=True,
-            )
-            if selected.returncode != 0:
-                raise RuntimeError(selected.stderr.strip() or "unable to select runtime pane")
+            self.embedded_terminal_agent_id = agent_id
+            self.embedded_terminal_target = target
+            self.apply_tmux_class()
+            if not await self.wait_for_embedded_terminal_layout(surface):
+                raise RuntimeError(
+                    "embedded terminal did not receive a visible layout rectangle"
+                )
+            if (
+                agent_id != self.selected_agent_id
+                or self.active_agent_tab != "latest-tab"
+                or not self.embedded_terminal_v2_enabled
+            ):
+                await self.release_tmux_writer_lease(agent_id)
+                self.embedded_terminal_agent_id = None
+                self.embedded_terminal_target = None
+                self.apply_tmux_class()
+                return False
             surface.attach(
                 tmux_client_attach_command(leased),
                 target=target,
                 cwd=str(leased.get("cwd") or Path.home()),
             )
         except Exception as exc:
+            self.embedded_terminal_agent_id = None
+            self.embedded_terminal_target = None
+            self.apply_tmux_class()
             await self.release_tmux_writer_lease(agent_id)
             self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
             surface.detach()
             return False
-        self.embedded_terminal_agent_id = agent_id
-        self.embedded_terminal_target = target
-        self.apply_tmux_class()
         status = self.query_one_or_none("#tmux-status", Static)
         if status is not None:
             status.update(
