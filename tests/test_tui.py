@@ -4106,7 +4106,80 @@ async def test_tui_starred_agents_sort_above_unstarred_by_freshness(
     assert table.get_row("new-unstarred")[0] == ""
 
 
-async def test_tui_toggle_star_agent_persists_and_preserves_focus(
+async def test_tui_freezes_agent_and_operator_order_only_while_table_focused() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.agents = {
+            "agent-old": {
+                "agent_id": "agent-old",
+                "agent_type": "caller",
+                "status": "working",
+                "project": "demo",
+                "last_seen_at": 100.0,
+            },
+            "agent-new": {
+                "agent_id": "agent-new",
+                "agent_type": "caller",
+                "status": "working",
+                "project": "demo",
+                "last_seen_at": 200.0,
+            },
+            "operator-old": {
+                "agent_id": "operator-old",
+                "agent_type": "operator",
+                "status": "working",
+                "project": "demo",
+                "last_seen_at": 100.0,
+                "metadata": {"operator_role": "root"},
+            },
+            "operator-new": {
+                "agent_id": "operator-new",
+                "agent_type": "operator",
+                "status": "working",
+                "project": "demo",
+                "last_seen_at": 200.0,
+                "metadata": {"operator_role": "root"},
+            },
+        }
+        app.render_agents()
+        agents = app.query_one("#agents", DataTable)
+        operators = app.query_one("#operators", DataTable)
+        events = app.query_one("#events", DataTable)
+
+        agents.focus()
+        await pilot.pause()
+        app.agents["agent-old"]["last_seen_at"] = 300.0
+        app.render_agents()
+        assert [str(row.key.value) for row in agents.ordered_rows] == [
+            "agent-new",
+            "agent-old",
+        ]
+
+        operators.focus()
+        await pilot.pause()
+        assert [str(row.key.value) for row in agents.ordered_rows] == [
+            "agent-old",
+            "agent-new",
+        ]
+        app.agents["operator-old"]["last_seen_at"] = 300.0
+        app.render_agents()
+        assert [str(row.key.value) for row in operators.ordered_rows] == [
+            "operator-new",
+            "operator-old",
+        ]
+
+        events.focus()
+        await pilot.pause()
+        assert [str(row.key.value) for row in operators.ordered_rows] == [
+            "operator-old",
+            "operator-new",
+        ]
+
+
+async def test_tui_toggle_star_agent_persists_and_defers_reorder_while_focused(
     tmp_path: Path,
 ) -> None:
     settings_file = tmp_path / "settings.json"
@@ -4116,7 +4189,7 @@ async def test_tui_toggle_star_agent_persists_and_preserves_focus(
     )
     app.queue_agent_star_sync = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
 
-    async with app.run_test():
+    async with app.run_test() as pilot:
         app.agents = {
             "agent-1": {
                 "agent_id": "agent-1",
@@ -4136,14 +4209,18 @@ async def test_tui_toggle_star_agent_persists_and_preserves_focus(
         app.toggle_selected_agent_star()
         table = app.query_one("#agents", DataTable)
         cursor_agent_id = app.agent_id_at_cursor()
-        ordered = [str(row.key.value) for row in table.ordered_rows]
+        ordered_while_focused = [str(row.key.value) for row in table.ordered_rows]
         starred_cell = table.get_row("agent-1")[0]
         saved = json.loads(settings_file.read_text(encoding="utf-8"))
+        app.query_one("#events", DataTable).focus()
+        await pilot.pause()
+        ordered_after_blur = [str(row.key.value) for row in table.ordered_rows]
 
     assert app.starred_agent_ids == {"agent-1"}
     assert saved["starred_agent_ids"] == ["agent-1"]
     assert cursor_agent_id == "agent-1"
-    assert ordered == ["agent-1", "agent-2"]
+    assert ordered_while_focused == ["agent-2", "agent-1"]
+    assert ordered_after_blur == ["agent-1", "agent-2"]
     assert starred_cell == "*"
 
 

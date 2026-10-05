@@ -5438,6 +5438,8 @@ class AgentPBXTUI(App[None]):
         self.rendered_agent_columns: tuple[str, ...] = ()
         self.rendered_operator_columns: tuple[str, ...] = ()
         self.rendered_agents_signature: tuple[Any, ...] | None = None
+        self.agent_table_order_lock: tuple[str, ...] | None = None
+        self.operator_table_order_lock: tuple[str, ...] | None = None
         self.agents: dict[str, dict[str, Any]] = {}
         self.selected_agent_id: str | None = None
         self.events: list[dict[str, Any]] = []
@@ -9865,6 +9867,36 @@ class AgentPBXTUI(App[None]):
             return False
         return agent_id == self.selected_agent_id and self.active_agent_tab == "latest-tab"
 
+    @staticmethod
+    def table_agent_order(table: DataTable[Any]) -> tuple[str, ...]:
+        return tuple(str(row.key.value) for row in table.ordered_rows)
+
+    @staticmethod
+    def agents_in_locked_order(
+        agents: list[dict[str, Any]],
+        locked_order: tuple[str, ...] | None,
+    ) -> tuple[list[dict[str, Any]], tuple[str, ...] | None]:
+        if locked_order is None:
+            return agents, None
+        agents_by_id = {
+            str(agent.get("agent_id") or ""): agent
+            for agent in agents
+            if str(agent.get("agent_id") or "")
+        }
+        ordered = [
+            agents_by_id.pop(agent_id)
+            for agent_id in locked_order
+            if agent_id in agents_by_id
+        ]
+        ordered.extend(
+            agent
+            for agent in agents
+            if str(agent.get("agent_id") or "") in agents_by_id
+        )
+        return ordered, tuple(
+            str(agent.get("agent_id") or "") for agent in ordered
+        )
+
     def ordered_agents(self, agent_type: str | None = None) -> list[dict[str, Any]]:
         agents = sorted(
             self.agents.values(),
@@ -10247,6 +10279,23 @@ class AgentPBXTUI(App[None]):
         operator_table = self.query_one_or_none("#operators", DataTable)
         if table is None or operator_table is None:
             return
+        if table.has_focus and self.agent_table_order_lock is None:
+            self.agent_table_order_lock = self.table_agent_order(table)
+        elif not table.has_focus:
+            self.agent_table_order_lock = None
+        if operator_table.has_focus and self.operator_table_order_lock is None:
+            self.operator_table_order_lock = self.table_agent_order(operator_table)
+        elif not operator_table.has_focus:
+            self.operator_table_order_lock = None
+
+        caller_agents, self.agent_table_order_lock = self.agents_in_locked_order(
+            self.caller_agents(),
+            self.agent_table_order_lock,
+        )
+        operator_agents, self.operator_table_order_lock = self.agents_in_locked_order(
+            self.operator_table_agents(),
+            self.operator_table_order_lock,
+        )
         cursor_agent_id = self.agent_id_at_cursor()
         cursor_operator_id = self.operator_id_at_cursor()
         scroll_x = table.scroll_x
@@ -10260,8 +10309,8 @@ class AgentPBXTUI(App[None]):
 
         self.render_agent_columns(table)
         table.clear()
-        caller_agent_ids = {str(agent["agent_id"]) for agent in self.caller_agents()}
-        for agent in self.caller_agents():
+        caller_agent_ids = {str(agent["agent_id"]) for agent in caller_agents}
+        for agent in caller_agents:
             agent_id = str(agent["agent_id"])
             row = self.agent_row_values(agent, self.rendered_agent_columns)
             cells = self.style_agent_row(
@@ -10290,10 +10339,8 @@ class AgentPBXTUI(App[None]):
 
         self.render_operator_columns(operator_table)
         operator_table.clear()
-        operator_agent_ids = {
-            str(agent["agent_id"]) for agent in self.operator_table_agents()
-        }
-        for agent in self.operator_table_agents():
+        operator_agent_ids = {str(agent["agent_id"]) for agent in operator_agents}
+        for agent in operator_agents:
             agent_id = str(agent["agent_id"])
             row = self.agent_row_values(agent, self.rendered_operator_columns)
             cells = self.style_agent_row(row, agent)
@@ -11072,8 +11119,26 @@ class AgentPBXTUI(App[None]):
         )
         return True
 
-    def on_descendant_focus(self, _: DescendantFocus) -> None:
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
         self.focus_generation.changed()
+        focused_id = str(event.widget.id or "")
+        released_order_lock = False
+        if focused_id == "agents":
+            table = self.query_one_or_none("#agents", DataTable)
+            if table is not None and self.agent_table_order_lock is None:
+                self.agent_table_order_lock = self.table_agent_order(table)
+        elif self.agent_table_order_lock is not None:
+            self.agent_table_order_lock = None
+            released_order_lock = True
+        if focused_id == "operators":
+            table = self.query_one_or_none("#operators", DataTable)
+            if table is not None and self.operator_table_order_lock is None:
+                self.operator_table_order_lock = self.table_agent_order(table)
+        elif self.operator_table_order_lock is not None:
+            self.operator_table_order_lock = None
+            released_order_lock = True
+        if released_order_lock:
+            self.call_after_refresh(self.render_agents)
 
     def handle_joplin_shortcut_key(
         self,
