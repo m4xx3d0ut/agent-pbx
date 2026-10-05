@@ -146,6 +146,32 @@ def test_agent_pane_adoption_blocks_duplicate_pbx_session(
         )
         assert preview["plan"]["eligible"] is False
         assert "agent-alias" in " ".join(preview["plan"]["blockers"])
+
+        alias = store.get_agent("agent-alias")
+        assert alias is not None
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id="agent-alias",
+                project="demo",
+                metadata={
+                    **alias["metadata"],
+                    "runtime_alias_of": "agent-a",
+                },
+            )
+        )
+        canonical = AgentPaneAdoptionService(store).preview(
+            agent_id="agent-a",
+            pane_id=pane_id,
+        )["plan"]
+        assert "claimed by other PBX identities" not in " ".join(
+            canonical["blockers"]
+        )
+        assert canonical["declared_runtime_aliases"] == ["agent-alias"]
+        alias_plan = AgentPaneAdoptionService(store).preview(
+            agent_id="agent-alias",
+            pane_id=pane_id,
+        )["plan"]
+        assert "runtime alias" in " ".join(alias_plan["blockers"])
     finally:
         tmux(socket_path, "kill-server")
 

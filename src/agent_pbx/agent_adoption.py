@@ -104,6 +104,13 @@ def agent_codex_session_id(agent: Mapping[str, Any]) -> str:
     ).strip()
 
 
+def agent_runtime_alias_target(agent: Mapping[str, Any]) -> str:
+    metadata = agent.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return ""
+    return str(metadata.get("runtime_alias_of") or "").strip()
+
+
 def managed_agent_window_name(agent_id: str) -> str:
     normalized = WINDOW_NAME_PATTERN.sub("-", str(agent_id).strip()).strip(".-")
     return (normalized or "agent")[:120]
@@ -406,6 +413,11 @@ class AgentPaneAdoptionService:
             blockers.append(identity.message or "runtime tmux server is unavailable")
         if str(agent.get("agent_type") or "caller") != "caller":
             blockers.append("pane adoption supports caller Agents only")
+        alias_target = agent_runtime_alias_target(agent)
+        if alias_target:
+            blockers.append(
+                f"Agent is a runtime alias of {alias_target!r}; adopt the canonical identity"
+            )
         session_id = agent_codex_session_id(agent)
         if not session_id:
             blockers.append("Agent has no Codex session ID")
@@ -440,13 +452,28 @@ class AgentPaneAdoptionService:
                     "Codex session is live in multiple panes: "
                     + ", ".join([pane.pane_id, *sorted(duplicate_panes)])
                 )
-        duplicate_agents = sorted(
-            str(item.get("agent_id") or "")
+        duplicate_records = [
+            item
             for item in self.store.list_agents(include_hidden=True)
             if str(item.get("agent_id") or "") != agent_id
             and session_id
             and agent_codex_session_id(item) == session_id
+        ]
+        declared_aliases = sorted(
+            str(item.get("agent_id") or "")
+            for item in duplicate_records
+            if agent_runtime_alias_target(item) == agent_id
         )
+        duplicate_agents = sorted(
+            str(item.get("agent_id") or "")
+            for item in duplicate_records
+            if agent_runtime_alias_target(item) != agent_id
+        )
+        if declared_aliases:
+            warnings.append(
+                "declared runtime aliases share this session: "
+                + ", ".join(declared_aliases)
+            )
         if duplicate_agents:
             blockers.append(
                 "Codex session is claimed by other PBX identities: "
@@ -518,6 +545,7 @@ class AgentPaneAdoptionService:
             "eligible": not blockers,
             "blockers": blockers,
             "warnings": warnings,
+            "declared_runtime_aliases": declared_aliases,
             "source_signature": source_signature,
             "source": source,
             "snapshot": {
