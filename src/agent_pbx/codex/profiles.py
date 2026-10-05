@@ -28,7 +28,14 @@ class ManagedCodexProfile:
         )
 
 
+DEFAULT_CALLER_PROFILE_ID = "sol-high"
+DEFAULT_OPERATOR_PROFILE_ID = "sol-xhigh"
+
+
 MANAGED_CODEX_PROFILES: dict[str, ManagedCodexProfile] = {
+    "sol-high": ManagedCodexProfile(
+        "sol-high", "Sol 5.6 / high", "gpt-5.6-sol", "high"
+    ),
     "sol-xhigh": ManagedCodexProfile(
         "sol-xhigh", "Sol 5.6 / xhigh", "gpt-5.6-sol", "xhigh"
     ),
@@ -106,4 +113,3 @@ def managed_profile_view(catalog: Iterable[CodexModelOption]) -> list[dict[str, 
             }
         )
     return views
-

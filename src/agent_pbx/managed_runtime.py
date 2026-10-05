@@ -11,7 +11,11 @@ import time
 from typing import Any, Callable, Iterable, Mapping
 import uuid
 
-from .codex.profiles import MANAGED_CODEX_PROFILES, validate_managed_profile
+from .codex.profiles import (
+    DEFAULT_CALLER_PROFILE_ID,
+    MANAGED_CODEX_PROFILES,
+    validate_managed_profile,
+)
 from .codex_cli import CodexModelOption, inspect_codex_model_catalog
 from .runtime_tmux import (
     ensure_runtime_socket_parent,
@@ -130,7 +134,7 @@ class ManagedRuntimeService:
         *,
         project_path: str,
         agent_id: str = "",
-        profile_id: str = "sol-xhigh",
+        profile_id: str = DEFAULT_CALLER_PROFILE_ID,
         runtime_server_mode: str = "dedicated",
     ) -> dict[str, Any]:
         path = self._validated_project_path(project_path)
@@ -178,7 +182,7 @@ class ManagedRuntimeService:
         *,
         project_path: str,
         agent_id: str = "",
-        profile_id: str = "sol-xhigh",
+        profile_id: str = DEFAULT_CALLER_PROFILE_ID,
         runtime_server_mode: str = "dedicated",
         server_url: str = "http://127.0.0.1:8765",
         token: str | None = None,
@@ -260,6 +264,18 @@ class ManagedRuntimeService:
                 "model_reasoning_effort": preview["reasoning_effort"],
                 "model_verbosity": preview["verbosity"],
                 "model_reasoning_summary": preview["reasoning_summary"],
+                "codex_model_preset": {
+                    "sol-high": "sol-5.6-high",
+                    "sol-xhigh": "sol-5.6-xhigh",
+                    "sol-max": "sol-5.6-max",
+                    "terra-xhigh": "terra-5.6-xhigh",
+                    "terra-max": "terra-5.6-max",
+                    "codex-5.5-xhigh": "legacy-5.5-xhigh",
+                }.get(profile_id, profile_id),
+                "codex_model": preview["model"],
+                "codex_model_reasoning_effort": preview["reasoning_effort"],
+                "codex_model_verbosity": preview["verbosity"],
+                "codex_model_reasoning_summary": preview["reasoning_summary"],
             }
             agent, mapping = self.store.create_managed_agent_runtime(
                 AgentRegisterRequest(

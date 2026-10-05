@@ -45,9 +45,10 @@ def register(client: TestClient, root: Path, *, agent_id: str = "agent-a") -> No
 
 def test_managed_profiles_validate_model_and_reasoning_catalog() -> None:
     catalog = (
-        model("gpt-5.6-sol", "xhigh", "max"),
+        model("gpt-5.6-sol", "high", "xhigh", "max"),
         model("gpt-5.6-terra", "xhigh", "max"),
     )
+    assert validate_managed_profile(MANAGED_CODEX_PROFILES["sol-high"], catalog).valid
     assert validate_managed_profile(MANAGED_CODEX_PROFILES["sol-xhigh"], catalog).valid
     unavailable = validate_managed_profile(
         MANAGED_CODEX_PROFILES["codex-5.5-xhigh"], catalog
@@ -105,7 +106,7 @@ def test_profiles_and_managed_skills_api(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "agent_pbx.api.inspect_codex_model_catalog",
         lambda: (
-            model("gpt-5.6-sol", "xhigh", "max"),
+            model("gpt-5.6-sol", "high", "xhigh", "max"),
             model("gpt-5.6-terra", "xhigh", "max"),
         ),
     )
@@ -119,7 +120,11 @@ def test_profiles_and_managed_skills_api(tmp_path: Path, monkeypatch) -> None:
         "/v2/codex/profiles", headers={"Authorization": "Bearer secret"}
     )
     assert profiles.status_code == 200
-    assert profiles.json()["default_profile"] == "sol-xhigh"
+    assert profiles.json()["default_profile"] == "sol-high"
+    assert profiles.json()["role_defaults"] == {
+        "caller": "sol-high",
+        "operator": "sol-xhigh",
+    }
     overlay_view = profiles.json()["personality"]["local_overlay"]
     assert overlay_view["active"] is True
     assert "private overlay contents" not in profiles.text
@@ -202,4 +207,3 @@ def test_elevated_model_requires_distinct_approval_and_tracks_lease(
     )
     assert finished.status_code == 200
     assert finished.json()["transition"]["verified"] is True
-

@@ -782,10 +782,20 @@ CODEX_MODEL_PRESETS: tuple[CodexModelPreset, ...] = (
         label="terra-5.6/max",
         model="gpt-5.6-terra",
         reasoning_effort="max",
-        description="Recommended daily-work migration target.",
+        description="Case-specific Terra 5.6 option with maximum reasoning.",
         reasoning_summary="detailed",
         verbosity="high",
         aliases=("terra-max", "terra5.6-max", "gpt-5.6-terra-max"),
+    ),
+    CodexModelPreset(
+        key="sol-5.6-high",
+        label="sol-5.6/high",
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+        description="Default caller Agent profile with balanced reasoning depth.",
+        reasoning_summary="detailed",
+        verbosity="high",
+        aliases=("sol-high", "sol5.6-high", "gpt-5.6-sol-high"),
         recommended=True,
     ),
     CodexModelPreset(
@@ -793,7 +803,7 @@ CODEX_MODEL_PRESETS: tuple[CodexModelPreset, ...] = (
         label="sol-5.6/xhigh",
         model="gpt-5.6-sol",
         reasoning_effort="xhigh",
-        description="Higher-intelligence Sol 5.6 option with xhigh reasoning.",
+        description="Default Operator profile with xhigh reasoning.",
         reasoning_summary="detailed",
         verbosity="high",
         aliases=("sol-xhigh", "sol", "gpt-5.6-sol-xhigh"),
@@ -816,6 +826,8 @@ CODEX_MODEL_PRESET_ALIASES = {
     for preset in CODEX_MODEL_PRESETS
     for alias in (preset.key, preset.label, *preset.aliases)
 }
+DEFAULT_CALLER_MODEL_PRESET_KEY = "sol-5.6-high"
+DEFAULT_OPERATOR_MODEL_PRESET_KEY = "sol-5.6-xhigh"
 
 
 @dataclass
@@ -1548,6 +1560,11 @@ def caller_agent_config_overrides(
     trust_override = codex_project_trust_config_override(work_root)
     if trust_override:
         overrides.append(trust_override)
+    overrides.extend(
+        codex_model_preset_config_overrides(
+            CODEX_MODEL_PRESET_BY_KEY[DEFAULT_CALLER_MODEL_PRESET_KEY]
+        )
+    )
     overrides.extend(codex_model_launch_config_overrides())
     overrides.extend(codex_terminal_config_overrides(terminal_mode))
     return overrides
@@ -1571,6 +1588,11 @@ def review_operator_config_overrides(
     trust_override = codex_project_trust_config_override(work_root)
     if trust_override:
         overrides.append(trust_override)
+    overrides.extend(
+        codex_model_preset_config_overrides(
+            CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
+        )
+    )
     overrides.extend(codex_model_launch_config_overrides())
     overrides.extend(codex_terminal_config_overrides(terminal_mode))
     return overrides
@@ -1605,6 +1627,11 @@ def operator_agent_config_overrides(
     trust_override = codex_project_trust_config_override(work_root)
     if trust_override:
         overrides.append(trust_override)
+    overrides.extend(
+        codex_model_preset_config_overrides(
+            CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
+        )
+    )
     overrides.extend(codex_model_launch_config_overrides())
     overrides.extend(codex_terminal_config_overrides(terminal_mode))
     return overrides
@@ -5609,10 +5636,11 @@ class AgentPBXTUI(App[None]):
         self.tmux_liveness_by_agent: dict[str, TmuxLiveness] = {}
         self.tmux_runtime_mapping_by_agent: dict[str, dict[str, Any]] = {}
         self.tmux_runtime_mapping_signature_by_agent: dict[
-            str, tuple[str, str, int | None, str]
+            str, tuple[str, str, str, str, int | None, str]
         ] = {}
         self.tmux_runtime_mapping_error_by_agent: dict[str, str] = {}
         self.latest_runtime_migration_batch: dict[str, Any] | None = None
+        self.latest_agent_pane_adoption_batch: dict[str, Any] | None = None
         self.tmux_terminal_client_id = f"tui-{os.getpid()}-{uuid.uuid4().hex[:12]}"
         self.embedded_terminal_agent_id: str | None = None
         self.embedded_terminal_target: str | None = None
@@ -5713,7 +5741,33 @@ class AgentPBXTUI(App[None]):
             preset = codex_model_preset_for(selector.value)
             if preset is not None:
                 return preset
-        return CODEX_MODEL_PRESET_BY_KEY["sol-5.6-xhigh"]
+        return self.default_codex_model_preset_for_agent()
+
+    def default_codex_model_preset_for_agent(
+        self,
+        agent_id: str | None = None,
+    ) -> CodexModelPreset:
+        target_id = str(agent_id or self.selected_agent_id or "").strip()
+        agent = self.agents.get(target_id) or {}
+        key = (
+            "sol-5.6-xhigh"
+            if self.agent_type(agent) == OPERATOR_AGENT_TYPE
+            else "sol-5.6-high"
+        )
+        return CODEX_MODEL_PRESET_BY_KEY[key]
+
+    def sync_codex_model_preset_for_agent(self, agent_id: str) -> CodexModelPreset:
+        agent = self.agents.get(agent_id) or {}
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        preset = (
+            codex_model_preset_from_metadata(metadata)
+            or self.default_codex_model_preset_for_agent(agent_id)
+        )
+        selector = self.query_one_or_none("#codex-model-preset", Select)
+        if selector is not None:
+            selector.value = preset.key
+        self.update_codex_model_status(preset)
+        return preset
 
     def codex_model_target_agent_id(self) -> str | None:
         """Return the explicit right-pane target for model-affecting actions.
@@ -6673,14 +6727,14 @@ class AgentPBXTUI(App[None]):
                             )
                     with TabPane("Codex", id="codex-tab"):
                         yield Static("Codex config: checking...", id="codex-config-status")
-                        yield Static("Model preset: Sol 5.6/xhigh standard", id="codex-model-status")
+                        yield Static("Model preset: Sol 5.6/high Agent default", id="codex-model-status")
                         with Horizontal(id="codex-model-actions"):
                             yield Select(
                                 [
                                     (preset.display_label, preset.key)
                                     for preset in CODEX_MODEL_PRESETS
                                 ],
-                                value="sol-5.6-xhigh",
+                                value="sol-5.6-high",
                                 allow_blank=False,
                                 id="codex-model-preset",
                             )
@@ -7085,6 +7139,21 @@ class AgentPBXTUI(App[None]):
             "Apply the latest reviewed runtime mapping repair",
             self.palette_lifecycle_repair_apply,
         )
+        yield SystemCommand(
+            "/agent native preview",
+            "Preview pane-preserving native tmux adoption for the selected Agent",
+            self.palette_agent_pane_adoption_preview,
+        )
+        yield SystemCommand(
+            "/agent native adopt",
+            "Apply the latest reviewed native tmux adoption",
+            self.palette_agent_pane_adoption_apply,
+        )
+        yield SystemCommand(
+            "/agent native rollback",
+            "Restore the latest adopted Agent pane to its source layout",
+            self.palette_agent_pane_adoption_rollback,
+        )
         yield SystemCommand("/esc", "Send Escape to the selected agent", self.palette_escape)
         yield SystemCommand("/ctrlc", "Send Ctrl+C to the selected tmux pane", self.palette_ctrl_c)
         yield SystemCommand("/restart", "Restart the selected tmux Codex pane", self.palette_tmux_restart)
@@ -7100,11 +7169,13 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/codex model cleanup plan", "Plan one-time starred/operator model cleanup", self.palette_codex_model_cleanup_plan)
         yield SystemCommand("/codex model terra-max", "Restart selected Codex pane on Terra 5.6/max", lambda: self.palette_codex_model_restart("terra-5.6-max"))
         yield SystemCommand("/codex model terra-xhigh", "Restart selected Codex pane on Terra 5.6/xhigh", lambda: self.palette_codex_model_restart("terra-5.6-xhigh"))
+        yield SystemCommand("/codex model sol-high", "Restart selected Codex pane on Sol 5.6/high", lambda: self.palette_codex_model_restart("sol-5.6-high"))
         yield SystemCommand("/codex model sol-max", "Restart selected Codex pane on Sol 5.6/max", lambda: self.palette_codex_model_restart("sol-5.6-max"))
         yield SystemCommand("/codex model sol-xhigh", "Restart selected Codex pane on Sol 5.6/xhigh", lambda: self.palette_codex_model_restart("sol-5.6-xhigh"))
         yield SystemCommand("/codex model legacy-5.5", "Restart selected Codex pane on Codex 5.5/xhigh", lambda: self.palette_codex_model_restart("legacy-5.5-xhigh"))
         yield SystemCommand("/codex model default terra-max", "Save Terra 5.6/max as global Codex default", lambda: self.palette_codex_model_default("terra-5.6-max"))
         yield SystemCommand("/codex model default terra-xhigh", "Save Terra 5.6/xhigh as global Codex default", lambda: self.palette_codex_model_default("terra-5.6-xhigh"))
+        yield SystemCommand("/codex model default sol-high", "Save Sol 5.6/high as global Codex default", lambda: self.palette_codex_model_default("sol-5.6-high"))
         yield SystemCommand("/codex model default sol-max", "Save Sol 5.6/max as global Codex default", lambda: self.palette_codex_model_default("sol-5.6-max"))
         yield SystemCommand("/codex model default sol-xhigh", "Save Sol 5.6/xhigh as global Codex default", lambda: self.palette_codex_model_default("sol-5.6-xhigh"))
         yield SystemCommand("/codex model default legacy-5.5", "Save Codex 5.5/xhigh as global Codex default", lambda: self.palette_codex_model_default("legacy-5.5-xhigh"))
@@ -7355,6 +7426,33 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_agent_pane_adoption_preview(self) -> None:
+        self.run_worker(
+            self.preview_selected_agent_pane_adoption(),
+            name="agent-pane-adoption-preview",
+            exclusive=True,
+        )
+
+    def palette_agent_pane_adoption_apply(self) -> None:
+        if self.latest_agent_pane_adoption_batch is None:
+            self.notify("Preview native Agent adoption first.", severity="warning")
+            return
+        self.run_worker(
+            self.apply_selected_agent_pane_adoption(),
+            name="agent-pane-adoption-apply",
+            exclusive=True,
+        )
+
+    def palette_agent_pane_adoption_rollback(self) -> None:
+        if self.latest_agent_pane_adoption_batch is None:
+            self.notify("No native Agent adoption is available to restore.", severity="warning")
+            return
+        self.run_worker(
+            self.rollback_selected_agent_pane_adoption(),
+            name="agent-pane-adoption-rollback",
+            exclusive=True,
+        )
+
     def palette_runtime_migration_apply(self) -> None:
         if self.latest_runtime_migration_batch is None:
             self.notify("Create a runtime migration preview first.", severity="warning")
@@ -7451,6 +7549,151 @@ class AgentPBXTUI(App[None]):
         self.notify(
             f"Launched {launched_id} on {payload.get('model')} in {project_path}."
         )
+        return True
+
+    async def preview_selected_agent_pane_adoption(self) -> dict[str, Any] | None:
+        agent_id = str(self.selected_agent_id or "").strip()
+        agent = self.agents.get(agent_id)
+        if not agent_id or not isinstance(agent, dict):
+            self.notify("Select a caller Agent first.", severity="warning")
+            return None
+        if self.agent_type(agent) != CALLER_AGENT_TYPE:
+            self.notify("Native pane adoption applies to caller Agents.", severity="warning")
+            return None
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes)
+        except Exception as exc:
+            self.notify(f"Unable to inspect tmux panes: {exc}", severity="error")
+            return None
+        pane, _mode = self.resolve_tmux_pane(agent_id, panes)
+        if pane is None:
+            self.notify(f"No live tmux pane is selected for {agent_id}.", severity="warning")
+            return None
+        outer = await asyncio.to_thread(read_outer_tmux_context, self.tmux_runtime_server)
+        payload = {
+            "agent_id": agent_id,
+            "pane_id": pane.pane_id,
+            "runtime_server_mode": self.tmux_runtime_server_mode,
+            "destination_session": "agent-pbx-agents",
+            "origin_session_name": outer.session_name if outer else None,
+            "origin_client_tty": outer.client_tty if outer else None,
+            "retention_days": 7,
+        }
+        try:
+            response = await self.api_client().post(
+                "/v2/agent-pane-adoptions/preview",
+                json=payload,
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            batch = response.json()
+        except Exception as exc:
+            self.notify(f"Native Agent adoption preview failed: {exc}", severity="error")
+            return None
+        self.latest_agent_pane_adoption_batch = batch
+        plan = batch.get("plan") if isinstance(batch.get("plan"), dict) else {}
+        source = plan.get("source") if isinstance(plan.get("source"), dict) else {}
+        lines = [
+            f"Native Agent pane adoption: {agent_id}",
+            "",
+            f"Eligible: {'yes' if plan.get('eligible') else 'no'}",
+            f"Pane: {plan.get('pane_id') or '-'}",
+            f"Codex session: {plan.get('codex_session_id') or '-'}",
+            f"Source: {source.get('session_name') or '-'}:{source.get('window_id') or '-'}",
+            f"Destination: {plan.get('destination_session')}:{plan.get('destination_window_name')}",
+            "Process action: move existing pane; no Codex restart",
+            "Final state: popped in",
+            "",
+            "Blockers:",
+            *([f"- {item}" for item in plan.get("blockers", [])] or ["- none"]),
+            "",
+            "Warnings:",
+            *([f"- {item}" for item in plan.get("warnings", [])] or ["- none"]),
+        ]
+        detail = self.query_one_or_none("#codex-config-detail", TextArea)
+        if detail is None:
+            detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = "\n".join(lines)
+        self.notify(
+            f"Native adoption preview for {agent_id}: "
+            f"{'eligible' if plan.get('eligible') else 'blocked'}."
+        )
+        return batch
+
+    async def apply_selected_agent_pane_adoption(self) -> bool:
+        batch = self.latest_agent_pane_adoption_batch or {}
+        batch_id = str(batch.get("batch_id") or "")
+        if not batch_id:
+            self.notify("Preview native Agent adoption first.", severity="warning")
+            return False
+        plan = batch.get("plan") if isinstance(batch.get("plan"), dict) else {}
+        agent_id = str(plan.get("agent_id") or "")
+        if agent_id != self.selected_agent_id:
+            self.notify(
+                "The reviewed adoption belongs to another Agent; preview again.",
+                severity="warning",
+            )
+            return False
+        if not plan.get("eligible"):
+            self.notify("The reviewed native adoption is blocked.", severity="error")
+            return False
+        await self.detach_embedded_tmux_terminal(release_lease=True)
+        try:
+            response = await self.api_client().post(
+                f"/v2/agent-pane-adoptions/{quote(batch_id, safe='')}/apply",
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self.notify(f"Native Agent adoption failed: {exc}", severity="error")
+            return False
+        self.latest_agent_pane_adoption_batch = payload.get("batch", batch)
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        mapping = result.get("mapping") if isinstance(result.get("mapping"), dict) else {}
+        pane_id = str(result.get("pane_id") or mapping.get("pane_id") or "")
+        if pane_id:
+            self.tmux_agent_targets[agent_id] = pane_id
+        self.tmux_direct_agent_modes[agent_id] = True
+        self.tmux_manual_override_agent_ids.add(agent_id)
+        self.tmux_detached_agent_ids.discard(agent_id)
+        if mapping:
+            self.tmux_runtime_mapping_by_agent[agent_id] = mapping
+        self.tmux_runtime_mapping_signature_by_agent.pop(agent_id, None)
+        self.save_settings()
+        await self.refresh_agents()
+        await self.refresh_tmux_stream()
+        self.notify(f"Adopted {agent_id} into native tmux; state is popped in.")
+        return True
+
+    async def rollback_selected_agent_pane_adoption(self) -> bool:
+        batch = self.latest_agent_pane_adoption_batch or {}
+        batch_id = str(batch.get("batch_id") or "")
+        if not batch_id:
+            self.notify("No native Agent adoption is available to restore.", severity="warning")
+            return False
+        await self.detach_embedded_tmux_terminal(release_lease=True)
+        try:
+            response = await self.api_client().post(
+                f"/v2/agent-pane-adoptions/{quote(batch_id, safe='')}/rollback",
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self.notify(f"Native Agent placement restore failed: {exc}", severity="error")
+            return False
+        self.latest_agent_pane_adoption_batch = payload.get("batch", batch)
+        self.tmux_runtime_mapping_by_agent.clear()
+        self.tmux_runtime_mapping_signature_by_agent.clear()
+        await self.refresh_agents()
+        await self.refresh_tmux_stream()
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        self.notify(f"Restored {result.get('agent_id') or 'Agent'} to its source tmux layout.")
         return True
 
     async def preview_runtime_migration(self) -> dict[str, Any] | None:
@@ -12336,7 +12579,7 @@ class AgentPBXTUI(App[None]):
         if agent_id != previous_agent_id:
             self.restore_agent_pane_state(agent_id)
         self.update_agent_title()
-        self.update_codex_model_status()
+        self.sync_codex_model_preset_for_agent(agent_id)
         if agent_id not in self.codex_runtime_by_agent and agent_id in self.agents:
             self.codex_runtime_by_agent[agent_id] = self.local_runtime_snapshot(
                 self.agents[agent_id]
@@ -12796,7 +13039,14 @@ class AgentPBXTUI(App[None]):
             or metadata.get("codex_thread_id")
             or ""
         ).strip()
-        signature = (identity.server_id, pane.pane_id, pane_pid, session_id)
+        signature = (
+            identity.server_id,
+            pane.session_name,
+            pane.window_id,
+            pane.pane_id,
+            pane_pid,
+            session_id,
+        )
         if self.tmux_runtime_mapping_signature_by_agent.get(agent_id) == signature:
             return True
         ticks = await asyncio.to_thread(runtime_process_start_ticks, pane_pid)
@@ -15037,9 +15287,19 @@ class AgentPBXTUI(App[None]):
         self,
         metadata: Mapping[str, Any],
         requested: CodexModelPreset | None,
+        *,
+        operator: bool = False,
     ) -> CodexModelPreset | None:
-        """Keep the existing model on ordinary restart unless a new one is selected."""
-        return requested or codex_model_preset_from_metadata(metadata)
+        """Keep an explicit model, otherwise apply the role-owned PBX default."""
+        return (
+            requested
+            or codex_model_preset_from_metadata(metadata)
+            or CODEX_MODEL_PRESET_BY_KEY[
+                DEFAULT_OPERATOR_MODEL_PRESET_KEY
+                if operator
+                else DEFAULT_CALLER_MODEL_PRESET_KEY
+            ]
+        )
 
     async def register_tmux_relaunched_caller(
         self,
@@ -15094,7 +15354,9 @@ class AgentPBXTUI(App[None]):
         pane_id = pane.pane_id
         agent = self.agents.get(agent_id)
         metadata = self.agent_metadata(agent)
-        effective_model_preset = self.restart_model_preset(metadata, model_preset)
+        effective_model_preset = self.restart_model_preset(
+            metadata, model_preset, operator=True
+        )
         if metadata.get("launched_by") != "agent-pbx-tui":
             self.notify(
                 f"{agent_id} has a non-TUI-owned tmux pane; detach it before restart.",
@@ -15212,7 +15474,9 @@ class AgentPBXTUI(App[None]):
     ) -> bool:
         agent = self.agents.get(agent_id)
         metadata = self.agent_metadata(agent)
-        effective_model_preset = self.restart_model_preset(metadata, model_preset)
+        effective_model_preset = self.restart_model_preset(
+            metadata, model_preset, operator=True
+        )
         rollback_model_preset = codex_model_preset_from_metadata(metadata)
         if metadata.get("launched_by") != "agent-pbx-tui":
             self.notify(
@@ -18316,6 +18580,11 @@ class AgentPBXTUI(App[None]):
         session_name: str,
         source_caller_agent_id: str | None = None,
     ) -> tuple[dict[str, Any], str, bool]:
+        existing_metadata = self.operator_metadata_for(agent_id)
+        launch_preset = (
+            codex_model_preset_from_metadata(existing_metadata)
+            or CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
+        )
         source_caller = self.agents.get(source_caller_agent_id or "")
         source_metadata = (
             source_caller.get("metadata")
@@ -18345,6 +18614,7 @@ class AgentPBXTUI(App[None]):
                     default_source_codex_session_id=str(
                         source_metadata.get("codex_session_id") or ""
                     ),
+                    model_preset=launch_preset,
                 )
                 self.tmux_agent_targets[agent_id] = pane_id
                 self.tmux_detached_agent_ids.discard(agent_id)
@@ -18366,6 +18636,7 @@ class AgentPBXTUI(App[None]):
             default_source_codex_session_id=str(
                 source_metadata.get("codex_session_id") or ""
             ),
+            model_preset=launch_preset,
         )
         pane_id = await self.live_operator_root_pane_id(agent_id)
         if pane_id:
@@ -18390,6 +18661,7 @@ class AgentPBXTUI(App[None]):
                     default_source_codex_session_id=str(
                         source_metadata.get("codex_session_id") or ""
                     ),
+                    model_preset=launch_preset,
                 )
             return agent, pane_id, False
 
@@ -18406,13 +18678,15 @@ class AgentPBXTUI(App[None]):
                     work_root=cwd,
                     include_campaign_lifecycle=True,
                     terminal_mode=self.codex_terminal_mode,
-                ),
+                )
+                + codex_model_preset_config_overrides(launch_preset),
             ),
             cwd=cwd,
             env=self.operator_launch_env(
                 agent_id=agent_id,
                 cwd=cwd,
                 mcp_url=mcp_url,
+                model_preset=launch_preset,
             ),
             width=self.detached_tmux_width,
             height=self.detached_tmux_height,
@@ -18437,6 +18711,7 @@ class AgentPBXTUI(App[None]):
             default_source_codex_session_id=str(
                 source_metadata.get("codex_session_id") or ""
             ),
+            model_preset=launch_preset,
         )
         await asyncio.sleep(1.0)
         sent = await self.send_text_to_tmux_pane(
@@ -18699,6 +18974,7 @@ class AgentPBXTUI(App[None]):
             source_session_id,
             fork_track_id=resolved_track_id,
         )
+        launch_preset = CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
         fork_metadata = {
             "agent_type": OPERATOR_AGENT_TYPE,
             "operator_role": OPERATOR_ROLE_FORK,
@@ -18718,6 +18994,7 @@ class AgentPBXTUI(App[None]):
             "mcp_url": mcp_url,
             "token_env": AGENT_PBX_TOKEN_ENV,
             "codex_command": codex_command,
+            **launch_preset.metadata(),
         }
         review_mcp_approval_servers: tuple[str, ...] = ()
         if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
@@ -18763,6 +19040,10 @@ class AgentPBXTUI(App[None]):
                 terminal_mode=self.codex_terminal_mode,
             )
         )
+        launch_config_overrides = [
+            *launch_config_overrides,
+            *codex_model_preset_config_overrides(launch_preset),
+        ]
         sandbox = (
             "workspace-write"
             if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
@@ -18821,6 +19102,7 @@ class AgentPBXTUI(App[None]):
                 source_cwd=caller_cwd,
                 work_root=launch_cwd,
                 review_launch_mode=mode,
+                model_preset=launch_preset,
             )
 
         pane_id = await self.launch_restart_pane(
@@ -22012,6 +22294,10 @@ class AgentPBXTUI(App[None]):
         if not await self.ensure_operator_auth_ready():
             return
         metadata = self.operator_metadata_for(agent_id)
+        launch_preset = (
+            codex_model_preset_from_metadata(metadata)
+            or CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
+        )
         cwd = str(metadata.get("cwd") or self.operator_cwd()).strip() or os.getcwd()
         codex_command = self.operator_codex_command()
         session_name = self.operator_tmux_session_name()
@@ -22040,12 +22326,14 @@ class AgentPBXTUI(App[None]):
                 work_root=cwd,
                 include_campaign_lifecycle=True,
                 terminal_mode=self.codex_terminal_mode,
-            ),
+            )
+            + codex_model_preset_config_overrides(launch_preset),
         )
         env = self.operator_launch_env(
             agent_id=agent_id,
             cwd=cwd,
             mcp_url=mcp_url,
+            model_preset=launch_preset,
         )
         env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
         try:
@@ -22105,6 +22393,7 @@ class AgentPBXTUI(App[None]):
                 tmux_pane_id=resumed_pane_id,
                 resumed_codex_session_id=target.session_id,
                 operator_session_history=history,
+                model_preset=launch_preset,
             )
         except Exception as exc:
             self.notify(

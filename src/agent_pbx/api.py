@@ -43,7 +43,12 @@ from .codex_sessions import enrich_codex_session_metadata
 from .codex_config import load_codex_config_view, patch_codex_config
 from .codex_cli import inspect_codex_model_catalog, update_codex_cli_package
 from .codex.capabilities import CodexCapabilityProbe
-from .codex.profiles import MANAGED_CODEX_PROFILES, managed_profile_view
+from .codex.profiles import (
+    DEFAULT_CALLER_PROFILE_ID,
+    DEFAULT_OPERATOR_PROFILE_ID,
+    MANAGED_CODEX_PROFILES,
+    managed_profile_view,
+)
 from .codex.skills import ManagedSkillPackService, PersonalityOverlay
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
@@ -68,6 +73,7 @@ from .issues import (
 )
 from .mcp_tools import create_mcp_asgi_app
 from .managed_runtime import ManagedRuntimeService
+from .agent_adoption import AgentPaneAdoptionService
 from .operator import OperatorService, operator_runbook_payload
 from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .polling import poll_commands as poll_commands_until
@@ -100,6 +106,7 @@ from .remote import (
 )
 from .schemas import (
     AgentActiveRequest,
+    AgentPaneAdoptionPreviewRequest,
     AgentPruneApplyResponse,
     AgentPruneBatchListResponse,
     AgentPruneBatchResponse,
@@ -380,6 +387,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.issues = issues
     app.state.operator_service = OperatorService(store)
     app.state.managed_runtime = ManagedRuntimeService(store)
+    app.state.agent_pane_adoption = AgentPaneAdoptionService(store)
     app.state.lifecycle = LifecycleService(store)
     if resolved_config.debug:
         app.add_middleware(DebugRequestLogMiddleware)
@@ -530,7 +538,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         overlay = await asyncio.to_thread(PersonalityOverlay.load, overlay_path)
         return {
             "api_version": "agent-pbx.codex-profiles/v2",
-            "default_profile": "sol-xhigh",
+            "default_profile": DEFAULT_CALLER_PROFILE_ID,
+            "role_defaults": {
+                "caller": DEFAULT_CALLER_PROFILE_ID,
+                "operator": DEFAULT_OPERATOR_PROFILE_ID,
+            },
             "profiles": managed_profile_view(catalog),
             "personality": {
                 "committed": "roses-architect",
@@ -1130,6 +1142,48 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         try:
             return await asyncio.to_thread(service.rollback_migration, batch_id)
         except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/agent-pane-adoptions/preview",
+        dependencies=[Depends(require_token)],
+    )
+    async def preview_agent_pane_adoption(
+        payload: AgentPaneAdoptionPreviewRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        service: AgentPaneAdoptionService = request.app.state.agent_pane_adoption
+        try:
+            return await asyncio.to_thread(service.preview, **payload.model_dump())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/agent-pane-adoptions/{batch_id}/apply",
+        dependencies=[Depends(require_token)],
+    )
+    async def apply_agent_pane_adoption(
+        batch_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        service: AgentPaneAdoptionService = request.app.state.agent_pane_adoption
+        try:
+            return await asyncio.to_thread(service.apply, batch_id)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/agent-pane-adoptions/{batch_id}/rollback",
+        dependencies=[Depends(require_token)],
+    )
+    async def rollback_agent_pane_adoption(
+        batch_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        service: AgentPaneAdoptionService = request.app.state.agent_pane_adoption
+        try:
+            return await asyncio.to_thread(service.rollback, batch_id)
+        except (OSError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post(

@@ -236,7 +236,7 @@ class TmuxRuntimeMappingResponse(BaseModel):
 class ManagedAgentLaunchRequest(BaseModel):
     project_path: str = Field(min_length=1, max_length=4096)
     agent_id: str = Field(default="", max_length=120)
-    profile_id: str = Field(default="sol-xhigh", min_length=1, max_length=120)
+    profile_id: str = Field(default="sol-high", min_length=1, max_length=120)
     runtime_server_mode: Literal[
         "dedicated", "outer_if_present", "outer_required"
     ] = "dedicated"
@@ -252,6 +252,20 @@ class RuntimeMigrationPreviewRequest(BaseModel):
 
 class RuntimeMigrationResultsRequest(BaseModel):
     results: list[dict[str, Any]] = Field(default_factory=list, max_length=500)
+
+
+class AgentPaneAdoptionPreviewRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=120)
+    pane_id: str = Field(default="", max_length=120)
+    runtime_server_mode: Literal[
+        "dedicated", "outer_if_present", "outer_required"
+    ] = "outer_if_present"
+    destination_session: str = Field(
+        default="agent-pbx-agents", min_length=1, max_length=240
+    )
+    origin_session_name: str | None = Field(default=None, max_length=240)
+    origin_client_tty: str | None = Field(default=None, max_length=4096)
+    retention_days: float = Field(default=7.0, ge=1.0, le=90.0)
 
 
 class CodexConfigMcpPatchRequest(BaseModel):

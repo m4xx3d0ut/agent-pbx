@@ -11408,6 +11408,11 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
         "AGENT_PBX_LOGICAL_OPERATOR_ID": "operator-0",
         "AGENT_PBX_OPERATOR_CWD": str(Path.cwd()),
         "AGENT_PBX_CWD": str(Path.cwd()),
+        "AGENT_PBX_CODEX_MODEL_PRESET": "sol-5.6-xhigh",
+        "AGENT_PBX_CODEX_MODEL": "gpt-5.6-sol",
+        "AGENT_PBX_CODEX_REASONING_EFFORT": "xhigh",
+        "AGENT_PBX_CODEX_REASONING_SUMMARY": "detailed",
+        "AGENT_PBX_CODEX_VERBOSITY": "high",
         "AGENT_PBX_TOKEN": "secret",
     }
     assert app.tmux_agent_targets["operator-0"] == "%42"
@@ -11879,14 +11884,23 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
 
     assert respawns[0]["target"] == "%10"
     launch_argv = shlex.split(str(respawns[0]["command"]))
-    assert launch_argv == [
+    assert launch_argv[:5] == [
         "codex",
         "--search",
         "resume",
         "--cd",
         str(Path.cwd()),
-        "session-1",
     ]
+    assert launch_argv[-1] == "session-1"
+    config_values = [
+        launch_argv[index + 1]
+        for index, value in enumerate(launch_argv[:-1])
+        if value == "-c"
+    ]
+    assert 'model="gpt-5.6-sol"' in config_values
+    assert 'model_reasoning_effort="high"' in config_values
+    assert 'model_reasoning_summary="detailed"' in config_values
+    assert 'model_verbosity="high"' in config_values
     assert app.tmux_agent_targets["agent-1"] == "%10"
     assert posts[0]["path"] == "/v1/agents/register"
     metadata = posts[0]["json"]["metadata"]  # type: ignore[index]
@@ -12142,13 +12156,21 @@ async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_com
         await app.restart_tmux_codex_session("agent-1")
 
     assert respawns[0]["target"] == "%10"
-    assert shlex.split(str(respawns[0]["command"])) == [
+    launch_argv = shlex.split(str(respawns[0]["command"]))
+    assert launch_argv[:4] == [
         "codex",
         "resume",
         "--cd",
         str(Path.cwd()),
-        "session-1",
     ]
+    assert launch_argv[-1] == "session-1"
+    config_values = [
+        launch_argv[index + 1]
+        for index, value in enumerate(launch_argv[:-1])
+        if value == "-c"
+    ]
+    assert 'model="gpt-5.6-sol"' in config_values
+    assert 'model_reasoning_effort="high"' in config_values
     assert captures in ([], ["agent-1"])
 
 
@@ -17874,6 +17896,45 @@ def test_tui_direct_caller_launch_preserves_global_workerbee_config() -> None:
     )
 
     assert not any(item.startswith("mcp_servers.workerbee=") for item in overrides)
+
+
+def test_tui_role_launches_use_distinct_sol_reasoning_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        CODEX_MODEL_ENV,
+        CODEX_REASONING_EFFORT_ENV,
+        CODEX_REASONING_SUMMARY_ENV,
+        CODEX_VERBOSITY_ENV,
+        CODEX_SERVICE_TIER_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    caller = caller_agent_config_overrides(
+        mcp_url="http://127.0.0.1:8767/mcp",
+    )
+    operator = operator_agent_config_overrides(
+        mcp_url="http://127.0.0.1:8767/mcp",
+    )
+
+    assert 'model="gpt-5.6-sol"' in caller
+    assert 'model_reasoning_effort="high"' in caller
+    assert 'model_reasoning_summary="detailed"' in caller
+    assert 'model_verbosity="high"' in caller
+    assert 'model="gpt-5.6-sol"' in operator
+    assert 'model_reasoning_effort="xhigh"' in operator
+    assert 'model_reasoning_summary="detailed"' in operator
+    assert 'model_verbosity="high"' in operator
+
+
+def test_tui_restart_model_defaults_follow_entity_role() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    caller = app.restart_model_preset({}, None)
+    operator = app.restart_model_preset({}, None, operator=True)
+
+    assert caller is not None and caller.key == "sol-5.6-high"
+    assert operator is not None and operator.key == "sol-5.6-xhigh"
 
 
 def test_tui_review_operator_config_overrides_trusts_scratch_work_root() -> None:

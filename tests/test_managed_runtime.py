@@ -48,7 +48,9 @@ def service(store: Store, root: Path) -> ManagedRuntimeService:
         project_roots=(root,),
         codex_bin="/usr/bin/codex-test",
         tmux_bin="tmux-test",
-        catalog_loader=lambda _command: (model("gpt-5.6-sol", "xhigh", "max"),),
+        catalog_loader=lambda _command: (
+            model("gpt-5.6-sol", "high", "xhigh", "max"),
+        ),
     )
 
 
@@ -181,7 +183,9 @@ def test_managed_launch_on_real_dedicated_tmux_server(
         project_roots=(root,),
         codex_bin=str(fake_codex),
         tmux_bin=shutil.which("tmux") or "tmux",
-        catalog_loader=lambda _command: (model("gpt-5.6-sol", "xhigh", "max"),),
+        catalog_loader=lambda _command: (
+            model("gpt-5.6-sol", "high", "xhigh", "max"),
+        ),
     )
 
     result = runtime.launch(project_path=str(repo))
@@ -278,7 +282,7 @@ def test_managed_runtime_api_discovers_projects_and_persists_migration(
     monkeypatch.setenv("AGENT_PBX_PROJECT_ROOTS", str(root))
     app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
     app.state.managed_runtime.catalog_loader = lambda _command: (
-        model("gpt-5.6-sol", "xhigh", "max"),
+        model("gpt-5.6-sol", "high", "xhigh", "max"),
     )
     client = TestClient(app)
     headers = {"Authorization": "Bearer secret"}
