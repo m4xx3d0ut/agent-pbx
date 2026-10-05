@@ -175,6 +175,71 @@ def codex_session_ids_for_process_tree(
     return tuple(sorted(session_ids))
 
 
+def current_codex_session_ids_for_process_tree(
+    root_pid: int,
+    *,
+    proc_root: Path = Path("/proc"),
+) -> tuple[str, ...]:
+    """Return the current rollout IDs, excluding fork source argv when possible.
+
+    ``codex fork <source-id>`` and related continuation commands retain the
+    source ID in argv while writing a distinct rollout for the new session.
+    A writable rollout descriptor is therefore stronger current-session
+    evidence than argv.  This keeps source sessions from looking duplicated by
+    every live fork that descended from them.
+    """
+
+    argv_ids: set[str] = set()
+    rollout_ids: set[str] = set()
+    writable_rollout_ids: set[str] = set()
+    for pid in _process_tree(root_pid, proc_root=proc_root):
+        try:
+            argv = [
+                value.decode(errors="replace")
+                for value in (proc_root / str(pid) / "cmdline").read_bytes().split(b"\0")
+                if value
+            ]
+        except OSError:
+            argv = []
+        argv_ids.update(value for value in argv if SESSION_ID_PATTERN.fullmatch(value))
+        fd_root = proc_root / str(pid) / "fd"
+        try:
+            descriptors = tuple(fd_root.iterdir())
+        except OSError:
+            descriptors = ()
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor)
+            except OSError:
+                continue
+            if "/.codex/sessions/" not in target or not target.endswith(".jsonl"):
+                continue
+            matches = re.findall(
+                r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+                Path(target).name,
+                flags=re.IGNORECASE,
+            )
+            rollout_ids.update(matches)
+            try:
+                flags_line = next(
+                    line
+                    for line in (
+                        proc_root / str(pid) / "fdinfo" / descriptor.name
+                    ).read_text().splitlines()
+                    if line.startswith("flags:")
+                )
+                flags = int(flags_line.split()[1], 8)
+            except (OSError, StopIteration, ValueError):
+                continue
+            if flags & os.O_ACCMODE in {os.O_WRONLY, os.O_RDWR}:
+                writable_rollout_ids.update(matches)
+    if writable_rollout_ids:
+        return tuple(sorted(writable_rollout_ids))
+    if rollout_ids:
+        return tuple(sorted(rollout_ids))
+    return tuple(sorted(argv_ids))
+
+
 class AgentPaneAdoptionService:
     """Move existing caller panes into one-pane managed runtime windows."""
 
@@ -355,7 +420,9 @@ class AgentPaneAdoptionService:
         elif pane is not None:
             placement = self._pane_placement(identity, pane.pane_id)
             source = placement.public_dict()
-            observed_session_ids = codex_session_ids_for_process_tree(placement.pane_pid)
+            observed_session_ids = current_codex_session_ids_for_process_tree(
+                placement.pane_pid
+            )
             if observed_session_ids and session_id not in observed_session_ids:
                 blockers.append(
                     "pane session evidence does not match the Agent Codex session ID"
@@ -363,7 +430,7 @@ class AgentPaneAdoptionService:
             duplicate_panes = []
             if session_id:
                 for candidate in panes:
-                    candidate_ids = codex_session_ids_for_process_tree(
+                    candidate_ids = current_codex_session_ids_for_process_tree(
                         int(candidate.pane_pid or 0)
                     )
                     if session_id in candidate_ids and candidate.pane_id != pane.pane_id:
@@ -584,7 +651,9 @@ class AgentPaneAdoptionService:
             raise RuntimeError("pane adoption selected the wrong tmux session")
         if destination.get("sibling_pane_ids"):
             raise RuntimeError("adopted Agent window is not a single-pane window")
-        observed = codex_session_ids_for_process_tree(int(destination["pane_pid"]))
+        observed = current_codex_session_ids_for_process_tree(
+            int(destination["pane_pid"])
+        )
         expected = str(plan.get("codex_session_id") or "")
         if observed and expected not in observed:
             raise RuntimeError("Codex session evidence changed during pane adoption")

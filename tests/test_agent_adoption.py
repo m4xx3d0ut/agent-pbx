@@ -10,6 +10,7 @@ import pytest
 from agent_pbx.agent_adoption import (
     AgentPaneAdoptionService,
     codex_session_ids_for_process_tree,
+    current_codex_session_ids_for_process_tree,
 )
 from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import Store
@@ -166,3 +167,33 @@ def test_codex_session_ids_use_open_rollout_files(tmp_path: Path) -> None:
     os.symlink(rollout, proc / "fd" / "7")
 
     assert codex_session_ids_for_process_tree(42, proc_root=tmp_path) == (session_id,)
+
+
+def test_current_codex_session_prefers_writable_rollout_over_fork_source_argv(
+    tmp_path: Path,
+) -> None:
+    proc = tmp_path / "42"
+    (proc / "task" / "42").mkdir(parents=True)
+    (proc / "task" / "42" / "children").write_text("")
+    source_id = "019e373c-ae09-7530-8250-c7d8f4db439a"
+    current_id = "019e373c-ae09-7530-8250-c7d8f4db439b"
+    (proc / "cmdline").write_bytes(f"codex\0fork\0{source_id}\0".encode())
+    (proc / "fd").mkdir()
+    (proc / "fdinfo").mkdir()
+    rollout = (
+        tmp_path
+        / ".codex/sessions/2026/05/17"
+        / f"rollout-2026-05-17T18-39-44-{current_id}.jsonl"
+    )
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("")
+    os.symlink(rollout, proc / "fd" / "7")
+    (proc / "fdinfo" / "7").write_text("flags:\t0100001\n")
+
+    assert codex_session_ids_for_process_tree(42, proc_root=tmp_path) == (
+        source_id,
+        current_id,
+    )
+    assert current_codex_session_ids_for_process_tree(42, proc_root=tmp_path) == (
+        current_id,
+    )
