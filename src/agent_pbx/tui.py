@@ -14787,69 +14787,128 @@ class AgentPBXTUI(App[None]):
         failures: list[str] = []
         lease_conflict = False
         attempts = max(1, CODEX_RESTART_LAUNCH_ATTEMPTS)
-        for attempt in range(1, attempts + 1):
+        pane_guarded = await asyncio.to_thread(tmux_support.pane_exists, pane_id)
+        previous_remain_on_exit = False
+        restored = False
+        replacement_ready = False
+        if pane_guarded:
             try:
-                await asyncio.to_thread(
-                    tmux_support.respawn_pane,
+                previous_remain_on_exit = await asyncio.to_thread(
+                    tmux_support.pane_remain_on_exit,
                     pane_id,
-                    command=command,
-                    cwd=cwd,
-                    env=env,
+                )
+                await asyncio.to_thread(
+                    tmux_support.set_pane_remain_on_exit,
+                    pane_id,
+                    True,
                 )
             except Exception as exc:
-                failures.append(str(exc))
-            else:
-                if CODEX_RESTART_STABILIZE_SECONDS > 0:
-                    await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
+                raise RuntimeError(
+                    f"unable to preserve {pane_id} for transactional restart; "
+                    f"no process was replaced: {exc}"
+                ) from exc
+
+        try:
+            for attempt in range(1, attempts + 1):
                 try:
-                    pane_alive = await asyncio.to_thread(
+                    await asyncio.to_thread(
+                        tmux_support.respawn_pane,
+                        pane_id,
+                        command=command,
+                        cwd=cwd,
+                        env=env,
+                    )
+                except Exception as exc:
+                    failures.append(str(exc))
+                else:
+                    if CODEX_RESTART_STABILIZE_SECONDS > 0:
+                        await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
+                    try:
+                        pane_alive = await asyncio.to_thread(
+                            tmux_support.pane_is_live,
+                            pane_id,
+                        )
+                    except Exception as exc:
+                        failures.append(f"{pane_id} liveness check failed: {exc}")
+                    else:
+                        if pane_alive:
+                            if await self.tmux_pane_has_codex_session_lease_conflict(
+                                pane_id
+                            ):
+                                lease_conflict = True
+                                failures.append(
+                                    f"{pane_id} opened Codex's conversation lease dialog"
+                                )
+                                break
+                            replacement_ready = True
+                            return pane_id
+                        exit_status = await asyncio.to_thread(
+                            tmux_support.pane_dead_status,
+                            pane_id,
+                        )
+                        status_detail = (
+                            f" with status {exit_status}"
+                            if exit_status is not None
+                            else ""
+                        )
+                        failures.append(
+                            f"{pane_id} exited{status_detail} before Codex restart stabilized"
+                        )
+                if attempt < attempts and CODEX_RESTART_RETRY_SECONDS > 0:
+                    await asyncio.sleep(CODEX_RESTART_RETRY_SECONDS)
+
+            rollback_detail = ""
+            if rollback_command:
+                try:
+                    await asyncio.to_thread(
+                        tmux_support.respawn_pane,
+                        pane_id,
+                        command=rollback_command,
+                        cwd=rollback_cwd,
+                        env=rollback_env,
+                    )
+                    if CODEX_RESTART_STABILIZE_SECONDS > 0:
+                        await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
+                    restored = await asyncio.to_thread(
                         tmux_support.pane_is_live,
                         pane_id,
                     )
                 except Exception as exc:
-                    failures.append(f"{pane_id} liveness check failed: {exc}")
+                    rollback_detail = f"; rollback failed: {exc}"
                 else:
-                    if pane_alive:
-                        if await self.tmux_pane_has_codex_session_lease_conflict(
-                            pane_id
-                        ):
-                            lease_conflict = True
-                            failures.append(
-                                f"{pane_id} opened Codex's conversation lease dialog"
-                            )
-                            break
-                        return pane_id
-                    failures.append(f"{pane_id} exited before Codex restart stabilized")
-            if attempt < attempts and CODEX_RESTART_RETRY_SECONDS > 0:
-                await asyncio.sleep(CODEX_RESTART_RETRY_SECONDS)
-
-        rollback_detail = ""
-        if rollback_command:
-            try:
-                await asyncio.to_thread(
-                    tmux_support.respawn_pane,
-                    pane_id,
-                    command=rollback_command,
-                    cwd=rollback_cwd,
-                    env=rollback_env,
-                )
-                if CODEX_RESTART_STABILIZE_SECONDS > 0:
-                    await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
-                restored = await asyncio.to_thread(tmux_support.pane_is_live, pane_id)
-            except Exception as exc:
-                rollback_detail = f"; rollback failed: {exc}"
-            else:
-                rollback_detail = (
-                    "; restored the prior command in the original pane"
-                    if restored
-                    else "; rollback command did not stay running"
-                )
-        detail = "; ".join(failures[-3:]) or "replacement pane did not stay running"
-        error_type = CodexSessionLeaseConflictError if lease_conflict else RuntimeError
-        raise error_type(
-            f"{label} in-place relaunch failed after {attempts} attempt(s): "
-            f"{detail}{rollback_detail}"
-        )
+                    rollback_detail = (
+                        "; restored the prior command in the original pane"
+                        if restored
+                        else "; rollback command did not stay running"
+                    )
+            detail = "; ".join(failures[-3:]) or "replacement pane did not stay running"
+            error_type = CodexSessionLeaseConflictError if lease_conflict else RuntimeError
+            raise error_type(
+                f"{label} in-place relaunch failed after {attempts} attempt(s): "
+                f"{detail}{rollback_detail}"
+            )
+        finally:
+            if pane_guarded and await asyncio.to_thread(
+                tmux_support.pane_exists,
+                pane_id,
+            ):
+                pane_live = await asyncio.to_thread(tmux_support.pane_is_live, pane_id)
+                if replacement_ready or restored or pane_live:
+                    try:
+                        await asyncio.to_thread(
+                            tmux_support.set_pane_remain_on_exit,
+                            pane_id,
+                            previous_remain_on_exit,
+                        )
+                    except Exception as exc:
+                        self.notify(
+                            f"Restart completed, but {pane_id}'s remain-on-exit "
+                            f"setting could not be restored: {exc}",
+                            severity="warning",
+                        )
+                # If replacement and rollback both failed, leave the dead pane
+                # retained.  That preserves the pane id, exit status, and screen
+                # for diagnosis or a subsequent manual recovery.
 
     async def restart_rollback_command(self, pane_id: str) -> str:
         """Capture a transient rollback command without persisting launch details."""

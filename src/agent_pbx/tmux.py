@@ -382,6 +382,70 @@ def pane_is_live(target: str, *, tmux_bin: str = "tmux") -> bool:
     return result.returncode == 0 and result.stdout.strip() != "1"
 
 
+def pane_remain_on_exit(target: str, *, tmux_bin: str = "tmux") -> bool:
+    """Return the effective ``remain-on-exit`` value for a pane."""
+    result = subprocess.run(
+        [tmux_bin, "display-message", "-p", "-t", target, "#{remain-on-exit}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (
+            result.stderr or result.stdout or "tmux remain-on-exit lookup failed"
+        ).strip()
+        raise RuntimeError(message)
+    return result.stdout.strip().lower() == "on"
+
+
+def set_pane_remain_on_exit(
+    target: str,
+    enabled: bool,
+    *,
+    tmux_bin: str = "tmux",
+) -> None:
+    """Set a pane-local ``remain-on-exit`` override.
+
+    A pane-local override keeps a failed replacement available for diagnostics
+    and rollback without changing the setting for unrelated panes or windows.
+    """
+    result = subprocess.run(
+        [
+            tmux_bin,
+            "set-option",
+            "-p",
+            "-t",
+            target,
+            "remain-on-exit",
+            "on" if enabled else "off",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (
+            result.stderr or result.stdout or "tmux remain-on-exit update failed"
+        ).strip()
+        raise RuntimeError(message)
+
+
+def pane_dead_status(target: str, *, tmux_bin: str = "tmux") -> int | None:
+    """Return the retained pane's exit status, if tmux reports one."""
+    result = subprocess.run(
+        [tmux_bin, "display-message", "-p", "-t", target, "#{pane_dead_status}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 def pane_start_command(target: str, *, tmux_bin: str = "tmux") -> str:
     result = subprocess.run(
         [tmux_bin, "display-message", "-p", "-t", target, "#{pane_start_command}"],

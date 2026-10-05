@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import shlex
+import shutil
 import subprocess
+import time
 from pathlib import Path
+
+import pytest
 
 from agent_pbx import tmux
 
@@ -434,6 +439,120 @@ def test_tmux_pane_is_live_checks_remain_on_exit_state(monkeypatch) -> None:
 
     assert tmux.pane_is_live("%42") is True
     assert tmux.pane_is_live("%42") is False
+
+
+def test_tmux_pane_remain_on_exit_reads_effective_value(monkeypatch) -> None:
+    outputs = iter(["off\n", "on\n"])
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, next(outputs), "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.pane_remain_on_exit("%42") is False
+    assert tmux.pane_remain_on_exit("%42") is True
+
+
+def test_tmux_set_pane_remain_on_exit_is_pane_local(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    tmux.set_pane_remain_on_exit("%42", True)
+    tmux.set_pane_remain_on_exit("%42", False)
+
+    assert calls == [
+        ["tmux", "set-option", "-p", "-t", "%42", "remain-on-exit", "on"],
+        ["tmux", "set-option", "-p", "-t", "%42", "remain-on-exit", "off"],
+    ]
+
+
+def test_tmux_pane_dead_status_parses_retained_exit_status(monkeypatch) -> None:
+    outputs = iter(["7\n", "\n"])
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, next(outputs), "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.pane_dead_status("%42") == 7
+    assert tmux.pane_dead_status("%42") is None
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux unavailable")
+def test_tmux_retains_failed_respawn_for_same_pane_rollback(tmp_path: Path) -> None:
+    tmux_executable = shutil.which("tmux") or "tmux"
+    socket_path = tmp_path / "transaction.sock"
+    wrapper = tmp_path / "tmux-transaction"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(tmux_executable)} -S {shlex.quote(str(socket_path))} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o700)
+    tmux_bin = str(wrapper)
+    pane_id = ""
+    try:
+        launched = subprocess.run(
+            [
+                tmux_bin,
+                "new-session",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-s",
+                "transaction",
+                "sleep 30",
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        pane_id = launched.stdout.strip()
+        assert pane_id
+
+        assert tmux.pane_remain_on_exit(pane_id, tmux_bin=tmux_bin) is False
+        tmux.set_pane_remain_on_exit(pane_id, True, tmux_bin=tmux_bin)
+        tmux.respawn_pane(pane_id, command="exit 7", tmux_bin=tmux_bin)
+        for _ in range(20):
+            if not tmux.pane_is_live(pane_id, tmux_bin=tmux_bin):
+                break
+            time.sleep(0.05)
+
+        assert tmux.pane_exists(pane_id, tmux_bin=tmux_bin) is True
+        assert tmux.pane_is_live(pane_id, tmux_bin=tmux_bin) is False
+        dead_status = None
+        for _ in range(20):
+            dead_status = tmux.pane_dead_status(pane_id, tmux_bin=tmux_bin)
+            if dead_status is not None:
+                break
+            time.sleep(0.05)
+        assert dead_status == 7
+
+        tmux.respawn_pane(pane_id, command="sleep 30", tmux_bin=tmux_bin)
+
+        assert tmux.pane_exists(pane_id, tmux_bin=tmux_bin) is True
+        assert tmux.pane_is_live(pane_id, tmux_bin=tmux_bin) is True
+        assert (
+            subprocess.run(
+                [tmux_bin, "display-message", "-p", "-t", pane_id, "#{pane_id}"],
+                capture_output=True,
+                check=True,
+                text=True,
+            ).stdout.strip()
+            == pane_id
+        )
+    finally:
+        subprocess.run(
+            [tmux_bin, "kill-server"],
+            capture_output=True,
+            text=True,
+        )
 
 
 def test_tmux_pane_clipboard_environment_only_returns_desktop_allowlist(monkeypatch) -> None:

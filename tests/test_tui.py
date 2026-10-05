@@ -11697,6 +11697,15 @@ async def test_tui_respawn_restart_pane_rolls_back_in_same_pane_after_failure(
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda _target: True)
+    monkeypatch.setattr(tmux_support, "pane_remain_on_exit", lambda _target: False)
+    remain_on_exit: list[bool] = []
+    monkeypatch.setattr(
+        tmux_support,
+        "set_pane_remain_on_exit",
+        lambda _target, enabled: remain_on_exit.append(enabled),
+    )
+    monkeypatch.setattr(tmux_support, "pane_dead_status", lambda _target: 1)
     monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: len(respawns) >= 3)
 
     with pytest.raises(RuntimeError, match="restored the prior command"):
@@ -11717,6 +11726,46 @@ async def test_tui_respawn_restart_pane_rolls_back_in_same_pane_after_failure(
         "codex resume new-session",
         "codex resume prior-session",
     ]
+    assert remain_on_exit == [True, False]
+
+
+async def test_tui_respawn_restart_pane_retains_dead_pane_when_rollback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    respawns: list[str] = []
+
+    def fake_respawn(_target: str, **kwargs: object) -> None:
+        respawns.append(str(kwargs["command"]))
+
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 1)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda _target: True)
+    monkeypatch.setattr(tmux_support, "pane_remain_on_exit", lambda _target: False)
+    remain_on_exit: list[bool] = []
+    monkeypatch.setattr(
+        tmux_support,
+        "set_pane_remain_on_exit",
+        lambda _target, enabled: remain_on_exit.append(enabled),
+    )
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: False)
+    monkeypatch.setattr(tmux_support, "pane_dead_status", lambda _target: 17)
+
+    with pytest.raises(RuntimeError, match="exited with status 17"):
+        await app.respawn_restart_pane(
+            pane_id="%10",
+            command="codex resume new-session",
+            label="agent-1",
+            rollback_command="codex resume prior-session",
+        )
+
+    assert respawns == [
+        "codex resume new-session",
+        "codex resume prior-session",
+    ]
+    assert remain_on_exit == [True]
 
 
 def test_tui_identifies_real_codex_resume_session_commands() -> None:
@@ -11757,6 +11806,14 @@ async def test_tui_respawn_restart_pane_rolls_back_on_codex_lease_dialog(
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda _target: True)
+    monkeypatch.setattr(tmux_support, "pane_remain_on_exit", lambda _target: False)
+    remain_on_exit: list[bool] = []
+    monkeypatch.setattr(
+        tmux_support,
+        "set_pane_remain_on_exit",
+        lambda _target, enabled: remain_on_exit.append(enabled),
+    )
     monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
     monkeypatch.setattr(
         tmux_support,
@@ -11779,6 +11836,7 @@ async def test_tui_respawn_restart_pane_rolls_back_on_codex_lease_dialog(
         "codex resume new-session",
         "codex resume prior-session",
     ]
+    assert remain_on_exit == [True, False]
 
 
 async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_command(
