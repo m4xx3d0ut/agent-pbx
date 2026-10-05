@@ -82,6 +82,7 @@ from agent_pbx.tui import (
     tmux_features_available,
 )
 from agent_pbx.terminal import PbxTerminalSurface, function_key_sequence
+from agent_pbx.runtime_tmux import RuntimeTmuxClient
 from textual.events import Click, Key, MouseDown
 from textual.widgets import (
     Button,
@@ -2114,6 +2115,131 @@ async def test_tui_shift_f2_writes_directly_to_embedded_terminal() -> None:
     assert app.embedded_terminal_agent_id is None
 
 
+async def test_tui_terminal_focus_bypasses_printable_and_control_priority_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    written: list[bytes] = []
+    invoked: list[str] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    action_names = (
+        "toggle_star_agent",
+        "toggle_hidden_agents",
+        "hide_agent",
+        "resume_operator",
+        "stop_operator",
+        "operator_history",
+        "start_review_operator_fork",
+        "launch_project_spawn",
+        "unhide_agent",
+        "restart_operator",
+        "purge_agent",
+        "monitor_campaign",
+        "view_campaign_report",
+        "copy_campaign_to_joplin",
+    )
+    for action_name in action_names:
+        monkeypatch.setattr(
+            app,
+            f"action_{action_name}",
+            lambda action_name=action_name: invoked.append(action_name),
+        )
+
+    keys = (
+        ("p", "p", b"p"),
+        ("h", "h", b"h"),
+        ("d", "d", b"d"),
+        ("u", "u", b"u"),
+        ("x", "x", b"x"),
+        ("y", "y", b"y"),
+        ("shift+w", "W", b"W"),
+        ("shift+p", "P", b"P"),
+        ("shift+h", "H", b"H"),
+        ("shift+u", "U", b"U"),
+        ("shift+d", "D", b"D"),
+        ("shift+m", "M", b"M"),
+        ("shift+r", "R", b"R"),
+        ("shift+c", "C", b"C"),
+        ("ctrl+c", None, b"\x03"),
+        ("ctrl+p", None, b"\x10"),
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        app.selected_agent_id = "agent-a"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server:%7"
+        terminal = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        terminal.process = FakeProcess()  # type: ignore[assignment]
+        terminal.target = "server:%7"
+        app.apply_tmux_class()
+        terminal.focus()
+        await pilot.pause()
+
+        for key, character, _expected in keys:
+            await app.on_event(Key(key, character))
+        await pilot.pause()
+
+        assert invoked == []
+        assert written == [expected for _key, _character, expected in keys]
+
+
+async def test_tui_priority_shortcuts_still_run_outside_terminal_focus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invoked: list[str] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    actions = (
+        ("p", "p", "toggle_star_agent"),
+        ("h", "h", "toggle_hidden_agents"),
+        ("d", "d", "hide_agent"),
+        ("u", "u", "resume_operator"),
+        ("x", "x", "stop_operator"),
+        ("y", "y", "operator_history"),
+        ("shift+w", "W", "start_review_operator_fork"),
+        ("shift+p", "P", "launch_project_spawn"),
+        ("shift+d", "D", "purge_agent"),
+        ("shift+m", "M", "monitor_campaign"),
+        ("shift+r", "R", "view_campaign_report"),
+        ("shift+c", "C", "copy_campaign_to_joplin"),
+    )
+    for _key, _character, action_name in actions:
+        monkeypatch.setattr(
+            app,
+            f"action_{action_name}",
+            lambda action_name=action_name: invoked.append(action_name),
+        )
+
+    async with app.run_test() as pilot:
+        agents = app.query_one("#agents", DataTable)
+        agents.focus()
+        await pilot.pause()
+        for key, character, _action_name in actions:
+            await app.on_event(Key(key, character))
+
+    assert invoked == [action_name for _key, _character, action_name in actions]
+
+
 async def test_tui_discards_embedded_terminal_attach_after_selection_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2695,6 +2821,181 @@ async def test_tui_tmux_toggle_hotkey_only_from_latest() -> None:
 
     assert captures == ["agent-1"]
     assert reports == ["agent-1"]
+
+
+async def test_tui_disabling_direct_mode_detaches_and_cannot_reacquire_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    acquired: list[str] = []
+    released: list[str] = []
+    reports: list[str] = []
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, _data: bytes) -> None:
+            return None
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    async def acquire(agent_id: str) -> dict[str, object]:
+        acquired.append(agent_id)
+        return {"state": "ready"}
+
+    async def release(agent_id: str) -> None:
+        released.append(agent_id)
+
+    async def load_latest(agent_id: str) -> None:
+        reports.append(agent_id)
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-1"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-1"
+        app.embedded_terminal_target = "server:%7"
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        process = FakeProcess()
+        surface.process = process  # type: ignore[assignment]
+        surface.target = "server:%7"
+        app.apply_tmux_class()
+        surface.focus()
+        monkeypatch.setattr(app, "acquire_tmux_writer_lease", acquire)
+        monkeypatch.setattr(app, "release_tmux_writer_lease", release)
+        monkeypatch.setattr(app, "load_latest_report", load_latest)
+
+        await app.action_toggle_tmux_direct()
+        await pilot.pause()
+        assert app.is_tmux_direct_enabled("agent-1") is False
+        assert surface.attached is False
+        assert process.alive is False
+        assert app.embedded_terminal_agent_id is None
+        assert app.embedded_terminal_target is None
+        assert released == ["agent-1"]
+        assert reports == ["agent-1"]
+
+        await app.renew_embedded_tmux_writer_lease_if_active()
+        assert acquired == []
+
+
+@pytest.mark.parametrize("stale_state", ("direct", "tab", "selection", "process"))
+async def test_tui_writer_renewal_releases_every_stale_embedded_state(
+    stale_state: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    acquired: list[str] = []
+    released: list[str] = []
+
+    class FakeProcess:
+        alive = True
+
+        def close(self) -> None:
+            self.alive = False
+
+    async def acquire(agent_id: str) -> dict[str, object]:
+        acquired.append(agent_id)
+        return {"state": "ready"}
+
+    async def release(agent_id: str) -> None:
+        released.append(agent_id)
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-1"
+        app.embedded_terminal_target = "server:%7"
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        process = FakeProcess()
+        surface.process = process  # type: ignore[assignment]
+        surface.target = "server:%7"
+        if stale_state == "direct":
+            app.tmux_direct_agent_modes["agent-1"] = False
+        elif stale_state == "tab":
+            app.active_agent_tab = "thread-tab"
+        elif stale_state == "selection":
+            app.selected_agent_id = "agent-2"
+        else:
+            process.alive = False
+        monkeypatch.setattr(app, "acquire_tmux_writer_lease", acquire)
+        monkeypatch.setattr(app, "release_tmux_writer_lease", release)
+
+        await app.renew_embedded_tmux_writer_lease_if_active()
+
+        assert acquired == []
+        assert released == ["agent-1"]
+        assert app.embedded_terminal_agent_id is None
+        assert app.embedded_terminal_target is None
+
+
+async def test_tui_pop_transaction_reuses_only_resolved_live_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    mapping = {
+        "server_mode": "outer_if_present",
+        "server_id": "outer",
+        "socket_path": "/tmp/pbx.sock",
+        "session_name": "runtime-a",
+        "pane_id": "%7",
+        "origin_session_name": "agent-pbx",
+        "origin_client_tty": None,
+    }
+    resolved = RuntimeTmuxClient(
+        "/dev/pts/9",
+        "agent-pbx",
+        frozenset({"attached", "focused"}),
+        90,
+    )
+    executed: list[tuple[str, ...]] = []
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return mapping
+
+    async def detach(*, release_lease: bool) -> None:
+        assert release_lease is True
+
+    async def load(_agent_id: str) -> None:
+        return None
+
+    def execute(plan: object) -> SimpleNamespace:
+        executed.append(plan.command)  # type: ignore[attr-defined]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("TMUX_PANE", "%2")
+    monkeypatch.setattr(app, "fetch_tmux_runtime_mapping", fetch)
+    monkeypatch.setattr(app, "detach_embedded_tmux_terminal", detach)
+    monkeypatch.setattr(app, "load_tmux_capture", load)
+    monkeypatch.setattr("agent_pbx.tui.resolve_invoking_outer_client", lambda *_args, **_kwargs: resolved)
+    monkeypatch.setattr("agent_pbx.tui.execute_runtime_pop_plan", execute)
+    app.selected_agent_id = "agent-1"
+
+    assert await app.pop_runtime("out") is True
+    assert executed[-1][-4:] == ("-c", "/dev/pts/9", "-t", "runtime-a")
+    assert app.tmux_pop_client_by_agent["agent-1"] == resolved
+
+    live = RuntimeTmuxClient(
+        resolved.tty,
+        "runtime-a",
+        resolved.flags,
+        resolved.client_pid,
+    )
+    monkeypatch.setattr("agent_pbx.tui.list_runtime_clients", lambda _identity: (live,))
+    assert await app.pop_runtime("in") is True
+    assert executed[-1][-4:] == ("-c", "/dev/pts/9", "-t", "agent-pbx")
+    assert "agent-1" not in app.tmux_pop_client_by_agent
 
 
 async def test_tui_tmux_direct_is_tracked_per_agent() -> None:

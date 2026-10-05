@@ -86,12 +86,16 @@ from .terminal import FunctionKeyPassthroughMap, PbxTerminalSurface
 from .runtime_tmux import (
     RuntimePopPlan,
     RuntimeServerMode,
+    RuntimeTmuxClient,
     execute_runtime_pop_plan,
+    list_runtime_clients,
     normalize_runtime_server_mode,
     process_start_ticks as runtime_process_start_ticks,
     read_outer_tmux_context,
     recursive_attachment_reason,
+    resolve_invoking_outer_client,
     resolve_runtime_tmux_server,
+    runtime_mapping_server_identity,
     runtime_pop_plan,
     tmux_client_attach_command,
 )
@@ -5644,6 +5648,7 @@ class AgentPBXTUI(App[None]):
         self.tmux_terminal_client_id = f"tui-{os.getpid()}-{uuid.uuid4().hex[:12]}"
         self.embedded_terminal_agent_id: str | None = None
         self.embedded_terminal_target: str | None = None
+        self.tmux_pop_client_by_agent: dict[str, RuntimeTmuxClient] = {}
         self.tmux_panes: list[tmux_support.TmuxPane] = []
         self.tmux_refreshing = False
         self.tmux_plan_selector_pane_by_agent: dict[str, str] = {}
@@ -5676,6 +5681,56 @@ class AgentPBXTUI(App[None]):
         self.tmux_refresh_timer: Timer | None = None
         self.attention_blink_timer: Timer | None = None
         self.tmux_writer_lease_timer: Timer | None = None
+
+    @staticmethod
+    def is_plain_function_key(key: str) -> bool:
+        normalized = str(key or "").strip().lower().replace("_", "+")
+        return bool(re.fullmatch(r"f(?:[1-9]|1[0-2])", normalized))
+
+    def embedded_terminal_surface(
+        self,
+        *,
+        require_focus: bool = False,
+    ) -> PbxTerminalSurface | None:
+        """Return the live writable terminal only while it owns Latest input."""
+
+        agent_id = self.embedded_terminal_agent_id
+        if (
+            not agent_id
+            or not self.embedded_terminal_v2_enabled
+            or self.active_agent_tab != "latest-tab"
+            or self.selected_agent_id != agent_id
+            or not self.is_tmux_direct_enabled(agent_id)
+        ):
+            return None
+        surface = self.query_one_or_none(
+            "#pbx-terminal-surface", PbxTerminalSurface
+        )
+        if surface is None or not surface.attached or surface.read_only_client:
+            return None
+        if require_focus:
+            try:
+                if self.focused is not surface:
+                    return None
+            except ScreenStackError:
+                return None
+        return surface
+
+    async def _check_bindings(self, key: str, priority: bool = False) -> bool:
+        """Let a focused writable terminal receive every non-PBX function key.
+
+        Textual evaluates priority bindings before forwarding a key to the
+        focused widget. The gate must therefore run here; action-level guards
+        alone would still consume printable characters and control bytes.
+        """
+
+        if (
+            priority
+            and self.embedded_terminal_surface(require_focus=True) is not None
+            and not self.is_plain_function_key(key)
+        ):
+            return False
+        return await super()._check_bindings(key, priority)
 
     def resolve_agent_refresh_seconds(self) -> float:
         default = (
@@ -9404,9 +9459,10 @@ class AgentPBXTUI(App[None]):
             self.show_compact_home()
 
     def focused_editable_text_input(self) -> bool:
-        return isinstance(self.focused, (Input, TextArea)) and not bool(
-            getattr(self.focused, "read_only", False)
-        )
+        return (
+            isinstance(self.focused, (Input, TextArea))
+            and not bool(getattr(self.focused, "read_only", False))
+        ) or self.embedded_terminal_surface(require_focus=True) is not None
 
     def action_start_operator(self) -> None:
         if self.focused_editable_text_input():
@@ -9529,7 +9585,7 @@ class AgentPBXTUI(App[None]):
         )
 
     def action_hide_agent(self) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self.focused_editable_text_input():
             return
         self.run_worker(
             self.dismiss_selected_agent(delete_thread=False),
@@ -9538,7 +9594,7 @@ class AgentPBXTUI(App[None]):
         )
 
     def action_toggle_hidden_agents(self) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self.focused_editable_text_input():
             return
         self.show_hidden_agents = not self.show_hidden_agents
         self.update_hidden_agent_button()
@@ -9552,7 +9608,7 @@ class AgentPBXTUI(App[None]):
         self.notify(f"Agents view is now {state} hidden agents.")
 
     def action_unhide_agent(self) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self.focused_editable_text_input():
             return
         self.run_worker(
             self.unhide_selected_agent(),
@@ -9561,7 +9617,7 @@ class AgentPBXTUI(App[None]):
         )
 
     def action_purge_agent(self) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self.focused_editable_text_input():
             return
         self.run_worker(
             self.dismiss_selected_agent(delete_thread=True),
@@ -9570,7 +9626,7 @@ class AgentPBXTUI(App[None]):
         )
 
     def action_toggle_star_agent(self) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self.focused_editable_text_input():
             return
         self.toggle_selected_agent_star()
 
@@ -9582,6 +9638,7 @@ class AgentPBXTUI(App[None]):
             if enabled:
                 self.notify("Tmux direct default enabled for agents without overrides.")
             else:
+                await self.detach_embedded_tmux_terminal(release_lease=True)
                 self.notify("Tmux direct default disabled for agents without overrides.")
             return
         enabled = self.set_agent_tmux_direct_enabled(
@@ -9591,6 +9648,7 @@ class AgentPBXTUI(App[None]):
         if enabled:
             await self.load_tmux_capture(self.selected_agent_id)
         else:
+            await self.detach_embedded_tmux_terminal(release_lease=True)
             await self.load_latest_report(self.selected_agent_id)
 
     def action_toggle_editor_fullscreen(self) -> None:
@@ -13281,14 +13339,62 @@ class AgentPBXTUI(App[None]):
         agent_id = self.embedded_terminal_agent_id
         if not agent_id:
             return
+        if self.embedded_terminal_surface() is None:
+            await self.detach_embedded_tmux_terminal(release_lease=True)
+            return
         mapping = await self.acquire_tmux_writer_lease(agent_id)
         if mapping is None:
-            await self.detach_embedded_tmux_terminal(release_lease=False)
+            await self.detach_embedded_tmux_terminal(release_lease=True)
             self.notify(
                 f"Embedded terminal writer lease was lost for {agent_id}; using capture fallback.",
                 severity="warning",
             )
             await self.load_tmux_capture(agent_id)
+            return
+        if self.embedded_terminal_surface() is None:
+            # State may change while the renewal request is in flight. Release
+            # the just-renewed lease instead of allowing the timer to resurrect
+            # a hidden or detached embedded client.
+            await self.detach_embedded_tmux_terminal(release_lease=True)
+
+    async def resolve_runtime_pop_client(
+        self,
+        agent_id: str,
+        mapping: dict[str, Any],
+        *,
+        direction: str,
+    ) -> RuntimeTmuxClient:
+        identity = runtime_mapping_server_identity(mapping)
+        if direction == "out":
+            return await asyncio.to_thread(
+                resolve_invoking_outer_client,
+                identity,
+                tui_pane_id=str(os.environ.get("TMUX_PANE") or ""),
+                origin_session_name=str(mapping.get("origin_session_name") or ""),
+            )
+        client = self.tmux_pop_client_by_agent.get(agent_id)
+        if client is None:
+            raise ValueError(
+                "cannot pop in safely: this TUI has no active pop-out client transaction"
+            )
+        clients = await asyncio.to_thread(list_runtime_clients, identity)
+        exact = tuple(
+            item
+            for item in clients
+            if item.tty == client.tty
+            and (client.client_pid is None or item.client_pid == client.client_pid)
+        )
+        if len(exact) != 1:
+            raise ValueError(
+                "cannot pop in safely: the recorded tmux client is no longer live"
+            )
+        runtime_session = str(mapping.get("session_name") or "")
+        if exact[0].session_name != runtime_session:
+            raise ValueError(
+                "cannot pop in safely: the recorded tmux client is not attached "
+                f"to runtime session {runtime_session!r}"
+            )
+        return exact[0]
 
     async def pop_runtime(self, direction: str) -> bool:
         agent_id = self.selected_agent_id
@@ -13299,19 +13405,33 @@ class AgentPBXTUI(App[None]):
         if mapping is None:
             self.notify("No managed tmux runtime mapping is available.", severity="warning")
             return False
+        resolved_client: RuntimeTmuxClient | None = None
         try:
-            plan = runtime_pop_plan(mapping, direction=direction)
+            mode = normalize_runtime_server_mode(mapping.get("server_mode"))
+            force_suspend = self.tmux_popout_mode == "suspend_attach" and direction == "out"
+            if force_suspend:
+                plan = RuntimePopPlan(
+                    "suspend_attach",
+                    tmux_client_attach_command(mapping),
+                    str(mapping.get("session_name") or ""),
+                )
+            else:
+                if mode is not RuntimeServerMode.DEDICATED:
+                    resolved_client = await self.resolve_runtime_pop_client(
+                        agent_id,
+                        mapping,
+                        direction=direction,
+                    )
+                plan = runtime_pop_plan(
+                    mapping,
+                    direction=direction,
+                    origin_client_tty=(resolved_client.tty if resolved_client else None),
+                )
             if self.tmux_popout_mode == "switch_client" and plan.action.startswith(
                 "suspend"
             ):
                 raise ValueError(
                     "switch-client pop-out requires an integrated outer tmux runtime"
-                )
-            if self.tmux_popout_mode == "suspend_attach" and direction == "out":
-                plan = RuntimePopPlan(
-                    "suspend_attach",
-                    tmux_client_attach_command(mapping),
-                    str(mapping.get("session_name") or ""),
                 )
         except ValueError as exc:
             self.notify(str(exc), severity="warning")
@@ -13326,6 +13446,10 @@ class AgentPBXTUI(App[None]):
             self.notify(result.stderr.strip() or "tmux pop failed", severity="error")
             await self.load_tmux_capture(agent_id)
             return False
+        if direction == "out" and resolved_client is not None:
+            self.tmux_pop_client_by_agent[agent_id] = resolved_client
+        elif direction == "in":
+            self.tmux_pop_client_by_agent.pop(agent_id, None)
         if direction == "in":
             await self.load_tmux_capture(agent_id)
         return True
@@ -28022,7 +28146,7 @@ class AgentPBXTUI(App[None]):
                         return self.load_tmux_capture(agent_id)
                 else:
                     def work_factory(agent_id: str = agent_id) -> Awaitable[None]:
-                        return self.load_latest_report(agent_id)
+                        return self.disable_tmux_direct(agent_id)
                 self.run_async_worker(
                     work_factory,
                     name="tmux-toggle",
@@ -28067,6 +28191,10 @@ class AgentPBXTUI(App[None]):
         await self.detach_embedded_tmux_terminal(release_lease=True)
         if agent_id and self.is_tmux_direct_enabled(agent_id):
             await self.load_tmux_capture(agent_id)
+
+    async def disable_tmux_direct(self, agent_id: str) -> None:
+        await self.detach_embedded_tmux_terminal(release_lease=True)
+        await self.load_latest_report(agent_id)
 
     def set_ui_theme(self, theme_name: str) -> None:
         self.ui_theme = self.resolve_theme(theme_name)

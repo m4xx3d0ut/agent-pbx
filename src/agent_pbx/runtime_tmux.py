@@ -60,6 +60,20 @@ class RuntimeTmuxPane:
 
 
 @dataclass(frozen=True)
+class RuntimeTmuxClient:
+    """Live tmux client identity used for one targeted pop transaction."""
+
+    tty: str
+    session_name: str
+    flags: frozenset[str]
+    client_pid: int | None
+
+    @property
+    def focused(self) -> bool:
+        return "focused" in self.flags
+
+
+@dataclass(frozen=True)
 class RuntimeMappingAssessment:
     state: str
     safe: bool
@@ -95,6 +109,14 @@ RUNTIME_PANE_FORMAT = "\t".join(
         "#{pane_current_path}",
         "#{pane_current_command}",
         "#{pane_title}",
+    )
+)
+RUNTIME_CLIENT_FORMAT = "\t".join(
+    (
+        "#{client_tty}",
+        "#{session_name}",
+        "#{client_flags}",
+        "#{client_pid}",
     )
 )
 
@@ -227,14 +249,22 @@ def ensure_runtime_socket_parent(path: Path) -> None:
     path.parent.chmod(0o700)
 
 
-def read_outer_tmux_context(identity: TmuxServerIdentity) -> OuterTmuxContext | None:
+def _read_outer_tmux_pane_context(
+    identity: TmuxServerIdentity,
+    *,
+    pane_id: str,
+) -> OuterTmuxContext | None:
     if not identity.ready or not identity.outer_detected:
+        return None
+    if not pane_id:
         return None
     result = subprocess.run(
         [
             *identity.command_prefix,
             "display-message",
             "-p",
+            "-t",
+            pane_id,
             "#{session_name}\t#{window_id}\t#{pane_id}\t#{client_tty}",
         ],
         capture_output=True,
@@ -246,6 +276,136 @@ def read_outer_tmux_context(identity: TmuxServerIdentity) -> OuterTmuxContext | 
     if len(parts) != 4 or not parts[0]:
         return None
     return OuterTmuxContext(*parts)
+
+
+def parse_runtime_client_line(line: str) -> RuntimeTmuxClient | None:
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) != 4 or not parts[0] or not parts[1]:
+        return None
+    try:
+        client_pid = int(parts[3]) or None
+    except ValueError:
+        client_pid = None
+    return RuntimeTmuxClient(
+        tty=parts[0],
+        session_name=parts[1],
+        flags=frozenset(item for item in parts[2].split(",") if item),
+        client_pid=client_pid,
+    )
+
+
+def list_runtime_clients(identity: TmuxServerIdentity) -> tuple[RuntimeTmuxClient, ...]:
+    if not identity.ready:
+        return ()
+    result = subprocess.run(
+        [*identity.command_prefix, "list-clients", "-F", RUNTIME_CLIENT_FORMAT],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return ()
+    return tuple(
+        client
+        for line in result.stdout.splitlines()
+        if (client := parse_runtime_client_line(line)) is not None
+    )
+
+
+def resolve_invoking_outer_client(
+    identity: TmuxServerIdentity,
+    *,
+    tui_pane_id: str,
+    origin_session_name: str,
+) -> RuntimeTmuxClient:
+    """Resolve only the live outer client that can safely own a pop action.
+
+    A pane belongs to a session rather than to one client. When several clients
+    view the origin session, the client that invoked the TUI action is the sole
+    focused client. If tmux cannot prove one candidate, fail instead of choosing
+    an arbitrary terminal.
+    """
+
+    pane_id = str(tui_pane_id or "").strip()
+    origin_session = str(origin_session_name or "").strip()
+    if not pane_id:
+        raise ValueError(
+            "cannot resolve the invoking outer tmux client: the TUI TMUX_PANE is unavailable"
+        )
+    if not origin_session:
+        raise ValueError(
+            "cannot resolve the invoking outer tmux client: the origin session is unavailable"
+        )
+    outer = _read_outer_tmux_pane_context(identity, pane_id=pane_id)
+    if outer is None:
+        raise ValueError(
+            f"cannot resolve the invoking outer tmux client: TUI pane {pane_id} is not live"
+        )
+    if outer.pane_id != pane_id or outer.session_name != origin_session:
+        raise ValueError(
+            "cannot resolve the invoking outer tmux client: "
+            f"TUI pane {pane_id} belongs to session {outer.session_name!r}, "
+            f"not recorded origin {origin_session!r}"
+        )
+    candidates = tuple(
+        client
+        for client in list_runtime_clients(identity)
+        if client.session_name == origin_session
+    )
+    if len(candidates) == 1:
+        return candidates[0]
+    focused = tuple(client for client in candidates if client.focused)
+    if len(focused) == 1:
+        return focused[0]
+    if not candidates:
+        raise ValueError(
+            "cannot resolve the invoking outer tmux client: "
+            f"no live client is attached to origin session {origin_session!r}"
+        )
+    raise ValueError(
+        "cannot resolve the invoking outer tmux client safely: "
+        f"{len(candidates)} clients are attached to origin session "
+        f"{origin_session!r} and no unique focused client exists"
+    )
+
+
+def read_outer_tmux_context(identity: TmuxServerIdentity) -> OuterTmuxContext | None:
+    pane_id = str(os.environ.get("TMUX_PANE") or "").strip()
+    outer = _read_outer_tmux_pane_context(identity, pane_id=pane_id)
+    if outer is None:
+        return None
+    try:
+        client = resolve_invoking_outer_client(
+            identity,
+            tui_pane_id=pane_id,
+            origin_session_name=outer.session_name,
+        )
+    except ValueError:
+        # Mapping registration may proceed without a client. Pop-out resolves
+        # the current invoker again and refuses ambiguous or absent clients.
+        return outer
+    return OuterTmuxContext(
+        outer.session_name,
+        outer.window_id,
+        outer.pane_id,
+        client.tty,
+    )
+
+
+def runtime_mapping_server_identity(
+    mapping: Mapping[str, Any],
+) -> TmuxServerIdentity:
+    mode = normalize_runtime_server_mode(mapping.get("server_mode"))
+    socket_path = str(mapping.get("socket_path") or "").strip()
+    if not socket_path:
+        raise ValueError("runtime mapping does not identify a tmux socket")
+    return TmuxServerIdentity(
+        mode,
+        mode,
+        str(mapping.get("server_id") or runtime_server_id(Path(socket_path))),
+        socket_path,
+        True,
+        mode is not RuntimeServerMode.DEDICATED,
+    )
 
 
 def recursive_attachment_reason(
@@ -304,6 +464,7 @@ def runtime_pop_plan(
     mapping: Mapping[str, Any],
     *,
     direction: str,
+    origin_client_tty: str | None = None,
 ) -> RuntimePopPlan:
     """Build a targeted pop transition for one originating tmux client.
 
@@ -317,7 +478,9 @@ def runtime_pop_plan(
     socket_path = str(mapping.get("socket_path") or "").strip()
     runtime_session = str(mapping.get("session_name") or "").strip()
     origin_session = str(mapping.get("origin_session_name") or "").strip()
-    origin_client = str(mapping.get("origin_client_tty") or "").strip()
+    origin_client = str(
+        origin_client_tty or mapping.get("origin_client_tty") or ""
+    ).strip()
     mode = normalize_runtime_server_mode(mapping.get("server_mode"))
     if not socket_path or not runtime_session:
         raise ValueError("runtime mapping is incomplete")
@@ -331,6 +494,8 @@ def runtime_pop_plan(
         )
     if not origin_client:
         raise ValueError("integrated runtime has no recorded originating client")
+    if runtime_session == origin_session:
+        raise ValueError("runtime target is the session containing the Agent PBX TUI")
     target_session = runtime_session if normalized == "out" else origin_session
     if not target_session:
         raise ValueError("integrated runtime has no recorded originating session")

@@ -2125,8 +2125,14 @@ class Store:
                     process_start_ticks = excluded.process_start_ticks,
                     codex_session_id = excluded.codex_session_id,
                     cwd = excluded.cwd,
-                    origin_client_tty = excluded.origin_client_tty,
-                    origin_session_name = excluded.origin_session_name,
+                    origin_client_tty = COALESCE(
+                        NULLIF(excluded.origin_client_tty, ''),
+                        tmux_runtime_mappings.origin_client_tty
+                    ),
+                    origin_session_name = COALESCE(
+                        NULLIF(excluded.origin_session_name, ''),
+                        tmux_runtime_mappings.origin_session_name
+                    ),
                     state = excluded.state,
                     writer_client_id = CASE
                         WHEN tmux_runtime_mappings.server_id != excluded.server_id

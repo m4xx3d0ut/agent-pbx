@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import socket
+import subprocess
 import tempfile
 
 from fastapi.testclient import TestClient
@@ -14,10 +15,13 @@ from agent_pbx.runtime_tmux import (
     MAX_GENERATED_UNIX_SOCKET_PATH_BYTES,
     OuterTmuxContext,
     RuntimeServerMode,
+    RuntimeTmuxClient,
     RuntimeTmuxPane,
+    TmuxServerIdentity,
     assess_runtime_mapping,
     ensure_runtime_socket_parent,
     recursive_attachment_reason,
+    resolve_invoking_outer_client,
     resolve_runtime_tmux_server,
     runtime_pop_plan,
     tmux_client_attach_command,
@@ -203,6 +207,190 @@ def test_integrated_pop_targets_only_recorded_client_and_sessions() -> None:
     assert pop_out.action == "switch_client_out"
     assert pop_out.command[-4:] == ("-c", "/dev/pts/9", "-t", "runtime-a")
     assert pop_in.command[-4:] == ("-c", "/dev/pts/9", "-t", "agent-pbx")
+
+
+def test_integrated_pop_rejects_recursive_origin_session() -> None:
+    with pytest.raises(ValueError, match="session containing the Agent PBX TUI"):
+        runtime_pop_plan(
+            {
+                "server_mode": "outer_if_present",
+                "socket_path": "/tmp/pbx.sock",
+                "session_name": "agent-pbx",
+                "origin_session_name": "agent-pbx",
+                "origin_client_tty": "/dev/pts/9",
+            },
+            direction="out",
+        )
+
+
+def test_integrated_pop_resolves_unique_live_invoking_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        "outer",
+        "/tmp/pbx.sock",
+        True,
+        True,
+    )
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        if "display-message" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "agent-pbx\t@1\t%2\t\n",
+                "",
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "/dev/pts/8\tother\tattached\t80\n"
+            "/dev/pts/9\tagent-pbx\tattached\t90\n",
+            "",
+        )
+
+    monkeypatch.setattr("agent_pbx.runtime_tmux.subprocess.run", run)
+    client = resolve_invoking_outer_client(
+        identity,
+        tui_pane_id="%2",
+        origin_session_name="agent-pbx",
+    )
+    assert client == RuntimeTmuxClient(
+        "/dev/pts/9",
+        "agent-pbx",
+        frozenset({"attached"}),
+        90,
+    )
+
+    mapping = {
+        "server_mode": "outer_if_present",
+        "socket_path": "/tmp/pbx.sock",
+        "session_name": "runtime-a",
+        "origin_session_name": "agent-pbx",
+        "origin_client_tty": None,
+    }
+    plan = runtime_pop_plan(
+        mapping,
+        direction="out",
+        origin_client_tty=client.tty,
+    )
+    assert plan.target_client == "/dev/pts/9"
+    assert plan.command[-4:] == ("-c", "/dev/pts/9", "-t", "runtime-a")
+
+
+def test_integrated_pop_uses_only_unique_focused_invoking_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        "outer",
+        "/tmp/pbx.sock",
+        True,
+        True,
+    )
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        if "display-message" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "agent-pbx\t@1\t%2\t\n",
+                "",
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "/dev/pts/1\tagent-pbx\tattached\t10\n"
+            "/dev/pts/2\tagent-pbx\tattached,focused\t20\n",
+            "",
+        )
+
+    monkeypatch.setattr("agent_pbx.runtime_tmux.subprocess.run", run)
+    client = resolve_invoking_outer_client(
+        identity,
+        tui_pane_id="%2",
+        origin_session_name="agent-pbx",
+    )
+    plan = runtime_pop_plan(
+        {
+            "server_mode": "outer_if_present",
+            "socket_path": "/tmp/pbx.sock",
+            "session_name": "runtime-a",
+            "origin_session_name": "agent-pbx",
+        },
+        direction="out",
+        origin_client_tty=client.tty,
+    )
+    assert client.tty == "/dev/pts/2"
+    assert "/dev/pts/1" not in plan.command
+    assert plan.command[-4:] == ("-c", "/dev/pts/2", "-t", "runtime-a")
+
+
+@pytest.mark.parametrize(
+    ("clients", "message"),
+    [
+        ("/dev/pts/8\tother\tattached\t80\n", "no live client"),
+        (
+            "/dev/pts/1\tagent-pbx\tattached\t10\n"
+            "/dev/pts/2\tagent-pbx\tattached\t20\n",
+            "no unique focused client",
+        ),
+    ],
+)
+def test_integrated_pop_refuses_absent_or_ambiguous_clients(
+    clients: str,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        "outer",
+        "/tmp/pbx.sock",
+        True,
+        True,
+    )
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        output = "agent-pbx\t@1\t%2\t\n" if "display-message" in command else clients
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr("agent_pbx.runtime_tmux.subprocess.run", run)
+    with pytest.raises(ValueError, match=message):
+        resolve_invoking_outer_client(
+            identity,
+            tui_pane_id="%2",
+            origin_session_name="agent-pbx",
+        )
+
+
+def test_mapping_refresh_preserves_non_null_origin_evidence(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(AgentRegisterRequest(agent_id="agent-a", project="demo"))
+    base = {
+        "entity_id": "agent-a",
+        "server_mode": "outer_if_present",
+        "server_id": "server-a",
+        "socket_path": "/tmp/server-a.sock",
+        "session_name": "runtime-a",
+        "pane_id": "%1",
+    }
+    store.upsert_tmux_runtime_mapping(
+        **base,
+        origin_client_tty="/dev/pts/9",
+        origin_session_name="agent-pbx",
+    )
+    refreshed = store.upsert_tmux_runtime_mapping(
+        **base,
+        origin_client_tty=None,
+        origin_session_name=None,
+    )
+    assert refreshed["origin_client_tty"] == "/dev/pts/9"
+    assert refreshed["origin_session_name"] == "agent-pbx"
 
 
 def test_dedicated_pop_uses_foreground_attach() -> None:
