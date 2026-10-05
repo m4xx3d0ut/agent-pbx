@@ -98,6 +98,48 @@ def test_virtual_terminal_ignores_private_device_status_queries() -> None:
     assert "beforeafter" in "\n".join(terminal.snapshot().lines)
 
 
+def test_virtual_terminal_scrolls_only_the_active_margin_region() -> None:
+    terminal = VirtualTerminal(24, 6)
+    terminal.feed(
+        b"\x1b[1;1Hone"
+        b"\x1b[2;1Htwo"
+        b"\x1b[3;1H/status"
+        b"\x1b[4;1H/statusline"
+        b"\x1b[5;1H> /sta"
+        b"\x1b[6;1Hfooter"
+        b"\x1b[3;5r"
+        b"\x1b[3S"
+    )
+    lines = terminal.snapshot().lines
+    assert lines[0].startswith("one")
+    assert lines[1].startswith("two")
+    assert not lines[2].strip()
+    assert not lines[3].strip()
+    assert not lines[4].strip()
+    assert lines[5].startswith("footer")
+
+
+def test_virtual_terminal_scroll_down_preserves_rows_outside_margins() -> None:
+    terminal = VirtualTerminal(24, 6)
+    terminal.feed(
+        b"\x1b[1;1Hone"
+        b"\x1b[2;1Htwo"
+        b"\x1b[3;1Hthree"
+        b"\x1b[4;1Hfour"
+        b"\x1b[5;1Hfive"
+        b"\x1b[6;1Hfooter"
+        b"\x1b[2;5r"
+        b"\x1b[2T"
+    )
+    lines = terminal.snapshot().lines
+    assert lines[0].startswith("one")
+    assert not lines[1].strip()
+    assert not lines[2].strip()
+    assert lines[3].startswith("two")
+    assert lines[4].startswith("three")
+    assert lines[5].startswith("footer")
+
+
 async def test_terminal_surface_streams_input_and_resizes() -> None:
     class TerminalApp(App[None]):
         def compose(self) -> ComposeResult:

@@ -4,10 +4,42 @@ import codecs
 from dataclasses import dataclass
 
 import pyte
+from pyte.screens import Margins
 
 
 class PbxHistoryScreen(pyte.HistoryScreen):
     """History screen tolerant of modern private terminal status queries."""
+
+    def scroll_up(self, count: int | None = None) -> None:
+        """Implement ECMA-48 SU within the active scrolling margins.
+
+        Pyte 0.8.2 does not dispatch ``CSI S``. Current tmux uses that
+        sequence to clear and redraw Codex composer overlays, so ignoring it
+        leaves popup rows behind after Escape.
+        """
+
+        top, bottom = self.margins or Margins(0, self.lines - 1)
+        amount = min(max(1, int(count or 1)), bottom - top + 1)
+        self.dirty.update(range(top, bottom + 1))
+        for row in range(top, bottom + 1):
+            source = row + amount
+            if source <= bottom and source in self.buffer:
+                self.buffer[row] = self.buffer.pop(source)
+            else:
+                self.buffer.pop(row, None)
+
+    def scroll_down(self, count: int | None = None) -> None:
+        """Implement ECMA-48 SD within the active scrolling margins."""
+
+        top, bottom = self.margins or Margins(0, self.lines - 1)
+        amount = min(max(1, int(count or 1)), bottom - top + 1)
+        self.dirty.update(range(top, bottom + 1))
+        for row in range(bottom, top - 1, -1):
+            source = row - amount
+            if source >= top and source in self.buffer:
+                self.buffer[row] = self.buffer.pop(source)
+            else:
+                self.buffer.pop(row, None)
 
     def report_device_status(self, mode: int, **kwargs: object) -> None:
         # Recent tmux versions emit private DSR queries such as CSI ? 996 n.
@@ -18,6 +50,16 @@ class PbxHistoryScreen(pyte.HistoryScreen):
         if kwargs.get("private"):
             return
         super().report_device_status(mode)
+
+
+class PbxStream(pyte.Stream):
+    """Pyte stream extended with sequences emitted by current tmux."""
+
+    csi = {
+        **pyte.Stream.csi,
+        "S": "scroll_up",
+        "T": "scroll_down",
+    }
 
 
 @dataclass(frozen=True)
@@ -39,7 +81,7 @@ class VirtualTerminal:
         self.rows = max(2, int(rows))
         self.history = max(0, int(history))
         self.screen = PbxHistoryScreen(self.columns, self.rows, history=self.history)
-        self.stream = pyte.Stream(self.screen)
+        self.stream = PbxStream(self.screen)
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     def feed(self, data: bytes) -> None:

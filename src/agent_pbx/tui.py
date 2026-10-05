@@ -12839,9 +12839,12 @@ class AgentPBXTUI(App[None]):
         creating the PTY.
         """
 
+        # Always complete at least one layout pass. A surface that was visible
+        # before it was hidden can retain its previous non-zero ``size`` until
+        # the new class-driven layout runs. Accepting that stale rectangle
+        # starts the nested client at the old split width and leaves Codex
+        # overlays clipped even though the surrounding PBX pane is wider.
         for _ in range(max(1, attempts)):
-            if surface.size.width > 0 and surface.size.height > 0:
-                return True
             ready = asyncio.Event()
             self.screen.refresh(layout=True)
             if not surface.call_after_refresh(ready.set):
@@ -12850,6 +12853,8 @@ class AgentPBXTUI(App[None]):
                 await asyncio.wait_for(ready.wait(), timeout=0.5)
             except TimeoutError:
                 continue
+            if surface.size.width > 0 and surface.size.height > 0:
+                return True
         return surface.size.width > 0 and surface.size.height > 0
 
     async def attach_embedded_tmux_terminal(

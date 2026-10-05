@@ -2200,11 +2200,15 @@ async def test_tui_waits_for_visible_terminal_layout_before_cold_attach(
             "cwd": "/tmp",
         }
 
+    async def release(_agent_id: str) -> None:
+        return None
+
     async with app.run_test(size=(120, 32)) as pilot:
         app.selected_agent_id = "operator-0"
         app.active_agent_tab = "latest-tab"
         app.embedded_terminal_v2_enabled = True
         monkeypatch.setattr(app, "acquire_tmux_writer_lease", acquire)
+        monkeypatch.setattr(app, "release_tmux_writer_lease", release)
         surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
         assert surface.size == (0, 0)
 
@@ -2242,6 +2246,29 @@ async def test_tui_waits_for_visible_terminal_layout_before_cold_attach(
             surface.size.height,
         )
         assert (surface.size.width, surface.size.height) != initial_size
+
+        # Hide the terminal, resize PBX while it has no live rectangle, and
+        # attach again. The stale non-zero size from the prior visible layout
+        # must not be accepted as the new PTY geometry.
+        visible_size = (surface.size.width, surface.size.height)
+        await app.detach_embedded_tmux_terminal(release_lease=True)
+        await pilot.pause()
+        await pilot.resize_terminal(200, 32)
+        await pilot.pause()
+        assert (
+            await app.attach_embedded_tmux_terminal(
+                "operator-0",
+                {
+                    "state": "ready",
+                    "server_id": "server-a",
+                    "pane_id": "%7",
+                },
+            )
+            is True
+        )
+        await pilot.pause()
+        assert attached_sizes[-1] == (surface.size.width, surface.size.height)
+        assert attached_sizes[-1][0] > visible_size[0]
 
     assert attached_sizes
     assert attached_sizes[0][0] > 0
