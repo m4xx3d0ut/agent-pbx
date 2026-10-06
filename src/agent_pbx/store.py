@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -424,6 +424,18 @@ class Store:
 
                 CREATE INDEX IF NOT EXISTS idx_model_elevation_agent_status
                     ON model_elevation_leases(agent_id, status, requested_at DESC);
+
+                -- The TUI refreshes these per-agent summaries frequently. Without
+                -- these indexes, list_agents() scans the complete reports,
+                -- commands, and poll_events tables once for every returned agent.
+                CREATE INDEX IF NOT EXISTS idx_reports_agent_created
+                    ON reports(agent_id, created_at DESC, report_id DESC);
+                CREATE INDEX IF NOT EXISTS idx_commands_status_agent_created
+                    ON commands(status, agent_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_commands_agent_created
+                    ON commands(agent_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_poll_events_agent_created
+                    ON poll_events(agent_id, created_at);
 
                 CREATE TABLE IF NOT EXISTS tmux_runtime_mappings (
                     entity_id TEXT PRIMARY KEY,

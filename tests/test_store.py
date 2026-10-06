@@ -1,7 +1,40 @@
 from pathlib import Path
 
 from agent_pbx.schemas import AgentRegisterRequest
-from agent_pbx.store import Store
+from agent_pbx.store import SCHEMA_VERSION, Store
+
+
+def test_store_installs_agent_summary_indexes(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+
+    with store.connect() as conn:
+        for name in (
+            "idx_reports_agent_created",
+            "idx_commands_status_agent_created",
+            "idx_commands_agent_created",
+            "idx_poll_events_agent_created",
+        ):
+            conn.execute(f"DROP INDEX {name}")
+        conn.execute(
+            "UPDATE metadata SET value = '28' WHERE key = 'schema_version'"
+        )
+
+    store.init()
+    with store.connect() as conn:
+        indexes = {
+            str(row["name"])
+            for table in ("reports", "commands", "poll_events")
+            for row in conn.execute(f"PRAGMA index_list({table})").fetchall()
+        }
+
+    assert store.schema_version() == SCHEMA_VERSION
+    assert {
+        "idx_reports_agent_created",
+        "idx_commands_status_agent_created",
+        "idx_commands_agent_created",
+        "idx_poll_events_agent_created",
+    } <= indexes
 
 
 def test_register_agent_merges_metadata_without_dropping_cwd(tmp_path: Path) -> None:

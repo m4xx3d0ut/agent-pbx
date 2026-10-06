@@ -491,7 +491,7 @@ def test_remote_schema_records_safe_token_and_audit_metadata(tmp_path: Path) -> 
     token_record = issued["record"]
     listed = client.get("/v2/remote/tokens", headers=RUNTIME_HEADERS)
 
-    assert app.state.store.schema_version() == 28
+    assert app.state.store.schema_version() == 29
     assert "token_hash" not in json.dumps(token_record)
     assert "token" not in listed.json()["tokens"][0]
     assert listed.json()["tokens"][0]["client_id"] == "audit-client"

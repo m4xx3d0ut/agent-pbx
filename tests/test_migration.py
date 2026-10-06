@@ -74,16 +74,16 @@ def test_migration_dry_run_and_apply_reach_current_schema(tmp_path: Path) -> Non
     Store(config.resolved_db_path).init()
     with sqlite3.connect(config.resolved_db_path) as conn:
         conn.execute(
-            "UPDATE metadata SET value = '27' WHERE key = 'schema_version'"
+            "UPDATE metadata SET value = '28' WHERE key = 'schema_version'"
         )
 
     dry_run = migration_dry_run(config)
     source_schema_after_dry_run, _ = database_posture(config.resolved_db_path)
     applied = apply_migration(config)
 
-    assert dry_run["source_schema"] == 27
+    assert dry_run["source_schema"] == 28
     assert dry_run["simulated_schema"] == SCHEMA_VERSION
-    assert source_schema_after_dry_run == 27
+    assert source_schema_after_dry_run == 28
     assert applied["ok"] is True
     assert applied["verification"]["schema"] == SCHEMA_VERSION
     assert Path(applied["backup"]["backup_path"]).is_dir()
