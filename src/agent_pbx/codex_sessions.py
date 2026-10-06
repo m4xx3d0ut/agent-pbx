@@ -22,6 +22,7 @@ class CodexTranscriptResult:
     phase: str
     line_index: int
     mtime: float
+    prompt: str = ""
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class _TranscriptTailEntry:
     session_id: str
     preferred: CodexTranscriptResult | None
     fallback: CodexTranscriptResult | None
+    latest_user_prompt: str
 
 
 class CodexTranscriptTailCache:
@@ -127,6 +129,7 @@ def _scan_transcript_tail(
     file_session_id = session_id or (entry.session_id if entry is not None else "")
     preferred = entry.preferred if entry is not None else None
     fallback = entry.fallback if entry is not None else None
+    latest_user_prompt = entry.latest_user_prompt if entry is not None else ""
     with path.open("rb") as handle:
         handle.seek(offset)
         while True:
@@ -152,6 +155,10 @@ def _scan_transcript_tail(
                 if isinstance(payload, dict) and not file_session_id:
                     file_session_id = str(payload.get("id") or "").strip()
                 continue
+            user_prompt = _user_message_text(record)
+            if user_prompt.strip():
+                latest_user_prompt = user_prompt
+                continue
             text = _assistant_message_text(record)
             if not text.strip():
                 continue
@@ -162,6 +169,7 @@ def _scan_transcript_tail(
                 phase=_record_phase(record),
                 line_index=line_index,
                 mtime=stat.st_mtime,
+                prompt=latest_user_prompt,
             )
             if result.phase in preferred_phases:
                 preferred = result
@@ -176,6 +184,7 @@ def _scan_transcript_tail(
         session_id=file_session_id,
         preferred=preferred,
         fallback=fallback,
+        latest_user_prompt=latest_user_prompt,
     )
 
 
@@ -428,6 +437,7 @@ def latest_assistant_transcript_from_session_file(
     file_session_id = str(session_id or "").strip()
     preferred: list[CodexTranscriptResult] = []
     fallback: list[CodexTranscriptResult] = []
+    latest_user_prompt = ""
     try:
         handle = transcript_path.open("r", encoding="utf-8")
     except OSError:
@@ -445,6 +455,10 @@ def latest_assistant_transcript_from_session_file(
                 if isinstance(session, dict) and not file_session_id:
                     file_session_id = str(session.get("id") or "").strip()
                 continue
+            user_prompt = _user_message_text(record)
+            if user_prompt.strip():
+                latest_user_prompt = user_prompt
+                continue
             text = _assistant_message_text(record)
             if not text.strip():
                 continue
@@ -456,6 +470,7 @@ def latest_assistant_transcript_from_session_file(
                 phase=phase,
                 line_index=index,
                 mtime=mtime,
+                prompt=latest_user_prompt,
             )
             if phase in preferred_phases:
                 preferred.append(result)
@@ -599,6 +614,39 @@ def _assistant_message_text(record: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         if str(item.get("type") or "") not in _ASSISTANT_TEXT_TYPES:
+            continue
+        text = str(item.get("text") or "")
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _user_message_text(record: dict[str, Any]) -> str:
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    record_type = str(record.get("type") or "")
+    payload_type = str(payload.get("type") or "")
+    if record_type == "event_msg" and payload_type == "user_message":
+        return str(payload.get("message") or "").strip()
+    if (
+        record_type != "response_item"
+        or payload_type not in _ASSISTANT_MESSAGE_TYPES
+        or str(payload.get("role") or "") != "user"
+    ):
+        return ""
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "")
+        if item_type not in {"input_text", "text"}:
             continue
         text = str(item.get("text") or "")
         if text:

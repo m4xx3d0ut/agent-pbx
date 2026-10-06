@@ -48,6 +48,10 @@ def test_plain_function_key_is_not_passthrough() -> None:
         ("enter", None, b"\r"),
         ("escape", None, b"\x1b"),
         ("ctrl+c", None, b"\x03"),
+        ("ctrl+j", None, b"\n"),
+        ("shift+enter", None, b"\n"),
+        ("alt+enter", None, b"\n"),
+        ("ctrl+enter", None, b"\n"),
         ("alt+x", None, b"\x1bx"),
         ("x", "λ", "λ".encode()),
     ],
@@ -93,12 +97,43 @@ async def test_terminal_surface_routes_wheel_to_typed_tmux_scroll_request() -> N
         surface.on_mouse_scroll_down(
             MouseScrollDown(surface, 0, 0, 0, 2, 0, False, False, False)
         )
+        await surface._on_key(Key("pageup", None))
         await surface._on_key(Key("shift+pageup", None))
         await pilot.pause()
 
     assert requests[:2] == [(-1, 3), (1, 2)]
     assert requests[2][0] == -1
     assert requests[2][1] >= 1
+    assert requests[3][0] == -1
+    assert requests[3][1] >= 1
+
+
+async def test_terminal_surface_child_scroll_mode_forwards_page_keys() -> None:
+    written: list[bytes] = []
+
+    class FakeProcess:
+        alive = True
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            self.alive = False
+
+    class TerminalApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield PbxTerminalSurface(id="terminal")
+
+    app = TerminalApp()
+    async with app.run_test():
+        surface = app.query_one("#terminal", PbxTerminalSurface)
+        surface.process = FakeProcess()  # type: ignore[assignment]
+        surface.target = "server:%7"
+        surface.set_scroll_mode(EMBEDDED_SCROLL_MODE_CHILD)
+        await surface._on_key(Key("pageup", None))
+        await surface._on_key(Key("pagedown", None))
+
+    assert written == [b"\x1b[5~", b"\x1b[6~"]
 
 
 async def test_terminal_surface_child_mode_and_shift_wheel_forward_mouse_bytes() -> None:

@@ -1160,22 +1160,33 @@ recursive attachment to the PBX TUI session, namespaces managed sessions, and
 targets only the initiating client.
 
 `AGENT_PBX_TUI_TMUX=1` and `AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2=1` explicitly
-enable the native local path. Press `Ctrl+T` or `F8` from `Latest` to toggle it
+enable the native local path. Press `Ctrl+T` from `Latest` to toggle it
 for the selected entity. Tmux controls are disabled when tmux is unavailable or
 the API URL is remote. Use `agent-pbx remote ssh-attach` for full-fidelity remote
 terminal access; the WSS client is the observer/control path.
 
 Plain configured function keys remain global PBX navigation even under terminal
 focus: `F1` Agents, `F2` Events, `F3` view, `F4` input, `F6/F7` fork navigation,
-and `F8` tmux. Shift+F1–F12 is translated to unmodified child F1–F12. Thus F2
+`F8` next alert, `F9` editor, and `F10` workspace launch. Repeated F8 presses
+focus and acknowledge one displayed Agent/Operator alert at a time.
+Shift+F1–F12 is translated to unmodified child F1–F12. Thus F2
 always focuses Events while Shift+F2 opens Codex warnings. The input layer also
 recognizes xterm F13–F24 aliases, and the key probe documents terminal-specific
 SSH or Termux sequences.
+
+Managed sessions pin Enter to submit and `Ctrl+J` to editor newline. The
+embedded terminal normalizes Shift+Enter, Alt+Enter, and Ctrl+Enter to that
+portable newline when the client reports those combinations distinctly. Use
+`/pbx keymap` for the combined ownership map and `/codex keymap` for Codex's
+native keymap viewer.
 
 The runtime tmux server owns scrollback; managed Codex profiles use
 `alternate_screen = "never"`. The embedded client is disposable, and closing or
 restarting the TUI does not stop Codex. Only one client receives the writer
 lease; observers cannot inject input or control authoritative geometry.
+With tmux-owned scrolling enabled, Page Up enters and scrolls copy mode; arrows
+and Page Up/Page Down then navigate history. `/tmux scrollback` remains the
+explicit Android/Termux and SSH fallback.
 
 The retained capture fallback uses `AGENT_PBX_TUI_TMUX_CAPTURE_LINES` and
 `AGENT_PBX_TUI_TMUX_REFRESH_SECONDS`. Set

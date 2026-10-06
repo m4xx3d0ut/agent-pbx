@@ -289,6 +289,7 @@ class CodexConfigPatchRequest(BaseModel):
     remove: list[str] = Field(default_factory=list)
     agent_pbx_mcp: CodexConfigMcpPatchRequest | None = None
     secret_updates: list[CodexConfigSecretPatchRequest] = Field(default_factory=list)
+    keymap_preset: Literal["portable", "reset"] | None = None
 
 
 class CodexConfigViewResponse(BaseModel):
@@ -304,6 +305,8 @@ class CodexConfigViewResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     editable_paths: list[str] = Field(default_factory=list)
     secret_update_paths: list[str] = Field(default_factory=list)
+    keymap: dict[str, Any] = Field(default_factory=dict)
+    keymap_presets: list[str] = Field(default_factory=list)
 
 
 class CodexConfigPatchResponse(BaseModel):

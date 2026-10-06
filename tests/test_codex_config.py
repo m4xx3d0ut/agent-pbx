@@ -157,3 +157,87 @@ def test_codex_config_patch_blocks_requirement_conflict(tmp_path: Path) -> None:
             config_path=config,
             updates={"sandbox_mode": "danger-full-access"},
         )
+
+
+def test_codex_config_portable_keymap_preserves_unrelated_bindings(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "\n".join(
+            [
+                "[tui]",
+                'alternate_screen = "never"',
+                "",
+                "[tui.keymap.editor]",
+                'move_word_left = "alt-b"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = patch_codex_config(config_path=config, keymap_preset="portable")
+    view = load_codex_config_view(config_path=config)
+    text = config.read_text(encoding="utf-8")
+
+    assert 'alternate_screen = "never"' in text
+    assert 'move_word_left = "alt-b"' in text
+    assert 'submit = ["enter"]' in text
+    assert (
+        'insert_newline = ["ctrl-j", "shift-enter", "alt-enter", "ctrl-enter"]'
+        in text
+    )
+    assert view["keymap"] == {
+        "configured": True,
+        "preset": "portable",
+        "composer": {"submit": ["enter"]},
+        "editor": {
+            "insert_newline": [
+                "ctrl-j",
+                "shift-enter",
+                "alt-enter",
+                "ctrl-enter",
+            ]
+        },
+    }
+    assert result.backup_path is not None
+    assert set(result.changed_paths) == {
+        "tui.keymap.composer.submit",
+        "tui.keymap.editor.insert_newline",
+    }
+
+
+def test_codex_config_keymap_reset_only_removes_managed_actions(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "\n".join(
+            [
+                "[tui.keymap.composer]",
+                'submit = ["enter"]',
+                'history_search_previous = "up"',
+                "",
+                "[tui.keymap.editor]",
+                'insert_newline = ["ctrl-j", "shift-enter"]',
+                'move_word_left = "alt-b"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    patch_codex_config(config_path=config, keymap_preset="reset")
+    view = load_codex_config_view(config_path=config)
+    text = config.read_text(encoding="utf-8")
+
+    assert "submit =" not in text
+    assert "insert_newline =" not in text
+    assert 'history_search_previous = "up"' in text
+    assert 'move_word_left = "alt-b"' in text
+    assert view["keymap"]["preset"] == "default"
+
+
+def test_codex_config_rejects_unknown_keymap_preset(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unsupported Codex keymap preset"):
+        patch_codex_config(
+            config_path=tmp_path / "config.toml",
+            keymap_preset="unsafe",
+        )

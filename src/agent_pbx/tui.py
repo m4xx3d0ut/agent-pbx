@@ -72,6 +72,7 @@ from .codex_sessions import (
     latest_assistant_transcript_for_session,
     latest_assistant_transcript_from_session_file,
 )
+from .codex.profiles import portable_codex_keymap_overrides
 from . import tmux as tmux_support
 from .project_spawn import (
     PROJECT_SPAWN_MODES,
@@ -579,6 +580,10 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/codex config",
     "/codex config refresh",
     "/codex config save",
+    "/codex keymap",
+    "/codex keymap portable",
+    "/codex keymap reset",
+    "/pbx keymap",
     "/codex mcp wire",
     "/codex update",
     "/codex model",
@@ -886,6 +891,7 @@ class CodexCopyCapture:
     phase: str = ""
     line_index: int | None = None
     mtime: float | None = None
+    prompt: str = ""
 
     @property
     def digest(self) -> str:
@@ -1838,9 +1844,10 @@ def normalize_codex_terminal_mode(value: object) -> str:
 
 def codex_terminal_config_overrides(mode: object) -> list[str]:
     normalized = normalize_codex_terminal_mode(mode)
+    overrides = list(portable_codex_keymap_overrides())
     if normalized == CODEX_TERMINAL_MODE_DEFAULT:
-        return []
-    overrides = [codex_config_override("tui.alternate_screen", "never")]
+        return overrides
+    overrides.append(codex_config_override("tui.alternate_screen", "never"))
     if normalized == CODEX_TERMINAL_MODE_RAW:
         overrides.append(codex_config_override("tui.raw_output_mode", True))
     return overrides
@@ -5338,7 +5345,13 @@ class AgentPBXTUI(App[None]):
             priority=True,
         ),
         ("ctrl+t", "toggle_tmux_direct", "Tmux"),
-        Binding("f8", "toggle_tmux_direct", "Tmux", key_display="F8"),
+        Binding(
+            "f8",
+            "focus_next_alert",
+            "Next Alert",
+            key_display="F8",
+            priority=True,
+        ),
         Binding("alt+t", "toggle_tmux_direct", "Tmux", key_display="Alt+T", show=False),
         Binding("p", "toggle_star_agent", "Star Agent", priority=True),
         Binding("h", "toggle_hidden_agents", "Hidden", priority=True),
@@ -6515,7 +6528,96 @@ class AgentPBXTUI(App[None]):
         )
         lines.extend(["", "Opaque secret replacement paths:"])
         lines.extend(f"- {path}" for path in secret_paths)
+        keymap = config.get("keymap") if isinstance(config.get("keymap"), dict) else {}
+        composer = keymap.get("composer") if isinstance(keymap.get("composer"), dict) else {}
+        editor = keymap.get("editor") if isinstance(keymap.get("editor"), dict) else {}
+        lines.extend(
+            [
+                "",
+                "Managed keymap:",
+                f"- preset: {keymap.get('preset') or 'default'}",
+                "- submit: "
+                + (", ".join(str(item) for item in composer.get("submit", [])) or "Codex default"),
+                "- newline: "
+                + (
+                    ", ".join(str(item) for item in editor.get("insert_newline", []))
+                    or "Codex default"
+                ),
+            ]
+        )
         return "\n".join(lines)
+
+    def format_effective_keymap(self) -> str:
+        return "\n".join(
+            [
+                "Agent PBX and Codex Keymap",
+                "",
+                "PBX-owned under every focus:",
+                "- F1 Agents · F2 Events · F3 right tabs · F4 input",
+                "- F5 Operators · F6/F7 forks · F8 next alert · F9 editor · F10 launch",
+                "- Ctrl+T toggles the selected Latest tmux surface",
+                "- Ctrl+P command palette",
+                "",
+                "Codex terminal input:",
+                "- Enter submit",
+                "- Ctrl+J newline (portable canonical binding)",
+                "- Shift+Enter / Alt+Enter / Ctrl+Enter -> Ctrl+J newline",
+                "- Ctrl+A/E line start/end · Alt+B/F word movement",
+                "- Ctrl+W/Alt+D delete word · Ctrl+U/K cut · Ctrl+Y yank",
+                "- Escape cancel · Ctrl+C interrupt",
+                "- Shift+F1..F12 -> child F1..F12",
+                "",
+                "Tmux history:",
+                "- Page Up enters and scrolls runtime tmux copy mode",
+                "- Up/Down and Page Up/Page Down navigate after entry",
+                "- /tmux scrollback remains the explicit fallback",
+                "",
+                "Use /codex keymap to open Codex's native keymap viewer.",
+            ]
+        )
+
+    async def apply_codex_keymap_preset(self, preset: str) -> bool:
+        try:
+            response = await self.api_client().patch(
+                "/v1/codex/config",
+                json={"keymap_preset": preset},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Codex keymap update failed: {exc}", severity="error")
+            return False
+        config = result.get("config") if isinstance(result, dict) else None
+        self.codex_config = config if isinstance(config, dict) else self.codex_config
+        self.render_codex_config(self.codex_config)
+        if preset == "portable":
+            self.notify(
+                "Saved the portable Codex keymap. Restart/resume running Codex "
+                "sessions before relying on the new global bindings."
+            )
+        else:
+            self.notify(
+                "Removed Agent PBX Codex keymap overrides. Restart/resume running "
+                "Codex sessions to reload defaults."
+            )
+        return True
+
+    async def open_native_codex_keymap(self) -> bool:
+        agent_id = str(self.selected_agent_id or "").strip()
+        if not agent_id or not self.is_tmux_direct_enabled(agent_id):
+            self.notify(
+                "Select a tmux-direct Agent or Operator before opening Codex /keymap.",
+                severity="warning",
+            )
+            return False
+        if not await self.send_text_to_tmux(agent_id, "/keymap"):
+            self.notify(
+                "Unable to send /keymap to the selected Codex pane.",
+                severity="error",
+            )
+            return False
+        return True
 
     def select_codex_config_field(self, key: str) -> None:
         self.selected_codex_config_key = key
@@ -6754,19 +6856,19 @@ class AgentPBXTUI(App[None]):
         )
         text = f"{nav} | Shift+F2 Codex warnings | Enter send | Ctrl+J newline | Ctrl+W word"
         if self.tmux_features_available:
-            text += " | Ctrl+T/F8 tmux"
+            text += " | Ctrl+T tmux | F8 alert"
         return text
 
     def tmux_hotkeys_text(self) -> str:
         if self.is_tiny_layout() or self.low_power_enabled:
             return (
                 "a Agt | e Evt | v Tabs | i In | Shift+F2 Codex warnings | "
-                "Enter send | C-J nl | C-W word | C-T/F8 PBX"
+                "Enter send | C-J nl | PgUp hist | C-T PBX | F8 alert"
             )
         return (
             "F1 Agents | F2 Events | Shift+F2 Codex warnings | F3 Tabs | "
             "F4 Input | Ctrl+P Palette | Enter send | Ctrl+J newline | "
-            "Ctrl+W word | Ctrl+T/F8 PBX"
+            "PgUp history | Ctrl+T PBX | F8 alert"
         )
 
     def editor_hotkeys_text(self) -> str:
@@ -6789,11 +6891,12 @@ class AgentPBXTUI(App[None]):
                 ActionDefinition("focus.operators", "Operators", "f5"),
                 ActionDefinition("operator.previous_fork", "Previous Fork", "f6"),
                 ActionDefinition("operator.next_fork", "Next Fork", "f7"),
-                ActionDefinition("terminal.toggle", "Tmux", "f8"),
+                ActionDefinition("terminal.toggle", "Tmux", "ctrl+t"),
+                ActionDefinition("alerts.next", "Focus next alert", "f8"),
                 ActionDefinition(
                     "terminal.scrollback",
                     "Enter tmux scrollback",
-                    "/tmux scrollback",
+                    "pageup or /tmux scrollback",
                     focus_scope="terminal",
                     capability="terminal_input",
                 ),
@@ -6965,6 +7068,8 @@ class AgentPBXTUI(App[None]):
                             yield Button("Save", id="codex-config-save", variant="primary")
                             yield Button("Remove", id="codex-config-remove", variant="error")
                             yield Button("Wire PBX MCP", id="codex-config-wire-pbx")
+                            yield Button("Portable Keys", id="codex-keymap-portable")
+                            yield Button("Reset Keys", id="codex-keymap-reset")
                         with Horizontal(id="codex-secret-inputs"):
                             yield Input(
                                 placeholder="Opaque secret path",
@@ -7357,6 +7462,10 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/codex config", "Open global Codex config", self.palette_codex_config)
         yield SystemCommand("/codex config refresh", "Refresh global Codex config", self.palette_codex_config_refresh)
         yield SystemCommand("/codex config save", "Save the Codex config key/value editor", self.palette_codex_config_save)
+        yield SystemCommand("/pbx keymap", "Show PBX and Codex key ownership", self.palette_pbx_keymap)
+        yield SystemCommand("/codex keymap", "Open the native Codex /keymap viewer", self.palette_codex_keymap)
+        yield SystemCommand("/codex keymap portable", "Save the portable Codex newline keymap", self.palette_codex_keymap_portable)
+        yield SystemCommand("/codex keymap reset", "Remove the Agent PBX keymap overrides", self.palette_codex_keymap_reset)
         yield SystemCommand("/codex mcp wire", "Write Agent PBX MCP config to global Codex config", self.palette_codex_mcp_wire)
         yield SystemCommand("/codex update", "Update host Codex CLI via the Agent PBX daemon", self.palette_codex_update)
         yield SystemCommand("/codex model", "Open Codex model presets", self.palette_codex_model)
@@ -8189,6 +8298,33 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.save_codex_config_field(),
             name="codex-config-save",
+            exclusive=True,
+        )
+
+    def palette_pbx_keymap(self) -> None:
+        self.activate_agent_tab("codex-tab")
+        detail = self.query_one_or_none("#codex-config-detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_effective_keymap()
+
+    def palette_codex_keymap(self) -> None:
+        self.run_worker(
+            self.open_native_codex_keymap(),
+            name="codex-native-keymap",
+            exclusive=True,
+        )
+
+    def palette_codex_keymap_portable(self) -> None:
+        self.run_worker(
+            self.apply_codex_keymap_preset("portable"),
+            name="codex-keymap-portable",
+            exclusive=True,
+        )
+
+    def palette_codex_keymap_reset(self) -> None:
+        self.run_worker(
+            self.apply_codex_keymap_preset("reset"),
+            name="codex-keymap-reset",
             exclusive=True,
         )
 
@@ -11527,6 +11663,38 @@ class AgentPBXTUI(App[None]):
             return False
         return await self.open_agent_latest(agent_id)
 
+    def next_alert_agent_id(self) -> str | None:
+        """Resolve exactly the alert currently represented by the top banner."""
+
+        attention = self.query_one_or_none("#attention", Static)
+        if (
+            attention is not None
+            and attention.has_class("attention-active")
+            and self.attention_agent_id in self.agents
+        ):
+            return self.attention_agent_id
+        for _label, agent_ids in self.unseen_latest_alert_groups():
+            for agent_id in agent_ids:
+                if agent_id in self.agents:
+                    return agent_id
+        return None
+
+    async def action_focus_next_alert(self) -> None:
+        agent_id = self.next_alert_agent_id()
+        if agent_id is None:
+            self.notify("No Agent or Operator alerts are pending.")
+            return
+        if not await self.open_agent_latest(agent_id):
+            self.notify(
+                f"Alert target {agent_id} is no longer available.",
+                severity="warning",
+            )
+            return
+        # End any temporary event flash immediately. open_agent_latest() has
+        # already acknowledged this entity's latest report and rerendering now
+        # advances the banner to the next pending alert, if one exists.
+        self.clear_flash(self.flash_generation)
+
     async def open_agent_latest(self, agent_id: str) -> bool:
         if agent_id not in self.agents:
             return False
@@ -13670,7 +13838,7 @@ class AgentPBXTUI(App[None]):
         if status is not None:
             status.update(
                 f"Tmux: native {leased.get('pane_id')} · F3 Tabs/Tab terminal · "
-                "Ctrl+P palette · Shift+PgUp history"
+                "Ctrl+P palette · PgUp history · Ctrl+J newline"
             )
         surface.focus()
         return True
@@ -14946,6 +15114,12 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "codex-config-wire-pbx":
             await self.wire_agent_pbx_mcp_config()
+            return
+        if event.button.id == "codex-keymap-portable":
+            await self.apply_codex_keymap_preset("portable")
+            return
+        if event.button.id == "codex-keymap-reset":
+            await self.apply_codex_keymap_preset("reset")
             return
         if event.button.id == "codex-secret-replace":
             await self.replace_codex_secret(remove=False)
@@ -26795,6 +26969,7 @@ class AgentPBXTUI(App[None]):
             phase=result.phase,
             line_index=result.line_index,
             mtime=result.mtime,
+            prompt=result.prompt,
         )
 
     def remember_codex_copy_capture(
@@ -26817,6 +26992,7 @@ class AgentPBXTUI(App[None]):
             text=candidate.text,
             source=f"Codex /copy via {candidate.source}",
             session_id=session_id,
+            prompt=transcript.prompt if transcript is not None else "",
         )
         # During a live turn, Whole response can legitimately be newer than the
         # last final-answer JSONL record.  At an idle boundary, use the active
@@ -26836,6 +27012,7 @@ class AgentPBXTUI(App[None]):
                 phase=transcript.phase,
                 line_index=transcript.line_index,
                 mtime=transcript.mtime,
+                prompt=transcript.prompt,
             )
         self.notify(
             "Joplin /copy output did not match the active Codex transcript; "
@@ -27013,7 +27190,7 @@ class AgentPBXTUI(App[None]):
                 )
                 await self.load_joplin_notes(agent_id)
                 return
-            prompt = self.latest_joplin_prompt_for_agent(agent_id)
+            prompt = capture.prompt or self.latest_joplin_prompt_for_agent(agent_id)
             body = format_joplin_tmux_response_copy_body(
                 prompt,
                 response_text,

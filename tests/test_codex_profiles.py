@@ -8,6 +8,7 @@ import pytest
 from agent_pbx.api import create_app
 from agent_pbx.codex.profiles import (
     MANAGED_CODEX_PROFILES,
+    portable_codex_keymap_overrides,
     validate_managed_profile,
 )
 from agent_pbx.codex.skills import ManagedSkillPackService, PersonalityOverlay
@@ -55,6 +56,16 @@ def test_managed_profiles_validate_model_and_reasoning_catalog() -> None:
     )
     assert not unavailable.valid
     assert "absent" in unavailable.errors[0]
+
+
+def test_managed_profiles_include_portable_editor_keymap() -> None:
+    overrides = MANAGED_CODEX_PROFILES["sol-high"].overrides()
+
+    assert portable_codex_keymap_overrides() == (
+        'tui.keymap.composer.submit=["enter"]',
+        'tui.keymap.editor.insert_newline=["ctrl-j","shift-enter","alt-enter","ctrl-enter"]',
+    )
+    assert set(portable_codex_keymap_overrides()).issubset(overrides)
 
 
 def test_skill_pack_apply_drift_and_rollback(tmp_path: Path) -> None:

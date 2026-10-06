@@ -34,6 +34,10 @@ _KEY_BYTES: dict[str, bytes] = {
     "delete": b"\x1b[3~",
     "pageup": b"\x1b[5~",
     "pagedown": b"\x1b[6~",
+    "ctrl+enter": b"\n",
+    "ctrl+j": b"\n",
+    "shift+enter": b"\n",
+    "alt+enter": b"\n",
 }
 
 _COLOR_NAMES = {
@@ -279,7 +283,7 @@ class PbxTerminalSurface(Widget):
     async def _on_key(self, event: events.Key) -> None:
         normalized = event.key.strip().lower().replace("_", "+")
         if (
-            normalized in {"shift+pageup", "shift+pagedown"}
+            normalized in {"pageup", "shift+pageup", "shift+pagedown"}
             and self.scroll_mode == EMBEDDED_SCROLL_MODE_TMUX
             and self.attached
             and not self.read_only_client
@@ -287,7 +291,7 @@ class PbxTerminalSurface(Widget):
             self.post_message(
                 TerminalScrollRequested(
                     self,
-                    direction=-1 if normalized == "shift+pageup" else 1,
+                    direction=-1 if normalized in {"pageup", "shift+pageup"} else 1,
                     ticks=max(1, self.terminal.rows // 5),
                 )
             )

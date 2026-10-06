@@ -1,9 +1,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Iterable
 
 from ..codex_cli import CodexModelOption, codex_model_config_overrides
+
+
+PORTABLE_CODEX_SUBMIT_KEYS = ("enter",)
+PORTABLE_CODEX_NEWLINE_KEYS = (
+    "ctrl-j",
+    "shift-enter",
+    "alt-enter",
+    "ctrl-enter",
+)
+
+
+def portable_codex_keymap_overrides() -> tuple[str, ...]:
+    """Return the small portable keymap contract PBX manages."""
+
+    return (
+        "tui.keymap.composer.submit="
+        + json.dumps(list(PORTABLE_CODEX_SUBMIT_KEYS), separators=(",", ":")),
+        "tui.keymap.editor.insert_newline="
+        + json.dumps(list(PORTABLE_CODEX_NEWLINE_KEYS), separators=(",", ":")),
+    )
 
 
 @dataclass(frozen=True)
@@ -25,7 +46,7 @@ class ManagedCodexProfile:
                 verbosity=self.verbosity,
                 reasoning_summary=self.reasoning_summary,
             )
-        )
+        ) + portable_codex_keymap_overrides()
 
 
 DEFAULT_CALLER_PROFILE_ID = "sol-high"

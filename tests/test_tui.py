@@ -288,7 +288,8 @@ def test_tui_constructs() -> None:
     assert ("ctrl+t", "toggle_tmux_direct", "Tmux") in app.BINDINGS
     assert any(
         getattr(binding, "key", None) == "f8"
-        and getattr(binding, "action", None) == "toggle_tmux_direct"
+        and getattr(binding, "action", None) == "focus_next_alert"
+        and getattr(binding, "priority", False) is True
         for binding in app.BINDINGS
     )
     assert any(
@@ -1485,7 +1486,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "F4 Input" in hotkey_text
         assert "Ctrl+J newline" in hotkey_text
         assert "Ctrl+W word" in hotkey_text
-        assert "Ctrl+T/F8 tmux" in hotkey_text
+        assert "Ctrl+T tmux" in hotkey_text
+        assert "F8 alert" in hotkey_text
         assert "Ctrl+A/E" not in hotkey_text
         assert "Ctrl+U" not in hotkey_text
         assert "start/end" not in hotkey_text
@@ -1593,7 +1595,7 @@ async def test_tui_disables_tmux_controls_when_unavailable(monkeypatch) -> None:
 
         assert app.tmux_features_available is False
         assert tmux_direct.disabled is True
-        assert "Ctrl+T/F8 tmux" not in str(hotkeys.renderable)
+        assert "Ctrl+T tmux" not in str(hotkeys.renderable)
 
 
 async def test_tui_select_agent_updates_composer_and_loads_report() -> None:
@@ -2784,7 +2786,7 @@ async def test_tui_managed_project_picker_loads_api_projects() -> None:
         await pilot.pause()
         table = app.screen.query_one("#managed-projects", DataTable)
         assert table.row_count == 1
-        assert app.screen.query_one("#managed-agent-profile", Select).value == "sol-xhigh"
+        assert app.screen.query_one("#managed-agent-profile", Select).value == "sol-high"
 
 
 async def test_tui_runtime_migration_applies_only_eligible_candidates() -> None:
@@ -3158,7 +3160,7 @@ async def test_tui_tmux_toggle_hotkey_only_from_latest() -> None:
         assert app.is_tmux_direct_enabled("agent-1") is True
         assert app.screen.has_class("tmux-direct")
 
-        await pilot.press("f8")
+        await pilot.press("ctrl+t")
         await pilot.pause()
         assert app.tmux_direct_agent_modes == {"agent-1": False}
         assert app.is_tmux_direct_enabled("agent-1") is False
@@ -8483,6 +8485,10 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/codex config" in titles
     assert "/codex config refresh" in titles
     assert "/codex config save" in titles
+    assert "/pbx keymap" in titles
+    assert "/codex keymap" in titles
+    assert "/codex keymap portable" in titles
+    assert "/codex keymap reset" in titles
     assert "/codex mcp wire" in titles
     assert "/codex update" in titles
     assert "/codex model" in titles
@@ -10109,6 +10115,50 @@ async def test_tui_joplin_copy_duplicate_guard_and_force_create_intentional_note
     assert app.selected_joplin_note_for_agent("agent-1") == "forced-note"
     assert app.joplin_copy_fingerprints_by_agent["agent-1"]["note_id"] == "forced-note"
     assert loads == ["agent-1", "agent-1", "agent-1"]
+
+
+async def test_tui_joplin_copy_title_prefers_prompt_associated_with_transcript() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    capture = CodexCopyCapture(
+        text="Latest response",
+        source="Codex transcript rollout.jsonl",
+        session_id="session-1",
+        prompt="prompt typed directly in the embedded Codex terminal",
+    )
+    created: list[tuple[str, str, str]] = []
+
+    async def fake_ensure() -> bool:
+        return True
+
+    async def fake_copy(agent_id: str) -> tuple[str, str]:
+        app.last_codex_copy_capture_by_agent[agent_id] = capture
+        return capture.text, capture.source
+
+    async def fake_create(
+        agent_id: str,
+        *,
+        title: str,
+        body: str,
+        success_message: str,
+    ) -> dict[str, str]:
+        created.append((agent_id, title, body))
+        return {"id": "note-1"}
+
+    async def fake_load(_agent_id: str) -> None:
+        return None
+
+    app.ensure_joplin_available = fake_ensure  # type: ignore[method-assign]
+    app.copy_tmux_response_text = fake_copy  # type: ignore[method-assign]
+    app.create_manual_joplin_copy = fake_create  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load  # type: ignore[method-assign]
+    app.sent_message_history_by_agent["agent-1"] = ["stale PBX-side prompt"]
+
+    await app.copy_tmux_response_to_joplin("agent-1")
+
+    assert created[0][1] == (
+        "Codex Response - prompt typed directly in the embedded Codex terminal"
+    )
+    assert "prompt typed directly in the embedded Codex terminal" in created[0][2]
 
 
 async def test_tui_joplin_copy_falls_back_to_transcript_before_tmux_capture(
@@ -14851,6 +14901,54 @@ async def test_tui_unseen_latest_tracking_clears_when_seen() -> None:
     assert app.unseen_latest_agent_ids == set()
 
 
+async def test_tui_f8_focuses_and_clears_one_alert_at_a_time() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    focused: list[str] = []
+
+    async def fake_open_agent_latest(agent_id: str) -> bool:
+        focused.append(agent_id)
+        app.selected_agent_id = agent_id
+        app.unseen_latest_agent_ids.discard(agent_id)
+        app.render_unseen_attention()
+        return True
+
+    app.open_agent_latest = fake_open_agent_latest  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.agents = {
+            "agent-done": {
+                "agent_id": "agent-done",
+                "agent_type": "caller",
+                "status": "done",
+                "project": "demo",
+                "last_seen_at": 101.0,
+            },
+            "operator-failed": {
+                "agent_id": "operator-failed",
+                "agent_type": "operator",
+                "status": "failed",
+                "project": "demo-operator",
+                "last_seen_at": 102.0,
+                "metadata": {"operator_role": "root"},
+            },
+        }
+        app.unseen_latest_agent_ids = {"agent-done", "operator-failed"}
+        app.render_agents()
+        app.render_unseen_attention()
+
+        await pilot.press("f8")
+        await pilot.pause()
+        assert focused == ["operator-failed"]
+        assert app.unseen_latest_agent_ids == {"agent-done"}
+        assert "agent-done" in str(app.query_one("#attention", Static).renderable)
+
+        await pilot.press("f8")
+        await pilot.pause()
+
+    assert focused == ["operator-failed", "agent-done"]
+    assert app.unseen_latest_agent_ids == set()
+
+
 def test_tui_persisted_latest_seen_prevents_startup_alert() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     app.latest_viewed_at_by_agent = {"agent-1": 101.0}
@@ -18783,11 +18881,17 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
 
 
 def test_tui_codex_terminal_mode_overrides_are_explicit_and_bounded() -> None:
-    assert codex_terminal_config_overrides(CODEX_TERMINAL_MODE_DEFAULT) == []
+    portable = [
+        'tui.keymap.composer.submit=["enter"]',
+        'tui.keymap.editor.insert_newline=["ctrl-j","shift-enter","alt-enter","ctrl-enter"]',
+    ]
+    assert codex_terminal_config_overrides(CODEX_TERMINAL_MODE_DEFAULT) == portable
     assert codex_terminal_config_overrides(CODEX_TERMINAL_MODE_SCROLLBACK) == [
+        *portable,
         'tui.alternate_screen="never"'
     ]
     assert codex_terminal_config_overrides(CODEX_TERMINAL_MODE_RAW) == [
+        *portable,
         'tui.alternate_screen="never"',
         "tui.raw_output_mode=true",
     ]
@@ -20494,3 +20598,57 @@ async def test_tui_codex_config_save_wire_and_secret_patch(
             }
         ]
     }
+
+
+async def test_tui_applies_portable_codex_keymap_preset() -> None:
+    calls: list[dict[str, object]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "ok": True,
+                "config": {
+                    "fields": [],
+                    "hidden_items": [],
+                    "mcp_servers": [],
+                    "requirements": [],
+                    "warnings": [],
+                    "keymap": {"preset": "portable"},
+                },
+            }
+
+    class Client:
+        async def patch(self, path: str, **kwargs: object) -> Response:
+            calls.append({"path": path, **kwargs})
+            return Response()
+
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="test")
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test():
+        applied = await app.apply_codex_keymap_preset("portable")
+
+    assert applied is True
+    assert calls[0]["path"] == "/v1/codex/config"
+    assert calls[0]["json"] == {"keymap_preset": "portable"}
+
+
+async def test_tui_opens_native_codex_keymap_in_selected_tmux_session() -> None:
+    sent: list[tuple[str, str]] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.selected_agent_id = "operator-0"
+    app.tmux_direct_agent_modes["operator-0"] = True
+
+    async def fake_send(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    app.send_text_to_tmux = fake_send  # type: ignore[method-assign]
+
+    opened = await app.open_native_codex_keymap()
+
+    assert opened is True
+    assert sent == [("operator-0", "/keymap")]

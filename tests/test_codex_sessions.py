@@ -32,6 +32,13 @@ def assistant_message(text: str, *, phase: str = "final_answer") -> dict[str, ob
     }
 
 
+def user_message(text: str) -> dict[str, object]:
+    return {
+        "type": "event_msg",
+        "payload": {"type": "user_message", "message": text},
+    }
+
+
 def test_latest_assistant_output_prefers_latest_final_answer(tmp_path) -> None:
     session_file = tmp_path / "rollout-session-1.jsonl"
     write_jsonl(
@@ -52,6 +59,54 @@ def test_latest_assistant_output_prefers_latest_final_answer(tmp_path) -> None:
     assert result.line_index == 3
     assert result.path == session_file
     assert result.mtime == session_file.stat().st_mtime
+
+
+def test_latest_assistant_transcript_keeps_associated_user_prompt(tmp_path) -> None:
+    session_file = tmp_path / "rollout-session-1.jsonl"
+    write_jsonl(
+        session_file,
+        [
+            {"type": "session_meta", "payload": {"id": "session-1"}},
+            user_message("first prompt"),
+            assistant_message("first response"),
+            user_message("latest prompt for the title"),
+            assistant_message("latest response"),
+        ],
+    )
+
+    result = latest_assistant_transcript_from_session_file(session_file)
+
+    assert result is not None
+    assert result.text == "latest response"
+    assert result.prompt == "latest prompt for the title"
+
+
+def test_transcript_tail_cache_updates_prompt_with_incremental_turn(tmp_path) -> None:
+    session_file = tmp_path / "rollout-session-1.jsonl"
+    write_jsonl(
+        session_file,
+        [
+            {"type": "session_meta", "payload": {"id": "session-1"}},
+            user_message("first prompt"),
+            assistant_message("first response"),
+        ],
+    )
+    cache = CodexTranscriptTailCache()
+    first = latest_assistant_transcript_from_session_file(
+        session_file,
+        tail_cache=cache,
+    )
+    with session_file.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(user_message("second prompt")) + "\n")
+        handle.write(json.dumps(assistant_message("second response")) + "\n")
+    second = latest_assistant_transcript_from_session_file(
+        session_file,
+        tail_cache=cache,
+    )
+
+    assert first is not None and first.prompt == "first prompt"
+    assert second is not None and second.prompt == "second prompt"
+    assert second.text == "second response"
 
 
 def test_latest_assistant_output_falls_back_to_any_assistant_text(tmp_path) -> None:

@@ -439,6 +439,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     item.model_dump(exclude_none=True)
                     for item in payload.secret_updates
                 ],
+                keymap_preset=payload.keymap_preset,
             )
         except ValueError as exc:
             raise HTTPException(

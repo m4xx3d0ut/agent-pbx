@@ -11,6 +11,11 @@ import tempfile
 import time
 from typing import Any, Iterable, Mapping
 
+from .codex.profiles import (
+    PORTABLE_CODEX_NEWLINE_KEYS,
+    PORTABLE_CODEX_SUBMIT_KEYS,
+)
+
 try:  # Python 3.11+
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - py310 compatibility
@@ -210,6 +215,8 @@ def load_codex_config_view(
             "mcp_servers.<server>.env_http_headers.<header>",
             "mcp_servers.<server>.http_headers.<header>",
         ],
+        "keymap": _keymap_status(parsed),
+        "keymap_presets": ["portable", "reset"],
     }
 
 
@@ -219,6 +226,7 @@ def patch_codex_config(
     remove: Iterable[str] | None = None,
     agent_pbx_mcp: Mapping[str, Any] | None = None,
     secret_updates: Iterable[Mapping[str, Any]] | None = None,
+    keymap_preset: str | None = None,
     config_path: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> CodexConfigPatchResult:
@@ -251,6 +259,10 @@ def patch_codex_config(
         new_text, mcp_changes = _patch_agent_pbx_mcp(new_text, agent_pbx_mcp)
         changed.extend(mcp_changes)
 
+    if keymap_preset:
+        new_text, keymap_changes = _patch_keymap_preset(new_text, keymap_preset)
+        changed.extend(keymap_changes)
+
     for patch in secret_updates or ():
         secret_path = str(patch.get("path") or "").strip()
         remove_secret = bool(patch.get("remove"))
@@ -271,6 +283,31 @@ def patch_codex_config(
         changed_paths=tuple(dict.fromkeys(changed)),
         backup_path=backup_path,
     )
+
+
+def _keymap_status(parsed: Mapping[str, Any]) -> dict[str, Any]:
+    tui = parsed.get("tui") if isinstance(parsed, Mapping) else None
+    keymap = tui.get("keymap") if isinstance(tui, Mapping) else None
+    composer = keymap.get("composer") if isinstance(keymap, Mapping) else None
+    editor = keymap.get("editor") if isinstance(keymap, Mapping) else None
+    submit = composer.get("submit") if isinstance(composer, Mapping) else None
+    newline = editor.get("insert_newline") if isinstance(editor, Mapping) else None
+    submit_keys = [str(item) for item in submit] if isinstance(submit, list) else []
+    newline_keys = [str(item) for item in newline] if isinstance(newline, list) else []
+    portable = (
+        submit_keys == list(PORTABLE_CODEX_SUBMIT_KEYS)
+        and newline_keys == list(PORTABLE_CODEX_NEWLINE_KEYS)
+    )
+    return {
+        "configured": bool(submit_keys or newline_keys),
+        "preset": (
+            "portable"
+            if portable
+            else ("custom" if submit_keys or newline_keys else "default")
+        ),
+        "composer": {"submit": submit_keys},
+        "editor": {"insert_newline": newline_keys},
+    }
 
 
 def _read_text(path: Path) -> tuple[str | None, str | None]:
@@ -639,6 +676,31 @@ def _patch_agent_pbx_mcp(text: str, patch: Mapping[str, Any]) -> tuple[str, list
         text = _set_table_key(text, ("mcp_servers", server), key, value)
         changes.append(f"mcp_servers.{server}.{key}")
     return text, changes
+
+
+def _patch_keymap_preset(text: str, preset: str) -> tuple[str, list[str]]:
+    normalized = str(preset or "").strip().lower()
+    if normalized not in {"portable", "reset"}:
+        raise ValueError(f"Unsupported Codex keymap preset {preset!r}.")
+    submit: list[str] | None
+    newline: list[str] | None
+    if normalized == "portable":
+        submit = list(PORTABLE_CODEX_SUBMIT_KEYS)
+        newline = list(PORTABLE_CODEX_NEWLINE_KEYS)
+    else:
+        submit = None
+        newline = None
+    text = _set_table_key(text, ("tui", "keymap", "composer"), "submit", submit)
+    text = _set_table_key(
+        text,
+        ("tui", "keymap", "editor"),
+        "insert_newline",
+        newline,
+    )
+    return text, [
+        "tui.keymap.composer.submit",
+        "tui.keymap.editor.insert_newline",
+    ]
 
 
 def _set_secret_path(text: str, path: str, value: str | None) -> str:
