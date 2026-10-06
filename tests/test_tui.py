@@ -15146,10 +15146,12 @@ async def test_tui_unseen_latest_blinks_attention_bar() -> None:
         app.attention_blink_phase = True
         app.render_unseen_attention()
         blink_text = str(attention.renderable)
+        screen_flash_active = "attention-flash" in app.screen.classes
 
     assert steady_text == "NEW latest: agent-1"
     assert blink_text == "NEW! latest: agent-1"
     assert attention.has_class("unseen-active")
+    assert screen_flash_active is False
 
 
 async def test_tui_unseen_latest_uses_latest_report_status_labels() -> None:

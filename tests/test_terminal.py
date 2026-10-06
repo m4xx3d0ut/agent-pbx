@@ -155,13 +155,13 @@ def test_pty_resize_notifies_child_process_group() -> None:
             sys.executable,
             "-c",
             "import os, signal\n"
-            "def resized(*_args):\n"
-            "    size = os.get_terminal_size()\n"
-            "    print(f'{size.lines} {size.columns}', flush=True)\n"
-            "    raise SystemExit(0)\n"
-            "signal.signal(signal.SIGWINCH, resized)\n"
+            "watched = {signal.SIGWINCH}\n"
+            "signal.pthread_sigmask(signal.SIG_BLOCK, watched)\n"
             "print('READY', flush=True)\n"
-            "signal.pause()\n",
+            "while True:\n"
+            "    signal.sigwait(watched)\n"
+            "    size = os.get_terminal_size()\n"
+            "    os.write(1, f'{size.lines} {size.columns}\\n'.encode())\n",
         ],
         columns=40,
         rows=8,
@@ -218,6 +218,55 @@ def test_virtual_terminal_scroll_down_preserves_rows_outside_margins() -> None:
     assert lines[3].startswith("two")
     assert lines[4].startswith("three")
     assert lines[5].startswith("footer")
+
+
+def test_terminal_surface_batches_contiguous_style_runs() -> None:
+    surface = PbxTerminalSurface()
+    surface.terminal = VirtualTerminal(40, 4)
+    surface.terminal.feed(
+        b"\x1b[1;1H\x1b[31mred-red-red\x1b[32mgreen-green\x1b[0m"
+        b"\x1b[2;1Hplain text"
+    )
+
+    rendered = surface.render()
+
+    assert rendered.plain.splitlines()[0].startswith("red-red-redgreen-green")
+    assert rendered.plain.splitlines()[1].startswith("plain text")
+    assert len(rendered.spans) < surface.terminal.columns
+
+
+def test_terminal_surface_preserves_reverse_cursor_style() -> None:
+    surface = PbxTerminalSurface()
+    surface.terminal = VirtualTerminal(10, 2)
+    surface.terminal.feed(b"abc")
+
+    normal_key = surface._rich_style_key(
+        surface.terminal.screen.buffer[0][surface.terminal.screen.cursor.x]
+    )
+    cursor_key = surface._rich_style_key(
+        surface.terminal.screen.buffer[0][surface.terminal.screen.cursor.x],
+        cursor=True,
+    )
+
+    assert normal_key[5] is False
+    assert cursor_key[5] is True
+    assert surface._rich_style(None) is surface._rich_style(None)
+
+
+def test_terminal_surface_reuses_clean_rendered_rows() -> None:
+    surface = PbxTerminalSurface()
+    surface.terminal = VirtualTerminal(30, 4)
+    surface.terminal.feed(b"\x1b[1;1Hfirst\x1b[2;1Hsecond")
+    surface.render()
+    cached = dict(surface._rendered_rows)
+
+    surface.terminal.feed(b"\x1b[2;1Hchanged")
+    rendered = surface.render()
+
+    assert rendered.plain.splitlines()[0].startswith("first")
+    assert rendered.plain.splitlines()[1].startswith("changed")
+    assert surface._rendered_rows[0] is cached[0]
+    assert surface._rendered_rows[1] is not cached[1]
 
 
 async def test_terminal_surface_streams_input_and_resizes() -> None:

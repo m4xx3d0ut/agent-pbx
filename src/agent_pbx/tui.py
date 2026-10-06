@@ -11279,7 +11279,10 @@ class AgentPBXTUI(App[None]):
                 "(/plan:1 start, /plan:2 clear context & start, /plan:3 stay)"
             )
             attention.add_class("unseen-active")
-            self.set_attention_flash_class(blink_active)
+            # The changing PLAN/PLAN! marker is sufficient recurring notice.
+            # Toggling a class on the entire Screen here forces both large
+            # panels to be restyled every blink and can starve terminal input.
+            self.set_attention_flash_class(False)
             return
         if not self.unseen_latest_agent_ids:
             if attention.has_class("unseen-active"):
@@ -11315,7 +11318,9 @@ class AgentPBXTUI(App[None]):
             parts.append(f"+{extra}")
         attention.update(" | ".join(parts))
         attention.add_class("unseen-active")
-        self.set_attention_flash_class(blink_active)
+        # Keep recurring unseen-report blink work local to this one-line bar.
+        # One-shot event flashes may still use the outer panel border below.
+        self.set_attention_flash_class(False)
 
     def set_attention_flash_class(self, enabled: bool) -> None:
         try:

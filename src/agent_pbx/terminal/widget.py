@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 import os
 from pathlib import Path
 import re
@@ -52,6 +53,31 @@ EMBEDDED_SCROLL_MODE_CHILD = "child"
 EMBEDDED_SCROLL_MODES = frozenset(
     {EMBEDDED_SCROLL_MODE_TMUX, EMBEDDED_SCROLL_MODE_CHILD}
 )
+
+TerminalStyleKey = tuple[
+    str | None,
+    str | None,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+]
+
+
+@lru_cache(maxsize=512)
+def _cached_rich_style(key: TerminalStyleKey) -> Style:
+    return Style(
+        color=key[0],
+        bgcolor=key[1],
+        bold=key[2],
+        italic=key[3],
+        underline=key[4],
+        reverse=key[5],
+        blink=key[6],
+        strike=key[7],
+    )
 
 
 def normalize_embedded_scroll_mode(value: object) -> str:
@@ -122,6 +148,10 @@ class PbxTerminalSurface(Widget):
         self.read_only_client = False
         self.total_pty_bytes = 0
         self._poll_timer: Timer | None = None
+        self._rendered_rows: dict[int, Text] = {}
+        self._render_screen = self.terminal.screen
+        self._render_geometry = (self.terminal.columns, self.terminal.rows)
+        self._render_cursor: tuple[bool, bool, int, int] | None = None
 
     @property
     def attached(self) -> bool:
@@ -155,6 +185,7 @@ class PbxTerminalSurface(Widget):
         # especially visible through SSH and Termux.
         process_env["TERM"] = "xterm-256color"
         self.terminal = VirtualTerminal(columns, rows, history=self.history)
+        self._invalidate_render_cache()
         self.process = PtyProcess(
             argv,
             cwd=cwd,
@@ -236,6 +267,7 @@ class PbxTerminalSurface(Widget):
         )
         if changed:
             self.terminal.resize(resolved_columns, resolved_rows)
+            self._invalidate_render_cache()
         process = self.process
         if process is not None and (
             process.columns != resolved_columns or process.rows != resolved_rows
@@ -351,40 +383,95 @@ class PbxTerminalSurface(Widget):
 
     def render(self) -> Text:
         screen = self.terminal.screen
+        geometry = (self.terminal.columns, self.terminal.rows)
+        if screen is not self._render_screen or geometry != self._render_geometry:
+            self._invalidate_render_cache()
+        cursor = (
+            self.has_focus,
+            bool(screen.cursor.hidden),
+            int(screen.cursor.y),
+            int(screen.cursor.x),
+        )
+        dirty_rows = set(screen.dirty)
+        if self._render_cursor != cursor:
+            if self._render_cursor is not None:
+                dirty_rows.add(self._render_cursor[2])
+            dirty_rows.add(cursor[2])
+        dirty_rows.update(
+            row_index
+            for row_index in range(self.terminal.rows)
+            if row_index not in self._rendered_rows
+        )
+        for row_index in dirty_rows:
+            if 0 <= row_index < self.terminal.rows:
+                self._rendered_rows[row_index] = self._render_row(row_index, cursor)
+        screen.dirty.clear()
+        self._render_cursor = cursor
+
         result = Text(no_wrap=True, overflow="crop")
         for row_index in range(self.terminal.rows):
-            row = screen.buffer.get(row_index, {})
-            for column in range(self.terminal.columns):
-                char = row.get(column)
-                value = str(getattr(char, "data", " ") or " ")
-                style = self._rich_style(char)
-                if (
-                    not bool(screen.cursor.hidden)
-                    and row_index == screen.cursor.y
-                    and column == screen.cursor.x
-                    and self.has_focus
-                ):
-                    style = style + Style(reverse=True)
-                result.append(value, style=style)
+            result.append_text(self._rendered_rows[row_index])
             if row_index < self.terminal.rows - 1:
                 result.append("\n")
         return result
 
+    def _render_row(
+        self,
+        row_index: int,
+        cursor: tuple[bool, bool, int, int],
+    ) -> Text:
+        row = self.terminal.screen.buffer.get(row_index, {})
+        result = Text(no_wrap=True, overflow="crop")
+        run_key: TerminalStyleKey | None = None
+        run_chars: list[str] = []
+        focused, cursor_hidden, cursor_y, cursor_x = cursor
+        for column in range(self.terminal.columns):
+            char = row.get(column)
+            value = str(getattr(char, "data", " ") or " ")
+            cursor_cell = (
+                focused
+                and not cursor_hidden
+                and row_index == cursor_y
+                and column == cursor_x
+            )
+            style_key = self._rich_style_key(char, cursor=cursor_cell)
+            if run_key is not None and style_key != run_key:
+                result.append("".join(run_chars), style=_cached_rich_style(run_key))
+                run_chars = []
+            run_key = style_key
+            run_chars.append(value)
+        if run_key is not None:
+            result.append("".join(run_chars), style=_cached_rich_style(run_key))
+        return result
+
+    def _invalidate_render_cache(self) -> None:
+        self._rendered_rows.clear()
+        self._render_screen = self.terminal.screen
+        self._render_geometry = (self.terminal.columns, self.terminal.rows)
+        self._render_cursor = None
+
     @classmethod
     def _rich_style(cls, char: object | None) -> Style:
-        if char is None:
-            return Style()
+        return _cached_rich_style(cls._rich_style_key(char))
+
+    @classmethod
+    def _rich_style_key(
+        cls,
+        char: object | None,
+        *,
+        cursor: bool = False,
+    ) -> TerminalStyleKey:
         fg = cls._rich_color(getattr(char, "fg", None))
         bg = cls._rich_color(getattr(char, "bg", None))
-        return Style(
-            color=fg,
-            bgcolor=bg,
-            bold=bool(getattr(char, "bold", False)),
-            italic=bool(getattr(char, "italics", False)),
-            underline=bool(getattr(char, "underscore", False)),
-            reverse=bool(getattr(char, "reverse", False)),
-            blink=bool(getattr(char, "blink", False)),
-            strike=bool(getattr(char, "strikethrough", False)),
+        return (
+            fg,
+            bg,
+            bool(getattr(char, "bold", False)),
+            bool(getattr(char, "italics", False)),
+            bool(getattr(char, "underscore", False)),
+            cursor or bool(getattr(char, "reverse", False)),
+            bool(getattr(char, "blink", False)),
+            bool(getattr(char, "strikethrough", False)),
         )
 
     @staticmethod
