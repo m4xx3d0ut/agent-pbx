@@ -25,6 +25,7 @@ TMUX_PANE_FORMAT = "\t".join(
         "#{window_name}",
         "#{alternate_on}",
         "#{session_attached}",
+        "#{window_id}",
     ]
 )
 DEFAULT_SUBMIT_DELAY_SECONDS = 0.08
@@ -67,6 +68,7 @@ class TmuxPane:
     window_name: str = ""
     alternate_on: bool = False
     session_attached: int = 0
+    window_id: str = ""
 
     @property
     def target_label(self) -> str:
@@ -91,7 +93,7 @@ def int_or_zero(value: str) -> int:
 
 def parse_pane_line(line: str) -> TmuxPane | None:
     parts = line.rstrip("\n").split("\t")
-    if len(parts) not in {11, 12, 14}:
+    if len(parts) not in {11, 12, 14, 15}:
         return None
     return TmuxPane(
         session_name=parts[0],
@@ -106,8 +108,9 @@ def parse_pane_line(line: str) -> TmuxPane | None:
         height=int_or_zero(parts[9]),
         history_size=int_or_zero(parts[10]),
         window_name=parts[11] if len(parts) >= 12 else "",
-        alternate_on=parts[12] == "1" if len(parts) == 14 else False,
-        session_attached=int_or_zero(parts[13]) if len(parts) == 14 else 0,
+        alternate_on=parts[12] == "1" if len(parts) >= 14 else False,
+        session_attached=int_or_zero(parts[13]) if len(parts) >= 14 else 0,
+        window_id=parts[14] if len(parts) >= 15 else "",
     )
 
 
@@ -458,6 +461,135 @@ def pane_start_command(target: str, *, tmux_bin: str = "tmux") -> str:
         ).strip()
         raise RuntimeError(message)
     return result.stdout.strip()
+
+
+def _runtime_tmux_command_prefix(
+    *,
+    tmux_bin: str,
+    socket_path: str | None,
+) -> list[str]:
+    """Build an exact runtime-server command prefix from a stored mapping."""
+
+    socket = str(socket_path or "").strip()
+    if not socket:
+        return [tmux_bin]
+    if not Path(socket).is_absolute():
+        raise ValueError("tmux runtime socket path must be absolute")
+    return [tmux_bin, "-S", socket]
+
+
+def pane_in_copy_mode(
+    target: str,
+    *,
+    socket_path: str | None = None,
+    tmux_bin: str = "tmux",
+) -> bool:
+    """Return whether the exact runtime pane is currently in a tmux mode."""
+
+    prefix = _runtime_tmux_command_prefix(
+        tmux_bin=tmux_bin,
+        socket_path=socket_path,
+    )
+    result = subprocess.run(
+        [*prefix, "display-message", "-p", "-t", target, "#{pane_in_mode}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (
+            result.stderr or result.stdout or "tmux pane mode lookup failed"
+        ).strip()
+        raise RuntimeError(message)
+    return result.stdout.strip() == "1"
+
+
+def enter_pane_copy_mode(
+    target: str,
+    *,
+    socket_path: str | None = None,
+    tmux_bin: str = "tmux",
+) -> bool:
+    """Enter tmux copy mode with exit-at-bottom behavior for one exact pane."""
+
+    if pane_in_copy_mode(
+        target,
+        socket_path=socket_path,
+        tmux_bin=tmux_bin,
+    ):
+        return False
+    prefix = _runtime_tmux_command_prefix(
+        tmux_bin=tmux_bin,
+        socket_path=socket_path,
+    )
+    result = subprocess.run(
+        [*prefix, "copy-mode", "-e", "-t", target],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (
+            result.stderr or result.stdout or "tmux copy mode activation failed"
+        ).strip()
+        raise RuntimeError(message)
+    return True
+
+
+def scroll_pane_copy_mode(
+    target: str,
+    direction: int,
+    *,
+    lines: int = 5,
+    socket_path: str | None = None,
+    tmux_bin: str = "tmux",
+) -> bool:
+    """Scroll an exact runtime pane without forwarding wheel input to Codex.
+
+    Upward scrolling enters copy mode when needed. Downward scrolling is a
+    no-op outside copy mode, so reaching live output can never turn a continued
+    swipe into prompt-history navigation in the child application.
+    """
+
+    normalized_direction = -1 if int(direction) < 0 else 1
+    amount = max(1, min(200, int(lines)))
+    active = pane_in_copy_mode(
+        target,
+        socket_path=socket_path,
+        tmux_bin=tmux_bin,
+    )
+    if normalized_direction < 0 and not active:
+        enter_pane_copy_mode(
+            target,
+            socket_path=socket_path,
+            tmux_bin=tmux_bin,
+        )
+        active = True
+    if not active:
+        return False
+    prefix = _runtime_tmux_command_prefix(
+        tmux_bin=tmux_bin,
+        socket_path=socket_path,
+    )
+    command = "scroll-up" if normalized_direction < 0 else "scroll-down"
+    result = subprocess.run(
+        [
+            *prefix,
+            "send-keys",
+            "-X",
+            "-t",
+            target,
+            "-N",
+            str(amount),
+            command,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (
+            result.stderr or result.stdout or "tmux copy mode scroll failed"
+        ).strip()
+        raise RuntimeError(message)
+    return True
 
 
 def _pane_pid(target: str, *, tmux_bin: str = "tmux") -> int | None:

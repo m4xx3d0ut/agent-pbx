@@ -8,6 +8,7 @@ from typing import Mapping, Sequence
 from rich.style import Style
 from rich.text import Text
 from textual import events
+from textual.message import Message
 from textual.timer import Timer
 from textual.widget import Widget
 
@@ -46,6 +47,39 @@ _COLOR_NAMES = {
     "brightwhite": "bright_white",
 }
 
+EMBEDDED_SCROLL_MODE_TMUX = "tmux"
+EMBEDDED_SCROLL_MODE_CHILD = "child"
+EMBEDDED_SCROLL_MODES = frozenset(
+    {EMBEDDED_SCROLL_MODE_TMUX, EMBEDDED_SCROLL_MODE_CHILD}
+)
+
+
+def normalize_embedded_scroll_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in EMBEDDED_SCROLL_MODES:
+        return normalized
+    return EMBEDDED_SCROLL_MODE_TMUX
+
+
+class TerminalScrollRequested(Message):
+    """Request tmux-owned history scrolling for an embedded terminal."""
+
+    def __init__(
+        self,
+        surface: Widget,
+        *,
+        direction: int,
+        ticks: int = 1,
+    ) -> None:
+        super().__init__()
+        self.surface = surface
+        self.direction = -1 if direction < 0 else 1
+        self.ticks = max(1, int(ticks))
+
+    @property
+    def control(self) -> Widget:
+        return self.surface
+
 
 def terminal_key_bytes(key: str, character: str | None = None) -> bytes | None:
     normalized = key.strip().lower().replace("_", "+")
@@ -76,10 +110,12 @@ class PbxTerminalSurface(Widget):
         id: str | None = None,
         history: int = 4_000,
         poll_interval: float = 0.03,
+        scroll_mode: str = EMBEDDED_SCROLL_MODE_TMUX,
     ) -> None:
         super().__init__(id=id)
         self.history = max(0, int(history))
         self.poll_interval = max(0.01, float(poll_interval))
+        self.scroll_mode = normalize_embedded_scroll_mode(scroll_mode)
         self.terminal = VirtualTerminal(80, 24, history=self.history)
         self.process: PtyProcess | None = None
         self.target = ""
@@ -151,6 +187,9 @@ class PbxTerminalSurface(Widget):
         self.process.write(data)
         return True
 
+    def set_scroll_mode(self, mode: str) -> None:
+        self.scroll_mode = normalize_embedded_scroll_mode(mode)
+
     def poll_pty(self) -> None:
         process = self.process
         if process is None:
@@ -207,6 +246,22 @@ class PbxTerminalSurface(Widget):
 
     async def _on_key(self, event: events.Key) -> None:
         normalized = event.key.strip().lower().replace("_", "+")
+        if (
+            normalized in {"shift+pageup", "shift+pagedown"}
+            and self.scroll_mode == EMBEDDED_SCROLL_MODE_TMUX
+            and self.attached
+            and not self.read_only_client
+        ):
+            self.post_message(
+                TerminalScrollRequested(
+                    self,
+                    direction=-1 if normalized == "shift+pageup" else 1,
+                    ticks=max(1, self.terminal.rows // 5),
+                )
+            )
+            event.stop()
+            event.prevent_default()
+            return
         if re.fullmatch(r"f(?:[1-9]|1[0-9]|2[0-4])", normalized):
             await super()._on_key(event)
             return
@@ -238,12 +293,40 @@ class PbxTerminalSurface(Widget):
             event.stop()
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        if self._write_mouse(64, event.x, event.y, event, release=False):
-            event.stop()
+        self._handle_mouse_scroll(event, direction=-1, raw_button=64)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        if self._write_mouse(65, event.x, event.y, event, release=False):
-            event.stop()
+        self._handle_mouse_scroll(event, direction=1, raw_button=65)
+
+    def _handle_mouse_scroll(
+        self,
+        event: events.MouseEvent,
+        *,
+        direction: int,
+        raw_button: int,
+    ) -> None:
+        if not self.attached or self.read_only_client:
+            return
+        # Shift is the explicit escape hatch for applications that need their
+        # own wheel protocol. The default path asks the parent TUI to drive the
+        # owning tmux pane's copy mode, keeping Codex prompt history untouched.
+        if self.scroll_mode == EMBEDDED_SCROLL_MODE_CHILD or event.shift:
+            if self._write_mouse(
+                raw_button,
+                event.x,
+                event.y,
+                event,
+                release=False,
+            ):
+                event.stop()
+                event.prevent_default()
+            return
+        delta = abs(int(getattr(event, "delta_y", 0) or 1))
+        self.post_message(
+            TerminalScrollRequested(self, direction=direction, ticks=delta)
+        )
+        event.stop()
+        event.prevent_default()
 
     def _write_mouse(
         self,

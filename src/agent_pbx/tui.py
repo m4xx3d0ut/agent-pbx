@@ -44,6 +44,7 @@ from textual.widgets import (
     Static,
     TabbedContent,
     TabPane,
+    Tabs,
     TextArea,
 )
 
@@ -82,7 +83,14 @@ from .workerbee_mcp import (
     inspect_workerbee_mcp,
 )
 from .contracts import ActionDefinition
-from .terminal import FunctionKeyPassthroughMap, PbxTerminalSurface
+from .terminal import (
+    EMBEDDED_SCROLL_MODE_CHILD,
+    EMBEDDED_SCROLL_MODE_TMUX,
+    FunctionKeyPassthroughMap,
+    PbxTerminalSurface,
+    TerminalScrollRequested,
+    normalize_embedded_scroll_mode,
+)
 from .runtime_tmux import (
     RuntimePopPlan,
     RuntimeServerMode,
@@ -323,6 +331,13 @@ TMUX_RUNTIME_SERVER_MODE_CHOICES = (
     ("Outer server when present", RuntimeServerMode.OUTER_IF_PRESENT.value),
     ("Require outer server", RuntimeServerMode.OUTER_REQUIRED.value),
 )
+EMBEDDED_TERMINAL_SCROLL_MODE_CHOICES = (
+    ("Tmux history (wheel/swipe)", EMBEDDED_SCROLL_MODE_TMUX),
+    ("Child application mouse input", EMBEDDED_SCROLL_MODE_CHILD),
+)
+EMBEDDED_TERMINAL_SCROLL_COALESCE_SECONDS = 0.03
+EMBEDDED_TERMINAL_SCROLL_LINES_PER_TICK = 5
+EMBEDDED_TERMINAL_SCROLL_MAX_LINES = 200
 MIN_TMUX_REFRESH_SECONDS = 0.25
 DEFAULT_AGENT_REFRESH_SECONDS = 2.0
 LOW_POWER_AGENT_REFRESH_SECONDS = 15.0
@@ -2857,6 +2872,34 @@ class NavigationTextArea(TextArea):
         await super()._on_key(event)
 
 
+class ReadingMarkdown(Markdown):
+    """Focusable Markdown reader with terminal-friendly keyboard scrolling."""
+
+    can_focus = True
+
+    async def _on_key(self, event: Key) -> None:
+        handle_joplin_shortcut = getattr(self.app, "handle_joplin_shortcut_key", None)
+        if handle_joplin_shortcut is not None and handle_joplin_shortcut(
+            event,
+            focused=self,
+        ):
+            return
+        action = {
+            "up": self.scroll_up,
+            "down": self.scroll_down,
+            "pageup": self.scroll_page_up,
+            "pagedown": self.scroll_page_down,
+            "home": self.scroll_home,
+            "end": self.scroll_end,
+        }.get(event.key)
+        if action is None:
+            await super()._on_key(event)
+            return
+        action(animate=False)
+        event.stop()
+        event.prevent_default()
+
+
 class TmuxStreamTextArea(NavigationTextArea):
     def _on_focus(self, event: Focus) -> None:
         super()._on_focus(event)
@@ -3793,6 +3836,7 @@ class SettingsScreen(ModalScreen[None]):
         tmux_features_available: bool,
         tmux_runtime_server_mode: str,
         embedded_terminal_enabled: bool,
+        embedded_terminal_scroll_mode: str,
         tmux_popout_mode: str,
         custom_theme_name: str,
         theme_name: str,
@@ -3811,6 +3855,9 @@ class SettingsScreen(ModalScreen[None]):
             tmux_runtime_server_mode
         ).value
         self.embedded_terminal_enabled = embedded_terminal_enabled
+        self.embedded_terminal_scroll_mode = normalize_embedded_scroll_mode(
+            embedded_terminal_scroll_mode
+        )
         self.tmux_popout_mode = tmux_popout_mode
         self.custom_theme_name = custom_theme_name
         self.theme_name = theme_name
@@ -3882,6 +3929,18 @@ class SettingsScreen(ModalScreen[None]):
                 )
                 embedded_terminal.disabled = not self.tmux_features_available
                 yield embedded_terminal
+                yield Static(
+                    "Embedded wheel/swipe behavior",
+                    id="embedded-terminal-scroll-mode-label",
+                )
+                embedded_scroll_mode = Select(
+                    EMBEDDED_TERMINAL_SCROLL_MODE_CHOICES,
+                    value=self.embedded_terminal_scroll_mode,
+                    allow_blank=False,
+                    id="embedded-terminal-scroll-mode",
+                )
+                embedded_scroll_mode.disabled = not self.tmux_features_available
+                yield embedded_scroll_mode
                 yield Static("Tmux pop-out behavior", id="tmux-popout-mode-label")
                 yield Select(
                     TMUX_POPOUT_MODE_CHOICES,
@@ -3935,6 +3994,9 @@ class SettingsScreen(ModalScreen[None]):
         elif event.select.id == "tmux-runtime-mode":
             event.stop()
             self.app.set_tmux_runtime_server_mode(str(event.value))  # type: ignore[attr-defined]
+        elif event.select.id == "embedded-terminal-scroll-mode":
+            event.stop()
+            self.app.set_embedded_terminal_scroll_mode(str(event.value))  # type: ignore[attr-defined]
         elif event.select.id == "tmux-popout-mode":
             event.stop()
             self.app.set_tmux_popout_mode(str(event.value))  # type: ignore[attr-defined]
@@ -5192,7 +5254,7 @@ class AgentPBXTUI(App[None]):
         ("s", "settings", "Settings"),
         Binding("f1", "focus_agents", "Agents", key_display="F1", priority=True),
         Binding("f2", "focus_events", "Events", key_display="F2", priority=True),
-        Binding("f3", "focus_right_pane", "View", key_display="F3", priority=True),
+        Binding("f3", "focus_right_pane", "Tabs", key_display="F3", priority=True),
         Binding("f4", "focus_latest_input", "Input", key_display="F4", priority=True),
         Binding("f5", "focus_operators", "Operators", key_display="F5", priority=True),
         Binding("f6", "prev_operator_fork", "Prev Fork", key_display="F6", priority=True),
@@ -5391,6 +5453,12 @@ class AgentPBXTUI(App[None]):
         self.embedded_terminal_v2_enabled = embedded_terminal_requested
         if not self.tmux_local_direct_context:
             self.embedded_terminal_v2_enabled = False
+        self.embedded_terminal_scroll_mode = normalize_embedded_scroll_mode(
+            self.settings.get(
+                "embedded_terminal_scroll_mode",
+                EMBEDDED_SCROLL_MODE_TMUX,
+            )
+        )
         self.tmux_popout_mode = str_setting(
             self.settings,
             "tmux_popout_mode",
@@ -5648,6 +5716,9 @@ class AgentPBXTUI(App[None]):
         self.tmux_terminal_client_id = f"tui-{os.getpid()}-{uuid.uuid4().hex[:12]}"
         self.embedded_terminal_agent_id: str | None = None
         self.embedded_terminal_target: str | None = None
+        self.embedded_terminal_scroll_pending = 0
+        self.embedded_terminal_scroll_worker_active = False
+        self.embedded_terminal_scroll_generation = 0
         self.tmux_pop_client_by_agent: dict[str, RuntimeTmuxClient] = {}
         self.tmux_panes: list[tmux_support.TmuxPane] = []
         self.tmux_refreshing = False
@@ -5687,6 +5758,15 @@ class AgentPBXTUI(App[None]):
         normalized = str(key or "").strip().lower().replace("_", "+")
         return bool(re.fullmatch(r"f(?:[1-9]|1[0-2])", normalized))
 
+    @classmethod
+    def pbx_owns_key_under_terminal_focus(cls, key: str) -> bool:
+        """Return whether PBX retains a key while the child terminal is focused."""
+
+        normalized = str(key or "").strip().lower().replace("_", "+")
+        return normalized == cls.COMMAND_PALETTE_BINDING or cls.is_plain_function_key(
+            normalized
+        )
+
     def embedded_terminal_surface(
         self,
         *,
@@ -5717,17 +5797,18 @@ class AgentPBXTUI(App[None]):
         return surface
 
     async def _check_bindings(self, key: str, priority: bool = False) -> bool:
-        """Let a focused writable terminal receive every non-PBX function key.
+        """Route focused-terminal keys through the central PBX ownership policy.
 
         Textual evaluates priority bindings before forwarding a key to the
         focused widget. The gate must therefore run here; action-level guards
         alone would still consume printable characters and control bytes.
+        Plain function keys and the command-palette key remain PBX-owned.
         """
 
         if (
             priority
             and self.embedded_terminal_surface(require_focus=True) is not None
-            and not self.is_plain_function_key(key)
+            and not self.pbx_owns_key_under_terminal_focus(key)
         ):
             return False
         return await super()._check_bindings(key, priority)
@@ -6623,9 +6704,9 @@ class AgentPBXTUI(App[None]):
 
     def composer_hotkeys_text(self) -> str:
         nav = (
-            "a Agents | e Events | v View | i Input"
+            "a Agents | e Events | v Tabs | i Input"
             if self.is_tiny_layout() or self.low_power_enabled
-            else "F1 Agents | F2 Events | F3 View | F4 Input"
+            else "F1 Agents | F2 Events | F3 Tabs | F4 Input"
         )
         text = f"{nav} | Shift+F2 Codex warnings | Enter send | Ctrl+J newline | Ctrl+W word"
         if self.tmux_features_available:
@@ -6635,12 +6716,13 @@ class AgentPBXTUI(App[None]):
     def tmux_hotkeys_text(self) -> str:
         if self.is_tiny_layout() or self.low_power_enabled:
             return (
-                "a Agt | e Evt | v View | i In | Shift+F2 Codex warnings | "
+                "a Agt | e Evt | v Tabs | i In | Shift+F2 Codex warnings | "
                 "Enter send | C-J nl | C-W word | C-T/F8 PBX"
             )
         return (
-            "F1 Agents | F2 Events | Shift+F2 Codex warnings | F3 View | "
-            "F4 Input | Enter send | Ctrl+J newline | Ctrl+W word | Ctrl+T/F8 PBX"
+            "F1 Agents | F2 Events | Shift+F2 Codex warnings | F3 Tabs | "
+            "F4 Input | Ctrl+P Palette | Enter send | Ctrl+J newline | "
+            "Ctrl+W word | Ctrl+T/F8 PBX"
         )
 
     def editor_hotkeys_text(self) -> str:
@@ -6658,12 +6740,19 @@ class AgentPBXTUI(App[None]):
             (
                 ActionDefinition("focus.agents", "Agents", "f1"),
                 ActionDefinition("focus.events", "Events", "f2"),
-                ActionDefinition("focus.view", "View", "f3"),
+                ActionDefinition("focus.tabs", "Tabs", "f3"),
                 ActionDefinition("focus.input", "Input", "f4"),
                 ActionDefinition("focus.operators", "Operators", "f5"),
                 ActionDefinition("operator.previous_fork", "Previous Fork", "f6"),
                 ActionDefinition("operator.next_fork", "Next Fork", "f7"),
                 ActionDefinition("terminal.toggle", "Tmux", "f8"),
+                ActionDefinition(
+                    "terminal.scrollback",
+                    "Enter tmux scrollback",
+                    "/tmux scrollback",
+                    focus_scope="terminal",
+                    capability="terminal_input",
+                ),
                 ActionDefinition("editor.fullscreen", "Editor Full", "f9"),
                 ActionDefinition(
                     "terminal.function_key_passthrough",
@@ -6743,7 +6832,10 @@ class AgentPBXTUI(App[None]):
                             )
                         with Vertical(id="tmux-panel"):
                             yield Static("Tmux: -", id="tmux-status")
-                            yield PbxTerminalSurface(id="pbx-terminal-surface")
+                            yield PbxTerminalSurface(
+                                id="pbx-terminal-surface",
+                                scroll_mode=self.embedded_terminal_scroll_mode,
+                            )
                             yield TmuxStreamTextArea(id="tmux-stream", read_only=True)
                             with Horizontal(id="tmux-actions"):
                                 yield Button("Auto", id="tmux-auto")
@@ -7011,7 +7103,10 @@ class AgentPBXTUI(App[None]):
                             cursor_type="row",
                             show_row_labels=False,
                         )
-                        yield Markdown("Select a note to read it.", id="joplin-reader")
+                        yield ReadingMarkdown(
+                            "Select a note to read it.",
+                            id="joplin-reader",
+                        )
                         yield NavigationTextArea(id="joplin-body")
                         with Vertical(id="joplin-actions"):
                             with Horizontal(id="joplin-crud-actions"):
@@ -7244,6 +7339,25 @@ class AgentPBXTUI(App[None]):
             self.palette_toggle_embedded_terminal,
         )
         yield SystemCommand(
+            "/tmux scrollback",
+            "Enter copy mode for the focused embedded tmux pane",
+            self.palette_tmux_scrollback,
+        )
+        yield SystemCommand(
+            "/tmux scroll mode history",
+            "Use wheel and swipe for tmux-owned history",
+            lambda: self.set_embedded_terminal_scroll_mode(
+                EMBEDDED_SCROLL_MODE_TMUX
+            ),
+        )
+        yield SystemCommand(
+            "/tmux scroll mode child",
+            "Forward wheel and swipe to the Codex child terminal",
+            lambda: self.set_embedded_terminal_scroll_mode(
+                EMBEDDED_SCROLL_MODE_CHILD
+            ),
+        )
+        yield SystemCommand(
             "/tmux pop out",
             "Open the selected runtime in its native tmux client",
             self.palette_tmux_pop_out,
@@ -7452,6 +7566,14 @@ class AgentPBXTUI(App[None]):
 
     def palette_toggle_embedded_terminal(self) -> None:
         self.set_embedded_terminal_enabled(not self.embedded_terminal_v2_enabled)
+
+    def palette_tmux_scrollback(self) -> None:
+        self.run_async_worker(
+            self.enter_embedded_tmux_scrollback,
+            name="tmux-enter-scrollback",
+            group="embedded-terminal-scroll",
+            exclusive=True,
+        )
 
     def palette_tmux_pop_out(self) -> None:
         self.run_worker(
@@ -9312,6 +9434,7 @@ class AgentPBXTUI(App[None]):
                 tmux_features_available=self.tmux_features_available,
                 tmux_runtime_server_mode=self.tmux_runtime_server_mode,
                 embedded_terminal_enabled=self.embedded_terminal_v2_enabled,
+                embedded_terminal_scroll_mode=self.embedded_terminal_scroll_mode,
                 tmux_popout_mode=self.tmux_popout_mode,
                 custom_theme_name=self.custom_theme_name,
                 theme_name=self.ui_theme,
@@ -9364,7 +9487,14 @@ class AgentPBXTUI(App[None]):
     async def action_focus_right_pane(self) -> None:
         if not await self.ensure_agent_pane_visible():
             return
-        self.focus_right_pane_content()
+        tabbed = self.query_one_or_none("#agent-tabs", TabbedContent)
+        if tabbed is None:
+            return
+        try:
+            tabs = tabbed.query_one(Tabs)
+        except NoMatches:
+            return
+        tabs.focus()
 
     async def action_focus_latest_input(self) -> None:
         if not await self.ensure_agent_pane_visible():
@@ -9446,7 +9576,12 @@ class AgentPBXTUI(App[None]):
             if target is None:
                 target = self.query_one_or_none("#operator-kb", DataTable)
         elif self.active_agent_tab == "joplin-tab":
-            target = self.query_one_or_none("#joplin-body", TextArea)
+            scope = self.joplin_selection_key(self.selected_agent_id or "")
+            mode = self.joplin_panel_state.mode_for(scope)
+            if mode in {"edit", "conflict"}:
+                target = self.query_one_or_none("#joplin-body", TextArea)
+            else:
+                target = self.query_one_or_none("#joplin-reader", ReadingMarkdown)
             if target is None:
                 target = self.query_one_or_none("#joplin-notes", DataTable)
         if target is None:
@@ -13100,7 +13235,7 @@ class AgentPBXTUI(App[None]):
         signature = (
             identity.server_id,
             pane.session_name,
-            pane.window_id,
+            pane.window_id or pane.window_index,
             pane.pane_id,
             pane_pid,
             session_id,
@@ -13112,7 +13247,7 @@ class AgentPBXTUI(App[None]):
             "server_mode": identity.effective_mode.value,
             "socket_path": identity.socket_path,
             "session_name": pane.session_name,
-            "window_id": pane.window_index,
+            "window_id": pane.window_id or pane.window_index,
             "window_name": pane.window_name,
             "pane_id": pane.pane_id,
             "pane_pid": pane_pid,
@@ -13256,6 +13391,7 @@ class AgentPBXTUI(App[None]):
             # The renewal timer owns lease refresh. Reacquiring on every pane
             # refresh caused database writes and event-stream churn while the
             # same client already held the lease.
+            surface.set_scroll_mode(self.embedded_terminal_scroll_mode)
             surface.sync_geometry()
             self.apply_tmux_class()
             return True
@@ -13296,6 +13432,7 @@ class AgentPBXTUI(App[None]):
                 target=target,
                 cwd=str(leased.get("cwd") or Path.home()),
             )
+            surface.set_scroll_mode(self.embedded_terminal_scroll_mode)
         except Exception as exc:
             self.embedded_terminal_agent_id = None
             self.embedded_terminal_target = None
@@ -13307,13 +13444,15 @@ class AgentPBXTUI(App[None]):
         status = self.query_one_or_none("#tmux-status", Static)
         if status is not None:
             status.update(
-                f"Tmux: native {leased.get('pane_id')} · F2 Events · Shift+F2 Codex warnings"
+                f"Tmux: native {leased.get('pane_id')} · F3 Tabs/Tab terminal · "
+                "Ctrl+P palette · Shift+PgUp history"
             )
         surface.focus()
         return True
 
     async def detach_embedded_tmux_terminal(self, *, release_lease: bool) -> None:
         agent_id = self.embedded_terminal_agent_id
+        self.clear_embedded_terminal_scroll_requests()
         surface = self.query_one_or_none(
             "#pbx-terminal-surface", PbxTerminalSurface
         )
@@ -13324,6 +13463,149 @@ class AgentPBXTUI(App[None]):
         self.apply_tmux_class()
         if release_lease and agent_id:
             await self.release_tmux_writer_lease(agent_id)
+
+    def clear_embedded_terminal_scroll_requests(self) -> None:
+        self.embedded_terminal_scroll_generation += 1
+        self.embedded_terminal_scroll_pending = 0
+        self.embedded_terminal_scroll_worker_active = False
+
+    def on_terminal_scroll_requested(
+        self,
+        event: TerminalScrollRequested,
+    ) -> None:
+        surface = self.embedded_terminal_surface()
+        if surface is None or event.control is not surface:
+            return
+        signed_ticks = event.ticks * (-1 if event.direction < 0 else 1)
+        pending = self.embedded_terminal_scroll_pending + signed_ticks
+        max_ticks = max(
+            1,
+            EMBEDDED_TERMINAL_SCROLL_MAX_LINES
+            // EMBEDDED_TERMINAL_SCROLL_LINES_PER_TICK,
+        )
+        self.embedded_terminal_scroll_pending = max(
+            -max_ticks,
+            min(max_ticks, pending),
+        )
+        if self.mouse_debug_enabled:
+            self.log.debug(
+                "embedded terminal scroll request "
+                f"agent={self.embedded_terminal_agent_id!r} "
+                f"ticks={signed_ticks} pending={self.embedded_terminal_scroll_pending}"
+            )
+        if not self.embedded_terminal_scroll_worker_active:
+            self.embedded_terminal_scroll_worker_active = True
+            generation = self.embedded_terminal_scroll_generation
+            self.run_async_worker(
+                lambda generation=generation: self.flush_embedded_terminal_scroll_requests(
+                    generation
+                ),
+                name="embedded-terminal-scroll",
+                group="embedded-terminal-scroll",
+                exit_on_error=False,
+            )
+        event.stop()
+
+    async def flush_embedded_terminal_scroll_requests(
+        self,
+        generation: int,
+    ) -> None:
+        try:
+            while generation == self.embedded_terminal_scroll_generation:
+                await asyncio.sleep(EMBEDDED_TERMINAL_SCROLL_COALESCE_SECONDS)
+                ticks = self.embedded_terminal_scroll_pending
+                self.embedded_terminal_scroll_pending = 0
+                if not ticks:
+                    return
+                await self.scroll_embedded_tmux_terminal(ticks, generation)
+        finally:
+            if generation == self.embedded_terminal_scroll_generation:
+                self.embedded_terminal_scroll_worker_active = False
+
+    async def scroll_embedded_tmux_terminal(
+        self,
+        ticks: int,
+        generation: int,
+    ) -> bool:
+        agent_id = self.embedded_terminal_agent_id
+        surface = self.embedded_terminal_surface()
+        if not agent_id or surface is None:
+            return False
+        mapping = await self.fetch_tmux_runtime_mapping(agent_id)
+        if (
+            generation != self.embedded_terminal_scroll_generation
+            or mapping is None
+            or agent_id != self.embedded_terminal_agent_id
+            or surface is not self.embedded_terminal_surface()
+        ):
+            return False
+        pane_id = str(mapping.get("pane_id") or "").strip()
+        if not pane_id or str(mapping.get("state") or "") != "ready":
+            return False
+        mapped_target = f"{mapping.get('server_id')}:{pane_id}"
+        if (
+            mapped_target != self.embedded_terminal_target
+            or surface.target != mapped_target
+        ):
+            return False
+        direction = -1 if ticks < 0 else 1
+        lines = min(
+            EMBEDDED_TERMINAL_SCROLL_MAX_LINES,
+            max(1, abs(ticks)) * EMBEDDED_TERMINAL_SCROLL_LINES_PER_TICK,
+        )
+        try:
+            acted = await asyncio.to_thread(
+                tmux_support.scroll_pane_copy_mode,
+                pane_id,
+                direction,
+                lines=lines,
+                socket_path=str(mapping.get("socket_path") or "") or None,
+            )
+        except Exception as exc:
+            self.notify(f"Embedded tmux scrollback failed: {exc}", severity="warning")
+            return False
+        return acted
+
+    async def enter_embedded_tmux_scrollback(self) -> bool:
+        agent_id = self.embedded_terminal_agent_id
+        surface = self.embedded_terminal_surface()
+        if not agent_id or surface is None:
+            self.notify(
+                "Focus a live embedded tmux terminal before entering scrollback.",
+                severity="warning",
+            )
+            return False
+        mapping = await self.fetch_tmux_runtime_mapping(agent_id)
+        if (
+            mapping is None
+            or agent_id != self.embedded_terminal_agent_id
+            or surface is not self.embedded_terminal_surface()
+        ):
+            self.notify("The embedded tmux runtime mapping changed.", severity="warning")
+            return False
+        pane_id = str(mapping.get("pane_id") or "").strip()
+        if not pane_id or str(mapping.get("state") or "") != "ready":
+            self.notify("The embedded tmux runtime is not ready.", severity="warning")
+            return False
+        mapped_target = f"{mapping.get('server_id')}:{pane_id}"
+        if (
+            mapped_target != self.embedded_terminal_target
+            or surface.target != mapped_target
+        ):
+            self.notify("The embedded tmux target no longer matches its mapping.", severity="warning")
+            return False
+        try:
+            await asyncio.to_thread(
+                tmux_support.enter_pane_copy_mode,
+                pane_id,
+                socket_path=str(mapping.get("socket_path") or "") or None,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to enter tmux scrollback: {exc}", severity="warning")
+            return False
+        surface.focus()
+        self.notify("Tmux scrollback active; use arrows, Page Up/Down, or swipe.")
+        return True
 
     def schedule_tmux_writer_lease_renewal(self) -> None:
         if not self.embedded_terminal_agent_id:
@@ -28186,6 +28468,25 @@ class AgentPBXTUI(App[None]):
         self.notify(f"Embedded native tmux terminal {state}.")
         return enabled
 
+    def set_embedded_terminal_scroll_mode(self, mode: str) -> str:
+        self.embedded_terminal_scroll_mode = normalize_embedded_scroll_mode(mode)
+        surface = self.query_one_or_none(
+            "#pbx-terminal-surface", PbxTerminalSurface
+        )
+        if surface is not None:
+            surface.set_scroll_mode(self.embedded_terminal_scroll_mode)
+        self.clear_embedded_terminal_scroll_requests()
+        self.save_settings()
+        label = dict(
+            (value, label)
+            for label, value in EMBEDDED_TERMINAL_SCROLL_MODE_CHOICES
+        ).get(
+            self.embedded_terminal_scroll_mode,
+            self.embedded_terminal_scroll_mode,
+        )
+        self.notify(f"Embedded wheel/swipe mode set to {label}.")
+        return self.embedded_terminal_scroll_mode
+
     async def disable_embedded_terminal(self) -> None:
         agent_id = self.selected_agent_id
         await self.detach_embedded_tmux_terminal(release_lease=True)
@@ -28505,6 +28806,7 @@ class AgentPBXTUI(App[None]):
             "tmux_capture_lines": self.tmux_capture_lines,
             "tmux_runtime_server_mode": self.tmux_runtime_server_mode,
             "embedded_terminal_v2": self.embedded_terminal_v2_enabled,
+            "embedded_terminal_scroll_mode": self.embedded_terminal_scroll_mode,
             "tmux_popout_mode": self.tmux_popout_mode,
             "tmux_agent_targets": self.tmux_agent_targets,
             "selected_operator_fork_target_by_operator": (

@@ -33,6 +33,7 @@ from agent_pbx.tui import (
     ModelElevationScreen,
     OperatorHistoryScreen,
     OperatorSessionCandidate,
+    ReadingMarkdown,
     PLAN_PBX_CONTEXT_PROMPT,
     PlanSelection,
     OPERATOR_MCP_APPROVAL_SERVERS_ENV,
@@ -81,8 +82,19 @@ from agent_pbx.tui import (
     slash_completion_direction,
     tmux_features_available,
 )
-from agent_pbx.terminal import PbxTerminalSurface, function_key_sequence
-from agent_pbx.runtime_tmux import RuntimeTmuxClient
+from agent_pbx.terminal import (
+    EMBEDDED_SCROLL_MODE_CHILD,
+    PbxTerminalSurface,
+    TerminalScrollRequested,
+    function_key_sequence,
+)
+from agent_pbx.runtime_tmux import (
+    OuterTmuxContext,
+    RuntimeServerMode,
+    RuntimeTmuxClient,
+    TmuxServerIdentity,
+)
+from textual.app import App, ComposeResult
 from textual.events import Click, Key, MouseDown
 from textual.widgets import (
     Button,
@@ -94,6 +106,7 @@ from textual.widgets import (
     Select,
     Static,
     TabbedContent,
+    Tabs,
     TextArea,
 )
 
@@ -340,6 +353,7 @@ def test_tui_constructs() -> None:
     assert app.agent_blink_enabled is True
     assert app.tmux_direct_enabled is False
     assert app.embedded_terminal_v2_enabled is False
+    assert app.embedded_terminal_scroll_mode == "tmux"
     assert app.event_stream_v2_enabled is False
     assert app.legacy_thread_enabled is True
     assert app.legacy_terminal_capture_enabled is True
@@ -638,6 +652,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
                 "tmux_capture_lines": 250,
                 "tmux_runtime_server_mode": "outer_if_present",
                 "embedded_terminal_v2": True,
+                "embedded_terminal_scroll_mode": "child",
                 "tmux_popout_mode": "switch_client",
                 "tmux_agent_targets": {"agent-1": "%1"},
                 "selected_operator_fork_target_by_operator": {
@@ -675,6 +690,7 @@ def test_tui_reads_saved_settings(tmp_path: Path) -> None:
     assert app.tmux_capture_lines == 250
     assert app.tmux_runtime_server_mode == "outer_if_present"
     assert app.embedded_terminal_v2_enabled is True
+    assert app.embedded_terminal_scroll_mode == EMBEDDED_SCROLL_MODE_CHILD
     assert app.tmux_popout_mode == "switch_client"
     assert app.tmux_agent_targets == {"agent-1": "%1"}
     assert app.selected_operator_fork_target_by_operator == {
@@ -903,6 +919,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     app.tmux_direct_agent_modes = {"agent-1": True, "agent-2": False}
     app.tmux_capture_lines = 333
     app.tmux_runtime_server_mode = "outer_if_present"
+    app.embedded_terminal_scroll_mode = EMBEDDED_SCROLL_MODE_CHILD
     app.tmux_agent_targets = {"agent-1": "%2"}
     app.selected_operator_fork_target_by_operator = {
         "operator-0": "operator-0-fork-agent-1:%7"
@@ -927,6 +944,7 @@ def test_tui_saves_settings(tmp_path: Path) -> None:
     assert saved["tmux_direct_agent_modes"] == {"agent-1": True, "agent-2": False}
     assert saved["tmux_capture_lines"] == 333
     assert saved["tmux_runtime_server_mode"] == "outer_if_present"
+    assert saved["embedded_terminal_scroll_mode"] == EMBEDDED_SCROLL_MODE_CHILD
     assert saved["tmux_agent_targets"] == {"agent-1": "%2"}
     assert saved["selected_operator_fork_target_by_operator"] == {
         "operator-0": "operator-0-fork-agent-1:%7"
@@ -1457,7 +1475,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         hotkey_text = str(hotkeys.renderable)
         assert "F1 Agents" in hotkey_text
         assert "F2 Events" in hotkey_text
-        assert "F3 View" in hotkey_text
+        assert "F3 Tabs" in hotkey_text
         assert "F4 Input" in hotkey_text
         assert "Ctrl+J newline" in hotkey_text
         assert "Ctrl+W word" in hotkey_text
@@ -2027,7 +2045,7 @@ async def test_tui_function_keys_focus_split_sections() -> None:
         await pilot.pause()
         agents = app.query_one("#agents", DataTable)
         events = app.query_one("#events", DataTable)
-        stream = app.query_one("#tmux-stream", TextArea)
+        tabs = app.query_one("#agent-tabs", TabbedContent).query_one(Tabs)
         message = app.query_one("#tmux-message", TextArea)
 
         await pilot.press("f1")
@@ -2040,10 +2058,15 @@ async def test_tui_function_keys_focus_split_sections() -> None:
 
         await pilot.press("f3")
         await pilot.pause()
-        assert app.focused is stream
+        assert app.focused is tabs
+
+        await pilot.press("right")
+        await pilot.pause()
+        assert app.active_agent_tab == "codex-tab"
 
         await pilot.press("f4")
         await pilot.pause()
+        assert app.active_agent_tab == "latest-tab"
         assert app.focused is message
 
 
@@ -2106,13 +2129,188 @@ async def test_tui_shift_f2_writes_directly_to_embedded_terminal() -> None:
 
         app.on_key(Key("f14", None))
         await pilot.pause()
-        assert written == [function_key_sequence(2)]
+        app.on_key(Key("f15", None))
+        await pilot.pause()
+        assert written == [function_key_sequence(2), function_key_sequence(3)]
 
         await pilot.press("f2")
         await pilot.pause()
         assert app.focused is app.query_one("#events", DataTable)
 
     assert app.embedded_terminal_agent_id is None
+
+
+async def test_tui_coalesces_embedded_wheel_into_exact_tmux_history_scroll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scrolled: list[tuple[str, int, int, str | None]] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, _data: bytes) -> None:
+            return None
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    def fake_scroll(
+        pane_id: str,
+        direction: int,
+        *,
+        lines: int,
+        socket_path: str | None,
+    ) -> bool:
+        scrolled.append((pane_id, direction, lines, socket_path))
+        return True
+
+    monkeypatch.setattr(tmux_support, "scroll_pane_copy_mode", fake_scroll)
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-a"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server:%7"
+        app.tmux_runtime_mapping_by_agent["agent-a"] = {
+            "state": "ready",
+            "server_id": "server",
+            "pane_id": "%7",
+            "socket_path": "/tmp/pbx.sock",
+        }
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        surface.process = FakeProcess()  # type: ignore[assignment]
+        surface.target = "server:%7"
+        surface.focus()
+        app.on_terminal_scroll_requested(
+            TerminalScrollRequested(surface, direction=-1, ticks=1)
+        )
+        app.on_terminal_scroll_requested(
+            TerminalScrollRequested(surface, direction=-1, ticks=2)
+        )
+        await pilot.pause(0.15)
+
+    assert scrolled == [("%7", -1, 15, "/tmp/pbx.sock")]
+
+
+async def test_tui_embedded_scroll_request_is_discarded_after_selection_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scrolled: list[str] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, _data: bytes) -> None:
+            return None
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    monkeypatch.setattr(
+        tmux_support,
+        "scroll_pane_copy_mode",
+        lambda pane_id, *_args, **_kwargs: scrolled.append(pane_id) or True,
+    )
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-a"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server:%7"
+        app.tmux_runtime_mapping_by_agent["agent-a"] = {
+            "state": "ready",
+            "server_id": "server",
+            "pane_id": "%7",
+            "socket_path": "/tmp/pbx.sock",
+        }
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        surface.process = FakeProcess()  # type: ignore[assignment]
+        surface.target = "server:%7"
+        app.on_terminal_scroll_requested(
+            TerminalScrollRequested(surface, direction=-1, ticks=1)
+        )
+        app.selected_agent_id = "agent-b"
+        await pilot.pause(0.1)
+
+    assert scrolled == []
+
+
+async def test_tui_explicit_scrollback_targets_selected_embedded_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered: list[tuple[str, str | None]] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, _data: bytes) -> None:
+            return None
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    def fake_enter(
+        pane_id: str,
+        *,
+        socket_path: str | None,
+    ) -> bool:
+        entered.append((pane_id, socket_path))
+        return True
+
+    monkeypatch.setattr(tmux_support, "enter_pane_copy_mode", fake_enter)
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-a"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server:%7"
+        app.tmux_runtime_mapping_by_agent["agent-a"] = {
+            "state": "ready",
+            "server_id": "server",
+            "pane_id": "%7",
+            "socket_path": "/tmp/pbx.sock",
+        }
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        surface.process = FakeProcess()  # type: ignore[assignment]
+        surface.target = "server:%7"
+        app.apply_tmux_class()
+        await pilot.pause()
+
+        assert await app.enter_embedded_tmux_scrollback() is True
+        await pilot.pause()
+        assert app.focused is surface
+
+    assert entered == [("%7", "/tmp/pbx.sock")]
 
 
 async def test_tui_terminal_focus_bypasses_printable_and_control_priority_bindings(
@@ -2179,7 +2377,6 @@ async def test_tui_terminal_focus_bypasses_printable_and_control_priority_bindin
         ("shift+r", "R", b"R"),
         ("shift+c", "C", b"C"),
         ("ctrl+c", None, b"\x03"),
-        ("ctrl+p", None, b"\x10"),
     )
 
     async with app.run_test() as pilot:
@@ -2200,8 +2397,140 @@ async def test_tui_terminal_focus_bypasses_printable_and_control_priority_bindin
             await app.on_event(Key(key, character))
         await pilot.pause()
 
-        assert invoked == []
-        assert written == [expected for _key, _character, expected in keys]
+    assert invoked == []
+    assert written == [expected for _key, _character, expected in keys]
+
+
+async def test_tui_ctrl_p_opens_palette_instead_of_writing_to_terminal() -> None:
+    written: list[bytes] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        app.selected_agent_id = "agent-a"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server:%7"
+        terminal = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        terminal.process = FakeProcess()  # type: ignore[assignment]
+        terminal.target = "server:%7"
+        app.apply_tmux_class()
+        terminal.focus()
+        await pilot.pause()
+
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+
+        assert app.screen.id == "--command-palette"
+        assert written == []
+
+
+async def test_tui_tabs_into_embedded_terminal_and_arrows_reach_tmux_client() -> None:
+    written: list[bytes] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        app.selected_agent_id = "agent-a"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server:%7"
+        terminal = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        terminal.process = FakeProcess()  # type: ignore[assignment]
+        terminal.target = "server:%7"
+        app.apply_tmux_class()
+        await pilot.pause()
+
+        await pilot.press("f3")
+        await pilot.pause()
+        assert app.focused is app.query_one("#agent-tabs", TabbedContent).query_one(
+            Tabs
+        )
+
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app.focused is terminal
+
+        await pilot.press("up", "down")
+        await pilot.pause()
+
+    assert written == [b"\x1b[A", b"\x1b[B"]
+
+
+async def test_tui_joplin_reader_accepts_tab_focus_and_arrow_scrolling() -> None:
+    class ReaderApp(App[None]):
+        CSS = """
+        #notes { height: 3; }
+        #reader { height: 8; overflow-y: auto; }
+        """
+
+        def compose(self) -> ComposeResult:
+            yield DataTable(id="notes")
+            yield ReadingMarkdown(id="reader")
+
+        def on_mount(self) -> None:
+            self.query_one("#notes", DataTable).add_column("Title")
+
+    app = ReaderApp()
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        reader = app.query_one("#reader", ReadingMarkdown)
+        await reader.update("\n\n".join(f"## Section {index}\n\nBody" for index in range(80)))
+        notes = app.query_one("#notes", DataTable)
+        notes.focus()
+        await pilot.pause()
+
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app.focused is reader
+
+        before = reader.scroll_y
+        await pilot.press("down", "down", "down")
+        await pilot.pause()
+        assert reader.scroll_y > before
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert reader.scroll_y < before + 3
 
 
 async def test_tui_priority_shortcuts_still_run_outside_terminal_focus(
@@ -2393,7 +2722,16 @@ async def test_tui_waits_for_visible_terminal_layout_before_cold_attach(
             is True
         )
         await pilot.pause()
-        assert attached_sizes[-1] == (surface.size.width, surface.size.height)
+        # Focus and surrounding status/footer updates may settle one frame
+        # after the disposable client starts. The regular PTY geometry sync is
+        # authoritative; the initial attach still must use the resized width
+        # rather than the previously hidden rectangle.
+        surface.poll_pty()
+        assert surface.process is not None
+        assert (surface.process.columns, surface.process.rows) == (
+            surface.size.width,
+            surface.size.height,
+        )
         assert attached_sizes[-1][0] > visible_size[0]
 
     assert attached_sizes
@@ -2527,7 +2865,7 @@ async def test_tui_plain_keys_focus_split_sections_for_tiny_terminals() -> None:
         await pilot.pause()
         agents = app.query_one("#agents", DataTable)
         events = app.query_one("#events", DataTable)
-        stream = app.query_one("#tmux-stream", TextArea)
+        tabs = app.query_one("#agent-tabs", TabbedContent).query_one(Tabs)
         message = app.query_one("#tmux-message", TextArea)
 
         await pilot.press("a")
@@ -2540,7 +2878,7 @@ async def test_tui_plain_keys_focus_split_sections_for_tiny_terminals() -> None:
 
         await pilot.press("v")
         await pilot.pause()
-        assert app.focused is stream
+        assert app.focused is tabs
 
         await pilot.press("i")
         await pilot.pause()
@@ -2580,7 +2918,7 @@ async def test_tui_function_keys_switch_compact_views() -> None:
         app.render_agents()
         agents = app.query_one("#agents", DataTable)
         events = app.query_one("#events", DataTable)
-        stream = app.query_one("#tmux-stream", TextArea)
+        tabs = app.query_one("#agent-tabs", TabbedContent).query_one(Tabs)
         message = app.query_one("#tmux-message", TextArea)
 
         await pilot.press("f2")
@@ -2593,7 +2931,7 @@ async def test_tui_function_keys_switch_compact_views() -> None:
         await pilot.pause()
         assert app.compact_view == "agent"
         assert app.selected_agent_id == "agent-1"
-        assert app.focused is stream
+        assert app.focused is tabs
 
         await pilot.press("f4")
         await pilot.pause()
@@ -2996,6 +3334,80 @@ async def test_tui_pop_transaction_reuses_only_resolved_live_client(
     assert await app.pop_runtime("in") is True
     assert executed[-1][-4:] == ("-c", "/dev/pts/9", "-t", "agent-pbx")
     assert "agent-1" not in app.tmux_pop_client_by_agent
+
+
+async def test_tui_tmux_runtime_mapping_uses_stable_window_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_local_direct_context = True
+    app.tmux_runtime_server = TmuxServerIdentity(
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        "outer-server",
+        "/tmp/tmux-1000/default",
+        True,
+        True,
+    )
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "metadata": {"codex_session_id": "session-1"},
+        }
+    }
+    pane = tmux_support.TmuxPane(
+        "agent-pbx-agents",
+        "2",
+        "0",
+        "%9",
+        True,
+        "node",
+        "agent-1",
+        "/home/me/agent-pbx",
+        100,
+        30,
+        0,
+        "agent-1",
+        True,
+        0,
+        "@42",
+    )
+    posted: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"state": "ready", "window_id": "@42", "pane_id": "%9"}
+
+    class FakeClient:
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict[str, object],
+            headers: dict[str, str],
+        ) -> FakeResponse:
+            posted["url"] = url
+            posted["json"] = json
+            posted["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_outer_tmux_context",
+        lambda _identity: OuterTmuxContext("agent-pbx", "@1", "%1", "/dev/pts/1"),
+    )
+    monkeypatch.setattr(tmux_support, "pane_root_pid", lambda _pane_id: 1234)
+    monkeypatch.setattr("agent_pbx.tui.runtime_process_start_ticks", lambda _pid: 5678)
+    monkeypatch.setattr(app, "api_client", lambda: FakeClient())
+
+    mapped = await app.ensure_tmux_runtime_mapping("agent-1", pane)
+
+    assert mapped is True
+    assert posted["url"] == "/v2/tmux/runtimes/agent-1"
+    assert posted["json"]["window_id"] == "@42"  # type: ignore[index]
+    assert app.tmux_runtime_mapping_signature_by_agent["agent-1"][2] == "@42"
 
 
 async def test_tui_tmux_direct_is_tracked_per_agent() -> None:

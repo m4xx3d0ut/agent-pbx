@@ -39,13 +39,14 @@ def test_tmux_parse_pane_line_keeps_legacy_output_compatible() -> None:
 
 def test_tmux_parse_pane_line_includes_terminal_and_attachment_state() -> None:
     pane = tmux.parse_pane_line(
-        "operators\t2\t0\t%88\t1\tcodex\toperator-5\t/tmp/project\t160\t48\t900\toperator-5\t1\t0"
+        "operators\t2\t0\t%88\t1\tcodex\toperator-5\t/tmp/project\t160\t48\t900\toperator-5\t1\t0\t@42"
     )
 
     assert pane is not None
     assert pane.window_name == "operator-5"
     assert pane.alternate_on is True
     assert pane.session_attached == 0
+    assert pane.window_id == "@42"
 
 
 def test_tmux_choose_pane_for_agent_prefers_matching_codex_pane() -> None:
@@ -652,6 +653,85 @@ def test_tmux_pane_start_command_reads_format(monkeypatch) -> None:
     assert calls == [
         ["tmux", "display-message", "-p", "-t", "%42", "#{pane_start_command}"]
     ]
+
+
+def test_tmux_copy_mode_scroll_enters_exact_runtime_and_scrolls_up(
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+    mode_checks = iter(("0\n", "0\n"))
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        stdout = next(mode_checks) if "display-message" in args else ""
+        return subprocess.CompletedProcess(args, 0, stdout, "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.scroll_pane_copy_mode(
+        "%42",
+        -1,
+        lines=15,
+        socket_path="/tmp/pbx.sock",
+    ) is True
+    assert calls == [
+        [
+            "tmux",
+            "-S",
+            "/tmp/pbx.sock",
+            "display-message",
+            "-p",
+            "-t",
+            "%42",
+            "#{pane_in_mode}",
+        ],
+        [
+            "tmux",
+            "-S",
+            "/tmp/pbx.sock",
+            "display-message",
+            "-p",
+            "-t",
+            "%42",
+            "#{pane_in_mode}",
+        ],
+        ["tmux", "-S", "/tmp/pbx.sock", "copy-mode", "-e", "-t", "%42"],
+        [
+            "tmux",
+            "-S",
+            "/tmp/pbx.sock",
+            "send-keys",
+            "-X",
+            "-t",
+            "%42",
+            "-N",
+            "15",
+            "scroll-up",
+        ],
+    ]
+
+
+def test_tmux_copy_mode_scroll_down_is_noop_outside_history(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "0\n", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.scroll_pane_copy_mode(
+        "%42",
+        1,
+        socket_path="/tmp/pbx.sock",
+    ) is False
+    assert len(calls) == 1
+    assert "display-message" in calls[0]
+
+
+def test_tmux_copy_mode_scroll_rejects_relative_runtime_socket() -> None:
+    with pytest.raises(ValueError, match="must be absolute"):
+        tmux.scroll_pane_copy_mode("%42", -1, socket_path="relative.sock")
 
 
 def test_tmux_quit_pane_sends_q_and_waits(monkeypatch) -> None:

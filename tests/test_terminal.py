@@ -9,6 +9,7 @@ import uuid
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.events import Key, MouseScrollDown, MouseScrollUp
 
 from agent_pbx.terminal.conformance import (
     run_dedicated_tmux_conformance,
@@ -17,7 +18,12 @@ from agent_pbx.terminal.conformance import (
 from agent_pbx.terminal.keys import FunctionKeyPassthroughMap, function_key_sequence
 from agent_pbx.terminal.pty import PtyProcess
 from agent_pbx.terminal.screen import VirtualTerminal
-from agent_pbx.terminal.widget import PbxTerminalSurface, terminal_key_bytes
+from agent_pbx.terminal.widget import (
+    EMBEDDED_SCROLL_MODE_CHILD,
+    PbxTerminalSurface,
+    TerminalScrollRequested,
+    terminal_key_bytes,
+)
 from agent_pbx.runtime_tmux import tmux_client_attach_command
 
 
@@ -52,6 +58,80 @@ def test_terminal_key_bytes_cover_control_and_unicode_input(
     expected: bytes,
 ) -> None:
     assert terminal_key_bytes(key, character) == expected
+
+
+async def test_terminal_surface_routes_wheel_to_typed_tmux_scroll_request() -> None:
+    requests: list[tuple[int, int]] = []
+
+    class FakeProcess:
+        alive = True
+
+        def write(self, _data: bytes) -> None:
+            raise AssertionError("tmux-owned wheel must not reach the child PTY")
+
+        def close(self) -> None:
+            self.alive = False
+
+    class TerminalApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield PbxTerminalSurface(id="terminal")
+
+        def on_terminal_scroll_requested(
+            self,
+            event: TerminalScrollRequested,
+        ) -> None:
+            requests.append((event.direction, event.ticks))
+
+    app = TerminalApp()
+    async with app.run_test() as pilot:
+        surface = app.query_one("#terminal", PbxTerminalSurface)
+        surface.process = FakeProcess()  # type: ignore[assignment]
+        surface.target = "server:%7"
+        surface.on_mouse_scroll_up(
+            MouseScrollUp(surface, 0, 0, 0, -3, 0, False, False, False)
+        )
+        surface.on_mouse_scroll_down(
+            MouseScrollDown(surface, 0, 0, 0, 2, 0, False, False, False)
+        )
+        await surface._on_key(Key("shift+pageup", None))
+        await pilot.pause()
+
+    assert requests[:2] == [(-1, 3), (1, 2)]
+    assert requests[2][0] == -1
+    assert requests[2][1] >= 1
+
+
+async def test_terminal_surface_child_mode_and_shift_wheel_forward_mouse_bytes() -> None:
+    written: list[bytes] = []
+
+    class FakeProcess:
+        alive = True
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            self.alive = False
+
+    class TerminalApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield PbxTerminalSurface(id="terminal")
+
+    app = TerminalApp()
+    async with app.run_test():
+        surface = app.query_one("#terminal", PbxTerminalSurface)
+        surface.process = FakeProcess()  # type: ignore[assignment]
+        surface.target = "server:%7"
+        surface.set_scroll_mode(EMBEDDED_SCROLL_MODE_CHILD)
+        surface.on_mouse_scroll_up(
+            MouseScrollUp(surface, 0, 0, 0, -1, 0, False, False, False)
+        )
+        surface.set_scroll_mode("tmux")
+        surface.on_mouse_scroll_down(
+            MouseScrollDown(surface, 1, 2, 0, 1, 0, True, False, False)
+        )
+
+    assert written == [b"\x1b[<64;1;1M", b"\x1b[<69;2;3M"]
 
 
 def test_pty_and_virtual_terminal_stream_and_resize() -> None:
@@ -373,5 +453,6 @@ def test_mapped_tmux_client_attaches_to_exact_window_and_pane() -> None:
     not __import__("os").getenv("AGENT_PBX_TEST_OUTER_TMUX"),
     reason="outer tmux mutation requires explicit test opt-in",
 )
+@pytest.mark.serial
 def test_normal_tmux_client_conformance_on_outer_server() -> None:
     assert run_outer_tmux_conformance().ok
