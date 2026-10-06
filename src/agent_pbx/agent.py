@@ -261,9 +261,12 @@ def runbook_markdown() -> str:
     return """\
 # Agent PBX Runbook
 
-Agent PBX is a local/LAN coordination bus for agent sessions. The agent still
-does normal work in its shell and code workspace; PBX adds shared status,
-operator follow-up queues, detailed report history, and TUI visibility.
+Agent PBX is a durable control and coordination plane for engineering-agent
+sessions. It owns Agent and Operator identity, lifecycle, routing, runtime
+mapping, and shared operational state while the attached Codex session performs
+normal work in its shell and project workspace. MCP reporting, follow-up queues,
+detailed history, and TUI visibility are control-plane interfaces rather than
+the product boundary.
 
 ## Session Start
 

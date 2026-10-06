@@ -1,17 +1,75 @@
 # Agent PBX
 
+**A runtime-grounded Agentic Engineering Control Plane.**
+
 <p align="center">
-  <img src="docs/assets/agent-pbx-tui.gif" alt="Agent PBX TUI showing caller agents, operator agents, campaigns, and workflow tabs" width="1200">
+  <img src="docs/assets/agent-pbx-tui.gif" alt="Agent PBX v2 showing an embedded native tmux and Codex runtime, managed Agent and Operator launch, campaigns, model configuration, WorkerBee status, project workflows, and Joplin reading mode" width="1200">
 </p>
 
-Agent PBX is a local/LAN MCP service for collecting agent turn reports, storing
-full response details, and queuing follow-up commands for agents to poll.
+Agent PBX gives engineering operators one durable control surface for Agents,
+Operators, Codex runtimes, projects, campaigns, handoffs, approvals, knowledge,
+and lifecycle. It preserves native Codex interaction through PBX-managed tmux
+sessions while keeping identity, workspace ownership, routing, policy, model
+profiles, and audit under Agent PBX control.
+
+Codex owns the reasoning and execution loop inside each attached session. Tmux
+owns terminal persistence and scrollback. Agent PBX owns the durable system
+around them. When WorkerBee is configured, runtime and infrastructure evidence
+can close the loop from implementation through deployment and validation.
+
+We call the resulting engineering practice **Agentic Application Stack
+Operations**, or **Agentic StackOps**.
+
+## What Agent PBX Operates
+
+- **Durable runtimes:** preserve Agents, Operators, sessions, models, panes,
+  workspaces, and execution evidence across TUI and CLI restarts.
+- **Native terminals:** interact with a normal tmux client and Codex renderer
+  inside the retained `Latest` tab.
+- **Engineering coordination:** manage Operators, forks, campaigns, handoffs,
+  reviews, alerts, approvals, and lifecycle operations.
+- **Project systems:** connect GitHub, Joplin, the project editor, managed skill
+  packs, and optional WorkerBee runtime truth.
+- **Multiple control surfaces:** use the local TUI, SSH-native attachment,
+  scoped remote clients, HTTP/WSS, and MCP against the same durable state.
+
+```mermaid
+flowchart LR
+    HUMAN[Engineering operator] --> PBX[Agent PBX control plane]
+
+    PBX --> ID[Durable Agents and Operators]
+    PBX --> POLICY[Policy, routing, approvals, lifecycle, audit]
+    PBX --> UI[TUI, SSH, API, WSS, MCP]
+
+    ID --> TMUX[PBX-managed tmux runtimes]
+    TMUX --> CODEX[Codex root sessions]
+    CODEX --> CHILDREN[Codex subagents]
+
+    PBX <--> WB[WorkerBee, optional]
+    WB <--> STACK[Application, platform, and infrastructure truth]
+```
+
+| Layer | Owns |
+|---|---|
+| Agent PBX | Durable identity, workspace ownership, topology, routing, policy, approvals, lifecycle, campaigns, handoffs, and audit |
+| Codex root | Reasoning, local task decomposition, tools, code execution, testing, and review |
+| Codex subagents | Bounded work beneath one Codex root |
+| tmux | PTYs, panes, sessions, persistence, attachment, geometry, and scrollback |
+| WorkerBee | Optional application, infrastructure, simulation, deployment, and runtime truth |
+| TUI | Operator interaction and rendering; closing it does not stop the managed runtime |
+
+See [the architecture overview](docs/architecture.md),
+[the v2 release notes](docs/releases/v2.0.0.md), and
+[the accepted architecture decisions](docs/adr/README.md) for the complete
+control-plane and compatibility boundaries.
+
+### Why PBX?
 
 The name borrows from telephony. A PBX, traditionally a private branch exchange,
 is a switchboard that routes calls between extensions and outside lines. Agent
-PBX applies that pattern to agent sessions: agents report into one hub,
-operators review the shared history, and follow-up commands are routed back to
-the right agent.
+PBX applies that pattern to engineering-agent runtimes: durable identities stay
+addressable while sessions, Operators, forks, tools, and human control surfaces
+connect through one governed exchange.
 
 ## Install
 

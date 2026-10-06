@@ -1,5 +1,9 @@
 # Agent PBX v2 installation and upgrade
 
+Agent PBX is a runtime-grounded Agentic Engineering Control Plane. Read the
+[architecture overview](architecture.md) for the ownership boundary among Agent
+PBX, Codex, tmux, WorkerBee, and the local or remote operator surfaces.
+
 Agent PBX v2 supports three operating shapes. They use the same hash-verified
 Python release bundle and differ in the host tools and services enabled.
 
