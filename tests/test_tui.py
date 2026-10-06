@@ -31,6 +31,7 @@ from agent_pbx.tui import (
     CustomSlashCommand,
     EditorCloseConfirmScreen,
     ModelElevationScreen,
+    ManagedProjectPickerScreen,
     OperatorHistoryScreen,
     OperatorSessionCandidate,
     ReadingMarkdown,
@@ -8570,6 +8571,19 @@ def test_tui_extracts_event_agent_id() -> None:
     assert app.event_agent_id({"payload": None}) is None
 
 
+def test_tui_palette_keeps_explicit_operator_selection(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.selected_agent_id = "operator-0"
+    monkeypatch.setattr(app, "focused_agent_table_id", lambda: None)
+    monkeypatch.setattr(app, "agent_id_at_cursor", lambda: "caller-at-stale-cursor")
+    monkeypatch.setattr(app, "operator_id_at_cursor", lambda: "operator-0")
+
+    assert app.selected_or_cursor_agent_id() == "operator-0"
+
+    monkeypatch.setattr(app, "focused_agent_table_id", lambda: "caller-in-focus")
+    assert app.selected_or_cursor_agent_id() == "caller-in-focus"
+
+
 def test_tui_theme_toggle_updates_app_theme() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -8831,6 +8845,43 @@ async def test_tui_f10_launches_workspace_under_terminal_focus() -> None:
 
     assert opened == [True]
     assert written == [function_key_sequence(10)]
+
+
+async def test_managed_project_picker_dismisses_before_selecting_launched_agent() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    launched: list[dict[str, object]] = []
+
+    async def fake_launch(**request: object) -> bool:
+        assert not isinstance(app.screen, ManagedProjectPickerScreen)
+        assert app.query_one("#agent-id", Input) is not None
+        launched.append(request)
+        return True
+
+    app.launch_managed_workspace_from_picker = fake_launch  # type: ignore[method-assign]
+    project = {
+        "path": "/tmp/demo",
+        "name": "demo",
+        "branch": "dev",
+        "available": True,
+        "owned_by": [],
+    }
+
+    async with app.run_test() as pilot:
+        app.push_screen(ManagedProjectPickerScreen([project], ["/tmp"]))
+        await pilot.pause()
+        app.screen.query_one("#managed-project-launch", Button).press()
+        await pilot.pause()
+
+    assert launched == [
+        {
+            "project_path": "/tmp/demo",
+            "agent_id": "",
+            "profile_id": "sol-high",
+            "runtime_server_mode": "dedicated",
+            "launch_mode": "agent",
+            "existing_owner_ids": [],
+        }
+    ]
 
 
 async def test_tui_codex_model_selector_displays_sol_postures() -> None:

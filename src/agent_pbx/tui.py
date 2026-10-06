@@ -4114,18 +4114,24 @@ class ManagedProjectPickerScreen(ModalScreen[None]):
         if not self.selected_path:
             self.app.notify("Select a Git project first.", severity="warning")
             return
-        launched = await self.app.launch_managed_workspace_from_picker(  # type: ignore[attr-defined]
-            project_path=self.selected_path,
-            agent_id=self.query_one("#managed-agent-id", Input).value,
-            profile_id=str(self.query_one("#managed-agent-profile", Select).value),
-            runtime_server_mode=str(
+        launch_request = {
+            "project_path": self.selected_path,
+            "agent_id": self.query_one("#managed-agent-id", Input).value,
+            "profile_id": str(self.query_one("#managed-agent-profile", Select).value),
+            "runtime_server_mode": str(
                 self.query_one("#managed-agent-runtime-mode", Select).value
             ),
-            launch_mode=str(self.query_one("#managed-launch-mode", Select).value),
-            existing_owner_ids=self.selected_owners,
+            "launch_mode": str(self.query_one("#managed-launch-mode", Select).value),
+            "existing_owner_ids": self.selected_owners,
+        }
+        # Managed launch selects the new Agent and attaches its terminal. Pop
+        # the modal first so app-level widget queries resolve against the main
+        # PBX screen instead of this temporary picker.
+        self.dismiss()
+        await asyncio.sleep(0)
+        await self.app.launch_managed_workspace_from_picker(  # type: ignore[attr-defined]
+            **launch_request,
         )
-        if launched:
-            self.dismiss()
 
 
 class RuntimeMigrationScreen(ModalScreen[None]):
@@ -17395,14 +17401,17 @@ class AgentPBXTUI(App[None]):
         focused_agent_id = self.focused_agent_table_id()
         if focused_agent_id:
             return focused_agent_id
+        # Once focus leaves the entity tables (for example, for the command
+        # palette), preserve the identity the operator explicitly selected.
+        # A stale Agents-table cursor must not override a selected Operator.
+        if self.selected_agent_id:
+            return self.selected_agent_id
         cursor_agent_id = self.agent_id_at_cursor()
         if cursor_agent_id:
             return cursor_agent_id
         cursor_operator_id = self.operator_id_at_cursor()
         if cursor_operator_id:
             return cursor_operator_id
-        if self.selected_agent_id:
-            return self.selected_agent_id
         agent_input = self.query_one_or_none("#agent-id", Input)
         if agent_input is not None:
             value = agent_input.value.strip()
