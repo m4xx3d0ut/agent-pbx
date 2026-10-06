@@ -1126,6 +1126,24 @@ Use `FOREGROUND` and `BACKGROUND` for normal text and the terminal base.
 `Settings -> Theme` or `/theme <name>` from the palette to switch back to your
 custom theme if another theme is selected.
 
+### Managed Workspace Launch
+
+The v2 project picker discovers Git repositories beneath daemon-approved roots.
+Configure one or more roots in the daemon environment; use `:` between roots on
+Linux and macOS:
+
+```bash
+AGENT_PBX_PROJECT_ROOTS="$HOME/git:$HOME/worktrees"
+```
+
+The daemon reads this value at startup, so restart the Agent PBX daemon after
+changing it. Press `F10` or run `/workspace launch` to choose a repository and
+launch either a caller Agent or a caller Agent plus its root Operator and
+default edit fork. `/agent launch` remains an alias for the same picker, while
+`/operator start` and `Shift+O` start an Operator for the selected registered
+caller. Plain `F10` remains PBX-owned under embedded-terminal focus;
+`Shift+F10` sends F10 to Codex.
+
 Agent PBX v2 enables the native local tmux path by default when the TUI uses a
 loopback daemon and `tmux` is available. `Latest` embeds a PTY-backed normal
 tmux client attached to the selected PBX-managed runtime. Codex keeps its native

@@ -482,6 +482,12 @@ def test_tui_operator_bindings_and_mcp_command_helpers() -> None:
         for binding in app.BINDINGS
     )
     assert any(
+        getattr(binding, "key", None) == "f10"
+        and getattr(binding, "action", None) == "launch_workspace"
+        and getattr(binding, "priority", False)
+        for binding in app.BINDINGS
+    )
+    assert any(
         getattr(binding, "key", None) == "shift+o"
         and getattr(binding, "action", None) == "start_operator"
         for binding in app.BINDINGS
@@ -8488,6 +8494,8 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/codex model sol-xhigh" in titles
     assert "/codex model default sol-max" in titles
     assert "/codex model default sol-xhigh" in titles
+    assert "/workspace launch" in titles
+    assert "/agent launch" in titles
     assert "/tmux" in titles
     assert "/latest" in titles
     assert "/thread" in titles
@@ -8548,6 +8556,155 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/gitdiff" not in titles
     assert "/gitpush" not in titles
     assert "/gitstageandcommit" not in titles
+
+
+async def test_tui_managed_workspace_reuses_caller_and_starts_operator() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    selected: list[str] = []
+    started: list[str] = []
+    app.agents = {
+        "codex-demo": {
+            "agent_id": "codex-demo",
+            "agent_type": "caller",
+            "project": "demo",
+            "status": "waiting",
+            "last_seen_at": 1.0,
+            "metadata": {
+                "cwd": "/tmp/demo",
+                "codex_session_id": "session-demo",
+            },
+        }
+    }
+
+    async def fake_select(agent_id: str) -> None:
+        selected.append(agent_id)
+        app.selected_agent_id = agent_id
+
+    async def fake_start_operator(
+        agent_id: str | None = None,
+        *,
+        source_caller_agent_id: str | None = None,
+    ) -> None:
+        assert agent_id is None
+        started.append(str(source_caller_agent_id))
+
+    app.select_agent = fake_select  # type: ignore[method-assign]
+    app.start_operator_agent = fake_start_operator  # type: ignore[method-assign]
+    app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    launched = await app.launch_managed_workspace_from_picker(
+        project_path="/tmp/demo",
+        agent_id="",
+        profile_id="sol-high",
+        runtime_server_mode="dedicated",
+        launch_mode="agent_operator",
+        existing_owner_ids=["codex-demo"],
+    )
+
+    assert launched is True
+    assert selected == ["codex-demo"]
+    assert started == ["codex-demo"]
+
+
+async def test_tui_managed_workspace_bootstraps_new_caller_before_operator() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    sent: list[tuple[str, str]] = []
+    started: list[str] = []
+
+    async def fake_launch(**_kwargs: object) -> bool:
+        app.selected_agent_id = "codex-demo"
+        app.agents["codex-demo"] = {
+            "agent_id": "codex-demo",
+            "agent_type": "caller",
+            "project": "demo",
+            "status": "online",
+            "last_seen_at": 1.0,
+            "metadata": {"cwd": "/tmp/demo"},
+        }
+        return True
+
+    async def fake_send(agent_id: str, prompt: str) -> bool:
+        sent.append((agent_id, prompt))
+        return True
+
+    async def fake_wait(agent_id: str, **_kwargs: object) -> bool:
+        app.agents[agent_id]["metadata"]["codex_session_id"] = "session-demo"
+        return True
+
+    async def fake_start_operator(
+        agent_id: str | None = None,
+        *,
+        source_caller_agent_id: str | None = None,
+    ) -> None:
+        assert agent_id is None
+        started.append(str(source_caller_agent_id))
+
+    app.launch_managed_agent_from_picker = fake_launch  # type: ignore[method-assign]
+    app.send_text_to_tmux = fake_send  # type: ignore[method-assign]
+    app.wait_for_managed_caller_registration = fake_wait  # type: ignore[method-assign]
+    app.start_operator_agent = fake_start_operator  # type: ignore[method-assign]
+    app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    launched = await app.launch_managed_workspace_from_picker(
+        project_path="/tmp/demo",
+        agent_id="codex-demo",
+        profile_id="sol-high",
+        runtime_server_mode="dedicated",
+        launch_mode="agent_operator",
+    )
+
+    assert launched is True
+    assert sent[0][0] == "codex-demo"
+    assert "startup registration only" in sent[0][1]
+    assert started == ["codex-demo"]
+
+
+async def test_tui_f10_launches_workspace_under_terminal_focus() -> None:
+    opened: list[bool] = []
+    written: list[bytes] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    async def fake_open() -> None:
+        opened.append(True)
+
+    app.open_managed_project_picker = fake_open  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-a"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server:%7"
+        terminal = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        terminal.process = FakeProcess()  # type: ignore[assignment]
+        terminal.target = "server:%7"
+        app.apply_tmux_class()
+        terminal.focus()
+        await pilot.pause()
+
+        await pilot.press("f10")
+        await pilot.pause()
+        app.on_key(Key("f22", None))
+        await pilot.pause()
+
+    assert opened == [True]
+    assert written == [function_key_sequence(10)]
 
 
 async def test_tui_codex_model_selector_displays_sol_postures() -> None:

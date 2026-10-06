@@ -674,6 +674,8 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/agents prune stale",
     "/agents prune forks",
     "/agents prune undo",
+    "/workspace launch",
+    "/agent launch",
     "/hide agent",
     "/show hidden agents",
     "/unhide agent",
@@ -4010,10 +4012,11 @@ class ManagedProjectPickerScreen(ModalScreen[None]):
         self.projects = projects
         self.roots = roots
         self.selected_path = ""
+        self.selected_owners: list[str] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="managed-project-picker"):
-            yield Static("Launch Managed Agent", id="managed-project-picker-title")
+            yield Static("Launch Project Workspace", id="managed-project-picker-title")
             yield Static(
                 "Approved roots: " + (", ".join(self.roots) or "none"),
                 id="managed-project-roots",
@@ -4022,11 +4025,21 @@ class ManagedProjectPickerScreen(ModalScreen[None]):
             yield Input(placeholder="Optional Agent ID", id="managed-agent-id")
             yield Select(
                 (
+                    ("Agent", "agent"),
+                    ("Agent + root Operator", "agent_operator"),
+                ),
+                value="agent",
+                allow_blank=False,
+                id="managed-launch-mode",
+            )
+            yield Select(
+                (
+                    ("Sol 5.6 / high", "sol-high"),
                     ("Sol 5.6 / xhigh", "sol-xhigh"),
                     ("Terra 5.6 / xhigh", "terra-xhigh"),
                     ("Terra 5.6 / max", "terra-max"),
                 ),
-                value="sol-xhigh",
+                value="sol-high",
                 allow_blank=False,
                 id="managed-agent-profile",
             )
@@ -4055,14 +4068,35 @@ class ManagedProjectPickerScreen(ModalScreen[None]):
                 key=path,
             )
         if self.projects:
-            first = str(self.projects[0].get("path") or "")
+            first_item = self.projects[0]
+            first = str(first_item.get("path") or "")
             if first:
                 self.selected_path = first
+                owners = first_item.get("owned_by")
+                self.selected_owners = (
+                    [str(owner) for owner in owners]
+                    if isinstance(owners, list)
+                    else []
+                )
                 table.move_cursor(row=0)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "managed-projects":
             self.selected_path = str(event.row_key.value)
+            selected = next(
+                (
+                    item
+                    for item in self.projects
+                    if str(item.get("path") or "") == self.selected_path
+                ),
+                {},
+            )
+            owners = selected.get("owned_by") if isinstance(selected, dict) else []
+            self.selected_owners = (
+                [str(owner) for owner in owners]
+                if isinstance(owners, list)
+                else []
+            )
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "managed-project-close":
@@ -4073,13 +4107,15 @@ class ManagedProjectPickerScreen(ModalScreen[None]):
         if not self.selected_path:
             self.app.notify("Select a Git project first.", severity="warning")
             return
-        launched = await self.app.launch_managed_agent_from_picker(  # type: ignore[attr-defined]
+        launched = await self.app.launch_managed_workspace_from_picker(  # type: ignore[attr-defined]
             project_path=self.selected_path,
             agent_id=self.query_one("#managed-agent-id", Input).value,
             profile_id=str(self.query_one("#managed-agent-profile", Select).value),
             runtime_server_mode=str(
                 self.query_one("#managed-agent-runtime-mode", Select).value
             ),
+            launch_mode=str(self.query_one("#managed-launch-mode", Select).value),
+            existing_owner_ids=self.selected_owners,
         )
         if launched:
             self.dismiss()
@@ -4568,6 +4604,7 @@ class AgentPBXTUI(App[None]):
     #tmux-runtime-mode,
     #tmux-popout-mode,
     #managed-agent-profile,
+    #managed-launch-mode,
     #managed-agent-runtime-mode {
         height: 3;
     }
@@ -5260,6 +5297,13 @@ class AgentPBXTUI(App[None]):
         Binding("f6", "prev_operator_fork", "Prev Fork", key_display="F6", priority=True),
         Binding("f7", "next_operator_fork", "Next Fork", key_display="F7", priority=True),
         Binding("f9", "toggle_editor_fullscreen", "Editor Full", key_display="F9"),
+        Binding(
+            "f10",
+            "launch_workspace",
+            "Launch Workspace",
+            key_display="F10",
+            priority=True,
+        ),
         Binding("shift+o", "start_operator", "Start Operator", key_display="O"),
         Binding("y", "operator_history", "Operator History", priority=True),
         Binding("u", "resume_operator", "Resume Operator", priority=True),
@@ -6754,6 +6798,7 @@ class AgentPBXTUI(App[None]):
                     capability="terminal_input",
                 ),
                 ActionDefinition("editor.fullscreen", "Editor Full", "f9"),
+                ActionDefinition("workspace.launch", "Launch Workspace", "f10"),
                 ActionDefinition(
                     "terminal.function_key_passthrough",
                     "Codex function key",
@@ -7472,8 +7517,13 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/agents prune forks", "Preview safe operator-fork pruning", self.palette_agents_prune_forks)
         yield SystemCommand("/agents prune undo", "Undo the latest agent prune batch", self.palette_agents_prune_undo)
         yield SystemCommand(
+            "/workspace launch",
+            "Choose a Git project and launch an Agent or Agent + Operator",
+            self.palette_managed_agent_launch,
+        )
+        yield SystemCommand(
             "/agent launch",
-            "Choose a Git project and launch a managed Agent",
+            "Choose a Git project and launch a managed workspace",
             self.palette_managed_agent_launch,
         )
         yield SystemCommand(
@@ -7667,7 +7717,14 @@ class AgentPBXTUI(App[None]):
         projects = payload.get("projects") if isinstance(payload, dict) else []
         roots = payload.get("roots") if isinstance(payload, dict) else []
         if not isinstance(projects, list) or not projects:
-            self.notify("No Git projects were found in approved roots.", severity="warning")
+            root_text = ", ".join(str(item) for item in roots) if isinstance(roots, list) else ""
+            self.notify(
+                "No Git projects were found in approved roots"
+                + (f": {root_text}." if root_text else ".")
+                + " Configure AGENT_PBX_PROJECT_ROOTS in the daemon environment "
+                "and restart the daemon after changing it.",
+                severity="warning",
+            )
             return
         self.push_screen(
             ManagedProjectPickerScreen(
@@ -7726,6 +7783,122 @@ class AgentPBXTUI(App[None]):
         self.notify(
             f"Launched {launched_id} on {payload.get('model')} in {project_path}."
         )
+        return True
+
+    def managed_workspace_caller_owner(
+        self,
+        owner_ids: Iterable[str],
+    ) -> str | None:
+        callers = sorted(
+            {
+                str(owner_id)
+                for owner_id in owner_ids
+                if str(owner_id) in self.agents
+                and self.agent_type(self.agents[str(owner_id)]) == CALLER_AGENT_TYPE
+            }
+        )
+        return callers[0] if len(callers) == 1 else None
+
+    async def wait_for_managed_caller_registration(
+        self,
+        agent_id: str,
+        *,
+        timeout_seconds: float = 30.0,
+    ) -> bool:
+        deadline = asyncio.get_running_loop().time() + max(0.1, timeout_seconds)
+        while True:
+            try:
+                response = await self.api_client().get(
+                    "/v1/agents",
+                    params={"include_hidden": "true"},
+                    headers=auth_headers(self.token),
+                    timeout=10,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except Exception:
+                payload = []
+            for item in payload if isinstance(payload, list) else []:
+                if not isinstance(item, dict) or item.get("agent_id") != agent_id:
+                    continue
+                self.agents[agent_id] = item
+                if self.operator_fork_start_blocker(agent_id) is None:
+                    return True
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.5)
+
+    async def launch_managed_workspace_from_picker(
+        self,
+        *,
+        project_path: str,
+        agent_id: str,
+        profile_id: str,
+        runtime_server_mode: str,
+        launch_mode: str,
+        existing_owner_ids: Iterable[str] = (),
+    ) -> bool:
+        mode = str(launch_mode or "agent").strip().lower()
+        if mode not in {"agent", "agent_operator"}:
+            self.notify(f"Unknown workspace launch mode: {launch_mode}", severity="error")
+            return False
+
+        owners = [str(owner) for owner in existing_owner_ids if str(owner)]
+        caller_id = self.managed_workspace_caller_owner(owners)
+        if owners and caller_id is None:
+            self.notify(
+                "The project has no unique caller Agent owner; select the intended "
+                "caller before starting an Operator.",
+                severity="error",
+            )
+            return False
+        if caller_id is None:
+            launched = await self.launch_managed_agent_from_picker(
+                project_path=project_path,
+                agent_id=agent_id,
+                profile_id=profile_id,
+                runtime_server_mode=runtime_server_mode,
+            )
+            if not launched:
+                return False
+            caller_id = self.selected_agent_id
+        elif caller_id in self.agents:
+            await self.select_agent(caller_id)
+            self.notify(f"Using existing caller Agent {caller_id} for this workspace.")
+
+        if mode == "agent":
+            return True
+        if not caller_id:
+            self.notify("Managed launch did not return a caller Agent id.", severity="error")
+            return False
+
+        if self.operator_fork_start_blocker(caller_id) is not None:
+            bootstrap = (
+                "Use Agent PBX in report mode. Register this Codex session under "
+                f"the existing Agent PBX id `{caller_id}`, send a waiting report, "
+                "then stop at the Codex prompt. This is startup registration only; "
+                "do not begin project work."
+            )
+            if not await self.send_text_to_tmux(caller_id, bootstrap):
+                self.notify(
+                    f"Agent {caller_id} launched, but startup registration could not "
+                    "be sent. Select it and use /operator start after it registers.",
+                    severity="warning",
+                )
+                return True
+            self.notify(
+                f"Waiting for {caller_id} to publish its Codex session before "
+                "starting the Operator."
+            )
+            if not await self.wait_for_managed_caller_registration(caller_id):
+                self.notify(
+                    f"Agent {caller_id} is running, but its Codex session has not "
+                    "registered yet. Use /operator start after registration completes.",
+                    severity="warning",
+                )
+                return True
+
+        await self.start_operator_agent(source_caller_agent_id=caller_id)
         return True
 
     async def preview_selected_agent_pane_adoption(self) -> dict[str, Any] | None:
@@ -9605,6 +9778,13 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.start_operator_agent(),
             name="start-operator",
+            exclusive=True,
+        )
+
+    def action_launch_workspace(self) -> None:
+        self.run_worker(
+            self.open_managed_project_picker(),
+            name="managed-project-picker",
             exclusive=True,
         )
 
