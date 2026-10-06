@@ -83,6 +83,22 @@ python -m pytest
 agent-pbx mcp serve --host 127.0.0.1 --port 8765
 ```
 
+Bare `python -m pytest` remains the sequential diagnostic path. For the full
+bounded parallel suite followed by the host-resource serial tail, run:
+
+```bash
+scripts/test_full.sh
+AGENT_PBX_TEST_WORKERS=4 scripts/test_full.sh
+```
+
+The default local worker count is four and uses pytest-xdist work stealing so
+the large Textual test module can be distributed by test instead of being
+pinned to one worker. Run `scripts/test_full.sh --serial` for a complete
+single-process parity check. Tests marked `serial` are excluded from all xdist
+workers and run afterward in the controller process. See
+[test execution and qualification](docs/testing.md) for worker-count evidence,
+resource-isolation rules, and failure reproduction.
+
 The server defaults to localhost. LAN binding requires bearer authentication,
 TLS, and explicit operator intent. V2 remote credentials support observer and
 controller roles, audience and expiry, optional client/Agent binding, immediate
