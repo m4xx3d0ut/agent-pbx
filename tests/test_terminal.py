@@ -304,6 +304,34 @@ def test_terminal_surface_reuses_clean_rendered_rows() -> None:
     assert surface._rendered_rows[1] is not cached[1]
 
 
+def test_terminal_surface_transition_covers_stale_frame_and_blocks_input() -> None:
+    written: list[bytes] = []
+
+    class FakeProcess:
+        alive = True
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+    surface = PbxTerminalSurface()
+    surface.terminal = VirtualTerminal(30, 4)
+    surface.terminal.feed(b"stale agent frame")
+    surface.process = FakeProcess()  # type: ignore[assignment]
+    surface.target = "server:%7"
+
+    surface.begin_transition("Switching native terminal to agent-b...")
+
+    assert surface.transitioning is True
+    assert "Switching native terminal to agent-b" in surface.render().plain
+    assert "stale agent frame" not in surface.render().plain
+    assert surface.write(b"unsafe") is False
+    assert written == []
+
+    surface.end_transition()
+    assert surface.transitioning is False
+    assert "stale agent frame" in surface.render().plain
+
+
 async def test_terminal_surface_streams_input_and_resizes() -> None:
     class TerminalApp(App[None]):
         def compose(self) -> ComposeResult:

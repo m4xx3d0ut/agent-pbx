@@ -5773,6 +5773,7 @@ class AgentPBXTUI(App[None]):
         self.tmux_terminal_client_id = f"tui-{os.getpid()}-{uuid.uuid4().hex[:12]}"
         self.embedded_terminal_agent_id: str | None = None
         self.embedded_terminal_target: str | None = None
+        self.embedded_terminal_transition_agent_id: str | None = None
         self.embedded_terminal_scroll_pending = 0
         self.embedded_terminal_scroll_worker_active = False
         self.embedded_terminal_scroll_generation = 0
@@ -5843,7 +5844,11 @@ class AgentPBXTUI(App[None]):
         surface = self.query_one_or_none(
             "#pbx-terminal-surface", PbxTerminalSurface
         )
-        if surface is None or not surface.attached or surface.read_only_client:
+        if (
+            surface is None
+            or not surface.attached
+            or surface.read_only_client
+        ):
             return None
         if require_focus:
             try:
@@ -13116,8 +13121,17 @@ class AgentPBXTUI(App[None]):
 
     async def select_agent(self, agent_id: str) -> None:
         previous_agent_id = self.selected_agent_id
+        smooth_terminal_handoff = self.should_smooth_terminal_handoff(
+            previous_agent_id,
+            agent_id,
+        )
+        if smooth_terminal_handoff:
+            self.begin_embedded_terminal_transition(agent_id)
         if agent_id != previous_agent_id:
-            await self.detach_embedded_tmux_terminal(release_lease=True)
+            await self.detach_embedded_tmux_terminal(
+                release_lease=True,
+                preserve_transition=smooth_terminal_handoff,
+            )
             self.save_current_agent_pane_state(previous_agent_id)
         was_compact_home = self.is_compact_layout() and self.compact_view == "home"
         self.selected_agent_id = agent_id
@@ -13464,6 +13478,7 @@ class AgentPBXTUI(App[None]):
             ):
                 return
         if not self.legacy_terminal_capture_enabled:
+            self.end_embedded_terminal_transition(agent_id)
             self.tmux_visible_capture_key = None
             self.update_tmux_status(
                 status,
@@ -13479,6 +13494,7 @@ class AgentPBXTUI(App[None]):
         try:
             panes = await asyncio.to_thread(tmux_support.list_panes)
         except Exception as exc:
+            self.end_embedded_terminal_transition(agent_id)
             self.tmux_visible_capture_key = None
             self.record_tmux_liveness_state(agent_id, "unavailable")
             self.update_tmux_status(
@@ -13497,6 +13513,7 @@ class AgentPBXTUI(App[None]):
                 pane = selector_pane
                 mode = "selector"
         if pane is None:
+            self.end_embedded_terminal_transition(agent_id)
             self.tmux_visible_capture_key = None
             self.update_tmux_plan_selector_state(agent_id, "")
             self.record_tmux_liveness_state(
@@ -13532,6 +13549,7 @@ class AgentPBXTUI(App[None]):
                 agent_id, mapping
             ):
                 return
+        self.end_embedded_terminal_transition(agent_id)
         cache_key = f"{agent_id}:{pane.pane_id}"
         self.prepare_tmux_stream_for_capture(stream, cache_key=cache_key, pane=pane)
         try:
@@ -13788,7 +13806,12 @@ class AgentPBXTUI(App[None]):
             surface.sync_geometry()
             self.apply_tmux_class()
             return True
-        await self.detach_embedded_tmux_terminal(release_lease=True)
+        await self.detach_embedded_tmux_terminal(
+            release_lease=True,
+            preserve_transition=(
+                self.embedded_terminal_transition_agent_id == agent_id
+            ),
+        )
         leased = await self.acquire_tmux_writer_lease(agent_id)
         if leased is None:
             return False
@@ -13834,6 +13857,8 @@ class AgentPBXTUI(App[None]):
             self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
             surface.detach()
             return False
+        self.embedded_terminal_transition_agent_id = None
+        self.apply_tmux_class()
         status = self.query_one_or_none("#tmux-status", Static)
         if status is not None:
             status.update(
@@ -13843,19 +13868,73 @@ class AgentPBXTUI(App[None]):
         surface.focus()
         return True
 
-    async def detach_embedded_tmux_terminal(self, *, release_lease: bool) -> None:
+    async def detach_embedded_tmux_terminal(
+        self,
+        *,
+        release_lease: bool,
+        preserve_transition: bool = False,
+    ) -> None:
         agent_id = self.embedded_terminal_agent_id
         self.clear_embedded_terminal_scroll_requests()
         surface = self.query_one_or_none(
             "#pbx-terminal-surface", PbxTerminalSurface
         )
         if surface is not None:
-            surface.detach()
+            surface.detach(preserve_transition=preserve_transition)
+        if not preserve_transition:
+            self.embedded_terminal_transition_agent_id = None
         self.embedded_terminal_agent_id = None
         self.embedded_terminal_target = None
         self.apply_tmux_class()
         if release_lease and agent_id:
             await self.release_tmux_writer_lease(agent_id)
+
+    def should_smooth_terminal_handoff(
+        self,
+        previous_agent_id: str | None,
+        agent_id: str,
+    ) -> bool:
+        if (
+            not previous_agent_id
+            or previous_agent_id == agent_id
+            or not self.embedded_terminal_v2_enabled
+            or self.active_agent_tab != "latest-tab"
+            or not self.is_tmux_direct_enabled(agent_id)
+            or self.active_agent_tab_by_agent.get(agent_id, "latest-tab")
+            != "latest-tab"
+            or self.embedded_terminal_agent_id != previous_agent_id
+        ):
+            return False
+        surface = self.query_one_or_none(
+            "#pbx-terminal-surface", PbxTerminalSurface
+        )
+        return bool(surface is not None and surface.attached)
+
+    def begin_embedded_terminal_transition(self, agent_id: str) -> None:
+        self.embedded_terminal_transition_agent_id = agent_id
+        surface = self.query_one_or_none(
+            "#pbx-terminal-surface", PbxTerminalSurface
+        )
+        if surface is not None:
+            surface.begin_transition(
+                f"Switching native terminal to {agent_id}..."
+            )
+        status = self.query_one_or_none("#tmux-status", Static)
+        if status is not None:
+            status.update(f"Tmux: switching native terminal to {agent_id}...")
+        self.apply_tmux_class()
+
+    def end_embedded_terminal_transition(self, agent_id: str | None = None) -> None:
+        transition_agent_id = self.embedded_terminal_transition_agent_id
+        if agent_id is not None and transition_agent_id != agent_id:
+            return
+        self.embedded_terminal_transition_agent_id = None
+        surface = self.query_one_or_none(
+            "#pbx-terminal-surface", PbxTerminalSurface
+        )
+        if surface is not None:
+            surface.end_transition()
+        self.apply_tmux_class()
 
     def clear_embedded_terminal_scroll_requests(self) -> None:
         self.embedded_terminal_scroll_generation += 1
@@ -29147,8 +29226,11 @@ class AgentPBXTUI(App[None]):
             screen.set_class(
                 bool(
                     self.embedded_terminal_v2_enabled
-                    and self.embedded_terminal_agent_id == self.selected_agent_id
                     and self.active_agent_tab == "latest-tab"
+                    and (
+                        self.embedded_terminal_agent_id == self.selected_agent_id
+                        or self.embedded_terminal_transition_agent_id is not None
+                    )
                 ),
                 "embedded-terminal",
             )

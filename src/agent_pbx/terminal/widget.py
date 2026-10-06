@@ -151,6 +151,7 @@ class PbxTerminalSurface(Widget):
         self.target = ""
         self.read_only_client = False
         self.total_pty_bytes = 0
+        self._transition_message = ""
         self._poll_timer: Timer | None = None
         self._rendered_rows: dict[int, Text] = {}
         self._render_screen = self.terminal.screen
@@ -160,6 +161,24 @@ class PbxTerminalSurface(Widget):
     @property
     def attached(self) -> bool:
         return bool(self.process and self.process.alive and self.target)
+
+    @property
+    def transitioning(self) -> bool:
+        """Return whether a new terminal target is replacing the old frame."""
+
+        return bool(self._transition_message)
+
+    def begin_transition(self, message: str) -> None:
+        """Cover a stale terminal frame while its replacement is attaching."""
+
+        self._transition_message = str(message or "Switching terminal...").strip()
+        self.refresh()
+
+    def end_transition(self) -> None:
+        if not self._transition_message:
+            return
+        self._transition_message = ""
+        self.refresh()
 
     def on_mount(self) -> None:
         self._poll_timer = self.set_interval(
@@ -177,7 +196,10 @@ class PbxTerminalSurface(Widget):
         env: Mapping[str, str] | None = None,
         read_only: bool = False,
     ) -> None:
-        self.detach()
+        # Keep a caller-provided handoff message visible until the new PTY
+        # produces its first frame. This avoids briefly repainting a stale
+        # terminal or the retained capture fallback during entity switches.
+        self.detach(preserve_transition=True)
         columns = max(2, self.size.width or 80)
         rows = max(2, self.size.height or 24)
         process_env = dict(os.environ if env is None else env)
@@ -205,7 +227,7 @@ class PbxTerminalSurface(Widget):
         self.poll_pty()
         self.refresh()
 
-    def detach(self) -> None:
+    def detach(self, *, preserve_transition: bool = False) -> None:
         if self._poll_timer is not None:
             self._poll_timer.pause()
         process = self.process
@@ -214,10 +236,17 @@ class PbxTerminalSurface(Widget):
             process.close()
         self.target = ""
         self.read_only_client = False
+        if not preserve_transition:
+            self._transition_message = ""
         self.refresh()
 
     def write(self, data: bytes) -> bool:
-        if not self.attached or self.read_only_client or self.process is None:
+        if (
+            self.transitioning
+            or not self.attached
+            or self.read_only_client
+            or self.process is None
+        ):
             return False
         self.process.write(data)
         return True
@@ -234,6 +263,7 @@ class PbxTerminalSurface(Widget):
         if chunk:
             self.total_pty_bytes += len(chunk)
             self.terminal.feed(chunk)
+            self._transition_message = ""
             self.refresh()
         if not process.alive and self._poll_timer is not None:
             self._poll_timer.pause()
@@ -281,6 +311,10 @@ class PbxTerminalSurface(Widget):
         return changed
 
     async def _on_key(self, event: events.Key) -> None:
+        if self.transitioning:
+            event.stop()
+            event.prevent_default()
+            return
         normalized = event.key.strip().lower().replace("_", "+")
         if (
             normalized in {"pageup", "shift+pageup", "shift+pagedown"}
@@ -309,6 +343,10 @@ class PbxTerminalSurface(Widget):
         event.prevent_default()
 
     def on_paste(self, event: events.Paste) -> None:
+        if self.transitioning:
+            event.stop()
+            event.prevent_default()
+            return
         if self.write(b"\x1b[200~" + event.text.encode("utf-8") + b"\x1b[201~"):
             event.stop()
             event.prevent_default()
@@ -386,6 +424,13 @@ class PbxTerminalSurface(Widget):
         )
 
     def render(self) -> Text:
+        if self._transition_message:
+            return Text(
+                f"\n  {self._transition_message}",
+                style=Style(color="cyan", italic=True),
+                no_wrap=True,
+                overflow="crop",
+            )
         screen = self.terminal.screen
         geometry = (self.terminal.columns, self.terminal.rows)
         if screen is not self._render_screen or geometry != self._render_geometry:

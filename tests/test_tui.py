@@ -2629,6 +2629,126 @@ async def test_tui_discards_embedded_terminal_attach_after_selection_changes(
     assert app.embedded_terminal_agent_id is None
 
 
+async def test_tui_direct_entity_switch_keeps_native_surface_during_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    class_states: list[bool] = []
+    rendered_during_attach: list[str] = []
+    released: list[str] = []
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def close(self) -> None:
+            self.alive = False
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    mapping = {
+        "state": "ready",
+        "server_id": "server-b",
+        "socket_path": "/tmp/pbx.sock",
+        "session_name": "runtime-b",
+        "window_id": "@12",
+        "pane_id": "%8",
+        "cwd": "/tmp",
+    }
+
+    async def fetch(agent_id: str) -> dict[str, object]:
+        assert agent_id == "agent-b"
+        return mapping
+
+    async def acquire(agent_id: str) -> dict[str, object]:
+        assert agent_id == "agent-b"
+        return mapping
+
+    async def release(agent_id: str) -> None:
+        released.append(agent_id)
+
+    async def load_thread(_agent_id: str) -> None:
+        return None
+
+    async def load_runtime(_agent_id: str) -> None:
+        return None
+
+    async with app.run_test(size=(120, 32)) as pilot:
+        app.agents = {
+            "agent-a": {
+                "agent_id": "agent-a",
+                "project": "a",
+                "status": "working",
+                "last_seen_at": 100.0,
+            },
+            "agent-b": {
+                "agent_id": "agent-b",
+                "project": "b",
+                "status": "working",
+                "last_seen_at": 101.0,
+            },
+        }
+        app.selected_agent_id = "agent-a"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server-a:%7"
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        old_process = FakeProcess()
+        surface.process = old_process  # type: ignore[assignment]
+        surface.target = "server-a:%7"
+        surface.terminal.feed(b"stale agent-a frame")
+        app.apply_tmux_class()
+        await pilot.pause()
+
+        original_apply = app.apply_tmux_class
+
+        def tracked_apply() -> None:
+            original_apply()
+            try:
+                screen = app.screen
+            except Exception:
+                return
+            class_states.append(screen.has_class("embedded-terminal"))
+
+        def attach(*_args: object, **kwargs: object) -> None:
+            rendered_during_attach.append(surface.render().plain)
+            surface.process = FakeProcess()  # type: ignore[assignment]
+            surface.target = str(kwargs["target"])
+            surface.end_transition()
+
+        monkeypatch.setattr(app, "apply_tmux_class", tracked_apply)
+        monkeypatch.setattr(app, "fetch_tmux_runtime_mapping", fetch)
+        monkeypatch.setattr(app, "acquire_tmux_writer_lease", acquire)
+        monkeypatch.setattr(app, "release_tmux_writer_lease", release)
+        monkeypatch.setattr(app, "load_thread", load_thread)
+        monkeypatch.setattr(app, "load_codex_runtime_status", load_runtime)
+        monkeypatch.setattr(surface, "attach", attach)
+
+        await app.select_agent("agent-b")
+        await pilot.pause()
+
+        assert app.selected_agent_id == "agent-b"
+        assert app.embedded_terminal_agent_id == "agent-b"
+        assert app.embedded_terminal_target == "server-b:%8"
+        assert app.embedded_terminal_transition_agent_id is None
+        assert surface.target == "server-b:%8"
+        assert app.screen.has_class("embedded-terminal")
+        assert released == ["agent-a"]
+        assert class_states
+        assert all(class_states)
+        assert rendered_during_attach
+        assert "Switching native terminal to agent-b" in rendered_during_attach[0]
+        assert "stale agent-a frame" not in rendered_during_attach[0]
+        monkeypatch.setattr(app, "apply_tmux_class", original_apply)
+
+
 async def test_tui_waits_for_visible_terminal_layout_before_cold_attach(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
