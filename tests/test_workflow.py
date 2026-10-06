@@ -513,6 +513,121 @@ def test_mark_latest_report_seen_is_shared_state(tmp_path: Path) -> None:
     assert events[-1]["payload"]["latest_report_seen_at"] == report["created_at"]
 
 
+def test_root_operator_alert_acknowledgement_cascades_to_older_edit_forks(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "operator-0",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {"operator_role": "root"},
+        },
+    )
+    for caller_id in ("caller-1", "caller-2", "caller-3"):
+        cwd = tmp_path / caller_id
+        cwd.mkdir()
+        client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": caller_id,
+                "project": caller_id,
+                "metadata": {
+                    "cwd": str(cwd),
+                    "codex_session_id": f"session-{caller_id}",
+                },
+            },
+        )
+
+    def ensure_fork(caller_id: str, *, review: bool = False) -> str:
+        suffix = "review-1" if review else "edit"
+        fork_id = f"operator-0-fork-{caller_id}-{suffix}"
+        response = client.post(
+            "/v1/operator/forks/ensure",
+            json={
+                "operator_agent_id": "operator-0",
+                "source_caller_agent_id": caller_id,
+                "fork_agent_id": fork_id,
+                "fork_track_id": "review-1" if review else "default",
+                "fork_purpose": "review" if review else "edit",
+                "access_mode": "review_readonly" if review else "edit",
+                "source_cwd": str(tmp_path / caller_id),
+                "work_root": str(tmp_path / caller_id),
+                "status": "running",
+            },
+        )
+        assert response.status_code == 200
+        return fork_id
+
+    older_edit = ensure_fork("caller-1")
+    newer_edit = ensure_fork("caller-2")
+    review_fork = ensure_fork("caller-3", review=True)
+
+    def report(agent_id: str, summary: str) -> dict[str, object]:
+        response = client.post(
+            f"/v1/agents/{agent_id}/reports",
+            json={
+                "project": "agent-pbx-operator",
+                "status": "working",
+                "summary": summary,
+                "detail": summary,
+                "reporting_agent_id": agent_id,
+            },
+        )
+        assert response.status_code == 200
+        time.sleep(0.002)
+        return response.json()
+
+    older_report = report(older_edit, "Older edit progress")
+    review_report = report(review_fork, "Review finding")
+    root_report = report("operator-0", "Root summarized edit progress")
+    newer_report = report(newer_edit, "New blocker after root summary")
+
+    response = client.post("/v2/operators/operator-0/alerts/acknowledge")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cutoff"] == root_report["created_at"]
+    acknowledged = {item["agent_id"]: item for item in payload["acknowledged"]}
+    assert acknowledged["operator-0"]["reason"] == "root"
+    assert acknowledged[older_edit]["reason"] == "linked_edit_fork"
+    preserved = {item["agent_id"]: item["reason"] for item in payload["preserved"]}
+    assert preserved[review_fork] == "review_fork"
+    assert preserved[newer_edit] == "newer_than_root_cutoff"
+
+    agents = {item["agent_id"]: item for item in client.get("/v1/agents").json()}
+    assert agents["operator-0"]["latest_report_seen_at"] == root_report["created_at"]
+    assert agents[older_edit]["latest_report_seen_at"] == older_report["created_at"]
+    assert agents[review_fork]["latest_report_seen_at"] is None
+    assert agents[newer_edit]["latest_report_seen_at"] is None
+    assert review_report["created_at"] < root_report["created_at"]
+    assert newer_report["created_at"] > root_report["created_at"]
+
+    events = client.get("/v1/events").json()
+    latest_seen_ids = {
+        event["payload"]["agent_id"]
+        for event in events
+        if event["type"] == "latest_seen"
+    }
+    assert latest_seen_ids == {"operator-0", older_edit}
+    assert events[-1]["type"] == "operator_alerts_acknowledged"
+
+
+def test_operator_alert_acknowledgement_rejects_caller(tmp_path: Path) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "caller-1", "project": "demo"},
+    )
+
+    response = client.post("/v2/operators/caller-1/alerts/acknowledge")
+
+    assert response.status_code == 409
+    assert "root operator" in response.json()["detail"]
+
+
 def test_report_metadata_can_suppress_tui_alerts(tmp_path: Path) -> None:
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
 

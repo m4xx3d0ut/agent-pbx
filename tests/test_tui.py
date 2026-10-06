@@ -15006,6 +15006,81 @@ async def test_tui_latest_seen_event_clears_remote_unseen_marker() -> None:
     assert row[1] == ""
 
 
+async def test_tui_root_seen_response_clears_linked_edit_fork_alerts() -> None:
+    requested: list[str] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "root_operator_id": "operator-0",
+                "cutoff": 102.0,
+                "acknowledged": [
+                    {
+                        "agent_id": "operator-0",
+                        "latest_report_seen_at": 102.0,
+                        "reason": "root",
+                        "changed": True,
+                    },
+                    {
+                        "agent_id": "operator-0-fork-caller-1",
+                        "latest_report_seen_at": 101.0,
+                        "reason": "linked_edit_fork",
+                        "changed": True,
+                    },
+                ],
+                "preserved": [],
+            }
+
+    class Client:
+        async def post(self, path: str, **_: object) -> Response:
+            requested.append(path)
+            return Response()
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "working",
+                "metadata": {"operator_role": "root"},
+                "latest_report_created_at": 102.0,
+                "last_seen_at": 102.0,
+            },
+            "operator-0-fork-caller-1": {
+                "agent_id": "operator-0-fork-caller-1",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "working",
+                "metadata": {
+                    "operator_role": "fork",
+                    "logical_operator_id": "operator-0",
+                    "fork_purpose": "edit",
+                },
+                "latest_report_created_at": 101.0,
+                "last_seen_at": 101.0,
+            },
+        }
+        app.unseen_latest_agent_ids = {
+            "operator-0",
+            "operator-0-fork-caller-1",
+        }
+
+        await app.mark_latest_seen_remote("operator-0")
+
+    assert requested == ["/v2/operators/operator-0/alerts/acknowledge"]
+    assert app.unseen_latest_agent_ids == set()
+    assert app.latest_viewed_at_by_agent == {
+        "operator-0": 102.0,
+        "operator-0-fork-caller-1": 101.0,
+    }
+
+
 async def test_tui_agent_starred_event_updates_visible_row() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 

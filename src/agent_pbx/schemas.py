@@ -367,6 +367,30 @@ class AgentResponse(BaseModel):
     active_campaign_count: int = 0
 
 
+class OperatorAlertAcknowledgementItem(BaseModel):
+    agent_id: str
+    latest_report_seen_at: float
+    reason: Literal["root", "linked_edit_fork"]
+    changed: bool = False
+
+
+class OperatorAlertPreservedItem(BaseModel):
+    agent_id: str
+    reason: Literal[
+        "review_fork",
+        "newer_than_root_cutoff",
+        "missing_agent",
+        "no_report",
+    ]
+
+
+class OperatorAlertAcknowledgementResponse(BaseModel):
+    root_operator_id: str
+    cutoff: float | None = None
+    acknowledged: list[OperatorAlertAcknowledgementItem] = Field(default_factory=list)
+    preserved: list[OperatorAlertPreservedItem] = Field(default_factory=list)
+
+
 class AgentPruneRequest(BaseModel):
     preset: AgentPrunePreset = "terminal-callers"
     min_age_days: float = Field(default=30.0, ge=0.0, le=3650.0)

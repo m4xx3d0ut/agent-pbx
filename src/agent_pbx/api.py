@@ -228,6 +228,7 @@ from .schemas import (
     OperatorProjectSpawnResponse,
     OperatorProjectSpawnUpdateRequest,
     OperatorReviewEscalationRequest,
+    OperatorAlertAcknowledgementResponse,
     OperatorAssignmentReportRequest,
     IssueActionRequest,
     IssueActionResponse,
@@ -1487,6 +1488,52 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             agent_id,
         )
         return agent
+
+    @app.post(
+        "/v2/operators/{root_operator_id}/alerts/acknowledge",
+        response_model=OperatorAlertAcknowledgementResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def acknowledge_operator_alert_family(
+        root_operator_id: str,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        try:
+            result = store.acknowledge_operator_alert_family(root_operator_id)
+        except ValueError as exc:
+            detail = str(exc)
+            code = 404 if "not registered" in detail else 409
+            raise HTTPException(status_code=code, detail=detail) from exc
+
+        for item in result["acknowledged"]:
+            if not item.get("changed"):
+                continue
+            agent_id = str(item["agent_id"])
+            agent = store.get_agent(agent_id) or {}
+            store.append_event(
+                "latest_seen",
+                {
+                    "agent_id": agent_id,
+                    "project": agent.get("project"),
+                    "latest_report_seen_at": item["latest_report_seen_at"],
+                    "root_operator_id": root_operator_id,
+                    "reason": item["reason"],
+                },
+                agent_id,
+            )
+        store.append_event(
+            "operator_alerts_acknowledged",
+            {
+                "root_operator_id": root_operator_id,
+                "cutoff": result["cutoff"],
+                "acknowledged": [
+                    item["agent_id"] for item in result["acknowledged"]
+                ],
+                "preserved": list(result["preserved"]),
+            },
+            root_operator_id,
+        )
+        return result
 
     async def set_agent_star(
         agent_id: str,

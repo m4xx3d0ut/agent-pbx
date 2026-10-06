@@ -12984,28 +12984,68 @@ class AgentPBXTUI(App[None]):
         self.save_settings()
 
     async def mark_latest_seen_remote(self, agent_id: str) -> None:
+        agent_record = self.agents.get(agent_id)
+        is_root_operator = bool(
+            agent_record
+            and self.agent_type(agent_record) == OPERATOR_AGENT_TYPE
+            and self.operator_role(agent_record) == OPERATOR_ROLE_ROOT
+        )
         try:
             response = await self.api_client().post(
-                f"/v1/agents/{agent_id}/latest/seen",
+                (
+                    f"/v2/operators/{agent_id}/alerts/acknowledge"
+                    if is_root_operator
+                    else f"/v1/agents/{agent_id}/latest/seen"
+                ),
                 headers=auth_headers(self.token),
             )
             response.raise_for_status()
-            agent = response.json()
+            payload = response.json()
         except Exception:
             return
-        if isinstance(agent, dict):
-            existing = self.agents.get(agent_id)
-            if existing is not None:
-                existing["latest_report_seen_at"] = agent.get("latest_report_seen_at")
-            else:
-                self.agents[agent_id] = agent
-            seen_at = self.shared_latest_seen_at(agent_id)
-            if seen_at is not None:
-                self.latest_viewed_at_by_agent[agent_id] = max(
-                    self.latest_viewed_at_by_agent.get(agent_id, 0.0),
+        if is_root_operator and isinstance(payload, dict):
+            acknowledged = payload.get("acknowledged")
+            changed = False
+            for item in acknowledged if isinstance(acknowledged, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                member_id = str(item.get("agent_id") or "").strip()
+                seen_at = float_value(item.get("latest_report_seen_at"))
+                if not member_id or seen_at is None:
+                    continue
+                existing = self.agents.get(member_id)
+                if existing is not None:
+                    existing["latest_report_seen_at"] = max(
+                        self.shared_latest_seen_at(member_id) or 0.0,
+                        seen_at,
+                    )
+                self.latest_viewed_at_by_agent[member_id] = max(
+                    self.latest_viewed_at_by_agent.get(member_id, 0.0),
                     seen_at,
                 )
+                current_report_at = self.latest_report_timestamp(member_id)
+                if current_report_at is None or current_report_at <= seen_at:
+                    self.unseen_latest_agent_ids.discard(member_id)
+                changed = True
+            if changed:
+                self.render_agents()
+                self.render_unseen_attention()
                 self.save_settings()
+            return
+        if not isinstance(payload, dict):
+            return
+        existing = self.agents.get(agent_id)
+        if existing is not None:
+            existing["latest_report_seen_at"] = payload.get("latest_report_seen_at")
+        else:
+            self.agents[agent_id] = payload
+        seen_at = self.shared_latest_seen_at(agent_id)
+        if seen_at is not None:
+            self.latest_viewed_at_by_agent[agent_id] = max(
+                self.latest_viewed_at_by_agent.get(agent_id, 0.0),
+                seen_at,
+            )
+            self.save_settings()
 
     async def load_latest_report(self, agent_id: str) -> None:
         detail = self.query_one_or_none("#detail", TextArea)

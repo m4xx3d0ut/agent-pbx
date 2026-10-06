@@ -3475,6 +3475,151 @@ class Store:
             )
         return self.get_agent(agent_id) if cursor.rowcount else None
 
+    def acknowledge_operator_alert_family(
+        self,
+        root_operator_id: str,
+    ) -> dict[str, Any]:
+        """Acknowledge a root Operator and linked edit-fork reports atomically.
+
+        The root report timestamp is the family cutoff. Review forks are never
+        acknowledged through the root, and an edit-fork report newer than the
+        root cutoff remains unseen.
+        """
+
+        acknowledged: list[dict[str, Any]] = []
+        preserved: list[dict[str, Any]] = []
+        cutoff: float | None = None
+        with self.connect() as conn:
+            root = conn.execute(
+                """
+                SELECT agent_type, metadata_json
+                FROM agents
+                WHERE agent_id = ?
+                """,
+                (root_operator_id,),
+            ).fetchone()
+            if root is None:
+                raise ValueError("root operator is not registered")
+            metadata = self._json_object(root["metadata_json"])
+            if (
+                str(root["agent_type"] or "") != OPERATOR_AGENT_TYPE
+                or str(metadata.get("operator_role") or OPERATOR_ROLE_ROOT)
+                == OPERATOR_ROLE_FORK
+            ):
+                raise ValueError("alert-family acknowledgement requires a root operator")
+
+            latest_root = conn.execute(
+                """
+                SELECT created_at
+                FROM reports
+                WHERE agent_id = ?
+                ORDER BY created_at DESC, report_id DESC
+                LIMIT 1
+                """,
+                (root_operator_id,),
+            ).fetchone()
+            if latest_root is None:
+                return {
+                    "root_operator_id": root_operator_id,
+                    "cutoff": None,
+                    "acknowledged": [],
+                    "preserved": [],
+                }
+            cutoff = float(latest_root["created_at"])
+
+            candidates: list[tuple[str, str]] = [(root_operator_id, "root")]
+            fork_rows = conn.execute(
+                """
+                SELECT fork_agent_id, fork_purpose, access_mode
+                FROM operator_forks
+                WHERE logical_operator_agent_id = ?
+                ORDER BY created_at ASC, operator_fork_id ASC
+                """,
+                (root_operator_id,),
+            ).fetchall()
+            seen_fork_ids: set[str] = set()
+            for fork in fork_rows:
+                fork_agent_id = str(fork["fork_agent_id"] or "").strip()
+                if not fork_agent_id or fork_agent_id in seen_fork_ids:
+                    continue
+                seen_fork_ids.add(fork_agent_id)
+                purpose = str(fork["fork_purpose"] or "edit").strip().lower()
+                access_mode = str(fork["access_mode"] or "edit").strip().lower()
+                if purpose == "review" or access_mode == "review_readonly":
+                    preserved.append(
+                        {"agent_id": fork_agent_id, "reason": "review_fork"}
+                    )
+                    continue
+                candidates.append((fork_agent_id, "linked_edit_fork"))
+
+            for agent_id, reason in candidates:
+                agent = conn.execute(
+                    """
+                    SELECT latest_report_seen_at
+                    FROM agents
+                    WHERE agent_id = ?
+                    """,
+                    (agent_id,),
+                ).fetchone()
+                if agent is None:
+                    preserved.append(
+                        {"agent_id": agent_id, "reason": "missing_agent"}
+                    )
+                    continue
+                latest = conn.execute(
+                    """
+                    SELECT created_at
+                    FROM reports
+                    WHERE agent_id = ?
+                    ORDER BY created_at DESC, report_id DESC
+                    LIMIT 1
+                    """,
+                    (agent_id,),
+                ).fetchone()
+                if latest is None:
+                    preserved.append({"agent_id": agent_id, "reason": "no_report"})
+                    continue
+                report_at = float(latest["created_at"])
+                if agent_id != root_operator_id and report_at > cutoff:
+                    preserved.append(
+                        {
+                            "agent_id": agent_id,
+                            "reason": "newer_than_root_cutoff",
+                        }
+                    )
+                    continue
+                previous = (
+                    float(agent["latest_report_seen_at"])
+                    if agent["latest_report_seen_at"] is not None
+                    else 0.0
+                )
+                conn.execute(
+                    """
+                    UPDATE agents
+                    SET latest_report_seen_at = MAX(
+                        COALESCE(latest_report_seen_at, 0),
+                        ?
+                    )
+                    WHERE agent_id = ?
+                    """,
+                    (report_at, agent_id),
+                )
+                acknowledged.append(
+                    {
+                        "agent_id": agent_id,
+                        "latest_report_seen_at": report_at,
+                        "reason": reason,
+                        "changed": report_at > previous,
+                    }
+                )
+
+        return {
+            "root_operator_id": root_operator_id,
+            "cutoff": cutoff,
+            "acknowledged": acknowledged,
+            "preserved": preserved,
+        }
+
     def set_agent_starred(
         self, agent_id: str, *, starred: bool
     ) -> dict[str, Any] | None:
