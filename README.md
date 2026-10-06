@@ -59,7 +59,7 @@ flowchart LR
 | TUI | Operator interaction and rendering; closing it does not stop the managed runtime |
 
 See [the architecture overview](docs/architecture.md),
-[the v2 release notes](docs/releases/v2.0.0.md), and
+[the v2.1 release notes](docs/releases/v2.1.0.md), and
 [the accepted architecture decisions](docs/adr/README.md) for the complete
 control-plane and compatibility boundaries.
 
@@ -1207,7 +1207,8 @@ loopback daemon and `tmux` is available. `Latest` embeds a PTY-backed normal
 tmux client attached to the selected PBX-managed runtime. Codex keeps its native
 selectors, warning view, approvals, paste, mouse, resize, cursor state, and tmux
 scrollback. The captured pane renderer and separate input remain available as a
-compatibility fallback through the v2.0 line.
+compatibility fallback in Agent PBX 2.1.0. Legacy-path removal still requires
+measured parity, a supported migration path, and published notice.
 
 The committed runtime-server default is `dedicated`, which works whether or not
 the TUI itself runs in tmux. Set

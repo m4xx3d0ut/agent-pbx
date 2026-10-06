@@ -2,6 +2,122 @@
 
 ## Unreleased
 
+## v2.1.0 - 2026-10-06
+
+### Highlights
+
+- Adds reversible adoption of existing Agents into PBX-managed native tmux
+  runtimes while preserving Codex session identity, process state, pane
+  topology, and rollback evidence.
+- Adds guided `F10` and palette project launch from configured filesystem
+  roots.
+- Hardens the embedded Codex terminal across keyboard ownership, modified
+  function-key passthrough, scrollback, resizing, redraw, pop lifecycle,
+  writer leases, and Android/Termux navigation.
+- Improves Agent and Operator lifecycle UX, alert handling, live list
+  stability, Joplin response export, and terminal transition performance.
+- Reframes and documents Agent PBX as a runtime-grounded Agentic Engineering
+  Control Plane for Agentic Application Stack Operations.
+
+### Added
+
+- Add reversible native Agent pane adoption with migration preview, rollback
+  evidence, current-rollout selection, and declared runtime aliases.
+- Add the `F10` scoped project launcher and equivalent palette actions.
+- Add configurable project-root discovery for managed Agent launch.
+- Add `F3` navigation to the right-pane tab row.
+- Add `PgUp` activation of runtime tmux scrollback from the embedded Codex
+  pane.
+- Add terminal reading-view keyboard navigation for Linux, SSH, and
+  Android/Termux clients.
+- Add configurable newline input for embedded Codex terminal sessions.
+- Add `F8` alert navigation and acknowledgement behavior.
+- Add deterministic v2 interface and hero-capture fixtures.
+- Add bounded parallel pytest lanes and serial-test isolation.
+- Add schema 29 refresh indexes for Agent-list summary queries.
+
+### Changed
+
+- Keep plain PBX function-key navigation active under terminal focus while
+  translating configured modified function keys to the child Codex terminal.
+- Preserve existing Codex panes when restart or migration verification fails.
+- Prefer the current Codex rollout when resolving session adoption candidates.
+- Preserve known origin-client evidence while refreshing runtime mappings.
+- Cascade root Operator alert acknowledgement to the related non-review fork.
+- Keep Agent and Operator ordering stable while the user is interacting with
+  their lists.
+- Use the configured prompt summary in Joplin response-note titles.
+- Reduce redundant embedded-terminal painting and input latency.
+- Smooth transitions between captured and native terminal surfaces.
+- Refresh the README, architecture documentation, and public release media
+  around the Agentic Engineering Control Plane product model.
+
+### Fixed
+
+- Fix printable PBX shortcut bindings consuming characters intended for the
+  focused Codex terminal.
+- Fix `Ctrl+C` and `Ctrl+P` ownership under embedded-terminal focus.
+- Fix stale or missing outer-tmux client identity during targeted pop-out.
+- Fix writer-lease renewal after native mode is disabled or the disposable
+  embedded client has exited.
+- Fix native tmux target selection, resize propagation, and pane geometry.
+- Fix embedded Codex popup and selector redraw artifacts after Escape.
+- Fix failed restart paths that could disconnect or retire a healthy source
+  pane prematurely.
+- Fix palette and modal actions targeting the previously selected entity.
+- Fix transient right-pane fallback flashes while switching between native
+  Agent and Operator terminals.
+- Fix managed-launch cleanup and selection behavior after launch dialogs.
+- Fix diagnostics isolation under parallel pytest execution.
+
+### Performance
+
+- Add SQLite indexes for common Agent refresh and summary queries.
+- Coalesce embedded-terminal paints and avoid unchanged-frame rendering.
+- Reduce terminal transition work while selecting Agents and Operators.
+- Add qualified parallel test lanes for faster full-suite execution.
+
+### Compatibility
+
+- Existing Agent, Operator, fork, Codex-session, tmux-pane, campaign, Joplin,
+  and project mappings remain supported.
+- Schema 29 is an additive index migration from the v2.0 schema 28 baseline.
+- Polling/nohup mode, Thread, HTTP refresh, and captured-terminal fallback
+  remain supported in Agent PBX 2.1.0.
+- Legacy-path removal still requires measured parity, a supported migration
+  path, and published notice.
+- Native terminal mode retains capture and pop-out recovery paths.
+
+### Upgrade notes
+
+- Back up the Agent PBX database, configuration, and runtime mappings before
+  upgrading.
+- Install Agent PBX 2.1.0, restart the daemon, and then restart each connected
+  TUI client.
+- Existing Codex Agents and Operators do not require a Codex restart solely
+  because Agent PBX was upgraded.
+- Verify retained entities, runtime mappings, native terminal attachment, and
+  schema 29 after the daemon restart.
+- Keep the pre-upgrade backup for at least seven days.
+- See `docs/releases/v2.1.0.md` and `docs/acceptance/v2.1-uat.md`.
+
+### Verification
+
+- Qualified local parallel suite: 874 passed.
+- Isolated serial lane: one expected skip with no failure.
+- Existing starred Agents, root Operators, edit forks, and review forks were
+  retained through migration and restart testing.
+- Native terminal typing, resizing, scrollback, function-key ownership,
+  pop-out, pop-in, TUI restart, daemon restart, and session reconciliation were
+  exercised against the workstation tmux topology.
+- Android/Termux-over-SSH scrollback and reading navigation were exercised.
+- Managed `F10` launch, alert cycling, Joplin response export, and deterministic
+  release capture were exercised.
+- `python -m compileall -q src tests`
+- `scripts/test_full.sh`
+- `python -m pytest -q tests/test_release_packaging.py`
+- `git diff --check`
+
 ## v2.0.0 - 2026-10-03
 
 ### Highlights

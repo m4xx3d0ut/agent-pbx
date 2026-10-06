@@ -115,10 +115,12 @@ client.
 
 Agent PBX v2 prefers native tmux and sequenced events for local clients. Report
 mode, explicit nohup polling, the Thread tab, HTTP refresh, and terminal capture
-remain compatibility paths through the v2.0 line. Their eventual removal
-requires measured parity, migration evidence, and published notice.
+remain compatibility paths in Agent PBX 2.1.0. Their eventual removal requires
+measured parity, migration evidence, a supported migration path, and published
+notice.
 
 The accepted architecture decisions are indexed in
 [docs/adr/README.md](adr/README.md). Installation and migration guidance is in
 [docs/install-v2.md](install-v2.md), and release acceptance evidence is in
-[docs/acceptance/v2-uat.md](acceptance/v2-uat.md).
+[docs/acceptance/v2-uat.md](acceptance/v2-uat.md) and
+[docs/acceptance/v2.1-uat.md](acceptance/v2.1-uat.md).
