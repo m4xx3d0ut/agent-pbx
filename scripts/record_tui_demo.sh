@@ -16,6 +16,7 @@ TMUX_SOCKET="${AGENT_PBX_DEMO_TMUX_SOCKET:-${OUT_DIR}/tmux.sock}"
 DEMO_PROJECT_ROOT="${AGENT_PBX_DEMO_PROJECT_ROOT:-/tmp/agent-pbx-demo-projects}"
 DEMO_PROJECT_DIR="${AGENT_PBX_DEMO_PROJECT_DIR:-${DEMO_PROJECT_ROOT}/agent-pbx-v2-demo}"
 DEMO_EXISTING_PROJECT_DIR="${AGENT_PBX_DEMO_EXISTING_PROJECT_DIR:-${DEMO_PROJECT_ROOT}/platform-console}"
+DEMO_LAUNCHED_AGENT_ID="${AGENT_PBX_DEMO_LAUNCHED_AGENT_ID:-codex-agent-pbx-v2-demo}"
 DEMO_RUNTIME_DIR="${AGENT_PBX_DEMO_RUNTIME_DIR:-${OUT_DIR}/runtime}"
 DEMO_RUNTIME_SOCKET="${DEMO_RUNTIME_DIR}/agent-pbx/runtime-tmux.sock"
 COLS="${AGENT_PBX_DEMO_COLS:-180}"
@@ -39,7 +40,7 @@ RENDER_LINE_HEIGHT="${AGENT_PBX_DEMO_RENDER_LINE_HEIGHT:-1.12}"
 RENDER_WIDTH="${AGENT_PBX_DEMO_RENDER_WIDTH:-1920}"
 RENDER_HEIGHT="${AGENT_PBX_DEMO_RENDER_HEIGHT:-1080}"
 RENDER_FPS="${AGENT_PBX_DEMO_RENDER_FPS:-30}"
-RENDER_SELECT="${AGENT_PBX_DEMO_RENDER_SELECT:-0..70}"
+RENDER_SELECT="${AGENT_PBX_DEMO_RENDER_SELECT:-0..67}"
 RENDER_EXACT_SIZE="${AGENT_PBX_DEMO_RENDER_EXACT_SIZE:-0}"
 WORKERBEE_BIN="${AGENT_PBX_WORKERBEE_BIN:-}"
 DEMO_FIXTURES="${AGENT_PBX_DEMO_FIXTURES:-1}"
@@ -78,7 +79,7 @@ Options:
   --layout NAME        TUI layout. Default: split
   --max-seconds N      Scripted recording timeout. Default: 120
   --render-size WxH    Exact GIF output size. Default: 1920x1080
-  --render-select SEL  agg frame selector. Default: 0..70
+  --render-select SEL  agg frame selector. Default: 0..67
   --exact-size         Resize/re-encode to --render-size with ffmpeg.
   --live-codex         Use the installed Codex CLI in the isolated demo runtime.
   --manual             Record without scripted key presses; quit the TUI to stop.
@@ -519,8 +520,8 @@ from urllib.parse import urlparse
 
 folders = [
     {"id": "root", "parent_id": "", "title": "Agent PBX"},
-    {"id": "project", "parent_id": "root", "title": "agent-pbx"},
-    {"id": "agent", "parent_id": "project", "title": "codex-main"},
+    {"id": "project", "parent_id": "root", "title": "agent-pbx-v2-demo"},
+    {"id": "agent", "parent_id": "project", "title": "codex-agent-pbx-v2-demo"},
 ]
 notes = {
     "release-checklist": {
@@ -535,7 +536,7 @@ notes = {
         "id": "tui-demo-notes",
         "parent_id": "project",
         "title": "TUI Demo Notes",
-        "body": "The demo walks through Latest, Thread, Files, WorkerBee, PRs, Issues, and Joplin.",
+        "body": "The demo walks through native Latest, Files, WorkerBee, PRs, Issues, campaigns, and Joplin.",
         "created_time": 1781100000000,
         "updated_time": 1781100600000,
     },
@@ -885,6 +886,7 @@ seed_operator_workflow() {
   log "Seeding deterministic Operator campaign after UI launch"
   AGENT_PBX_DEMO_SERVER="$SERVER" \
   AGENT_PBX_DEMO_TOKEN="$TOKEN" \
+  AGENT_PBX_DEMO_LAUNCHED_AGENT_ID="$DEMO_LAUNCHED_AGENT_ID" \
   python3 - <<'PY'
 from __future__ import annotations
 
@@ -894,6 +896,7 @@ import urllib.request
 
 server = os.environ["AGENT_PBX_DEMO_SERVER"].rstrip("/")
 token = os.environ["AGENT_PBX_DEMO_TOKEN"]
+launched_agent_id = os.environ["AGENT_PBX_DEMO_LAUNCHED_AGENT_ID"]
 headers = {
     "Authorization": f"Bearer {token}",
     "Content-Type": "application/json",
@@ -910,6 +913,41 @@ def request(method: str, path: str, payload: dict[str, object]) -> dict[str, obj
     with urllib.request.urlopen(req, timeout=8) as response:
         body = response.read().decode()
         return json.loads(body) if body else {}
+
+
+# The deterministic runtime does not register through MCP, so promote the
+# isolated fork records to the state that a real Codex launch reports. Campaign
+# delivery then exercises the normal queue path and renders healthy topology.
+request(
+    "POST",
+    "/v1/operator/forks/ensure",
+    {
+        "operator_agent_id": "operator-0",
+        "source_caller_agent_id": launched_agent_id,
+        "fork_agent_id": "operator-0-fork-codex-agent-pbx-v2-demo-demo",
+        "fork_track_id": "default",
+        "fork_purpose": "edit",
+        "access_mode": "edit",
+        "status": "running",
+        "summary": "Deterministic demo edit fork is ready.",
+        "metadata": {"demo": True},
+    },
+)
+request(
+    "POST",
+    "/v1/operator/forks/ensure",
+    {
+        "operator_agent_id": "operator-0",
+        "source_caller_agent_id": "release-review",
+        "fork_agent_id": "operator-0-fork-release-review-demo",
+        "fork_track_id": "default",
+        "fork_purpose": "edit",
+        "access_mode": "edit",
+        "status": "running",
+        "summary": "Deterministic demo release-review fork is ready.",
+        "metadata": {"demo": True},
+    },
+)
 
 
 request(
@@ -950,7 +988,7 @@ request(
         ],
         "assignments": [
             {
-                "target_agent_id": "agent-pbx-demo",
+                "target_agent_id": launched_agent_id,
                 "title": "Validate native runtime",
                 "prompt": "Verify terminal attachment, resize, input, and persistence.",
                 "criteria": ["Native tmux runtime remains ready."],
@@ -1035,17 +1073,17 @@ drive_demo() {
   log "Demo scene: embedded native Agent runtime"
   sleep 3
 
-  # F10 managed Agent launch: project -> Agent id -> default Agent mode,
-  # Sol/high profile, dedicated runtime -> Launch.
+  # F10 managed Agent launch: project -> optional Agent id -> default Agent
+  # mode, Sol/high profile, dedicated runtime -> Launch. Leave the optional
+  # ID blank and use the API's deterministic project-derived identifier. This
+  # avoids depending on terminal-specific Tab focus behavior for the capture.
   tmux_demo send-keys -t "$SESSION" F10
   wait_for_screen_text "Launch Project Workspace" 40
   log "Demo scene: F10 managed workspace launch"
   sleep 4
-  tmux_demo send-keys -t "$SESSION" Tab
-  tmux_demo send-keys -t "$SESSION" -l "agent-pbx-demo"
-  tmux_demo send-keys -t "$SESSION" Tab Tab Tab Tab Enter
-  wait_for_demo_agent "agent-pbx-demo" 1
-  wait_for_screen_text "agent-pbx-demo" 120
+  tmux_demo send-keys -t "$SESSION" Tab Tab Tab Tab Tab Enter
+  wait_for_demo_agent "$DEMO_LAUNCHED_AGENT_ID" 1
+  wait_for_screen_text "$DEMO_LAUNCHED_AGENT_ID" 120
   wait_for_screen_text "DEMO CODEX RUNTIME" 120
   log "Demo scene: newly launched managed Agent"
   sleep 4
@@ -1059,7 +1097,10 @@ drive_demo() {
   send_palette "/operator start"
   wait_for_demo_agent "operator-0" 0
   wait_for_screen_text "operator-0" 160
-  sleep 4
+  # Continue directly into the Operator-owned campaign. A newly registered
+  # root can briefly lack its native session mapping while the fork starts;
+  # that transitional fallback is diagnostic state, not a release-demo scene.
+  sleep 0.5
   seed_operator_workflow
 
   # Campaigns are scoped to an Operator identity. Select the newly launched
@@ -1081,6 +1122,16 @@ drive_demo() {
   send_palette "/workerbee"
   log "Demo scene: WorkerBee runtime truth"
   sleep 3
+
+  # Return to the managed caller before showing project-scoped engineering
+  # surfaces. The palette then retains this explicit selection across tabs.
+  tmux_demo send-keys -t "$SESSION" F1
+  sleep 0.5
+  tmux_demo send-keys -t "$SESSION" Home
+  sleep 0.25
+  tmux_demo send-keys -t "$SESSION" Enter
+  wait_for_screen_text "5.6-SOL/HIGH" 80
+
   send_palette "/files"
   log "Demo scene: scoped files"
   sleep 2.5
@@ -1099,12 +1150,7 @@ drive_demo() {
 
   # Close on the newly launched Agent's native runtime.
   send_palette "/latest"
-  sleep 2
-  tmux_demo send-keys -t "$SESSION" F1
-  sleep 0.5
-  tmux_demo send-keys -t "$SESSION" Home
-  sleep 0.25
-  tmux_demo send-keys -t "$SESSION" Enter
+  wait_for_screen_text "5.6-SOL/HIGH" 80
   wait_for_screen_text "Agent · gpt-5.6-sol/high" 120
   log "Demo scene: closing native Agent runtime"
   sleep 3
@@ -1134,7 +1180,20 @@ record_cast() {
   "$ASCIINEMA_BIN" rec --overwrite --title "$TITLE" --cols "$COLS" --rows "$ROWS" -c "$attach_cmd" "$CAST_PATH" &
   RECORDER_PID="$!"
   sleep 0.5
-  drive_demo &
+  (
+    set +e
+    (
+      set -e
+      drive_demo
+    )
+    driver_status="$?"
+    # A failed scene must also stop asciinema so cleanup does not wait for the
+    # watchdog and an incomplete cast can never be rendered as the hero.
+    if kill -0 "$RECORDER_PID" >/dev/null 2>&1; then
+      kill -INT "$RECORDER_PID" >/dev/null 2>&1 || true
+    fi
+    exit "$driver_status"
+  ) &
   DRIVER_PID="$!"
   (
     sleep "$MAX_RECORD_SECONDS"
@@ -1148,12 +1207,16 @@ record_cast() {
   set +e
   wait "$RECORDER_PID"
   local recorder_status="$?"
+  wait "$DRIVER_PID"
+  local driver_status="$?"
   set -e
   RECORDER_PID=""
   kill "$RECORDING_WATCHDOG_PID" >/dev/null 2>&1 || true
   RECORDING_WATCHDOG_PID=""
-  wait "$DRIVER_PID" >/dev/null 2>&1 || true
   DRIVER_PID=""
+  if [[ "$driver_status" != "0" ]]; then
+    fail "scripted scene driver failed with status ${driver_status}; refusing to render an incomplete capture"
+  fi
   if [[ ! -s "$CAST_PATH" ]]; then
     fail "asciinema did not produce a non-empty cast (status ${recorder_status})"
   fi
