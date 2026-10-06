@@ -36,7 +36,9 @@ jobs:
       - name: Compile source and tests
         run: python -m compileall -q src tests
       - name: Run full test suite
-        run: python -m pytest -q
+        env:
+          AGENT_PBX_TEST_WORKERS: "2"
+        run: scripts/test_full.sh
       - name: Check release manifest tests
         run: python -m pytest -q tests/test_release_packaging.py
 

@@ -72,7 +72,11 @@ def test_release_manifest_rejects_path_outside_wheelhouse(tmp_path: Path) -> Non
 
 def test_release_shell_scripts_are_syntactically_valid() -> None:
     root = Path(__file__).parents[1]
-    for script in ("scripts/build_wheelhouse.sh", "scripts/install-agent-pbx.sh"):
+    for script in (
+        "scripts/build_wheelhouse.sh",
+        "scripts/install-agent-pbx.sh",
+        "scripts/test_full.sh",
+    ):
         result = subprocess.run(
             ["sh", "-n", str(root / script)],
             capture_output=True,
