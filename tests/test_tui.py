@@ -6838,6 +6838,109 @@ async def test_tui_joplin_unavailable_does_not_call_note_endpoints() -> None:
         assert not any("/joplin/notes" in path for path in calls)
 
 
+async def test_tui_joplin_managed_sync_preserves_cached_view_during_api_restart() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    handoff_started = False
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            nonlocal handoff_started
+            if path == "/v1/joplin/status":
+                return Response(
+                    {
+                        "configured": True,
+                        "available": not handoff_started,
+                        "notebook": "Agent PBX",
+                        "sync": {
+                            "enabled": True,
+                            "running": 1 if handoff_started else 0,
+                            "pending": 0,
+                        },
+                        "error": (
+                            {
+                                "code": "JOPLIN_UNAVAILABLE",
+                                "message": "connection refused",
+                            }
+                            if handoff_started
+                            else None
+                        ),
+                    }
+                )
+            if path == "/v1/projects/agent-1/joplin/notes":
+                handoff_started = True
+                raise RuntimeError("HTTP 503 during managed Joplin sync")
+            if path in {"/v1/agents", "/v1/events"}:
+                return Response([])
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        handoff_started = False
+        app.selected_agent_id = "agent-1"
+        note = {
+            "id": "cached-note",
+            "title": "Cached response",
+            "body": "Existing readable response",
+            "updated_time": 123.0,
+            "encryption_applied": 0,
+        }
+        app.render_joplin_notes("agent-1", [note])
+        app.set_selected_joplin_note_for_agent("agent-1", "cached-note")
+        await app.update_joplin_reader("Existing readable response")
+        assert app.query_one("#joplin-notes", DataTable).row_count == 1
+
+        await app.load_joplin_notes("agent-1")
+        await pilot.pause()
+
+        table = app.query_one("#joplin-notes", DataTable)
+        reader = app.query_one("#joplin-reader", Markdown)
+        status = app.query_one("#joplin-status", Static)
+        assert table.row_count == 1
+        assert table.get_row("cached-note")[1] == "Cached response"
+        assert "Existing readable response" in str(
+            getattr(reader, "source_markdown", "")
+        )
+        assert "Data API restarting" in str(status.renderable)
+        assert app.query_one("#joplin-edit", Button).disabled is True
+
+
+async def test_tui_joplin_sync_completion_refreshes_visible_panel() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    refreshed: list[str] = []
+
+    async def fake_load_joplin_notes(agent_id: str) -> None:
+        refreshed.append(agent_id)
+
+    app.load_joplin_notes = fake_load_joplin_notes  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-1"
+        app.active_agent_tab = "joplin-tab"
+        app.handle_event(
+            {
+                "event_id": 1,
+                "type": "joplin_sync_succeeded",
+                "agent_id": "sync-1",
+                "payload": {"agent_id": "agent-1", "sync_id": "sync-1"},
+            }
+        )
+        await pilot.pause()
+
+    assert refreshed == ["agent-1"]
+
+
 async def test_tui_file_completion_uses_cached_files() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 

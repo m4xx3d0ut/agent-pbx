@@ -256,6 +256,107 @@ def test_joplin_sync_zero_exit_fails_when_e2ee_items_remain(tmp_path: Path) -> N
     assert caught.value.encryption["pending_notes"] == 1
 
 
+def test_joplin_targeted_sync_ignores_unrelated_encrypted_note(
+    tmp_path: Path,
+) -> None:
+    fake = FakeJoplinApi()
+    fake.notes["target-note"] = {
+        "id": "target-note",
+        "parent_id": "target-folder",
+        "title": "Target",
+        "body": "Saved response",
+        "encryption_applied": 0,
+    }
+    fake.notes["unrelated-locked-note"] = {
+        "id": "unrelated-locked-note",
+        "parent_id": "other-folder",
+        "title": "Unrelated",
+        "body": "ciphertext",
+        "encryption_applied": 1,
+    }
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            e2ee_wait_seconds=0,
+        ),
+        client=fake.client(),
+    )
+    service.sync = lambda: None  # type: ignore[method-assign]
+    gateway = JoplinGateway(make_store(tmp_path), service)
+
+    gateway.run_sync_job(
+        {
+            "sync_id": "sync-target",
+            "reason": "note_copy_create",
+            "reasons": ["note_copy_create"],
+            "note_id": "target-note",
+            "note_ids": ["target-note"],
+        }
+    )
+
+    assert service.encryption_status(force=True)["pending_total"] == 1
+
+
+def test_joplin_targeted_sync_fails_when_target_remains_encrypted(
+    tmp_path: Path,
+) -> None:
+    fake = FakeJoplinApi()
+    fake.notes["target-note"] = {
+        "id": "target-note",
+        "parent_id": "target-folder",
+        "title": "Target",
+        "body": "ciphertext",
+        "encryption_applied": 1,
+    }
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            e2ee_wait_seconds=0,
+        ),
+        client=fake.client(),
+    )
+    service.sync = lambda: None  # type: ignore[method-assign]
+    gateway = JoplinGateway(make_store(tmp_path), service)
+
+    with pytest.raises(JoplinE2EELockedError) as caught:
+        gateway.run_sync_job(
+            {
+                "sync_id": "sync-target",
+                "reason": "note_update",
+                "note_id": "target-note",
+                "note_ids": ["target-note"],
+            }
+        )
+
+    assert caught.value.encryption["scope"] == "sync_targets"
+    assert caught.value.encryption["pending_note_ids"] == ["target-note"]
+
+
+def test_joplin_targeted_delete_sync_accepts_missing_target(tmp_path: Path) -> None:
+    fake = FakeJoplinApi()
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            e2ee_wait_seconds=0,
+        ),
+        client=fake.client(),
+    )
+    service.sync = lambda: None  # type: ignore[method-assign]
+    gateway = JoplinGateway(make_store(tmp_path), service)
+
+    gateway.run_sync_job(
+        {
+            "sync_id": "sync-delete",
+            "reason": "note_delete",
+            "note_id": "deleted-note",
+            "note_ids": ["deleted-note"],
+        }
+    )
+
+
 def test_joplin_profile_coordinator_external_mode_refuses_live_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

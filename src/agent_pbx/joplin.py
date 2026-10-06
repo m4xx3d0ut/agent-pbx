@@ -34,6 +34,7 @@ DEFAULT_JOPLIN_NOTEBOOK = "Agent PBX"
 DEFAULT_JOPLIN_TIMEOUT_SECONDS = 15.0
 DEFAULT_JOPLIN_E2EE_WAIT_SECONDS = 10.0
 JOPLIN_PROFILE_OWNER_MODES = {"external", "managed_cli"}
+JOPLIN_DELETE_SYNC_REASONS = {"note_delete", "project_note_delete"}
 TERMINAL_LOG_STATUSES = {
     "blocked",
     "canceled",
@@ -177,6 +178,23 @@ class JoplinE2EELockedError(JoplinApiError):
             retryable=True,
         )
         self.encryption = encryption
+
+
+class JoplinSyncTargetError(JoplinApiError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        note_ids: list[str],
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=409,
+            code=code,
+            retryable=True,
+        )
+        self.note_ids = note_ids
 
 
 class JoplinProfileInUseError(JoplinApiError):
@@ -821,6 +839,85 @@ class JoplinService:
                 raise JoplinE2EELockedError(encryption)
             time.sleep(min(0.25, max(0.01, deadline - time.monotonic())))
 
+    def wait_for_sync_targets(
+        self,
+        note_ids: list[str],
+        *,
+        expect_deleted: bool = False,
+    ) -> dict[str, Any]:
+        targets = list(
+            dict.fromkeys(
+                note_id.strip() for note_id in note_ids if note_id.strip()
+            )
+        )
+        if not targets:
+            return {
+                "state": "ready",
+                "target_note_ids": [],
+                "expected_deleted": expect_deleted,
+            }
+        timeout = max(0.0, float(self.config.e2ee_wait_seconds))
+        deadline = time.monotonic() + timeout
+        while True:
+            encrypted: list[str] = []
+            missing: list[str] = []
+            present: list[str] = []
+            for note_id in targets:
+                try:
+                    note = self._request(
+                        "GET",
+                        f"/notes/{note_id}",
+                        params={"fields": "id,encryption_applied"},
+                    )
+                except JoplinApiError as exc:
+                    if exc.status_code == 404:
+                        missing.append(note_id)
+                        continue
+                    raise
+                present.append(note_id)
+                if self.note_encrypted(note):
+                    encrypted.append(note_id)
+
+            if expect_deleted and not present:
+                return {
+                    "state": "ready",
+                    "target_note_ids": targets,
+                    "expected_deleted": True,
+                }
+            if not expect_deleted and not missing and not encrypted:
+                return {
+                    "state": "ready",
+                    "target_note_ids": targets,
+                    "expected_deleted": False,
+                }
+            if time.monotonic() < deadline:
+                time.sleep(min(0.25, max(0.01, deadline - time.monotonic())))
+                continue
+            if encrypted:
+                raise JoplinE2EELockedError(
+                    {
+                        "state": "locked",
+                        "scope": "sync_targets",
+                        "pending_total": len(encrypted),
+                        "pending_notes": len(encrypted),
+                        "pending_resources": 0,
+                        "pending_folders": 0,
+                        "pending_note_ids": encrypted,
+                        "checked_at": self.clock(),
+                    }
+                )
+            if expect_deleted:
+                raise JoplinSyncTargetError(
+                    "Joplin sync completed but the targeted deleted note(s) remain present",
+                    code="JOPLIN_SYNC_TARGET_PRESENT",
+                    note_ids=present,
+                )
+            raise JoplinSyncTargetError(
+                "Joplin sync completed but the targeted note(s) are unavailable",
+                code="JOPLIN_SYNC_TARGET_MISSING",
+                note_ids=missing,
+            )
+
     @staticmethod
     def _assert_note_revision(
         existing: dict[str, Any],
@@ -1309,7 +1406,43 @@ class JoplinGateway:
             lock_file.flush()
             try:
                 self.profile_coordinator.run_sync()
-                self.service.wait_for_decryption()
+                note_ids = [
+                    str(note_id)
+                    for note_id in job.get("note_ids", [])
+                    if str(note_id).strip()
+                ]
+                if not note_ids and job.get("note_id"):
+                    note_ids = [str(job["note_id"])]
+                reasons = {
+                    str(reason)
+                    for reason in job.get("reasons", [])
+                    if str(reason).strip()
+                }
+                if not reasons and job.get("reason"):
+                    reasons = {str(job["reason"])}
+                if note_ids:
+                    delete_reasons = reasons & JOPLIN_DELETE_SYNC_REASONS
+                    if delete_reasons and delete_reasons != reasons:
+                        raise JoplinApiError(
+                            "Joplin sync job mixes deleted and retained note targets",
+                            code="JOPLIN_SYNC_TARGET_AMBIGUOUS",
+                            retryable=False,
+                        )
+                    self.service.wait_for_sync_targets(
+                        note_ids,
+                        expect_deleted=bool(delete_reasons),
+                    )
+                    # Keep global E2EE health current for the status surface, but
+                    # do not fail a targeted write because an unrelated item is
+                    # still encrypted elsewhere in the profile.
+                    try:
+                        self.service.encryption_status(force=True)
+                    except JoplinApiError:
+                        pass
+                else:
+                    # Manual/profile-wide sync remains strict: it is the operator's
+                    # explicit whole-profile consistency check.
+                    self.service.wait_for_decryption()
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 

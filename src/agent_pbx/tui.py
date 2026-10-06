@@ -5724,6 +5724,7 @@ class AgentPBXTUI(App[None]):
         self.selected_joplin_note_id = self.joplin_panel_state.selected_note_id
         self.selected_joplin_note_id_by_agent = self.joplin_panel_state.selected_by_scope
         self.joplin_draft_timer: Timer | None = None
+        self.joplin_sync_refresh_timer: Timer | None = None
         self.joplin_quit_armed_until = 0.0
         self.joplin_body_loading = False
         self.joplin_overwrite_armed_until: dict[str, float] = {}
@@ -25316,8 +25317,15 @@ class AgentPBXTUI(App[None]):
             return
 
     def format_joplin_status_line(self, status: dict[str, Any]) -> str:
+        sync = status.get("sync") if isinstance(status.get("sync"), dict) else None
+        sync_running = self.joplin_sync_in_progress(status)
+        if not status.get("available") and sync_running:
+            return (
+                f"Joplin: {status.get('notebook') or 'Agent PBX'}"
+                f" | {self.format_joplin_sync_summary(sync)}"
+                " | Data API restarting"
+            )
         if status.get("available"):
-            sync = status.get("sync") if isinstance(status.get("sync"), dict) else None
             sync_text = f" | {self.format_joplin_sync_summary(sync)}" if sync else ""
             encryption = (
                 status.get("encryption")
@@ -25333,6 +25341,37 @@ class AgentPBXTUI(App[None]):
         error = status.get("error") if isinstance(status.get("error"), dict) else {}
         code = error.get("code") or "JOPLIN_UNAVAILABLE"
         return f"Joplin: {code}"
+
+    @staticmethod
+    def joplin_sync_in_progress(status: dict[str, Any]) -> bool:
+        sync = status.get("sync") if isinstance(status.get("sync"), dict) else {}
+        return bool(int(sync.get("running") or 0))
+
+    def schedule_joplin_sync_refresh(self, agent_id: str) -> None:
+        if self.joplin_sync_refresh_timer is not None:
+            self.joplin_sync_refresh_timer.stop()
+
+        def retry() -> None:
+            self.joplin_sync_refresh_timer = None
+            if (
+                self.selected_agent_id != agent_id
+                or self.active_agent_tab != "joplin-tab"
+            ):
+                return
+            self.run_worker(
+                self.load_joplin_notes(agent_id),
+                name="joplin-sync-retry",
+                group="joplin-refresh",
+                exclusive=True,
+            )
+
+        self.joplin_sync_refresh_timer = self.set_timer(1.0, retry)
+
+    def cancel_joplin_sync_refresh(self) -> None:
+        if self.joplin_sync_refresh_timer is None:
+            return
+        self.joplin_sync_refresh_timer.stop()
+        self.joplin_sync_refresh_timer = None
 
     def format_joplin_sync_summary(self, sync: dict[str, Any] | None) -> str:
         if not sync or not sync.get("enabled"):
@@ -26077,6 +26116,9 @@ class AgentPBXTUI(App[None]):
             return
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
         draft = self.joplin_panel_state.draft_for(cache_agent_id)
+        reader_markdown_before_load = str(
+            getattr(reader, "source_markdown", "") or ""
+        )
         generation_resource = f"joplin-notes:{cache_agent_id}"
         generation = self.async_generations.start(generation_resource)
         if not self.joplin_configured:
@@ -26087,6 +26129,12 @@ class AgentPBXTUI(App[None]):
             )
             return
         if not self.joplin_available:
+            if self.joplin_sync_in_progress(self.joplin_status):
+                self.set_joplin_mutation_controls_locked(True)
+                if reader_markdown_before_load:
+                    await self.update_joplin_reader(reader_markdown_before_load)
+                self.schedule_joplin_sync_refresh(agent_id)
+                return
             table.clear()
             self.set_joplin_mutation_controls_locked(False)
             await self.update_joplin_reader(
@@ -26108,6 +26156,18 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             if not self.async_generations.current(generation_resource, generation):
                 return
+            # Managed CLI sync briefly stops and restarts the Data API server.
+            # Preserve the current note list, reader, and dirty draft through
+            # that expected handoff; the terminal sync event reloads the panel.
+            await self.refresh_joplin_status()
+            if not self.async_generations.current(generation_resource, generation):
+                return
+            if self.joplin_sync_in_progress(self.joplin_status):
+                self.set_joplin_mutation_controls_locked(True)
+                if reader_markdown_before_load:
+                    await self.update_joplin_reader(reader_markdown_before_load)
+                self.schedule_joplin_sync_refresh(agent_id)
+                return
             table.clear()
             await self.update_joplin_reader(
                 f"Unable to load Joplin notes for "
@@ -26116,6 +26176,7 @@ class AgentPBXTUI(App[None]):
             return
         if not self.async_generations.current(generation_resource, generation):
             return
+        self.cancel_joplin_sync_refresh()
         self.render_joplin_notes(agent_id, notes)
         if draft and draft.dirty:
             await self.render_joplin_mode(agent_id)
@@ -29729,6 +29790,18 @@ class AgentPBXTUI(App[None]):
             self.handle_operator_campaign_event(campaign_operator_id)
         if event_type.startswith("operator_kb_") and operator_kb_operator_id:
             self.handle_operator_kb_event(operator_kb_operator_id)
+        if (
+            event_type in {"joplin_sync_succeeded", "joplin_sync_failed"}
+            and selected_agent_id
+            and self.active_agent_tab == "joplin-tab"
+        ):
+            self.cancel_joplin_sync_refresh()
+            self.run_worker(
+                self.load_joplin_notes(selected_agent_id),
+                name="joplin-sync-refresh",
+                group="joplin-refresh",
+                exclusive=True,
+            )
         if event_type == "codex_runtime_observed" and agent_id:
             payload = event.get("payload")
             snapshot = payload.get("snapshot") if isinstance(payload, dict) else None
