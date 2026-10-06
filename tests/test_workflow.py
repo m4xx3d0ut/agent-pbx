@@ -1870,6 +1870,7 @@ def test_agent_files_diagnostics_are_scoped_and_parsed(
     outside = tmp_path / "outside.py"
     outside.write_text("import sys\n", encoding="utf-8")
     calls: list[list[str]] = []
+    real_run = subprocess.run
 
     def fake_which(name: str) -> str | None:
         return f"/usr/bin/{name}" if name == "ruff" else None
@@ -1878,6 +1879,8 @@ def test_agent_files_diagnostics_are_scoped_and_parsed(
         args: list[str],
         **kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
+        if not args or args[0] != "/usr/bin/ruff":
+            return real_run(args, **kwargs)
         calls.append(args)
         assert kwargs["cwd"] == str(repo)
         assert kwargs["timeout"] == 20.0
