@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -29,7 +30,8 @@ def test_agent_pane_adoption_moves_and_restores_live_pane(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    socket_path = tmp_path / "tmux.sock"
+    socket_dir = tempfile.TemporaryDirectory(prefix="apbx-adopt-", dir="/tmp")
+    socket_path = Path(socket_dir.name) / "tmux.sock"
     source = tmux(
         socket_path,
         "new-session",
@@ -115,13 +117,15 @@ def test_agent_pane_adoption_moves_and_restores_live_pane(
         assert store.get_tmux_runtime_mapping("agent-a") is None
     finally:
         tmux(socket_path, "kill-server")
+        socket_dir.cleanup()
 
 
 def test_agent_pane_adoption_blocks_duplicate_pbx_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    socket_path = tmp_path / "tmux.sock"
+    socket_dir = tempfile.TemporaryDirectory(prefix="apbx-adopt-", dir="/tmp")
+    socket_path = Path(socket_dir.name) / "tmux.sock"
     server = subprocess.Popen(
         ["tmux", "-S", str(socket_path), "new-session", "-d", "-s", "workspace", "sleep 300"]
     )
@@ -174,6 +178,7 @@ def test_agent_pane_adoption_blocks_duplicate_pbx_session(
         assert "runtime alias" in " ".join(alias_plan["blockers"])
     finally:
         tmux(socket_path, "kill-server")
+        socket_dir.cleanup()
 
 
 def test_codex_session_ids_use_open_rollout_files(tmp_path: Path) -> None:

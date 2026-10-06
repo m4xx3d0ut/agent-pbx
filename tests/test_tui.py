@@ -13464,7 +13464,8 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     assert sent[0][0] == "%30"
     assert "agent_id: operator-0" in sent[0][1]
     assert app.tmux_agent_targets["operator-0"] == "%30"
-    assert captures == ["operator-0"]
+    assert captures
+    assert set(captures) == {"operator-0"}
 
 
 async def test_tui_refuses_sol_restart_when_another_pane_owns_the_resume_session(

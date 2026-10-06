@@ -3,6 +3,7 @@ from __future__ import annotations
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -485,10 +486,11 @@ def test_tmux_pane_dead_status_parses_retained_exit_status(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux unavailable")
-def test_tmux_retains_failed_respawn_for_same_pane_rollback(tmp_path: Path) -> None:
+def test_tmux_retains_failed_respawn_for_same_pane_rollback() -> None:
     tmux_executable = shutil.which("tmux") or "tmux"
-    socket_path = tmp_path / "transaction.sock"
-    wrapper = tmp_path / "tmux-transaction"
+    socket_dir = tempfile.TemporaryDirectory(prefix="apbx-respawn-", dir="/tmp")
+    socket_path = Path(socket_dir.name) / "transaction.sock"
+    wrapper = Path(socket_dir.name) / "tmux-transaction"
     wrapper.write_text(
         "#!/bin/sh\n"
         f"exec {shlex.quote(tmux_executable)} -S {shlex.quote(str(socket_path))} \"$@\"\n",
@@ -554,6 +556,7 @@ def test_tmux_retains_failed_respawn_for_same_pane_rollback(tmp_path: Path) -> N
             capture_output=True,
             text=True,
         )
+        socket_dir.cleanup()
 
 
 def test_tmux_pane_clipboard_environment_only_returns_desktop_allowlist(monkeypatch) -> None:

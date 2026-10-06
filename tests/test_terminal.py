@@ -190,13 +190,13 @@ def test_pty_resize_notifies_child_process_group() -> None:
             sys.executable,
             "-c",
             "import os, signal\n"
-            "watched = {signal.SIGWINCH}\n"
-            "signal.pthread_sigmask(signal.SIG_BLOCK, watched)\n"
+            "def resized(*_args):\n"
+            "    size = os.get_terminal_size()\n"
+            "    os.write(1, f'{size.lines} {size.columns}\\n'.encode())\n"
+            "signal.signal(signal.SIGWINCH, resized)\n"
             "print('READY', flush=True)\n"
             "while True:\n"
-            "    signal.sigwait(watched)\n"
-            "    size = os.get_terminal_size()\n"
-            "    os.write(1, f'{size.lines} {size.columns}\\n'.encode())\n",
+            "    signal.pause()\n",
         ],
         columns=40,
         rows=8,
