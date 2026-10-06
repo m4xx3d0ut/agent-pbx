@@ -2310,6 +2310,7 @@ def format_joplin_tmux_response_copy_body(
     response: str,
     *,
     capture_source: str = "",
+    capture: CodexCopyCapture | None = None,
 ) -> str:
     clean_prompt = prompt.strip()
     clean_response = response.strip()
@@ -2325,6 +2326,26 @@ def format_joplin_tmux_response_copy_body(
     ]
     if capture_source.strip():
         lines.extend(["## Capture", "", capture_source.strip(), ""])
+    if capture is not None:
+        modified = (
+            datetime.fromtimestamp(capture.mtime, timezone.utc).isoformat()
+            if capture.mtime is not None
+            else ""
+        )
+        lines.extend(
+            [
+                "## Capture provenance",
+                "",
+                f"- Session ID: `{capture.session_id or 'unavailable'}`",
+                f"- Transcript path: `{capture.path or 'unavailable'}`",
+                f"- Phase: `{capture.phase or 'unavailable'}`",
+                "- Line index: "
+                f"`{capture.line_index if capture.line_index is not None else 'unavailable'}`",
+                f"- Transcript mtime: `{modified or 'unavailable'}`",
+                f"- Response SHA-256: `{capture.digest}`",
+                "",
+            ]
+        )
     lines.extend(["## Response", "", response_body])
     return "\n".join(lines)
 
@@ -25298,7 +25319,17 @@ class AgentPBXTUI(App[None]):
         if status.get("available"):
             sync = status.get("sync") if isinstance(status.get("sync"), dict) else None
             sync_text = f" | {self.format_joplin_sync_summary(sync)}" if sync else ""
-            return f"Joplin: {status.get('notebook') or 'Agent PBX'}{sync_text}"
+            encryption = (
+                status.get("encryption")
+                if isinstance(status.get("encryption"), dict)
+                else None
+            )
+            locked = int((encryption or {}).get("pending_total") or 0)
+            encryption_text = f" | 🔒 E2EE pending {locked}" if locked else ""
+            return (
+                f"Joplin: {status.get('notebook') or 'Agent PBX'}"
+                f"{sync_text}{encryption_text}"
+            )
         error = status.get("error") if isinstance(status.get("error"), dict) else {}
         code = error.get("code") or "JOPLIN_UNAVAILABLE"
         return f"Joplin: {code}"
@@ -25952,6 +25983,27 @@ class AgentPBXTUI(App[None]):
         setattr(reader, "source_markdown", markdown)
         await reader.update(markdown)
 
+    @staticmethod
+    def joplin_note_is_locked(note: dict[str, Any] | None) -> bool:
+        if not isinstance(note, dict):
+            return False
+        return bool(note.get("decryption_pending") or note.get("encryption_applied"))
+
+    def set_joplin_mutation_controls_locked(self, locked: bool) -> None:
+        for button_id in (
+            "joplin-rename",
+            "joplin-delete",
+            "joplin-edit",
+            "joplin-preview",
+            "joplin-save",
+            "joplin-conflict-merge",
+            "joplin-conflict-copy",
+            "joplin-conflict-overwrite",
+        ):
+            button = self.query_one_or_none(f"#{button_id}", Button)
+            if button is not None:
+                button.disabled = locked
+
     async def render_joplin_mode(
         self,
         agent_id: str,
@@ -25970,6 +26022,12 @@ class AgentPBXTUI(App[None]):
         if active_note is None:
             note_id = self.selected_joplin_note_for_agent(agent_id)
             active_note = self.joplin_notes_by_agent.get(scope, {}).get(note_id or "")
+        locked = self.joplin_note_is_locked(active_note)
+        self.set_joplin_mutation_controls_locked(locked)
+        if locked:
+            self.joplin_panel_state.set_mode(scope, "read")
+            mode = "locked"
+            draft = None
         if mode in {"edit", "conflict"} and draft is not None:
             reader.styles.display = "none"
             body.styles.display = "block"
@@ -25982,11 +26040,20 @@ class AgentPBXTUI(App[None]):
         else:
             body.styles.display = "none"
             reader.styles.display = "block"
-            markdown = (
-                draft.body
-                if mode == "preview" and draft is not None
-                else str((active_note or {}).get("body") or "")
-            )
+            if locked:
+                markdown = (
+                    "# 🔒 Encrypted Joplin note\n\n"
+                    "This note is present, but the configured Joplin profile has "
+                    "not decrypted it. Unlock E2EE in Joplin and run **Sync Now**. "
+                    "Editing, renaming, deleting, appending, and conflict overwrite "
+                    "remain disabled until decryption completes."
+                )
+            else:
+                markdown = (
+                    draft.body
+                    if mode == "preview" and draft is not None
+                    else str((active_note or {}).get("body") or "")
+                )
             await self.update_joplin_reader(markdown or "_Empty Joplin note._")
         if conflict_actions is not None:
             conflict_actions.styles.display = (
@@ -25995,8 +26062,10 @@ class AgentPBXTUI(App[None]):
         status = self.query_one_or_none("#joplin-status", Static)
         if status is not None and active_note is not None:
             dirty = " · dirty draft" if draft and draft.dirty else ""
+            lock_text = " · 🔒 decryption pending" if locked else ""
             status.update(
-                f"Joplin {mode}: {active_note.get('title') or active_note.get('id')}{dirty}"
+                f"Joplin {mode}: {active_note.get('title') or active_note.get('id')}"
+                f"{dirty}{lock_text}"
             )
 
     async def load_joplin_notes(self, agent_id: str) -> None:
@@ -26012,12 +26081,14 @@ class AgentPBXTUI(App[None]):
         generation = self.async_generations.start(generation_resource)
         if not self.joplin_configured:
             table.clear()
+            self.set_joplin_mutation_controls_locked(False)
             await self.update_joplin_reader(
                 self.format_joplin_unavailable(self.joplin_status)
             )
             return
         if not self.joplin_available:
             table.clear()
+            self.set_joplin_mutation_controls_locked(False)
             await self.update_joplin_reader(
                 self.format_joplin_unavailable(self.joplin_status)
             )
@@ -26060,6 +26131,7 @@ class AgentPBXTUI(App[None]):
             await self.select_joplin_note(note_id, agent_id=agent_id)
         else:
             self.set_selected_joplin_note_for_agent(agent_id, None)
+            self.set_joplin_mutation_controls_locked(False)
             await self.update_joplin_reader("No project-scoped Joplin notes yet.")
 
     def render_joplin_notes(
@@ -26078,7 +26150,11 @@ class AgentPBXTUI(App[None]):
             note_map[note_id] = note
             table.add_row(
                 self.format_joplin_time(note.get("updated_time")),
-                str(note.get("title") or note_id),
+                (
+                    f"🔒 {note.get('title') or note_id}"
+                    if self.joplin_note_is_locked(note)
+                    else str(note.get("title") or note_id)
+                ),
                 key=note_id,
             )
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
@@ -26176,6 +26252,30 @@ class AgentPBXTUI(App[None]):
         note = self.joplin_notes_by_agent.get(cache_agent_id, {}).get(note_id, {})
         return str(note.get("title") or note_id)
 
+    def current_joplin_note(
+        self,
+        agent_id: str,
+        note_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        resolved_note_id = note_id or self.selected_joplin_note_for_agent(agent_id)
+        if not resolved_note_id:
+            return None
+        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        return self.joplin_notes_by_agent.get(cache_agent_id, {}).get(resolved_note_id)
+
+    def guard_joplin_note_mutation(
+        self,
+        agent_id: str,
+        note_id: str | None = None,
+    ) -> bool:
+        if not self.joplin_note_is_locked(self.current_joplin_note(agent_id, note_id)):
+            return True
+        self.notify(
+            "This Joplin note is encrypted. Unlock E2EE and sync before changing it.",
+            severity="warning",
+        )
+        return False
+
     def open_joplin_title_modal(self, agent_id: str, *, action: str) -> None:
         note_id = self.selected_joplin_note_for_agent(agent_id)
         scope = self.joplin_selection_key(agent_id)
@@ -26188,6 +26288,8 @@ class AgentPBXTUI(App[None]):
             return
         if action == "rename" and not note_id:
             self.notify("Select a Joplin note before renaming.", severity="warning")
+            return
+        if action == "rename" and not self.guard_joplin_note_mutation(agent_id, note_id):
             return
         current_title = (
             self.current_joplin_note_title(agent_id, note_id)
@@ -26255,6 +26357,8 @@ class AgentPBXTUI(App[None]):
         if not note_id:
             self.notify("Select a Joplin note before renaming.", severity="warning")
             return
+        if not self.guard_joplin_note_mutation(agent_id, note_id):
+            return
         try:
             edit_response = await self.api_client().post(
                 self.joplin_edit_url_for_agent(agent_id, note_id),
@@ -26291,6 +26395,8 @@ class AgentPBXTUI(App[None]):
         if not note_id:
             self.notify("Select a Joplin note before deleting.", severity="warning")
             return
+        if not self.guard_joplin_note_mutation(agent_id, note_id):
+            return
         self.push_screen(
             JoplinDeleteConfirmScreen(
                 agent_id=agent_id,
@@ -26301,6 +26407,8 @@ class AgentPBXTUI(App[None]):
 
     async def delete_joplin_note(self, agent_id: str, note_id: str) -> None:
         if not await self.ensure_joplin_available():
+            return
+        if not self.guard_joplin_note_mutation(agent_id, note_id):
             return
         try:
             response = await self.api_client().delete(
@@ -26323,6 +26431,8 @@ class AgentPBXTUI(App[None]):
         note_id = self.selected_joplin_note_for_agent(agent_id)
         if not note_id:
             self.notify("Select a Joplin note before editing.", severity="warning")
+            return
+        if not self.guard_joplin_note_mutation(agent_id, note_id):
             return
         scope = self.joplin_selection_key(agent_id)
         existing = self.joplin_panel_state.draft_for(scope)
@@ -26458,6 +26568,8 @@ class AgentPBXTUI(App[None]):
         note_id = self.selected_joplin_note_for_agent(agent_id)
         if not note_id:
             self.notify("Select a Joplin note before saving.", severity="warning")
+            return
+        if not self.guard_joplin_note_mutation(agent_id, note_id):
             return
         scope = self.joplin_selection_key(agent_id)
         draft = self.joplin_panel_state.draft_for(scope)
@@ -27283,6 +27395,7 @@ class AgentPBXTUI(App[None]):
                 prompt,
                 response_text,
                 capture_source=clipboard_source,
+                capture=capture,
             )
             title = joplin_tmux_copy_title(prompt)
             note = await self.create_manual_joplin_copy(

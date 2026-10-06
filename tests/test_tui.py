@@ -2536,10 +2536,50 @@ async def test_tui_joplin_reader_accepts_tab_focus_and_arrow_scrolling() -> None
         await pilot.press("down", "down", "down")
         await pilot.pause()
         assert reader.scroll_y > before
-
         await pilot.press("up")
         await pilot.pause()
         assert reader.scroll_y < before + 3
+
+
+async def test_tui_joplin_encrypted_note_renders_locked_and_disables_mutation() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    note = {
+        "id": "locked-note",
+        "parent_id": "folder",
+        "title": "Remote encrypted note",
+        "body": "",
+        "encryption_applied": 1,
+        "decryption_pending": True,
+        "updated_time": 123.0,
+    }
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-1"
+        app.set_selected_joplin_note_for_agent("agent-1", "locked-note")
+        app.joplin_notes_by_agent["agent-1"] = {"locked-note": note}
+        app.render_joplin_notes("agent-1", [note])
+        await app.render_joplin_mode("agent-1", note=note)
+        await pilot.pause()
+
+        reader = app.query_one("#joplin-reader", Markdown)
+        status = app.query_one("#joplin-status", Static)
+        table = app.query_one("#joplin-notes", DataTable)
+        title_cell = table.get_row("locked-note")[1]
+
+        assert "Encrypted Joplin note" in str(getattr(reader, "source_markdown", ""))
+        assert "decryption pending" in str(status.renderable)
+        assert str(title_cell).startswith("🔒")
+        for button_id in (
+            "joplin-rename",
+            "joplin-delete",
+            "joplin-edit",
+            "joplin-preview",
+            "joplin-save",
+            "joplin-conflict-overwrite",
+        ):
+            assert app.query_one(f"#{button_id}", Button).disabled is True
+        assert app.query_one("#joplin-new", Button).disabled is False
+        assert app.query_one("#joplin-sync", Button).disabled is False
 
 
 async def test_tui_priority_shortcuts_still_run_outside_terminal_focus(
@@ -10288,12 +10328,18 @@ async def test_tui_joplin_copy_duplicate_guard_and_force_create_intentional_note
     assert loads == ["agent-1", "agent-1", "agent-1"]
 
 
-async def test_tui_joplin_copy_title_prefers_prompt_associated_with_transcript() -> None:
+async def test_tui_joplin_copy_title_prefers_prompt_associated_with_transcript(
+    tmp_path: Path,
+) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     capture = CodexCopyCapture(
         text="Latest response",
         source="Codex transcript rollout.jsonl",
         session_id="session-1",
+        path=str(tmp_path / "rollout-session-1.jsonl"),
+        phase="final_answer",
+        line_index=42,
+        mtime=1_790_000_000.0,
         prompt="prompt typed directly in the embedded Codex terminal",
     )
     created: list[tuple[str, str, str]] = []
@@ -10330,6 +10376,11 @@ async def test_tui_joplin_copy_title_prefers_prompt_associated_with_transcript()
         "Codex Response - prompt typed directly in the embedded Codex terminal"
     )
     assert "prompt typed directly in the embedded Codex terminal" in created[0][2]
+    assert "## Capture provenance" in created[0][2]
+    assert "Session ID: `session-1`" in created[0][2]
+    assert "Phase: `final_answer`" in created[0][2]
+    assert "Line index: `42`" in created[0][2]
+    assert "Response SHA-256:" in created[0][2]
 
 
 async def test_tui_joplin_copy_falls_back_to_transcript_before_tmux_capture(

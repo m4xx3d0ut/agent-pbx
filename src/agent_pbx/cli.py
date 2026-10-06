@@ -822,6 +822,7 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         joplin_profile=joplin_config.profile,
         joplin_timeout_seconds=joplin_config.timeout_seconds,
         joplin_sync_on_write=joplin_config.sync_on_write,
+        joplin_profile_owner_mode=joplin_config.profile_owner_mode,
         joplin_webdav_url=joplin_config.webdav_url,
         joplin_webdav_username=joplin_config.webdav_username,
         joplin_webdav_password=(
@@ -923,6 +924,7 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         joplin_profile=daemon_config.joplin_profile,
         joplin_timeout_seconds=daemon_config.joplin_timeout_seconds,
         joplin_sync_on_write=daemon_config.joplin_sync_on_write,
+        joplin_profile_owner_mode=daemon_config.joplin_profile_owner_mode,
         joplin_webdav_url=daemon_config.joplin_webdav_url,
         joplin_webdav_username=daemon_config.joplin_webdav_username,
         joplin_webdav_password_configured=bool(
@@ -982,6 +984,7 @@ def _print_mcp_status(result: dict[str, object]) -> None:
         "joplin_profile",
         "joplin_timeout_seconds",
         "joplin_sync_on_write",
+        "joplin_profile_owner_mode",
         "joplin_webdav_url",
         "joplin_webdav_username",
         "joplin_webdav_password_configured",

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import shutil
 import subprocess
 import threading
@@ -24,12 +25,15 @@ JOPLIN_TOKEN_ENV = "AGENT_PBX_JOPLIN_TOKEN"
 JOPLIN_NOTEBOOK_ENV = "AGENT_PBX_JOPLIN_NOTEBOOK"
 JOPLIN_TIMEOUT_ENV = "AGENT_PBX_JOPLIN_TIMEOUT_SECONDS"
 JOPLIN_SYNC_ON_WRITE_ENV = "AGENT_PBX_JOPLIN_SYNC_ON_WRITE"
+JOPLIN_PROFILE_OWNER_MODE_ENV = "AGENT_PBX_JOPLIN_PROFILE_OWNER_MODE"
 JOPLIN_WEBDAV_URL_ENV = "AGENT_PBX_JOPLIN_WEBDAV_URL"
 JOPLIN_WEBDAV_USERNAME_ENV = "AGENT_PBX_JOPLIN_WEBDAV_USERNAME"
 JOPLIN_WEBDAV_PASSWORD_ENV = "AGENT_PBX_JOPLIN_WEBDAV_PASSWORD"
 
 DEFAULT_JOPLIN_NOTEBOOK = "Agent PBX"
 DEFAULT_JOPLIN_TIMEOUT_SECONDS = 15.0
+DEFAULT_JOPLIN_E2EE_WAIT_SECONDS = 10.0
+JOPLIN_PROFILE_OWNER_MODES = {"external", "managed_cli"}
 TERMINAL_LOG_STATUSES = {
     "blocked",
     "canceled",
@@ -150,6 +154,36 @@ class JoplinSyncLockError(JoplinApiError):
         )
 
 
+class JoplinEncryptedNoteError(JoplinApiError):
+    def __init__(self, note_id: str) -> None:
+        super().__init__(
+            "Joplin note is encrypted and cannot be read or changed until the "
+            "profile decrypts it",
+            status_code=409,
+            code="JOPLIN_NOTE_ENCRYPTED",
+            retryable=True,
+        )
+        self.note_id = note_id
+
+
+class JoplinE2EELockedError(JoplinApiError):
+    def __init__(self, encryption: dict[str, Any]) -> None:
+        pending = int(encryption.get("pending_total") or 0)
+        super().__init__(
+            f"Joplin sync completed but {pending} item(s) remain encrypted; "
+            "unlock E2EE in the configured profile and retry",
+            status_code=409,
+            code="JOPLIN_E2EE_LOCKED",
+            retryable=True,
+        )
+        self.encryption = encryption
+
+
+class JoplinProfileInUseError(JoplinApiError):
+    def __init__(self, message: str, *, code: str = "JOPLIN_PROFILE_IN_USE") -> None:
+        super().__init__(message, status_code=409, code=code, retryable=True)
+
+
 def joplin_note_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -161,6 +195,7 @@ def joplin_note_revision(note: dict[str, Any]) -> str:
         "body": str(note.get("body") or ""),
         "updated_time": note.get("updated_time"),
         "user_updated_time": note.get("user_updated_time"),
+        "encryption_applied": int(bool(note.get("encryption_applied"))),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -201,6 +236,8 @@ class JoplinConfig:
     profile: Path | None = None
     timeout_seconds: float = DEFAULT_JOPLIN_TIMEOUT_SECONDS
     sync_on_write: bool = False
+    profile_owner_mode: str = "external"
+    e2ee_wait_seconds: float = DEFAULT_JOPLIN_E2EE_WAIT_SECONDS
     webdav_url: str | None = None
     webdav_username: str | None = None
     webdav_password_configured: bool = False
@@ -224,6 +261,8 @@ class JoplinService:
         self._root_notebook_id: str | None = None
         self._folder_cache: dict[tuple[str | None, str], str] = {}
         self._sync_lock = threading.Lock()
+        self._encryption_lock = threading.Lock()
+        self._encryption_cache: tuple[float, dict[str, Any]] | None = None
 
     def status(self) -> dict[str, Any]:
         base = {
@@ -234,6 +273,7 @@ class JoplinService:
             "joplin_bin": str(self.config.joplin_bin) if self.config.joplin_bin else None,
             "profile": str(self.config.profile) if self.config.profile else None,
             "sync_on_write": self.config.sync_on_write,
+            "profile_owner_mode": self.config.profile_owner_mode,
             "webdav_url": self.config.webdav_url,
             "webdav_username": self.config.webdav_username,
             "webdav_password_configured": self.config.webdav_password_configured,
@@ -267,10 +307,28 @@ class JoplinService:
                     "retryable": True,
                 },
             }
+        encryption: dict[str, Any] | None = None
+        encryption_error: dict[str, Any] | None = None
+        try:
+            encryption = self.encryption_status()
+        except JoplinApiError as exc:
+            encryption_error = {
+                "code": exc.code,
+                "message": str(exc),
+                "retryable": exc.retryable,
+            }
+        except Exception as exc:  # status remains usable if an older API omits fields
+            encryption_error = {
+                "code": "JOPLIN_E2EE_STATUS_UNAVAILABLE",
+                "message": str(exc),
+                "retryable": True,
+            }
         return {
             **base,
             "available": True,
             "root_notebook_id": root_id,
+            "encryption": encryption,
+            "encryption_error": encryption_error,
         }
 
     def list_notes_for_agent(self, agent: dict[str, Any]) -> list[dict[str, Any]]:
@@ -279,7 +337,8 @@ class JoplinService:
             f"/folders/{folder_id}/notes",
             {
                 "fields": (
-                    "id,parent_id,title,created_time,updated_time,user_updated_time"
+                    "id,parent_id,title,created_time,updated_time,user_updated_time,"
+                    "encryption_applied"
                 ),
                 "order_by": "updated_time",
                 "order_dir": "DESC",
@@ -297,7 +356,7 @@ class JoplinService:
                     {
                         "fields": (
                             "id,parent_id,title,created_time,updated_time,"
-                            "user_updated_time"
+                            "user_updated_time,encryption_applied"
                         ),
                         "order_by": "updated_time",
                         "order_dir": "DESC",
@@ -319,7 +378,7 @@ class JoplinService:
             params={
                 "fields": (
                     "id,parent_id,title,body,created_time,updated_time,"
-                    "user_updated_time"
+                    "user_updated_time,encryption_applied"
                 )
             },
         )
@@ -335,7 +394,7 @@ class JoplinService:
             params={
                 "fields": (
                     "id,parent_id,title,body,created_time,updated_time,"
-                    "user_updated_time"
+                    "user_updated_time,encryption_applied"
                 )
             },
         )
@@ -377,6 +436,7 @@ class JoplinService:
         force: bool = False,
     ) -> dict[str, Any]:
         existing = self.get_note_for_project(project, note_id)
+        self.assert_note_mutable(existing)
         self._assert_note_revision(
             existing,
             base_revision=base_revision,
@@ -406,6 +466,7 @@ class JoplinService:
         note_id: str,
     ) -> dict[str, Any]:
         existing = self.get_note_for_project(project, note_id)
+        self.assert_note_mutable(existing)
         self._request("DELETE", f"/notes/{note_id}")
         if self.config.sync_on_write:
             self.sync()
@@ -424,6 +485,7 @@ class JoplinService:
         force: bool = False,
     ) -> dict[str, Any]:
         existing = self.get_note_for_agent(agent, note_id)
+        self.assert_note_mutable(existing)
         self._assert_note_revision(
             existing,
             base_revision=base_revision,
@@ -453,6 +515,7 @@ class JoplinService:
         note_id: str,
     ) -> dict[str, Any]:
         existing = self.get_note_for_agent(agent, note_id)
+        self.assert_note_mutable(existing)
         self._request("DELETE", f"/notes/{note_id}")
         if self.config.sync_on_write:
             self.sync()
@@ -580,8 +643,14 @@ class JoplinService:
         note = self._request(
             "GET",
             f"/notes/{note_id}",
-            params={"fields": "id,parent_id,title,body,created_time,updated_time"},
+            params={
+                "fields": (
+                    "id,parent_id,title,body,created_time,updated_time,"
+                    "user_updated_time,encryption_applied"
+                )
+            },
         )
+        self.assert_note_mutable(note)
         existing = str(note.get("body") or "")
         body = f"{existing.rstrip()}\n\n{markdown.strip()}\n"
         self._request("PUT", f"/notes/{note_id}", json={"body": body})
@@ -699,6 +768,60 @@ class JoplinService:
             )
 
     @staticmethod
+    def note_encrypted(note: dict[str, Any]) -> bool:
+        try:
+            return int(note.get("encryption_applied") or 0) != 0
+        except (TypeError, ValueError):
+            return bool(note.get("encryption_applied"))
+
+    @classmethod
+    def assert_note_mutable(cls, note: dict[str, Any]) -> None:
+        if cls.note_encrypted(note):
+            raise JoplinEncryptedNoteError(str(note.get("id") or "unknown"))
+
+    def encryption_status(self, *, force: bool = False) -> dict[str, Any]:
+        now = self.clock()
+        with self._encryption_lock:
+            if (
+                not force
+                and self._encryption_cache is not None
+                and now - self._encryption_cache[0] < 10.0
+            ):
+                return dict(self._encryption_cache[1])
+            counts: dict[str, int] = {}
+            for item_type, path in (
+                ("notes", "/notes"),
+                ("resources", "/resources"),
+                ("folders", "/folders"),
+            ):
+                items = self._get_paginated(
+                    path,
+                    {"fields": "id,encryption_applied"},
+                )
+                counts[item_type] = sum(self.note_encrypted(item) for item in items)
+            payload: dict[str, Any] = {
+                "state": "locked" if any(counts.values()) else "ready",
+                "pending_total": sum(counts.values()),
+                "pending_notes": counts["notes"],
+                "pending_resources": counts["resources"],
+                "pending_folders": counts["folders"],
+                "checked_at": now,
+            }
+            self._encryption_cache = (now, payload)
+            return dict(payload)
+
+    def wait_for_decryption(self) -> dict[str, Any]:
+        timeout = max(0.0, float(self.config.e2ee_wait_seconds))
+        deadline = time.monotonic() + timeout
+        while True:
+            encryption = self.encryption_status(force=True)
+            if not int(encryption.get("pending_total") or 0):
+                return encryption
+            if time.monotonic() >= deadline:
+                raise JoplinE2EELockedError(encryption)
+            time.sleep(min(0.25, max(0.01, deadline - time.monotonic())))
+
+    @staticmethod
     def _assert_note_revision(
         existing: dict[str, Any],
         *,
@@ -801,6 +924,7 @@ class JoplinService:
 
     @staticmethod
     def _note_summary(note: dict[str, Any]) -> dict[str, Any]:
+        encrypted = JoplinService.note_encrypted(note)
         return {
             "id": str(note.get("id") or ""),
             "parent_id": str(note.get("parent_id") or ""),
@@ -808,18 +932,271 @@ class JoplinService:
             "created_time": note.get("created_time"),
             "updated_time": note.get("updated_time"),
             "user_updated_time": note.get("user_updated_time"),
+            "encryption_applied": int(encrypted),
+            "decryption_pending": encrypted,
         }
 
     @classmethod
     def _note_response(cls, note: dict[str, Any]) -> dict[str, Any]:
+        encrypted = cls.note_encrypted(note)
         response = {
             **cls._note_summary(note),
-            "body": str(note.get("body") or ""),
+            # Never expose an encrypted payload as note text. Joplin normally
+            # returns an empty body for locked items, but this remains fail-closed
+            # if a client version returns serialized ciphertext instead.
+            "body": "" if encrypted else str(note.get("body") or ""),
         }
         response["title_hash"] = joplin_note_hash(response["title"])
         response["body_hash"] = joplin_note_hash(response["body"])
         response["revision"] = joplin_note_revision(response)
         return response
+
+
+class JoplinProfileCoordinator:
+    """Serialize CLI sync with the Data API server for one Joplin profile."""
+
+    def __init__(self, service: JoplinService) -> None:
+        self.service = service
+        self.config = service.config
+
+    def run_sync(self) -> None:
+        mode = str(self.config.profile_owner_mode or "external").strip().lower()
+        if mode not in JOPLIN_PROFILE_OWNER_MODES:
+            raise JoplinApiError(
+                f"unsupported Joplin profile owner mode: {mode}",
+                code="JOPLIN_PROFILE_OWNER_MODE_INVALID",
+                retryable=False,
+            )
+        profile = self.config.profile
+        if profile is None:
+            if mode == "managed_cli":
+                raise JoplinProfileInUseError(
+                    "managed Joplin profile ownership requires an explicit profile path",
+                    code="JOPLIN_PROFILE_REQUIRED",
+                )
+            self.service.sync()
+            return
+
+        server_pid = self._validated_server_pid(profile)
+        if mode == "external" and server_pid is not None:
+            raise JoplinProfileInUseError(
+                "the Joplin Data API server is using this profile; stop it before "
+                "CLI sync or set managed_cli ownership"
+            )
+        if mode == "external":
+            self.service.sync()
+            return
+
+        if server_pid is not None:
+            self._stop_server(server_pid)
+        sync_error: Exception | None = None
+        try:
+            self.service.sync()
+        except Exception as exc:  # preserve sync failure after server recovery
+            sync_error = exc
+        restart_error: Exception | None = None
+        try:
+            self._start_server(profile)
+        except Exception as exc:
+            restart_error = exc
+        if restart_error is not None:
+            if sync_error is not None:
+                raise JoplinProfileInUseError(
+                    f"Joplin sync failed ({sync_error}) and the Data API server "
+                    f"could not be restored ({restart_error})",
+                    code="JOPLIN_PROFILE_RECOVERY_FAILED",
+                ) from restart_error
+            raise restart_error
+        if sync_error is not None:
+            raise sync_error
+
+    def _validated_server_pid(self, profile: Path) -> int | None:
+        pid_path = profile.expanduser().resolve() / "clipper-pid.txt"
+        try:
+            raw_pid = pid_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            if self._api_server_reachable():
+                raise JoplinProfileInUseError(
+                    "Joplin Data API is reachable but its profile pid cannot be "
+                    "verified; refusing to run CLI sync",
+                    code="JOPLIN_PROFILE_SERVER_UNVERIFIED",
+                )
+            return None
+        except OSError as exc:
+            raise JoplinProfileInUseError(
+                f"cannot inspect Joplin Data API pid file: {exc}",
+                code="JOPLIN_PROFILE_SERVER_UNVERIFIED",
+            ) from exc
+        try:
+            pid = int(raw_pid)
+        except ValueError as exc:
+            raise JoplinProfileInUseError(
+                "Joplin Data API pid file is invalid",
+                code="JOPLIN_PROFILE_SERVER_UNVERIFIED",
+            ) from exc
+        if pid <= 1 or not self._process_exists(pid):
+            return None
+        if not self._process_owned_by_user(pid):
+            raise JoplinProfileInUseError(
+                "Joplin Data API process is not owned by the Agent PBX user",
+                code="JOPLIN_PROFILE_SERVER_UNVERIFIED",
+            )
+        command = self._process_command(pid)
+        if not self._server_command_matches(command, profile):
+            raise JoplinProfileInUseError(
+                "Joplin Data API pid does not identify the configured profile server",
+                code="JOPLIN_PROFILE_SERVER_UNVERIFIED",
+            )
+        return pid
+
+    @staticmethod
+    def _process_owned_by_user(pid: int) -> bool:
+        try:
+            return Path(f"/proc/{pid}").stat().st_uid == os.getuid()
+        except OSError:
+            pass
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "uid="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            return result.returncode == 0 and int(result.stdout.strip()) == os.getuid()
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return False
+
+    def _api_server_reachable(self) -> bool:
+        if not self.config.api_url:
+            return False
+        try:
+            response = httpx.get(
+                f"{str(self.config.api_url).rstrip('/')}/ping",
+                timeout=1.0,
+            )
+        except httpx.HTTPError:
+            return False
+        return response.status_code == 200 and "JoplinClipperServer" in response.text
+
+    @staticmethod
+    def _process_exists(pid: int) -> bool:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[2]
+        except (OSError, IndexError):
+            state = ""
+        if state == "Z":
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @staticmethod
+    def _process_command(pid: int) -> list[str]:
+        proc_cmdline = Path(f"/proc/{pid}/cmdline")
+        try:
+            data = proc_cmdline.read_bytes()
+        except OSError:
+            data = b""
+        if data:
+            return [part.decode("utf-8", errors="replace") for part in data.split(b"\0") if part]
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        return result.stdout.strip().split()
+
+    def _server_command_matches(self, command: list[str], profile: Path) -> bool:
+        if not command:
+            return False
+        profile_text = str(profile.expanduser().resolve())
+        try:
+            profile_index = command.index("--profile")
+        except ValueError:
+            return False
+        if profile_index + 1 >= len(command):
+            return False
+        try:
+            command_profile = str(Path(command[profile_index + 1]).expanduser().resolve())
+        except OSError:
+            return False
+        if command_profile != profile_text:
+            return False
+        if not any(
+            command[index : index + 2] == ["server", "start"]
+            for index in range(max(0, len(command) - 1))
+        ):
+            return False
+        executable = self.service.sync_command()[0]
+        expected = str(Path(executable).expanduser().resolve())
+        return any(
+            str(Path(part).expanduser().resolve()) == expected
+            for part in command
+            if part and not part.startswith("-")
+        )
+
+    def _stop_server(self, pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + min(max(self.config.timeout_seconds, 5.0), 30.0)
+        while self._process_exists(pid):
+            if time.monotonic() >= deadline:
+                raise JoplinProfileInUseError(
+                    "Joplin Data API server did not stop before the safe sync deadline"
+                )
+            time.sleep(0.1)
+
+    def _start_server(self, profile: Path) -> None:
+        executable = self.service.sync_command()[0]
+        profile = profile.expanduser().resolve()
+        log_path = profile / "agent-pbx-server.log"
+        profile.mkdir(parents=True, exist_ok=True)
+        with log_path.open("ab") as log:
+            try:
+                subprocess.Popen(
+                    [executable, "--profile", str(profile), "server", "start"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            except OSError as exc:
+                raise JoplinProfileInUseError(
+                    f"unable to restart Joplin Data API server: {exc}",
+                    code="JOPLIN_PROFILE_RECOVERY_FAILED",
+                ) from exc
+        deadline = time.monotonic() + min(max(self.config.timeout_seconds, 5.0), 30.0)
+        last_error = "server did not answer"
+        while time.monotonic() < deadline:
+            try:
+                url = f"{str(self.config.api_url).rstrip('/')}/ping"
+                response = httpx.get(url, timeout=1.0)
+                if (
+                    response.status_code == 200
+                    and "JoplinClipperServer" in response.text
+                ):
+                    return
+                last_error = f"HTTP {response.status_code}"
+            except httpx.HTTPError as exc:
+                last_error = str(exc)
+            time.sleep(0.2)
+        raise JoplinProfileInUseError(
+            f"Joplin Data API server did not recover after sync: {last_error}",
+            code="JOPLIN_PROFILE_RECOVERY_FAILED",
+        )
 
 
 class JoplinGateway:
@@ -830,6 +1207,7 @@ class JoplinGateway:
         *,
         sync_on_write: bool | None = None,
         clock: Any = time.time,
+        profile_coordinator: JoplinProfileCoordinator | None = None,
     ) -> None:
         self.store = store
         self.service = service
@@ -840,6 +1218,7 @@ class JoplinGateway:
             else bool(getattr(service.config, "sync_on_write", False))
         )
         self.clock = clock
+        self.profile_coordinator = profile_coordinator or JoplinProfileCoordinator(service)
         profile_source = str(
             getattr(service.config, "profile", None)
             or getattr(service.config, "api_url", None)
@@ -929,7 +1308,8 @@ class JoplinGateway:
             )
             lock_file.flush()
             try:
-                self.service.sync()
+                self.profile_coordinator.run_sync()
+                self.service.wait_for_decryption()
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
@@ -953,6 +1333,7 @@ class JoplinGateway:
         client_id: str,
     ) -> dict[str, Any]:
         note = self.service.get_note_for_agent(agent, note_id)
+        self.service.assert_note_mutable(note)
         edit = self.store.begin_joplin_edit(
             client_id=client_id,
             scope_key=f"agent:{agent.get('agent_id')}",
@@ -976,6 +1357,7 @@ class JoplinGateway:
         client_id: str,
     ) -> dict[str, Any]:
         note = self.service.get_note_for_project(project, note_id)
+        self.service.assert_note_mutable(note)
         edit = self.store.begin_joplin_edit(
             client_id=client_id,
             scope_key=f"project:{project}",
@@ -1396,6 +1778,11 @@ class JoplinGateway:
 
 
 def env_joplin_config() -> JoplinConfig:
+    profile_owner_mode = (
+        env_text_value(JOPLIN_PROFILE_OWNER_MODE_ENV) or "external"
+    ).lower()
+    if profile_owner_mode not in JOPLIN_PROFILE_OWNER_MODES:
+        profile_owner_mode = "external"
     return JoplinConfig(
         api_url=env_text_value(JOPLIN_API_URL_ENV),
         token=env_text_value(JOPLIN_TOKEN_ENV),
@@ -1404,6 +1791,7 @@ def env_joplin_config() -> JoplinConfig:
         profile=env_path_value(JOPLIN_PROFILE_ENV),
         timeout_seconds=env_float(JOPLIN_TIMEOUT_ENV, DEFAULT_JOPLIN_TIMEOUT_SECONDS),
         sync_on_write=env_flag(JOPLIN_SYNC_ON_WRITE_ENV),
+        profile_owner_mode=profile_owner_mode,
         webdav_url=env_text_value(JOPLIN_WEBDAV_URL_ENV),
         webdav_username=env_text_value(JOPLIN_WEBDAV_USERNAME_ENV),
         webdav_password_configured=bool(env_text_value(JOPLIN_WEBDAV_PASSWORD_ENV)),

@@ -18,7 +18,11 @@ from agent_pbx.joplin import (
     JoplinApiError,
     JoplinConfig,
     JoplinConflictError,
+    JoplinE2EELockedError,
+    JoplinEncryptedNoteError,
     JoplinGateway,
+    JoplinProfileCoordinator,
+    JoplinProfileInUseError,
     JoplinSyncLockError,
     JoplinScopeError,
     JoplinService,
@@ -31,6 +35,7 @@ class FakeJoplinApi:
     def __init__(self) -> None:
         self.folders: dict[str, dict[str, object]] = {}
         self.notes: dict[str, dict[str, object]] = {}
+        self.resources: dict[str, dict[str, object]] = {}
         self.next_folder = 1
         self.next_note = 1
         self.folder_note_requests: list[str] = []
@@ -44,6 +49,8 @@ class FakeJoplinApi:
         path = request.url.path
         if path == "/folders" and request.method == "GET":
             return self.json({"items": list(self.folders.values()), "has_more": False})
+        if path == "/resources" and request.method == "GET":
+            return self.json({"items": list(self.resources.values()), "has_more": False})
         if path == "/folders" and request.method == "POST":
             payload = json.loads(request.content.decode())
             folder_id = f"folder-{self.next_folder}"
@@ -65,12 +72,14 @@ class FakeJoplinApi:
             ]
             return self.json({"items": notes, "has_more": False})
         if path == "/notes" and request.method == "GET":
-            parent_id = query.get("parent_id", [""])[0]
-            notes = [
-                note
-                for note in self.notes.values()
-                if str(note.get("parent_id") or "") == parent_id
-            ]
+            notes = list(self.notes.values())
+            if "parent_id" in query:
+                parent_id = query.get("parent_id", [""])[0]
+                notes = [
+                    note
+                    for note in notes
+                    if str(note.get("parent_id") or "") == parent_id
+                ]
             return self.json({"items": notes, "has_more": False})
         if path == "/notes" and request.method == "POST":
             payload = json.loads(request.content.decode())
@@ -83,6 +92,7 @@ class FakeJoplinApi:
                 "body": payload["body"],
                 "created_time": 1_700_000_000_000 + self.next_note,
                 "updated_time": 1_700_000_000_000 + self.next_note,
+                "encryption_applied": 0,
             }
             self.notes[note_id] = note
             return self.json(note)
@@ -151,6 +161,182 @@ def test_joplin_note_revision_rejects_stale_update_and_preserves_markdown() -> N
     assert caught.value.current["body"] == "External edit"
     assert caught.value.as_error()["code"] == "JOPLIN_NOTE_CONFLICT"
     assert fake.notes[str(created["id"])]["body"] == "External edit"
+
+
+def test_joplin_encrypted_note_is_reported_as_locked_and_never_exposes_ciphertext() -> None:
+    fake = FakeJoplinApi()
+    service = make_service(fake)
+    agent = {"agent_id": "agent-1", "project": "demo", "metadata": {}}
+    created = service.create_note_for_agent(
+        agent,
+        event_type="NOTE",
+        title="Remote note",
+        body="plaintext before sync",
+    )
+    raw = fake.notes[str(created["id"])]
+    raw["body"] = "JED01000022000000ciphertext"
+    raw["encryption_applied"] = 1
+
+    note = service.get_note_for_agent(agent, str(created["id"]))
+    summaries = service.list_notes_for_agent(agent)
+
+    assert note["body"] == ""
+    assert note["encryption_applied"] == 1
+    assert note["decryption_pending"] is True
+    assert summaries[0]["decryption_pending"] is True
+    assert "ciphertext" not in json.dumps(note)
+    with pytest.raises(JoplinEncryptedNoteError):
+        service.update_note_for_agent(agent, str(created["id"]), body="overwrite")
+    with pytest.raises(JoplinEncryptedNoteError):
+        service.delete_note_for_agent(agent, str(created["id"]))
+    with pytest.raises(JoplinEncryptedNoteError):
+        service.append_to_note(str(created["id"]), "append")
+    assert fake.notes[str(created["id"])]["body"] == "JED01000022000000ciphertext"
+
+
+def test_joplin_status_counts_pending_encrypted_items() -> None:
+    fake = FakeJoplinApi()
+    service = make_service(fake)
+    service.ensure_root_notebook()
+    fake.notes["locked-note"] = {
+        "id": "locked-note",
+        "parent_id": "folder-1",
+        "title": "Locked",
+        "body": "ciphertext",
+        "encryption_applied": 1,
+    }
+    fake.resources["locked-resource"] = {
+        "id": "locked-resource",
+        "encryption_applied": 1,
+    }
+    fake.folders["locked-folder"] = {
+        "id": "locked-folder",
+        "title": "Locked folder",
+        "parent_id": "folder-1",
+        "encryption_applied": 1,
+    }
+
+    status = service.status()
+
+    assert status["available"] is True
+    assert status["encryption"] == {
+        "state": "locked",
+        "pending_total": 3,
+        "pending_notes": 1,
+        "pending_resources": 1,
+        "pending_folders": 1,
+        "checked_at": 123.0,
+    }
+
+
+def test_joplin_sync_zero_exit_fails_when_e2ee_items_remain(tmp_path: Path) -> None:
+    fake = FakeJoplinApi()
+    fake.notes["locked-note"] = {
+        "id": "locked-note",
+        "parent_id": "folder",
+        "title": "Locked",
+        "body": "ciphertext",
+        "encryption_applied": 1,
+    }
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            e2ee_wait_seconds=0,
+        ),
+        client=fake.client(),
+    )
+    service.sync = lambda: None  # type: ignore[method-assign]
+    gateway = JoplinGateway(make_store(tmp_path), service)
+
+    with pytest.raises(JoplinE2EELockedError) as caught:
+        gateway.run_sync_job({"sync_id": "sync-locked"})
+
+    assert caught.value.code == "JOPLIN_E2EE_LOCKED"
+    assert caught.value.encryption["pending_notes"] == 1
+
+
+def test_joplin_profile_coordinator_external_mode_refuses_live_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=tmp_path / "profile",
+            profile_owner_mode="external",
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    sync_calls: list[bool] = []
+    monkeypatch.setattr(coordinator, "_validated_server_pid", lambda _profile: 123)
+    monkeypatch.setattr(service, "sync", lambda: sync_calls.append(True))
+
+    with pytest.raises(JoplinProfileInUseError) as caught:
+        coordinator.run_sync()
+
+    assert caught.value.code == "JOPLIN_PROFILE_IN_USE"
+    assert sync_calls == []
+
+
+def test_joplin_profile_coordinator_managed_mode_stops_syncs_and_restores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "profile"
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=profile,
+            profile_owner_mode="managed_cli",
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    events: list[str] = []
+    monkeypatch.setattr(coordinator, "_validated_server_pid", lambda _profile: 321)
+    monkeypatch.setattr(coordinator, "_stop_server", lambda pid: events.append(f"stop:{pid}"))
+    monkeypatch.setattr(coordinator, "_start_server", lambda path: events.append(f"start:{path}"))
+    monkeypatch.setattr(service, "sync", lambda: events.append("sync"))
+
+    coordinator.run_sync()
+
+    assert events == ["stop:321", "sync", f"start:{profile}"]
+
+
+def test_joplin_profile_coordinator_restores_server_after_sync_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "profile"
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=profile,
+            profile_owner_mode="managed_cli",
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    events: list[str] = []
+    monkeypatch.setattr(coordinator, "_validated_server_pid", lambda _profile: 321)
+    monkeypatch.setattr(coordinator, "_stop_server", lambda pid: events.append(f"stop:{pid}"))
+    monkeypatch.setattr(coordinator, "_start_server", lambda path: events.append(f"start:{path}"))
+
+    def fail_sync() -> None:
+        events.append("sync")
+        raise JoplinApiError("sync failed")
+
+    monkeypatch.setattr(service, "sync", fail_sync)
+
+    with pytest.raises(JoplinApiError, match="sync failed"):
+        coordinator.run_sync()
+
+    assert events == ["stop:321", "sync", f"start:{profile}"]
 
 
 def test_joplin_gateway_records_two_client_conflict_and_rebases_merge(
@@ -289,6 +475,59 @@ def test_joplin_api_two_client_conflict_has_recovery_actions(
     assert "<<<<<<< LOCAL DRAFT" in detail["merged"]["body"]
     assert resolved.status_code == 200
     assert resolved.json()["conflict_copy"]["body"] == "from b"
+
+
+def test_joplin_api_returns_locked_note_and_blocks_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeJoplinApi()
+
+    def service_factory(config: JoplinConfig) -> JoplinService:
+        return JoplinService(config, client=fake.client(), clock=lambda: 123.0)
+
+    monkeypatch.setattr("agent_pbx.api.JoplinService", service_factory)
+    app = create_app(
+        ServerConfig(
+            db_path=tmp_path / "pbx.sqlite",
+            joplin_api_url="http://joplin.local",
+            joplin_token="secret",
+        )
+    )
+    with TestClient(app) as client:
+        client.post(
+            "/v1/agents/register",
+            json={"agent_id": "agent-1", "project": "demo", "metadata": {}},
+        )
+        created = client.post(
+            "/v1/agents/agent-1/joplin/notes",
+            json={"title": "Locked", "body": "plain"},
+        ).json()
+        raw = fake.notes[str(created["id"])]
+        raw["body"] = "JED01000022000000ciphertext"
+        raw["encryption_applied"] = 1
+
+        fetched = client.get(f"/v1/agents/agent-1/joplin/notes/{created['id']}")
+        edit = client.post(
+            f"/v1/agents/agent-1/joplin/notes/{created['id']}/edit",
+            json={"client_id": "client-a"},
+        )
+        updated = client.put(
+            f"/v1/agents/agent-1/joplin/notes/{created['id']}",
+            json={"body": "overwrite"},
+        )
+        deleted = client.delete(
+            f"/v1/agents/agent-1/joplin/notes/{created['id']}"
+        )
+
+    assert fetched.status_code == 200
+    assert fetched.json()["body"] == ""
+    assert fetched.json()["decryption_pending"] is True
+    assert "ciphertext" not in fetched.text
+    for response in (edit, updated, deleted):
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "JOPLIN_NOTE_ENCRYPTED"
+        assert "ciphertext" not in response.text
 
 
 class FakeJoplinService:

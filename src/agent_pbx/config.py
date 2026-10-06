@@ -44,6 +44,7 @@ class ServerConfig:
     joplin_profile: Path | None = None
     joplin_timeout_seconds: float = 15.0
     joplin_sync_on_write: bool = False
+    joplin_profile_owner_mode: str = "external"
     joplin_webdav_url: str | None = None
     joplin_webdav_username: str | None = None
     joplin_webdav_password_configured: bool = False

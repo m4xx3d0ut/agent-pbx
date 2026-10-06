@@ -23,6 +23,7 @@ from .joplin import (
     JOPLIN_BIN_ENV,
     JOPLIN_NOTEBOOK_ENV,
     JOPLIN_PROFILE_ENV,
+    JOPLIN_PROFILE_OWNER_MODE_ENV,
     JOPLIN_SYNC_ON_WRITE_ENV,
     JOPLIN_TIMEOUT_ENV,
     JOPLIN_TOKEN_ENV,
@@ -68,6 +69,7 @@ MANAGED_CHILD_ENV_VARS = {
     JOPLIN_NOTEBOOK_ENV,
     JOPLIN_BIN_ENV,
     JOPLIN_PROFILE_ENV,
+    JOPLIN_PROFILE_OWNER_MODE_ENV,
     JOPLIN_TIMEOUT_ENV,
     JOPLIN_SYNC_ON_WRITE_ENV,
     JOPLIN_WEBDAV_URL_ENV,
@@ -116,6 +118,7 @@ class MCPDaemonConfig:
     joplin_profile: Path | None = None
     joplin_timeout_seconds: float = 15.0
     joplin_sync_on_write: bool = False
+    joplin_profile_owner_mode: str = "external"
     joplin_webdav_url: str | None = None
     joplin_webdav_username: str | None = None
     joplin_webdav_password: str | None = None
@@ -205,6 +208,7 @@ def config_from_args(
     joplin_profile: Path | None = None,
     joplin_timeout_seconds: float = 15.0,
     joplin_sync_on_write: bool = False,
+    joplin_profile_owner_mode: str = "external",
     joplin_webdav_url: str | None = None,
     joplin_webdav_username: str | None = None,
     joplin_webdav_password: str | None = None,
@@ -247,6 +251,7 @@ def config_from_args(
         joplin_profile=joplin_profile.expanduser() if joplin_profile else None,
         joplin_timeout_seconds=joplin_timeout_seconds,
         joplin_sync_on_write=joplin_sync_on_write,
+        joplin_profile_owner_mode=joplin_profile_owner_mode,
         joplin_webdav_url=joplin_webdav_url,
         joplin_webdav_username=joplin_webdav_username,
         joplin_webdav_password=joplin_webdav_password,
@@ -336,6 +341,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "joplin_profile": str(config.joplin_profile) if config.joplin_profile else None,
         "joplin_timeout_seconds": config.joplin_timeout_seconds,
         "joplin_sync_on_write": config.joplin_sync_on_write,
+        "joplin_profile_owner_mode": config.joplin_profile_owner_mode,
         "joplin_webdav_url": config.joplin_webdav_url,
         "joplin_webdav_username": config.joplin_webdav_username,
         "joplin_webdav_password_configured": bool(config.joplin_webdav_password),
@@ -406,6 +412,7 @@ def _child_env(config: MCPDaemonConfig) -> dict[str, str]:
         child_env[JOPLIN_PROFILE_ENV] = str(config.joplin_profile.expanduser())
     child_env[JOPLIN_TIMEOUT_ENV] = str(config.joplin_timeout_seconds)
     child_env[JOPLIN_SYNC_ON_WRITE_ENV] = "1" if config.joplin_sync_on_write else "0"
+    child_env[JOPLIN_PROFILE_OWNER_MODE_ENV] = config.joplin_profile_owner_mode
     if config.joplin_webdav_url:
         child_env[JOPLIN_WEBDAV_URL_ENV] = config.joplin_webdav_url
     if config.joplin_webdav_username:
@@ -528,6 +535,7 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "joplin_profile": str(config.joplin_profile) if config.joplin_profile else None,
         "joplin_timeout_seconds": config.joplin_timeout_seconds,
         "joplin_sync_on_write": config.joplin_sync_on_write,
+        "joplin_profile_owner_mode": config.joplin_profile_owner_mode,
         "joplin_webdav_url": config.joplin_webdav_url,
         "joplin_webdav_username": config.joplin_webdav_username,
         "joplin_webdav_password_configured": bool(config.joplin_webdav_password),

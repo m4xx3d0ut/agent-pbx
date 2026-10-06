@@ -274,6 +274,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         profile=resolved_config.joplin_profile,
         timeout_seconds=resolved_config.joplin_timeout_seconds,
         sync_on_write=resolved_config.joplin_sync_on_write,
+        profile_owner_mode=resolved_config.joplin_profile_owner_mode,
         webdav_url=resolved_config.joplin_webdav_url,
         webdav_username=resolved_config.joplin_webdav_username,
         webdav_password_configured=(
@@ -4615,19 +4616,25 @@ async def run_joplin_call(
         response_status = (
             status.HTTP_404_NOT_FOUND
             if exc.status_code == status.HTTP_404_NOT_FOUND
+            else status.HTTP_409_CONFLICT
+            if exc.status_code == status.HTTP_409_CONFLICT
             else status.HTTP_401_UNAUTHORIZED
             if exc.code == "JOPLIN_AUTH_ERROR"
             else status.HTTP_429_TOO_MANY_REQUESTS
             if exc.code == "JOPLIN_RATE_LIMITED"
             else status.HTTP_503_SERVICE_UNAVAILABLE
         )
+        detail = {
+            "code": exc.code,
+            "message": str(exc),
+            "retryable": exc.retryable,
+        }
+        encryption = getattr(exc, "encryption", None)
+        if isinstance(encryption, dict):
+            detail["encryption"] = encryption
         raise HTTPException(
             status_code=response_status,
-            detail={
-                "code": exc.code,
-                "message": str(exc),
-                "retryable": exc.retryable,
-            },
+            detail=detail,
         ) from exc
     except ValueError as exc:
         raise HTTPException(

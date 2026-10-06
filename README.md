@@ -798,6 +798,13 @@ state. Press `Sync Now` or use `/joplin sync` to queue a manual sync. Sync
 failures are retained in Agent PBX status/events; they do not roll back the note
 write that triggered them.
 
+Encrypted items are shown as `🔒 decryption pending`, never as empty notes.
+Agent PBX does not return encrypted payloads through its API and blocks edit,
+rename, delete, append, and overwrite actions until the configured Joplin
+profile decrypts the item. A sync is successful only after the local API reports
+zero pending encrypted notes, resources, and folders; otherwise the durable sync
+job fails with `JOPLIN_E2EE_LOCKED` and the status line shows the pending count.
+
 Joplin actions are available from the tab buttons and the local TUI
 palette/slash commands: `/joplin` opens the tab, `/joplin refresh` reloads
 scoped notes, `/joplin new` creates a scoped note, `/joplin rename` renames the
@@ -838,6 +845,26 @@ joplin --profile ~/.config/joplin-agent-pbx
 # If encrypted: :e2ee decrypt
 # Inside Joplin: :server start
 ```
+
+Joplin documents the terminal Data API server and terminal sync client as
+separate profile users. They must not operate the same profile concurrently.
+The safe committed default is:
+
+```bash
+AGENT_PBX_JOPLIN_PROFILE_OWNER_MODE=external
+```
+
+In `external` mode, Agent PBX refuses CLI sync while a validated same-profile
+Data API server is running. A dedicated single-user workstation may opt into:
+
+```bash
+AGENT_PBX_JOPLIN_PROFILE_OWNER_MODE=managed_cli
+```
+
+With an explicit `AGENT_PBX_JOPLIN_PROFILE`, Agent PBX verifies the profile
+server PID, process owner, executable, and command; stops that exact server;
+runs one profile-locked sync; restarts the Data API server; waits for `/ping`;
+and validates decryption. It never stops an ambiguous or foreign process.
 
 For E2EE troubleshooting from a shell:
 

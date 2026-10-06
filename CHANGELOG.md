@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Changed
+
+- Serialize same-profile Joplin Data API and CLI sync access through an
+  explicit external or managed profile-ownership policy.
+- Validate post-sync E2EE state before marking durable Joplin sync jobs
+  successful.
+- Add Codex session, transcript, turn-phase, line, mtime, and response-hash
+  provenance to copied-response notes.
+
+### Fixed
+
+- Render encrypted Joplin items as locked instead of empty and block note
+  mutation until decryption completes.
+- Restore the exact validated Joplin Data API process after managed CLI sync
+  without exposing E2EE credentials or ciphertext through Agent PBX.
+
 ## v2.1.0 - 2026-10-06
 
 ### Highlights

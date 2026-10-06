@@ -1550,12 +1550,15 @@ class JoplinStatusResponse(BaseModel):
     joplin_bin: str | None = None
     profile: str | None = None
     sync_on_write: bool = False
+    profile_owner_mode: str = "external"
     webdav_url: str | None = None
     webdav_username: str | None = None
     webdav_password_configured: bool = False
     checked_at: float
     root_notebook_id: str | None = None
     sync: dict[str, Any] | None = None
+    encryption: dict[str, Any] | None = None
+    encryption_error: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
 
 
@@ -1598,6 +1601,8 @@ class JoplinNoteSummary(BaseModel):
     created_time: int | float | None = None
     updated_time: int | float | None = None
     user_updated_time: int | float | None = None
+    encryption_applied: int = 0
+    decryption_pending: bool = False
 
 
 class JoplinNoteResponse(JoplinNoteSummary):
