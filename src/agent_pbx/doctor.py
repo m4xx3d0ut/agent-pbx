@@ -20,6 +20,7 @@ from .compat import compatibility_posture
 from .mcp_daemon import MCPDaemonConfig, lan_auth_guard, mcp_daemon_status
 from .store import SCHEMA_VERSION
 from .tmux_binary import configured_tmux_binary, resolve_tmux_binary
+from .runtime_tmux import RUNTIME_TMUX_SOCKET_ENV, tmux_socket_from_environment
 from .ui.theme import terminal_color_depth
 
 
@@ -208,16 +209,107 @@ def _tmux_check(which: Callable[[str], str | None], timeout: float) -> DoctorChe
         version = (result.stdout or result.stderr).strip()
     except Exception as exc:  # noqa: BLE001 - doctor normalizes host failures
         return DoctorCheck("tmux", "fail", f"tmux probe failed ({type(exc).__name__})")
-    outer = bool(os.getenv("TMUX"))
+    outer_socket = tmux_socket_from_environment(os.getenv("TMUX"))
+    outer = outer_socket is not None
+    details = [
+        f"configured command: {configured}; resolved path: {path}; "
+        f"outer tmux detected: {'yes' if outer else 'no'}"
+    ]
+    warnings: list[str] = []
+    client_version = version.removeprefix("tmux ").strip()
+    if outer_socket is not None:
+        server = _tmux_server_diagnostic(path, outer_socket, timeout)
+        if server:
+            details.append(f"outer server: {server['description']}")
+            if server.get("version") and server["version"] != client_version:
+                warnings.append(
+                    f"outer client/server version skew ({client_version} vs {server['version']})"
+                )
+    runtime_socket_raw = str(os.getenv(RUNTIME_TMUX_SOCKET_ENV) or "").strip()
+    if runtime_socket_raw:
+        runtime_socket = Path(runtime_socket_raw).expanduser()
+        runtime_bin = configured_tmux_binary()
+        runtime = _tmux_server_diagnostic(runtime_bin, runtime_socket, timeout)
+        if runtime:
+            details.append(f"runtime server: {runtime['description']}")
+            if runtime.get("plugin_contaminated"):
+                warnings.append("dedicated runtime inherited resurrect/continuum options")
+        else:
+            details.append(f"runtime server: unavailable at {runtime_socket}")
+    status = "fail" if result.returncode != 0 else "warn" if warnings else "pass"
     return DoctorCheck(
         "tmux",
-        "pass" if result.returncode == 0 else "fail",
-        version or path,
-        detail=(
-            f"configured command: {configured}; resolved path: {path}; "
-            f"outer tmux detected: {'yes' if outer else 'no'}"
+        status,
+        (version or path) + (f"; {'; '.join(warnings)}" if warnings else ""),
+        detail="; ".join(details),
+        remediation=(
+            "Start dedicated runtimes with the Agent PBX managed tmux config and "
+            "align the outer tmux client/server version before migration."
+            if warnings
+            else ""
         ),
     )
+
+
+def _tmux_server_diagnostic(
+    tmux_bin: str,
+    socket_path: Path,
+    timeout: float,
+) -> dict[str, Any] | None:
+    """Return live server identity without trusting the invoking client version."""
+
+    try:
+        identity = subprocess.run(
+            [
+                tmux_bin,
+                "-S",
+                str(socket_path),
+                "display-message",
+                "-p",
+                "#{version}\t#{pid}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=max(1.0, timeout),
+        )
+    except Exception:  # noqa: BLE001 - doctor converts host failures to evidence
+        return None
+    if identity.returncode != 0:
+        return None
+    fields = identity.stdout.strip().split("\t")
+    if len(fields) != 2 or not fields[0]:
+        return None
+    version, pid_text = fields
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        pid = 0
+    executable = ""
+    if pid > 0 and sys.platform.startswith("linux"):
+        try:
+            executable = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            executable = ""
+    options = subprocess.run(
+        [tmux_bin, "-S", str(socket_path), "show-options", "-g"],
+        capture_output=True,
+        text=True,
+        timeout=max(1.0, timeout),
+    )
+    option_text = options.stdout.casefold() if options.returncode == 0 else ""
+    contaminated = "continuum" in option_text or "resurrect" in option_text
+    description = f"{version} pid={pid or 'unknown'} socket={socket_path}"
+    if executable:
+        description += f" exe={executable}"
+    if contaminated:
+        description += " plugins=resurrect/continuum"
+    return {
+        "version": version,
+        "pid": pid or None,
+        "executable": executable or None,
+        "plugin_contaminated": contaminated,
+        "description": description,
+    }
 
 
 def _terminal_check() -> DoctorCheck:

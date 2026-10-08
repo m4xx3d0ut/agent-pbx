@@ -19,6 +19,7 @@ from agent_pbx.runtime_tmux import (
     RuntimeTmuxPane,
     TmuxServerIdentity,
     assess_runtime_mapping,
+    dedicated_runtime_config_path,
     ensure_dedicated_runtime_server,
     ensure_runtime_socket_parent,
     probe_runtime_panes,
@@ -29,6 +30,7 @@ from agent_pbx.runtime_tmux import (
     runtime_pop_plan,
     tmux_client_attach_command,
     tmux_select_runtime_pane_command,
+    write_managed_runtime_tmux_config,
 )
 from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import Store
@@ -222,6 +224,8 @@ def test_dedicated_server_starts_without_session_environment(
     assert ensure_dedicated_runtime_server(identity) is True
     assert calls[1] == [
         "tmux-test",
+        "-f",
+        str(socket_path.with_suffix(".conf")),
         "-S",
         str(socket_path),
         "start-server",
@@ -232,6 +236,49 @@ def test_dedicated_server_starts_without_session_environment(
         "off",
     ]
     assert all("TOKEN" not in part for part in calls[1])
+    config = socket_path.with_suffix(".conf")
+    assert config.stat().st_mode & 0o777 == 0o600
+    body = config.read_text()
+    assert "tmux-continuum" not in body
+    assert "tmux-resurrect" not in body
+    assert "history-limit 100000" in body
+
+
+def test_dedicated_runtime_config_is_private_and_plugin_free(tmp_path: Path) -> None:
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-a",
+        str(tmp_path / "runtime" / "tmux.sock"),
+        True,
+        False,
+    )
+    path = dedicated_runtime_config_path(identity, environ={})
+    written = write_managed_runtime_tmux_config(path)
+
+    assert written == path
+    assert written.stat().st_mode & 0o777 == 0o600
+    body = written.read_text()
+    assert "focus-events on" in body
+    assert "mouse on" in body
+    assert "set-clipboard external" in body
+    assert "@plugin" not in body
+
+
+def test_dedicated_runtime_config_override_must_be_absolute(tmp_path: Path) -> None:
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-a",
+        str(tmp_path / "tmux.sock"),
+        True,
+        False,
+    )
+    with pytest.raises(ValueError, match="must be an absolute path"):
+        dedicated_runtime_config_path(
+            identity,
+            environ={"AGENT_PBX_TMUX_RUNTIME_CONFIG": "relative.conf"},
+        )
 
 
 def test_outer_required_reports_missing_tmux() -> None:
@@ -719,3 +766,24 @@ def test_tmux_runtime_live_validation_clears_stale_writer(
     )
     assert acquired.status_code == 409
     assert "server_lost" in acquired.json()["detail"]
+
+    # Repeated refreshes and failed lease attempts for the same fault must not
+    # flood Events or repeatedly raise the same alert banner.
+    client.get("/v2/tmux/runtimes/agent-a", headers=headers)
+    client.post(
+        "/v2/tmux/runtimes/agent-a/writer/acquire",
+        headers=headers,
+        json={"client_id": "new-tui", "ttl_seconds": 30},
+    )
+    events = client.get(
+        "/v1/events",
+        headers=headers,
+        params={"limit": 100},
+    ).json()
+    reconciliation = [
+        event
+        for event in events
+        if event["type"] == "tmux_runtime_reconciliation_required"
+        and event["subject_id"] == "agent-a"
+    ]
+    assert len(reconciliation) == 1

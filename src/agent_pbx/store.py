@@ -1838,6 +1838,60 @@ class Store:
             "created_at": created_at,
         }
 
+    def append_event_if_changed(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        subject_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Append an event unless the latest matching subject event is identical.
+
+        Runtime reconciliation runs on short refresh intervals.  Keeping this
+        comparison and insert in one SQLite transaction prevents unchanged
+        faults from flooding the durable event stream or the TUI alert banner.
+        """
+
+        created_at = now_ts()
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT payload_json
+                FROM events
+                WHERE type = ? AND subject_id IS ?
+                ORDER BY event_id DESC
+                LIMIT 1
+                """,
+                (event_type, subject_id),
+            ).fetchone()
+            if row is not None:
+                try:
+                    previous = json.dumps(
+                        json.loads(str(row["payload_json"])),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    previous = str(row["payload_json"])
+                if previous == encoded:
+                    return None
+            cursor = conn.execute(
+                """
+                INSERT INTO events(type, subject_id, payload_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (event_type, subject_id, encoded, created_at),
+            )
+            event_id = int(cursor.lastrowid)
+        return {
+            "event_id": event_id,
+            "type": event_type,
+            "subject_id": subject_id,
+            "payload": payload,
+            "created_at": created_at,
+        }
+
     def list_events(self, *, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(

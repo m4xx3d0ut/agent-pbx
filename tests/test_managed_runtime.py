@@ -289,6 +289,46 @@ def test_runtime_migration_snapshot_results_and_rollback(tmp_path: Path) -> None
     assert store.get_tmux_runtime_mapping("agent-a")["pane_id"] == "%1"  # type: ignore[index]
 
 
+def test_runtime_migration_blocks_duplicate_session_aliases(tmp_path: Path) -> None:
+    root = tmp_path / "git"
+    repo_a = init_repo(root / "a")
+    repo_b = init_repo(root / "b")
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    for agent_id, repo, agent_type in (
+        ("caller-alias", repo_a, "caller"),
+        ("operator-0", repo_b, "operator"),
+    ):
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=agent_id,
+                project=repo.name,
+                agent_type=agent_type,
+                metadata={"cwd": str(repo), "codex_session_id": "shared-session"},
+            )
+        )
+        store.set_agent_starred(agent_id, starred=True)
+    store.upsert_tmux_runtime_mapping(
+        entity_id="operator-0",
+        server_mode="dedicated",
+        server_id="server-a",
+        socket_path="/tmp/server-a.sock",
+        session_name="runtime-operator-0",
+        pane_id="%1",
+        cwd=str(repo_b),
+        state="ready",
+    )
+
+    preview = service(store, root).preview_migration(target_cli_version="0.200.0")
+    candidates = {item["agent_id"]: item for item in preview["candidates"]}
+
+    assert candidates["operator-0"]["eligible"] is True
+    assert candidates["caller-alias"]["eligible"] is False
+    assert "owned by migration candidate operator-0" in "; ".join(
+        candidates["caller-alias"]["blockers"]
+    )
+
+
 def test_managed_runtime_api_discovers_projects_and_persists_migration(
     tmp_path: Path,
     monkeypatch,
@@ -330,7 +370,8 @@ def test_managed_runtime_api_discovers_projects_and_persists_migration(
         json={"agent_ids": ["agent-a"], "target_cli_version": "0.200.0"},
     )
     assert migration.status_code == 200
-    assert migration.json()["blocked_count"] == 1
+    assert migration.json()["blocked_count"] == 0
+    assert migration.json()["eligible_count"] == 1
     listed = client.get("/v2/runtime-migrations", headers=headers)
     assert listed.status_code == 200
     assert listed.json()["batches"][0]["batch_id"] == migration.json()["batch_id"]

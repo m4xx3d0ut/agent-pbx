@@ -116,9 +116,17 @@ def parse_pane_line(line: str) -> TmuxPane | None:
     )
 
 
-def list_panes(tmux_bin: str = "tmux") -> list[TmuxPane]:
+def list_panes(
+    tmux_bin: str = "tmux",
+    *,
+    socket_path: str | None = None,
+) -> list[TmuxPane]:
+    prefix = _runtime_tmux_command_prefix(
+        tmux_bin=tmux_bin,
+        socket_path=socket_path,
+    )
     result = subprocess.run(
-        [configured_tmux_binary(tmux_bin), "list-panes", "-a", "-F", TMUX_PANE_FORMAT],
+        [*prefix, "list-panes", "-a", "-F", TMUX_PANE_FORMAT],
         capture_output=True,
         check=True,
         text=True,
@@ -131,9 +139,15 @@ def list_panes(tmux_bin: str = "tmux") -> list[TmuxPane]:
     return panes
 
 
-def session_exists(session_name: str, *, tmux_bin: str = "tmux") -> bool:
+def session_exists(
+    session_name: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> bool:
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     result = subprocess.run(
-        [configured_tmux_binary(tmux_bin), "has-session", "-t", session_name],
+        [*prefix, "has-session", "-t", session_name],
         capture_output=True,
         text=True,
     )
@@ -150,12 +164,18 @@ def launch_pane(
     width: int | None = None,
     height: int | None = None,
     tmux_bin: str = "tmux",
+    socket_path: str | None = None,
 ) -> str:
     args: list[str]
-    existing_session = session_exists(session_name, tmux_bin=tmux_bin)
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
+    existing_session = session_exists(
+        session_name,
+        tmux_bin=tmux_bin,
+        socket_path=socket_path,
+    )
     if existing_session:
         args = [
-            configured_tmux_binary(tmux_bin),
+            *prefix,
             "new-window",
             "-d",
             "-P",
@@ -168,7 +188,7 @@ def launch_pane(
         ]
     else:
         args = [
-            configured_tmux_binary(tmux_bin),
+            *prefix,
             "new-session",
             "-d",
             "-P",
@@ -205,19 +225,27 @@ def launch_pane(
     if (width or height) and pane_session_attached(
         pane_id,
         tmux_bin=tmux_bin,
+        socket_path=socket_path,
     ) == 0:
         resize_window(
             pane_id,
             width=width,
             height=height,
             tmux_bin=tmux_bin,
+            socket_path=socket_path,
         )
     return pane_id
 
 
-def pane_session_attached(target: str, *, tmux_bin: str = "tmux") -> int:
+def pane_session_attached(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> int:
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     result = subprocess.run(
-        [configured_tmux_binary(tmux_bin), "display-message", "-p", "-t", target, "#{session_attached}"],
+        [*prefix, "display-message", "-p", "-t", target, "#{session_attached}"],
         capture_output=True,
         text=True,
     )
@@ -232,23 +260,38 @@ def resize_window(
     width: int | None = None,
     height: int | None = None,
     tmux_bin: str = "tmux",
+    socket_path: str | None = None,
 ) -> None:
-    args = [configured_tmux_binary(tmux_bin), "resize-window", "-t", target]
+    if not ((width is not None and int(width) > 0) or (height is not None and int(height) > 0)):
+        return
+    args = [
+        *_runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path),
+        "resize-window",
+        "-t",
+        target,
+    ]
     if width is not None and int(width) > 0:
         args.extend(["-x", str(int(width))])
     if height is not None and int(height) > 0:
         args.extend(["-y", str(int(height))])
-    if len(args) == 4:
-        return
     result = subprocess.run(args, capture_output=True, text=True)
     if result.returncode != 0:
         message = (result.stderr or result.stdout or "tmux resize failed").strip()
         raise RuntimeError(message)
 
 
-def pane_root_pid(target: str, *, tmux_bin: str = "tmux") -> int | None:
+def pane_root_pid(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> int | None:
+    prefix = _runtime_tmux_command_prefix(
+        tmux_bin=tmux_bin,
+        socket_path=socket_path,
+    )
     result = subprocess.run(
-        [configured_tmux_binary(tmux_bin), "display-message", "-p", "-t", target, "#{pane_pid}"],
+        [*prefix, "display-message", "-p", "-t", target, "#{pane_pid}"],
         capture_output=True,
         text=True,
     )
@@ -336,9 +379,16 @@ def respawn_pane(
     cwd: str | None = None,
     env: Mapping[str, str] | None = None,
     tmux_bin: str = "tmux",
+    socket_path: str | None = None,
 ) -> None:
     """Replace a pane command without changing its pane, window, or layout."""
-    args = [configured_tmux_binary(tmux_bin), "respawn-pane", "-k", "-t", target]
+    args = [
+        *_runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path),
+        "respawn-pane",
+        "-k",
+        "-t",
+        target,
+    ]
     if cwd:
         args.extend(["-c", cwd])
     if env:
@@ -357,9 +407,15 @@ def respawn_pane(
         raise RuntimeError(message)
 
 
-def kill_pane(target: str, *, tmux_bin: str = "tmux") -> None:
+def kill_pane(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> None:
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     result = subprocess.run(
-        [configured_tmux_binary(tmux_bin), "kill-pane", "-t", target],
+        [*prefix, "kill-pane", "-t", target],
         capture_output=True,
         text=True,
     )
@@ -368,29 +424,47 @@ def kill_pane(target: str, *, tmux_bin: str = "tmux") -> None:
         raise RuntimeError(message)
 
 
-def pane_exists(target: str, *, tmux_bin: str = "tmux") -> bool:
+def pane_exists(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> bool:
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     result = subprocess.run(
-        [configured_tmux_binary(tmux_bin), "display-message", "-p", "-t", target, "#{pane_id}"],
+        [*prefix, "display-message", "-p", "-t", target, "#{pane_id}"],
         capture_output=True,
         text=True,
     )
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def pane_is_live(target: str, *, tmux_bin: str = "tmux") -> bool:
+def pane_is_live(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> bool:
     """Return whether a pane still exists and is not a remain-on-exit pane."""
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     result = subprocess.run(
-        [configured_tmux_binary(tmux_bin), "display-message", "-p", "-t", target, "#{pane_dead}"],
+        [*prefix, "display-message", "-p", "-t", target, "#{pane_dead}"],
         capture_output=True,
         text=True,
     )
     return result.returncode == 0 and result.stdout.strip() != "1"
 
 
-def pane_remain_on_exit(target: str, *, tmux_bin: str = "tmux") -> bool:
+def pane_remain_on_exit(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> bool:
     """Return the effective ``remain-on-exit`` value for a pane."""
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     result = subprocess.run(
-        [configured_tmux_binary(tmux_bin), "display-message", "-p", "-t", target, "#{remain-on-exit}"],
+        [*prefix, "display-message", "-p", "-t", target, "#{remain-on-exit}"],
         capture_output=True,
         text=True,
     )
@@ -407,6 +481,7 @@ def set_pane_remain_on_exit(
     enabled: bool,
     *,
     tmux_bin: str = "tmux",
+    socket_path: str | None = None,
 ) -> None:
     """Set a pane-local ``remain-on-exit`` override.
 
@@ -415,7 +490,7 @@ def set_pane_remain_on_exit(
     """
     result = subprocess.run(
         [
-            configured_tmux_binary(tmux_bin),
+            *_runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path),
             "set-option",
             "-p",
             "-t",
@@ -433,10 +508,16 @@ def set_pane_remain_on_exit(
         raise RuntimeError(message)
 
 
-def pane_dead_status(target: str, *, tmux_bin: str = "tmux") -> int | None:
+def pane_dead_status(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> int | None:
     """Return the retained pane's exit status, if tmux reports one."""
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     result = subprocess.run(
-        [configured_tmux_binary(tmux_bin), "display-message", "-p", "-t", target, "#{pane_dead_status}"],
+        [*prefix, "display-message", "-p", "-t", target, "#{pane_dead_status}"],
         capture_output=True,
         text=True,
     )
@@ -451,9 +532,15 @@ def pane_dead_status(target: str, *, tmux_bin: str = "tmux") -> int | None:
         return None
 
 
-def pane_start_command(target: str, *, tmux_bin: str = "tmux") -> str:
+def pane_start_command(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> str:
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     result = subprocess.run(
-        [configured_tmux_binary(tmux_bin), "display-message", "-p", "-t", target, "#{pane_start_command}"],
+        [*prefix, "display-message", "-p", "-t", target, "#{pane_start_command}"],
         capture_output=True,
         text=True,
     )
@@ -799,8 +886,13 @@ def capture_pane(
     alternate_screen: bool = False,
     copy_mode: bool = False,
     preserve_trailing_spaces: bool = False,
+    socket_path: str | None = None,
 ) -> str:
-    args = [configured_tmux_binary(tmux_bin), "capture-pane", "-p"]
+    args = [
+        *_runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path),
+        "capture-pane",
+        "-p",
+    ]
     if join_wrapped:
         args.append("-J")
     if alternate_screen:
@@ -834,15 +926,17 @@ def send_text(
     submit_delay_seconds: float = DEFAULT_SUBMIT_DELAY_SECONDS,
     bracketed_paste: bool | None = None,
     submit: bool = True,
+    socket_path: str | None = None,
 ) -> None:
     buffer_name = f"agent-pbx-{os.getpid()}"
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     subprocess.run(
-        [configured_tmux_binary(tmux_bin), "load-buffer", "-b", buffer_name, "-"],
+        [*prefix, "load-buffer", "-b", buffer_name, "-"],
         input=text,
         check=True,
         text=True,
     )
-    paste_cmd = [configured_tmux_binary(tmux_bin), "paste-buffer"]
+    paste_cmd = [*prefix, "paste-buffer"]
     use_bracketed_paste = (
         bracketed_paste if bracketed_paste is not None else bracketed_paste_enabled()
     )
@@ -858,7 +952,7 @@ def send_text(
         if submit_delay_seconds > 0:
             time.sleep(submit_delay_seconds)
         subprocess.run(
-            [configured_tmux_binary(tmux_bin), "send-keys", "-t", target, "C-m"],
+            [*prefix, "send-keys", "-t", target, "C-m"],
             check=True,
             text=True,
         )
@@ -871,9 +965,11 @@ def send_literal_keys(
     tmux_bin: str = "tmux",
     submit_delay_seconds: float = DEFAULT_SUBMIT_DELAY_SECONDS,
     submit: bool = True,
+    socket_path: str | None = None,
 ) -> None:
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     subprocess.run(
-        [configured_tmux_binary(tmux_bin), "send-keys", "-t", target, "-l", text],
+        [*prefix, "send-keys", "-t", target, "-l", text],
         check=True,
         text=True,
     )
@@ -881,15 +977,22 @@ def send_literal_keys(
         if submit_delay_seconds > 0:
             time.sleep(submit_delay_seconds)
         subprocess.run(
-            [configured_tmux_binary(tmux_bin), "send-keys", "-t", target, "C-m"],
+            [*prefix, "send-keys", "-t", target, "C-m"],
             check=True,
             text=True,
         )
 
 
-def send_key(target: str, key: str, *, tmux_bin: str = "tmux") -> None:
+def send_key(
+    target: str,
+    key: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> None:
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     subprocess.run(
-        [configured_tmux_binary(tmux_bin), "send-keys", "-t", target, key],
+        [*prefix, "send-keys", "-t", target, key],
         check=True,
         text=True,
     )

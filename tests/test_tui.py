@@ -2989,7 +2989,11 @@ async def test_tui_runtime_migration_applies_only_eligible_candidates() -> None:
             {
                 "agent_id": "agent-a",
                 "eligible": True,
-                "mapping": {"pane_id": "%1"},
+                "mapping": {
+                    "pane_id": "%1",
+                    "state": "ready",
+                    "server_id": app.tmux_runtime_server.server_id,
+                },
                 "blockers": [],
             },
             {
@@ -3013,6 +3017,128 @@ async def test_tui_runtime_migration_applies_only_eligible_candidates() -> None:
         {"agent_id": "agent-b", "status": "skipped", "reason": "no mapping"},
     ]
     assert posted[0]["path"] == "/v2/runtime-migrations/batch-1/results"
+
+
+async def test_tui_managed_resume_launches_on_exact_dedicated_server(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    socket_path = tmp_path / "runtime.sock"
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret", tmux_direct=True)
+    app.tmux_runtime_server = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-new",
+        str(socket_path),
+        True,
+        False,
+        tmux_bin="/opt/tmux-3.7c",
+    )
+    launch_calls: list[dict[str, object]] = []
+    posts: list[str] = []
+    project = tmp_path / "demo"
+    project.mkdir()
+    mapping_response = {
+        "entity_id": "agent-a",
+        "state": "ready",
+        "server_mode": "dedicated",
+        "server_id": "server-new",
+        "socket_path": str(socket_path),
+        "session_name": "agent-pbx-runtime-agent-a",
+        "pane_id": "%9",
+        "metadata": {"tmux_bin": "/opt/tmux-3.7c"},
+    }
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append(path)
+            if path.startswith("/v2/tmux/runtimes/"):
+                return Response(mapping_response)
+            body = kwargs["json"]  # type: ignore[index]
+            return Response(body)  # type: ignore[arg-type]
+
+        async def aclose(self) -> None:
+            return None
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return {"state": "server_lost", "pane_id": "%1"}
+
+    async def available(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def no_conflict(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    def launch(**kwargs: object) -> str:
+        launch_calls.append(kwargs)
+        return "%9"
+
+    pane = tmux_support.TmuxPane(
+        "agent-pbx-runtime-agent-a",
+        "0",
+        "0",
+        "%9",
+        True,
+        "node",
+        "agent-a",
+        str(project),
+        120,
+        40,
+        0,
+        window_name="agent-a",
+        window_id="@9",
+    )
+    app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
+    app.ensure_codex_resume_session_available = available  # type: ignore[method-assign]
+    app.tmux_pane_has_codex_session_lease_conflict = no_conflict  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.ensure_dedicated_runtime_server", lambda _identity: False)
+    monkeypatch.setattr(tmux_support, "launch_pane", launch)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(tmux_support, "list_panes", lambda *_args, **_kwargs: [pane])
+    monkeypatch.setattr(tmux_support, "pane_root_pid", lambda *_args, **_kwargs: 4321)
+    monkeypatch.setattr("agent_pbx.tui.runtime_process_start_ticks", lambda _pid: 123)
+
+    async with app.run_test():
+        if app.http_client is not None:
+            await app.http_client.aclose()
+            app.http_client = None
+        app.api_client = lambda: Client()  # type: ignore[method-assign]
+        app.agents = {
+            "agent-a": {
+                "agent_id": "agent-a",
+                "agent_type": "caller",
+                "project": "demo",
+                "name": "Agent A",
+                "pbx_active": True,
+                "metadata": {
+                    "cwd": str(project),
+                    "codex_session_id": "session-a",
+                    "codex_command": "codex",
+                },
+            }
+        }
+        assert await app.resume_tmux_codex_in_managed_runtime("agent-a") is True
+
+    assert launch_calls[0]["tmux_bin"] == "/opt/tmux-3.7c"
+    assert launch_calls[0]["socket_path"] == str(socket_path)
+    assert "session-a" in str(launch_calls[0]["command"])
+    assert launch_calls[0]["env"]["AGENT_PBX_AGENT_ID"] == "agent-a"  # type: ignore[index]
+    assert posts[0] == "/v2/tmux/runtimes/agent-a"
+    assert app.tmux_runtime_mapping_by_agent["agent-a"]["pane_id"] == "%9"
 
 
 async def test_tui_layout_refresh_preserves_visible_events_focus() -> None:
@@ -13487,6 +13613,119 @@ async def test_tui_restart_tmux_requires_tmux_direct(monkeypatch) -> None:
         await app.restart_tmux_codex_session("agent-1")
 
     assert "agent-1" not in app.tmux_agent_targets
+
+
+async def test_tui_resolves_restart_pane_from_authoritative_runtime_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    mapping = {
+        "entity_id": "agent-1",
+        "state": "ready",
+        "server_mode": "dedicated",
+        "socket_path": "/run/user/1000/agent-pbx/runtime.sock",
+        "session_name": "agent-pbx-runtime-agent-1",
+        "pane_id": "%77",
+        "metadata": {"tmux_bin": "/opt/tmux-3.7c"},
+    }
+    app.tmux_runtime_mapping_by_agent["agent-1"] = mapping
+    observed: list[dict[str, object]] = []
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return mapping
+
+    def list_panes(*_args: object, **kwargs: object) -> list[tmux_support.TmuxPane]:
+        observed.append(kwargs)
+        return [
+            tmux_support.TmuxPane(
+                "agent-pbx-runtime-agent-1",
+                "0",
+                "0",
+                "%77",
+                True,
+                "node",
+                "agent-1",
+                "/tmp/demo",
+                120,
+                40,
+                50,
+                window_name="codex",
+                window_id="@7",
+            )
+        ]
+
+    app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", list_panes)
+
+    pane = await app.resolve_tmux_send_pane("agent-1", status=None)
+
+    assert pane is not None and pane.pane_id == "%77"
+    assert observed == [
+        {
+            "tmux_bin": "/opt/tmux-3.7c",
+            "socket_path": "/run/user/1000/agent-pbx/runtime.sock",
+        }
+    ]
+    assert app.tmux_agent_targets["agent-1"] == "%77"
+
+
+async def test_tui_does_not_fall_back_to_legacy_pane_for_stale_runtime_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    mapping = {
+        "entity_id": "agent-1",
+        "state": "server_lost",
+        "socket_path": "/run/user/1000/agent-pbx/missing.sock",
+        "session_name": "agent-pbx-runtime-agent-1",
+        "pane_id": "%77",
+    }
+    app.tmux_runtime_mapping_by_agent["agent-1"] = mapping
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return mapping
+
+    app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        tmux_support,
+        "list_panes",
+        lambda *_args, **_kwargs: pytest.fail("legacy server must not be inspected"),
+    )
+
+    assert await app.resolve_tmux_send_pane("agent-1", status=None) is None
+
+
+async def test_tui_send_key_to_mapped_pane_uses_exact_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_runtime_mapping_by_agent["agent-1"] = {
+        "entity_id": "agent-1",
+        "state": "ready",
+        "server_mode": "dedicated",
+        "socket_path": "/run/user/1000/agent-pbx/runtime.sock",
+        "session_name": "agent-pbx-runtime-agent-1",
+        "pane_id": "%77",
+        "metadata": {"tmux_bin": "/opt/tmux-3.7c"},
+    }
+    observed: list[tuple[str, str, dict[str, object]]] = []
+
+    def send_key(pane_id: str, key: str, **kwargs: object) -> None:
+        observed.append((pane_id, key, kwargs))
+
+    monkeypatch.setattr(tmux_support, "send_key", send_key)
+
+    assert await app.send_key_to_tmux_pane("%77", "Escape") is True
+    assert observed == [
+        (
+            "%77",
+            "Escape",
+            {
+                "tmux_bin": "/opt/tmux-3.7c",
+                "socket_path": "/run/user/1000/agent-pbx/runtime.sock",
+            },
+        )
+    ]
 
 
 async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) -> None:

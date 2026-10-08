@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 from agent_pbx.cli import build_parser
 from agent_pbx.doctor import (
@@ -9,6 +10,7 @@ from agent_pbx.doctor import (
     DoctorReport,
     _database_check,
     _security_check,
+    _tmux_server_diagnostic,
     _compatibility_check,
     doctor_json,
     doctor_markdown,
@@ -116,3 +118,35 @@ def test_doctor_cli_parser_exposes_release_gate_options() -> None:
     assert args.strict is True
     assert args.no_service_probes is True
     assert args.codex_bin == "codex-x"
+
+
+def test_tmux_server_diagnostic_reports_server_binary_and_plugin_contamination(
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "display-message" in command:
+            return subprocess.CompletedProcess(command, 0, "3.2a\t4242\n", "")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "@continuum-restore on\n@plugin tmux-plugins/tmux-resurrect\n",
+            "",
+        )
+
+    monkeypatch.setattr("agent_pbx.doctor.subprocess.run", run)
+    monkeypatch.setattr("agent_pbx.doctor.os.readlink", lambda _path: "/usr/bin/tmux")
+
+    result = _tmux_server_diagnostic(
+        "/opt/tmux-3.7c",
+        Path("/tmp/tmux.sock"),
+        2.0,
+    )
+
+    assert result is not None
+    assert result["version"] == "3.2a"
+    assert result["executable"] == "/usr/bin/tmux"
+    assert result["plugin_contaminated"] is True
+    assert calls[0][:3] == ["/opt/tmux-3.7c", "-S", "/tmp/tmux.sock"]

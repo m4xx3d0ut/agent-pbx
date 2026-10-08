@@ -877,7 +877,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 clear_writer_lease=not bool(assessment["safe"]),
             )
             if not assessment["safe"]:
-                store.append_event(
+                store.append_event_if_changed(
                     "tmux_runtime_reconciliation_required",
                     assessment,
                     entity_id,
@@ -902,7 +902,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             )
             results.append({"mapping": updated, "assessment": assessment})
             if not assessment["safe"]:
-                store.append_event(
+                store.append_event_if_changed(
                     "tmux_runtime_reconciliation_required",
                     assessment,
                     str(mapping["entity_id"]),
@@ -933,7 +933,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 },
                 clear_writer_lease=True,
             )
-            store.append_event(
+            store.append_event_if_changed(
                 "tmux_runtime_reconciliation_required",
                 assessment,
                 entity_id,

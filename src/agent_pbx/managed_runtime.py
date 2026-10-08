@@ -36,6 +36,7 @@ from .tmux_binary import configured_tmux_binary
 PROJECT_ROOTS_ENV = "AGENT_PBX_PROJECT_ROOTS"
 DEFAULT_MIGRATION_RETENTION_DAYS = 7.0
 AGENT_ID_PATTERN = re.compile(r"[^a-z0-9_.-]+")
+ACTIVE_MIGRATION_STATUSES = {"online", "working", "waiting", "blocked", "needs_input"}
 
 
 @dataclass(frozen=True)
@@ -367,12 +368,21 @@ class ManagedRuntimeService:
                 or ""
             ).strip()
             blockers: list[str] = []
-            if mapping is None:
-                blockers.append("no runtime mapping")
-            elif str(mapping.get("state") or "") != "ready":
-                blockers.append(f"runtime mapping is {mapping.get('state')}")
             if not session_id:
                 blockers.append("no Codex resume session id")
+            cwd = str(
+                metadata.get("work_root")
+                or metadata.get("cwd")
+                or metadata.get("source_cwd")
+                or ""
+            ).strip()
+            if not cwd or not Path(cwd).is_dir():
+                blockers.append("working directory is unavailable")
+            status = str(agent.get("status") or "").strip().casefold()
+            if not bool(agent.get("pbx_active", True)) or status not in ACTIVE_MIGRATION_STATUSES:
+                blockers.append("retained identity is not active; preserve without relaunch")
+            if mapping is not None and bool(mapping.get("writer_lease_active")):
+                blockers.append("runtime writer lease is active")
             selected.append(
                 {
                     "agent_id": agent_id,
@@ -380,6 +390,7 @@ class ManagedRuntimeService:
                     "project": agent.get("project"),
                     "starred": bool(agent.get("starred")),
                     "session_id": session_id or None,
+                    "cwd": cwd or None,
                     "mapping": mapping,
                     "blockers": blockers,
                     "eligible": not blockers,
@@ -396,6 +407,33 @@ class ManagedRuntimeService:
                     },
                 }
             )
+        by_session: dict[str, list[dict[str, Any]]] = {}
+        for item in selected:
+            session_id = str(item.get("session_id") or "")
+            if session_id:
+                by_session.setdefault(session_id, []).append(item)
+        for session_id, candidates in by_session.items():
+            if len(candidates) < 2:
+                continue
+            owner = sorted(
+                candidates,
+                key=lambda item: (
+                    str((item.get("mapping") or {}).get("state") or "") != "ready",
+                    item.get("agent_type") != "operator",
+                    str(item.get("agent_id") or ""),
+                ),
+            )[0]
+            owner_id = str(owner.get("agent_id") or "")
+            for item in candidates:
+                if item is owner:
+                    continue
+                blockers = item.get("blockers")
+                if isinstance(blockers, list):
+                    blockers.append(
+                        f"Codex session {session_id} is owned by migration candidate {owner_id}"
+                    )
+                    item["eligible"] = False
+            owner["eligible"] = not bool(owner.get("blockers"))
         missing = sorted(requested - {str(item["agent_id"]) for item in selected})
         if missing:
             raise ValueError(f"unknown migration agent ids: {', '.join(missing)}")
