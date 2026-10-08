@@ -85,6 +85,30 @@ def test_runtime_server_outer_if_present_falls_back_without_outer(tmp_path: Path
     assert len(os.fsencode(identity.socket_path)) <= MAX_GENERATED_UNIX_SOCKET_PATH_BYTES
 
 
+def test_runtime_server_uses_configured_dedicated_socket(tmp_path: Path) -> None:
+    socket_path = tmp_path / "pbx-3.7c.sock"
+
+    identity = resolve_runtime_tmux_server(
+        "dedicated",
+        environ={"AGENT_PBX_TMUX_RUNTIME_SOCKET": str(socket_path)},
+    )
+
+    assert identity.ready is True
+    assert identity.effective_mode is RuntimeServerMode.DEDICATED
+    assert identity.socket_path == str(socket_path)
+    assert "configured dedicated runtime socket" in identity.message
+
+
+def test_runtime_server_rejects_relative_configured_socket() -> None:
+    identity = resolve_runtime_tmux_server(
+        "dedicated",
+        environ={"AGENT_PBX_TMUX_RUNTIME_SOCKET": "relative/tmux.sock"},
+    )
+
+    assert identity.ready is False
+    assert "absolute path" in identity.message
+
+
 def test_generated_dedicated_socket_shortens_long_runtime_root(tmp_path: Path) -> None:
     long_root = tmp_path / ("runtime-segment-" * 12)
     identity = resolve_runtime_tmux_server(

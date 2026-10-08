@@ -1250,6 +1250,10 @@ use a qualified tmux build without replacing the host package. The daemon,
 TUI, embedded clients, managed launches, reconciliation, and doctor use the
 same selection. Runtime mappings record the binary that created them so a
 legacy server can retain its matching client during a staged migration.
+Set `AGENT_PBX_TMUX_RUNTIME_SOCKET` to an absolute user-owned socket path when
+separate Agent PBX installations or qualified tmux versions must use distinct
+failure domains. The default remains the user-local
+`$XDG_RUNTIME_DIR/agent-pbx/runtime-tmux.sock`.
 
 `AGENT_PBX_TUI_TMUX=1` and `AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2=1` explicitly
 enable the native local path. Press `Ctrl+T` from `Latest` to toggle it

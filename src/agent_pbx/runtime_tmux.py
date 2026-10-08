@@ -126,6 +126,7 @@ RUNTIME_CLIENT_FORMAT = "\t".join(
 # Darwin's sockaddr_un.sun_path is shorter than Linux's. Keep generated paths
 # below both limits, including room for the terminating NUL byte.
 MAX_GENERATED_UNIX_SOCKET_PATH_BYTES = 100
+RUNTIME_TMUX_SOCKET_ENV = "AGENT_PBX_TMUX_RUNTIME_SOCKET"
 
 
 def normalize_runtime_server_mode(value: object) -> RuntimeServerMode:
@@ -210,12 +211,30 @@ def resolve_runtime_tmux_server(
                 False,
                 "TMUX does not identify an outer server",
             )
-    base = runtime_dir or Path(
-        env.get("XDG_RUNTIME_DIR") or f"/tmp/agent-pbx-{os.getuid()}"
-    )
-    dedicated_socket = base.expanduser() / "agent-pbx" / "runtime-tmux.sock"
+    configured_socket = str(env.get(RUNTIME_TMUX_SOCKET_ENV) or "").strip()
+    if configured_socket:
+        dedicated_socket = Path(configured_socket).expanduser()
+        if not dedicated_socket.is_absolute():
+            return TmuxServerIdentity(
+                requested,
+                RuntimeServerMode.DEDICATED,
+                runtime_server_id(dedicated_socket, uid=uid),
+                str(dedicated_socket),
+                False,
+                False,
+                f"{RUNTIME_TMUX_SOCKET_ENV} must be an absolute path",
+            )
+    else:
+        base = runtime_dir or Path(
+            env.get("XDG_RUNTIME_DIR") or f"/tmp/agent-pbx-{os.getuid()}"
+        )
+        dedicated_socket = base.expanduser() / "agent-pbx" / "runtime-tmux.sock"
     shortened = False
-    if len(os.fsencode(str(dedicated_socket))) > MAX_GENERATED_UNIX_SOCKET_PATH_BYTES:
+    if (
+        not configured_socket
+        and len(os.fsencode(str(dedicated_socket)))
+        > MAX_GENERATED_UNIX_SOCKET_PATH_BYTES
+    ):
         owner = os.getuid() if uid is None else int(uid)
         digest = hashlib.sha256(str(dedicated_socket).encode()).hexdigest()[:16]
         dedicated_socket = Path("/tmp") / f"agent-pbx-{owner}" / f"rt-{digest}.sock"
@@ -229,6 +248,10 @@ def resolve_runtime_tmux_server(
         fallback_message = (
             f"{fallback_message}; " if fallback_message else ""
         ) + "dedicated socket moved to a short user-local path"
+    if configured_socket:
+        fallback_message = (
+            f"{fallback_message}; " if fallback_message else ""
+        ) + "using configured dedicated runtime socket"
     return TmuxServerIdentity(
         requested,
         RuntimeServerMode.DEDICATED,
