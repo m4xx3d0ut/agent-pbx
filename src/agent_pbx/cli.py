@@ -940,6 +940,7 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         host=daemon_config.host,
         port=daemon_config.port,
         log_level=log_level,
+        access_log=env_flag("AGENT_PBX_DAEMON_ACCESS_LOG"),
         ssl_certfile=(
             str(daemon_config.tls_certfile) if daemon_config.tls_certfile else None
         ),

@@ -476,3 +476,30 @@ def test_foreground_mcp_serve_refuses_lan_without_token(
 
     assert result == 1
     assert not (tmp_path / "agent-pbx.sqlite").exists()
+
+
+def test_foreground_mcp_disables_access_log_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setenv("AGENT_PBX_NO_CONFIG", "1")
+    monkeypatch.delenv("AGENT_PBX_DAEMON_ACCESS_LOG", raising=False)
+    monkeypatch.setattr(
+        "agent_pbx.cli.uvicorn.run",
+        lambda _app, **kwargs: calls.append(kwargs),
+    )
+
+    result = main(
+        [
+            "mcp",
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--state-root",
+            str(tmp_path),
+        ]
+    )
+
+    assert result == 0
+    assert calls[0]["access_log"] is False
