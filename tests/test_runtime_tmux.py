@@ -20,6 +20,7 @@ from agent_pbx.runtime_tmux import (
     TmuxServerIdentity,
     assess_runtime_mapping,
     ensure_runtime_socket_parent,
+    probe_runtime_panes,
     recursive_attachment_reason,
     resolve_invoking_outer_client,
     resolve_runtime_tmux_server,
@@ -107,6 +108,34 @@ def test_runtime_server_rejects_relative_configured_socket() -> None:
 
     assert identity.ready is False
     assert "absolute path" in identity.message
+
+
+def test_runtime_pane_probe_distinguishes_dead_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-a",
+        "/tmp/pbx.sock",
+        True,
+        False,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.runtime_tmux.subprocess.run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            1,
+            "",
+            "no server running on /tmp/pbx.sock",
+        ),
+    )
+
+    ready, message, panes = probe_runtime_panes(identity)
+
+    assert ready is False
+    assert "no server running" in message
+    assert panes == ()
 
 
 def test_generated_dedicated_socket_shortens_long_runtime_root(tmp_path: Path) -> None:
@@ -467,6 +496,16 @@ def test_tmux_runtime_api_registers_reconciles_and_leases_writer(
     observed = pane()
     monkeypatch.setattr("agent_pbx.api.list_runtime_panes", lambda _identity: (observed,))
     monkeypatch.setattr("agent_pbx.api.process_start_ticks", lambda _pid: 900)
+
+    async def inspect_live(_mapping: object) -> dict[str, object]:
+        return {
+            "state": "ready",
+            "safe": True,
+            "message": "runtime matches",
+            "repair_pane_id": None,
+        }
+
+    monkeypatch.setattr("agent_pbx.api.inspect_tmux_runtime_mapping_live", inspect_live)
     app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
     client = TestClient(app)
     headers = {"Authorization": "Bearer secret"}
@@ -569,3 +608,44 @@ def test_tmux_runtime_api_rejects_recursive_session(tmp_path: Path, monkeypatch)
         directory.cleanup()
     assert response.status_code == 409
     assert "Agent PBX TUI" in response.json()["detail"]
+
+
+def test_tmux_runtime_live_validation_clears_stale_writer(
+    tmp_path: Path,
+) -> None:
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer secret"}
+    client.post(
+        "/v1/agents/register",
+        headers=headers,
+        json={"agent_id": "agent-a", "project": "demo", "metadata": {}},
+    )
+    app.state.store.upsert_tmux_runtime_mapping(
+        entity_id="agent-a",
+        server_mode="dedicated",
+        server_id="missing-server",
+        socket_path=str(tmp_path / "missing.sock"),
+        session_name="runtime-a",
+        pane_id="%7",
+        state="ready",
+    )
+    app.state.store.acquire_tmux_writer_lease(
+        "agent-a",
+        client_id="stale-tui",
+        ttl_seconds=30,
+    )
+
+    fetched = client.get("/v2/tmux/runtimes/agent-a", headers=headers)
+    assert fetched.status_code == 200
+    assert fetched.json()["state"] == "server_lost"
+    assert fetched.json()["writer_client_id"] is None
+    assert fetched.json()["writer_lease_active"] is False
+
+    acquired = client.post(
+        "/v2/tmux/runtimes/agent-a/writer/acquire",
+        headers=headers,
+        json={"client_id": "new-tui", "ttl_seconds": 30},
+    )
+    assert acquired.status_code == 409
+    assert "server_lost" in acquired.json()["detail"]

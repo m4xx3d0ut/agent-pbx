@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import shlex
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -2198,6 +2199,7 @@ async def test_tui_coalesces_embedded_wheel_into_exact_tmux_history_scroll(
             "pane_id": "%7",
             "socket_path": "/tmp/pbx.sock",
         }
+        app.tmux_runtime_mapping_validated_at_by_agent["agent-a"] = time.monotonic()
         surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
         surface.process = FakeProcess()  # type: ignore[assignment]
         surface.target = "server:%7"
@@ -2254,6 +2256,7 @@ async def test_tui_embedded_scroll_request_is_discarded_after_selection_change(
             "pane_id": "%7",
             "socket_path": "/tmp/pbx.sock",
         }
+        app.tmux_runtime_mapping_validated_at_by_agent["agent-a"] = time.monotonic()
         surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
         surface.process = FakeProcess()  # type: ignore[assignment]
         surface.target = "server:%7"
@@ -2311,6 +2314,7 @@ async def test_tui_explicit_scrollback_targets_selected_embedded_runtime(
             "pane_id": "%7",
             "socket_path": "/tmp/pbx.sock",
         }
+        app.tmux_runtime_mapping_validated_at_by_agent["agent-a"] = time.monotonic()
         surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
         surface.process = FakeProcess()  # type: ignore[assignment]
         surface.target = "server:%7"
@@ -3579,6 +3583,44 @@ async def test_tui_tmux_runtime_mapping_uses_stable_window_id(
     assert posted["url"] == "/v2/tmux/runtimes/agent-1"
     assert posted["json"]["window_id"] == "@42"  # type: ignore[index]
     assert app.tmux_runtime_mapping_signature_by_agent["agent-1"][2] == "@42"
+
+
+async def test_tui_runtime_mapping_cache_expires_into_live_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_runtime_mapping_by_agent["agent-1"] = {
+        "entity_id": "agent-1",
+        "state": "ready",
+    }
+    app.tmux_runtime_mapping_validated_at_by_agent["agent-1"] = time.monotonic()
+    calls = 0
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"entity_id": "agent-1", "state": "server_lost"}
+
+    class FakeClient:
+        async def get(self, *_args: object, **_kwargs: object) -> FakeResponse:
+            nonlocal calls
+            calls += 1
+            return FakeResponse()
+
+    monkeypatch.setattr(app, "api_client", lambda: FakeClient())
+
+    assert (await app.fetch_tmux_runtime_mapping("agent-1"))["state"] == "ready"
+    assert calls == 0
+    app.tmux_runtime_mapping_validated_at_by_agent["agent-1"] = 0.0
+    assert (await app.fetch_tmux_runtime_mapping("agent-1"))["state"] == "server_lost"
+    assert calls == 1
+    assert app.tmux_runtime_mapping_error_by_agent["agent-1"] == (
+        "runtime mapping is server_lost"
+    )
 
 
 async def test_tui_tmux_direct_is_tracked_per_agent() -> None:

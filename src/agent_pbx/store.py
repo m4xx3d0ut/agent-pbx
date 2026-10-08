@@ -2203,6 +2203,7 @@ class Store:
         *,
         state: str,
         metadata: dict[str, Any] | None = None,
+        clear_writer_lease: bool = False,
     ) -> dict[str, Any]:
         mapping = self.get_tmux_runtime_mapping(entity_id)
         if mapping is None:
@@ -2210,14 +2211,25 @@ class Store:
         merged = dict(mapping.get("metadata") or {})
         merged.update(metadata or {})
         with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE tmux_runtime_mappings
-                SET state = ?, metadata_json = ?, updated_at = ?
-                WHERE entity_id = ?
-                """,
-                (state, json.dumps(merged), now_ts(), entity_id),
-            )
+            if clear_writer_lease:
+                conn.execute(
+                    """
+                    UPDATE tmux_runtime_mappings
+                    SET state = ?, metadata_json = ?, writer_client_id = NULL,
+                        writer_lease_expires_at = NULL, updated_at = ?
+                    WHERE entity_id = ?
+                    """,
+                    (state, json.dumps(merged), now_ts(), entity_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE tmux_runtime_mappings
+                    SET state = ?, metadata_json = ?, updated_at = ?
+                    WHERE entity_id = ?
+                    """,
+                    (state, json.dumps(merged), now_ts(), entity_id),
+                )
         updated = self.get_tmux_runtime_mapping(entity_id)
         assert updated is not None
         return updated

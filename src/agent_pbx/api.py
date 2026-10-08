@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import (
     BackgroundTasks,
@@ -90,7 +90,9 @@ from .runtime_tmux import (
     list_runtime_panes,
     normalize_runtime_server_mode,
     process_start_ticks,
+    probe_runtime_panes,
     recursive_attachment_reason,
+    runtime_mapping_tmux_binary,
     runtime_server_id,
     validate_tmux_socket,
 )
@@ -260,6 +262,56 @@ from .workerbee import WorkerBeeStatusService
 
 
 logger = logging.getLogger("agent_pbx.api")
+
+
+async def inspect_tmux_runtime_mapping_live(
+    mapping: Mapping[str, Any],
+) -> dict[str, object]:
+    """Assess one runtime against its live socket, pane, and process evidence."""
+
+    socket_path = Path(str(mapping.get("socket_path") or ""))
+    ready, message = await asyncio.to_thread(validate_tmux_socket, socket_path)
+    if not ready:
+        return {
+            "state": "server_lost",
+            "safe": False,
+            "message": message,
+            "repair_pane_id": None,
+        }
+    mode = normalize_runtime_server_mode(mapping.get("server_mode"))
+    identity = TmuxServerIdentity(
+        mode,
+        mode,
+        str(mapping.get("server_id") or runtime_server_id(socket_path)),
+        str(socket_path),
+        True,
+        mode is not RuntimeServerMode.DEDICATED,
+        tmux_bin=runtime_mapping_tmux_binary(mapping),
+    )
+    responsive, response_message, panes = await asyncio.to_thread(
+        probe_runtime_panes,
+        identity,
+    )
+    if not responsive:
+        return {
+            "state": "server_lost",
+            "safe": False,
+            "message": response_message,
+            "repair_pane_id": None,
+        }
+    selected = next(
+        (pane for pane in panes if pane.pane_id == mapping.get("pane_id")),
+        None,
+    )
+    ticks = await asyncio.to_thread(
+        process_start_ticks,
+        selected.pane_pid if selected is not None else None,
+    )
+    return assess_runtime_mapping(
+        mapping,
+        panes,
+        observed_start_ticks=ticks,
+    ).public_dict()
 
 
 def create_app(config: ServerConfig | None = None) -> FastAPI:
@@ -812,6 +864,24 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         mapping = store.get_tmux_runtime_mapping(entity_id)
         if mapping is None:
             raise HTTPException(status_code=404, detail="tmux runtime mapping not found")
+        assessment = await inspect_tmux_runtime_mapping_live(mapping)
+        assessed_state = str(assessment["state"])
+        if assessed_state != str(mapping.get("state") or "") or not assessment["safe"]:
+            mapping = store.set_tmux_runtime_state(
+                entity_id,
+                state=assessed_state,
+                metadata={
+                    "last_live_validation": assessment,
+                    "live_validated_at": time.time(),
+                },
+                clear_writer_lease=not bool(assessment["safe"]),
+            )
+            if not assessment["safe"]:
+                store.append_event(
+                    "tmux_runtime_reconciliation_required",
+                    assessment,
+                    entity_id,
+                )
         return mapping
 
     @app.post(
@@ -822,55 +892,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         store: Store = Depends(get_store),
     ) -> dict[str, object]:
         results: list[dict[str, object]] = []
-        panes_by_server: dict[str, tuple[object, ...]] = {}
         for mapping in store.list_tmux_runtime_mappings():
-            socket_path = Path(str(mapping["socket_path"]))
-            ready, message = await asyncio.to_thread(validate_tmux_socket, socket_path)
-            if not ready:
-                assessment = {
-                    "state": "server_lost",
-                    "safe": False,
-                    "message": message,
-                    "repair_pane_id": None,
-                }
-            else:
-                server_id = str(mapping["server_id"])
-                if server_id not in panes_by_server:
-                    mode = normalize_runtime_server_mode(mapping["server_mode"])
-                    identity = TmuxServerIdentity(
-                        mode,
-                        mode,
-                        server_id,
-                        str(socket_path),
-                        True,
-                        mode is not RuntimeServerMode.DEDICATED,
-                    )
-                    panes_by_server[server_id] = await asyncio.to_thread(
-                        list_runtime_panes,
-                        identity,
-                    )
-                panes = panes_by_server[server_id]
-                selected = next(
-                    (
-                        pane
-                        for pane in panes
-                        if getattr(pane, "pane_id", None) == mapping["pane_id"]
-                    ),
-                    None,
-                )
-                ticks = await asyncio.to_thread(
-                    process_start_ticks,
-                    getattr(selected, "pane_pid", None),
-                )
-                assessment = assess_runtime_mapping(
-                    mapping,
-                    panes,  # type: ignore[arg-type]
-                    observed_start_ticks=ticks,
-                ).public_dict()
+            assessment = await inspect_tmux_runtime_mapping_live(mapping)
             updated = store.set_tmux_runtime_state(
                 str(mapping["entity_id"]),
                 state=str(assessment["state"]),
                 metadata={"last_reconciliation": assessment, "reconciled_at": time.time()},
+                clear_writer_lease=not bool(assessment["safe"]),
             )
             results.append({"mapping": updated, "assessment": assessment})
             if not assessment["safe"]:
@@ -892,6 +920,33 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         store: Store = Depends(get_store),
     ) -> dict[str, object]:
         previous = store.get_tmux_runtime_mapping(entity_id)
+        if previous is None:
+            raise HTTPException(status_code=404, detail="tmux runtime mapping not found")
+        assessment = await inspect_tmux_runtime_mapping_live(previous)
+        if not assessment["safe"]:
+            store.set_tmux_runtime_state(
+                entity_id,
+                state=str(assessment["state"]),
+                metadata={
+                    "last_live_validation": assessment,
+                    "live_validated_at": time.time(),
+                },
+                clear_writer_lease=True,
+            )
+            store.append_event(
+                "tmux_runtime_reconciliation_required",
+                assessment,
+                entity_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"tmux runtime is {assessment['state']}: "
+                    f"{assessment['message']}"
+                ),
+            )
+        if str(previous.get("state") or "") != "ready":
+            previous = store.set_tmux_runtime_state(entity_id, state="ready")
         was_current_owner = bool(
             previous
             and previous.get("writer_lease_active")

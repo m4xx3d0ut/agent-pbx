@@ -589,20 +589,31 @@ def parse_runtime_pane_line(line: str) -> RuntimeTmuxPane | None:
 
 
 def list_runtime_panes(identity: TmuxServerIdentity) -> tuple[RuntimeTmuxPane, ...]:
+    _ready, _message, panes = probe_runtime_panes(identity)
+    return panes
+
+
+def probe_runtime_panes(
+    identity: TmuxServerIdentity,
+) -> tuple[bool, str, tuple[RuntimeTmuxPane, ...]]:
+    """Query panes while distinguishing an empty server from a dead socket."""
+
     if not identity.ready:
-        return ()
+        return False, identity.message or "tmux server is unavailable", ()
     result = subprocess.run(
         [*identity.command_prefix, "list-panes", "-a", "-F", RUNTIME_PANE_FORMAT],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        return ()
-    return tuple(
+        message = (result.stderr or result.stdout or "tmux server query failed").strip()
+        return False, message, ()
+    panes = tuple(
         pane
         for line in result.stdout.splitlines()
         if (pane := parse_runtime_pane_line(line)) is not None
     )
+    return True, "", panes
 
 
 def process_start_ticks(pid: int | None, *, proc_root: Path = Path("/proc")) -> int | None:

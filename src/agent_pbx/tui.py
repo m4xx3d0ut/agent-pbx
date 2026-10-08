@@ -328,6 +328,7 @@ TMUX_POPOUT_MODE_CHOICES = (
 )
 TMUX_WRITER_LEASE_SECONDS = 30.0
 TMUX_WRITER_RENEW_SECONDS = 12.0
+TMUX_RUNTIME_MAPPING_CACHE_SECONDS = 3.0
 TMUX_RUNTIME_SERVER_MODE_CHOICES = (
     ("Dedicated PBX server", RuntimeServerMode.DEDICATED.value),
     ("Outer server when present", RuntimeServerMode.OUTER_IF_PRESENT.value),
@@ -5793,6 +5794,7 @@ class AgentPBXTUI(App[None]):
         self.tmux_visible_capture_key: str | None = None
         self.tmux_liveness_by_agent: dict[str, TmuxLiveness] = {}
         self.tmux_runtime_mapping_by_agent: dict[str, dict[str, Any]] = {}
+        self.tmux_runtime_mapping_validated_at_by_agent: dict[str, float] = {}
         self.tmux_runtime_mapping_signature_by_agent: dict[
             str, tuple[str, str, str, str, int | None, str]
         ] = {}
@@ -8182,6 +8184,7 @@ class AgentPBXTUI(App[None]):
             return False
         self.latest_agent_pane_adoption_batch = payload.get("batch", batch)
         self.tmux_runtime_mapping_by_agent.clear()
+        self.tmux_runtime_mapping_validated_at_by_agent.clear()
         self.tmux_runtime_mapping_signature_by_agent.clear()
         await self.refresh_agents()
         await self.refresh_tmux_stream()
@@ -8301,6 +8304,7 @@ class AgentPBXTUI(App[None]):
             return False
         restored = payload.get("restored") if isinstance(payload, dict) else []
         self.tmux_runtime_mapping_by_agent.clear()
+        self.tmux_runtime_mapping_validated_at_by_agent.clear()
         self.tmux_runtime_mapping_signature_by_agent.clear()
         await self.refresh_agents()
         self.notify(f"Restored {len(restored) if isinstance(restored, list) else 0} runtime snapshots.")
@@ -13714,6 +13718,7 @@ class AgentPBXTUI(App[None]):
             self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
             return False
         self.tmux_runtime_mapping_by_agent[agent_id] = mapping
+        self.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
         self.tmux_runtime_mapping_signature_by_agent[agent_id] = signature
         self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
         return True
@@ -13723,7 +13728,12 @@ class AgentPBXTUI(App[None]):
         agent_id: str,
     ) -> dict[str, Any] | None:
         cached = self.tmux_runtime_mapping_by_agent.get(agent_id)
-        if cached is not None and str(cached.get("state") or "") == "ready":
+        validated_at = self.tmux_runtime_mapping_validated_at_by_agent.get(agent_id, 0.0)
+        if (
+            cached is not None
+            and str(cached.get("state") or "") == "ready"
+            and time.monotonic() - validated_at < TMUX_RUNTIME_MAPPING_CACHE_SECONDS
+        ):
             return cached
         try:
             response = await self.api_client().get(
@@ -13731,6 +13741,8 @@ class AgentPBXTUI(App[None]):
                 headers=auth_headers(self.token),
             )
             if response.status_code == 404:
+                self.tmux_runtime_mapping_by_agent.pop(agent_id, None)
+                self.tmux_runtime_mapping_validated_at_by_agent.pop(agent_id, None)
                 return None
             response.raise_for_status()
             mapping = response.json()
@@ -13738,7 +13750,13 @@ class AgentPBXTUI(App[None]):
             self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
             return None
         self.tmux_runtime_mapping_by_agent[agent_id] = mapping
-        self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+        self.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
+        if str(mapping.get("state") or "") == "ready":
+            self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+        else:
+            self.tmux_runtime_mapping_error_by_agent[agent_id] = (
+                f"runtime mapping is {mapping.get('state') or 'unavailable'}"
+            )
         return mapping
 
     async def acquire_tmux_writer_lease(self, agent_id: str) -> dict[str, Any] | None:
@@ -13757,6 +13775,7 @@ class AgentPBXTUI(App[None]):
             self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
             return None
         self.tmux_runtime_mapping_by_agent[agent_id] = mapping
+        self.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
         self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
         return mapping
 
