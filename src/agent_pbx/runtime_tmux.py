@@ -10,6 +10,8 @@ import stat
 import subprocess
 from typing import Any, Mapping
 
+from .tmux_binary import configured_tmux_binary
+
 
 class RuntimeServerMode(str, Enum):
     DEDICATED = "dedicated"
@@ -26,10 +28,11 @@ class TmuxServerIdentity:
     ready: bool
     outer_detected: bool
     message: str = ""
+    tmux_bin: str = ""
 
     @property
     def command_prefix(self) -> tuple[str, ...]:
-        return ("tmux", "-S", self.socket_path)
+        return (configured_tmux_binary(self.tmux_bin or None), "-S", self.socket_path)
 
     def public_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -405,7 +408,16 @@ def runtime_mapping_server_identity(
         socket_path,
         True,
         mode is not RuntimeServerMode.DEDICATED,
+        tmux_bin=runtime_mapping_tmux_binary(mapping),
     )
+
+
+def runtime_mapping_tmux_binary(mapping: Mapping[str, Any]) -> str:
+    metadata = mapping.get("metadata")
+    configured = ""
+    if isinstance(metadata, Mapping):
+        configured = str(metadata.get("tmux_bin") or "").strip()
+    return configured_tmux_binary(configured or None)
 
 
 def recursive_attachment_reason(
@@ -445,7 +457,13 @@ def tmux_client_attach_command(
     # selecting a pane before a session-only attach does not change the
     # session's current window, so the new client can otherwise display an
     # unrelated Agent or Operator.
-    command = ["tmux", "-S", socket_path, "-u", "attach-session"]
+    command = [
+        runtime_mapping_tmux_binary(mapping),
+        "-S",
+        socket_path,
+        "-u",
+        "attach-session",
+    ]
     if read_only:
         command.append("-r")
     command.extend(("-t", target))
@@ -457,7 +475,14 @@ def tmux_select_runtime_pane_command(mapping: Mapping[str, Any]) -> tuple[str, .
     pane_id = str(mapping.get("pane_id") or "").strip()
     if not socket_path or not pane_id:
         raise ValueError("runtime mapping does not identify a tmux socket and pane")
-    return ("tmux", "-S", socket_path, "select-pane", "-t", pane_id)
+    return (
+        runtime_mapping_tmux_binary(mapping),
+        "-S",
+        socket_path,
+        "select-pane",
+        "-t",
+        pane_id,
+    )
 
 
 def runtime_pop_plan(
@@ -502,7 +527,7 @@ def runtime_pop_plan(
     return RuntimePopPlan(
         f"switch_client_{normalized}",
         (
-            "tmux",
+            runtime_mapping_tmux_binary(mapping),
             "-S",
             socket_path,
             "switch-client",

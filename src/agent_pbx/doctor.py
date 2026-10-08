@@ -19,6 +19,7 @@ from .codex_cli import inspect_codex_posture
 from .compat import compatibility_posture
 from .mcp_daemon import MCPDaemonConfig, lan_auth_guard, mcp_daemon_status
 from .store import SCHEMA_VERSION
+from .tmux_binary import configured_tmux_binary, resolve_tmux_binary
 from .ui.theme import terminal_color_depth
 
 
@@ -191,7 +192,8 @@ def _executable_checks(which: Callable[[str], str | None]) -> list[DoctorCheck]:
 
 
 def _tmux_check(which: Callable[[str], str | None], timeout: float) -> DoctorCheck:
-    path = which("tmux")
+    configured = configured_tmux_binary()
+    path = resolve_tmux_binary(which=which)
     if not path:
         return DoctorCheck(
             "tmux",
@@ -211,7 +213,10 @@ def _tmux_check(which: Callable[[str], str | None], timeout: float) -> DoctorChe
         "tmux",
         "pass" if result.returncode == 0 else "fail",
         version or path,
-        detail=f"outer tmux detected: {'yes' if outer else 'no'}",
+        detail=(
+            f"configured command: {configured}; resolved path: {path}; "
+            f"outer tmux detected: {'yes' if outer else 'no'}"
+        ),
     )
 
 

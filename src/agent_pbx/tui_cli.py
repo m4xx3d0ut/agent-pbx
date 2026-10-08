@@ -83,6 +83,7 @@ def write_tui_config_template(path: Path) -> bool:
                 "AGENT_PBX_TUI_TMUX=1",
                 "AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2=1",
                 "AGENT_PBX_TUI_TMUX_RUNTIME_SERVER_MODE=dedicated",
+                "# AGENT_PBX_TMUX_BIN=/absolute/path/to/qualified/tmux",
                 "AGENT_PBX_TUI_EVENT_STREAM_V2=1",
                 "AGENT_PBX_TUI_LOW_POWER=0",
                 "AGENT_PBX_TUI_AGENT_REFRESH_SECONDS=2",

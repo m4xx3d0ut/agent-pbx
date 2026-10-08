@@ -151,6 +151,7 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
         "AGENT_PBX_TUI_TMUX_CAPTURE_LINES",
         "AGENT_PBX_TUI_TMUX_REFRESH_SECONDS",
         "AGENT_PBX_TUI_TMUX_RUNTIME_SERVER_MODE",
+        "AGENT_PBX_TMUX_BIN",
         "AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2",
         "AGENT_PBX_TUI_EVENT_STREAM_V2",
         "AGENT_PBX_TUI_COMPAT_THREAD",

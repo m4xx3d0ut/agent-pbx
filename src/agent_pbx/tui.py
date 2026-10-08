@@ -116,6 +116,7 @@ from .ui.panels.joplin import JoplinPanelState
 from .ui.panels.operators import OperatorPanelState
 from .ui.runtime import runtime_header, runtime_topology
 from .ui.theme import terminal_color_depth, textual_palette
+from .tmux_binary import configured_tmux_binary, resolve_tmux_binary
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
@@ -1778,7 +1779,7 @@ def tmux_features_available(
     tmux_direct_enabled: bool = False,
     tmux_bin: str = "tmux",
 ) -> bool:
-    if shutil.which(tmux_bin) is None:
+    if resolve_tmux_binary(tmux_bin) is None:
         return False
     return bool(os.getenv("TMUX")) or tmux_direct_enabled or env_flag(
         "AGENT_PBX_TUI_TMUX_SHOW"
@@ -13695,7 +13696,11 @@ class AgentPBXTUI(App[None]):
             "cwd": pane.cwd,
             "origin_client_tty": outer.client_tty if outer else None,
             "origin_session_name": outer.session_name if outer else None,
-            "metadata": {"managed_by": "agent-pbx-tui", "mapping_source": "latest"},
+            "metadata": {
+                "managed_by": "agent-pbx-tui",
+                "mapping_source": "latest",
+                "tmux_bin": configured_tmux_binary(),
+            },
         }
         try:
             response = await self.api_client().post(

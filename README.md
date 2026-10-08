@@ -1245,6 +1245,12 @@ workstation config to reuse a validated outer tmux server and enable targeted
 recursive attachment to the PBX TUI session, namespaces managed sessions, and
 targets only the initiating client.
 
+Set `AGENT_PBX_TMUX_BIN` to an absolute executable path when Agent PBX should
+use a qualified tmux build without replacing the host package. The daemon,
+TUI, embedded clients, managed launches, reconciliation, and doctor use the
+same selection. Runtime mappings record the binary that created them so a
+legacy server can retain its matching client during a staged migration.
+
 `AGENT_PBX_TUI_TMUX=1` and `AGENT_PBX_TUI_EMBEDDED_TERMINAL_V2=1` explicitly
 enable the native local path. Press `Ctrl+T` from `Latest` to toggle it
 for the selected entity. Tmux controls are disabled when tmux is unavailable or

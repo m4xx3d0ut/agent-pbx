@@ -23,6 +23,7 @@ from agent_pbx.runtime_tmux import (
     recursive_attachment_reason,
     resolve_invoking_outer_client,
     resolve_runtime_tmux_server,
+    runtime_mapping_server_identity,
     runtime_pop_plan,
     tmux_client_attach_command,
     tmux_select_runtime_pane_command,
@@ -182,6 +183,33 @@ def test_tmux_client_commands_are_mapping_scoped() -> None:
     )
     assert "-r" in tmux_client_attach_command(mapping, read_only=True)
     assert tmux_select_runtime_pane_command(mapping)[-2:] == ("-t", "%7")
+
+
+def test_tmux_client_commands_use_configured_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TMUX_BIN", "/opt/agent-pbx/tmux")
+    mapping = {
+        "socket_path": "/tmp/pbx.sock",
+        "session_name": "runtime-a",
+        "window_id": "@12",
+        "pane_id": "%7",
+    }
+
+    assert tmux_client_attach_command(mapping)[0] == "/opt/agent-pbx/tmux"
+    assert tmux_select_runtime_pane_command(mapping)[0] == "/opt/agent-pbx/tmux"
+
+
+def test_runtime_mapping_preserves_legacy_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TMUX_BIN", "/opt/agent-pbx/tmux")
+    mapping = {
+        "server_mode": "dedicated",
+        "socket_path": "/tmp/pbx.sock",
+        "session_name": "runtime-a",
+        "pane_id": "%7",
+        "metadata": {"tmux_bin": "/usr/bin/tmux"},
+    }
+
+    assert tmux_client_attach_command(mapping)[0] == "/usr/bin/tmux"
+    assert runtime_mapping_server_identity(mapping).command_prefix[0] == "/usr/bin/tmux"
 
 
 def test_tmux_client_attach_falls_back_to_session_for_legacy_mapping() -> None:

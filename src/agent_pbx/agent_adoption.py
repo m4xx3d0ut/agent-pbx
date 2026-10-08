@@ -17,6 +17,7 @@ from .runtime_tmux import (
 )
 from .schemas import AgentRegisterRequest
 from .store import Store
+from .tmux_binary import configured_tmux_binary
 
 
 DEFAULT_AGENT_RUNTIME_SESSION = "agent-pbx-agents"
@@ -252,7 +253,7 @@ class AgentPaneAdoptionService:
 
     def __init__(self, store: Store, *, tmux_bin: str = "tmux") -> None:
         self.store = store
-        self.tmux_bin = tmux_bin
+        self.tmux_bin = configured_tmux_binary(tmux_bin)
 
     def preview(
         self,

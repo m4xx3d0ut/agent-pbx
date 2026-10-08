@@ -28,6 +28,7 @@ from .runtime_tmux import (
 )
 from .schemas import AgentRegisterRequest
 from .store import Store
+from .tmux_binary import configured_tmux_binary
 
 
 PROJECT_ROOTS_ENV = "AGENT_PBX_PROJECT_ROOTS"
@@ -100,7 +101,7 @@ class ManagedRuntimeService:
             for path in (project_roots or default_managed_project_roots())
         )
         self.codex_bin = codex_bin or shutil.which("codex") or "codex"
-        self.tmux_bin = tmux_bin or shutil.which("tmux") or "tmux"
+        self.tmux_bin = configured_tmux_binary(tmux_bin)
         self.catalog_loader = catalog_loader or (
             lambda command: inspect_codex_model_catalog(command)
         )
@@ -202,6 +203,7 @@ class ManagedRuntimeService:
             bool(identity_data["ready"]),
             bool(identity_data["outer_detected"]),
             str(identity_data.get("message") or ""),
+            str(identity_data.get("tmux_bin") or self.tmux_bin),
         )
         socket_path = Path(identity.socket_path)
         if identity.effective_mode is RuntimeServerMode.DEDICATED:
@@ -296,7 +298,11 @@ class ManagedRuntimeService:
                     "process_start_ticks": process_start_ticks(pane.pane_pid),
                     "cwd": pane.cwd,
                     "state": "ready",
-                    "metadata": {"managed_launch": True, "profile_id": profile_id},
+                    "metadata": {
+                        "managed_launch": True,
+                        "profile_id": profile_id,
+                        "tmux_bin": self.tmux_bin,
+                    },
                 },
             )
         except Exception:

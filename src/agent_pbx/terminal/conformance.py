@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import tempfile
 import time
@@ -11,6 +10,7 @@ import uuid
 
 from .pty import PtyProcess
 from .screen import VirtualTerminal
+from ..tmux_binary import resolve_tmux_binary
 
 
 @dataclass(frozen=True)
@@ -27,7 +27,7 @@ class TmuxConformanceResult:
 
 
 def run_dedicated_tmux_conformance(*, timeout: float = 5.0) -> TmuxConformanceResult:
-    tmux = shutil.which("tmux")
+    tmux = resolve_tmux_binary()
     if not tmux:
         raise RuntimeError("tmux is unavailable")
     socket_name = f"agent-pbx-conformance-{uuid.uuid4().hex[:12]}"
@@ -95,7 +95,7 @@ def run_dedicated_tmux_conformance(*, timeout: float = 5.0) -> TmuxConformanceRe
 def run_outer_tmux_conformance(*, timeout: float = 5.0) -> TmuxConformanceResult:
     """Exercise a disposable session on the server named by the local TMUX value."""
 
-    tmux = shutil.which("tmux")
+    tmux = resolve_tmux_binary()
     tmux_env = os.getenv("TMUX", "").strip()
     if not tmux:
         raise RuntimeError("tmux is unavailable")
