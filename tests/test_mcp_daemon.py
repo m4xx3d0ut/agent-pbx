@@ -12,6 +12,7 @@ from agent_pbx.mcp_daemon import (
     restart_mcp_daemon,
     start_mcp_daemon,
     stop_mcp_daemon,
+    rotate_mcp_daemon_log,
     _pid_matches_metadata,
 )
 from agent_pbx.paths import default_state_root
@@ -51,6 +52,20 @@ def test_mcp_daemon_status_reports_stale_metadata(
     assert status["running"] is False
     assert status["stale"] is True
     assert status["mcp_url"] == "http://127.0.0.1:9876/mcp"
+
+
+def test_mcp_daemon_log_rotation_is_bounded(tmp_path: Path) -> None:
+    log = tmp_path / "mcp-daemon.log"
+    log.write_text("current", encoding="utf-8")
+    (tmp_path / "mcp-daemon.log.1").write_text("prior", encoding="utf-8")
+    (tmp_path / "mcp-daemon.log.2").write_text("oldest", encoding="utf-8")
+
+    rotated = rotate_mcp_daemon_log(log, max_bytes=1, backups=2)
+
+    assert rotated == [tmp_path / "mcp-daemon.log.1"]
+    assert not log.exists()
+    assert (tmp_path / "mcp-daemon.log.1").read_text(encoding="utf-8") == "current"
+    assert (tmp_path / "mcp-daemon.log.2").read_text(encoding="utf-8") == "prior"
 
 
 def test_mcp_status_accepts_token_for_command_symmetry() -> None:

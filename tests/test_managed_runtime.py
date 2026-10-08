@@ -123,6 +123,14 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
         title="demo",
     )
     monkeypatch.setattr("agent_pbx.managed_runtime.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.ensure_dedicated_runtime_server",
+        lambda _identity: True,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.restore_dedicated_runtime_exit_policy",
+        lambda _identity: None,
+    )
     monkeypatch.setattr("agent_pbx.managed_runtime.validate_tmux_socket", lambda _path: (True, ""))
     monkeypatch.setattr("agent_pbx.managed_runtime.list_runtime_panes", lambda _identity: (pane,))
     monkeypatch.setattr("agent_pbx.managed_runtime.process_start_ticks", lambda _pid: 99)
@@ -155,6 +163,14 @@ def test_managed_launch_failure_kills_session_without_orphan_agent(
         return real_run(argv, **kwargs)
 
     monkeypatch.setattr("agent_pbx.managed_runtime.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.ensure_dedicated_runtime_server",
+        lambda _identity: True,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.restore_dedicated_runtime_exit_policy",
+        lambda _identity: None,
+    )
     monkeypatch.setattr("agent_pbx.managed_runtime.validate_tmux_socket", lambda _path: (True, ""))
     monkeypatch.setattr("agent_pbx.managed_runtime.list_runtime_panes", lambda _identity: ())
 

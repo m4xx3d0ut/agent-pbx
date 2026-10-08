@@ -123,7 +123,10 @@ def test_lifecycle_mapping_repair_requires_unique_matching_candidate(
         title="agent-1",
     )
     monkeypatch.setattr("agent_pbx.lifecycle.validate_tmux_socket", lambda _path: (True, ""))
-    monkeypatch.setattr("agent_pbx.lifecycle.list_runtime_panes", lambda _identity: (candidate,))
+    monkeypatch.setattr(
+        "agent_pbx.lifecycle.probe_runtime_panes",
+        lambda _identity: (True, "", (candidate,)),
+    )
     monkeypatch.setattr(
         "agent_pbx.lifecycle.process_start_ticks",
         lambda pid: {100: 10, 200: 20}.get(pid),

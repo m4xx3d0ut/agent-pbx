@@ -19,6 +19,7 @@ from agent_pbx.runtime_tmux import (
     RuntimeTmuxPane,
     TmuxServerIdentity,
     assess_runtime_mapping,
+    ensure_dedicated_runtime_server,
     ensure_runtime_socket_parent,
     probe_runtime_panes,
     recursive_attachment_reason,
@@ -138,6 +139,31 @@ def test_runtime_pane_probe_distinguishes_dead_server(
     assert panes == ()
 
 
+def test_runtime_pane_probe_reports_missing_mapping_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-a",
+        "/tmp/pbx.sock",
+        True,
+        False,
+        tmux_bin="/missing/tmux-legacy",
+    )
+
+    def missing_binary(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("/missing/tmux-legacy")
+
+    monkeypatch.setattr("agent_pbx.runtime_tmux.subprocess.run", missing_binary)
+
+    ready, message, panes = probe_runtime_panes(identity)
+
+    assert ready is False
+    assert "/missing/tmux-legacy" in message
+    assert panes == ()
+
+
 def test_generated_dedicated_socket_shortens_long_runtime_root(tmp_path: Path) -> None:
     long_root = tmp_path / ("runtime-segment-" * 12)
     identity = resolve_runtime_tmux_server(
@@ -162,6 +188,50 @@ def test_runtime_socket_parent_is_private_and_rejects_symlink(tmp_path: Path) ->
     link.symlink_to(target, target_is_directory=True)
     with pytest.raises(PermissionError, match="real directory"):
         ensure_runtime_socket_parent(link / "tmux.sock")
+
+
+def test_dedicated_server_starts_without_session_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    socket_path = tmp_path / "runtime" / "tmux.sock"
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-a",
+        str(socket_path),
+        True,
+        False,
+        tmux_bin="tmux-test",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "display-message" in command:
+            return subprocess.CompletedProcess(command, 1, "", "no server")
+        socket_path.touch()
+        monkeypatch.setattr(
+            "agent_pbx.runtime_tmux.validate_tmux_socket",
+            lambda _path: (True, ""),
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("agent_pbx.runtime_tmux.subprocess.run", fake_run)
+
+    assert ensure_dedicated_runtime_server(identity) is True
+    assert calls[1] == [
+        "tmux-test",
+        "-S",
+        str(socket_path),
+        "start-server",
+        ";",
+        "set-option",
+        "-g",
+        "exit-empty",
+        "off",
+    ]
+    assert all("TOKEN" not in part for part in calls[1])
 
 
 def test_outer_required_reports_missing_tmux() -> None:

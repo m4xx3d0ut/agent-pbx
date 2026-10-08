@@ -162,6 +162,77 @@ def validate_tmux_socket(path: Path, *, uid: int | None = None) -> tuple[bool, s
     return True, ""
 
 
+def ensure_dedicated_runtime_server(identity: TmuxServerIdentity) -> bool:
+    """Start an empty dedicated server before session secrets are supplied.
+
+    Tmux keeps the argv of the process that first becomes the server.  Starting
+    it with ``new-session -e SECRET=...`` therefore leaves launch-only values
+    visible in the long-lived server command line.  A secret-free
+    ``start-server`` command avoids that exposure; ``exit-empty`` keeps the
+    server alive until the first managed session is created.
+
+    Return ``True`` when this call started the server and ``False`` when an
+    existing server was already responsive.
+    """
+
+    if identity.effective_mode is not RuntimeServerMode.DEDICATED:
+        return False
+    socket_path = Path(identity.socket_path).expanduser()
+    if not socket_path.is_absolute():
+        raise ValueError("dedicated runtime tmux socket must be absolute")
+    ensure_runtime_socket_parent(socket_path)
+    responsive = subprocess.run(
+        [*identity.command_prefix, "display-message", "-p", "#{pid}"],
+        capture_output=True,
+        text=True,
+    )
+    if responsive.returncode == 0:
+        return False
+    started = subprocess.run(
+        [
+            *identity.command_prefix,
+            "start-server",
+            ";",
+            "set-option",
+            "-g",
+            "exit-empty",
+            "off",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if started.returncode != 0:
+        message = (
+            started.stderr
+            or started.stdout
+            or "dedicated runtime tmux server failed to start"
+        ).strip()
+        raise RuntimeError(message)
+    ready, message = validate_tmux_socket(socket_path)
+    if not ready:
+        raise RuntimeError(message)
+    return True
+
+
+def restore_dedicated_runtime_exit_policy(identity: TmuxServerIdentity) -> None:
+    """Restore tmux's normal exit-when-empty behavior after first launch."""
+
+    if identity.effective_mode is not RuntimeServerMode.DEDICATED:
+        return
+    result = subprocess.run(
+        [*identity.command_prefix, "set-option", "-g", "exit-empty", "on"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        # An empty temporary server may exit as the option is applied.  That is
+        # the intended cleanup result when new-session itself failed.
+        message = (result.stderr or result.stdout or "").casefold()
+        if "no server running" not in message and "connection refused" not in message:
+            detail = result.stderr or result.stdout or "unable to restore tmux exit policy"
+            raise RuntimeError(detail.strip())
+
+
 def runtime_server_id(path: Path, *, uid: int | None = None) -> str:
     owner = os.getuid() if uid is None else int(uid)
     canonical = str(path.resolve(strict=False))
@@ -600,11 +671,14 @@ def probe_runtime_panes(
 
     if not identity.ready:
         return False, identity.message or "tmux server is unavailable", ()
-    result = subprocess.run(
-        [*identity.command_prefix, "list-panes", "-a", "-F", RUNTIME_PANE_FORMAT],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [*identity.command_prefix, "list-panes", "-a", "-F", RUNTIME_PANE_FORMAT],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        return False, f"tmux server query failed: {exc}", ()
     if result.returncode != 0:
         message = (result.stderr or result.stdout or "tmux server query failed").strip()
         return False, message, ()

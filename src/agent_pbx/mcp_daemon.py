@@ -47,6 +47,10 @@ from .pull_requests import (
 
 MCP_DAEMON_FILE = "mcp-daemon.json"
 MCP_DAEMON_LOG = "mcp-daemon.log"
+MCP_DAEMON_LOG_MAX_BYTES_ENV = "AGENT_PBX_DAEMON_LOG_MAX_BYTES"
+MCP_DAEMON_LOG_BACKUPS_ENV = "AGENT_PBX_DAEMON_LOG_BACKUPS"
+DEFAULT_MCP_DAEMON_LOG_MAX_BYTES = 64 * 1024 * 1024
+DEFAULT_MCP_DAEMON_LOG_BACKUPS = 3
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 TOKEN_ENV = "AGENT_PBX_TOKEN"
 MANAGED_CHILD_ENV_VARS = {
@@ -169,6 +173,64 @@ class MCPDaemonConfig:
         return self.host not in LOOPBACK_HOSTS
 
 
+def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(str(os.getenv(name) or "").strip())
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def rotate_mcp_daemon_log(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+    backups: int | None = None,
+) -> list[Path]:
+    """Rotate a bounded daemon log before opening it for a new process."""
+
+    limit = (
+        max(1, int(max_bytes))
+        if max_bytes is not None
+        else _bounded_env_int(
+            MCP_DAEMON_LOG_MAX_BYTES_ENV,
+            DEFAULT_MCP_DAEMON_LOG_MAX_BYTES,
+            minimum=1024 * 1024,
+            maximum=16 * 1024 * 1024 * 1024,
+        )
+    )
+    keep = (
+        max(0, min(20, int(backups)))
+        if backups is not None
+        else _bounded_env_int(
+            MCP_DAEMON_LOG_BACKUPS_ENV,
+            DEFAULT_MCP_DAEMON_LOG_BACKUPS,
+            minimum=0,
+            maximum=20,
+        )
+    )
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return []
+    if size < limit:
+        return []
+    if keep == 0:
+        path.unlink()
+        return []
+    oldest = path.with_name(f"{path.name}.{keep}")
+    with suppress(FileNotFoundError):
+        oldest.unlink()
+    for index in range(keep - 1, 0, -1):
+        source = path.with_name(f"{path.name}.{index}")
+        destination = path.with_name(f"{path.name}.{index + 1}")
+        if source.exists():
+            source.replace(destination)
+    first = path.with_name(f"{path.name}.1")
+    path.replace(first)
+    return [first]
+
+
 def config_from_args(
     *,
     state_root: Path | None = None,
@@ -284,6 +346,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
     child_env = _child_env(config)
 
     argv = _serve_argv(config)
+    rotated_logs = rotate_mcp_daemon_log(config.log_file)
     log = open(config.log_file, "ab")  # noqa: SIM115 - passed to detached child
     try:
         proc = subprocess.Popen(
@@ -318,6 +381,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "remote_terminal_snapshots_enabled": config.remote_terminal_snapshots_enabled,
         "legacy_polling_enabled": config.legacy_polling_enabled,
         "debug": config.debug,
+        "rotated_logs": [str(path) for path in rotated_logs],
         "debug_smoke": config.debug_smoke,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,

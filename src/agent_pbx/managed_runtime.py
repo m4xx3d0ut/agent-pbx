@@ -18,12 +18,14 @@ from .codex.profiles import (
 )
 from .codex_cli import CodexModelOption, inspect_codex_model_catalog
 from .runtime_tmux import (
+    ensure_dedicated_runtime_server,
     ensure_runtime_socket_parent,
     RuntimeServerMode,
     TmuxServerIdentity,
     list_runtime_panes,
     process_start_ticks,
     resolve_runtime_tmux_server,
+    restore_dedicated_runtime_exit_policy,
     validate_tmux_socket,
 )
 from .schemas import AgentRegisterRequest
@@ -206,8 +208,10 @@ class ManagedRuntimeService:
             str(identity_data.get("tmux_bin") or self.tmux_bin),
         )
         socket_path = Path(identity.socket_path)
+        dedicated_server_started = False
         if identity.effective_mode is RuntimeServerMode.DEDICATED:
             ensure_runtime_socket_parent(socket_path)
+            dedicated_server_started = ensure_dedicated_runtime_server(identity)
         env = {
             "AGENT_PBX_AGENT_ID": str(preview["agent_id"]),
             "AGENT_PBX_SERVER_URL": server_url.rstrip("/"),
@@ -234,7 +238,18 @@ class ManagedRuntimeService:
         for key, value in env.items():
             command.extend(("-e", f"{key}={value}"))
         command.append(shlex.join(str(item) for item in preview["command"]))
-        launched = subprocess.run(command, capture_output=True, text=True)
+        try:
+            launched = subprocess.run(command, capture_output=True, text=True)
+            if dedicated_server_started:
+                restore_dedicated_runtime_exit_policy(identity)
+        except Exception:
+            if dedicated_server_started:
+                subprocess.run(
+                    [*identity.command_prefix, "kill-server"],
+                    capture_output=True,
+                    text=True,
+                )
+            raise
         if launched.returncode != 0:
             raise RuntimeError(
                 (launched.stderr or launched.stdout or "tmux launch failed").strip()

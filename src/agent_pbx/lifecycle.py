@@ -9,11 +9,10 @@ from typing import Any
 from .contracts import LifecycleState
 from .runtime_tmux import (
     RuntimeTmuxPane,
-    TmuxServerIdentity,
     assess_runtime_mapping,
-    list_runtime_panes,
-    normalize_runtime_server_mode,
+    probe_runtime_panes,
     process_start_ticks,
+    runtime_mapping_server_identity,
     validate_tmux_socket,
 )
 from .schemas import ReportCreateRequest
@@ -316,16 +315,17 @@ class LifecycleService:
                 "mapping": self._mapping_identity(mapping),
                 "repair_candidate": None,
             }
-        mode = normalize_runtime_server_mode(mapping.get("server_mode"))
-        identity = TmuxServerIdentity(
-            mode,
-            mode,
-            str(mapping.get("server_id") or ""),
-            str(socket_path),
-            True,
-            mode.value != "dedicated",
-        )
-        panes = list_runtime_panes(identity)
+        identity = runtime_mapping_server_identity(mapping)
+        responsive, response_message, panes = probe_runtime_panes(identity)
+        if not responsive:
+            return {
+                "registered": True,
+                "state": "server_lost",
+                "safe": False,
+                "message": response_message,
+                "mapping": self._mapping_identity(mapping),
+                "repair_candidate": None,
+            }
         selected = next(
             (pane for pane in panes if pane.pane_id == mapping.get("pane_id")),
             None,
