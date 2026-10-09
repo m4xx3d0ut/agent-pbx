@@ -628,6 +628,12 @@ def tmux_client_attach_command(
         "-S",
         socket_path,
         "-u",
+        "set-window-option",
+        "-t",
+        target,
+        "window-size",
+        "latest",
+        ";",
         "attach-session",
     ]
     if read_only:
