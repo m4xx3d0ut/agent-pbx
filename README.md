@@ -878,8 +878,22 @@ AGENT_PBX_JOPLIN_PROFILE_OWNER_MODE=managed_cli
 
 With an explicit `AGENT_PBX_JOPLIN_PROFILE`, Agent PBX verifies the profile
 server PID, process owner, executable, and command; stops that exact server;
-runs one profile-locked sync; restarts the Data API server; waits for `/ping`;
-and validates decryption. It never stops an ambiguous or foreign process.
+runs one profile-locked sync and a non-interactive E2EE decrypt retry; restarts
+the Data API server; waits for `/ping`; and validates decryption. It never stops
+an ambiguous or foreign process. Manual/profile-wide sync fails when decryption
+cannot complete. A targeted write may still succeed when its declared note is
+verified as plaintext, while unrelated encrypted items remain visible as a
+profile health warning.
+
+The managed decrypt pass uses only Joplin's own cached master-key credential.
+Agent PBX does not receive or persist the E2EE password. If the credential is
+missing or Joplin's crypto worker fails, the validated API server is restored
+and the sync reports `JOPLIN_E2EE_PASSWORD_REQUIRED` or
+`JOPLIN_E2EE_DECRYPT_FAILED`. Unlock the dedicated profile interactively before
+retrying. If the master key already loads but the crypto worker still fails,
+use a supported Joplin client/runtime that can decrypt the item and keep its
+encrypted payload intact until recovery succeeds. Do not put the password in
+`local.env` or a command-line argument.
 
 For E2EE troubleshooting from a shell:
 

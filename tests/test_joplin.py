@@ -4,6 +4,7 @@ import asyncio
 import fcntl
 import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 from urllib.parse import parse_qs
 
@@ -18,6 +19,7 @@ from agent_pbx.joplin import (
     JoplinApiError,
     JoplinConfig,
     JoplinConflictError,
+    JoplinE2EEDecryptError,
     JoplinE2EELockedError,
     JoplinEncryptedNoteError,
     JoplinGateway,
@@ -248,12 +250,129 @@ def test_joplin_sync_zero_exit_fails_when_e2ee_items_remain(tmp_path: Path) -> N
     )
     service.sync = lambda: None  # type: ignore[method-assign]
     gateway = JoplinGateway(make_store(tmp_path), service)
+    decrypt_requirements: list[bool] = []
+    gateway.profile_coordinator = SimpleNamespace(
+        run_sync=lambda *, require_decryption=True: decrypt_requirements.append(
+            require_decryption
+        )
+    )
 
     with pytest.raises(JoplinE2EELockedError) as caught:
         gateway.run_sync_job({"sync_id": "sync-locked"})
 
     assert caught.value.code == "JOPLIN_E2EE_LOCKED"
     assert caught.value.encryption["pending_notes"] == 1
+    assert decrypt_requirements == [True]
+
+
+def test_joplin_service_runs_noninteractive_e2ee_decrypt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JoplinService(
+        JoplinConfig(
+            joplin_bin=tmp_path / "joplin",
+            profile=tmp_path / "profile",
+        )
+    )
+    calls: list[tuple[list[str], object]] = []
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((command, kwargs.get("stdin")))
+        return SimpleNamespace(returncode=0, stdout="Completed decryption.", stderr="")
+
+    monkeypatch.setattr("agent_pbx.joplin.subprocess.run", run)
+
+    service.decrypt_encrypted_items()
+
+    assert calls == [
+        (
+            [
+                str(tmp_path / "joplin"),
+                "--profile",
+                str(tmp_path / "profile"),
+                "e2ee",
+                "decrypt",
+                "--retry-failed-items",
+                "--force",
+            ],
+            subprocess.DEVNULL,
+        )
+    ]
+
+
+def test_joplin_service_reports_native_crypto_decrypt_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JoplinService(
+        JoplinConfig(
+            joplin_bin=tmp_path / "joplin",
+            profile=tmp_path / "profile",
+        )
+    )
+    monkeypatch.setattr(
+        "agent_pbx.joplin.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=-6,
+            stdout="Starting decryption",
+            stderr="Assertion failed: errors->Empty()",
+        ),
+    )
+
+    with pytest.raises(JoplinE2EEDecryptError) as caught:
+        service.decrypt_encrypted_items()
+
+    assert caught.value.code == "JOPLIN_E2EE_DECRYPT_FAILED"
+    assert "crypto worker" in str(caught.value)
+
+
+def test_joplin_service_reports_missing_master_password(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JoplinService(
+        JoplinConfig(
+            joplin_bin=tmp_path / "joplin",
+            profile=tmp_path / "profile",
+        )
+    )
+    monkeypatch.setattr(
+        "agent_pbx.joplin.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="Master key is not loaded",
+        ),
+    )
+
+    with pytest.raises(JoplinE2EEDecryptError) as caught:
+        service.decrypt_encrypted_items()
+
+    assert caught.value.code == "JOPLIN_E2EE_PASSWORD_REQUIRED"
+
+
+def test_joplin_service_reports_decrypt_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JoplinService(
+        JoplinConfig(
+            joplin_bin=tmp_path / "joplin",
+            profile=tmp_path / "profile",
+        )
+    )
+
+    def time_out(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(["joplin", "e2ee", "decrypt"], 60)
+
+    monkeypatch.setattr("agent_pbx.joplin.subprocess.run", time_out)
+
+    with pytest.raises(JoplinE2EEDecryptError) as caught:
+        service.decrypt_encrypted_items()
+
+    assert caught.value.code == "JOPLIN_E2EE_DECRYPT_FAILED"
+    assert "timed out" in str(caught.value)
 
 
 def test_joplin_targeted_sync_ignores_unrelated_encrypted_note(
@@ -284,6 +403,12 @@ def test_joplin_targeted_sync_ignores_unrelated_encrypted_note(
     )
     service.sync = lambda: None  # type: ignore[method-assign]
     gateway = JoplinGateway(make_store(tmp_path), service)
+    decrypt_requirements: list[bool] = []
+    gateway.profile_coordinator = SimpleNamespace(
+        run_sync=lambda *, require_decryption=True: decrypt_requirements.append(
+            require_decryption
+        )
+    )
 
     gateway.run_sync_job(
         {
@@ -296,6 +421,7 @@ def test_joplin_targeted_sync_ignores_unrelated_encrypted_note(
     )
 
     assert service.encryption_status(force=True)["pending_total"] == 1
+    assert decrypt_requirements == [False]
 
 
 def test_joplin_targeted_sync_fails_when_target_remains_encrypted(
@@ -402,10 +528,15 @@ def test_joplin_profile_coordinator_managed_mode_stops_syncs_and_restores(
     monkeypatch.setattr(coordinator, "_stop_server", lambda pid: events.append(f"stop:{pid}"))
     monkeypatch.setattr(coordinator, "_start_server", lambda path: events.append(f"start:{path}"))
     monkeypatch.setattr(service, "sync", lambda: events.append("sync"))
+    monkeypatch.setattr(
+        service,
+        "decrypt_encrypted_items",
+        lambda: events.append("decrypt"),
+    )
 
     coordinator.run_sync()
 
-    assert events == ["stop:321", "sync", f"start:{profile}"]
+    assert events == ["stop:321", "sync", "decrypt", f"start:{profile}"]
 
 
 def test_joplin_profile_coordinator_restores_server_after_sync_failure(
@@ -433,11 +564,115 @@ def test_joplin_profile_coordinator_restores_server_after_sync_failure(
         raise JoplinApiError("sync failed")
 
     monkeypatch.setattr(service, "sync", fail_sync)
+    monkeypatch.setattr(
+        service,
+        "decrypt_encrypted_items",
+        lambda: events.append("decrypt"),
+    )
 
     with pytest.raises(JoplinApiError, match="sync failed"):
         coordinator.run_sync()
 
     assert events == ["stop:321", "sync", f"start:{profile}"]
+
+
+def test_joplin_profile_coordinator_restores_server_after_decrypt_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "profile"
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=profile,
+            profile_owner_mode="managed_cli",
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    events: list[str] = []
+    monkeypatch.setattr(coordinator, "_validated_server_pid", lambda _profile: 321)
+    monkeypatch.setattr(coordinator, "_stop_server", lambda pid: events.append(f"stop:{pid}"))
+    monkeypatch.setattr(coordinator, "_start_server", lambda path: events.append(f"start:{path}"))
+    monkeypatch.setattr(service, "sync", lambda: events.append("sync"))
+
+    def fail_decrypt() -> None:
+        events.append("decrypt")
+        raise JoplinE2EEDecryptError("decrypt failed")
+
+    monkeypatch.setattr(service, "decrypt_encrypted_items", fail_decrypt)
+
+    with pytest.raises(JoplinE2EEDecryptError, match="decrypt failed"):
+        coordinator.run_sync()
+
+    assert events == ["stop:321", "sync", "decrypt", f"start:{profile}"]
+
+
+def test_joplin_profile_coordinator_can_defer_unrelated_decrypt_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "profile"
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=profile,
+            profile_owner_mode="managed_cli",
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    events: list[str] = []
+    monkeypatch.setattr(coordinator, "_validated_server_pid", lambda _profile: 321)
+    monkeypatch.setattr(coordinator, "_stop_server", lambda pid: events.append(f"stop:{pid}"))
+    monkeypatch.setattr(coordinator, "_start_server", lambda path: events.append(f"start:{path}"))
+    monkeypatch.setattr(service, "sync", lambda: events.append("sync"))
+
+    def fail_decrypt() -> None:
+        events.append("decrypt")
+        raise JoplinE2EEDecryptError("unrelated locked item")
+
+    monkeypatch.setattr(service, "decrypt_encrypted_items", fail_decrypt)
+
+    error = coordinator.run_sync(require_decryption=False)
+
+    assert isinstance(error, JoplinE2EEDecryptError)
+    assert events == ["stop:321", "sync", "decrypt", f"start:{profile}"]
+
+
+def test_joplin_profile_coordinator_restores_server_after_unexpected_decrypt_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "profile"
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=profile,
+            profile_owner_mode="managed_cli",
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    events: list[str] = []
+    monkeypatch.setattr(coordinator, "_validated_server_pid", lambda _profile: 321)
+    monkeypatch.setattr(coordinator, "_stop_server", lambda pid: events.append(f"stop:{pid}"))
+    monkeypatch.setattr(coordinator, "_start_server", lambda path: events.append(f"start:{path}"))
+    monkeypatch.setattr(service, "sync", lambda: events.append("sync"))
+
+    def fail_decrypt() -> None:
+        events.append("decrypt")
+        raise RuntimeError("unexpected decrypt failure")
+
+    monkeypatch.setattr(service, "decrypt_encrypted_items", fail_decrypt)
+
+    with pytest.raises(RuntimeError, match="unexpected decrypt failure"):
+        coordinator.run_sync(require_decryption=False)
+
+    assert events == ["stop:321", "sync", "decrypt", f"start:{profile}"]
 
 
 def test_joplin_gateway_records_two_client_conflict_and_rebases_merge(

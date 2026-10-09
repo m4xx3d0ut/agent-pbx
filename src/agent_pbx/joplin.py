@@ -180,6 +180,20 @@ class JoplinE2EELockedError(JoplinApiError):
         self.encryption = encryption
 
 
+class JoplinE2EEDecryptError(JoplinApiError):
+    def __init__(self, message: str, *, password_required: bool = False) -> None:
+        super().__init__(
+            message,
+            status_code=409,
+            code=(
+                "JOPLIN_E2EE_PASSWORD_REQUIRED"
+                if password_required
+                else "JOPLIN_E2EE_DECRYPT_FAILED"
+            ),
+            retryable=True,
+        )
+
+
 class JoplinSyncTargetError(JoplinApiError):
     def __init__(
         self,
@@ -785,6 +799,68 @@ class JoplinService:
                 retryable=True,
             )
 
+    def decrypt_encrypted_items(self) -> None:
+        command = [
+            *self.sync_command()[:-1],
+            "e2ee",
+            "decrypt",
+            "--retry-failed-items",
+            "--force",
+        ]
+        timeout = max(self.config.timeout_seconds, 60.0)
+        with self._sync_lock:
+            try:
+                result = subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise JoplinE2EEDecryptError(
+                    f"Joplin E2EE decryption timed out after {timeout:.0f}s; "
+                    "unlock the configured profile interactively and retry"
+                ) from exc
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise JoplinE2EEDecryptError(
+                    f"Joplin E2EE decryption could not start: {exc}"
+                ) from exc
+        if result.returncode == 0:
+            return
+
+        output = "\n".join(
+            part.strip() for part in (result.stdout, result.stderr) if part.strip()
+        )
+        normalized = output.lower()
+        password_required = any(
+            marker in normalized
+            for marker in (
+                "invalid password",
+                "master key is not loaded",
+                "masterkeynotloaded",
+                "password is needed to decrypt",
+            )
+        )
+        if result.returncode < 0 or "assertion failed" in normalized:
+            raise JoplinE2EEDecryptError(
+                "Joplin E2EE decryption terminated inside its crypto worker; "
+                "the cached master-key password may be invalid or the encrypted "
+                "item may be incompatible. Unlock E2EE interactively in the "
+                "configured profile and retry."
+            )
+        if password_required:
+            raise JoplinE2EEDecryptError(
+                "Joplin needs the E2EE master password. Unlock the configured "
+                "profile interactively and retry.",
+                password_required=True,
+            )
+        raise JoplinE2EEDecryptError(
+            f"Joplin E2EE decryption failed with exit code {result.returncode}; "
+            "unlock the configured profile interactively and retry"
+        )
+
     @staticmethod
     def note_encrypted(note: dict[str, Any]) -> bool:
         try:
@@ -1056,7 +1132,11 @@ class JoplinProfileCoordinator:
         self.service = service
         self.config = service.config
 
-    def run_sync(self) -> None:
+    def run_sync(
+        self,
+        *,
+        require_decryption: bool = True,
+    ) -> JoplinE2EEDecryptError | None:
         mode = str(self.config.profile_owner_mode or "external").strip().lower()
         if mode not in JOPLIN_PROFILE_OWNER_MODES:
             raise JoplinApiError(
@@ -1072,7 +1152,7 @@ class JoplinProfileCoordinator:
                     code="JOPLIN_PROFILE_REQUIRED",
                 )
             self.service.sync()
-            return
+            return None
 
         server_pid = self._validated_server_pid(profile)
         if mode == "external" and server_pid is not None:
@@ -1082,20 +1162,28 @@ class JoplinProfileCoordinator:
             )
         if mode == "external":
             self.service.sync()
-            return
+            return None
 
         if server_pid is not None:
             self._stop_server(server_pid)
         sync_error: Exception | None = None
-        try:
-            self.service.sync()
-        except Exception as exc:  # preserve sync failure after server recovery
-            sync_error = exc
+        decrypt_error: Exception | None = None
         restart_error: Exception | None = None
         try:
-            self._start_server(profile)
-        except Exception as exc:
-            restart_error = exc
+            try:
+                self.service.sync()
+            except Exception as exc:  # preserve sync failure after server recovery
+                sync_error = exc
+            if sync_error is None:
+                try:
+                    self.service.decrypt_encrypted_items()
+                except Exception as exc:  # restore the server for every decrypt failure
+                    decrypt_error = exc
+        finally:
+            try:
+                self._start_server(profile)
+            except Exception as exc:
+                restart_error = exc
         if restart_error is not None:
             if sync_error is not None:
                 raise JoplinProfileInUseError(
@@ -1103,9 +1191,22 @@ class JoplinProfileCoordinator:
                     f"could not be restored ({restart_error})",
                     code="JOPLIN_PROFILE_RECOVERY_FAILED",
                 ) from restart_error
+            if decrypt_error is not None:
+                raise JoplinProfileInUseError(
+                    f"Joplin decryption failed ({decrypt_error}) and the Data API "
+                    f"server could not be restored ({restart_error})",
+                    code="JOPLIN_PROFILE_RECOVERY_FAILED",
+                ) from restart_error
             raise restart_error
         if sync_error is not None:
             raise sync_error
+        if decrypt_error is not None:
+            if isinstance(decrypt_error, JoplinE2EEDecryptError):
+                if require_decryption:
+                    raise decrypt_error
+                return decrypt_error
+            raise decrypt_error
+        return None
 
     def _validated_server_pid(self, profile: Path) -> int | None:
         pid_path = profile.expanduser().resolve() / "clipper-pid.txt"
@@ -1405,7 +1506,6 @@ class JoplinGateway:
             )
             lock_file.flush()
             try:
-                self.profile_coordinator.run_sync()
                 note_ids = [
                     str(note_id)
                     for note_id in job.get("note_ids", [])
@@ -1420,6 +1520,9 @@ class JoplinGateway:
                 }
                 if not reasons and job.get("reason"):
                     reasons = {str(job["reason"])}
+                self.profile_coordinator.run_sync(
+                    require_decryption=not bool(note_ids),
+                )
                 if note_ids:
                     delete_reasons = reasons & JOPLIN_DELETE_SYNC_REASONS
                     if delete_reasons and delete_reasons != reasons:

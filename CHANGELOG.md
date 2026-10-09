@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- Run Joplin's explicit E2EE decrypt pass while the managed profile is the
+  sole owner, restore the validated Data API server after decrypt failures,
+  and report password-required and native crypto-worker failures separately.
+- Preserve targeted Joplin write success when its verified note is plaintext
+  even if an unrelated encrypted profile item cannot yet be decrypted.
+
 ## v2.1.1 - 2026-10-09
 
 ### Added
