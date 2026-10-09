@@ -5802,6 +5802,7 @@ class AgentPBXTUI(App[None]):
             str, tuple[str, str, str, str, int | None, str]
         ] = {}
         self.tmux_runtime_mapping_error_by_agent: dict[str, str] = {}
+        self.runtime_migration_error_by_agent: dict[str, str] = {}
         self.latest_runtime_migration_batch: dict[str, Any] | None = None
         self.latest_agent_pane_adoption_batch: dict[str, Any] | None = None
         self.tmux_terminal_client_id = f"tui-{os.getpid()}-{uuid.uuid4().hex[:12]}"
@@ -8263,6 +8264,7 @@ class AgentPBXTUI(App[None]):
             if isinstance(mapping, dict):
                 self.tmux_runtime_mapping_by_agent[agent_id] = mapping
                 self.tmux_agent_targets[agent_id] = str(mapping.get("pane_id") or "")
+            self.runtime_migration_error_by_agent.pop(agent_id, None)
             try:
                 target_server_id = self.tmux_runtime_server.server_id
                 restart_in_place = bool(
@@ -8276,14 +8278,20 @@ class AgentPBXTUI(App[None]):
                     else await self.resume_tmux_codex_in_managed_runtime(agent_id)
                 )
             except Exception as exc:
-                results.append({"agent_id": agent_id, "status": "failed", "error": str(exc)})
+                reason = str(exc)
+                self.runtime_migration_error_by_agent[agent_id] = reason
+                results.append({"agent_id": agent_id, "status": "failed", "error": reason})
             else:
-                results.append(
-                    {
-                        "agent_id": agent_id,
-                        "status": "complete" if restarted else "failed",
-                    }
-                )
+                result = {
+                    "agent_id": agent_id,
+                    "status": "complete" if restarted else "failed",
+                }
+                if not restarted:
+                    result["error"] = self.runtime_migration_error_by_agent.get(
+                        agent_id,
+                        "runtime restart or resume returned false without a diagnostic",
+                    )
+                results.append(result)
         batch_id = str(batch.get("batch_id") or "")
         try:
             response = await self.api_client().post(
@@ -16025,22 +16033,35 @@ class AgentPBXTUI(App[None]):
                 excluding_pane_id=replacing_pane_id,
             )
         except Exception as exc:
-            self.notify(
+            return self.record_runtime_migration_failure(
+                agent_id,
                 f"Unable to verify whether {agent_id}'s Codex session is already open; "
                 f"no pane was replaced. {exc}",
                 severity="warning",
             )
-            return False
         if not owners:
             return True
         owner_labels = ", ".join(owner.display_label for owner in owners)
-        self.notify(
+        return self.record_runtime_migration_failure(
+            agent_id,
             f"Refused to resume {agent_id}: its Codex conversation is active in "
             f"{owner_labels}. Close or wait for that owner, then retry; to branch "
             "intentionally, use Codex's explicit fork action. Agent PBX will not "
             "fork automatically.",
             severity="warning",
         )
+
+    def record_runtime_migration_failure(
+        self,
+        agent_id: str,
+        message: str,
+        *,
+        severity: str = "error",
+    ) -> bool:
+        """Persist a runtime transition failure before displaying it in the TUI."""
+
+        self.runtime_migration_error_by_agent[agent_id] = message
+        self.notify(message, severity=severity)
         return False
 
     def codex_session_lease_conflict_detected(self, text: str) -> bool:
@@ -17132,27 +17153,31 @@ class AgentPBXTUI(App[None]):
         remains the rollback record until the new pane is live and registered.
         """
 
+        self.runtime_migration_error_by_agent.pop(agent_id, None)
         agent = self.agents.get(agent_id)
         if not isinstance(agent, dict):
-            self.notify(f"{agent_id} is not loaded.", severity="warning")
-            return False
+            return self.record_runtime_migration_failure(
+                agent_id,
+                f"{agent_id} is not loaded.",
+                severity="warning",
+            )
         identity = self.tmux_runtime_server
         if not identity.ready or identity.effective_mode is not RuntimeServerMode.DEDICATED:
-            self.notify(
+            return self.record_runtime_migration_failure(
+                agent_id,
                 "Managed cross-server resume requires a ready dedicated runtime server.",
                 severity="warning",
             )
-            return False
         source_mapping = await self.fetch_tmux_runtime_mapping(agent_id)
         if isinstance(source_mapping, dict) and str(source_mapping.get("state") or "") == "ready":
             if str(source_mapping.get("server_id") or "") == identity.server_id:
                 return await self.restart_tmux_codex_session(agent_id)
-            self.notify(
+            return self.record_runtime_migration_failure(
+                agent_id,
                 f"{agent_id}'s source runtime is still live; close it at a safe turn "
                 "boundary before managed resume.",
                 severity="warning",
             )
-            return False
         metadata = self.agent_metadata(agent)
         session_id = str(
             metadata.get("fork_codex_session_id")
@@ -17162,8 +17187,11 @@ class AgentPBXTUI(App[None]):
             or ""
         ).strip()
         if not session_id:
-            self.notify(f"{agent_id} has no Codex session to resume.", severity="warning")
-            return False
+            return self.record_runtime_migration_failure(
+                agent_id,
+                f"{agent_id} has no Codex session to resume.",
+                severity="warning",
+            )
         cwd = str(
             metadata.get("work_root")
             or metadata.get("cwd")
@@ -17171,8 +17199,10 @@ class AgentPBXTUI(App[None]):
             or ""
         ).strip()
         if not cwd or not Path(cwd).is_dir():
-            self.notify(f"{agent_id}'s working directory is unavailable: {cwd!r}", severity="error")
-            return False
+            return self.record_runtime_migration_failure(
+                agent_id,
+                f"{agent_id}'s working directory is unavailable: {cwd!r}",
+            )
         if not await self.ensure_codex_resume_session_available(agent_id, session_id):
             return False
 
@@ -17188,7 +17218,11 @@ class AgentPBXTUI(App[None]):
         sandbox: str | None = None
         if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
             if not await self.ensure_operator_auth_ready():
-                return False
+                return self.record_runtime_migration_failure(
+                    agent_id,
+                    "Operator authentication is not ready for managed resume.",
+                    severity="warning",
+                )
             await self.configure_operator_codex_mcp(
                 codex_command=codex_command,
                 mcp_url=mcp_url,
@@ -17279,85 +17313,118 @@ class AgentPBXTUI(App[None]):
             "tmux_bin": identity.command_prefix[0],
             "socket_path": identity.socket_path,
         }
-        started = False
         pane_id = ""
         try:
             started = await asyncio.to_thread(ensure_dedicated_runtime_server, identity)
-            pane_id = await asyncio.to_thread(
-                tmux_support.launch_pane,
-                session_name=session_name,
-                window_name=safe_id[:120],
-                command=command,
-                cwd=cwd,
-                env=env,
-                width=self.detached_tmux_width,
-                height=self.detached_tmux_height,
-                **runtime_kwargs,
-            )
             if started:
                 await asyncio.to_thread(restore_dedicated_runtime_exit_policy, identity)
-            if CODEX_RESTART_STABILIZE_SECONDS > 0:
-                await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
-            if not await asyncio.to_thread(
-                tmux_support.pane_is_live,
-                pane_id,
-                **runtime_kwargs,
-            ):
-                raise RuntimeError("resumed Codex pane exited before stabilization")
-            if await self.tmux_pane_has_codex_session_lease_conflict(
-                pane_id,
-                **runtime_kwargs,
-            ):
-                raise CodexSessionLeaseConflictError(
-                    "resumed Codex pane opened the conversation lease dialog"
-                )
-            panes = await asyncio.to_thread(tmux_support.list_panes, **runtime_kwargs)
-            pane = next((item for item in panes if item.pane_id == pane_id), None)
-            if pane is None:
-                raise RuntimeError("resumed pane is not visible on the target runtime server")
-            pane_pid = await asyncio.to_thread(
-                tmux_support.pane_root_pid,
-                pane_id,
-                **runtime_kwargs,
-            )
-            response = await self.api_client().post(
-                f"/v2/tmux/runtimes/{quote(agent_id, safe='')}",
-                json={
-                    "server_mode": RuntimeServerMode.DEDICATED.value,
-                    "socket_path": identity.socket_path,
-                    "session_name": pane.session_name,
-                    "window_id": pane.window_id or pane.window_index,
-                    "window_name": pane.window_name,
-                    "pane_id": pane.pane_id,
-                    "pane_pid": pane_pid,
-                    "process_start_ticks": await asyncio.to_thread(
-                        runtime_process_start_ticks,
-                        pane_pid,
-                    ),
-                    "codex_session_id": session_id,
-                    "cwd": pane.cwd,
-                    "metadata": {
-                        "managed_by": "agent-pbx-tui",
-                        "mapping_source": "managed_cross_server_resume",
-                        "tmux_bin": identity.command_prefix[0],
-                    },
-                },
-                headers=auth_headers(self.token),
-            )
-            response.raise_for_status()
-            mapping = response.json()
         except Exception as exc:
-            if pane_id:
-                try:
-                    await asyncio.to_thread(
-                        tmux_support.kill_pane,
-                        pane_id,
-                        **runtime_kwargs,
+            return self.record_runtime_migration_failure(
+                agent_id,
+                f"Unable to prepare the managed tmux server for {agent_id}: {exc}",
+            )
+
+        attempts = max(1, CODEX_RESTART_LAUNCH_ATTEMPTS)
+        failures: list[str] = []
+        mapping: dict[str, Any] | None = None
+        for attempt in range(1, attempts + 1):
+            pane_id = ""
+            try:
+                pane_id = await asyncio.to_thread(
+                    tmux_support.launch_pane,
+                    session_name=session_name,
+                    window_name=safe_id[:120],
+                    command=command,
+                    cwd=cwd,
+                    env=env,
+                    width=self.detached_tmux_width,
+                    height=self.detached_tmux_height,
+                    **runtime_kwargs,
+                )
+                if CODEX_RESTART_STABILIZE_SECONDS > 0:
+                    await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
+                if not await asyncio.to_thread(
+                    tmux_support.pane_is_live,
+                    pane_id,
+                    **runtime_kwargs,
+                ):
+                    raise RuntimeError("resumed Codex pane exited before stabilization")
+                if await self.tmux_pane_has_codex_session_lease_conflict(
+                    pane_id,
+                    **runtime_kwargs,
+                ):
+                    raise CodexSessionLeaseConflictError(
+                        "resumed Codex pane opened the conversation lease dialog"
                     )
-                except Exception:
-                    pass
-            self.notify(f"Unable to resume {agent_id} on managed tmux: {exc}", severity="error")
-            return False
+                panes = await asyncio.to_thread(tmux_support.list_panes, **runtime_kwargs)
+                pane = next((item for item in panes if item.pane_id == pane_id), None)
+                if pane is None:
+                    raise RuntimeError("resumed pane is not visible on the target runtime server")
+                pane_pid = await asyncio.to_thread(
+                    tmux_support.pane_root_pid,
+                    pane_id,
+                    **runtime_kwargs,
+                )
+                response = await self.api_client().post(
+                    f"/v2/tmux/runtimes/{quote(agent_id, safe='')}",
+                    json={
+                        "server_mode": RuntimeServerMode.DEDICATED.value,
+                        "socket_path": identity.socket_path,
+                        "session_name": pane.session_name,
+                        "window_id": pane.window_id or pane.window_index,
+                        "window_name": pane.window_name,
+                        "pane_id": pane.pane_id,
+                        "pane_pid": pane_pid,
+                        "process_start_ticks": await asyncio.to_thread(
+                            runtime_process_start_ticks,
+                            pane_pid,
+                        ),
+                        "codex_session_id": session_id,
+                        "cwd": pane.cwd,
+                        "metadata": {
+                            "managed_by": "agent-pbx-tui",
+                            "mapping_source": "managed_cross_server_resume",
+                            "tmux_bin": identity.command_prefix[0],
+                        },
+                    },
+                    headers=auth_headers(self.token),
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise RuntimeError("runtime registration returned a non-object response")
+                mapping = payload
+                break
+            except Exception as exc:
+                failures.append(f"attempt {attempt}: {exc}")
+                if pane_id:
+                    try:
+                        await asyncio.to_thread(
+                            tmux_support.kill_pane,
+                            pane_id,
+                            **runtime_kwargs,
+                        )
+                    except Exception as cleanup_exc:
+                        failures.append(f"unable to remove attempted pane {pane_id}: {cleanup_exc}")
+                        break
+                retry_lease = isinstance(exc, CodexSessionLeaseConflictError)
+                if (
+                    retry_lease
+                    and attempt < attempts
+                    and CODEX_RESTART_RETRY_SECONDS > 0
+                ):
+                    await asyncio.sleep(CODEX_RESTART_RETRY_SECONDS)
+                if retry_lease and attempt < attempts:
+                    continue
+                break
+
+        if mapping is None:
+            detail = "; ".join(failures[-attempts:]) or "target pane was not created"
+            return self.record_runtime_migration_failure(
+                agent_id,
+                f"Unable to resume {agent_id} on managed tmux after "
+                f"{attempt} attempt(s): {detail}",
+            )
 
         updated_metadata = {
             **metadata,
@@ -30112,9 +30179,9 @@ class AgentPBXTUI(App[None]):
             )
         except OSError:
             return
-        if self.remote_client_state_ready:
+        if self.remote_client_state_ready and self.is_running:
             self.run_worker(
-                self.persist_remote_view_state_debounced(),
+                self.persist_remote_view_state_debounced,
                 name="remote-view-state",
                 group="remote-view-state",
                 exclusive=True,

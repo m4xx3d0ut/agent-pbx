@@ -3019,7 +3019,85 @@ async def test_tui_runtime_migration_applies_only_eligible_candidates() -> None:
     assert posted[0]["path"] == "/v2/runtime-migrations/batch-1/results"
 
 
-async def test_tui_managed_resume_launches_on_exact_dedicated_server(
+async def test_tui_runtime_migration_persists_false_return_diagnostic() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    posted: list[dict[str, object]] = []
+
+    async def fake_resume(agent_id: str) -> bool:
+        app.runtime_migration_error_by_agent[agent_id] = (
+            "resumed Codex pane opened the conversation lease dialog"
+        )
+        return False
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # type: ignore[no-untyped-def]
+            return {"batch_id": "batch-failed", "status": "partial"}
+
+    class Client:
+        async def post(self, path, **kwargs):  # type: ignore[no-untyped-def]
+            posted.append({"path": path, **kwargs})
+            return Response()
+
+        async def aclose(self) -> None:
+            return None
+
+    app.resume_tmux_codex_in_managed_runtime = fake_resume  # type: ignore[method-assign]
+    batch = {
+        "batch_id": "batch-failed",
+        "candidates": [
+            {
+                "agent_id": "agent-a",
+                "eligible": True,
+                "mapping": {"pane_id": "%1", "state": "moved", "server_id": "old"},
+                "blockers": [],
+            }
+        ],
+    }
+    async with app.run_test():
+        if app.http_client is not None:
+            await app.http_client.aclose()
+            app.http_client = None
+        app.api_client = lambda: Client()  # type: ignore[method-assign]
+        results = await app.apply_runtime_migration_batch(batch)
+
+    assert results == [
+        {
+            "agent_id": "agent-a",
+            "status": "failed",
+            "error": "resumed Codex pane opened the conversation lease dialog",
+        }
+    ]
+    assert posted[0]["json"]["results"] == results  # type: ignore[index]
+
+
+async def test_tui_save_settings_schedules_remote_state_lazily(tmp_path: Path) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        tmux_direct=True,
+        settings_file=tmp_path / "settings.json",
+    )
+    scheduled: list[object] = []
+
+    def fake_run_worker(work: object, **_kwargs: object) -> SimpleNamespace:
+        scheduled.append(work)
+        return SimpleNamespace()
+
+    async with app.run_test():
+        app.remote_client_state_ready = True
+        app.run_worker = fake_run_worker  # type: ignore[method-assign]
+        app.save_settings()
+
+    assert scheduled
+    assert all(inspect.iscoroutinefunction(work) for work in scheduled)
+    assert all(not inspect.isawaitable(work) for work in scheduled)
+
+
+async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3078,12 +3156,17 @@ async def test_tui_managed_resume_launches_on_exact_dedicated_server(
     async def available(*_args: object, **_kwargs: object) -> bool:
         return True
 
-    async def no_conflict(*_args: object, **_kwargs: object) -> bool:
-        return False
+    async def conflict_once(pane_id: str, **_kwargs: object) -> bool:
+        return pane_id == "%8"
 
     def launch(**kwargs: object) -> str:
         launch_calls.append(kwargs)
-        return "%9"
+        return "%8" if len(launch_calls) == 1 else "%9"
+
+    killed: list[str] = []
+
+    def kill(pane_id: str, **_kwargs: object) -> None:
+        killed.append(pane_id)
 
     pane = tmux_support.TmuxPane(
         "agent-pbx-runtime-agent-a",
@@ -3102,11 +3185,14 @@ async def test_tui_managed_resume_launches_on_exact_dedicated_server(
     )
     app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
     app.ensure_codex_resume_session_available = available  # type: ignore[method-assign]
-    app.tmux_pane_has_codex_session_lease_conflict = no_conflict  # type: ignore[method-assign]
+    app.tmux_pane_has_codex_session_lease_conflict = conflict_once  # type: ignore[method-assign]
     app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 2)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.ensure_dedicated_runtime_server", lambda _identity: False)
     monkeypatch.setattr(tmux_support, "launch_pane", launch)
+    monkeypatch.setattr(tmux_support, "kill_pane", kill)
     monkeypatch.setattr(tmux_support, "pane_is_live", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(tmux_support, "list_panes", lambda *_args, **_kwargs: [pane])
     monkeypatch.setattr(tmux_support, "pane_root_pid", lambda *_args, **_kwargs: 4321)
@@ -3133,12 +3219,83 @@ async def test_tui_managed_resume_launches_on_exact_dedicated_server(
         }
         assert await app.resume_tmux_codex_in_managed_runtime("agent-a") is True
 
-    assert launch_calls[0]["tmux_bin"] == "/opt/tmux-3.7c"
-    assert launch_calls[0]["socket_path"] == str(socket_path)
-    assert "session-a" in str(launch_calls[0]["command"])
-    assert launch_calls[0]["env"]["AGENT_PBX_AGENT_ID"] == "agent-a"  # type: ignore[index]
+    assert len(launch_calls) == 2
+    assert killed == ["%8"]
+    assert launch_calls[-1]["tmux_bin"] == "/opt/tmux-3.7c"
+    assert launch_calls[-1]["socket_path"] == str(socket_path)
+    assert "session-a" in str(launch_calls[-1]["command"])
+    assert launch_calls[-1]["env"]["AGENT_PBX_AGENT_ID"] == "agent-a"  # type: ignore[index]
     assert posts[0] == "/v2/tmux/runtimes/agent-a"
     assert app.tmux_runtime_mapping_by_agent["agent-a"]["pane_id"] == "%9"
+
+
+async def test_tui_managed_resume_reports_exhausted_lease_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "demo"
+    project.mkdir()
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret", tmux_direct=True)
+    app.tmux_runtime_server = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-new",
+        str(tmp_path / "runtime.sock"),
+        True,
+        False,
+        tmux_bin="/opt/tmux-3.7c",
+    )
+    launches: list[str] = []
+    killed: list[str] = []
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return {"state": "moved", "pane_id": "%old"}
+
+    async def available(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def conflict(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    def launch(**_kwargs: object) -> str:
+        pane_id = f"%attempt-{len(launches) + 1}"
+        launches.append(pane_id)
+        return pane_id
+
+    def kill(pane_id: str, **_kwargs: object) -> None:
+        killed.append(pane_id)
+
+    app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
+    app.ensure_codex_resume_session_available = available  # type: ignore[method-assign]
+    app.tmux_pane_has_codex_session_lease_conflict = conflict  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 2)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.ensure_dedicated_runtime_server", lambda _identity: False)
+    monkeypatch.setattr(tmux_support, "launch_pane", launch)
+    monkeypatch.setattr(tmux_support, "kill_pane", kill)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda *_args, **_kwargs: True)
+
+    async with app.run_test():
+        app.agents = {
+            "agent-a": {
+                "agent_id": "agent-a",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(project),
+                    "codex_session_id": "session-a",
+                    "codex_command": "codex",
+                },
+            }
+        }
+        assert await app.resume_tmux_codex_in_managed_runtime("agent-a") is False
+
+    assert launches == ["%attempt-1", "%attempt-2"]
+    assert killed == launches
+    error = app.runtime_migration_error_by_agent["agent-a"]
+    assert "after 2 attempt(s)" in error
+    assert "conversation lease dialog" in error
 
 
 async def test_tui_layout_refresh_preserves_visible_events_focus() -> None:
