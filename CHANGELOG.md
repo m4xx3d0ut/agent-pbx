@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v2.1.1rc1 - 2026-10-09
+
 ### Added
 
 - Add exact-tag TestPyPI and production PyPI Trusted Publishing workflows with
