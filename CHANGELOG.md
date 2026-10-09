@@ -13,6 +13,10 @@
 
 ### Fixed
 
+- Install and select the generated `agent-pbx-1337` Codex syntax theme through
+  a drift-safe command, report its posture through doctor, and reconcile stale
+  `NO_COLOR` inherited by persistent dedicated tmux servers while preserving
+  an explicit user color-suppression preference.
 - Route Operator campaign follow-ups, root messages, KB seed prompts, and
   knowledge turns through the target runtime mapping's recorded tmux binary,
   socket, session, window, and pane instead of probing the daemon's inherited

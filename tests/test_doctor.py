@@ -9,6 +9,7 @@ from agent_pbx.doctor import (
     DoctorCheck,
     DoctorReport,
     _database_check,
+    _codex_theme_check,
     _security_check,
     _tmux_server_diagnostic,
     _compatibility_check,
@@ -118,6 +119,32 @@ def test_doctor_cli_parser_exposes_release_gate_options() -> None:
     assert args.strict is True
     assert args.no_service_probes is True
     assert args.codex_bin == "codex-x"
+
+    theme = build_parser().parse_args(
+        ["codex", "theme", "install", "--codex-home", "/tmp/codex", "--force"]
+    )
+    assert theme.command == "codex"
+    assert theme.codex_command == "theme"
+    assert theme.codex_theme_command == "install"
+    assert theme.codex_home == Path("/tmp/codex")
+    assert theme.force is True
+
+
+def test_doctor_reports_managed_codex_theme_posture(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    missing = _codex_theme_check()
+    assert missing.status == "warn"
+    assert "theme install" in missing.remediation
+
+    from agent_pbx.codex_theme import install_managed_codex_theme
+
+    install_managed_codex_theme(codex_home=tmp_path / ".codex")
+    ready = _codex_theme_check()
+    assert ready.status == "pass"
+    assert "installed and selected" in ready.summary
 
 
 def test_tmux_server_diagnostic_reports_server_binary_and_plugin_contamination(

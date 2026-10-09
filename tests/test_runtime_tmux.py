@@ -25,6 +25,7 @@ from agent_pbx.runtime_tmux import (
     probe_runtime_panes,
     recursive_attachment_reason,
     resolve_invoking_outer_client,
+    reconcile_dedicated_runtime_color_environment,
     resolve_runtime_tmux_server,
     runtime_mapping_server_identity,
     runtime_pop_plan,
@@ -279,6 +280,77 @@ def test_dedicated_runtime_config_override_must_be_absolute(tmp_path: Path) -> N
             identity,
             environ={"AGENT_PBX_TMUX_RUNTIME_CONFIG": "relative.conf"},
         )
+
+
+def test_dedicated_runtime_color_reconciliation_removes_stale_no_color(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-a",
+        "/tmp/pbx.sock",
+        True,
+        False,
+        tmux_bin="tmux-test",
+    )
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("agent_pbx.runtime_tmux.subprocess.run", run)
+
+    result = reconcile_dedicated_runtime_color_environment(
+        identity,
+        environ={"COLORTERM": "truecolor"},
+    )
+
+    assert result["color_enabled"] is True
+    assert calls == [
+        ["tmux-test", "-S", "/tmp/pbx.sock", "set-environment", "-g", "-u", "NO_COLOR"],
+        [
+            "tmux-test",
+            "-S",
+            "/tmp/pbx.sock",
+            "set-environment",
+            "-g",
+            "COLORTERM",
+            "truecolor",
+        ],
+    ]
+
+
+def test_dedicated_runtime_color_reconciliation_preserves_explicit_no_color(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-a",
+        "/tmp/pbx.sock",
+        True,
+        False,
+        tmux_bin="tmux-test",
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "agent_pbx.runtime_tmux.subprocess.run",
+        lambda command, **_kwargs: (
+            calls.append(command)
+            or subprocess.CompletedProcess(command, 0, "", "")
+        ),
+    )
+
+    result = reconcile_dedicated_runtime_color_environment(
+        identity,
+        environ={"NO_COLOR": "1"},
+    )
+
+    assert result["color_enabled"] is False
+    assert calls[0][-2:] == ["NO_COLOR", "1"]
+    assert calls[1][-2:] == ["COLORTERM", "truecolor"]
 
 
 def test_outer_required_reports_missing_tmux() -> None:

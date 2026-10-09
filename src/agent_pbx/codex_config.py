@@ -217,6 +217,7 @@ def load_codex_config_view(
         ],
         "keymap": _keymap_status(parsed),
         "keymap_presets": ["portable", "reset"],
+        "theme": _theme_status(parsed),
     }
 
 
@@ -227,6 +228,7 @@ def patch_codex_config(
     agent_pbx_mcp: Mapping[str, Any] | None = None,
     secret_updates: Iterable[Mapping[str, Any]] | None = None,
     keymap_preset: str | None = None,
+    tui_theme: str | None = None,
     config_path: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> CodexConfigPatchResult:
@@ -262,6 +264,22 @@ def patch_codex_config(
     if keymap_preset:
         new_text, keymap_changes = _patch_keymap_preset(new_text, keymap_preset)
         changed.extend(keymap_changes)
+
+    if tui_theme is not None:
+        normalized_theme = str(tui_theme or "").strip()
+        if normalized_theme and not re.fullmatch(
+            r"[a-z0-9]+(?:-[a-z0-9]+)*", normalized_theme
+        ):
+            raise ValueError("Codex tui.theme must be a kebab-case theme name.")
+        updated = _set_table_key(
+            new_text,
+            ("tui",),
+            "theme",
+            normalized_theme or None,
+        )
+        if updated != new_text:
+            changed.append("tui.theme")
+            new_text = updated
 
     for patch in secret_updates or ():
         secret_path = str(patch.get("path") or "").strip()
@@ -308,6 +326,12 @@ def _keymap_status(parsed: Mapping[str, Any]) -> dict[str, Any]:
         "composer": {"submit": submit_keys},
         "editor": {"insert_newline": newline_keys},
     }
+
+
+def _theme_status(parsed: Mapping[str, Any]) -> dict[str, Any]:
+    tui = parsed.get("tui") if isinstance(parsed, Mapping) else None
+    value = str(tui.get("theme") or "").strip() if isinstance(tui, Mapping) else ""
+    return {"configured": bool(value), "name": value or None}
 
 
 def _read_text(path: Path) -> tuple[str | None, str | None]:

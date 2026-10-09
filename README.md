@@ -1214,6 +1214,23 @@ Use `FOREGROUND` and `BACKGROUND` for normal text and the terminal base.
 `Settings -> Theme` or `/theme <name>` from the palette to switch back to your
 custom theme if another theme is selected.
 
+The Agent PBX frame theme and the Codex code/diff syntax theme are separate
+surfaces. Install and select the managed Codex theme with:
+
+```bash
+agent-pbx codex theme install
+agent-pbx codex theme status
+```
+
+The installer writes `agent-pbx-1337.tmTheme` under `$CODEX_HOME/themes`,
+updates only `tui.theme` in Codex configuration, creates a configuration backup
+when one already exists, and refuses to overwrite a drifted or unsafe theme
+file unless `--force` is explicitly supplied after review. Existing Codex
+processes must be restarted/resumed at a safe turn boundary before a corrected
+process environment and startup theme are guaranteed to take effect. `doctor`
+reports both managed-theme posture and a stale `NO_COLOR` retained by the
+dedicated runtime tmux server.
+
 ### Managed Workspace Launch
 
 The v2 project picker discovers Git repositories beneath daemon-approved roots.

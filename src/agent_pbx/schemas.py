@@ -290,6 +290,7 @@ class CodexConfigPatchRequest(BaseModel):
     agent_pbx_mcp: CodexConfigMcpPatchRequest | None = None
     secret_updates: list[CodexConfigSecretPatchRequest] = Field(default_factory=list)
     keymap_preset: Literal["portable", "reset"] | None = None
+    tui_theme: str | None = Field(default=None, max_length=120)
 
 
 class CodexConfigViewResponse(BaseModel):
@@ -307,6 +308,7 @@ class CodexConfigViewResponse(BaseModel):
     secret_update_paths: list[str] = Field(default_factory=list)
     keymap: dict[str, Any] = Field(default_factory=dict)
     keymap_presets: list[str] = Field(default_factory=list)
+    theme: dict[str, Any] = Field(default_factory=dict)
 
 
 class CodexConfigPatchResponse(BaseModel):

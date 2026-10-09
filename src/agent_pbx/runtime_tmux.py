@@ -269,6 +269,7 @@ def ensure_dedicated_runtime_server(identity: TmuxServerIdentity) -> bool:
         text=True,
     )
     if responsive.returncode == 0:
+        reconcile_dedicated_runtime_color_environment(identity)
         return False
     config_path = write_managed_runtime_tmux_config(
         dedicated_runtime_config_path(identity)
@@ -300,7 +301,52 @@ def ensure_dedicated_runtime_server(identity: TmuxServerIdentity) -> bool:
     ready, message = validate_tmux_socket(socket_path)
     if not ready:
         raise RuntimeError(message)
+    reconcile_dedicated_runtime_color_environment(identity)
     return True
+
+
+def reconcile_dedicated_runtime_color_environment(
+    identity: TmuxServerIdentity,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Keep persistent managed servers from retaining stale color suppression.
+
+    A dedicated tmux server can outlive the process that created it. In
+    particular, a server started from a Codex tool shell may inherit
+    ``NO_COLOR=1`` even though the real TUI terminal supports color. Mirror an
+    explicit caller preference, otherwise remove the stale value. The managed
+    terminal surface and tmux configuration both support true color.
+    """
+
+    if identity.effective_mode is not RuntimeServerMode.DEDICATED:
+        return {"reconciled": False, "reason": "runtime server is not dedicated"}
+    source = os.environ if environ is None else environ
+    no_color = str(source.get("NO_COLOR") or "").strip()
+    color_term = str(source.get("COLORTERM") or "").strip()
+    if color_term.casefold() not in {"truecolor", "24bit"}:
+        color_term = "truecolor"
+
+    operations = (
+        ("NO_COLOR", no_color or None),
+        ("COLORTERM", color_term),
+    )
+    for name, value in operations:
+        command = [*identity.command_prefix, "set-environment", "-g"]
+        if value is None:
+            command.extend(("-u", name))
+        else:
+            command.extend((name, value))
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = result.stderr or result.stdout or f"unable to set {name}"
+            raise RuntimeError(detail.strip())
+    return {
+        "reconciled": True,
+        "no_color": no_color or None,
+        "color_term": color_term,
+        "color_enabled": not bool(no_color),
+    }
 
 
 def restore_dedicated_runtime_exit_policy(identity: TmuxServerIdentity) -> None:

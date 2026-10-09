@@ -16,6 +16,7 @@ import httpx
 
 from . import __version__
 from .codex_cli import inspect_codex_posture
+from .codex_theme import MANAGED_CODEX_THEME_NAME, managed_codex_theme_status
 from .compat import compatibility_posture
 from .mcp_daemon import MCPDaemonConfig, lan_auth_guard, mcp_daemon_status
 from .store import SCHEMA_VERSION
@@ -125,6 +126,7 @@ def run_platform_doctor(
     checks.append(_security_check(config))
     checks.append(_compatibility_check(config))
     checks.append(_codex_check(codex_command, timeout))
+    checks.append(_codex_theme_check())
     checks.append(_workerbee_check(config, which, timeout))
     checks.append(_joplin_check(config, timeout, probe_services=probe_services))
     checks.append(_clipboard_check(which))
@@ -234,6 +236,8 @@ def _tmux_check(which: Callable[[str], str | None], timeout: float) -> DoctorChe
             details.append(f"runtime server: {runtime['description']}")
             if runtime.get("plugin_contaminated"):
                 warnings.append("dedicated runtime inherited resurrect/continuum options")
+            if runtime.get("no_color"):
+                warnings.append("dedicated runtime inherited NO_COLOR")
         else:
             details.append(f"runtime server: unavailable at {runtime_socket}")
     status = "fail" if result.returncode != 0 else "warn" if warnings else "pass"
@@ -243,8 +247,8 @@ def _tmux_check(which: Callable[[str], str | None], timeout: float) -> DoctorChe
         (version or path) + (f"; {'; '.join(warnings)}" if warnings else ""),
         detail="; ".join(details),
         remediation=(
-            "Start dedicated runtimes with the Agent PBX managed tmux config and "
-            "align the outer tmux client/server version before migration."
+            "Start or reconcile dedicated runtimes through Agent PBX so tmux "
+            "options, color environment, and client/server versions are aligned."
             if warnings
             else ""
         ),
@@ -298,16 +302,37 @@ def _tmux_server_diagnostic(
     )
     option_text = options.stdout.casefold() if options.returncode == 0 else ""
     contaminated = "continuum" in option_text or "resurrect" in option_text
+    environment = subprocess.run(
+        [tmux_bin, "-S", str(socket_path), "show-environment", "-g"],
+        capture_output=True,
+        text=True,
+        timeout=max(1.0, timeout),
+    )
+    server_environment: dict[str, str] = {}
+    if environment.returncode == 0:
+        for line in environment.stdout.splitlines():
+            if not line or line.startswith("-") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            server_environment[key] = value
+    no_color = str(server_environment.get("NO_COLOR") or "").strip()
+    color_term = str(server_environment.get("COLORTERM") or "").strip()
     description = f"{version} pid={pid or 'unknown'} socket={socket_path}"
     if executable:
         description += f" exe={executable}"
     if contaminated:
         description += " plugins=resurrect/continuum"
+    if no_color:
+        description += f" NO_COLOR={no_color}"
+    if color_term:
+        description += f" COLORTERM={color_term}"
     return {
         "version": version,
         "pid": pid or None,
         "executable": executable or None,
         "plugin_contaminated": contaminated,
+        "no_color": no_color or None,
+        "color_term": color_term or None,
         "description": description,
     }
 
@@ -471,6 +496,29 @@ def _codex_check(command: str, timeout: float) -> DoctorCheck:
         versions,
         detail=f"model={model}; catalog={posture.model_catalog_count}",
         remediation=" ".join(posture.warnings),
+    )
+
+
+def _codex_theme_check() -> DoctorCheck:
+    theme = managed_codex_theme_status()
+    if theme.ready:
+        return DoctorCheck(
+            "codex-theme",
+            "pass",
+            f"{MANAGED_CODEX_THEME_NAME} installed and selected",
+            detail=f"{theme.path}; sha256={theme.expected_sha256}",
+        )
+    reasons: list[str] = []
+    if theme.state != "matched":
+        reasons.append(f"asset={theme.state}")
+    if not theme.selected:
+        reasons.append(f"selected={theme.configured_theme or 'unset'}")
+    return DoctorCheck(
+        "codex-theme",
+        "warn",
+        "; ".join(reasons) or "managed theme is not ready",
+        detail=theme.path,
+        remediation="Run `agent-pbx codex theme install` and restart/resume Codex sessions at a safe turn boundary.",
     )
 
 

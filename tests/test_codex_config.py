@@ -241,3 +241,34 @@ def test_codex_config_rejects_unknown_keymap_preset(tmp_path: Path) -> None:
             config_path=tmp_path / "config.toml",
             keymap_preset="unsafe",
         )
+
+
+def test_codex_config_theme_preserves_other_tui_settings(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[tui]\nalternate_screen = "never"\nstatus_line = ["model"]\n',
+        encoding="utf-8",
+    )
+
+    result = patch_codex_config(
+        config_path=config,
+        tui_theme="agent-pbx-1337",
+    )
+
+    text = config.read_text(encoding="utf-8")
+    assert 'alternate_screen = "never"' in text
+    assert 'status_line = ["model"]' in text
+    assert 'theme = "agent-pbx-1337"' in text
+    assert result.changed_paths == ("tui.theme",)
+    assert result.view["theme"] == {
+        "configured": True,
+        "name": "agent-pbx-1337",
+    }
+
+
+def test_codex_config_theme_rejects_non_kebab_name(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="kebab-case"):
+        patch_codex_config(
+            config_path=tmp_path / "config.toml",
+            tui_theme="Agent PBX Theme",
+        )

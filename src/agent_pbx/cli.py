@@ -20,6 +20,11 @@ from .agent import (
 from .api import create_app, create_token_helper_app
 from .config import ServerConfig
 from .compat import POLLING_ENV, compatibility_flag
+from .codex_theme import (
+    install_managed_codex_theme,
+    managed_codex_theme_status,
+    render_managed_codex_theme_status,
+)
 from .doctor import doctor_json, doctor_markdown, run_platform_doctor
 from .envfile import load_user_env_defaults
 from .joplin import (
@@ -283,6 +288,21 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--no-service-probes", action="store_true")
     doctor.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
     doctor.add_argument("--json", action="store_true")
+
+    codex = subcommands.add_parser("codex", help="Manage Codex integration assets.")
+    codex_subcommands = codex.add_subparsers(dest="codex_command", required=True)
+    codex_theme = codex_subcommands.add_parser(
+        "theme", help="Inspect or install the managed Codex syntax theme."
+    )
+    codex_theme_subcommands = codex_theme.add_subparsers(
+        dest="codex_theme_command", required=True
+    )
+    for command_name in ("status", "install"):
+        command = codex_theme_subcommands.add_parser(command_name)
+        command.add_argument("--codex-home", type=Path, default=None)
+        command.add_argument("--json", action="store_true")
+        if command_name == "install":
+            command.add_argument("--force", action="store_true")
 
     migrate = subcommands.add_parser(
         "migrate",
@@ -572,6 +592,25 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(doctor_json(report) if args.json else doctor_markdown(report))
         return 1 if report.failure_count or (args.strict and report.warning_count) else 0
+
+    if args.command == "codex" and args.codex_command == "theme":
+        try:
+            if args.codex_theme_command == "install":
+                theme = install_managed_codex_theme(
+                    codex_home=args.codex_home,
+                    force=bool(args.force),
+                )
+            else:
+                theme = managed_codex_theme_status(codex_home=args.codex_home)
+        except (OSError, PermissionError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(
+            json.dumps(theme.public_dict(), indent=2, sort_keys=True)
+            if args.json
+            else render_managed_codex_theme_status(theme)
+        )
+        return 0 if theme.ready else 1
 
     if args.command == "remote" and args.remote_command == "ssh-attach":
         try:

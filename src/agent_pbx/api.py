@@ -493,6 +493,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     for item in payload.secret_updates
                 ],
                 keymap_preset=payload.keymap_preset,
+                tui_theme=payload.tui_theme,
             )
         except ValueError as exc:
             raise HTTPException(
