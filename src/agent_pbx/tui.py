@@ -13811,6 +13811,7 @@ class AgentPBXTUI(App[None]):
             if response.status_code == 404:
                 self.tmux_runtime_mapping_by_agent.pop(agent_id, None)
                 self.tmux_runtime_mapping_validated_at_by_agent.pop(agent_id, None)
+                self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
                 return None
             response.raise_for_status()
             mapping = response.json()
@@ -17260,11 +17261,6 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return False
-        status = self.query_one_or_none("#tmux-status", Static)
-        pane = await self.resolve_tmux_send_pane(agent_id, status=status)
-        if pane is None:
-            self.notify(f"No tmux pane found for {agent_id}.", severity="warning")
-            return False
         agent = self.agents.get(agent_id)
         if not isinstance(agent, dict):
             self.notify(f"{agent_id} is not loaded.", severity="warning")
@@ -17277,6 +17273,57 @@ class AgentPBXTUI(App[None]):
             )
             if not activated:
                 return False
+        mapping = await self.fetch_tmux_runtime_mapping(agent_id)
+        mapping_state = (
+            str(mapping.get("state") or "")
+            if isinstance(mapping, dict)
+            else ""
+        )
+        if mapping is None or mapping_state != "ready":
+            if mapping is None:
+                lookup_error = str(
+                    self.tmux_runtime_mapping_error_by_agent.get(agent_id) or ""
+                ).strip()
+                if lookup_error:
+                    self.notify(
+                        f"Unable to verify the managed runtime for {agent_id}; "
+                        f"no new pane was created. {lookup_error}",
+                        severity="warning",
+                    )
+                    if model_elevation_lease_id:
+                        await self.finish_model_elevation_lease(
+                            model_elevation_lease_id,
+                            status="failed",
+                            transition={"reason": "runtime_mapping_lookup_failed"},
+                        )
+                    return False
+            restarted = await self.resume_tmux_codex_in_managed_runtime(
+                agent_id,
+                model_preset=model_preset,
+            )
+            if not restarted:
+                if model_elevation_lease_id:
+                    await self.finish_model_elevation_lease(
+                        model_elevation_lease_id,
+                        status="failed",
+                        transition={"reason": "managed_resume_failed"},
+                    )
+                return False
+            await self.refresh_agents()
+            await self.refresh_events()
+            await self.load_tmux_capture(agent_id)
+            return True
+        status = self.query_one_or_none("#tmux-status", Static)
+        pane = await self.resolve_tmux_send_pane(agent_id, status=status)
+        if pane is None:
+            self.notify(f"No tmux pane found for {agent_id}.", severity="warning")
+            if model_elevation_lease_id:
+                await self.finish_model_elevation_lease(
+                    model_elevation_lease_id,
+                    status="failed",
+                    transition={"reason": "runtime_pane_unavailable"},
+                )
+            return False
         if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
             if self.operator_role(agent) == OPERATOR_ROLE_FORK:
                 restarted = await self.relaunch_operator_fork_codex(
@@ -17320,7 +17367,12 @@ class AgentPBXTUI(App[None]):
         await self.load_tmux_capture(agent_id)
         return True
 
-    async def resume_tmux_codex_in_managed_runtime(self, agent_id: str) -> bool:
+    async def resume_tmux_codex_in_managed_runtime(
+        self,
+        agent_id: str,
+        *,
+        model_preset: CodexModelPreset | None = None,
+    ) -> bool:
         """Resume a preserved identity on the configured managed runtime server.
 
         Cross-server migration cannot move a live PTY.  This path therefore
@@ -17403,7 +17455,7 @@ class AgentPBXTUI(App[None]):
 
         preset = self.restart_model_preset(
             metadata,
-            None,
+            model_preset,
             operator=self.agent_type(agent) == OPERATOR_AGENT_TYPE,
         )
         codex_command = self.codex_command_on_current_shell(

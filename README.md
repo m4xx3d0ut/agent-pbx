@@ -1102,8 +1102,13 @@ nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
 `/side` chat. Use `/restart` or `/codex restart` in tmux direct mode to type
 Codex `/quit`, wait briefly for Codex to exit (the containing shell may remain),
 then relaunch the known Codex session when Agent PBX can recover its metadata.
-Use `/codex
-update` to ask the Agent PBX daemon to run the allowlisted npm update for
+If the retained Agent or Operator has no ready v2 runtime mapping, the same
+explicit restart creates a fresh pane on the configured managed tmux server,
+resumes the preserved Codex session, registers and verifies the new mapping,
+and leaves the stale or absent pane reference behind. Agent PBX refuses to
+create a pane when the daemon cannot verify mapping state, preventing an
+unreachable runtime from being duplicated. Use `/codex update` to ask the Agent
+PBX daemon to run the allowlisted npm update for
 `@openai/codex`, then use `/restart` or `/codex restart` to move long-lived
 caller, root-operator, and fork panes onto the updated executable. TUI-owned
 operators and forks can be relaunched automatically; caller panes require a known

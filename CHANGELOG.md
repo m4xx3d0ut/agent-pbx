@@ -13,6 +13,9 @@
 
 ### Fixed
 
+- Create a fresh v2 managed tmux runtime mapping and resume the preserved Codex
+  session when an explicit Agent or Operator restart finds no ready mapping;
+  fail closed when mapping state cannot be verified.
 - Install and select the generated `agent-pbx-1337` Codex syntax theme through
   a drift-safe command, report its posture through doctor, and reconcile stale
   `NO_COLOR` inherited by persistent dedicated tmux servers while preserving

@@ -127,6 +127,22 @@ def rich_log_plain(log: RichLog) -> str:
     return "\n".join(lines)
 
 
+def cache_ready_runtime_mapping(
+    app: AgentPBXTUI,
+    agent_id: str,
+    *,
+    pane_id: str,
+    session_name: str,
+) -> None:
+    app.tmux_runtime_mapping_by_agent[agent_id] = {
+        "entity_id": agent_id,
+        "state": "ready",
+        "session_name": session_name,
+        "pane_id": pane_id,
+    }
+    app.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
+
+
 @pytest.fixture(autouse=True)
 def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
     for name in [
@@ -3314,7 +3330,10 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
                 },
             }
         }
-        assert await app.resume_tmux_codex_in_managed_runtime("agent-a") is True
+        assert await app.resume_tmux_codex_in_managed_runtime(
+            "agent-a",
+            model_preset=codex_model_preset_for("terra-max"),
+        ) is True
 
     assert len(launch_calls) == 2
     assert len(respawn_calls) == 2
@@ -3328,6 +3347,8 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
     assert str(launch_env["PATH"]).split(os.pathsep)[0] == str(tmp_path)
     assert shlex.split(str(respawn_calls[-1]["command"]))[0] == str(codex_binary)
     assert "session-a" in str(respawn_calls[-1]["command"])
+    assert 'model="gpt-5.6-terra"' in str(respawn_calls[-1]["command"])
+    assert 'model_reasoning_effort="max"' in str(respawn_calls[-1]["command"])
     assert remain_on_exit_calls == [("%8", True), ("%9", True), ("%9", False)]
     assert posts[0] == "/v2/tmux/runtimes/agent-a"
     assert app.tmux_runtime_mapping_by_agent["agent-a"]["pane_id"] == "%9"
@@ -4216,6 +4237,32 @@ async def test_tui_runtime_mapping_cache_expires_into_live_validation(
     assert app.tmux_runtime_mapping_error_by_agent["agent-1"] == (
         "runtime mapping is server_lost"
     )
+
+
+async def test_tui_runtime_mapping_404_clears_stale_lookup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_runtime_mapping_by_agent["agent-1"] = {
+        "entity_id": "agent-1",
+        "state": "server_lost",
+    }
+    app.tmux_runtime_mapping_validated_at_by_agent["agent-1"] = 0.0
+    app.tmux_runtime_mapping_error_by_agent["agent-1"] = "runtime mapping is server_lost"
+
+    class MissingResponse:
+        status_code = 404
+
+    class FakeClient:
+        async def get(self, *_args: object, **_kwargs: object) -> MissingResponse:
+            return MissingResponse()
+
+    monkeypatch.setattr(app, "api_client", lambda: FakeClient())
+
+    assert await app.fetch_tmux_runtime_mapping("agent-1") is None
+    assert "agent-1" not in app.tmux_runtime_mapping_by_agent
+    assert "agent-1" not in app.tmux_runtime_mapping_validated_at_by_agent
+    assert "agent-1" not in app.tmux_runtime_mapping_error_by_agent
 
 
 async def test_tui_tmux_direct_is_tracked_per_agent() -> None:
@@ -13762,7 +13809,15 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%10")
+    monkeypatch.setattr(tmux_support, "pane_remain_on_exit", lambda _target: False)
+    monkeypatch.setattr(
+        tmux_support,
+        "set_pane_remain_on_exit",
+        lambda _target, _enabled: None,
+    )
     monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%10")
+    monkeypatch.setattr(tmux_support, "capture_pane", lambda *_args, **_kwargs: "")
     monkeypatch.setattr(
         tmux_support,
         "pane_start_command",
@@ -13786,6 +13841,12 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
         app.tmux_agent_targets["agent-1"] = "%10"
         app.tmux_manual_override_agent_ids.add("agent-1")
         app.tmux_direct_agent_modes["agent-1"] = True
+        cache_ready_runtime_mapping(
+            app,
+            "agent-1",
+            pane_id="%10",
+            session_name="agent-pbx",
+        )
         await app.restart_tmux_codex_session("agent-1")
 
     assert respawns[0]["target"] == "%10"
@@ -13814,6 +13875,133 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
     assert metadata["codex_command"] == "codex --search"
     assert metadata["last_tmux_restart_mode"] == "in_place"
     assert captures == ["agent-1"]
+
+
+@pytest.mark.parametrize(
+    ("agent_type", "mapping", "model_preset_key"),
+    [
+        ("caller", None, "terra-max"),
+        (
+            "operator",
+            {
+                "entity_id": "agent-1",
+                "state": "foreign",
+                "pane_id": "%stale",
+            },
+            None,
+        ),
+    ],
+)
+async def test_tui_restart_without_ready_mapping_resumes_managed_runtime(
+    agent_type: str,
+    mapping: dict[str, object] | None,
+    model_preset_key: str | None,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_features_available = True
+    resumed: list[tuple[str, object | None]] = []
+    refreshed: list[str] = []
+
+    async def fetch(agent_id: str) -> dict[str, object] | None:
+        assert agent_id == "agent-1"
+        if mapping is None:
+            app.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+        return mapping
+
+    async def resume(
+        agent_id: str,
+        *,
+        model_preset: object | None = None,
+    ) -> bool:
+        resumed.append((agent_id, model_preset))
+        return True
+
+    async def refresh_agents() -> None:
+        refreshed.append("agents")
+
+    async def refresh_events() -> None:
+        refreshed.append("events")
+
+    async def load_capture(agent_id: str) -> None:
+        refreshed.append(f"capture:{agent_id}")
+
+    async def resolve_pane(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("legacy pane discovery must not run without a ready v2 mapping")
+
+    async def validate_model_preset(*_args: object) -> bool:
+        return True
+
+    app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
+    app.resume_tmux_codex_in_managed_runtime = resume  # type: ignore[method-assign]
+    app.refresh_agents = refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = refresh_events  # type: ignore[method-assign]
+    app.load_tmux_capture = load_capture  # type: ignore[method-assign]
+    app.resolve_tmux_send_pane = resolve_pane  # type: ignore[method-assign]
+    app.ensure_codex_model_preset_valid = validate_model_preset  # type: ignore[method-assign]
+
+    model_preset = (
+        codex_model_preset_for(model_preset_key)
+        if model_preset_key is not None
+        else None
+    )
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "agent_type": agent_type,
+                "project": "demo",
+                "pbx_active": False,
+                "status": "done",
+                "metadata": {
+                    "cwd": str(Path.cwd()),
+                    "codex_session_id": "session-1",
+                },
+            }
+        }
+        app.tmux_direct_agent_modes["agent-1"] = True
+        refreshed.clear()
+        assert await app.restart_tmux_codex_session(
+            "agent-1",
+            model_preset=model_preset,
+        ) is True
+
+    assert resumed == [("agent-1", model_preset)]
+    assert refreshed == ["agents", "events", "capture:agent-1"]
+
+
+async def test_tui_restart_without_mapping_fails_closed_on_lookup_error() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_features_available = True
+    resumed: list[str] = []
+
+    async def fetch(agent_id: str) -> None:
+        app.tmux_runtime_mapping_error_by_agent[agent_id] = "daemon unavailable"
+        return None
+
+    async def resume(agent_id: str, **_kwargs: object) -> bool:
+        resumed.append(agent_id)
+        return True
+
+    app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
+    app.resume_tmux_codex_in_managed_runtime = resume  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "agent-1": {
+                "agent_id": "agent-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(Path.cwd()),
+                    "codex_session_id": "session-1",
+                },
+            }
+        }
+        app.tmux_direct_agent_modes["agent-1"] = True
+        assert await app.restart_tmux_codex_session("agent-1") is False
+
+    assert resumed == []
 
 
 async def test_tui_launch_restart_pane_retries_dead_replacement(
@@ -14059,6 +14247,12 @@ async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_com
         app.tmux_agent_targets["agent-1"] = "%10"
         app.tmux_manual_override_agent_ids.add("agent-1")
         app.tmux_direct_agent_modes["agent-1"] = True
+        cache_ready_runtime_mapping(
+            app,
+            "agent-1",
+            pane_id="%10",
+            session_name="agent-pbx",
+        )
         await app.restart_tmux_codex_session("agent-1")
 
     assert respawns[0]["target"] == "%10"
@@ -14442,6 +14636,12 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
             }
         }
         app.selected_agent_id = "operator-0"
+        cache_ready_runtime_mapping(
+            app,
+            "operator-0",
+            pane_id="%30",
+            session_name="agent-pbx-operators",
+        )
         await app.restart_tmux_codex_session(
             "operator-0",
             model_preset=codex_model_preset_for("terra-max"),
@@ -14987,6 +15187,12 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
         app.tmux_agent_targets["operator-0-fork-caller-review-1"] = "%20"
         app.tmux_manual_override_agent_ids.add("operator-0-fork-caller-review-1")
         app.tmux_direct_agent_modes["operator-0-fork-caller-review-1"] = True
+        cache_ready_runtime_mapping(
+            app,
+            "operator-0-fork-caller-review-1",
+            pane_id="%20",
+            session_name="agent-pbx-operators",
+        )
         await app.restart_tmux_codex_session("operator-0-fork-caller-review-1")
 
     assert respawns[0]["target"] == "%20"
@@ -15204,6 +15410,12 @@ async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_
         app.tmux_agent_targets["operator-0-fork-caller-review-1"] = "%20"
         app.tmux_manual_override_agent_ids.add("operator-0-fork-caller-review-1")
         app.tmux_direct_agent_modes["operator-0-fork-caller-review-1"] = True
+        cache_ready_runtime_mapping(
+            app,
+            "operator-0-fork-caller-review-1",
+            pane_id="%20",
+            session_name="agent-pbx-operators",
+        )
         await app.restart_tmux_codex_session("operator-0-fork-caller-review-1")
 
     assert respawns[0]["target"] == "%20"
