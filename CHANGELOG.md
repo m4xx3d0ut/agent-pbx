@@ -14,8 +14,9 @@
 ### Fixed
 
 - Restore the original `cyberpunk` TUI RGB contract, retain the newer
-  deuteranopia-friendly palette as `cyberpunk-accessible`, and keep true-color
-  rendering stable when the outer workspace uses tmux 3.2.
+  deuteranopia-friendly palette as a visibly distinct deep-teal
+  `cyberpunk-accessible` option, and keep true-color rendering stable when the
+  outer workspace uses tmux 3.2.
 - Use each runtime mapping's recorded tmux executable for embedded wheel,
   Page Up/Down, and explicit copy-mode actions so managed tmux 3.7 sessions do
   not fall back to an incompatible host tmux 3.2 client.

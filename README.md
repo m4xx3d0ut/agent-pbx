@@ -1183,8 +1183,9 @@ input prompt before sending.
 ### Custom Theme Creation Guide
 
 Agent PBX ships with the original `cyberpunk`, the opt-in deuteranopia-friendly
-`cyberpunk-accessible`, `minimal`, and the bundled custom `1337`
-theme. To create your own theme, rename the custom theme, select it, then
+`cyberpunk-accessible` with visibly distinct deep-teal surfaces and stronger
+foreground contrast, `minimal`, and the bundled custom `1337` theme. To create
+your own theme, rename the custom theme, select it, then
 override the color slots with environment variables. Keep personal palettes in
 your gitignored `local.env` or shell profile.
 
@@ -1313,8 +1314,11 @@ The default TUI theme uses a cyberpunk palette with neon cyan, magenta, yellow,
 and green over a dark terminal base. Use the `Theme` selector in `Settings` or
 set `AGENT_PBX_TUI_THEME` to choose another built-in theme. `minimal` uses a
 plain black/white terminal base while preserving semantic highlight colors for
-alerts, status, and activity. `1337` keeps the black and bright-green terminal
-look. See the custom theme guide above for user-defined palettes.
+alerts, status, and activity. `cyberpunk-accessible` uses a deep-teal surface
+stack and high-contrast cool status colors so it remains visibly different
+from the original navy/purple `cyberpunk` theme. `1337` keeps the black and
+bright-green terminal look. See the custom theme guide above for user-defined
+palettes.
 
 ## TUI History Thread
 

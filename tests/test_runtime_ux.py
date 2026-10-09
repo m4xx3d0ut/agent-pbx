@@ -207,7 +207,35 @@ def test_legacy_cyberpunk_theme_keeps_its_public_rgb_contract() -> None:
         "boost": "#2b174b",
     }
     assert CYBERPUNK_PALETTE["muted"] == "#697386"
-    assert textual_palette(PBX_PALETTE)["primary"] == "#00d7ff"
+    assert textual_palette(PBX_PALETTE)["primary"] == "#5ee7ff"
+
+
+def test_accessible_cyberpunk_theme_has_distinct_high_contrast_surfaces() -> None:
+    accessible = textual_palette(PBX_PALETTE)
+    legacy = textual_palette(CYBERPUNK_PALETTE)
+
+    for key in ("background", "surface", "panel", "boost"):
+        assert accessible[key] != legacy[key]
+
+    def relative_luminance(color: str) -> float:
+        channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [
+            channel / 12.92
+            if channel <= 0.04045
+            else ((channel + 0.055) / 1.055) ** 2.4
+            for channel in channels
+        ]
+        return (0.2126 * linear[0]) + (0.7152 * linear[1]) + (0.0722 * linear[2])
+
+    def contrast_ratio(first: str, second: str) -> float:
+        lighter, darker = sorted(
+            (relative_luminance(first), relative_luminance(second)),
+            reverse=True,
+        )
+        return (lighter + 0.05) / (darker + 0.05)
+
+    for key in ("background", "surface", "panel", "boost"):
+        assert contrast_ratio(accessible["foreground"], accessible[key]) >= 7.0
 
 
 async def test_tui_runtime_surface_is_outer_and_capability_gated() -> None:

@@ -32,19 +32,19 @@ CYBERPUNK_PALETTE: dict[str, str] = {
 # palette avoids red/green adjacency and remains legible under common
 # deuteranopia simulations.
 PBX_PALETTE: dict[str, str] = {
-    "primary": "#00d7ff",
-    "secondary": "#af87ff",
-    "warning": "#ffd75f",
-    "error": "#ff5f87",
-    "success": "#5fffff",
-    "accent": "#ff5fd7",
-    "foreground": "#e6edf7",
-    "muted": "#8492a6",
-    "background": "#070b16",
-    "surface": "#101826",
-    "panel": "#1a102a",
-    "boost": "#2b174b",
-    "executing": "#5fafff",
+    "primary": "#5ee7ff",
+    "secondary": "#c6a8ff",
+    "warning": "#ffd166",
+    "error": "#ff6b9d",
+    "success": "#8bdcff",
+    "accent": "#ff87d7",
+    "foreground": "#f4fbff",
+    "muted": "#9aafbd",
+    "background": "#03141c",
+    "surface": "#0a2630",
+    "panel": "#102f3d",
+    "boost": "#17495a",
+    "executing": "#76a9ff",
 }
 
 STATE_COLOR_KEYS: dict[CodexRuntimeState, str] = {
