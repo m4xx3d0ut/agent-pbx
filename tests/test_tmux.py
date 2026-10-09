@@ -521,7 +521,11 @@ def test_tmux_retains_failed_respawn_for_same_pane_rollback() -> None:
 
         assert tmux.pane_remain_on_exit(pane_id, tmux_bin=tmux_bin) is False
         tmux.set_pane_remain_on_exit(pane_id, True, tmux_bin=tmux_bin)
-        tmux.respawn_pane(pane_id, command="exit 7", tmux_bin=tmux_bin)
+        tmux.respawn_pane(
+            pane_id,
+            command="printf 'resume failed\\n'; exit 7",
+            tmux_bin=tmux_bin,
+        )
         for _ in range(20):
             if not tmux.pane_is_live(pane_id, tmux_bin=tmux_bin):
                 break
@@ -536,6 +540,11 @@ def test_tmux_retains_failed_respawn_for_same_pane_rollback() -> None:
                 break
             time.sleep(0.05)
         assert dead_status == 7
+        assert "resume failed" in tmux.capture_pane(
+            pane_id,
+            lines=10,
+            tmux_bin=tmux_bin,
+        )
 
         tmux.respawn_pane(pane_id, command="sleep 30", tmux_bin=tmux_bin)
 

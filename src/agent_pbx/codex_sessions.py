@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -312,6 +313,86 @@ def default_codex_home() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".codex"
+
+
+def codex_thread_writer_lock_path(
+    session_id: str,
+    *,
+    codex_home: str | Path | None = None,
+) -> Path:
+    """Return Codex's process-coordination lock for one thread."""
+
+    cleaned = str(session_id or "").strip()
+    if not cleaned:
+        raise ValueError("Codex session ID is required")
+    root = Path(codex_home).expanduser() if codex_home else default_codex_home()
+    return root / "thread-writer-locks" / f"{cleaned}.lock"
+
+
+def codex_thread_writer_lock_available(
+    session_id: str,
+    *,
+    codex_home: str | Path | None = None,
+) -> bool:
+    """Return whether Codex's advisory writer lock can be acquired now.
+
+    The lock file may persist after a process exits, so existence alone is not a
+    lease signal.  Open the existing inode without creating or replacing it and
+    probe the same exclusive ``flock`` used by Codex.  A missing file is free;
+    an inode created immediately afterwards will still be caught by the stable
+    wait helper before migration proceeds.
+    """
+
+    path = codex_thread_writer_lock_path(session_id, codex_home=codex_home)
+    try:
+        descriptor = os.open(path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return True
+    try:
+        acquired = False
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError:
+            return False
+        finally:
+            if acquired:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def wait_for_codex_thread_writer_lock_release(
+    session_id: str,
+    *,
+    codex_home: str | Path | None = None,
+    timeout_seconds: float = 30.0,
+    stable_seconds: float = 2.0,
+    poll_seconds: float = 0.25,
+) -> bool:
+    """Wait until the Codex writer lock remains free for a stable interval."""
+
+    timeout = max(0.0, float(timeout_seconds))
+    stable = max(0.0, float(stable_seconds))
+    poll = max(0.01, float(poll_seconds))
+    deadline = time.monotonic() + timeout
+    available_since: float | None = None
+    while True:
+        now = time.monotonic()
+        if codex_thread_writer_lock_available(session_id, codex_home=codex_home):
+            if available_since is None:
+                available_since = now
+            if now - available_since >= stable:
+                return True
+        else:
+            available_since = None
+        if now >= deadline:
+            return False
+        time.sleep(min(poll, max(0.0, deadline - now)))
 
 
 def enrich_codex_session_metadata(

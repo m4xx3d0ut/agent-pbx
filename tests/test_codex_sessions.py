@@ -1,14 +1,18 @@
+import fcntl
 import json
 
 from agent_pbx.codex_sessions import (
     CodexSessionPathCache,
     CodexTranscriptTailCache,
+    codex_thread_writer_lock_available,
+    codex_thread_writer_lock_path,
     codex_session_transcript_boundary,
     find_codex_session_file,
     latest_assistant_output_for_session,
     latest_assistant_output_from_session_file,
     latest_assistant_transcript_for_session,
     latest_assistant_transcript_from_session_file,
+    wait_for_codex_thread_writer_lock_release,
 )
 
 
@@ -37,6 +41,41 @@ def user_message(text: str) -> dict[str, object]:
         "type": "event_msg",
         "payload": {"type": "user_message", "message": text},
     }
+
+
+def test_codex_thread_writer_lock_probe_uses_advisory_flock(tmp_path) -> None:
+    session_id = "session-lock"
+    path = codex_thread_writer_lock_path(session_id, codex_home=tmp_path)
+
+    assert path == tmp_path / "thread-writer-locks" / "session-lock.lock"
+    assert codex_thread_writer_lock_available(session_id, codex_home=tmp_path) is True
+
+    path.parent.mkdir(parents=True)
+    with path.open("a+b") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert codex_thread_writer_lock_available(session_id, codex_home=tmp_path) is False
+        assert (
+            wait_for_codex_thread_writer_lock_release(
+                session_id,
+                codex_home=tmp_path,
+                timeout_seconds=0.02,
+                stable_seconds=0,
+                poll_seconds=0.01,
+            )
+            is False
+        )
+        fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+
+    assert (
+        wait_for_codex_thread_writer_lock_release(
+            session_id,
+            codex_home=tmp_path,
+            timeout_seconds=0.1,
+            stable_seconds=0,
+            poll_seconds=0.01,
+        )
+        is True
+    )
 
 
 def test_latest_assistant_output_prefers_latest_final_answer(tmp_path) -> None:

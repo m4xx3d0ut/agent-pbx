@@ -3113,6 +3113,8 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
         tmux_bin="/opt/tmux-3.7c",
     )
     launch_calls: list[dict[str, object]] = []
+    respawn_calls: list[dict[str, object]] = []
+    remain_on_exit_calls: list[tuple[str, bool]] = []
     posts: list[str] = []
     project = tmp_path / "demo"
     project.mkdir()
@@ -3156,12 +3158,20 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
     async def available(*_args: object, **_kwargs: object) -> bool:
         return True
 
-    async def conflict_once(pane_id: str, **_kwargs: object) -> bool:
-        return pane_id == "%8"
-
     def launch(**kwargs: object) -> str:
         launch_calls.append(kwargs)
         return "%8" if len(launch_calls) == 1 else "%9"
+
+    def respawn(pane_id: str, **kwargs: object) -> None:
+        respawn_calls.append({"pane_id": pane_id, **kwargs})
+
+    def retain(pane_id: str, enabled: bool, **_kwargs: object) -> None:
+        remain_on_exit_calls.append((pane_id, enabled))
+
+    def capture(pane_id: str, **_kwargs: object) -> str:
+        if pane_id == "%8":
+            return "This conversation is open in another app"
+        return "Codex ready"
 
     killed: list[str] = []
 
@@ -3185,15 +3195,21 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
     )
     app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
     app.ensure_codex_resume_session_available = available  # type: ignore[method-assign]
-    app.tmux_pane_has_codex_session_lease_conflict = conflict_once  # type: ignore[method-assign]
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 2)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.ensure_dedicated_runtime_server", lambda _identity: False)
+    monkeypatch.setattr(
+        "agent_pbx.tui.wait_for_codex_thread_writer_lock_release",
+        lambda *_args, **_kwargs: True,
+    )
     monkeypatch.setattr(tmux_support, "launch_pane", launch)
+    monkeypatch.setattr(tmux_support, "respawn_pane", respawn)
+    monkeypatch.setattr(tmux_support, "set_pane_remain_on_exit", retain)
     monkeypatch.setattr(tmux_support, "kill_pane", kill)
     monkeypatch.setattr(tmux_support, "pane_is_live", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(tmux_support, "capture_pane", capture)
     monkeypatch.setattr(tmux_support, "list_panes", lambda *_args, **_kwargs: [pane])
     monkeypatch.setattr(tmux_support, "pane_root_pid", lambda *_args, **_kwargs: 4321)
     monkeypatch.setattr("agent_pbx.tui.runtime_process_start_ticks", lambda _pid: 123)
@@ -3220,11 +3236,14 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
         assert await app.resume_tmux_codex_in_managed_runtime("agent-a") is True
 
     assert len(launch_calls) == 2
+    assert len(respawn_calls) == 2
     assert killed == ["%8"]
     assert launch_calls[-1]["tmux_bin"] == "/opt/tmux-3.7c"
     assert launch_calls[-1]["socket_path"] == str(socket_path)
-    assert "session-a" in str(launch_calls[-1]["command"])
+    assert launch_calls[-1]["command"] == "sleep 86400"
     assert launch_calls[-1]["env"]["AGENT_PBX_AGENT_ID"] == "agent-a"  # type: ignore[index]
+    assert "session-a" in str(respawn_calls[-1]["command"])
+    assert remain_on_exit_calls == [("%8", True), ("%9", True), ("%9", False)]
     assert posts[0] == "/v2/tmux/runtimes/agent-a"
     assert app.tmux_runtime_mapping_by_agent["agent-a"]["pane_id"] == "%9"
 
@@ -3246,6 +3265,7 @@ async def test_tui_managed_resume_reports_exhausted_lease_retries(
         tmux_bin="/opt/tmux-3.7c",
     )
     launches: list[str] = []
+    respawns: list[str] = []
     killed: list[str] = []
 
     async def fetch(_agent_id: str) -> dict[str, object]:
@@ -3254,27 +3274,37 @@ async def test_tui_managed_resume_reports_exhausted_lease_retries(
     async def available(*_args: object, **_kwargs: object) -> bool:
         return True
 
-    async def conflict(*_args: object, **_kwargs: object) -> bool:
-        return True
-
     def launch(**_kwargs: object) -> str:
         pane_id = f"%attempt-{len(launches) + 1}"
         launches.append(pane_id)
         return pane_id
+
+    def respawn(pane_id: str, **_kwargs: object) -> None:
+        respawns.append(pane_id)
 
     def kill(pane_id: str, **_kwargs: object) -> None:
         killed.append(pane_id)
 
     app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
     app.ensure_codex_resume_session_available = available  # type: ignore[method-assign]
-    app.tmux_pane_has_codex_session_lease_conflict = conflict  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 2)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.ensure_dedicated_runtime_server", lambda _identity: False)
+    monkeypatch.setattr(
+        "agent_pbx.tui.wait_for_codex_thread_writer_lock_release",
+        lambda *_args, **_kwargs: True,
+    )
     monkeypatch.setattr(tmux_support, "launch_pane", launch)
+    monkeypatch.setattr(tmux_support, "respawn_pane", respawn)
+    monkeypatch.setattr(tmux_support, "set_pane_remain_on_exit", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(tmux_support, "kill_pane", kill)
     monkeypatch.setattr(tmux_support, "pane_is_live", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "capture_pane",
+        lambda *_args, **_kwargs: "failed to acquire thread writer lock: active",
+    )
 
     async with app.run_test():
         app.agents = {
@@ -3292,10 +3322,150 @@ async def test_tui_managed_resume_reports_exhausted_lease_retries(
         assert await app.resume_tmux_codex_in_managed_runtime("agent-a") is False
 
     assert launches == ["%attempt-1", "%attempt-2"]
+    assert respawns == launches
     assert killed == launches
     error = app.runtime_migration_error_by_agent["agent-a"]
     assert "after 2 attempt(s)" in error
     assert "conversation lease dialog" in error
+
+
+async def test_tui_managed_resume_refuses_active_thread_writer_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "demo"
+    project.mkdir()
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_runtime_server = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-new",
+        str(tmp_path / "runtime.sock"),
+        True,
+        False,
+        tmux_bin="/opt/tmux-3.7c",
+    )
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return {"state": "moved", "pane_id": "%old"}
+
+    async def available(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
+    app.ensure_codex_resume_session_available = available  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "agent_pbx.tui.wait_for_codex_thread_writer_lock_release",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "launch_pane",
+        lambda **_kwargs: pytest.fail("target pane must not launch while writer lock is active"),
+    )
+
+    async with app.run_test():
+        app.agents = {
+            "agent-a": {
+                "agent_id": "agent-a",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(project),
+                    "codex_session_id": "session-a",
+                    "codex_command": "codex",
+                },
+            }
+        }
+        assert await app.resume_tmux_codex_in_managed_runtime("agent-a") is False
+
+    error = app.runtime_migration_error_by_agent["agent-a"]
+    assert "thread-writer lease remained active" in error
+    assert "session-a.lock" in error
+
+
+async def test_tui_managed_resume_retains_exit_diagnostic_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "demo"
+    project.mkdir()
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_runtime_server = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-new",
+        str(tmp_path / "runtime.sock"),
+        True,
+        False,
+        tmux_bin="/opt/tmux-3.7c",
+    )
+    launches: list[str] = []
+    respawns: list[str] = []
+    killed: list[str] = []
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return {"state": "moved", "pane_id": "%old"}
+
+    async def available(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    def launch(**_kwargs: object) -> str:
+        launches.append("%failed")
+        return "%failed"
+
+    app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
+    app.ensure_codex_resume_session_available = available  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 3)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.ensure_dedicated_runtime_server", lambda _identity: False)
+    monkeypatch.setattr(
+        "agent_pbx.tui.wait_for_codex_thread_writer_lock_release",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(tmux_support, "launch_pane", launch)
+    monkeypatch.setattr(
+        tmux_support,
+        "respawn_pane",
+        lambda pane_id, **_kwargs: respawns.append(pane_id),
+    )
+    monkeypatch.setattr(tmux_support, "set_pane_remain_on_exit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(tmux_support, "pane_dead_status", lambda *_args, **_kwargs: 78)
+    monkeypatch.setattr(
+        tmux_support,
+        "capture_pane",
+        lambda *_args, **_kwargs: "fatal: invalid generated Codex configuration",
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "kill_pane",
+        lambda pane_id, **_kwargs: killed.append(pane_id),
+    )
+
+    async with app.run_test():
+        app.agents = {
+            "agent-a": {
+                "agent_id": "agent-a",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(project),
+                    "codex_session_id": "session-a",
+                    "codex_command": "codex",
+                },
+            }
+        }
+        assert await app.resume_tmux_codex_in_managed_runtime("agent-a") is False
+
+    assert launches == ["%failed"]
+    assert respawns == ["%failed"]
+    assert killed == ["%failed"]
+    error = app.runtime_migration_error_by_agent["agent-a"]
+    assert "after 1 attempt(s)" in error
+    assert "status 78" in error
+    assert "invalid generated Codex configuration" in error
 
 
 async def test_tui_layout_refresh_preserves_visible_events_focus() -> None:

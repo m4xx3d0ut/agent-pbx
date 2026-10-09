@@ -67,10 +67,12 @@ from .codex_sessions import (
     CodexTranscriptTailCache,
     CodexTranscriptBoundary,
     CodexTranscriptResult,
+    codex_thread_writer_lock_path,
     codex_session_id_from_file,
     codex_session_transcript_boundary,
     latest_assistant_transcript_for_session,
     latest_assistant_transcript_from_session_file,
+    wait_for_codex_thread_writer_lock_release,
 )
 from .codex.profiles import portable_codex_keymap_overrides
 from . import tmux as tmux_support
@@ -192,9 +194,16 @@ CODEX_RESTART_WAIT_SECONDS = 5.0
 CODEX_RESTART_LAUNCH_ATTEMPTS = 3
 CODEX_RESTART_STABILIZE_SECONDS = 2.0
 CODEX_RESTART_RETRY_SECONDS = 1.0
+CODEX_SESSION_WRITER_LOCK_WAIT_SECONDS = 15.0
+CODEX_SESSION_WRITER_LOCK_STABLE_SECONDS = 1.0
+CODEX_MANAGED_RESUME_PLACEHOLDER_COMMAND = "sleep 86400"
+CODEX_MANAGED_RESUME_FAILURE_CAPTURE_LINES = 30
+CODEX_MANAGED_RESUME_FAILURE_CAPTURE_CHARS = 800
 CODEX_SESSION_LEASE_CONFLICT_MARKERS = (
     "this conversation is open in another app",
     "close it there and press r to continue here",
+    "failed to acquire thread writer lock",
+    "failed to acquire thread writer coordination lock",
 )
 FORK_RESUME_IDENTITY_METADATA_KEYS = (
     "fork_codex_session_id",
@@ -16068,6 +16077,58 @@ class AgentPBXTUI(App[None]):
         normalized = text.lower()
         return any(marker in normalized for marker in CODEX_SESSION_LEASE_CONFLICT_MARKERS)
 
+    @staticmethod
+    def bounded_runtime_failure_capture(text: str) -> str:
+        """Return a compact local terminal tail suitable for a migration error."""
+
+        lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+        captured = " | ".join(lines[-8:])
+        limit = CODEX_MANAGED_RESUME_FAILURE_CAPTURE_CHARS
+        if len(captured) <= limit:
+            return captured
+        return "…" + captured[-(limit - 1) :]
+
+    async def retained_tmux_pane_failure(
+        self,
+        pane_id: str,
+        *,
+        tmux_bin: str,
+        socket_path: str | None,
+    ) -> tuple[str, bool]:
+        """Describe a retained process exit and classify Codex lease failures."""
+
+        exit_status = await asyncio.to_thread(
+            tmux_support.pane_dead_status,
+            pane_id,
+            tmux_bin=tmux_bin,
+            socket_path=socket_path,
+        )
+        try:
+            captured = await asyncio.to_thread(
+                tmux_support.capture_pane,
+                pane_id,
+                lines=CODEX_MANAGED_RESUME_FAILURE_CAPTURE_LINES,
+                tmux_bin=tmux_bin,
+                socket_path=socket_path,
+            )
+        except Exception as exc:
+            captured = ""
+            capture_error = f"; terminal capture failed: {exc}"
+        else:
+            capture_error = ""
+        status_detail = (
+            f" with status {exit_status}" if exit_status is not None else ""
+        )
+        terminal_tail = self.bounded_runtime_failure_capture(captured)
+        output_detail = f"; terminal tail: {terminal_tail}" if terminal_tail else ""
+        detail = (
+            f"{pane_id} exited{status_detail} before Codex resume stabilized"
+            f"{output_detail}{capture_error}"
+        )
+        return detail, self.codex_session_lease_conflict_detected(captured)
+
     async def tmux_pane_has_codex_session_lease_conflict(
         self,
         pane_id: str,
@@ -17205,6 +17266,25 @@ class AgentPBXTUI(App[None]):
             )
         if not await self.ensure_codex_resume_session_available(agent_id, session_id):
             return False
+        writer_lock_released = await asyncio.to_thread(
+            wait_for_codex_thread_writer_lock_release,
+            session_id,
+            codex_home=self.codex_home_dir(),
+            timeout_seconds=CODEX_SESSION_WRITER_LOCK_WAIT_SECONDS,
+            stable_seconds=CODEX_SESSION_WRITER_LOCK_STABLE_SECONDS,
+        )
+        if not writer_lock_released:
+            lock_path = codex_thread_writer_lock_path(
+                session_id,
+                codex_home=self.codex_home_dir(),
+            )
+            return self.record_runtime_migration_failure(
+                agent_id,
+                f"Refused to resume {agent_id}: Codex's thread-writer lease remained "
+                f"active at {lock_path} after "
+                f"{CODEX_SESSION_WRITER_LOCK_WAIT_SECONDS:g} seconds.",
+                severity="warning",
+            )
 
         preset = self.restart_model_preset(
             metadata,
@@ -17334,11 +17414,25 @@ class AgentPBXTUI(App[None]):
                     tmux_support.launch_pane,
                     session_name=session_name,
                     window_name=safe_id[:120],
-                    command=command,
+                    command=CODEX_MANAGED_RESUME_PLACEHOLDER_COMMAND,
                     cwd=cwd,
                     env=env,
                     width=self.detached_tmux_width,
                     height=self.detached_tmux_height,
+                    **runtime_kwargs,
+                )
+                await asyncio.to_thread(
+                    tmux_support.set_pane_remain_on_exit,
+                    pane_id,
+                    True,
+                    **runtime_kwargs,
+                )
+                await asyncio.to_thread(
+                    tmux_support.respawn_pane,
+                    pane_id,
+                    command=command,
+                    cwd=cwd,
+                    env=env,
                     **runtime_kwargs,
                 )
                 if CODEX_RESTART_STABILIZE_SECONDS > 0:
@@ -17348,11 +17442,39 @@ class AgentPBXTUI(App[None]):
                     pane_id,
                     **runtime_kwargs,
                 ):
-                    raise RuntimeError("resumed Codex pane exited before stabilization")
-                if await self.tmux_pane_has_codex_session_lease_conflict(
+                    detail, lease_conflict = await self.retained_tmux_pane_failure(
+                        pane_id,
+                        **runtime_kwargs,
+                    )
+                    error_type = (
+                        CodexSessionLeaseConflictError if lease_conflict else RuntimeError
+                    )
+                    raise error_type(detail)
+                try:
+                    captured = await asyncio.to_thread(
+                        tmux_support.capture_pane,
+                        pane_id,
+                        lines=CODEX_MANAGED_RESUME_FAILURE_CAPTURE_LINES,
+                        **runtime_kwargs,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"unable to inspect retained target pane {pane_id}: {exc}"
+                    ) from exc
+                if not await asyncio.to_thread(
+                    tmux_support.pane_is_live,
                     pane_id,
                     **runtime_kwargs,
                 ):
+                    detail, lease_conflict = await self.retained_tmux_pane_failure(
+                        pane_id,
+                        **runtime_kwargs,
+                    )
+                    error_type = (
+                        CodexSessionLeaseConflictError if lease_conflict else RuntimeError
+                    )
+                    raise error_type(detail)
+                if self.codex_session_lease_conflict_detected(captured):
                     raise CodexSessionLeaseConflictError(
                         "resumed Codex pane opened the conversation lease dialog"
                     )
@@ -17394,6 +17516,19 @@ class AgentPBXTUI(App[None]):
                 if not isinstance(payload, dict):
                     raise RuntimeError("runtime registration returned a non-object response")
                 mapping = payload
+                try:
+                    await asyncio.to_thread(
+                        tmux_support.set_pane_remain_on_exit,
+                        pane_id,
+                        False,
+                        **runtime_kwargs,
+                    )
+                except Exception as exc:
+                    self.notify(
+                        f"{agent_id} resumed, but {pane_id}'s diagnostic retention "
+                        f"could not be disabled: {exc}",
+                        severity="warning",
+                    )
                 break
             except Exception as exc:
                 failures.append(f"attempt {attempt}: {exc}")
