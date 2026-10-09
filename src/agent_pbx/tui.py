@@ -13684,6 +13684,19 @@ class AgentPBXTUI(App[None]):
             or not self.tmux_local_direct_context
         ):
             return False
+        existing = await self.fetch_tmux_runtime_mapping(agent_id)
+        if (
+            isinstance(existing, dict)
+            and str(existing.get("state") or "") == "ready"
+            and str(existing.get("server_id") or "")
+            and str(existing.get("server_id") or "") != identity.server_id
+        ):
+            # An outer-server capture fallback can still discover a legacy pane
+            # after the Agent has moved to a healthy dedicated runtime. Keep the
+            # authoritative live mapping instead of adopting that stale shell
+            # back over the managed Codex pane.
+            self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+            return True
         outer = await asyncio.to_thread(read_outer_tmux_context, identity)
         reason = recursive_attachment_reason(
             target_session=pane.session_name,

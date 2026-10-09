@@ -4110,6 +4110,61 @@ async def test_tui_tmux_runtime_mapping_uses_stable_window_id(
     assert app.tmux_runtime_mapping_signature_by_agent["agent-1"][2] == "@42"
 
 
+async def test_tui_outer_fallback_preserves_ready_dedicated_runtime_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_local_direct_context = True
+    app.tmux_runtime_server = TmuxServerIdentity(
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        "outer-server",
+        "/tmp/tmux-1000/default",
+        True,
+        True,
+    )
+    dedicated = {
+        "entity_id": "agent-1",
+        "state": "ready",
+        "server_id": "dedicated-server",
+        "socket_path": "/run/user/1000/agent-pbx/runtime.sock",
+        "pane_id": "%8",
+    }
+    app.tmux_runtime_mapping_by_agent["agent-1"] = dedicated
+    app.tmux_runtime_mapping_validated_at_by_agent["agent-1"] = time.monotonic()
+    pane = tmux_support.TmuxPane(
+        "agent-pbx-agents",
+        "2",
+        "0",
+        "%16",
+        True,
+        "zsh",
+        "agent-1",
+        "/home/me/agent-pbx",
+        100,
+        30,
+        0,
+        "agent-1",
+        True,
+        0,
+        "@42",
+    )
+
+    class FakeClient:
+        async def post(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("healthy dedicated mapping must not be overwritten")
+
+    monkeypatch.setattr(app, "api_client", lambda: FakeClient())
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_root_pid",
+        lambda _pane_id: pytest.fail("outer pane must not be inspected for adoption"),
+    )
+
+    assert await app.ensure_tmux_runtime_mapping("agent-1", pane) is True
+    assert app.tmux_runtime_mapping_by_agent["agent-1"] == dedicated
+
+
 async def test_tui_runtime_mapping_cache_expires_into_live_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
