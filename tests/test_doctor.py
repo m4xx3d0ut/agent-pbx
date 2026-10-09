@@ -165,6 +165,7 @@ def test_tmux_server_diagnostic_reports_server_binary_and_plugin_contamination(
 
     monkeypatch.setattr("agent_pbx.doctor.subprocess.run", run)
     monkeypatch.setattr("agent_pbx.doctor.os.readlink", lambda _path: "/usr/bin/tmux")
+    monkeypatch.setattr("agent_pbx.doctor.sys.platform", "linux")
 
     result = _tmux_server_diagnostic(
         "/opt/tmux-3.7c",
