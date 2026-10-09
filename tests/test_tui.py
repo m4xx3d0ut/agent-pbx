@@ -1,5 +1,6 @@
 import inspect
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -3097,10 +3098,75 @@ async def test_tui_save_settings_schedules_remote_state_lazily(tmp_path: Path) -
     assert all(not inspect.isawaitable(work) for work in scheduled)
 
 
+def configure_managed_resume_test_codex(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Path:
+    binary = tmp_path / "codex-test"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setenv("AGENT_PBX_TUI_CODEX_BIN", str(binary))
+    return binary
+
+
+def test_tui_resolves_managed_codex_command_and_explicit_launch_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    binary = configure_managed_resume_test_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    command, launch_path = app.resolved_codex_launch_command(
+        f"{binary} --search --yolo"
+    )
+
+    assert shlex.split(command) == [str(binary), "--search", "--yolo"]
+    assert launch_path.split(os.pathsep) == [str(tmp_path), "/usr/bin", "/bin"]
+
+
+def test_tui_pins_node_for_managed_npm_codex_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    node = tmp_path / "node"
+    node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    node.chmod(0o755)
+    codex = tmp_path / "codex"
+    codex.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    codex.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    command, launch_path = app.resolved_codex_launch_command(
+        f"{codex} --search --yolo"
+    )
+
+    assert shlex.split(command) == [
+        str(node),
+        str(codex),
+        "--search",
+        "--yolo",
+    ]
+    assert launch_path.split(os.pathsep)[0] == str(tmp_path)
+
+
+def test_tui_refuses_missing_managed_codex_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    with pytest.raises(RuntimeError, match="AGENT_PBX_TUI_CODEX_BIN"):
+        app.resolved_codex_launch_command("codex --search")
+
+
 async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    codex_binary = configure_managed_resume_test_codex(monkeypatch, tmp_path)
     socket_path = tmp_path / "runtime.sock"
     app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret", tmux_direct=True)
     app.tmux_runtime_server = TmuxServerIdentity(
@@ -3242,6 +3308,10 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
     assert launch_calls[-1]["socket_path"] == str(socket_path)
     assert launch_calls[-1]["command"] == "sleep 86400"
     assert launch_calls[-1]["env"]["AGENT_PBX_AGENT_ID"] == "agent-a"  # type: ignore[index]
+    launch_env = launch_calls[-1]["env"]
+    assert isinstance(launch_env, dict)
+    assert str(launch_env["PATH"]).split(os.pathsep)[0] == str(tmp_path)
+    assert shlex.split(str(respawn_calls[-1]["command"]))[0] == str(codex_binary)
     assert "session-a" in str(respawn_calls[-1]["command"])
     assert remain_on_exit_calls == [("%8", True), ("%9", True), ("%9", False)]
     assert posts[0] == "/v2/tmux/runtimes/agent-a"
@@ -3252,6 +3322,7 @@ async def test_tui_managed_resume_reports_exhausted_lease_retries(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    configure_managed_resume_test_codex(monkeypatch, tmp_path)
     project = tmp_path / "demo"
     project.mkdir()
     app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret", tmux_direct=True)
@@ -3388,6 +3459,7 @@ async def test_tui_managed_resume_retains_exit_diagnostic_without_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    configure_managed_resume_test_codex(monkeypatch, tmp_path)
     project = tmp_path / "demo"
     project.mkdir()
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)

@@ -15934,6 +15934,81 @@ class AgentPBXTUI(App[None]):
         shell_parts = shlex.split(self.operator_codex_command())
         return shlex.join([*shell_parts, *argv[1:]])
 
+    def resolved_codex_launch_command(self, codex_command: str) -> tuple[str, str]:
+        """Return an absolute Codex command and the PATH needed by its launcher.
+
+        Managed runtime migration can be driven by a headless helper whose PATH
+        differs from the interactive TUI.  Tmux copies that helper environment
+        into a newly created session, so a bare ``codex`` command may disappear
+        even when another runtime session can resolve it.  Resolve the executable
+        before creating a pane and explicitly carry its parent directory in PATH;
+        this also keeps ``#!/usr/bin/env node`` npm launchers working.
+        """
+
+        clean = codex_command.strip()
+        if not clean:
+            raise RuntimeError("Codex launch command is empty")
+        try:
+            argv = shlex.split(clean)
+        except ValueError as exc:
+            raise RuntimeError(f"Codex launch command is invalid: {exc}") from exc
+        if not argv:
+            raise RuntimeError("Codex launch command is empty")
+
+        executable = argv[0]
+        expanded = Path(executable).expanduser()
+        if expanded.is_absolute() or os.sep in executable:
+            candidate = expanded.absolute()
+            resolved = str(candidate) if candidate.is_file() else ""
+        else:
+            resolved = shutil.which(executable) or ""
+        if not resolved or not os.access(resolved, os.X_OK):
+            raise RuntimeError(
+                f"Codex executable {executable!r} is unavailable in the launch environment; "
+                "set AGENT_PBX_TUI_CODEX_BIN to an executable absolute path"
+            )
+
+        current_path = os.getenv("PATH", "")
+        path_entries = [str(Path(resolved).parent), *current_path.split(os.pathsep)]
+        launch_path = os.pathsep.join(
+            dict.fromkeys(entry for entry in path_entries if entry)
+        )
+        argv[0] = resolved
+        try:
+            with Path(resolved).open("rb") as handle:
+                shebang = handle.readline(256).decode(
+                    "utf-8", errors="replace"
+                ).strip()
+        except OSError:
+            shebang = ""
+        if shebang.startswith("#!"):
+            try:
+                interpreter_parts = shlex.split(shebang[2:].strip())
+            except ValueError:
+                interpreter_parts = []
+            if (
+                len(interpreter_parts) == 2
+                and Path(interpreter_parts[0]).name == "env"
+                and interpreter_parts[1] == "node"
+            ):
+                node = next(
+                    (
+                        str(candidate)
+                        for entry in launch_path.split(os.pathsep)
+                        if entry
+                        for candidate in (Path(entry) / "node",)
+                        if candidate.is_file() and os.access(candidate, os.X_OK)
+                    ),
+                    "",
+                )
+                if not node or not os.access(node, os.X_OK):
+                    raise RuntimeError(
+                        "Codex uses an env-node launcher, but an executable Node.js "
+                        "runtime is unavailable beside the configured Codex executable"
+                    )
+                argv = [node, resolved, *argv[1:]]
+        return shlex.join(argv), launch_path
+
     @staticmethod
     def codex_resume_session_id_from_command(command: str) -> str | None:
         """Return the session passed to a real ``codex ... resume`` command.
@@ -17294,6 +17369,16 @@ class AgentPBXTUI(App[None]):
         codex_command = self.codex_command_on_current_shell(
             str(metadata.get("codex_command") or self.operator_codex_command())
         )
+        try:
+            codex_command, codex_launch_path = self.resolved_codex_launch_command(
+                codex_command
+            )
+        except RuntimeError as exc:
+            return self.record_runtime_migration_failure(
+                agent_id,
+                f"Refused to create a managed tmux pane for {agent_id}: {exc}",
+                severity="warning",
+            )
         mcp_url = agent_pbx_mcp_url(self.server)
         sandbox: str | None = None
         if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
@@ -17379,6 +17464,7 @@ class AgentPBXTUI(App[None]):
             if self.token:
                 env[AGENT_PBX_TOKEN_ENV] = self.token
         overrides.extend(codex_model_preset_config_overrides(preset))
+        env["PATH"] = codex_launch_path
         env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = session_id
         command = self.operator_resume_command(
             codex_command,
