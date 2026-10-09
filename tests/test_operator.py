@@ -679,6 +679,115 @@ def test_operator_campaign_tmux_delivery_records_sent_command(
     assert assignment["state"] == "sent"
 
 
+def test_operator_followup_uses_managed_runtime_tmux_binary_and_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store, tmux_bin="/usr/bin/tmux")
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        tmux_pane_id="%22",
+        status="running",
+        metadata={"pbx_mode": "report", "tmux_pane_id": "%22"},
+    )
+    managed_tmux = "/home/test/.local/bin/tmux-3.7c"
+    managed_socket = "/run/user/1000/agent-pbx/runtime-tmux-3.7c-v2.sock"
+    managed_session = "agent-pbx-runtime-operator-0-fork-caller-1"
+    store.upsert_tmux_runtime_mapping(
+        entity_id="operator-0-fork-caller-1",
+        server_mode="dedicated",
+        server_id="runtime-37",
+        socket_path=managed_socket,
+        session_name=managed_session,
+        window_id="@22",
+        window_name="operator-0-fork-caller-1",
+        pane_id="%22",
+        cwd=str(tmp_path / "caller-1"),
+        state="ready",
+        metadata={"tmux_bin": managed_tmux},
+    )
+    pane = tmux_support.TmuxPane(
+        session_name=managed_session,
+        window_index="0",
+        pane_index="0",
+        pane_id="%22",
+        active=True,
+        current_command="node",
+        title="operator-0-fork-caller-1",
+        cwd=str(tmp_path / "caller-1"),
+        width=100,
+        height=30,
+        history_size=10,
+        window_name="operator-0-fork-caller-1",
+        window_id="@22",
+    )
+    list_calls: list[tuple[str, str | None]] = []
+    send_calls: list[tuple[str, str, str, str | None]] = []
+
+    def fake_list_panes(
+        tmux_bin: str = "tmux",
+        *,
+        socket_path: str | None = None,
+    ) -> list[tmux_support.TmuxPane]:
+        list_calls.append((tmux_bin, socket_path))
+        return [pane]
+
+    def fake_send_text(
+        target: str,
+        text: str,
+        *,
+        tmux_bin: str = "tmux",
+        socket_path: str | None = None,
+        **_: object,
+    ) -> None:
+        send_calls.append((target, text, tmux_bin, socket_path))
+
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.list_panes",
+        fake_list_panes,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.send_text",
+        fake_send_text,
+    )
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Mapped follow-up",
+        objective="Dispatch through the durable managed runtime mapping.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Start."}],
+        delivery="queue",
+    )
+    assignment = campaign["assignments"][0]
+
+    command = service.send_followup(
+        operator_agent_id="operator-0",
+        campaign_id=campaign["campaign_id"],
+        target_agent_id="caller-1",
+        assignment_id=assignment["assignment_id"],
+        operator_fork_id=fork["operator_fork_id"],
+        message="Continue from the checkpoint.",
+        delivery="auto",
+    )
+
+    assert list_calls == [(managed_tmux, managed_socket)]
+    assert send_calls == [
+        (
+            "%22",
+            "Continue from the checkpoint.",
+            managed_tmux,
+            managed_socket,
+        )
+    ]
+    assert command["status"] == "sent"
+    assert command["payload"]["tmux_pane_id"] == "%22"
+
+
 @pytest.mark.asyncio
 async def test_mcp_operator_campaign_tools_queue_delivery(tmp_path: Path) -> None:
     store = Store(tmp_path / "pbx.sqlite")

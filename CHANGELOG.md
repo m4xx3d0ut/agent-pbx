@@ -13,6 +13,10 @@
 
 ### Fixed
 
+- Route Operator campaign follow-ups, root messages, KB seed prompts, and
+  knowledge turns through the target runtime mapping's recorded tmux binary,
+  socket, session, window, and pane instead of probing the daemon's inherited
+  host tmux context.
 - Restore the original `cyberpunk` TUI RGB contract, retain the newer
   deuteranopia-friendly palette as a visibly distinct deep-teal
   `cyberpunk-accessible` option, and keep true-color rendering stable when the

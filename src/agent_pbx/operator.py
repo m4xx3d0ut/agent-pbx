@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import os
 import re
@@ -16,6 +17,7 @@ from .schemas import (
     OperatorAssignmentCreate,
     ReportCreateRequest,
 )
+from .runtime_tmux import runtime_mapping_tmux_binary
 from .security import now_ts
 from .store import Store
 from .tmux_binary import configured_tmux_binary
@@ -57,6 +59,16 @@ FORK_RESUME_IDENTITY_METADATA_KEYS = (
     "codex_thread_id",
     "last_resume_codex_session_id",
 )
+
+
+@dataclass(frozen=True)
+class _TmuxDeliveryTarget:
+    pane: tmux_support.TmuxPane
+    tmux_bin: str
+    socket_path: str | None = None
+    runtime_mapped: bool = False
+
+
 REVIEW_FORK_PURPOSE = "review"
 REVIEW_FORK_ACCESS_MODE = "review_readonly"
 REVIEW_ESCALATION_ROUTES = {
@@ -3334,8 +3346,7 @@ class OperatorService:
             )
         if resolved != "tmux":
             raise ValueError("delivery must be auto, queue, or tmux")
-        pane = self._resolve_tmux_pane(target)
-        tmux_support.send_text(pane.pane_id, message, tmux_bin=self.tmux_bin)
+        pane = self._send_tmux_text(target, message)
         payload["tmux_pane_id"] = pane.pane_id
         payload["tmux_target"] = pane.target_label
         payload["tmux_target_command"] = pane.current_command
@@ -3388,8 +3399,7 @@ class OperatorService:
             )
         if resolved != "tmux":
             raise ValueError("delivery must be auto, queue, or tmux")
-        pane = self._resolve_tmux_pane(target)
-        tmux_support.send_text(pane.pane_id, message, tmux_bin=self.tmux_bin)
+        pane = self._send_tmux_text(target, message)
         command_payload["tmux_pane_id"] = pane.pane_id
         command_payload["tmux_target"] = pane.target_label
         command_payload["tmux_target_command"] = pane.current_command
@@ -3450,8 +3460,7 @@ class OperatorService:
             )
         if resolved != "tmux":
             raise ValueError("delivery must be auto, queue, or tmux")
-        pane = self._resolve_tmux_pane(target)
-        tmux_support.send_text(pane.pane_id, seed_run["prompt"], tmux_bin=self.tmux_bin)
+        pane = self._send_tmux_text(target, seed_run["prompt"])
         payload["tmux_pane_id"] = pane.pane_id
         payload["tmux_target"] = pane.target_label
         payload["tmux_target_command"] = pane.current_command
@@ -3525,8 +3534,7 @@ class OperatorService:
             )
             delivery_status = "queued"
         elif resolved == "tmux":
-            pane = self._resolve_tmux_pane(target)
-            tmux_support.send_text(pane.pane_id, turn["message"], tmux_bin=self.tmux_bin)
+            pane = self._send_tmux_text(target, turn["message"])
             tmux_pane_id = pane.pane_id
             payload["tmux_pane_id"] = pane.pane_id
             payload["tmux_target"] = pane.target_label
@@ -4224,7 +4232,59 @@ class OperatorService:
             command["command_id"],
         )
 
-    def _resolve_tmux_pane(self, agent: dict[str, Any]) -> tmux_support.TmuxPane:
+    def _resolve_tmux_target(self, agent: dict[str, Any]) -> _TmuxDeliveryTarget:
+        agent_id = str(agent.get("agent_id") or "").strip()
+        mapping = self.store.get_tmux_runtime_mapping(agent_id) if agent_id else None
+        if mapping is not None:
+            tmux_bin = runtime_mapping_tmux_binary(mapping)
+            socket_path = str(mapping.get("socket_path") or "").strip()
+            pane_id = str(mapping.get("pane_id") or "").strip()
+            session_name = str(mapping.get("session_name") or "").strip()
+            window_id = str(mapping.get("window_id") or "").strip()
+            if not socket_path or not pane_id or not session_name:
+                raise ValueError(
+                    f"managed tmux runtime mapping for {agent_id} is incomplete"
+                )
+            try:
+                panes = tmux_support.list_panes(
+                    tmux_bin,
+                    socket_path=socket_path,
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve mapped runtime context.
+                raise ValueError(
+                    f"managed tmux runtime for {agent_id} is unavailable: {exc}"
+                ) from exc
+            matches = [
+                pane
+                for pane in panes
+                if pane.pane_id == pane_id
+                and pane.session_name == session_name
+                and (not window_id or pane.window_id == window_id)
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"managed tmux runtime for {agent_id} did not expose exact pane "
+                    f"{pane_id} in session {session_name}"
+                )
+            pane = matches[0]
+            mapped_cwd = str(mapping.get("cwd") or "").strip()
+            if mapped_cwd and pane.cwd != mapped_cwd:
+                raise ValueError(
+                    f"managed tmux runtime pane {pane_id} for {agent_id} changed "
+                    "workspace"
+                )
+            if not self._codex_like_command(pane.current_command):
+                raise ValueError(
+                    f"managed tmux runtime pane {pane_id} for {agent_id} is not "
+                    "running Codex"
+                )
+            return _TmuxDeliveryTarget(
+                pane=pane,
+                tmux_bin=tmux_bin,
+                socket_path=socket_path,
+                runtime_mapped=True,
+            )
+
         try:
             panes = tmux_support.list_panes(self.tmux_bin)
         except Exception as exc:  # noqa: BLE001 - surface actionable delivery error.
@@ -4240,7 +4300,7 @@ class OperatorService:
             if len(matches) == 1:
                 pane = matches[0]
                 if self._explicit_tmux_pane_matches_agent(pane, agent):
-                    return pane
+                    return _TmuxDeliveryTarget(pane=pane, tmux_bin=self.tmux_bin)
         if self._is_operator_fork_agent(agent):
             fork_panes = [
                 pane
@@ -4248,7 +4308,10 @@ class OperatorService:
                 if self._pane_matches_operator_fork_agent(pane, agent)
             ]
             if len(fork_panes) == 1:
-                return fork_panes[0]
+                return _TmuxDeliveryTarget(
+                    pane=fork_panes[0],
+                    tmux_bin=self.tmux_bin,
+                )
             if not fork_panes:
                 raise ValueError(
                     f"no local tmux pane/window matched operator fork {agent['agent_id']}; "
@@ -4264,9 +4327,54 @@ class OperatorService:
                 f"no unique local tmux pane matched {agent['agent_id']}; "
                 "enable tmux direct mode or use delivery='queue' with nohup polling"
             )
-        return pane
+        return _TmuxDeliveryTarget(pane=pane, tmux_bin=self.tmux_bin)
+
+    def _resolve_tmux_pane(self, agent: dict[str, Any]) -> tmux_support.TmuxPane:
+        return self._resolve_tmux_target(agent).pane
+
+    def _send_tmux_text(
+        self,
+        agent: dict[str, Any],
+        message: str,
+    ) -> tmux_support.TmuxPane:
+        target = self._resolve_tmux_target(agent)
+        try:
+            tmux_support.send_text(
+                target.pane.pane_id,
+                message,
+                tmux_bin=target.tmux_bin,
+                socket_path=target.socket_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve exact target context.
+            source = "managed runtime" if target.runtime_mapped else "local tmux"
+            raise ValueError(
+                f"{source} delivery to {target.pane.pane_id} failed: {exc}"
+            ) from exc
+        return target.pane
 
     def _preflight_tmux_target(self, agent: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(agent.get("agent_id") or "").strip()
+        if agent_id and self.store.get_tmux_runtime_mapping(agent_id) is not None:
+            try:
+                target = self._resolve_tmux_target(agent)
+            except Exception as exc:  # noqa: BLE001 - preserve operator-facing reason.
+                return {
+                    "ok": False,
+                    "reason": str(exc),
+                    "retryable": True,
+                    "pane": None,
+                    "warnings": [],
+                    "metadata": {"runtime_mapped": True},
+                }
+            pane = target.pane
+            return {
+                "ok": True,
+                "reason": None,
+                "retryable": False,
+                "pane": self._tmux_pane_payload(pane),
+                "warnings": self._tmux_binding_warnings(pane, agent),
+                "metadata": {"runtime_mapped": True},
+            }
         try:
             panes = tmux_support.list_panes(self.tmux_bin)
         except Exception as exc:  # noqa: BLE001 - preflight should explain tmux failures.
