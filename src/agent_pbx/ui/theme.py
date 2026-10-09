@@ -6,10 +6,31 @@ from typing import Mapping
 from ..contracts import CodexRuntimeState
 
 
-# One semantic source for PBX widgets, tmux surfaces, and generated Codex
-# syntax themes. States always retain a symbol and text label so color is never
-# the only signal. The palette avoids red/green adjacency and remains legible
-# under common deuteranopia simulations.
+# Preserve the original TUI palette under the long-standing ``cyberpunk``
+# selector. Existing workstation and SSH users rely on these exact RGB values,
+# so changing them in place is a compatibility break even when the replacement
+# palette is more accessible.
+CYBERPUNK_PALETTE: dict[str, str] = {
+    "primary": "#00e5ff",
+    "secondary": "#9b5cff",
+    "warning": "#fcee09",
+    "error": "#ff2e88",
+    "success": "#38ff9c",
+    "accent": "#ff3df2",
+    "foreground": "#f2f7ff",
+    "muted": "#697386",
+    "background": "#070b16",
+    "surface": "#101826",
+    "panel": "#1a102a",
+    "boost": "#2b174b",
+    "executing": "#3b82f6",
+}
+
+# Accessible semantic source for PBX runtime status, tmux surfaces, generated
+# Codex syntax themes, and the opt-in ``cyberpunk-accessible`` TUI theme. States
+# always retain a symbol and text label so color is never the only signal. This
+# palette avoids red/green adjacency and remains legible under common
+# deuteranopia simulations.
 PBX_PALETTE: dict[str, str] = {
     "primary": "#00d7ff",
     "secondary": "#af87ff",
@@ -87,9 +108,11 @@ def terminal_color_depth(environment: Mapping[str, str] | None = None) -> int:
     return 4
 
 
-def textual_palette() -> dict[str, str]:
+def textual_palette(
+    palette: Mapping[str, str] = CYBERPUNK_PALETTE,
+) -> dict[str, str]:
     return {
-        key: PBX_PALETTE[key]
+        key: palette[key]
         for key in (
             "primary",
             "secondary",

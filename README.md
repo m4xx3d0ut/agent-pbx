@@ -1182,7 +1182,8 @@ input prompt before sending.
 
 ### Custom Theme Creation Guide
 
-Agent PBX ships with `cyberpunk`, `minimal`, and the bundled custom `1337`
+Agent PBX ships with the original `cyberpunk`, the opt-in deuteranopia-friendly
+`cyberpunk-accessible`, `minimal`, and the bundled custom `1337`
 theme. To create your own theme, rename the custom theme, select it, then
 override the color slots with environment variables. Keep personal palettes in
 your gitignored `local.env` or shell profile.

@@ -13,6 +13,15 @@
 
 ### Fixed
 
+- Restore the original `cyberpunk` TUI RGB contract, retain the newer
+  deuteranopia-friendly palette as `cyberpunk-accessible`, and keep true-color
+  rendering stable when the outer workspace uses tmux 3.2.
+- Use each runtime mapping's recorded tmux executable for embedded wheel,
+  Page Up/Down, and explicit copy-mode actions so managed tmux 3.7 sessions do
+  not fall back to an incompatible host tmux 3.2 client.
+- Resolve the rollout held open by a managed pane through that mapping's exact
+  tmux executable and socket, preventing reused pane IDs on the outer 3.2
+  server from selecting the wrong Codex session history.
 - Type the supported Codex `/quit` command as literal key input, allow its
   bounded shutdown time, and recognize exit when a shell-rooted pane remains.
 - Render encrypted Joplin items as locked instead of empty and block note

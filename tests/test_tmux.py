@@ -368,13 +368,27 @@ def test_tmux_pane_open_rollout_paths_follows_process_tree(tmp_path, monkeypatch
         (root / "status").write_text(f"Name:\ttest\nPPid:\t{parent}\n", encoding="utf-8")
     (proc_root / "101" / "fd" / "3").symlink_to(rollout)
     (proc_root / "101" / "fd" / "4").symlink_to(unrelated)
-    monkeypatch.setattr(tmux, "pane_root_pid", lambda *args, **kwargs: 100)
+    pane_lookup: dict[str, object] = {}
+
+    def fake_pane_root_pid(target: str, **kwargs: object) -> int:
+        pane_lookup["target"] = target
+        pane_lookup.update(kwargs)
+        return 100
+
+    monkeypatch.setattr(tmux, "pane_root_pid", fake_pane_root_pid)
 
     assert tmux.pane_open_rollout_paths(
         "%42",
         codex_home=codex_home,
+        tmux_bin="/opt/pbx/tmux-3.7c",
+        socket_path="/tmp/pbx.sock",
         proc_root=proc_root,
     ) == (Path(rollout),)
+    assert pane_lookup == {
+        "target": "%42",
+        "tmux_bin": "/opt/pbx/tmux-3.7c",
+        "socket_path": "/tmp/pbx.sock",
+    }
 
 
 def test_tmux_kill_pane_uses_target(monkeypatch) -> None:

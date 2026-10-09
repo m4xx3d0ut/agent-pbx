@@ -11,10 +11,12 @@ from agent_pbx.config import ServerConfig
 from agent_pbx.contracts import CodexRuntimeState
 from agent_pbx.ui.runtime import runtime_header, runtime_topology
 from agent_pbx.ui.theme import (
+    CYBERPUNK_PALETTE,
     PBX_PALETTE,
     codex_syntax_theme_xml,
     runtime_color,
     terminal_color_depth,
+    textual_palette,
     tmux_theme_options,
 )
 from agent_pbx.tui import AgentPBXTUI
@@ -188,6 +190,24 @@ def test_accessible_theme_has_terminal_fallbacks_and_shared_generators() -> None
     assert PBX_PALETTE["primary"] in tmux
     assert PBX_PALETTE["primary"] in codex
     assert "Agent PBX 1337 Accessible" in codex
+
+
+def test_legacy_cyberpunk_theme_keeps_its_public_rgb_contract() -> None:
+    assert textual_palette() == {
+        "primary": "#00e5ff",
+        "secondary": "#9b5cff",
+        "warning": "#fcee09",
+        "error": "#ff2e88",
+        "success": "#38ff9c",
+        "accent": "#ff3df2",
+        "foreground": "#f2f7ff",
+        "background": "#070b16",
+        "surface": "#101826",
+        "panel": "#1a102a",
+        "boost": "#2b174b",
+    }
+    assert CYBERPUNK_PALETTE["muted"] == "#697386"
+    assert textual_palette(PBX_PALETTE)["primary"] == "#00d7ff"
 
 
 async def test_tui_runtime_surface_is_outer_and_capability_gated() -> None:

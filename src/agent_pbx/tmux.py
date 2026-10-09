@@ -339,10 +339,15 @@ def pane_open_rollout_paths(
     *,
     codex_home: str | Path | None = None,
     tmux_bin: str = "tmux",
+    socket_path: str | None = None,
     proc_root: str | Path = "/proc",
 ) -> tuple[Path, ...]:
     """Find Codex rollout JSONL files held open by a pane's process tree."""
-    pid = pane_root_pid(target, tmux_bin=tmux_bin)
+    pid = pane_root_pid(
+        target,
+        tmux_bin=tmux_bin,
+        socket_path=socket_path,
+    )
     if pid is None:
         return ()
     home = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"

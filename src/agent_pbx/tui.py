@@ -120,7 +120,7 @@ from .ui.panels.editor import EditorPanelState
 from .ui.panels.joplin import JoplinPanelState
 from .ui.panels.operators import OperatorPanelState
 from .ui.runtime import runtime_header, runtime_topology
-from .ui.theme import terminal_color_depth, textual_palette
+from .ui.theme import PBX_PALETTE, terminal_color_depth, textual_palette
 from .tmux_binary import configured_tmux_binary, resolve_tmux_binary
 
 
@@ -146,6 +146,7 @@ ATTENTION_EVENT_TYPES = {
 }
 STARRED_AGENT_COLUMN = "*"
 DEFAULT_TUI_THEME = "cyberpunk"
+ACCESSIBLE_TUI_THEME = "cyberpunk-accessible"
 MINIMAL_TUI_THEME = "minimal"
 DEFAULT_CUSTOM_THEME_NAME = "1337"
 THEME_1337_NAME = DEFAULT_CUSTOM_THEME_NAME
@@ -700,6 +701,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/unhide agent",
     "/purge agent",
     "/theme cyberpunk",
+    "/theme cyberpunk-accessible",
     "/theme minimal",
     "/layout adaptive",
     "/layout split",
@@ -1095,6 +1097,7 @@ class PlanSelection:
 
 
 CYBERPUNK_PALETTE = textual_palette()
+CYBERPUNK_ACCESSIBLE_PALETTE = textual_palette(PBX_PALETTE)
 MINIMAL_PALETTE = {
     "primary": "#ffffff",
     "secondary": "#c0c0c0",
@@ -1142,6 +1145,10 @@ def build_theme(name: str, palette: dict[str, str]) -> Theme:
 
 
 THEME_CYBERPUNK = build_theme(DEFAULT_TUI_THEME, CYBERPUNK_PALETTE)
+THEME_CYBERPUNK_ACCESSIBLE = build_theme(
+    ACCESSIBLE_TUI_THEME,
+    CYBERPUNK_ACCESSIBLE_PALETTE,
+)
 THEME_MINIMAL = build_theme(MINIMAL_TUI_THEME, MINIMAL_PALETTE)
 
 
@@ -1226,6 +1233,15 @@ def is_minimal_theme_selector(theme: str) -> bool:
     }
 
 
+def is_accessible_theme_selector(theme: str) -> bool:
+    normalized = theme.strip().lower().replace("_", "-")
+    return normalized in {
+        ACCESSIBLE_TUI_THEME,
+        "accessible",
+        "deuteranopia",
+    }
+
+
 def is_default_theme_selector(theme: str) -> bool:
     normalized = theme.strip().lower().replace("_", "-")
     return normalized in {
@@ -1256,6 +1272,8 @@ def env_theme_value(custom_name: str | None = None) -> str | None:
         return resolved_custom_name
     if is_minimal_theme_selector(theme):
         return MINIMAL_TUI_THEME
+    if is_accessible_theme_selector(theme):
+        return ACCESSIBLE_TUI_THEME
     if is_default_theme_selector(theme):
         return DEFAULT_TUI_THEME
     return None
@@ -3996,6 +4014,7 @@ class SettingsScreen(ModalScreen[None]):
                 yield Select(
                     [
                         ("Cyberpunk", DEFAULT_TUI_THEME),
+                        ("Cyberpunk Accessible", ACCESSIBLE_TUI_THEME),
                         ("Minimal", MINIMAL_TUI_THEME),
                         (self.custom_theme_name, self.custom_theme_name),
                     ],
@@ -5450,6 +5469,7 @@ class AgentPBXTUI(App[None]):
         self.custom_palette = env_custom_palette()
         self.custom_theme = build_theme(self.custom_theme_name, self.custom_palette)
         self.register_theme(THEME_CYBERPUNK)
+        self.register_theme(THEME_CYBERPUNK_ACCESSIBLE)
         self.register_theme(THEME_MINIMAL)
         self.register_theme(self.custom_theme)
         self.server = server.rstrip("/")
@@ -7712,6 +7732,11 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/unhide agent", "Unhide the selected hidden agent", self.palette_unhide_agent)
         yield SystemCommand("/purge agent", "Hide selected agent and delete its thread data", self.palette_purge_agent)
         yield SystemCommand("/theme cyberpunk", "Use the Cyberpunk theme", lambda: self.palette_set_theme(DEFAULT_TUI_THEME))
+        yield SystemCommand(
+            "/theme cyberpunk-accessible",
+            "Use the deuteranopia-friendly Cyberpunk theme",
+            lambda: self.palette_set_theme(ACCESSIBLE_TUI_THEME),
+        )
         yield SystemCommand("/theme minimal", "Use the high-compatibility Minimal theme", lambda: self.palette_set_theme(MINIMAL_TUI_THEME))
         yield SystemCommand(f"/theme {self.custom_theme_name}", "Use the custom TUI theme", lambda: self.palette_set_theme(self.custom_theme_name))
         yield SystemCommand("/layout adaptive", "Use adaptive layout mode", lambda: self.palette_set_layout(ADAPTIVE_TUI_LAYOUT))
@@ -14127,6 +14152,7 @@ class AgentPBXTUI(App[None]):
                 direction,
                 lines=lines,
                 socket_path=str(mapping.get("socket_path") or "") or None,
+                tmux_bin=runtime_mapping_tmux_binary(mapping),
             )
         except Exception as exc:
             self.notify(f"Embedded tmux scrollback failed: {exc}", severity="warning")
@@ -14166,6 +14192,7 @@ class AgentPBXTUI(App[None]):
                 tmux_support.enter_pane_copy_mode,
                 pane_id,
                 socket_path=str(mapping.get("socket_path") or "") or None,
+                tmux_bin=runtime_mapping_tmux_binary(mapping),
             )
         except Exception as exc:
             self.notify(f"Unable to enter tmux scrollback: {exc}", severity="warning")
@@ -27661,11 +27688,27 @@ class AgentPBXTUI(App[None]):
         if pane is None:
             pane = await self.resolve_tmux_send_pane(agent_id, status=None)
         if pane is not None:
+            mapping = self.tmux_runtime_mapping_by_agent.get(agent_id)
+            if mapping is None:
+                mapping = await self.fetch_tmux_runtime_mapping(agent_id)
+            rollout_tmux_bin = configured_tmux_binary()
+            rollout_socket_path: str | None = None
+            if (
+                isinstance(mapping, dict)
+                and str(mapping.get("state") or "") == "ready"
+                and str(mapping.get("pane_id") or "") == pane.pane_id
+            ):
+                rollout_tmux_bin = runtime_mapping_tmux_binary(mapping)
+                rollout_socket_path = (
+                    str(mapping.get("socket_path") or "").strip() or None
+                )
             try:
                 open_paths = await asyncio.to_thread(
                     tmux_support.pane_open_rollout_paths,
                     pane.pane_id,
                     codex_home=self.codex_home_dir(),
+                    tmux_bin=rollout_tmux_bin,
+                    socket_path=rollout_socket_path,
                 )
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 open_paths = ()
@@ -30364,6 +30407,8 @@ class AgentPBXTUI(App[None]):
             return self.custom_theme_name
         if is_minimal_theme_selector(theme_name):
             return MINIMAL_TUI_THEME
+        if is_accessible_theme_selector(theme_name):
+            return ACCESSIBLE_TUI_THEME
         if is_default_theme_selector(theme_name):
             return DEFAULT_TUI_THEME
         return DEFAULT_TUI_THEME

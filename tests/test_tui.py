@@ -1105,6 +1105,15 @@ def test_tui_reads_minimal_theme_env(monkeypatch) -> None:
     assert app.theme == "minimal"
 
 
+def test_tui_reads_accessible_cyberpunk_theme_env(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_TUI_THEME", "cyberpunk-accessible")
+
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert app.ui_theme == "cyberpunk-accessible"
+    assert app.theme == "cyberpunk-accessible"
+
+
 def test_tui_reads_layout_env_aliases(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_PBX_TUI_LAYOUT", "mobile")
 
@@ -2156,7 +2165,7 @@ async def test_tui_shift_f2_writes_directly_to_embedded_terminal() -> None:
 async def test_tui_coalesces_embedded_wheel_into_exact_tmux_history_scroll(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scrolled: list[tuple[str, int, int, str | None]] = []
+    scrolled: list[tuple[str, int, int, str | None, str]] = []
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
 
     class FakeProcess:
@@ -2183,8 +2192,9 @@ async def test_tui_coalesces_embedded_wheel_into_exact_tmux_history_scroll(
         *,
         lines: int,
         socket_path: str | None,
+        tmux_bin: str,
     ) -> bool:
-        scrolled.append((pane_id, direction, lines, socket_path))
+        scrolled.append((pane_id, direction, lines, socket_path, tmux_bin))
         return True
 
     monkeypatch.setattr(tmux_support, "scroll_pane_copy_mode", fake_scroll)
@@ -2199,6 +2209,7 @@ async def test_tui_coalesces_embedded_wheel_into_exact_tmux_history_scroll(
             "server_id": "server",
             "pane_id": "%7",
             "socket_path": "/tmp/pbx.sock",
+            "metadata": {"tmux_bin": "/opt/pbx/tmux-3.7c"},
         }
         app.tmux_runtime_mapping_validated_at_by_agent["agent-a"] = time.monotonic()
         surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
@@ -2213,7 +2224,9 @@ async def test_tui_coalesces_embedded_wheel_into_exact_tmux_history_scroll(
         )
         await pilot.pause(0.15)
 
-    assert scrolled == [("%7", -1, 15, "/tmp/pbx.sock")]
+    assert scrolled == [
+        ("%7", -1, 15, "/tmp/pbx.sock", "/opt/pbx/tmux-3.7c")
+    ]
 
 
 async def test_tui_embedded_scroll_request_is_discarded_after_selection_change(
@@ -2273,7 +2286,7 @@ async def test_tui_embedded_scroll_request_is_discarded_after_selection_change(
 async def test_tui_explicit_scrollback_targets_selected_embedded_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    entered: list[tuple[str, str | None]] = []
+    entered: list[tuple[str, str | None, str]] = []
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
 
     class FakeProcess:
@@ -2298,8 +2311,9 @@ async def test_tui_explicit_scrollback_targets_selected_embedded_runtime(
         pane_id: str,
         *,
         socket_path: str | None,
+        tmux_bin: str,
     ) -> bool:
-        entered.append((pane_id, socket_path))
+        entered.append((pane_id, socket_path, tmux_bin))
         return True
 
     monkeypatch.setattr(tmux_support, "enter_pane_copy_mode", fake_enter)
@@ -2314,6 +2328,7 @@ async def test_tui_explicit_scrollback_targets_selected_embedded_runtime(
             "server_id": "server",
             "pane_id": "%7",
             "socket_path": "/tmp/pbx.sock",
+            "metadata": {"tmux_bin": "/opt/pbx/tmux-3.7c"},
         }
         app.tmux_runtime_mapping_validated_at_by_agent["agent-a"] = time.monotonic()
         surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
@@ -2326,7 +2341,7 @@ async def test_tui_explicit_scrollback_targets_selected_embedded_runtime(
         await pilot.pause()
         assert app.focused is surface
 
-    assert entered == [("%7", "/tmp/pbx.sock")]
+    assert entered == [("%7", "/tmp/pbx.sock", "/opt/pbx/tmux-3.7c")]
 
 
 async def test_tui_terminal_focus_bypasses_printable_and_control_priority_bindings(
@@ -11728,11 +11743,25 @@ async def test_tui_active_codex_session_prefers_rollout_open_in_target_pane(
         "agent_id": "agent-1",
         "metadata": {"codex_session_id": "session-stale"},
     }
+    app.tmux_runtime_mapping_by_agent["agent-1"] = {
+        "state": "ready",
+        "pane_id": pane.pane_id,
+        "socket_path": "/run/user/1000/pbx-3.7.sock",
+        "metadata": {"tmux_bin": "/opt/pbx/tmux-3.7c"},
+    }
+    app.tmux_runtime_mapping_validated_at_by_agent["agent-1"] = time.monotonic()
     app.codex_home_dir = lambda: tmp_path  # type: ignore[method-assign]
+    pane_lookup: dict[str, object] = {}
+
+    def fake_open_rollouts(*args: object, **kwargs: object) -> tuple[Path, ...]:
+        pane_lookup["args"] = args
+        pane_lookup["kwargs"] = kwargs
+        return (rollout,)
+
     monkeypatch.setattr(
         tmux_support,
         "pane_open_rollout_paths",
-        lambda *args, **kwargs: (rollout,),
+        fake_open_rollouts,
     )
 
     active = await app.active_codex_session_for_agent("agent-1", pane=pane)
@@ -11742,6 +11771,14 @@ async def test_tui_active_codex_session_prefers_rollout_open_in_target_pane(
     assert active.path == rollout
     assert active.source == "pane-open-rollout"
     assert active.confidence == "high"
+    assert pane_lookup == {
+        "args": (pane.pane_id,),
+        "kwargs": {
+            "codex_home": tmp_path,
+            "tmux_bin": "/opt/pbx/tmux-3.7c",
+            "socket_path": "/run/user/1000/pbx-3.7.sock",
+        },
+    }
 
 
 async def test_tui_fork_transcript_fallback_excludes_source_session(
