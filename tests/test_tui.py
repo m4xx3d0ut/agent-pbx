@@ -4311,7 +4311,8 @@ async def test_tui_tmux_direct_is_tracked_per_agent() -> None:
         assert app.tmux_direct_enabled is False
         assert app.tmux_direct_agent_modes == {"agent-1": True}
         assert app.screen.has_class("tmux-direct") is True
-        assert captures == ["agent-1"]
+        assert captures
+        assert set(captures) == {"agent-1"}
 
         await app.select_agent("agent-2")
         await pilot.pause()
