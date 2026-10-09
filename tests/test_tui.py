@@ -13728,6 +13728,88 @@ async def test_tui_send_key_to_mapped_pane_uses_exact_runtime(
     ]
 
 
+async def test_tui_refreshes_runtime_process_evidence_after_in_place_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    mapping = {
+        "entity_id": "agent-1",
+        "state": "ready",
+        "server_mode": "dedicated",
+        "server_id": "server-a",
+        "socket_path": "/run/user/1000/agent-pbx/runtime.sock",
+        "session_name": "agent-pbx-runtime-agent-1",
+        "pane_id": "%77",
+        "pane_pid": 100,
+        "process_start_ticks": 200,
+        "codex_session_id": "session-1",
+        "origin_client_tty": "/dev/pts/4",
+        "origin_session_name": "agent-pbx",
+        "metadata": {"tmux_bin": "/opt/tmux-3.7c", "kept": True},
+    }
+    refreshed = {
+        **mapping,
+        "pane_pid": 4321,
+        "process_start_ticks": 9876,
+    }
+    app.tmux_runtime_mapping_by_agent["agent-1"] = mapping
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "metadata": {"codex_session_id": "session-1"},
+        }
+    }
+    posts: list[tuple[str, dict[str, object]]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return refreshed
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append((path, kwargs["json"]))  # type: ignore[arg-type]
+            return Response()
+
+    pane = tmux_support.TmuxPane(
+        "agent-pbx-runtime-agent-1",
+        "0",
+        "0",
+        "%77",
+        True,
+        "node",
+        "agent-1",
+        "/tmp/demo",
+        120,
+        40,
+        0,
+        window_name="codex",
+        window_id="@7",
+    )
+    app.api_client = lambda: Client()  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", lambda **_kwargs: [pane])
+    monkeypatch.setattr(tmux_support, "pane_root_pid", lambda *_args, **_kwargs: 4321)
+    monkeypatch.setattr("agent_pbx.tui.runtime_process_start_ticks", lambda _pid: 9876)
+
+    assert await app.refresh_tmux_runtime_mapping_after_restart("agent-1", "%77")
+    assert posts[0][0] == "/v2/tmux/runtimes/agent-1"
+    assert posts[0][1]["pane_pid"] == 4321
+    assert posts[0][1]["process_start_ticks"] == 9876
+    assert posts[0][1]["origin_client_tty"] == "/dev/pts/4"
+    assert posts[0][1]["metadata"] == {
+        "tmux_bin": "/opt/tmux-3.7c",
+        "kept": True,
+        "mapping_source": "in_place_restart",
+    }
+    assert app.tmux_runtime_mapping_by_agent["agent-1"] == refreshed
+
+
 async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) -> None:
     monkeypatch.setenv(OPERATOR_MCP_APPROVAL_SERVERS_ENV, "agent-pbx,workerbee")
     app = AgentPBXTUI(

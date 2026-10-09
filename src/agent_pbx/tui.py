@@ -16402,6 +16402,99 @@ class AgentPBXTUI(App[None]):
             return updated
         return None
 
+    async def refresh_tmux_runtime_mapping_after_restart(
+        self,
+        agent_id: str,
+        pane_id: str,
+    ) -> bool:
+        """Refresh process evidence after an in-place pane respawn.
+
+        Tmux preserves the pane id across ``respawn-pane`` while replacing its
+        root process.  Leaving the old PID/start ticks in the durable mapping
+        makes the next live assessment classify a healthy pane as reused.
+        """
+
+        mapping = self.tmux_runtime_mapping_by_agent.get(agent_id)
+        if not isinstance(mapping, dict):
+            return True
+        socket_path = str(mapping.get("socket_path") or "").strip()
+        if not socket_path:
+            return True
+        runtime_kwargs = {
+            "tmux_bin": runtime_mapping_tmux_binary(mapping),
+            "socket_path": socket_path,
+        }
+        try:
+            panes = await asyncio.to_thread(tmux_support.list_panes, **runtime_kwargs)
+            pane = next((item for item in panes if item.pane_id == pane_id), None)
+            if pane is None:
+                raise RuntimeError(f"respawned pane {pane_id} is unavailable")
+            pane_pid = await asyncio.to_thread(
+                tmux_support.pane_root_pid,
+                pane_id,
+                **runtime_kwargs,
+            )
+            if pane_pid is None:
+                raise RuntimeError(f"respawned pane {pane_id} has no root process")
+            agent = self.agents.get(agent_id)
+            metadata = self.agent_metadata(agent)
+            session_id = str(
+                metadata.get("fork_codex_session_id")
+                or metadata.get("last_resume_codex_session_id")
+                or metadata.get("codex_session_id")
+                or metadata.get("codex_thread_id")
+                or mapping.get("codex_session_id")
+                or ""
+            ).strip()
+            mapping_metadata = (
+                dict(mapping.get("metadata"))
+                if isinstance(mapping.get("metadata"), dict)
+                else {}
+            )
+            response = await self.api_client().post(
+                f"/v2/tmux/runtimes/{quote(agent_id, safe='')}",
+                json={
+                    "server_mode": normalize_runtime_server_mode(
+                        mapping.get("server_mode")
+                    ).value,
+                    "socket_path": socket_path,
+                    "session_name": pane.session_name,
+                    "window_id": pane.window_id or pane.window_index,
+                    "window_name": pane.window_name,
+                    "pane_id": pane.pane_id,
+                    "pane_pid": pane_pid,
+                    "process_start_ticks": await asyncio.to_thread(
+                        runtime_process_start_ticks,
+                        pane_pid,
+                    ),
+                    "codex_session_id": session_id or None,
+                    "cwd": pane.cwd,
+                    "origin_client_tty": mapping.get("origin_client_tty"),
+                    "origin_session_name": mapping.get("origin_session_name"),
+                    "metadata": {
+                        **mapping_metadata,
+                        "mapping_source": "in_place_restart",
+                        "tmux_bin": runtime_kwargs["tmux_bin"],
+                    },
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            refreshed = response.json()
+            if not isinstance(refreshed, dict):
+                raise RuntimeError("runtime mapping refresh returned invalid data")
+        except Exception as exc:
+            self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
+            self.notify(
+                f"Restarted {agent_id}, but runtime evidence refresh failed: {exc}",
+                severity="error",
+            )
+            return False
+        self.tmux_runtime_mapping_by_agent[agent_id] = refreshed
+        self.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
+        self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+        return True
+
     async def relaunch_operator_root_codex(
         self,
         agent_id: str,
@@ -17012,6 +17105,17 @@ class AgentPBXTUI(App[None]):
                     model_elevation_lease_id,
                     status="failed",
                     transition={"reason": "restart_failed"},
+                )
+            return False
+        if not await self.refresh_tmux_runtime_mapping_after_restart(
+            agent_id,
+            pane.pane_id,
+        ):
+            if model_elevation_lease_id:
+                await self.finish_model_elevation_lease(
+                    model_elevation_lease_id,
+                    status="failed",
+                    transition={"reason": "runtime_mapping_refresh_failed"},
                 )
             return False
         await self.refresh_agents()
