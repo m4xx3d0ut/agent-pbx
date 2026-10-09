@@ -798,6 +798,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         if reason:
             raise HTTPException(status_code=409, detail=reason)
         mode = normalize_runtime_server_mode(payload.server_mode)
+        # Runtime mappings may belong to a qualified tmux server whose client
+        # protocol differs from the daemon's default tmux.  The TUI records
+        # that executable in mapping metadata; use it for the registration
+        # preflight as well as subsequent reconciliation and attachment.
+        # Probing a newer server with the host's older client can fail before
+        # the mapping is stored, leaving a valid managed pane orphaned.
+        tmux_bin = runtime_mapping_tmux_binary({"metadata": payload.metadata})
         identity = TmuxServerIdentity(
             mode,
             mode,
@@ -805,6 +812,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             str(socket_path.resolve(strict=True)),
             True,
             mode is not RuntimeServerMode.DEDICATED,
+            tmux_bin=tmux_bin,
         )
         panes = await asyncio.to_thread(list_runtime_panes, identity)
         pane = next((item for item in panes if item.pane_id == payload.pane_id), None)

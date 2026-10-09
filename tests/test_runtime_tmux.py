@@ -617,7 +617,13 @@ def test_tmux_runtime_api_registers_reconciles_and_leases_writer(
     directory, socket_path = short_socket_path()
     server = bind_socket(socket_path)
     observed = pane()
-    monkeypatch.setattr("agent_pbx.api.list_runtime_panes", lambda _identity: (observed,))
+    inspected_identities = []
+
+    def list_panes(identity):
+        inspected_identities.append(identity)
+        return (observed,)
+
+    monkeypatch.setattr("agent_pbx.api.list_runtime_panes", list_panes)
     monkeypatch.setattr("agent_pbx.api.process_start_ticks", lambda _pid: 900)
 
     async def inspect_live(_mapping: object) -> dict[str, object]:
@@ -657,10 +663,12 @@ def test_tmux_runtime_api_registers_reconciles_and_leases_writer(
                 "cwd": observed.cwd,
                 "origin_session_name": "workspace",
                 "origin_client_tty": "/dev/pts/3",
+                "metadata": {"tmux_bin": "/opt/agent-pbx/tmux-3.7c"},
             },
         )
         assert mapping.status_code == 200
         assert mapping.json()["process_start_ticks"] == 900
+        assert inspected_identities[0].command_prefix[0] == "/opt/agent-pbx/tmux-3.7c"
         first = client.post(
             "/v2/tmux/runtimes/agent-a/writer/acquire",
             headers=headers,
