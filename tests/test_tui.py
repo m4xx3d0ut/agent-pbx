@@ -13459,6 +13459,8 @@ async def test_tui_start_operator_does_not_bind_stale_caller_when_operator_selec
                 "agent_id": "operator-0",
                 "agent_type": "operator",
                 "project": "agent-pbx-operator",
+                "status": "registered",
+                "last_seen_at": 1.0,
                 "metadata": {"agent_type": "operator", "operator_role": "root"},
             },
             "caller-1": {
@@ -13466,6 +13468,7 @@ async def test_tui_start_operator_does_not_bind_stale_caller_when_operator_selec
                 "agent_type": "caller",
                 "project": "demo",
                 "status": "working",
+                "last_seen_at": 1.0,
                 "metadata": {
                     "cwd": str(Path.cwd()),
                     "codex_session_id": "session-caller-1",
