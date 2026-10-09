@@ -534,7 +534,9 @@ def test_tmux_retains_failed_respawn_for_same_pane_rollback() -> None:
         assert tmux.pane_exists(pane_id, tmux_bin=tmux_bin) is True
         assert tmux.pane_is_live(pane_id, tmux_bin=tmux_bin) is False
         dead_status = None
-        for _ in range(20):
+        # A loaded parallel suite can delay tmux publishing pane_dead_status
+        # after pane_dead flips. Keep this bounded while avoiding a false race.
+        for _ in range(100):
             dead_status = tmux.pane_dead_status(pane_id, tmux_bin=tmux_bin)
             if dead_status is not None:
                 break
@@ -746,32 +748,82 @@ def test_tmux_copy_mode_scroll_rejects_relative_runtime_socket() -> None:
         tmux.scroll_pane_copy_mode("%42", -1, socket_path="relative.sock")
 
 
-def test_tmux_quit_pane_sends_q_and_waits(monkeypatch) -> None:
-    sent: list[tuple[str, str]] = []
-    waited: list[tuple[str, float]] = []
+def test_tmux_quit_pane_sends_literal_quit_and_waits_for_codex(monkeypatch) -> None:
+    sent: list[tuple[str, str, str | None]] = []
+    waited: list[tuple[str, float, str | None]] = []
 
     def fake_send_literal_keys(
         target: str,
         text: str,
         **kwargs: object,
     ) -> None:
-        sent.append((target, text))
+        sent.append((target, text, kwargs.get("socket_path")))
 
-    def fake_wait_for_pane_exit(
+    def fake_wait_for_codex_exit(
         target: str,
         *,
         timeout_seconds: float = 0,
         **kwargs: object,
     ) -> bool:
-        waited.append((target, timeout_seconds))
+        waited.append((target, timeout_seconds, kwargs.get("socket_path")))
         return True
 
     monkeypatch.setattr(tmux, "send_literal_keys", fake_send_literal_keys)
-    monkeypatch.setattr(tmux, "wait_for_pane_exit", fake_wait_for_pane_exit)
+    monkeypatch.setattr(tmux, "wait_for_codex_exit", fake_wait_for_codex_exit)
+    monkeypatch.setattr(tmux, "pane_current_command", lambda *_args, **_kwargs: "node")
 
-    assert tmux.quit_pane("%42", timeout_seconds=1.5) is True
-    assert sent == [("%42", "/q")]
-    assert waited == [("%42", 1.5)]
+    assert tmux.quit_pane(
+        "%42",
+        timeout_seconds=1.5,
+        socket_path="/tmp/pbx.sock",
+    ) is True
+    assert sent == [("%42", "/quit", "/tmp/pbx.sock")]
+    assert waited == [("%42", 1.5, "/tmp/pbx.sock")]
+
+
+def test_tmux_quit_pane_does_not_type_into_an_idle_shell(monkeypatch) -> None:
+    sent: list[str] = []
+
+    monkeypatch.setattr(tmux, "pane_current_command", lambda *_args, **_kwargs: "zsh")
+    monkeypatch.setattr(
+        tmux,
+        "send_literal_keys",
+        lambda _target, text, **_kwargs: sent.append(text),
+    )
+
+    assert tmux.quit_pane("%42") is True
+    assert sent == []
+
+
+def test_tmux_wait_for_codex_exit_accepts_shell_rooted_pane(monkeypatch) -> None:
+    commands = iter(("node", "node", "zsh"))
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(
+        tmux,
+        "pane_current_command",
+        lambda *_args, **_kwargs: next(commands),
+    )
+    monkeypatch.setattr(tmux.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    assert tmux.wait_for_codex_exit("%42", timeout_seconds=1.0) is True
+    assert sleeps == [tmux.PANE_EXIT_POLL_SECONDS, tmux.PANE_EXIT_POLL_SECONDS]
+
+
+def test_tmux_wait_for_codex_exit_accepts_closed_pane(monkeypatch) -> None:
+    monkeypatch.setattr(tmux, "pane_current_command", lambda *_args, **_kwargs: None)
+
+    assert tmux.wait_for_codex_exit("%42", timeout_seconds=1.0) is True
+
+
+def test_tmux_wait_for_codex_exit_times_out_while_codex_remains(monkeypatch) -> None:
+    clock = iter((0.0, 0.0, 0.2))
+
+    monkeypatch.setattr(tmux, "pane_current_command", lambda *_args, **_kwargs: "node")
+    monkeypatch.setattr(tmux.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(tmux.time, "sleep", lambda _seconds: None)
+
+    assert tmux.wait_for_codex_exit("%42", timeout_seconds=0.1) is False
 
 
 def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:

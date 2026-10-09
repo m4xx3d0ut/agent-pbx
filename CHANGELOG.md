@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- Type the supported Codex `/quit` command as literal key input, allow its
+  bounded shutdown time, and recognize exit when a shell-rooted pane remains.
 - Render encrypted Joplin items as locked instead of empty and block note
   mutation until decryption completes.
 - Restore the exact validated Joplin Data API process after managed CLI sync

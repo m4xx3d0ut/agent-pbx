@@ -1099,9 +1099,10 @@ mode, `/esc` sends `tmux send-keys Escape` to the selected Codex pane. Outside
 tmux direct mode, it queues a `send_key` command with `key="escape"` for
 nohup-mode agents that poll PBX. Use `/ctrlc` in tmux direct mode to send
 `tmux send-keys C-c` to the selected Codex pane, for example to back out of a
-`/side` chat. Use `/restart` or `/codex restart` in tmux direct mode to send
-Codex `/q`, wait briefly for the pane to exit, then relaunch Codex with the
-known session when Agent PBX can recover the session metadata. Use `/codex
+`/side` chat. Use `/restart` or `/codex restart` in tmux direct mode to type
+Codex `/quit`, wait briefly for Codex to exit (the containing shell may remain),
+then relaunch the known Codex session when Agent PBX can recover its metadata.
+Use `/codex
 update` to ask the Agent PBX daemon to run the allowlisted npm update for
 `@openai/codex`, then use `/restart` or `/codex restart` to move long-lived
 caller, root-operator, and fork panes onto the updated executable. TUI-owned

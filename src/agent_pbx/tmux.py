@@ -31,8 +31,9 @@ TMUX_PANE_FORMAT = "\t".join(
     ]
 )
 DEFAULT_SUBMIT_DELAY_SECONDS = 0.08
-DEFAULT_QUIT_WAIT_SECONDS = 5.0
+DEFAULT_QUIT_WAIT_SECONDS = 30.0
 PANE_EXIT_POLL_SECONDS = 0.1
+CODEX_FOREGROUND_COMMANDS = {"bun", "codex", "deno", "node", "nodejs"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off", "n", "disabled", ""}
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PANE_CLIPBOARD_ENV_KEYS = (
@@ -859,17 +860,90 @@ def wait_for_pane_exit(
         time.sleep(max(0.01, interval_seconds))
 
 
+def pane_current_command(
+    target: str,
+    *,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> str | None:
+    """Return the pane's foreground command, or ``None`` once it is gone."""
+
+    prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
+    result = subprocess.run(
+        [
+            *prefix,
+            "display-message",
+            "-p",
+            "-t",
+            target,
+            "#{pane_current_command}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def command_may_be_codex(command: str) -> bool:
+    """Recognize the foreground launchers used by interactive Codex."""
+
+    normalized = Path(str(command or "").strip()).name.casefold()
+    return normalized in CODEX_FOREGROUND_COMMANDS or "codex" in normalized
+
+
+def wait_for_codex_exit(
+    target: str,
+    *,
+    timeout_seconds: float = DEFAULT_QUIT_WAIT_SECONDS,
+    interval_seconds: float = PANE_EXIT_POLL_SECONDS,
+    tmux_bin: str = "tmux",
+    socket_path: str | None = None,
+) -> bool:
+    """Wait until Codex exits, including when tmux keeps its parent shell alive."""
+
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        command = pane_current_command(
+            target,
+            tmux_bin=tmux_bin,
+            socket_path=socket_path,
+        )
+        if command is None or not command_may_be_codex(command):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.01, interval_seconds))
+
+
 def quit_pane(
     target: str,
     *,
     tmux_bin: str = "tmux",
     timeout_seconds: float = DEFAULT_QUIT_WAIT_SECONDS,
+    socket_path: str | None = None,
 ) -> bool:
-    send_literal_keys(target, "/q", tmux_bin=tmux_bin)
-    return wait_for_pane_exit(
+    current_command = pane_current_command(
+        target,
+        tmux_bin=tmux_bin,
+        socket_path=socket_path,
+    )
+    if current_command is None or not command_may_be_codex(current_command):
+        return True
+    # Slash commands must be typed as literal keys. Bracketed paste deliberately
+    # leaves them as prompt text in current Codex releases.
+    send_literal_keys(
+        target,
+        "/quit",
+        tmux_bin=tmux_bin,
+        socket_path=socket_path,
+    )
+    return wait_for_codex_exit(
         target,
         timeout_seconds=timeout_seconds,
         tmux_bin=tmux_bin,
+        socket_path=socket_path,
     )
 
 

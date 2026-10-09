@@ -190,7 +190,7 @@ REVIEW_OPERATOR_FORK_LAUNCH_MODE_CODEX_FORK = "codex_fork"
 REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT = "fresh_context"
 REVIEW_OPERATOR_FORK_LAUNCH_MODE_ENV = "AGENT_PBX_TUI_REVIEW_FORK_LAUNCH_MODE"
 DEFAULT_OPERATOR_TMUX_SESSION = "agent-pbx-operators"
-CODEX_RESTART_WAIT_SECONDS = 5.0
+CODEX_RESTART_WAIT_SECONDS = 30.0
 CODEX_RESTART_LAUNCH_ATTEMPTS = 3
 CODEX_RESTART_STABILIZE_SECONDS = 2.0
 CODEX_RESTART_RETRY_SECONDS = 1.0
@@ -16277,14 +16277,14 @@ class AgentPBXTUI(App[None]):
                 timeout_seconds=CODEX_RESTART_WAIT_SECONDS,
             )
         except Exception as exc:
-            self.notify(f"Unable to send /q to {label}: {exc}", severity="warning")
+            self.notify(f"Unable to send /quit to {label}: {exc}", severity="warning")
             exited = False
         if exited:
             return True
         try:
             await asyncio.to_thread(tmux_support.kill_pane, pane_id)
         except Exception as exc:
-            self.notify(f"Unable to kill {label} after /q: {exc}", severity="error")
+            self.notify(f"Unable to kill {label} after /quit: {exc}", severity="error")
             return False
         return True
 
@@ -17135,7 +17135,7 @@ class AgentPBXTUI(App[None]):
         ).strip()
         if not session_id:
             self.notify(
-                f"{agent_id} is missing metadata.codex_session_id; send /q manually.",
+                f"{agent_id} is missing metadata.codex_session_id; send /quit manually.",
                 severity="warning",
             )
             return False
@@ -17147,7 +17147,7 @@ class AgentPBXTUI(App[None]):
         )
         if not codex_command:
             self.notify(
-                f"{agent_id} has no recoverable Codex launch command; send /q manually.",
+                f"{agent_id} has no recoverable Codex launch command; send /quit manually.",
                 severity="warning",
             )
             return False
