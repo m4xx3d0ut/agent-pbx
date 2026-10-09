@@ -73,6 +73,19 @@ connect through one governed exchange.
 
 ## Install
 
+### Install from PyPI
+
+Install the current Python package in a virtual environment with:
+
+```bash
+python -m pip install agent-pbx
+agent-pbx --version
+```
+
+PyPI contains the Agent PBX wheel and source distribution. Use the GitHub
+Release wheelhouse below when a checksummed offline dependency bundle is
+required.
+
 ### One-line release install
 
 When release artifacts are published, install the latest wheelhouse with:
@@ -165,7 +178,9 @@ credential-administration, audit, or MCP surfaces.
 
 See [v2 installation and upgrade](docs/install-v2.md) for Linux/macOS host
 requirements, remote clients, verified/offline wheelhouses, migration, and
-rollback.
+rollback. Maintainers should follow the
+[Trusted Publishing release procedure](docs/releasing.md) for TestPyPI and
+production PyPI releases.
 
 ## Local Environment
 

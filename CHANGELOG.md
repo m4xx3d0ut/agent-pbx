@@ -2,7 +2,21 @@
 
 ## Unreleased
 
+### Added
+
+- Add exact-tag TestPyPI and production PyPI Trusted Publishing workflows with
+  protected GitHub environments, short-lived OIDC credentials, immutable build
+  artifacts, package attestations, post-publish hash verification, and clean
+  index-install smoke tests.
+- Add deterministic release identity and archive validators covering tag,
+  commit, package version, changelog, release notes, duplicate index versions,
+  private/generated package content, metadata, and distribution hashes.
+
 ### Changed
+
+- Pin GitHub Actions used by release gates to reviewed commit SHAs and attach
+  the existing checksummed Linux wheelhouse to successful GitHub Releases
+  separately from the wheel and source distribution published to PyPI.
 
 - Serialize same-profile Joplin Data API and CLI sync access through an
   explicit external or managed profile-ownership policy.
