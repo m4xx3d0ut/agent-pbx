@@ -349,13 +349,13 @@ def test_tmux_client_commands_are_mapping_scoped() -> None:
         "-u",
         "set-window-option",
         "-t",
-        "runtime-a:@12.%7",
+        "=runtime-a:@12.%7",
         "window-size",
         "latest",
         ";",
         "attach-session",
         "-t",
-        "runtime-a:@12.%7",
+        "=runtime-a:@12.%7",
     )
     assert "-r" in tmux_client_attach_command(mapping, read_only=True)
     assert tmux_select_runtime_pane_command(mapping)[-2:] == ("-t", "%7")
@@ -395,7 +395,7 @@ def test_tmux_client_attach_falls_back_to_session_for_legacy_mapping() -> None:
             "session_name": "runtime-a",
             "pane_id": "%7",
         }
-    )[-2:] == ("-t", "runtime-a")
+    )[-2:] == ("-t", "=runtime-a")
 
 
 def test_integrated_pop_targets_only_recorded_client_and_sessions() -> None:
@@ -409,8 +409,8 @@ def test_integrated_pop_targets_only_recorded_client_and_sessions() -> None:
     pop_out = runtime_pop_plan(mapping, direction="out")
     pop_in = runtime_pop_plan(mapping, direction="in")
     assert pop_out.action == "switch_client_out"
-    assert pop_out.command[-4:] == ("-c", "/dev/pts/9", "-t", "runtime-a")
-    assert pop_in.command[-4:] == ("-c", "/dev/pts/9", "-t", "agent-pbx")
+    assert pop_out.command[-4:] == ("-c", "/dev/pts/9", "-t", "=runtime-a")
+    assert pop_in.command[-4:] == ("-c", "/dev/pts/9", "-t", "=agent-pbx")
 
 
 def test_integrated_pop_rejects_recursive_origin_session() -> None:
@@ -481,7 +481,7 @@ def test_integrated_pop_resolves_unique_live_invoking_client(
         origin_client_tty=client.tty,
     )
     assert plan.target_client == "/dev/pts/9"
-    assert plan.command[-4:] == ("-c", "/dev/pts/9", "-t", "runtime-a")
+    assert plan.command[-4:] == ("-c", "/dev/pts/9", "-t", "=runtime-a")
 
 
 def test_integrated_pop_uses_only_unique_focused_invoking_client(
@@ -530,7 +530,7 @@ def test_integrated_pop_uses_only_unique_focused_invoking_client(
     )
     assert client.tty == "/dev/pts/2"
     assert "/dev/pts/1" not in plan.command
-    assert plan.command[-4:] == ("-c", "/dev/pts/2", "-t", "runtime-a")
+    assert plan.command[-4:] == ("-c", "/dev/pts/2", "-t", "=runtime-a")
 
 
 @pytest.mark.parametrize(
@@ -607,7 +607,7 @@ def test_dedicated_pop_uses_foreground_attach() -> None:
         direction="out",
     )
     assert plan.action == "suspend_attach"
-    assert plan.command[-2:] == ("-t", "runtime-a")
+    assert plan.command[-2:] == ("-t", "=runtime-a")
 
 
 def test_tmux_runtime_api_registers_reconciles_and_leases_writer(

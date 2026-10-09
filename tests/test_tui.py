@@ -4021,7 +4021,7 @@ async def test_tui_pop_transaction_reuses_only_resolved_live_client(
     app.selected_agent_id = "agent-1"
 
     assert await app.pop_runtime("out") is True
-    assert executed[-1][-4:] == ("-c", "/dev/pts/9", "-t", "runtime-a")
+    assert executed[-1][-4:] == ("-c", "/dev/pts/9", "-t", "=runtime-a")
     assert app.tmux_pop_client_by_agent["agent-1"] == resolved
 
     live = RuntimeTmuxClient(
@@ -4032,7 +4032,7 @@ async def test_tui_pop_transaction_reuses_only_resolved_live_client(
     )
     monkeypatch.setattr("agent_pbx.tui.list_runtime_clients", lambda _identity: (live,))
     assert await app.pop_runtime("in") is True
-    assert executed[-1][-4:] == ("-c", "/dev/pts/9", "-t", "agent-pbx")
+    assert executed[-1][-4:] == ("-c", "/dev/pts/9", "-t", "=agent-pbx")
     assert "agent-1" not in app.tmux_pop_client_by_agent
 
 

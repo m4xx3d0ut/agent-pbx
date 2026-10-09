@@ -9,6 +9,7 @@ import time
 from typing import Any, Mapping
 
 from .runtime_tmux import (
+    exact_tmux_session_target,
     RuntimeServerMode,
     TmuxServerIdentity,
     list_runtime_panes,
@@ -624,7 +625,12 @@ class AgentPaneAdoptionService:
         session_name: str,
     ) -> bool:
         present = subprocess.run(
-            [*identity.command_prefix, "has-session", "-t", session_name],
+            [
+                *identity.command_prefix,
+                "has-session",
+                "-t",
+                exact_tmux_session_target(session_name),
+            ],
             capture_output=True,
             text=True,
         )
@@ -654,7 +660,7 @@ class AgentPaneAdoptionService:
             "-s",
             str(plan["pane_id"]),
             "-t",
-            f"{plan['destination_session']}:",
+            f"{exact_tmux_session_target(str(plan['destination_session']))}:",
             "-n",
             str(plan["destination_window_name"]),
             "-P",

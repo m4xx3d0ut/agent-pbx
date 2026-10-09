@@ -19,6 +19,23 @@ class RuntimeServerMode(str, Enum):
     OUTER_REQUIRED = "outer_required"
 
 
+def exact_tmux_session_target(session_name: str) -> str:
+    """Return tmux's exact-match form for a session name.
+
+    Tmux otherwise accepts a unique session-name prefix.  Managed runtime
+    names commonly share prefixes (for example, a caller and one of its review
+    forks), so a bare target can attach to or create a window in the wrong
+    session.
+    """
+
+    normalized = str(session_name or "").strip()
+    if not normalized:
+        raise ValueError("tmux session name is empty")
+    if normalized.startswith(("=", "$")):
+        return normalized
+    return f"={normalized}"
+
+
 @dataclass(frozen=True)
 class TmuxServerIdentity:
     requested_mode: RuntimeServerMode
@@ -612,7 +629,7 @@ def tmux_client_attach_command(
         raise ValueError("runtime mapping does not identify a tmux socket and session")
     window_id = str(mapping.get("window_id") or "").strip()
     pane_id = str(mapping.get("pane_id") or "").strip()
-    target = session_name
+    target = exact_tmux_session_target(session_name)
     if window_id:
         target = f"{target}:{window_id}"
         if pane_id:
@@ -706,7 +723,7 @@ def runtime_pop_plan(
             "-c",
             origin_client,
             "-t",
-            target_session,
+            exact_tmux_session_target(target_session),
         ),
         target_session,
         origin_client,

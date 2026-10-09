@@ -18,6 +18,7 @@ from .codex.profiles import (
 )
 from .codex_cli import CodexModelOption, inspect_codex_model_catalog
 from .runtime_tmux import (
+    exact_tmux_session_target,
     ensure_dedicated_runtime_server,
     ensure_runtime_socket_parent,
     RuntimeServerMode,
@@ -576,7 +577,14 @@ class ManagedRuntimeService:
 
     def _kill_session(self, identity: TmuxServerIdentity, session_name: str) -> None:
         subprocess.run(
-            [self.tmux_bin, "-S", identity.socket_path, "kill-session", "-t", session_name],
+            [
+                self.tmux_bin,
+                "-S",
+                identity.socket_path,
+                "kill-session",
+                "-t",
+                exact_tmux_session_target(session_name),
+            ],
             capture_output=True,
             text=True,
         )

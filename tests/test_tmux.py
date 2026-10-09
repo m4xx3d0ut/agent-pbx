@@ -232,6 +232,7 @@ def test_tmux_launch_pane_injects_environment(monkeypatch) -> None:
     )
 
     assert pane_id == "%42"
+    assert calls[0] == ["tmux", "has-session", "-t", "=operators"]
     assert calls[1] == [
         "tmux",
         "new-session",
@@ -314,6 +315,8 @@ def test_tmux_launch_pane_resizes_existing_detached_session(monkeypatch) -> None
         width=160,
         height=48,
     ) == "%43"
+    assert calls[0] == ["tmux", "has-session", "-t", "=operators"]
+    assert calls[1][calls[1].index("-t") + 1] == "=operators"
     assert calls[-1] == [
         "tmux",
         "resize-window",

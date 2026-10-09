@@ -9,6 +9,7 @@ import time
 from typing import Any, Mapping, Sequence
 
 from .tmux_binary import configured_tmux_binary
+from .runtime_tmux import exact_tmux_session_target
 
 
 TMUX_PANE_FORMAT = "\t".join(
@@ -148,7 +149,7 @@ def session_exists(
 ) -> bool:
     prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     result = subprocess.run(
-        [*prefix, "has-session", "-t", session_name],
+        [*prefix, "has-session", "-t", exact_tmux_session_target(session_name)],
         capture_output=True,
         text=True,
     )
@@ -183,7 +184,7 @@ def launch_pane(
             "-F",
             "#{pane_id}",
             "-t",
-            session_name,
+            exact_tmux_session_target(session_name),
             "-n",
             window_name,
         ]
