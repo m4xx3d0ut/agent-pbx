@@ -1,0 +1,121 @@
+name: reusable release quality
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Exact immutable Git release tag to validate and build
+        required: true
+        type: string
+      channel:
+        description: Release channel enforced by the tag validator
+        required: true
+        type: string
+      index-json-url:
+        description: Package-index project JSON endpoint used for duplicate checks
+        required: true
+        type: string
+    outputs:
+      version:
+        description: Validated package version
+        value: ${{ jobs.validate-release.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Check out the exact release tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Validate tag, commit, version, documents, and package-index state
+        id: release
+        run: >-
+          python scripts/validate_release.py metadata
+          --tag "${{ inputs.tag }}"
+          --channel "${{ inputs.channel }}"
+          --branch origin/dev
+          --index-json-url "${{ inputs.index-json-url }}"
+
+  test-release:
+    needs: validate-release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out the exact release tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install tmux on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install tmux on macOS
+        if: runner.os == 'macOS'
+        run: brew install tmux
+      - name: Install Agent PBX and test dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Compile source and tests
+        run: python -m compileall -q src tests scripts
+      - name: Run full test suite
+        env:
+          AGENT_PBX_TEST_WORKERS: "2"
+        run: scripts/test_full.sh
+
+  build-distributions:
+    needs: validate-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact release tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install isolated build and verification tools
+        run: python -m pip install "build>=1,<2" "twine>=6,<7"
+      - name: Build wheel and source distribution once
+        run: python -m build --sdist --wheel --outdir release-artifact/packages
+      - name: Validate package metadata
+        run: python -m twine check --strict release-artifact/packages/*
+      - name: Inspect package archives
+        run: >-
+          python scripts/validate_release.py archives
+          --dist release-artifact/packages
+          --version "${{ needs.validate-release.outputs.version }}"
+      - name: Smoke-test installation from the built wheel
+        run: >-
+          python scripts/smoke_install_release.py
+          release-artifact/packages/*.whl
+          --version "${{ needs.validate-release.outputs.version }}"
+      - name: Record SHA-256 checksums
+        run: sha256sum release-artifact/packages/* | tee release-artifact/SHA256SUMS
+      - name: Upload immutable distribution artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-package-distributions
+          path: release-artifact/
+          if-no-files-found: error
+          retention-days: 7

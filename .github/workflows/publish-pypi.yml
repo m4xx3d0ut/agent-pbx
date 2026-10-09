@@ -1,0 +1,97 @@
+name: publish Agent PBX to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    if: ${{ !github.event.release.prerelease }}
+    uses: ./.github/workflows/release-quality.yml
+    with:
+      tag: ${{ github.event.release.tag_name }}
+      channel: production
+      index-json-url: https://pypi.org/pypi/agent-pbx/json
+    permissions:
+      contents: read
+
+  publish-pypi:
+    needs: quality
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/agent-pbx/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the exact tested distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-package-distributions
+          path: release-artifact
+      - name: Publish distributions to PyPI with OIDC
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: release-artifact/packages/
+          attestations: true
+
+  verify-pypi:
+    needs: [quality, publish-pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact release tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - name: Download the published distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-package-distributions
+          path: release-artifact
+      - name: Verify PyPI hashes and clean installation
+        run: >-
+          python scripts/verify_pypi_release.py
+          --project agent-pbx
+          --version "${{ needs.quality.outputs.version }}"
+          --dist release-artifact/packages
+
+  publish-github-assets:
+    needs: [quality, verify-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the exact release tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Build checksummed Linux wheelhouse and installer
+        run: scripts/build_wheelhouse.sh --out dist/agent-pbx-wheelhouse
+      - name: Verify release manifest
+        run: python scripts/release_manifest.py verify --wheelhouse dist/agent-pbx-wheelhouse
+      - name: Attach wheelhouse assets to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: >-
+          gh release upload "$RELEASE_TAG"
+          dist/agent-pbx-wheelhouse.tar.gz
+          dist/agent-pbx-wheelhouse.tar.gz.sha256
+          dist/install-agent-pbx.sh

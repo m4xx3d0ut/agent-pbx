@@ -85,6 +85,23 @@ def test_release_shell_scripts_are_syntactically_valid() -> None:
         assert result.returncode == 0, result.stderr
 
 
+def test_release_python_scripts_compile() -> None:
+    root = Path(__file__).parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "py_compile",
+            str(root / "scripts" / "smoke_install_release.py"),
+            str(root / "scripts" / "validate_release.py"),
+            str(root / "scripts" / "verify_pypi_release.py"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_python_310_declares_tomllib_fallback() -> None:
     root = Path(__file__).parents[1]
     project = root.joinpath("pyproject.toml").read_text(encoding="utf-8")
