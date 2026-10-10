@@ -10,6 +10,9 @@
   stale-record forget controls.
 - Add focus-scoped right-tab shortcuts: F3 followed by Shift+F1–F11, with a
   portable `1..9`, `0`, `-` fallback that never captures terminal input.
+- Follow the Git wiki remote's advertised default branch during publication so
+  Gitea `main` and GitHub `master` wikis remain visible without host-specific
+  defaults.
 
 ## v2.2.0 - 2026-10-10
 

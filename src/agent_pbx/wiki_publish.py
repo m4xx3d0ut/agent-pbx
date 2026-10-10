@@ -168,7 +168,7 @@ def publish_wiki_stage(
     *,
     remote: str,
     confirm: str,
-    branch: str = "master",
+    branch: str | None = None,
     work_root: Path | None = None,
 ) -> dict[str, Any]:
     stage = stage_root.expanduser().resolve()
@@ -196,6 +196,29 @@ def publish_wiki_stage(
         )
         if cloned.returncode != 0:
             raise RuntimeError((cloned.stderr or cloned.stdout or "wiki clone failed").strip())
+        selected_branch = str(branch or "").strip()
+        if not selected_branch:
+            current_branch = subprocess.run(
+                ["git", "-C", str(checkout), "symbolic-ref", "--quiet", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            selected_branch = current_branch.stdout.strip()
+            if current_branch.returncode != 0 or not selected_branch:
+                raise ValueError(
+                    "wiki remote has no advertised default branch; pass --branch explicitly"
+                )
+        valid_branch = subprocess.run(
+            ["git", "check-ref-format", "--branch", selected_branch],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if valid_branch.returncode != 0:
+            raise ValueError(
+                (valid_branch.stderr or valid_branch.stdout or "invalid wiki branch").strip()
+            )
         pages_root = stage / WIKI_PAGES_DIR
         for name in manifest["pages"]:
             shutil.copyfile(pages_root / name, checkout / name)
@@ -212,6 +235,8 @@ def publish_wiki_stage(
                 "published": False,
                 "unchanged": True,
                 "stage_digest": expected,
+                "remote": remote_value,
+                "branch": selected_branch,
             }
         subprocess.run(
             ["git", "-C", str(checkout), "config", "user.name", "Agent PBX Wiki Publisher"],
@@ -226,7 +251,15 @@ def publish_wiki_stage(
             check=True,
         )
         pushed = subprocess.run(
-            ["git", "-C", str(checkout), "push", "--quiet", "origin", f"HEAD:{branch}"],
+            [
+                "git",
+                "-C",
+                str(checkout),
+                "push",
+                "--quiet",
+                "origin",
+                f"HEAD:{selected_branch}",
+            ],
             capture_output=True,
             text=True,
             timeout=60,
@@ -239,7 +272,7 @@ def publish_wiki_stage(
         "unchanged": False,
         "stage_digest": expected,
         "remote": remote_value,
-        "branch": branch,
+        "branch": selected_branch,
         "published_pages": list(manifest["pages"]),
         "unknown_remote_pages_preserved": True,
     }

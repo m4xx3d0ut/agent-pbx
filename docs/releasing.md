@@ -186,6 +186,8 @@ agent-pbx wiki publish \
 ```
 
 The publisher preserves unknown remote pages; it stages and commits only the
-versioned Agent PBX page names. An empty or uninitialized GitHub Wiki still
-requires the repository owner to enable/initialize Wiki support before the
-remote can accept a clone or push.
+versioned Agent PBX page names. By default it publishes to the branch advertised
+by the remote wiki's `HEAD`, which preserves GitHub `master` and Gitea `main`
+conventions. Use `--branch` only for an intentional override. An empty or
+uninitialized wiki still requires the repository owner to enable or initialize
+Wiki support before the remote can accept a clone or push.

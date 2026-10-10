@@ -86,8 +86,10 @@ def test_wiki_stage_refuses_unowned_destination(tmp_path: Path) -> None:
     assert (output / "operator-file").read_text() == "keep"
 
 
-def test_wiki_publish_requires_digest_and_preserves_unknown_remote_pages(
+@pytest.mark.parametrize("initial_branch", ["main", "master"])
+def test_wiki_publish_follows_remote_head_and_preserves_unknown_pages(
     tmp_path: Path,
+    initial_branch: str,
 ) -> None:
     _repository, source = source_tree(tmp_path)
     stage = tmp_path / "stage"
@@ -95,12 +97,12 @@ def test_wiki_publish_requires_digest_and_preserves_unknown_remote_pages(
     remote = tmp_path / "project.wiki.git"
     seed = tmp_path / "seed"
     subprocess.run(
-        ["git", "init", "--bare", "--initial-branch=master", str(remote)],
+        ["git", "init", "--bare", f"--initial-branch={initial_branch}", str(remote)],
         check=True,
         capture_output=True,
     )
     subprocess.run(
-        ["git", "init", "--initial-branch=master", str(seed)],
+        ["git", "init", f"--initial-branch={initial_branch}", str(seed)],
         check=True,
         capture_output=True,
     )
@@ -112,7 +114,11 @@ def test_wiki_publish_requires_digest_and_preserves_unknown_remote_pages(
         capture_output=True,
     )
     subprocess.run(["git", "-C", str(seed), "remote", "add", "origin", str(remote)], check=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "master"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(seed), "push", "origin", initial_branch],
+        check=True,
+        capture_output=True,
+    )
 
     with pytest.raises(ValueError, match="exactly match"):
         publish_wiki_stage(stage, remote=str(remote), confirm="wrong")
@@ -127,6 +133,7 @@ def test_wiki_publish_requires_digest_and_preserves_unknown_remote_pages(
     subprocess.run(["git", "clone", "--quiet", str(remote), str(verify)], check=True)
 
     assert result["published"] is True
+    assert result["branch"] == initial_branch
     assert (verify / "Home.md").is_file()
     assert (verify / "_Sidebar.md").is_file()
     assert (verify / "Operator-Page.md").read_text() == "# Preserve me\n"

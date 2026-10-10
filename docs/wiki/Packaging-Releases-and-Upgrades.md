@@ -78,7 +78,9 @@ agent-pbx wiki publish \
 ```
 
 The publisher updates only managed page names and preserves unknown remote
-pages. Package publication never publishes the wiki implicitly.
+pages. It follows the remote wiki's advertised `HEAD` branch by default, so a
+Gitea `main` wiki and a GitHub `master` wiki remain visible without a host-
+specific default. Package publication never publishes the wiki implicitly.
 
 See the complete [release procedure](../releasing.md),
 [installation and rollback guide](../install-v2.md), and

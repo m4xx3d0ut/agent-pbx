@@ -432,13 +432,17 @@ def build_parser() -> argparse.ArgumentParser:
     wiki_stage.add_argument("--revision", default="main")
     wiki_stage.add_argument("--json", action="store_true")
     wiki_publish = wiki_subcommands.add_parser(
-        "publish", help="Publish a reviewed stage to an explicit GitHub Wiki remote."
+        "publish", help="Publish a reviewed stage to an explicit Git wiki remote."
     )
     wiki_publish.add_argument(
         "--stage", type=Path, default=Path("artifacts/wiki-stage")
     )
     wiki_publish.add_argument("--remote", required=True)
-    wiki_publish.add_argument("--branch", default="master")
+    wiki_publish.add_argument(
+        "--branch",
+        default=None,
+        help="Target branch; defaults to the remote wiki's advertised HEAD.",
+    )
     wiki_publish.add_argument("--confirm", required=True)
     wiki_publish.add_argument("--work-root", type=Path, default=None)
     wiki_publish.add_argument("--json", action="store_true")

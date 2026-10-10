@@ -50,5 +50,7 @@ agent-pbx wiki publish \
 ```
 
 The publisher updates only the staged page names and preserves unknown remote
-wiki pages. It does not delete or mirror arbitrary remote content.
+wiki pages. It follows the remote wiki's advertised default branch unless an
+explicit `--branch` override is supplied. It does not delete or mirror arbitrary
+remote content.
 
