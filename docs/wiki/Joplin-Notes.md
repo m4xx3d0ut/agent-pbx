@@ -48,8 +48,10 @@ There is no silent last-writer-wins path.
 Encrypted items appear as locked rather than empty. Mutation remains disabled
 until the dedicated Joplin profile decrypts the item. A targeted write may be
 successful when its verified note is plaintext even if an unrelated encrypted
-item remains; a manual profile-wide sync still reports the unrelated E2EE
-posture.
+item remains, and targeted jobs do not invoke whole-profile decryption. The TUI
+reports write health separately from profile E2EE posture. `Validate` or
+`/joplin validate profile` runs the strict profile-wide check; `/joplin sync`
+remains a compatibility alias and still reports unresolved E2EE items.
 
 ## Credential boundary
 

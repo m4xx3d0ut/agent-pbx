@@ -1174,7 +1174,7 @@ class JoplinProfileCoordinator:
                 self.service.sync()
             except Exception as exc:  # preserve sync failure after server recovery
                 sync_error = exc
-            if sync_error is None:
+            if sync_error is None and require_decryption:
                 try:
                     self.service.decrypt_encrypted_items()
                 except Exception as exc:  # restore the server for every decrypt failure

@@ -811,17 +811,21 @@ through Agent PBX, waits for the tmux pane to settle, then asks Codex for
 previews Markdown, and supports quick create, rename, delete, and save controls
 inside the Agent PBX notebook scope only.
 
-The Joplin tab status line shows queued, running, successful, and failed sync
-state. Press `Sync Now` or use `/joplin sync` to queue a manual sync. Sync
-failures are retained in Agent PBX status/events; they do not roll back the note
-write that triggered them.
+The Joplin tab reports targeted write health separately from whole-profile E2EE
+validation, for example `Writes: ok | Profile: E2EE locked 17`. Press
+`Validate` or use `/joplin validate profile` to run the strict whole-profile
+check. `/joplin sync` remains a compatibility alias. Historical failures remain
+in Agent PBX status/events for audit; they do not roll back a note write that
+completed successfully.
 
 Encrypted items are shown as `🔒 decryption pending`, never as empty notes.
 Agent PBX does not return encrypted payloads through its API and blocks edit,
 rename, delete, append, and overwrite actions until the configured Joplin
-profile decrypts the item. A sync is successful only after the local API reports
-zero pending encrypted notes, resources, and folders; otherwise the durable sync
-job fails with `JOPLIN_E2EE_LOCKED` and the status line shows the pending count.
+profile decrypts the item. A targeted write succeeds after its declared note is
+verified as plaintext even when unrelated encrypted objects remain. Strict
+profile validation requires zero pending encrypted notes, resources, and
+folders; otherwise that validation job fails with `JOPLIN_E2EE_LOCKED` and the
+status line shows the pending count.
 
 Joplin actions are available from the tab buttons and the local TUI
 palette/slash commands: `/joplin` opens the tab, `/joplin refresh` reloads
@@ -830,7 +834,8 @@ selected note, `/joplin delete` confirms and deletes the selected scoped note,
 `/joplin copy` copies the latest Codex response in tmux direct mode, `/joplin
 copy report` copies the latest PBX report, `/joplin log start` and `/joplin log
 stop` control the growing LOG note, `/joplin save` saves the selected note body,
-and `/joplin sync` queues a manual sync job.
+and `/joplin validate profile` queues a strict profile validation. `/joplin
+sync` is retained as an alias for the same strict operation.
 
 The Joplin tab buttons show their shortcut key directly, such as `New n` and
 `Copy c`. Press `Ctrl+G` then that key; when focus is outside an editable note
@@ -888,12 +893,13 @@ AGENT_PBX_JOPLIN_PROFILE_OWNER_MODE=managed_cli
 
 With an explicit `AGENT_PBX_JOPLIN_PROFILE`, Agent PBX verifies the profile
 server PID, process owner, executable, and command; stops that exact server;
-runs one profile-locked sync and a non-interactive E2EE decrypt retry; restarts
-the Data API server; waits for `/ping`; and validates decryption. It never stops
-an ambiguous or foreign process. Manual/profile-wide sync fails when decryption
-cannot complete. A targeted write may still succeed when its declared note is
-verified as plaintext, while unrelated encrypted items remain visible as a
-profile health warning.
+runs one profile-locked sync and restarts the Data API server. Targeted writes
+then verify only their declared note and do not invoke whole-profile decryption.
+Strict profile validation additionally runs a non-interactive E2EE decrypt retry
+before restoring the server and fails when decryption cannot complete. Agent PBX
+never stops an ambiguous or foreign process. Unrelated encrypted items remain
+visible as a separate profile-health warning without failing a verified targeted
+write.
 
 The managed decrypt pass uses only Joplin's own cached master-key credential.
 Agent PBX does not receive or persist the E2EE password. If the credential is

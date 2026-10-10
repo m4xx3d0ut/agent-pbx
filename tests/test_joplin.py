@@ -609,7 +609,7 @@ def test_joplin_profile_coordinator_restores_server_after_decrypt_failure(
     assert events == ["stop:321", "sync", "decrypt", f"start:{profile}"]
 
 
-def test_joplin_profile_coordinator_can_defer_unrelated_decrypt_failure(
+def test_joplin_profile_coordinator_skips_decrypt_for_targeted_sync(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -630,16 +630,16 @@ def test_joplin_profile_coordinator_can_defer_unrelated_decrypt_failure(
     monkeypatch.setattr(coordinator, "_start_server", lambda path: events.append(f"start:{path}"))
     monkeypatch.setattr(service, "sync", lambda: events.append("sync"))
 
-    def fail_decrypt() -> None:
-        events.append("decrypt")
-        raise JoplinE2EEDecryptError("unrelated locked item")
+    monkeypatch.setattr(
+        service,
+        "decrypt_encrypted_items",
+        lambda: events.append("decrypt"),
+    )
 
-    monkeypatch.setattr(service, "decrypt_encrypted_items", fail_decrypt)
+    result = coordinator.run_sync(require_decryption=False)
 
-    error = coordinator.run_sync(require_decryption=False)
-
-    assert isinstance(error, JoplinE2EEDecryptError)
-    assert events == ["stop:321", "sync", "decrypt", f"start:{profile}"]
+    assert result is None
+    assert events == ["stop:321", "sync", f"start:{profile}"]
 
 
 def test_joplin_profile_coordinator_restores_server_after_unexpected_decrypt_error(
@@ -670,7 +670,7 @@ def test_joplin_profile_coordinator_restores_server_after_unexpected_decrypt_err
     monkeypatch.setattr(service, "decrypt_encrypted_items", fail_decrypt)
 
     with pytest.raises(RuntimeError, match="unexpected decrypt failure"):
-        coordinator.run_sync(require_decryption=False)
+        coordinator.run_sync()
 
     assert events == ["stop:321", "sync", "decrypt", f"start:{profile}"]
 
@@ -742,6 +742,47 @@ def test_joplin_sync_jobs_coalesce_only_redundant_work(tmp_path: Path) -> None:
     assert second["coalesced"] is True
     assert set(second["note_ids"]) == {"note-1", "note-2"}
     assert manual["sync_id"] != first["sync_id"]
+
+
+def test_joplin_sync_status_separates_writes_from_profile_validation(
+    tmp_path: Path,
+) -> None:
+    store = make_store(tmp_path)
+    write = store.enqueue_joplin_sync(
+        reason="note_update",
+        agent_id="agent-1",
+        note_id="note-1",
+        profile_key="profile-a",
+    )
+    profile = store.enqueue_joplin_sync(
+        reason="manual",
+        profile_key="profile-a",
+    )
+
+    claimed_write = store.claim_next_joplin_sync_job()
+    assert claimed_write is not None
+    assert claimed_write["sync_id"] == write["sync_id"]
+    store.complete_joplin_sync_job(str(write["sync_id"]), success=True)
+    claimed_profile = store.claim_next_joplin_sync_job()
+    assert claimed_profile is not None
+    assert claimed_profile["sync_id"] == profile["sync_id"]
+    store.complete_joplin_sync_job(
+        str(profile["sync_id"]),
+        success=False,
+        error="profile remains encrypted",
+        error_code="JOPLIN_E2EE_LOCKED",
+    )
+
+    status = store.joplin_sync_status()
+
+    assert status["latest"]["sync_id"] == profile["sync_id"]
+    assert status["write_sync"]["current_status"] == "succeeded"
+    assert status["write_sync"]["latest"]["sync_id"] == write["sync_id"]
+    assert status["write_sync"]["failed"] == 0
+    assert status["profile_validation"]["current_status"] == "failed"
+    assert status["profile_validation"]["latest_error"]["error_code"] == (
+        "JOPLIN_E2EE_LOCKED"
+    )
 
 
 def test_joplin_sync_profile_lock_reports_actionable_error(tmp_path: Path) -> None:
@@ -1506,6 +1547,8 @@ def test_joplin_api_sync_status_manual_and_sync_on_write(
     assert status.status_code == 200
     assert status.json()["enabled"] is True
     assert status.json()["sync_on_write"] is True
+    assert status.json()["write_sync"]["current_status"] == "queued"
+    assert status.json()["profile_validation"]["current_status"] == "queued"
     assert {"note_note_create", "manual"}.issubset(reasons)
 
 

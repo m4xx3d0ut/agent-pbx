@@ -4395,6 +4395,81 @@ class Store:
         return [self._joplin_sync_job_from_row(row) for row in rows]
 
     def joplin_sync_status(self) -> dict[str, Any]:
+        def lane_status(
+            conn: sqlite3.Connection,
+            *,
+            targeted: bool,
+        ) -> dict[str, Any]:
+            targeted_expression = """
+                COALESCE(note_id, '') <> ''
+                OR COALESCE(note_ids_json, '[]') NOT IN ('', '[]', 'null')
+            """
+            scope_clause = (
+                f"({targeted_expression})"
+                if targeted
+                else f"NOT ({targeted_expression})"
+            )
+            count_rows = conn.execute(
+                f"""
+                SELECT status, COUNT(*) AS count
+                FROM joplin_sync_jobs
+                WHERE {scope_clause}
+                GROUP BY status
+                """
+            ).fetchall()
+            counts = {
+                str(row["status"]): int(row["count"] or 0)
+                for row in count_rows
+            }
+
+            def latest_row(status: str | None = None) -> sqlite3.Row | None:
+                status_clause = "" if status is None else "AND status = ?"
+                parameters: tuple[object, ...] = () if status is None else (status,)
+                return conn.execute(
+                    f"""
+                    SELECT sync_id, status, reason, agent_id, note_id, error,
+                           created_at, started_at, finished_at, attempts,
+                           profile_key, note_ids_json, reasons_json, generation,
+                           progress_json, error_code
+                    FROM joplin_sync_jobs
+                    WHERE {scope_clause} {status_clause}
+                    ORDER BY COALESCE(finished_at, started_at, created_at) DESC,
+                             sync_id DESC
+                    LIMIT 1
+                    """,
+                    parameters,
+                ).fetchone()
+
+            latest = latest_row()
+            latest_success = latest_row("succeeded")
+            latest_error = latest_row("failed")
+            if counts.get("running", 0):
+                current_status = "running"
+            elif counts.get("queued", 0):
+                current_status = "queued"
+            elif latest is not None:
+                current_status = str(latest["status"] or "ready")
+            else:
+                current_status = "ready"
+            return {
+                "current_status": current_status,
+                "pending": counts.get("queued", 0),
+                "running": counts.get("running", 0),
+                "succeeded": counts.get("succeeded", 0),
+                "failed": counts.get("failed", 0),
+                "latest": self._joplin_sync_job_from_row(latest) if latest else None,
+                "latest_success": (
+                    self._joplin_sync_job_from_row(latest_success)
+                    if latest_success
+                    else None
+                ),
+                "latest_error": (
+                    self._joplin_sync_job_from_row(latest_error)
+                    if latest_error
+                    else None
+                ),
+            }
+
         with self.connect() as conn:
             count_rows = conn.execute(
                 """
@@ -4439,6 +4514,8 @@ class Store:
                 LIMIT 1
                 """
             ).fetchone()
+            write_sync = lane_status(conn, targeted=True)
+            profile_validation = lane_status(conn, targeted=False)
         counts = {str(row["status"]): int(row["count"] or 0) for row in count_rows}
         return {
             "pending": counts.get("queued", 0),
@@ -4456,6 +4533,8 @@ class Store:
                 if latest_error
                 else None
             ),
+            "write_sync": write_sync,
+            "profile_validation": profile_validation,
         }
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:

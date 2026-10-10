@@ -1584,6 +1584,17 @@ class JoplinSyncJobResponse(BaseModel):
     coalesced: bool = False
 
 
+class JoplinSyncLaneResponse(BaseModel):
+    current_status: str = "ready"
+    pending: int = 0
+    running: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    latest: JoplinSyncJobResponse | None = None
+    latest_success: JoplinSyncJobResponse | None = None
+    latest_error: JoplinSyncJobResponse | None = None
+
+
 class JoplinSyncStatusResponse(BaseModel):
     enabled: bool
     sync_on_write: bool = False
@@ -1594,6 +1605,12 @@ class JoplinSyncStatusResponse(BaseModel):
     latest: JoplinSyncJobResponse | None = None
     latest_success: JoplinSyncJobResponse | None = None
     latest_error: JoplinSyncJobResponse | None = None
+    write_sync: JoplinSyncLaneResponse = Field(
+        default_factory=JoplinSyncLaneResponse
+    )
+    profile_validation: JoplinSyncLaneResponse = Field(
+        default_factory=JoplinSyncLaneResponse
+    )
 
 
 class JoplinNoteSummary(BaseModel):

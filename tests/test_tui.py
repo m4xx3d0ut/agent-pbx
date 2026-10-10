@@ -1491,7 +1491,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert joplin_copy.label.plain == "Copy c"
         assert joplin_log_start.label.plain == "LOG+ l"
         assert joplin_log_stop.label.plain == "LOG- x"
-        assert joplin_sync.label.plain == "Sync u"
+        assert joplin_sync.label.plain == "Validate u"
         assert joplin_save.label.plain == "Save s"
         assert joplin_edit.label.plain == "Edit e"
         assert joplin_preview.label.plain == "Preview p"
@@ -1629,6 +1629,60 @@ def test_tui_joplin_sync_summary_reports_current_failure() -> None:
     )
 
     assert summary == "Sync: error"
+
+
+def test_tui_joplin_status_separates_write_and_profile_health() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    status = app.format_joplin_status_line(
+        {
+            "available": True,
+            "notebook": "Agent PBX",
+            "sync": {
+                "enabled": True,
+                "write_sync": {
+                    "current_status": "succeeded",
+                    "running": 0,
+                    "pending": 0,
+                },
+                "profile_validation": {
+                    "current_status": "failed",
+                    "running": 0,
+                    "pending": 0,
+                },
+            },
+            "encryption": {"state": "locked", "pending_total": 17},
+        }
+    )
+
+    assert status == "Joplin: Agent PBX | Writes: ok | Profile: E2EE locked 17"
+
+
+def test_tui_joplin_status_reports_profile_error_without_locked_items() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    status = app.format_joplin_status_line(
+        {
+            "available": True,
+            "notebook": "Agent PBX",
+            "sync": {
+                "enabled": True,
+                "write_sync": {
+                    "current_status": "succeeded",
+                    "running": 0,
+                    "pending": 0,
+                },
+                "profile_validation": {
+                    "current_status": "failed",
+                    "running": 0,
+                    "pending": 0,
+                },
+            },
+            "encryption": {"state": "ready", "pending_total": 0},
+        }
+    )
+
+    assert status == "Joplin: Agent PBX | Writes: ok | Profile: error"
 
 
 async def test_tui_disables_tmux_controls_when_unavailable(monkeypatch) -> None:
@@ -10339,6 +10393,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/joplin log stop",
         "/joplin save",
         "/joplin sync",
+        "/joplin validate profile",
         "/codex",
         "/codex config",
         "/codex config refresh",

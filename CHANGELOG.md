@@ -26,6 +26,9 @@
 
 ### Fixed
 
+- Separate targeted Joplin write health from strict profile E2EE validation,
+  skip whole-profile decrypt attempts for targeted jobs, and label manual sync
+  as profile validation while retaining `/joplin sync` as an alias.
 - Render the public hero and architecture visuals on PyPI by using absolute
   HTTPS asset URLs, while retaining the architecture's maintained Mermaid
   source in the repository.

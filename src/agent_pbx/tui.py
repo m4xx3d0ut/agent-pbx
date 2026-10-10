@@ -664,6 +664,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/joplin note copy source",
     "/joplin note paste",
     "/joplin sync",
+    "/joplin validate profile",
     "/plan",
     "/plan latest",
     "/plan thread",
@@ -767,6 +768,7 @@ JOPLIN_SLASH_ACTIONS = {
     "/joplin note copy source": "note-copy-source",
     "/joplin note paste": "note-paste",
     "/joplin sync": "sync",
+    "/joplin validate profile": "sync",
 }
 JOPLIN_SHORTCUT_ACTIONS = {
     "n": ("new", "new"),
@@ -779,7 +781,7 @@ JOPLIN_SHORTCUT_ACTIONS = {
     "c": ("copy", "copy"),
     "l": ("log-start", "log on"),
     "x": ("log-stop", "log off"),
-    "u": ("sync", "sync"),
+    "u": ("sync", "profile validation"),
     "b": ("note-copy", "note copy"),
     "v": ("note-paste", "note paste"),
 }
@@ -7508,7 +7510,7 @@ class AgentPBXTUI(App[None]):
                                 yield Button("Copy c", id="joplin-copy-latest")
                                 yield Button("LOG+ l", id="joplin-log-start")
                                 yield Button("LOG- x", id="joplin-log-stop")
-                                yield Button("Sync u", id="joplin-sync")
+                                yield Button("Validate u", id="joplin-sync")
                             with Horizontal(id="joplin-clipboard-actions"):
                                 yield Button("Copy Note b", id="joplin-note-copy")
                                 yield Button("Paste Note v", id="joplin-note-paste")
@@ -7831,7 +7833,16 @@ class AgentPBXTUI(App[None]):
             yield SystemCommand("/joplin note copy", "Copy selected text or the current note source", self.palette_joplin_note_copy)
             yield SystemCommand("/joplin note copy source", "Copy the complete current note source", self.palette_joplin_note_copy_source)
             yield SystemCommand("/joplin note paste", "Paste clipboard text into the active note editor", self.palette_joplin_note_paste)
-            yield SystemCommand("/joplin sync", "Queue a Joplin sync job", self.palette_joplin_sync)
+            yield SystemCommand(
+                "/joplin sync",
+                "Validate the complete Joplin profile, including E2EE",
+                self.palette_joplin_sync,
+            )
+            yield SystemCommand(
+                "/joplin validate profile",
+                "Validate the complete Joplin profile, including E2EE",
+                self.palette_joplin_sync,
+            )
         yield SystemCommand("/plan", "Toggle plan mode for the selected agent", self.palette_toggle_plan_mode)
         yield SystemCommand("/plan latest", "Show latest report plan options", self.palette_plan_latest)
         yield SystemCommand("/plan thread", "Show selected thread plan options", self.palette_plan_thread)
@@ -26750,11 +26761,11 @@ class AgentPBXTUI(App[None]):
                 if isinstance(status.get("encryption"), dict)
                 else None
             )
-            locked = int((encryption or {}).get("pending_total") or 0)
-            encryption_text = f" | 🔒 E2EE pending {locked}" if locked else ""
+            profile_text = self.format_joplin_profile_summary(sync, encryption)
+            profile_suffix = f" | {profile_text}" if profile_text else ""
             return (
                 f"Joplin: {status.get('notebook') or 'Agent PBX'}"
-                f"{sync_text}{encryption_text}"
+                f"{sync_text}{profile_suffix}"
             )
         error = status.get("error") if isinstance(status.get("error"), dict) else {}
         code = error.get("code") or "JOPLIN_UNAVAILABLE"
@@ -26794,6 +26805,20 @@ class AgentPBXTUI(App[None]):
     def format_joplin_sync_summary(self, sync: dict[str, Any] | None) -> str:
         if not sync or not sync.get("enabled"):
             return "Sync: off"
+        write_sync = sync.get("write_sync")
+        if isinstance(write_sync, dict):
+            running = int(write_sync.get("running") or 0)
+            pending = int(write_sync.get("pending") or 0)
+            if running:
+                return f"Writes: running {running}"
+            if pending:
+                return f"Writes: queued {pending}"
+            status = str(write_sync.get("current_status") or "ready").lower()
+            if status == "failed":
+                return "Writes: error"
+            if status == "succeeded":
+                return "Writes: ok"
+            return "Writes: ready"
         running = int(sync.get("running") or 0)
         pending = int(sync.get("pending") or 0)
         if running:
@@ -26813,6 +26838,35 @@ class AgentPBXTUI(App[None]):
         if sync.get("latest_success"):
             return "Sync: ok"
         return "Sync: ready"
+
+    @staticmethod
+    def format_joplin_profile_summary(
+        sync: dict[str, Any] | None,
+        encryption: dict[str, Any] | None,
+    ) -> str:
+        locked = int((encryption or {}).get("pending_total") or 0)
+        if locked:
+            return f"Profile: E2EE locked {locked}"
+        profile = (
+            sync.get("profile_validation")
+            if isinstance(sync, dict)
+            and isinstance(sync.get("profile_validation"), dict)
+            else None
+        )
+        if profile is None:
+            return ""
+        running = int(profile.get("running") or 0)
+        pending = int(profile.get("pending") or 0)
+        if running:
+            return f"Profile: validating {running}"
+        if pending:
+            return f"Profile: queued {pending}"
+        status = str(profile.get("current_status") or "ready").lower()
+        if status == "failed":
+            return "Profile: error"
+        if status == "succeeded":
+            return "Profile: ok"
+        return "Profile: ready"
 
     async def fetch_joplin_note_summaries(
         self,
@@ -29560,10 +29614,13 @@ class AgentPBXTUI(App[None]):
             response.raise_for_status()
             job = response.json()
         except Exception as exc:
-            self.notify(f"Joplin sync failed to queue: {exc}", severity="error")
+            self.notify(
+                f"Joplin profile validation failed to queue: {exc}",
+                severity="error",
+            )
             return
         sync_id = str(job.get("sync_id") or "")
-        self.notify(f"Joplin sync queued {sync_id[:8]}.")
+        self.notify(f"Joplin profile validation queued {sync_id[:8]}.")
         await self.refresh_joplin_status()
 
     async def ensure_joplin_available(self) -> bool:
