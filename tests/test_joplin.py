@@ -1475,6 +1475,26 @@ def test_joplin_service_lists_notes_with_folder_scoped_endpoint() -> None:
     assert fake.folder_note_requests == [str(note["parent_id"])]
 
 
+def test_joplin_missing_scope_reads_do_not_create_folders() -> None:
+    fake = FakeJoplinApi()
+    service = make_service(fake)
+    agent = {
+        "agent_id": "agent-1",
+        "project": "missing",
+        "metadata": {"session_id": "session-1"},
+    }
+
+    assert service.list_notes_for_agent(agent) == []
+    assert service.list_notes_for_project("missing") == []
+    assert fake.folders == {}
+    assert fake.next_folder == 1
+    with pytest.raises(JoplinScopeError):
+        service.get_note_for_agent(agent, "outside")
+    with pytest.raises(JoplinScopeError):
+        service.get_note_for_project("missing", "outside")
+    assert fake.folders == {}
+
+
 def test_joplin_service_project_scope_includes_direct_and_descendant_notes() -> None:
     fake = FakeJoplinApi()
     service = make_service(fake)

@@ -16,7 +16,7 @@ from .schemas import (
     ReportCreateRequest,
     plan_options_to_jsonable,
 )
-from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES
+from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_slug
 from .security import hash_secret, now_ts
 
 
@@ -2747,6 +2747,11 @@ class Store:
                 project = existing["project"]
             elif name is None and existing:
                 name = existing["name"]
+            if agent_type == "caller" and existing_fork_identity is None:
+                project = self._canonical_caller_registration_project(
+                    requested_project=project,
+                    existing_project=(str(existing["project"]) if existing else None),
+                )
             conn.execute(
                 """
                 INSERT INTO agents
@@ -2775,6 +2780,31 @@ class Store:
                 ),
             )
         return self.get_agent(request.agent_id) or {}
+
+    @staticmethod
+    def _project_value_is_path(value: str) -> bool:
+        text = str(value or "").strip()
+        return bool(text) and (
+            Path(text).expanduser().is_absolute()
+            or "/" in text
+            or "\\" in text
+        )
+
+    @classmethod
+    def _canonical_caller_registration_project(
+        cls,
+        *,
+        requested_project: str,
+        existing_project: str | None,
+    ) -> str:
+        requested = str(requested_project or "").strip()
+        if not cls._project_value_is_path(requested):
+            return requested
+        existing = str(existing_project or "").strip()
+        if existing and not cls._project_value_is_path(existing):
+            return existing
+        basename = re.split(r"[/\\]+", requested.rstrip("/\\"))[-1]
+        return normalize_project_slug(basename, default="project")
 
     def agent_registration_identity_violation_payload(
         self,
@@ -3462,6 +3492,21 @@ class Store:
         metadata = dict(request.metadata or {})
         metadata.setdefault("reporting_agent_id", reporting_agent_id)
         return request.model_copy(update={"metadata": metadata})
+
+    @staticmethod
+    def report_request_with_canonical_project(
+        agent: dict[str, Any],
+        request: ReportCreateRequest,
+    ) -> ReportCreateRequest:
+        canonical_project = str(agent.get("project") or "").strip()
+        requested_project = str(request.project or "").strip()
+        if not canonical_project or canonical_project == requested_project:
+            return request
+        metadata = dict(request.metadata or {})
+        metadata.setdefault("requested_project", requested_project)
+        return request.model_copy(
+            update={"project": canonical_project, "metadata": metadata}
+        )
 
     @classmethod
     def declared_reporting_agent_id(

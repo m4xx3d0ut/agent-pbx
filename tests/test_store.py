@@ -105,6 +105,74 @@ def test_register_agent_backfills_cwd_from_absolute_repo_path(tmp_path: Path) ->
     assert agent["metadata"]["cwd"] == str(repo)
 
 
+def test_register_agent_preserves_logical_project_when_refresh_uses_cwd(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "1337-b04rd"
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="board-agent",
+            project="1337-board",
+            metadata={"cwd": str(repo)},
+        )
+    )
+
+    agent = store.register_agent(
+        AgentRegisterRequest(
+            agent_id="board-agent",
+            project=str(repo),
+            metadata={"cwd": str(repo), "pbx_mode": "report"},
+        )
+    )
+
+    assert agent["project"] == "1337-board"
+    assert agent["metadata"]["cwd"] == str(repo)
+    assert agent["metadata"]["pbx_mode"] == "report"
+
+
+def test_register_agent_makes_first_path_project_route_safe(tmp_path: Path) -> None:
+    repo = tmp_path / "1337-b04rd"
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+
+    agent = store.register_agent(
+        AgentRegisterRequest(
+            agent_id="board-agent",
+            project=str(repo),
+            metadata={"cwd": str(repo)},
+        )
+    )
+
+    assert agent["project"] == "1337-b04rd"
+
+
+def test_register_agent_can_replace_path_project_with_logical_project(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "1337-b04rd"
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="board-agent",
+            project=str(repo),
+            metadata={"cwd": str(repo)},
+        )
+    )
+
+    agent = store.register_agent(
+        AgentRegisterRequest(
+            agent_id="board-agent",
+            project="1337-board",
+            metadata={"cwd": str(repo)},
+        )
+    )
+
+    assert agent["project"] == "1337-board"
+
+
 def test_register_agent_preserves_operator_identity_on_default_refresh(
     tmp_path: Path,
 ) -> None:

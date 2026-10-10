@@ -26,6 +26,10 @@
 
 ### Fixed
 
+- Preserve a caller's route-safe logical project identity when later Agent
+  registration or report metadata supplies an absolute working directory, and
+  keep Joplin list/get requests read-only so missing scopes cannot create
+  duplicate path-derived notebooks.
 - Identify Joplin-native conflict copies as local-only, immutable recovery
   records; reject false-positive targeted sync completion and provide a
   revision-guarded promotion action that creates a uniquely titled normal note

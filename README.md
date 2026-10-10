@@ -811,6 +811,12 @@ through Agent PBX, waits for the tmux pane to settle, then asks Codex for
 previews Markdown, and supports quick create, rename, delete, and save controls
 inside the Agent PBX notebook scope only.
 
+The project folder name comes from the caller's route-safe logical Agent PBX
+project identity; its absolute `metadata.cwd` remains separate and cannot
+replace that identity during a report refresh. Note list/get requests never
+create missing project or Agent folders. Folder creation occurs only for an
+explicit note-creation operation.
+
 The Joplin tab reports targeted write health separately from whole-profile E2EE
 validation, for example `Writes: ok | Profile: E2EE locked 17`. Press
 `Validate` or use `/joplin validate profile` to run the strict whole-profile

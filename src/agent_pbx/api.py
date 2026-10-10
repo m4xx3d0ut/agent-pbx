@@ -1453,6 +1453,18 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         if agent is None:
             raise HTTPException(status_code=404, detail="agent not registered")
         request = store.report_request_with_identity_metadata(request)
+        requested_project = request.project
+        request = store.report_request_with_canonical_project(agent, request)
+        if request.project != requested_project:
+            store.append_event(
+                "report_project_canonicalized",
+                {
+                    "agent_id": agent_id,
+                    "requested_project": requested_project,
+                    "project": request.project,
+                },
+                agent_id,
+            )
         violation = store.report_identity_violation_payload(agent_id, request)
         if violation is not None:
             store.append_event("report_identity_violation", violation, agent_id)

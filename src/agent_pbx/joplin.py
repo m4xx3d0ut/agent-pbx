@@ -378,7 +378,9 @@ class JoplinService:
         }
 
     def list_notes_for_agent(self, agent: dict[str, Any]) -> list[dict[str, Any]]:
-        folder_id = self.ensure_agent_folder(agent)
+        folder_id = self.find_agent_folder(agent)
+        if folder_id is None:
+            return []
         notes = self._get_paginated(
             f"/folders/{folder_id}/notes",
             {
@@ -418,7 +420,9 @@ class JoplinService:
         return summaries
 
     def get_note_for_agent(self, agent: dict[str, Any], note_id: str) -> dict[str, Any]:
-        folder_id = self.ensure_agent_folder(agent)
+        folder_id = self.find_agent_folder(agent)
+        if folder_id is None:
+            raise JoplinScopeError("note is outside the selected agent's Joplin scope")
         note = self._request(
             "GET",
             f"/notes/{note_id}",
@@ -436,6 +440,8 @@ class JoplinService:
 
     def get_note_for_project(self, project: str, note_id: str) -> dict[str, Any]:
         folder_ids = self.project_folder_ids(project)
+        if not folder_ids:
+            raise JoplinScopeError("note is outside the selected project's Joplin scope")
         note = self._request(
             "GET",
             f"/notes/{note_id}",
@@ -838,7 +844,9 @@ class JoplinService:
         return self.ensure_folder(project, parent_id=root_id)
 
     def project_folder_ids(self, project: str) -> set[str]:
-        project_id = self.ensure_project_folder(project)
+        project_id = self.find_project_folder(project)
+        if project_id is None:
+            return set()
         folders = self._get_paginated(
             "/folders",
             {"fields": "id,parent_id,title"},
@@ -864,6 +872,22 @@ class JoplinService:
     def ensure_agent_folder(self, agent: dict[str, Any]) -> str:
         project_id = self.ensure_project_folder(str(agent["project"]))
         return self.ensure_folder(str(agent["agent_id"]), parent_id=project_id)
+
+    def find_project_folder(self, project: str) -> str | None:
+        root_id = self._root_notebook_id or self.find_folder_id(
+            self.config.notebook,
+            parent_id=None,
+        )
+        if root_id is None:
+            return None
+        self._root_notebook_id = root_id
+        return self.find_folder_id(project, parent_id=root_id)
+
+    def find_agent_folder(self, agent: dict[str, Any]) -> str | None:
+        project_id = self.find_project_folder(str(agent["project"]))
+        if project_id is None:
+            return None
+        return self.find_folder_id(str(agent["agent_id"]), parent_id=project_id)
 
     def ensure_root_notebook(self) -> str:
         if self._root_notebook_id:

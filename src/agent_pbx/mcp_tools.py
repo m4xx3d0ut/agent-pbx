@@ -913,6 +913,18 @@ def build_mcp_server(
                 metadata=metadata or {},
             )
         )
+        requested_project = request.project
+        request = store.report_request_with_canonical_project(agent, request)
+        if request.project != requested_project:
+            store.append_event(
+                "report_project_canonicalized",
+                {
+                    "agent_id": agent_id,
+                    "requested_project": requested_project,
+                    "project": request.project,
+                },
+                agent_id,
+            )
         violation = store.report_identity_violation_payload(agent_id, request)
         if violation is not None:
             store.append_event("report_identity_violation", violation, agent_id)

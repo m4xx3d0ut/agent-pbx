@@ -133,6 +133,66 @@ async def test_mcp_reporting_and_command_tools(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_canonicalizes_caller_project_and_report_project(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    mcp = build_mcp_server(store)
+    repo = tmp_path / "1337-b04rd"
+    await mcp.call_tool(
+        "pbx_register_agent",
+        {
+            "agent_id": "board-agent",
+            "project": "1337-board",
+            "metadata": {"cwd": str(repo)},
+        },
+    )
+
+    refreshed = tool_json(
+        await mcp.call_tool(
+            "pbx_register_agent",
+            {
+                "agent_id": "board-agent",
+                "project": str(repo),
+                "metadata": {"cwd": str(repo)},
+            },
+        )
+    )
+    report = tool_json(
+        await mcp.call_tool(
+            "pbx_report_turn",
+            {
+                "agent_id": "board-agent",
+                "project": str(repo),
+                "summary": "Done",
+                "detail": "Canonical project test",
+            },
+        )
+    )
+
+    assert refreshed["project"] == "1337-board"
+    assert report["project"] == "1337-board"
+    assert report["metadata"]["requested_project"] == str(repo)
+    events = store.list_events()
+    registration = [
+        event
+        for event in events
+        if event["type"] == "agent_registration_project_canonicalized"
+    ]
+    report_events = [
+        event for event in events if event["type"] == "report_project_canonicalized"
+    ]
+    assert registration[-1]["payload"]["requested_project"] == str(repo)
+    assert registration[-1]["payload"]["project"] == "1337-board"
+    assert report_events[-1]["payload"] == {
+        "agent_id": "board-agent",
+        "requested_project": str(repo),
+        "project": "1337-board",
+    }
+
+
+@pytest.mark.asyncio
 async def test_mcp_polling_can_be_disabled_without_removing_tool(tmp_path: Path) -> None:
     store = Store(tmp_path / "pbx.sqlite")
     store.init()

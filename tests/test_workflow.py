@@ -145,6 +145,54 @@ def test_report_command_event_workflow(tmp_path: Path) -> None:
     assert events.json()[1]["payload"]["created_at"] == report.json()["created_at"]
 
 
+def test_api_preserves_logical_project_during_path_refresh_and_report(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    repo = tmp_path / "1337-b04rd"
+    repo.mkdir()
+
+    first = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "board-agent",
+            "project": "1337-board",
+            "metadata": {"cwd": str(repo)},
+        },
+    )
+    refreshed = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "board-agent",
+            "project": str(repo),
+            "metadata": {"cwd": str(repo)},
+        },
+    )
+    report = client.post(
+        "/v1/agents/board-agent/reports",
+        json={
+            "project": str(repo),
+            "status": "done",
+            "summary": "Complete",
+            "detail": "The logical project must remain route-safe.",
+        },
+    )
+
+    assert first.status_code == 200
+    assert refreshed.status_code == 200
+    assert refreshed.json()["project"] == "1337-board"
+    assert report.status_code == 200
+    assert report.json()["project"] == "1337-board"
+    assert report.json()["metadata"]["requested_project"] == str(repo)
+    assert client.get("/v1/agents").json()[0]["project"] == "1337-board"
+    events = client.get("/v1/events").json()
+    assert any(
+        event["type"] == "agent_registration_project_canonicalized"
+        for event in events
+    )
+    assert any(event["type"] == "report_project_canonicalized" for event in events)
+
+
 def test_legacy_poll_endpoint_returns_gone_when_disabled(tmp_path: Path) -> None:
     client = TestClient(
         create_app(

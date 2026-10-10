@@ -14,6 +14,12 @@ tab opens in rendered Markdown reading mode. Explicit Edit switches to source
 mode; Preview returns to rendered content without publishing. Dirty drafts are
 protected across selection, tab, disconnect, and exit transitions.
 
+Project folders use the caller's route-safe logical Agent PBX project name.
+The absolute working directory remains separate registration metadata and does
+not replace that identity during later reports or refreshes. Listing or opening
+a missing project or Agent scope returns an empty/not-found result without
+creating Joplin folders; only an explicit create action may initialize them.
+
 The reading view is keyboard-focusable. Arrow keys and Page Up/Page Down work
 over desktop, SSH, and Termux clients. Each note keeps a revision-scoped scroll
 position, so an unchanged refresh does not jump to the top while a changed
