@@ -827,10 +827,19 @@ profile validation requires zero pending encrypted notes, resources, and
 folders; otherwise that validation job fails with `JOPLIN_E2EE_LOCKED` and the
 status line shows the pending count.
 
+Joplin-native conflict copies are shown as `⚠ LOCAL` and kept read-only
+because they are local recovery records without normal remote sync items. Use
+`Promote Local` twice within five seconds, or `/joplin promote conflict`, to
+create a revision-checked, uniquely titled normal note containing the same
+Markdown. Agent PBX preserves the readable conflict and its encrypted original;
+the promoted copy follows the regular targeted-sync path without requiring a
+whole-profile E2EE decrypt pass.
+
 Joplin actions are available from the tab buttons and the local TUI
 palette/slash commands: `/joplin` opens the tab, `/joplin refresh` reloads
 scoped notes, `/joplin new` creates a scoped note, `/joplin rename` renames the
 selected note, `/joplin delete` confirms and deletes the selected scoped note,
+`/joplin promote conflict` safely promotes a selected local conflict copy,
 `/joplin copy` copies the latest Codex response in tmux direct mode, `/joplin
 copy report` copies the latest PBX report, `/joplin log start` and `/joplin log
 stop` control the growing LOG note, `/joplin save` saves the selected note body,

@@ -2978,6 +2978,112 @@ async def test_tui_joplin_encrypted_note_renders_locked_and_disables_mutation() 
         assert app.query_one("#joplin-sync", Button).disabled is False
 
 
+async def test_tui_joplin_native_conflict_is_labeled_and_only_promotion_is_enabled() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    note = {
+        "id": "conflict-note",
+        "parent_id": "folder",
+        "title": "Release Ledger",
+        "body": "# Recovered locally",
+        "revision": "rev-conflict",
+        "is_conflict": True,
+        "conflict_original_id": "encrypted-original",
+        "updated_time": 123.0,
+    }
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-1"
+        app.set_selected_joplin_note_for_agent("agent-1", "conflict-note")
+        app.joplin_notes_by_agent["agent-1"] = {"conflict-note": note}
+        app.render_joplin_notes("agent-1", [note])
+        await app.render_joplin_mode("agent-1", note=note)
+        await pilot.pause()
+
+        table = app.query_one("#joplin-notes", DataTable)
+        title_cell = table.get_row("conflict-note")[1]
+        status = app.query_one("#joplin-status", Static)
+        reader = app.query_one("#joplin-reader", Markdown)
+
+        assert str(title_cell).startswith("⚠ LOCAL")
+        assert "local-only conflict" in str(status.renderable)
+        assert "Local Joplin conflict recovery copy" in str(
+            getattr(reader, "source_markdown", "")
+        )
+        assert app.query_one("#joplin-native-conflict-promote", Button).disabled is False
+        for button_id in (
+            "joplin-rename",
+            "joplin-delete",
+            "joplin-edit",
+            "joplin-conflict-merge",
+            "joplin-conflict-keep",
+            "joplin-conflict-copy",
+            "joplin-conflict-overwrite",
+        ):
+            assert app.query_one(f"#{button_id}", Button).disabled is True
+
+
+async def test_tui_joplin_native_conflict_promotion_requires_second_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    note = {
+        "id": "conflict-note",
+        "title": "Release Ledger",
+        "body": "recovered",
+        "revision": "rev-conflict",
+        "is_conflict": True,
+        "conflict_original_id": "encrypted-original",
+    }
+    posts: list[tuple[str, dict[str, object]]] = []
+    notices: list[str] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "source": note,
+                "promoted": {
+                    "id": "promoted-note",
+                    "title": "Release Ledger-Recovered-conflict",
+                    "body": "recovered",
+                    "revision": "rev-promoted",
+                    "is_conflict": False,
+                },
+            }
+
+    class Client:
+        async def post(self, url: str, **kwargs: object) -> Response:
+            posts.append((url, dict(kwargs.get("json") or {})))
+            return Response()
+
+    async def available() -> bool:
+        return True
+
+    async def load(_agent_id: str) -> None:
+        return None
+
+    app.selected_agent_id = "agent-1"
+    app.joplin_notes_by_agent["agent-1"] = {"conflict-note": note}
+    app.set_selected_joplin_note_for_agent("agent-1", "conflict-note")
+    app.ensure_joplin_available = available  # type: ignore[method-assign]
+    app.load_joplin_notes = load  # type: ignore[method-assign]
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.notify = lambda message, **_kwargs: notices.append(str(message))  # type: ignore[method-assign]
+
+    await app.promote_joplin_native_conflict("agent-1")
+    assert posts == []
+    assert any("again within 5 seconds" in notice for notice in notices)
+
+    await app.promote_joplin_native_conflict("agent-1")
+    assert len(posts) == 1
+    assert posts[0][0].endswith("/conflict-note/promote-conflict")
+    assert posts[0][1]["expected_revision"] == "rev-conflict"
+    assert posts[0][1]["expected_original_id"] == "encrypted-original"
+    assert app.selected_joplin_note_for_agent("agent-1") == "promoted-note"
+
+
 async def test_tui_priority_shortcuts_still_run_outside_terminal_focus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

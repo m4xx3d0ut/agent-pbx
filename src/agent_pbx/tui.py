@@ -663,6 +663,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/joplin note copy",
     "/joplin note copy source",
     "/joplin note paste",
+    "/joplin promote conflict",
     "/joplin sync",
     "/joplin validate profile",
     "/plan",
@@ -767,6 +768,7 @@ JOPLIN_SLASH_ACTIONS = {
     "/joplin note copy": "note-copy",
     "/joplin note copy source": "note-copy-source",
     "/joplin note paste": "note-paste",
+    "/joplin promote conflict": "promote-conflict",
     "/joplin sync": "sync",
     "/joplin validate profile": "sync",
 }
@@ -5924,6 +5926,7 @@ class AgentPBXTUI(App[None]):
         self.joplin_quit_armed_until = 0.0
         self.joplin_body_loading = False
         self.joplin_overwrite_armed_until: dict[str, float] = {}
+        self.joplin_native_conflict_promote_armed_until: dict[str, float] = {}
         self.codex_session_path_cache = CodexSessionPathCache()
         self.codex_transcript_tail_cache = CodexTranscriptTailCache()
         self.active_codex_session_by_agent: dict[str, ActiveCodexSession] = {}
@@ -7515,6 +7518,11 @@ class AgentPBXTUI(App[None]):
                                 yield Button("Copy Note b", id="joplin-note-copy")
                                 yield Button("Paste Note v", id="joplin-note-paste")
                             with Horizontal(id="joplin-conflict-actions"):
+                                yield Button(
+                                    "Promote Local",
+                                    id="joplin-native-conflict-promote",
+                                    variant="warning",
+                                )
                                 yield Button("Review merge", id="joplin-conflict-merge")
                                 yield Button("Keep Joplin", id="joplin-conflict-keep")
                                 yield Button("Save copy", id="joplin-conflict-copy")
@@ -7833,6 +7841,11 @@ class AgentPBXTUI(App[None]):
             yield SystemCommand("/joplin note copy", "Copy selected text or the current note source", self.palette_joplin_note_copy)
             yield SystemCommand("/joplin note copy source", "Copy the complete current note source", self.palette_joplin_note_copy_source)
             yield SystemCommand("/joplin note paste", "Paste clipboard text into the active note editor", self.palette_joplin_note_paste)
+            yield SystemCommand(
+                "/joplin promote conflict",
+                "Promote a selected local Joplin conflict to a synchronizable note",
+                self.palette_joplin_promote_conflict,
+            )
             yield SystemCommand(
                 "/joplin sync",
                 "Validate the complete Joplin profile, including E2EE",
@@ -9411,6 +9424,16 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_joplin_promote_conflict(self) -> None:
+        agent_id = self.palette_joplin_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "promote-conflict"),
+            name="palette-joplin-promote-conflict",
+            exclusive=True,
+        )
+
     def palette_joplin_sync(self) -> None:
         agent_id = self.palette_joplin_agent_id()
         if agent_id is None:
@@ -10071,6 +10094,8 @@ class AgentPBXTUI(App[None]):
             await self.copy_joplin_note_to_clipboard(agent_id, force_source=True)
         elif action == "note-paste":
             await self.paste_joplin_note_from_clipboard(agent_id)
+        elif action == "promote-conflict":
+            await self.promote_joplin_native_conflict(agent_id)
         elif action == "sync":
             await self.sync_joplin_now(agent_id)
         else:
@@ -12886,6 +12911,16 @@ class AgentPBXTUI(App[None]):
     def joplin_edit_url_for_agent(self, agent_id: str, note_id: str) -> str:
         return f"{self.joplin_notes_url_for_agent(agent_id, note_id)}/edit"
 
+    def joplin_native_conflict_promote_url_for_agent(
+        self,
+        agent_id: str,
+        note_id: str,
+    ) -> str:
+        return (
+            f"{self.joplin_notes_url_for_agent(agent_id, note_id)}"
+            "/promote-conflict"
+        )
+
     def joplin_conflict_url_for_agent(
         self,
         agent_id: str,
@@ -15610,6 +15645,7 @@ class AgentPBXTUI(App[None]):
             "joplin-preview": "preview",
             "joplin-note-copy": "note-copy",
             "joplin-note-paste": "note-paste",
+            "joplin-native-conflict-promote": "promote-conflict",
         }
         joplin_action = joplin_button_actions.get(str(event.button.id or ""))
         if joplin_action is not None:
@@ -27595,6 +27631,8 @@ class AgentPBXTUI(App[None]):
             note.get("user_updated_time"),
             int_value(note.get("encryption_applied")) or 0,
             bool(note.get("decryption_pending")),
+            bool(note.get("is_conflict")),
+            str(note.get("conflict_original_id") or ""),
         )
 
     @classmethod
@@ -27638,6 +27676,8 @@ class AgentPBXTUI(App[None]):
                 note.get("user_updated_time"),
                 int_value(note.get("encryption_applied")) or 0,
                 bool(note.get("decryption_pending")),
+                bool(note.get("is_conflict")),
+                str(note.get("conflict_original_id") or ""),
             )
             for note in notes
             if str(note.get("id") or "")
@@ -27649,6 +27689,12 @@ class AgentPBXTUI(App[None]):
             return False
         return bool(note.get("decryption_pending") or note.get("encryption_applied"))
 
+    @staticmethod
+    def joplin_note_is_native_conflict(note: Mapping[str, Any] | None) -> bool:
+        if not isinstance(note, Mapping):
+            return False
+        return bool(note.get("is_conflict"))
+
     def set_joplin_mutation_controls_locked(self, locked: bool) -> None:
         for button_id in (
             "joplin-rename",
@@ -27657,6 +27703,7 @@ class AgentPBXTUI(App[None]):
             "joplin-preview",
             "joplin-save",
             "joplin-conflict-merge",
+            "joplin-conflict-keep",
             "joplin-conflict-copy",
             "joplin-conflict-overwrite",
             "joplin-note-paste",
@@ -27700,7 +27747,8 @@ class AgentPBXTUI(App[None]):
             note_id = self.selected_joplin_note_for_agent(agent_id)
             active_note = self.joplin_notes_by_agent.get(scope, {}).get(note_id or "")
         locked = self.joplin_note_is_locked(active_note)
-        self.set_joplin_mutation_controls_locked(locked)
+        native_conflict = self.joplin_note_is_native_conflict(active_note)
+        self.set_joplin_mutation_controls_locked(locked or native_conflict)
         if locked:
             self.joplin_panel_state.set_mode(scope, "read")
             mode = "locked"
@@ -27737,6 +27785,15 @@ class AgentPBXTUI(App[None]):
                     if mode == "preview" and draft is not None
                     else str((active_note or {}).get("body") or "")
                 )
+                if native_conflict:
+                    markdown = (
+                        "# ⚠ Local Joplin conflict recovery copy\n\n"
+                        "This note is readable locally but Joplin will not publish it "
+                        "as an ordinary synchronized note. Use **Promote Local** to "
+                        "create a guarded, synchronizable copy. The source remains "
+                        "preserved.\n\n---\n\n"
+                        f"{markdown}"
+                    )
             note_id = str((active_note or {}).get("id") or "")
             position_id = (
                 f"{note_id}:preview" if mode == "preview" and draft is not None else note_id
@@ -27752,17 +27809,37 @@ class AgentPBXTUI(App[None]):
                 position_id=position_id,
                 revision=revision,
             )
+        native_promote = self.query_one_or_none(
+            "#joplin-native-conflict-promote", Button
+        )
+        has_edit_conflict = bool(draft is not None and draft.conflict_id)
+        if native_promote is not None:
+            native_promote.disabled = locked or not native_conflict
+        for button_id in (
+            "joplin-conflict-merge",
+            "joplin-conflict-keep",
+            "joplin-conflict-copy",
+            "joplin-conflict-overwrite",
+        ):
+            button = self.query_one_or_none(f"#{button_id}", Button)
+            if button is not None:
+                button.disabled = locked or native_conflict or not has_edit_conflict
         if conflict_actions is not None:
             conflict_actions.styles.display = (
-                "block" if draft is not None and draft.conflict_id else "none"
+                "block" if has_edit_conflict or native_conflict else "none"
             )
         status = self.query_one_or_none("#joplin-status", Static)
         if status is not None and active_note is not None:
             dirty = " · dirty draft" if draft and draft.dirty else ""
             lock_text = " · 🔒 decryption pending" if locked else ""
+            native_conflict_text = (
+                " · ⚠ local-only conflict; promote to sync"
+                if native_conflict
+                else ""
+            )
             status.update(
                 f"Joplin {mode}: {active_note.get('title') or active_note.get('id')}"
-                f"{dirty}{lock_text}"
+                f"{dirty}{lock_text}{native_conflict_text}"
             )
 
     async def load_joplin_notes(self, agent_id: str) -> None:
@@ -27912,7 +27989,11 @@ class AgentPBXTUI(App[None]):
                 (
                     f"🔒 {note.get('title') or note_id}"
                     if self.joplin_note_is_locked(note)
-                    else str(note.get("title") or note_id)
+                    else (
+                        f"⚠ LOCAL {note.get('title') or note_id}"
+                        if self.joplin_note_is_native_conflict(note)
+                        else str(note.get("title") or note_id)
+                    )
                 ),
                 key=note_id,
             )
@@ -28037,7 +28118,15 @@ class AgentPBXTUI(App[None]):
         agent_id: str,
         note_id: str | None = None,
     ) -> bool:
-        if not self.joplin_note_is_locked(self.current_joplin_note(agent_id, note_id)):
+        note = self.current_joplin_note(agent_id, note_id)
+        if self.joplin_note_is_native_conflict(note):
+            self.notify(
+                "This is a local-only Joplin conflict recovery copy. Promote it "
+                "before editing, renaming, or deleting it.",
+                severity="warning",
+            )
+            return False
+        if not self.joplin_note_is_locked(note):
             return True
         self.notify(
             "This Joplin note is encrypted. Unlock E2EE and sync before changing it.",
@@ -28429,6 +28518,100 @@ class AgentPBXTUI(App[None]):
                 f"Joplin draft remains local; daemon persistence failed: {exc}",
                 severity="warning",
             )
+
+    @staticmethod
+    def joplin_native_conflict_promotion_title(note: Mapping[str, Any]) -> str:
+        note_id = str(note.get("id") or "")
+        base = str(note.get("title") or "Joplin-Recovery").strip()
+        suffix = f"-Recovered-{note_id[:8] or 'local'}"
+        return f"{base[: max(1, 240 - len(suffix))]}{suffix}"
+
+    async def promote_joplin_native_conflict(self, agent_id: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
+        note_id = self.selected_joplin_note_for_agent(agent_id)
+        if not note_id:
+            self.notify(
+                "Select a local Joplin conflict before promoting it.",
+                severity="warning",
+            )
+            return
+        note = self.current_joplin_note(agent_id, note_id)
+        if not self.joplin_note_is_native_conflict(note):
+            self.notify(
+                "The selected Joplin note is not a local conflict recovery copy.",
+                severity="warning",
+            )
+            return
+        if not isinstance(note, dict) or not note.get("revision") or "body" not in note:
+            await self.select_joplin_note(
+                note_id,
+                agent_id=agent_id,
+                force_refresh=True,
+            )
+            note = self.current_joplin_note(agent_id, note_id)
+        if not isinstance(note, dict) or not note.get("revision"):
+            self.notify(
+                "The local Joplin conflict could not be refreshed for promotion.",
+                severity="error",
+            )
+            return
+        target_title = self.joplin_native_conflict_promotion_title(note)
+        armed_key = f"{self.joplin_selection_key(agent_id)}:{note_id}"
+        armed_until = self.joplin_native_conflict_promote_armed_until.get(
+            armed_key,
+            0.0,
+        )
+        if time.monotonic() > armed_until:
+            self.joplin_native_conflict_promote_armed_until[armed_key] = (
+                time.monotonic() + 5.0
+            )
+            self.notify(
+                f"Promotion will create {target_title!r} and preserve the local "
+                "conflict. Select Promote Local again within 5 seconds.",
+                severity="warning",
+            )
+            return
+        self.joplin_native_conflict_promote_armed_until.pop(armed_key, None)
+        try:
+            response = await self.api_client().post(
+                self.joplin_native_conflict_promote_url_for_agent(
+                    agent_id,
+                    note_id,
+                ),
+                json={
+                    "title": target_title,
+                    "expected_revision": str(note["revision"]),
+                    "expected_original_id": (
+                        str(note.get("conflict_original_id") or "") or None
+                    ),
+                },
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self.notify(f"Joplin conflict promotion failed: {exc}", severity="error")
+            return
+        promoted = payload.get("promoted") if isinstance(payload, dict) else None
+        promoted_id = (
+            str(promoted.get("id") or "") if isinstance(promoted, dict) else ""
+        )
+        if not promoted_id:
+            self.notify(
+                "Joplin conflict promotion returned no promoted note.",
+                severity="error",
+            )
+            return
+        scope = self.joplin_selection_key(agent_id)
+        self.joplin_notes_by_agent.setdefault(scope, {})[promoted_id] = promoted
+        self.set_selected_joplin_note_for_agent(agent_id, promoted_id)
+        self.notify(
+            f"Promoted local conflict to {promoted.get('title') or promoted_id}; "
+            "synchronization is queued and the source remains preserved."
+        )
+        await self.load_joplin_notes(agent_id)
 
     async def resolve_joplin_conflict(
         self,

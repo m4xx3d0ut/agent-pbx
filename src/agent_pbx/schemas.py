@@ -1622,6 +1622,8 @@ class JoplinNoteSummary(BaseModel):
     user_updated_time: int | float | None = None
     encryption_applied: int = 0
     decryption_pending: bool = False
+    is_conflict: bool = False
+    conflict_original_id: str | None = None
 
 
 class JoplinNoteResponse(JoplinNoteSummary):
@@ -1675,6 +1677,17 @@ class JoplinConflictResolveRequest(BaseModel):
         "save_conflict_copy",
         "overwrite",
     ]
+
+
+class JoplinNativeConflictPromoteRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+    expected_revision: str = Field(min_length=1, max_length=128)
+    expected_original_id: str | None = Field(default=None, max_length=120)
+
+
+class JoplinNativeConflictPromoteResponse(BaseModel):
+    source: JoplinNoteResponse
+    promoted: JoplinNoteResponse
 
 
 class JoplinLogAppendRequest(BaseModel):

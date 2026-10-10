@@ -148,6 +148,8 @@ from .schemas import (
     JoplinEditStartRequest,
     JoplinLogAppendRequest,
     JoplinLogResponse,
+    JoplinNativeConflictPromoteRequest,
+    JoplinNativeConflictPromoteResponse,
     JoplinNoteCreateRequest,
     JoplinNoteResponse,
     JoplinNoteSummary,
@@ -2193,6 +2195,27 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             client_id=payload.client_id,
         )
 
+    @app.post(
+        "/v1/projects/{project}/joplin/notes/{note_id}/promote-conflict",
+        response_model=JoplinNativeConflictPromoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def promote_project_joplin_native_conflict(
+        project: str,
+        note_id: str,
+        payload: JoplinNativeConflictPromoteRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        joplin = require_joplin(request)
+        return await run_joplin_call(
+            joplin.promote_native_conflict_for_project,
+            project,
+            note_id,
+            title=payload.title,
+            expected_revision=payload.expected_revision,
+            expected_original_id=payload.expected_original_id,
+        )
+
     @app.put(
         "/v1/projects/{project}/joplin/notes/{note_id}",
         response_model=JoplinNoteResponse,
@@ -2319,6 +2342,29 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             agent,
             note_id,
             client_id=payload.client_id,
+        )
+
+    @app.post(
+        "/v1/agents/{agent_id}/joplin/notes/{note_id}/promote-conflict",
+        response_model=JoplinNativeConflictPromoteResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def promote_agent_joplin_native_conflict(
+        agent_id: str,
+        note_id: str,
+        payload: JoplinNativeConflictPromoteRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        agent = require_agent(store, agent_id)
+        joplin = require_joplin(request)
+        return await run_joplin_call(
+            joplin.promote_native_conflict_for_agent,
+            agent,
+            note_id,
+            title=payload.title,
+            expected_revision=payload.expected_revision,
+            expected_original_id=payload.expected_original_id,
         )
 
     @app.put(

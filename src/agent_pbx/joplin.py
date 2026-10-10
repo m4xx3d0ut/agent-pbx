@@ -167,6 +167,18 @@ class JoplinEncryptedNoteError(JoplinApiError):
         self.note_id = note_id
 
 
+class JoplinNativeConflictError(JoplinApiError):
+    def __init__(self, note_id: str) -> None:
+        super().__init__(
+            "Joplin note is a local conflict recovery copy and cannot be changed; "
+            "promote it to a normal note first",
+            status_code=409,
+            code="JOPLIN_NATIVE_CONFLICT_READ_ONLY",
+            retryable=False,
+        )
+        self.note_id = note_id
+
+
 class JoplinE2EELockedError(JoplinApiError):
     def __init__(self, encryption: dict[str, Any]) -> None:
         pending = int(encryption.get("pending_total") or 0)
@@ -228,6 +240,8 @@ def joplin_note_revision(note: dict[str, Any]) -> str:
         "updated_time": note.get("updated_time"),
         "user_updated_time": note.get("user_updated_time"),
         "encryption_applied": int(bool(note.get("encryption_applied"))),
+        "is_conflict": JoplinService.note_is_conflict(note),
+        "conflict_original_id": str(note.get("conflict_original_id") or ""),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -370,7 +384,7 @@ class JoplinService:
             {
                 "fields": (
                     "id,parent_id,title,created_time,updated_time,user_updated_time,"
-                    "encryption_applied"
+                    "encryption_applied,is_conflict,conflict_original_id"
                 ),
                 "order_by": "updated_time",
                 "order_dir": "DESC",
@@ -388,7 +402,8 @@ class JoplinService:
                     {
                         "fields": (
                             "id,parent_id,title,created_time,updated_time,"
-                            "user_updated_time,encryption_applied"
+                            "user_updated_time,encryption_applied,is_conflict,"
+                            "conflict_original_id"
                         ),
                         "order_by": "updated_time",
                         "order_dir": "DESC",
@@ -410,7 +425,8 @@ class JoplinService:
             params={
                 "fields": (
                     "id,parent_id,title,body,created_time,updated_time,"
-                    "user_updated_time,encryption_applied"
+                    "user_updated_time,encryption_applied,is_conflict,"
+                    "conflict_original_id"
                 )
             },
         )
@@ -426,7 +442,8 @@ class JoplinService:
             params={
                 "fields": (
                     "id,parent_id,title,body,created_time,updated_time,"
-                    "user_updated_time,encryption_applied"
+                    "user_updated_time,encryption_applied,is_conflict,"
+                    "conflict_original_id"
                 )
             },
         )
@@ -454,6 +471,31 @@ class JoplinService:
         if self.config.sync_on_write:
             self.sync()
         return self._note_response(note)
+
+    def promote_native_conflict_for_project(
+        self,
+        project: str,
+        note_id: str,
+        *,
+        title: str,
+        expected_revision: str,
+        expected_original_id: str | None = None,
+    ) -> dict[str, Any]:
+        source = self.get_note_for_project(project, note_id)
+        target_title = self._validate_native_conflict_promotion(
+            source,
+            title=title,
+            expected_revision=expected_revision,
+            expected_original_id=expected_original_id,
+            existing_notes=self.list_notes_for_project(project),
+        )
+        promoted = self.create_note_for_project(
+            project,
+            title=target_title,
+            body=str(source.get("body") or ""),
+        )
+        self._assert_promoted_note(promoted)
+        return {"source": source, "promoted": promoted}
 
     def update_note_for_project(
         self,
@@ -579,6 +621,107 @@ class JoplinService:
         if self.config.sync_on_write:
             self.sync()
         return self._note_response(note)
+
+    def promote_native_conflict_for_agent(
+        self,
+        agent: dict[str, Any],
+        note_id: str,
+        *,
+        title: str,
+        expected_revision: str,
+        expected_original_id: str | None = None,
+    ) -> dict[str, Any]:
+        source = self.get_note_for_agent(agent, note_id)
+        target_title = self._validate_native_conflict_promotion(
+            source,
+            title=title,
+            expected_revision=expected_revision,
+            expected_original_id=expected_original_id,
+            existing_notes=self.list_notes_for_agent(agent),
+        )
+        promoted = self.create_note_for_agent(
+            agent,
+            event_type="RECOVERED",
+            title=target_title,
+            body=str(source.get("body") or ""),
+        )
+        self._assert_promoted_note(promoted)
+        return {"source": source, "promoted": promoted}
+
+    @classmethod
+    def _validate_native_conflict_promotion(
+        cls,
+        source: dict[str, Any],
+        *,
+        title: str,
+        expected_revision: str,
+        expected_original_id: str | None,
+        existing_notes: list[dict[str, Any]],
+    ) -> str:
+        note_id = str(source.get("id") or "unknown")
+        if cls.note_encrypted(source):
+            raise JoplinEncryptedNoteError(note_id)
+        if not cls.note_is_conflict(source):
+            raise JoplinApiError(
+                "Joplin note is not a local conflict recovery copy",
+                status_code=409,
+                code="JOPLIN_NOTE_NOT_NATIVE_CONFLICT",
+                retryable=False,
+            )
+        if str(source.get("revision") or "") != expected_revision:
+            raise JoplinApiError(
+                "Joplin conflict recovery copy changed before promotion; refresh and retry",
+                status_code=409,
+                code="JOPLIN_CONFLICT_PROMOTION_STALE",
+                retryable=True,
+            )
+        original_id = str(source.get("conflict_original_id") or "")
+        if original_id and str(expected_original_id or "") != original_id:
+            raise JoplinApiError(
+                "Joplin conflict origin did not match the requested promotion",
+                status_code=409,
+                code="JOPLIN_CONFLICT_ORIGIN_MISMATCH",
+                retryable=False,
+            )
+        target_title = title.strip()
+        if not target_title:
+            raise JoplinApiError(
+                "Joplin conflict promotion requires a non-empty title",
+                status_code=422,
+                code="JOPLIN_CONFLICT_PROMOTION_TITLE_REQUIRED",
+                retryable=False,
+            )
+        source_title = str(source.get("title") or "").strip()
+        if target_title.casefold() == source_title.casefold():
+            raise JoplinApiError(
+                "Use a unique title for the promoted note so it cannot be confused "
+                "with the preserved conflict and encrypted original",
+                status_code=409,
+                code="JOPLIN_CONFLICT_PROMOTION_TITLE_UNCHANGED",
+                retryable=False,
+            )
+        for note in existing_notes:
+            if str(note.get("id") or "") == note_id:
+                continue
+            if str(note.get("title") or "").strip().casefold() == target_title.casefold():
+                raise JoplinApiError(
+                    f"A Joplin note already uses promotion title {target_title!r}",
+                    status_code=409,
+                    code="JOPLIN_CONFLICT_PROMOTION_TITLE_EXISTS",
+                    retryable=False,
+                )
+        return target_title
+
+    @classmethod
+    def _assert_promoted_note(cls, promoted: dict[str, Any]) -> None:
+        if cls.note_encrypted(promoted) or cls.note_is_conflict(promoted):
+            raise JoplinApiError(
+                "Joplin created the recovery note in a non-publishable state; the "
+                "source conflict remains preserved",
+                status_code=409,
+                code="JOPLIN_CONFLICT_PROMOTION_NOT_PUBLISHABLE",
+                retryable=True,
+            )
 
     def create_document(
         self,
@@ -868,10 +1011,19 @@ class JoplinService:
         except (TypeError, ValueError):
             return bool(note.get("encryption_applied"))
 
+    @staticmethod
+    def note_is_conflict(note: dict[str, Any]) -> bool:
+        try:
+            return int(note.get("is_conflict") or 0) != 0
+        except (TypeError, ValueError):
+            return bool(note.get("is_conflict"))
+
     @classmethod
     def assert_note_mutable(cls, note: dict[str, Any]) -> None:
         if cls.note_encrypted(note):
             raise JoplinEncryptedNoteError(str(note.get("id") or "unknown"))
+        if cls.note_is_conflict(note):
+            raise JoplinNativeConflictError(str(note.get("id") or "unknown"))
 
     def encryption_status(self, *, force: bool = False) -> dict[str, Any]:
         now = self.clock()
@@ -936,6 +1088,7 @@ class JoplinService:
         deadline = time.monotonic() + timeout
         while True:
             encrypted: list[str] = []
+            local_conflicts: list[str] = []
             missing: list[str] = []
             present: list[str] = []
             for note_id in targets:
@@ -943,7 +1096,12 @@ class JoplinService:
                     note = self._request(
                         "GET",
                         f"/notes/{note_id}",
-                        params={"fields": "id,encryption_applied"},
+                        params={
+                            "fields": (
+                                "id,encryption_applied,is_conflict,"
+                                "conflict_original_id"
+                            )
+                        },
                     )
                 except JoplinApiError as exc:
                     if exc.status_code == 404:
@@ -953,6 +1111,8 @@ class JoplinService:
                 present.append(note_id)
                 if self.note_encrypted(note):
                     encrypted.append(note_id)
+                if self.note_is_conflict(note):
+                    local_conflicts.append(note_id)
 
             if expect_deleted and not present:
                 return {
@@ -960,6 +1120,13 @@ class JoplinService:
                     "target_note_ids": targets,
                     "expected_deleted": True,
                 }
+            if local_conflicts and not expect_deleted:
+                raise JoplinSyncTargetError(
+                    "Joplin cannot synchronize the targeted note because it is "
+                    "a local conflict recovery copy; promote it to a normal note first",
+                    code="JOPLIN_NATIVE_CONFLICT_LOCAL_ONLY",
+                    note_ids=local_conflicts,
+                )
             if not expect_deleted and not missing and not encrypted:
                 return {
                     "state": "ready",
@@ -1107,6 +1274,10 @@ class JoplinService:
             "user_updated_time": note.get("user_updated_time"),
             "encryption_applied": int(encrypted),
             "decryption_pending": encrypted,
+            "is_conflict": JoplinService.note_is_conflict(note),
+            "conflict_original_id": (
+                str(note.get("conflict_original_id") or "") or None
+            ),
         }
 
     @classmethod
@@ -1560,6 +1731,81 @@ class JoplinGateway:
 
     def get_note_for_project(self, project: str, note_id: str) -> dict[str, Any]:
         return self.service.get_note_for_project(project, note_id)
+
+    def promote_native_conflict_for_project(
+        self,
+        project: str,
+        note_id: str,
+        *,
+        title: str,
+        expected_revision: str,
+        expected_original_id: str | None = None,
+    ) -> dict[str, Any]:
+        result = self.service.promote_native_conflict_for_project(
+            project,
+            note_id,
+            title=title,
+            expected_revision=expected_revision,
+            expected_original_id=expected_original_id,
+        )
+        promoted_id = str(result["promoted"].get("id") or "")
+        self._enqueue_write_sync(
+            "project_note_conflict_promote",
+            note_id=promoted_id,
+        )
+        self.store.append_event(
+            "joplin_native_conflict_promoted",
+            {
+                "project": project,
+                "source_note_id": note_id,
+                "source_original_id": str(
+                    result["source"].get("conflict_original_id") or ""
+                )
+                or None,
+                "promoted_note_id": promoted_id,
+                "promoted_title": str(result["promoted"].get("title") or ""),
+            },
+            project,
+        )
+        return result
+
+    def promote_native_conflict_for_agent(
+        self,
+        agent: dict[str, Any],
+        note_id: str,
+        *,
+        title: str,
+        expected_revision: str,
+        expected_original_id: str | None = None,
+    ) -> dict[str, Any]:
+        result = self.service.promote_native_conflict_for_agent(
+            agent,
+            note_id,
+            title=title,
+            expected_revision=expected_revision,
+            expected_original_id=expected_original_id,
+        )
+        promoted_id = str(result["promoted"].get("id") or "")
+        self._enqueue_write_sync(
+            "note_conflict_promote",
+            agent=agent,
+            note_id=promoted_id,
+        )
+        self.store.append_event(
+            "joplin_native_conflict_promoted",
+            {
+                "agent_id": str(agent.get("agent_id") or ""),
+                "source_note_id": note_id,
+                "source_original_id": str(
+                    result["source"].get("conflict_original_id") or ""
+                )
+                or None,
+                "promoted_note_id": promoted_id,
+                "promoted_title": str(result["promoted"].get("title") or ""),
+            },
+            str(agent.get("agent_id") or note_id),
+        )
+        return result
 
     def begin_edit_for_agent(
         self,

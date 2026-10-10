@@ -23,9 +23,11 @@ from agent_pbx.joplin import (
     JoplinE2EELockedError,
     JoplinEncryptedNoteError,
     JoplinGateway,
+    JoplinNativeConflictError,
     JoplinProfileCoordinator,
     JoplinProfileInUseError,
     JoplinSyncLockError,
+    JoplinSyncTargetError,
     JoplinScopeError,
     JoplinService,
 )
@@ -194,6 +196,84 @@ def test_joplin_encrypted_note_is_reported_as_locked_and_never_exposes_ciphertex
     with pytest.raises(JoplinEncryptedNoteError):
         service.append_to_note(str(created["id"]), "append")
     assert fake.notes[str(created["id"])]["body"] == "JED01000022000000ciphertext"
+
+
+def test_joplin_native_conflict_is_exposed_and_promoted_without_mutating_source() -> None:
+    fake = FakeJoplinApi()
+    service = make_service(fake)
+    created = service.create_note_for_project(
+        "demo",
+        title="Release Ledger",
+        body="# Preserved recovery body",
+    )
+    source_id = str(created["id"])
+    fake.notes[source_id]["is_conflict"] = 1
+    fake.notes[source_id]["conflict_original_id"] = "encrypted-original"
+    source = service.get_note_for_project("demo", source_id)
+
+    promoted = service.promote_native_conflict_for_project(
+        "demo",
+        source_id,
+        title="Release Ledger Active",
+        expected_revision=str(source["revision"]),
+        expected_original_id="encrypted-original",
+    )
+
+    assert source["is_conflict"] is True
+    assert source["conflict_original_id"] == "encrypted-original"
+    assert promoted["source"]["id"] == source_id
+    assert promoted["promoted"]["id"] != source_id
+    assert promoted["promoted"]["title"] == "Release Ledger Active"
+    assert promoted["promoted"]["body"] == "# Preserved recovery body"
+    assert promoted["promoted"]["is_conflict"] is False
+    with pytest.raises(JoplinNativeConflictError):
+        service.update_note_for_project("demo", source_id, body="overwrite")
+    with pytest.raises(JoplinNativeConflictError):
+        service.delete_note_for_project("demo", source_id)
+    with pytest.raises(JoplinNativeConflictError):
+        service.append_to_note(source_id, "append")
+    assert fake.notes[source_id]["is_conflict"] == 1
+    assert fake.notes[source_id]["title"] == "Release Ledger"
+
+
+def test_joplin_native_conflict_promotion_requires_current_provenance() -> None:
+    fake = FakeJoplinApi()
+    service = make_service(fake)
+    created = service.create_note_for_project("demo", title="Ledger", body="body")
+    source_id = str(created["id"])
+    fake.notes[source_id]["is_conflict"] = 1
+    fake.notes[source_id]["conflict_original_id"] = "original"
+    source = service.get_note_for_project("demo", source_id)
+
+    with pytest.raises(JoplinApiError) as stale:
+        service.promote_native_conflict_for_project(
+            "demo",
+            source_id,
+            title="Ledger Active",
+            expected_revision="stale",
+            expected_original_id="original",
+        )
+    assert stale.value.code == "JOPLIN_CONFLICT_PROMOTION_STALE"
+
+    with pytest.raises(JoplinApiError) as origin:
+        service.promote_native_conflict_for_project(
+            "demo",
+            source_id,
+            title="Ledger Active",
+            expected_revision=str(source["revision"]),
+            expected_original_id="wrong",
+        )
+    assert origin.value.code == "JOPLIN_CONFLICT_ORIGIN_MISMATCH"
+
+    with pytest.raises(JoplinApiError) as unchanged:
+        service.promote_native_conflict_for_project(
+            "demo",
+            source_id,
+            title="Ledger",
+            expected_revision=str(source["revision"]),
+            expected_original_id="original",
+        )
+    assert unchanged.value.code == "JOPLIN_CONFLICT_PROMOTION_TITLE_UNCHANGED"
 
 
 def test_joplin_status_counts_pending_encrypted_items() -> None:
@@ -458,6 +538,46 @@ def test_joplin_targeted_sync_fails_when_target_remains_encrypted(
 
     assert caught.value.encryption["scope"] == "sync_targets"
     assert caught.value.encryption["pending_note_ids"] == ["target-note"]
+
+
+def test_joplin_targeted_sync_rejects_local_native_conflict(
+    tmp_path: Path,
+) -> None:
+    fake = FakeJoplinApi()
+    fake.notes["target-note"] = {
+        "id": "target-note",
+        "parent_id": "target-folder",
+        "title": "Local recovery",
+        "body": "readable but local",
+        "encryption_applied": 0,
+        "is_conflict": 1,
+        "conflict_original_id": "encrypted-original",
+    }
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            e2ee_wait_seconds=0,
+        ),
+        client=fake.client(),
+    )
+    gateway = JoplinGateway(make_store(tmp_path), service)
+    gateway.profile_coordinator = SimpleNamespace(
+        run_sync=lambda *, require_decryption=True: None
+    )
+
+    with pytest.raises(JoplinSyncTargetError) as caught:
+        gateway.run_sync_job(
+            {
+                "sync_id": "sync-target",
+                "reason": "project_note_update",
+                "note_id": "target-note",
+                "note_ids": ["target-note"],
+            }
+        )
+
+    assert caught.value.code == "JOPLIN_NATIVE_CONFLICT_LOCAL_ONLY"
+    assert caught.value.note_ids == ["target-note"]
 
 
 def test_joplin_targeted_delete_sync_accepts_missing_target(tmp_path: Path) -> None:
@@ -852,6 +972,58 @@ def test_joplin_api_two_client_conflict_has_recovery_actions(
     assert "<<<<<<< LOCAL DRAFT" in detail["merged"]["body"]
     assert resolved.status_code == 200
     assert resolved.json()["conflict_copy"]["body"] == "from b"
+
+
+def test_joplin_api_promotes_native_conflict_to_preserved_normal_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeJoplinApi()
+
+    def service_factory(config: JoplinConfig) -> JoplinService:
+        return JoplinService(config, client=fake.client(), clock=lambda: 123.0)
+
+    monkeypatch.setattr("agent_pbx.api.JoplinService", service_factory)
+    app = create_app(
+        ServerConfig(
+            db_path=tmp_path / "pbx.sqlite",
+            joplin_api_url="http://joplin.local",
+            joplin_token="secret",
+        )
+    )
+    with TestClient(app) as client:
+        client.post(
+            "/v1/agents/register",
+            json={"agent_id": "agent-1", "project": "demo", "metadata": {}},
+        )
+        created = client.post(
+            "/v1/projects/demo/joplin/notes",
+            json={"title": "Ledger", "body": "recovered body"},
+        ).json()
+        source_id = str(created["id"])
+        fake.notes[source_id]["is_conflict"] = 1
+        fake.notes[source_id]["conflict_original_id"] = "encrypted-original"
+        source = client.get(
+            f"/v1/projects/demo/joplin/notes/{source_id}"
+        ).json()
+
+        response = client.post(
+            f"/v1/projects/demo/joplin/notes/{source_id}/promote-conflict",
+            json={
+                "title": "Ledger Active",
+                "expected_revision": source["revision"],
+                "expected_original_id": "encrypted-original",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"]["id"] == source_id
+    assert payload["source"]["is_conflict"] is True
+    assert payload["promoted"]["title"] == "Ledger Active"
+    assert payload["promoted"]["body"] == "recovered body"
+    assert payload["promoted"]["is_conflict"] is False
+    assert fake.notes[source_id]["is_conflict"] == 1
 
 
 def test_joplin_api_returns_locked_note_and_blocks_mutation(

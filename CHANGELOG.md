@@ -26,6 +26,10 @@
 
 ### Fixed
 
+- Identify Joplin-native conflict copies as local-only, immutable recovery
+  records; reject false-positive targeted sync completion and provide a
+  revision-guarded promotion action that creates a uniquely titled normal note
+  while preserving both the readable conflict and its encrypted original.
 - Separate targeted Joplin write health from strict profile E2EE validation,
   skip whole-profile decrypt attempts for targeted jobs, and label manual sync
   as profile validation while retaining `/joplin sync` as an alias.

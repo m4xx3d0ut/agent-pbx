@@ -45,6 +45,14 @@ base revisions and hashes; when Joplin changed after the draft began, Agent PBX
 offers review/merge, keep-Joplin, conflict-copy, or explicit overwrite paths.
 There is no silent last-writer-wins path.
 
+Joplin-native conflict copies are labeled `⚠ LOCAL` and remain read-only.
+They do not have a remote sync item, so Agent PBX rejects targeted sync jobs
+that name them instead of reporting false success. `Promote Local` or
+`/joplin promote conflict` requires a second action within five seconds, checks
+the current note revision and original-note identity, and creates a uniquely
+titled normal note with the same Markdown body. The readable conflict and its
+encrypted original remain intact for rollback and later E2EE recovery.
+
 Encrypted items appear as locked rather than empty. Mutation remains disabled
 until the dedicated Joplin profile decrypts the item. A targeted write may be
 successful when its verified note is plaintext even if an unrelated encrypted
