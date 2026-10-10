@@ -409,6 +409,34 @@ class AgentFileService:
             "error": None,
         }
 
+    def resolve_terminal_editor_target(
+        self,
+        agent: dict[str, Any],
+        *,
+        path: str,
+    ) -> tuple[Path, Path] | FileBrowserError:
+        """Resolve a terminal-editor file through the same browser policy."""
+
+        resolved = self._resolve_agent_target(agent, path)
+        if isinstance(resolved, FileBrowserError):
+            return resolved
+        root, target = resolved
+        display_path = self._display_path(root, target)
+        sensitive = self._sensitive_path_error(display_path)
+        if sensitive is not None:
+            return sensitive
+        if not target.exists():
+            return FileBrowserError("FILE_NOT_FOUND", f"path does not exist: {display_path}")
+        if not target.is_file():
+            return FileBrowserError("NOT_A_FILE", f"path is not a file: {display_path}")
+        try:
+            mode = target.stat().st_mode
+        except OSError as exc:
+            return FileBrowserError("READ_FAILED", str(exc))
+        if not stat.S_ISREG(mode):
+            return FileBrowserError("NOT_A_FILE", f"path is not a regular file: {display_path}")
+        return root, target
+
     def write_document_for_agent(
         self,
         agent: dict[str, Any],

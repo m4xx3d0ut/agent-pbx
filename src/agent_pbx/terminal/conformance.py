@@ -52,7 +52,9 @@ def run_dedicated_tmux_conformance(*, timeout: float = 5.0) -> TmuxConformanceRe
             timeout=timeout,
         )
         env=dict(os.environ)
-        env.setdefault("TERM", "xterm-256color")
+        # This PTY supplies an xterm-compatible renderer; a tool or CI shell
+        # may otherwise leak TERM=dumb into the nested tmux client.
+        env["TERM"] = "xterm-256color"
         process=PtyProcess(
             [tmux, "-L", socket_name, "-f", str(config), "attach-session", "-t", session],
             env=env,
@@ -125,7 +127,7 @@ def run_outer_tmux_conformance(*, timeout: float = 5.0) -> TmuxConformanceResult
         env = dict(os.environ)
         env.pop("TMUX", None)
         env.pop("TMUX_PANE", None)
-        env.setdefault("TERM", "xterm-256color")
+        env["TERM"] = "xterm-256color"
         process = PtyProcess(
             [*prefix, "attach-session", "-t", session],
             env=env,

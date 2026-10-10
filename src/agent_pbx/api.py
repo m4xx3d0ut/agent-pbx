@@ -52,6 +52,7 @@ from .codex.profiles import (
 from .codex.skills import ManagedSkillPackService, PersonalityOverlay
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
+from .terminal_editor import ManagedTerminalEditorService
 from .events import EventClientRegistry, EventStreamService
 from .codex.runtime import CodexRuntimeService
 from .joplin import (
@@ -128,6 +129,7 @@ from .schemas import (
     EventResponse,
     EventStreamEnvelope,
     FileDiagnosticsRequest,
+    TerminalEditorStartRequest,
     FileDiagnosticsResponse,
     FileCreateRequest,
     FileDeleteRequest,
@@ -403,6 +405,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             try:
                 yield
             finally:
+                with suppress(Exception):
+                    await asyncio.to_thread(app.state.terminal_editor.stop_all)
                 if joplin_sync_task is not None:
                     joplin_sync_task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -433,6 +437,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     )
     app.state.codex_runtime = CodexRuntimeService(store)
     app.state.files = AgentFileService()
+    app.state.terminal_editor = ManagedTerminalEditorService(
+        app.state.files,
+        runtime_root=resolved_config.db_path.parent / "editor-runtimes",
+    )
     app.state.joplin = joplin
     app.state.workerbee = WorkerBeeStatusService(
         workerbee_bin=resolved_config.workerbee_bin,
@@ -2593,6 +2601,92 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="agent not registered")
         files = request.app.state.files
         return await asyncio.to_thread(files.list_for_agent, agent, path=path)
+
+    @app.get(
+        "/v1/terminal-editor/profiles",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_token)],
+    )
+    async def terminal_editor_profile_view(request: Request) -> dict[str, Any]:
+        return request.app.state.terminal_editor.profile_view()
+
+    @app.post(
+        "/v1/agents/{agent_id}/terminal-editor/preview",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_controller)],
+    )
+    async def preview_terminal_editor(
+        agent_id: str,
+        payload: TerminalEditorStartRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.terminal_editor.preview,
+                agent,
+                path=payload.path,
+                profile_id=payload.profile_id,
+                line=payload.line,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v1/agents/{agent_id}/terminal-editor",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_controller)],
+    )
+    async def start_terminal_editor(
+        agent_id: str,
+        payload: TerminalEditorStartRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        agent = store.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.terminal_editor.start,
+                agent,
+                path=payload.path,
+                profile_id=payload.profile_id,
+                line=payload.line,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get(
+        "/v1/agents/{agent_id}/terminal-editor",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_token)],
+    )
+    async def terminal_editor_status(
+        agent_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        if store.get_agent(agent_id) is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        return await asyncio.to_thread(request.app.state.terminal_editor.status, agent_id)
+
+    @app.delete(
+        "/v1/agents/{agent_id}/terminal-editor",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_controller)],
+    )
+    async def stop_terminal_editor(
+        agent_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        if store.get_agent(agent_id) is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        return await asyncio.to_thread(request.app.state.terminal_editor.stop, agent_id)
 
     @app.get(
         "/v1/agents/{agent_id}/files/preview",

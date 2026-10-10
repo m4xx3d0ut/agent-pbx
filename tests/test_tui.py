@@ -3172,6 +3172,70 @@ async def test_tui_discards_embedded_terminal_attach_after_selection_changes(
     assert app.embedded_terminal_agent_id is None
 
 
+async def test_tui_managed_editor_owns_printable_keys_but_not_plain_f_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    written: list[bytes] = []
+    invoked: list[str] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    async def no_status(_agent_id: str) -> None:
+        return None
+
+    app.load_terminal_editor_status = no_status  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        app,
+        "action_toggle_star_agent",
+        lambda: invoked.append("toggle-star"),
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        app.selected_agent_id = "agent-a"
+        app.terminal_editor_agent_id = "agent-a"
+        terminal = app.query_one("#pbx-editor-terminal", PbxTerminalSurface)
+        terminal.process = FakeProcess()  # type: ignore[assignment]
+        terminal.target = "editor:agent-a:%41"
+        app.activate_agent_tab("editor-tab")
+        app.apply_terminal_editor_class()
+        terminal.focus()
+        await pilot.pause()
+
+        await app.on_event(Key("p", "p"))
+        await app.on_event(Key("h", "h"))
+        await app.on_event(Key("ctrl+c", None))
+        app.on_key(Key("f15", None))
+        await pilot.pause()
+
+        assert written == [function_key_sequence(3), b"p", b"h", b"\x03"]
+        assert invoked == []
+
+        await pilot.press("f3")
+        await pilot.pause()
+        assert app.focused is not terminal
+        assert app.focused.__class__.__name__ == "ContentTabs"
+
+    assert terminal.attached is False
+
+
 async def test_tui_direct_entity_switch_keeps_native_surface_during_handoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

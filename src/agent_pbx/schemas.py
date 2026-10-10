@@ -1856,6 +1856,12 @@ class FileDiagnosticsRequest(BaseModel):
     tool: Literal["auto", "ruff", "mypy"] = "auto"
 
 
+class TerminalEditorStartRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=1000)
+    profile_id: str | None = Field(default=None, max_length=64)
+    line: int | None = Field(default=None, ge=1, le=10_000_000)
+
+
 class FileDiagnostic(BaseModel):
     path: str
     line: int

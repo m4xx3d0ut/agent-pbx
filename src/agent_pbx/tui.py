@@ -5171,6 +5171,23 @@ class AgentPBXTUI(App[None]):
         scrollbar-background: $surface;
     }
 
+    #pbx-editor-terminal {
+        display: none;
+        height: 1fr;
+        min-height: 16;
+        border: tall $accent;
+        background: $surface;
+    }
+
+    Screen.terminal-editor #editor,
+    Screen.terminal-editor #editor-diagnostics {
+        display: none;
+    }
+
+    Screen.terminal-editor #pbx-editor-terminal {
+        display: block;
+    }
+
     #editor-diagnostics {
         height: 6;
         min-height: 3;
@@ -5967,6 +5984,8 @@ class AgentPBXTUI(App[None]):
         self.editor_rendering = False
         self.editor_rendered_agent_id: str | None = None
         self.editor_fullscreen = False
+        self.terminal_editor_runtime_by_agent: dict[str, dict[str, Any]] = {}
+        self.terminal_editor_agent_id: str | None = None
         self.active_agent_tab_by_agent: dict[str, str] = {}
         self.navigation_history = NavigationHistory()
         self.navigation_recording_suspended = 0
@@ -6091,6 +6110,33 @@ class AgentPBXTUI(App[None]):
                 return None
         return surface
 
+    def writable_terminal_surface(
+        self,
+        *,
+        require_focus: bool = False,
+    ) -> PbxTerminalSurface | None:
+        """Return the focused Codex or managed-editor terminal input owner."""
+
+        surface = self.embedded_terminal_surface(require_focus=require_focus)
+        if surface is not None:
+            return surface
+        if (
+            self.active_agent_tab != "editor-tab"
+            or not self.selected_agent_id
+            or self.terminal_editor_agent_id != self.selected_agent_id
+        ):
+            return None
+        surface = self.query_one_or_none("#pbx-editor-terminal", PbxTerminalSurface)
+        if surface is None or not surface.attached or surface.read_only_client:
+            return None
+        if require_focus:
+            try:
+                if self.focused is not surface:
+                    return None
+            except ScreenStackError:
+                return None
+        return surface
+
     async def _check_bindings(self, key: str, priority: bool = False) -> bool:
         """Route focused-terminal keys through the central PBX ownership policy.
 
@@ -6102,7 +6148,7 @@ class AgentPBXTUI(App[None]):
 
         if (
             priority
-            and self.embedded_terminal_surface(require_focus=True) is not None
+            and self.writable_terminal_surface(require_focus=True) is not None
             and not self.pbx_owns_key_under_terminal_focus(key)
         ):
             return False
@@ -7113,8 +7159,11 @@ class AgentPBXTUI(App[None]):
 
     def editor_hotkeys_text(self) -> str:
         if self.is_tiny_layout() or self.low_power_enabled:
-            return "F9 full | Save/Revert/Close buttons | copy path/text | check"
-        return "F9 fullscreen | Save/Revert/Close buttons | Copy Path/Text | Check"
+            return "F3 tabs | F9 full | Terminal native editor | Save/Revert/Close"
+        return (
+            "F3 Tabs | Shift+F keys to editor | F9 fullscreen | "
+            "Terminal native editor | Save/Revert/Close | Copy Path/Text | Check"
+        )
 
     def joplin_hotkeys_text(self) -> str:
         return JOPLIN_SHORTCUT_HINT
@@ -7403,6 +7452,10 @@ class AgentPBXTUI(App[None]):
                             soft_wrap=False,
                             tab_behavior="indent",
                         )
+                        yield PbxTerminalSurface(
+                            id="pbx-editor-terminal",
+                            scroll_mode=EMBEDDED_SCROLL_MODE_CHILD,
+                        )
                         yield NavigationTextArea(
                             "Diagnostics: not run",
                             id="editor-diagnostics",
@@ -7414,6 +7467,8 @@ class AgentPBXTUI(App[None]):
                             yield Button("Copy Path", id="editor-copy-path")
                             yield Button("Copy Text", id="editor-copy-text")
                             yield Button("Check", id="editor-check")
+                            yield Button("Terminal", id="editor-terminal")
+                            yield Button("Stop Term", id="editor-terminal-stop")
                             yield Button("Close", id="editor-close")
                             yield Button("Full F9", id="editor-fullscreen")
                         yield Static(self.editor_hotkeys_text(), id="editor-hotkeys")
@@ -7801,6 +7856,11 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/editor copy path", "Copy the current editor file path", self.palette_editor_copy_path)
         yield SystemCommand("/editor copy text", "Copy the current editor text", self.palette_editor_copy_text)
         yield SystemCommand("/editor fullscreen", "Toggle editor fullscreen", self.palette_editor_fullscreen)
+        yield SystemCommand("/editor terminal", "Open the current file in a managed terminal editor", self.palette_editor_terminal)
+        yield SystemCommand("/editor terminal nvim", "Open the current file in Neovim", self.palette_editor_terminal_nvim)
+        yield SystemCommand("/editor terminal vim", "Open the current file in Vim", self.palette_editor_terminal_vim)
+        yield SystemCommand("/editor terminal nano", "Open the current file in Nano", self.palette_editor_terminal_nano)
+        yield SystemCommand("/editor terminal close", "Stop the managed terminal editor", self.palette_editor_terminal_close)
         yield SystemCommand("/editor close", "Close the current editor file", self.palette_editor_close)
         yield SystemCommand("/editor focus", "Focus the Editor tab", self.palette_editor_focus)
         yield SystemCommand("/editor reveal", "Reveal the current editor file in Files", self.palette_editor_reveal)
@@ -8873,6 +8933,38 @@ class AgentPBXTUI(App[None]):
 
     def palette_editor_fullscreen(self) -> None:
         self.action_toggle_editor_fullscreen()
+
+    def palette_editor_terminal(self) -> None:
+        self._palette_editor_terminal_profile(None)
+
+    def palette_editor_terminal_nvim(self) -> None:
+        self._palette_editor_terminal_profile("nvim")
+
+    def palette_editor_terminal_vim(self) -> None:
+        self._palette_editor_terminal_profile("vim")
+
+    def palette_editor_terminal_nano(self) -> None:
+        self._palette_editor_terminal_profile("nano")
+
+    def _palette_editor_terminal_profile(self, profile_id: str | None) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.start_terminal_editor(agent_id, profile_id=profile_id),
+            name="palette-editor-terminal",
+            exclusive=True,
+        )
+
+    def palette_editor_terminal_close(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.stop_terminal_editor(agent_id),
+            name="palette-editor-terminal-close",
+            exclusive=True,
+        )
 
     def palette_editor_close(self) -> None:
         agent_id = self.palette_agent_id()
@@ -10284,7 +10376,17 @@ class AgentPBXTUI(App[None]):
             if target is None:
                 target = self.query_one_or_none("#files", DataTable)
         elif self.active_agent_tab == "editor-tab":
-            target = self.query_one_or_none("#editor", TextArea)
+            terminal = self.query_one_or_none(
+                "#pbx-editor-terminal", PbxTerminalSurface
+            )
+            if (
+                terminal is not None
+                and terminal.attached
+                and self.terminal_editor_agent_id == self.selected_agent_id
+            ):
+                target = terminal
+            else:
+                target = self.query_one_or_none("#editor", TextArea)
         elif self.active_agent_tab == "workerbee-tab":
             target = self.query_one_or_none("#workerbee-detail", TextArea)
         elif self.active_agent_tab == "pull-requests-tab":
@@ -12394,10 +12496,14 @@ class AgentPBXTUI(App[None]):
         *,
         focused: Widget | None = None,
     ) -> bool:
-        if self.active_agent_tab != "latest-tab" or not self.selected_agent_id:
+        if not self.selected_agent_id:
             return False
         focused_id = str(getattr(focused, "id", "") or "")
-        if focused_id not in {"tmux-stream", "pbx-terminal-surface"}:
+        if focused_id not in {
+            "tmux-stream",
+            "pbx-terminal-surface",
+            "pbx-editor-terminal",
+        }:
             return False
         translated = self.function_key_passthrough.translate(
             [event.key, getattr(event, "name", ""), *(event.aliases or [])]
@@ -12406,15 +12512,15 @@ class AgentPBXTUI(App[None]):
             return False
         event.stop()
         event.prevent_default()
-        terminal = self.query_one_or_none(
-            "#pbx-terminal-surface", PbxTerminalSurface
-        )
+        terminal = self.writable_terminal_surface(require_focus=True)
         if (
-            focused_id == "pbx-terminal-surface"
+            focused_id in {"pbx-terminal-surface", "pbx-editor-terminal"}
             and terminal is not None
             and terminal.attached
             and terminal.write(translated.sequence)
         ):
+            return True
+        if focused_id == "pbx-editor-terminal":
             return True
         self.run_worker(
             self.send_key_to_tmux(
@@ -13530,6 +13636,12 @@ class AgentPBXTUI(App[None]):
             )
         if prior_tab == "joplin-tab" and activated_tab != "joplin-tab":
             self.remember_joplin_reader_position()
+        if prior_tab == "editor-tab" and activated_tab != "editor-tab":
+            self.run_async_worker(
+                self.detach_terminal_editor_surface,
+                name="terminal-editor-tab-detach",
+                exclusive=True,
+            )
         self.active_agent_tab = activated_tab
         if agent_id:
             self.active_agent_tab_by_agent[agent_id] = self.active_agent_tab
@@ -13583,6 +13695,11 @@ class AgentPBXTUI(App[None]):
             )
         if self.active_agent_tab == "editor-tab" and agent_id:
             self.render_editor_for_agent(agent_id)
+            self.run_async_worker(
+                lambda agent_id=agent_id: self.load_terminal_editor_status(agent_id),
+                name="terminal-editor-status",
+                exclusive=True,
+            )
         if self.active_agent_tab == "operator-kb-tab" and agent_id:
             self.run_async_worker(
                 lambda agent_id=agent_id: self.load_operator_kb(agent_id),
@@ -13679,6 +13796,7 @@ class AgentPBXTUI(App[None]):
                 release_lease=True,
                 preserve_transition=smooth_terminal_handoff,
             )
+            await self.detach_terminal_editor_surface()
             self.save_current_agent_pane_state(previous_agent_id)
         was_compact_home = self.is_compact_layout() and self.compact_view == "home"
         self.selected_agent_id = agent_id
@@ -13858,6 +13976,7 @@ class AgentPBXTUI(App[None]):
             await self.load_agent_files(agent_id)
         elif self.active_agent_tab == "editor-tab":
             self.render_editor_for_agent(agent_id)
+            await self.load_terminal_editor_status(agent_id)
         elif self.active_agent_tab == "workerbee-tab":
             await self.load_workerbee_status(agent_id)
         elif self.active_agent_tab == "pull-requests-tab":
@@ -15587,6 +15706,12 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "editor-check":
             await self.check_editor_document(self.selected_agent_id)
+            return
+        if event.button.id == "editor-terminal":
+            await self.start_terminal_editor(self.selected_agent_id)
+            return
+        if event.button.id == "editor-terminal-stop":
+            await self.stop_terminal_editor(self.selected_agent_id)
             return
         if event.button.id == "editor-close":
             await self.request_close_editor_document(self.selected_agent_id)
@@ -26267,6 +26392,193 @@ class AgentPBXTUI(App[None]):
         self.render_editor_for_agent(agent_id)
         self.set_editor_diagnostics("Diagnostics: not run")
         self.focus_right_pane_content()
+
+    def apply_terminal_editor_class(self) -> None:
+        surface = self.query_one_or_none(
+            "#pbx-editor-terminal", PbxTerminalSurface
+        )
+        active = bool(
+            self.active_agent_tab == "editor-tab"
+            and self.selected_agent_id
+            and self.terminal_editor_agent_id == self.selected_agent_id
+            and surface is not None
+            and surface.attached
+        )
+        try:
+            screens = list(self.screen_stack)
+        except ScreenStackError:
+            return
+        for screen in screens:
+            screen.set_class(active, "terminal-editor")
+
+    async def attach_terminal_editor(
+        self,
+        agent_id: str,
+        runtime: dict[str, Any],
+    ) -> bool:
+        if (
+            agent_id != self.selected_agent_id
+            or self.active_agent_tab != "editor-tab"
+            or not runtime.get("running")
+        ):
+            return False
+        surface = self.query_one_or_none(
+            "#pbx-editor-terminal", PbxTerminalSurface
+        )
+        if surface is None:
+            return False
+        target = f"editor:{agent_id}:{runtime.get('pane_id')}"
+        if (
+            self.terminal_editor_agent_id == agent_id
+            and surface.attached
+            and surface.target == target
+        ):
+            surface.sync_geometry()
+            self.apply_terminal_editor_class()
+            return True
+        await self.detach_terminal_editor_surface()
+        if agent_id != self.selected_agent_id or self.active_agent_tab != "editor-tab":
+            return False
+        self.terminal_editor_agent_id = agent_id
+        self.terminal_editor_runtime_by_agent[agent_id] = dict(runtime)
+        try:
+            # Reveal the terminal before starting its PTY so the nested tmux
+            # client receives the real Editor-tab rectangle rather than 80x24.
+            for screen in list(self.screen_stack):
+                screen.set_class(True, "terminal-editor")
+            if not await self.wait_for_embedded_terminal_layout(surface):
+                raise RuntimeError(
+                    "managed terminal editor did not receive a visible layout rectangle"
+                )
+            if agent_id != self.selected_agent_id or self.active_agent_tab != "editor-tab":
+                raise RuntimeError("editor target changed while attaching")
+            surface.attach(
+                tmux_client_attach_command(runtime),
+                target=target,
+                cwd=str(runtime.get("root") or Path.home()),
+            )
+            surface.set_scroll_mode(EMBEDDED_SCROLL_MODE_CHILD)
+        except Exception as exc:
+            surface.detach()
+            self.terminal_editor_agent_id = None
+            self.apply_terminal_editor_class()
+            self.notify(f"Unable to attach terminal editor: {exc}", severity="error")
+            return False
+        self.apply_terminal_editor_class()
+        self.set_editor_status(
+            f"Editor: terminal {runtime.get('profile_id')} · {runtime.get('path')}"
+        )
+        surface.focus()
+        return True
+
+    async def detach_terminal_editor_surface(self) -> None:
+        surface = self.query_one_or_none(
+            "#pbx-editor-terminal", PbxTerminalSurface
+        )
+        if surface is not None:
+            surface.detach()
+        self.terminal_editor_agent_id = None
+        self.apply_terminal_editor_class()
+
+    async def load_terminal_editor_status(self, agent_id: str) -> None:
+        try:
+            response = await self.api_client().get(
+                f"/v1/agents/{agent_id}/terminal-editor",
+                headers=auth_headers(self.token),
+                timeout=10,
+            )
+            response.raise_for_status()
+            runtime = response.json()
+        except Exception as exc:
+            self.notify(f"Unable to load terminal editor: {exc}", severity="warning")
+            return
+        if not runtime.get("running"):
+            self.terminal_editor_runtime_by_agent.pop(agent_id, None)
+            if self.terminal_editor_agent_id == agent_id:
+                await self.detach_terminal_editor_surface()
+            return
+        self.terminal_editor_runtime_by_agent[agent_id] = dict(runtime)
+        if agent_id == self.selected_agent_id and self.active_agent_tab == "editor-tab":
+            await self.attach_terminal_editor(agent_id, runtime)
+
+    async def start_terminal_editor(
+        self,
+        agent_id: str | None = None,
+        *,
+        profile_id: str | None = None,
+    ) -> bool:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        document = self.editor_document_for_agent(resolved_agent_id)
+        if not resolved_agent_id or document is None:
+            self.notify("Open a file in the editor first.", severity="warning")
+            return False
+        self.capture_editor_buffer(resolved_agent_id)
+        if resolved_agent_id in self.editor_dirty_agent_ids:
+            self.notify(
+                "Save or revert Textual editor changes before opening a terminal editor.",
+                severity="warning",
+            )
+            return False
+        path = str(document.get("path") or "")
+        if not path:
+            self.notify("Editor file path is missing.", severity="warning")
+            return False
+        payload: dict[str, Any] = {
+            "path": path,
+            "line": self.selected_file_line_by_agent.get(resolved_agent_id),
+        }
+        if profile_id:
+            payload["profile_id"] = profile_id
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{resolved_agent_id}/terminal-editor",
+                json=payload,
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            runtime = response.json()
+        except Exception as exc:
+            self.notify(f"Unable to start terminal editor: {exc}", severity="error")
+            return False
+        self.terminal_editor_runtime_by_agent[resolved_agent_id] = dict(runtime)
+        self.activate_agent_tab("editor-tab")
+        attached = await self.attach_terminal_editor(resolved_agent_id, runtime)
+        if attached:
+            self.notify(
+                f"Managed {runtime.get('profile_id') or 'terminal'} editor opened."
+            )
+        return attached
+
+    async def stop_terminal_editor(self, agent_id: str | None = None) -> bool:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if not resolved_agent_id:
+            self.notify("Select an Agent or Operator first.", severity="warning")
+            return False
+        runtime = self.terminal_editor_runtime_by_agent.get(resolved_agent_id, {})
+        path = str(runtime.get("path") or "")
+        try:
+            response = await self.api_client().delete(
+                f"/v1/agents/{resolved_agent_id}/terminal-editor",
+                headers=auth_headers(self.token),
+                timeout=15,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"Unable to stop terminal editor: {exc}", severity="error")
+            return False
+        if self.terminal_editor_agent_id == resolved_agent_id:
+            await self.detach_terminal_editor_surface()
+        self.terminal_editor_runtime_by_agent.pop(resolved_agent_id, None)
+        if path and self.editor_document_for_agent(resolved_agent_id) is not None:
+            await self.open_editor_for_agent(resolved_agent_id, path=path)
+        self.notify(
+            "Managed terminal editor stopped."
+            if result.get("stopped")
+            else "No managed terminal editor was running."
+        )
+        return True
 
     async def save_editor_document(self, agent_id: str | None = None) -> bool:
         resolved_agent_id = agent_id or self.selected_agent_id
