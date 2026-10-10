@@ -13089,6 +13089,9 @@ class AgentPBXTUI(App[None]):
     ) -> None:
         if event.tabbed_content.id != "agent-tabs":
             return
+        prior_tab = self.active_agent_tab
+        if prior_tab == "joplin-tab" and str(event.pane.id) != "joplin-tab":
+            self.remember_joplin_reader_position()
         self.active_agent_tab = str(event.pane.id)
         agent_id = self.selected_agent_id
         if agent_id:
@@ -13158,6 +13161,8 @@ class AgentPBXTUI(App[None]):
         agent_id = agent_id or self.selected_agent_id
         if not agent_id:
             return
+        if self.active_agent_tab == "joplin-tab":
+            self.remember_joplin_reader_position()
         self.active_agent_tab_by_agent[agent_id] = self.active_agent_tab
         if self.selected_thread_item_id:
             self.selected_thread_item_id_by_agent[agent_id] = self.selected_thread_item_id
@@ -27020,14 +27025,103 @@ class AgentPBXTUI(App[None]):
         _ = message
         return agent_id
 
-    async def update_joplin_reader(self, markdown: str) -> None:
-        reader = self.query_one_or_none("#joplin-reader", Markdown)
+    async def update_joplin_reader(
+        self,
+        markdown: str,
+        *,
+        scope: str = "",
+        position_id: str = "",
+        revision: str = "",
+    ) -> bool:
+        reader = self.query_one_or_none("#joplin-reader", ReadingMarkdown)
+        if reader is None:
+            return False
+        source_changed = str(getattr(reader, "source_markdown", "") or "") != markdown
+        prior_identity = (
+            str(getattr(reader, "joplin_scope", "") or ""),
+            str(getattr(reader, "joplin_position_id", "") or ""),
+            str(getattr(reader, "joplin_revision", "") or ""),
+        )
+        identity = (scope, position_id, revision)
+        if not source_changed and prior_identity == identity:
+            return False
+        self.remember_joplin_reader_position()
+        if source_changed:
+            setattr(reader, "source_markdown", markdown)
+            await reader.update(markdown)
+        setattr(reader, "joplin_scope", scope)
+        setattr(reader, "joplin_position_id", position_id)
+        setattr(reader, "joplin_revision", revision)
+        self.restore_joplin_reader_position(
+            scope=scope,
+            position_id=position_id,
+            revision=revision,
+            reset_if_missing=source_changed,
+        )
+        return source_changed
+
+    def remember_joplin_reader_position(self) -> None:
+        reader = self.query_one_or_none("#joplin-reader", ReadingMarkdown)
         if reader is None:
             return
-        if str(getattr(reader, "source_markdown", "") or "") == markdown:
+        scope = str(getattr(reader, "joplin_scope", "") or "")
+        position_id = str(getattr(reader, "joplin_position_id", "") or "")
+        revision = str(getattr(reader, "joplin_revision", "") or "")
+        if not scope or not position_id or not revision:
             return
-        setattr(reader, "source_markdown", markdown)
-        await reader.update(markdown)
+        self.joplin_panel_state.remember_reader_position(
+            scope,
+            position_id,
+            revision=revision,
+            scroll_y=float(reader.scroll_y),
+            scroll_target_y=float(reader.scroll_target_y),
+        )
+
+    def restore_joplin_reader_position(
+        self,
+        *,
+        scope: str,
+        position_id: str,
+        revision: str,
+        reset_if_missing: bool,
+    ) -> None:
+        reader = self.query_one_or_none("#joplin-reader", ReadingMarkdown)
+        if reader is None:
+            return
+        position = self.joplin_panel_state.reader_position(
+            scope,
+            position_id,
+            revision=revision,
+        ) if scope and position_id and revision else None
+
+        def restore() -> None:
+            if (
+                str(getattr(reader, "joplin_scope", "") or "") != scope
+                or str(getattr(reader, "joplin_position_id", "") or "")
+                != position_id
+                or str(getattr(reader, "joplin_revision", "") or "")
+                != revision
+            ):
+                return
+            if position is None:
+                if reset_if_missing:
+                    reader.scroll_home(animate=False, immediate=True)
+                return
+            reader.scroll_y = position.scroll_y
+            reader.scroll_target_y = position.scroll_target_y
+
+        self.call_after_refresh(restore)
+
+    @classmethod
+    def joplin_reader_revision(cls, note: Mapping[str, Any] | None) -> str:
+        if not isinstance(note, Mapping):
+            return ""
+        explicit = str(note.get("revision") or note.get("body_hash") or "").strip()
+        if explicit:
+            return explicit
+        return hashlib.sha256(
+            repr(cls.joplin_note_cache_version(note)).encode("utf-8")
+        ).hexdigest()
 
     @staticmethod
     def joplin_note_cache_version(note: Mapping[str, Any] | None) -> tuple[object, ...]:
@@ -27133,6 +27227,7 @@ class AgentPBXTUI(App[None]):
             mode = "locked"
             draft = None
         if mode in {"edit", "conflict"} and draft is not None:
+            self.remember_joplin_reader_position()
             reader.styles.display = "none"
             body.styles.display = "block"
             if body.text != draft.body:
@@ -27158,7 +27253,21 @@ class AgentPBXTUI(App[None]):
                     if mode == "preview" and draft is not None
                     else str((active_note or {}).get("body") or "")
                 )
-            await self.update_joplin_reader(markdown or "_Empty Joplin note._")
+            note_id = str((active_note or {}).get("id") or "")
+            position_id = (
+                f"{note_id}:preview" if mode == "preview" and draft is not None else note_id
+            )
+            revision = (
+                f"preview:{draft.edit_id}:{hashlib.sha256(markdown.encode('utf-8')).hexdigest()}"
+                if mode == "preview" and draft is not None
+                else self.joplin_reader_revision(active_note)
+            )
+            await self.update_joplin_reader(
+                markdown or "_Empty Joplin note._",
+                scope=scope,
+                position_id=position_id,
+                revision=revision,
+            )
         if conflict_actions is not None:
             conflict_actions.styles.display = (
                 "block" if draft is not None and draft.conflict_id else "none"

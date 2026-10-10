@@ -2583,6 +2583,71 @@ async def test_tui_joplin_reader_accepts_tab_focus_and_arrow_scrolling() -> None
         assert reader.scroll_y < before + 3
 
 
+async def test_tui_joplin_reader_restores_scroll_only_for_unchanged_revision() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    long_body = "\n\n".join(
+        f"## Section {index}\n\nBody line {index}" for index in range(100)
+    )
+    note_one = {
+        "id": "note-1",
+        "title": "One",
+        "body": long_body,
+        "revision": "rev-1",
+        "updated_time": 1,
+    }
+    note_two = {
+        "id": "note-2",
+        "title": "Two",
+        "body": "\n\n".join(f"## Other {index}" for index in range(40)),
+        "revision": "rev-2",
+        "updated_time": 2,
+    }
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        app.selected_agent_id = "agent-1"
+        app.joplin_configured = True
+
+        async def keep_cached_notes(_agent_id: str) -> None:
+            return None
+
+        app.load_joplin_notes = keep_cached_notes  # type: ignore[method-assign]
+        app.activate_agent_tab("joplin-tab")
+        await pilot.pause()
+        scope = app.joplin_selection_key("agent-1")
+        app.joplin_notes_by_agent[scope] = {
+            "note-1": note_one,
+            "note-2": note_two,
+        }
+        app.set_selected_joplin_note_for_agent("agent-1", "note-1")
+        await app.render_joplin_mode("agent-1", note=note_one)
+        await pilot.pause()
+        reader = app.query_one("#joplin-reader", ReadingMarkdown)
+        reader.scroll_to(y=30, animate=False, immediate=True)
+        await pilot.pause()
+        remembered_y = float(reader.scroll_y)
+        assert remembered_y > 0
+
+        app.set_selected_joplin_note_for_agent("agent-1", "note-2")
+        await app.render_joplin_mode("agent-1", note=note_two)
+        await pilot.pause()
+        app.set_selected_joplin_note_for_agent("agent-1", "note-1")
+        await app.render_joplin_mode("agent-1", note=note_one)
+        await pilot.pause()
+        assert float(reader.scroll_y) == pytest.approx(remembered_y)
+
+        changed_note = {
+            **note_one,
+            "body": "# Revised\n\n" + long_body,
+            "revision": "rev-1-new",
+            "updated_time": 3,
+        }
+        app.joplin_notes_by_agent[scope]["note-1"] = changed_note
+        await app.render_joplin_mode("agent-1", note=changed_note)
+        await pilot.pause()
+        assert float(reader.scroll_y) == 0
+
+
 async def test_tui_joplin_encrypted_note_renders_locked_and_disables_mutation() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     note = {

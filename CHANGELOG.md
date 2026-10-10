@@ -22,6 +22,9 @@
 - Preserve cached Joplin note bodies and list geometry across unchanged sync
   refreshes, invalidate them on note revision changes, and suppress redundant
   Markdown renders that caused visible selection and reading-view jumps.
+- Keep a revision-scoped reading position for each Joplin note and preview so
+  keyboard, mouse, and Termux readers return to the same offset without
+  restoring stale positions after content changes.
 - Run Joplin's explicit E2EE decrypt pass while the managed profile is the
   sole owner, restore the validated Data API server after decrypt failures,
   and report password-required and native crypto-worker failures separately.

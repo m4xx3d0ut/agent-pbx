@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+MAX_READER_POSITIONS_PER_SCOPE = 256
+
+
 @dataclass
 class JoplinDraft:
     note_id: str
@@ -19,6 +22,13 @@ class JoplinDraft:
     merged_body: str | None = None
 
 
+@dataclass(frozen=True)
+class JoplinReaderPosition:
+    revision: str
+    scroll_y: float
+    scroll_target_y: float
+
+
 @dataclass
 class JoplinPanelState:
     notes_by_scope: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
@@ -26,6 +36,9 @@ class JoplinPanelState:
     selected_note_id: str | None = None
     mode_by_scope: dict[str, str] = field(default_factory=dict)
     drafts_by_scope: dict[str, JoplinDraft] = field(default_factory=dict)
+    reader_positions_by_scope: dict[str, dict[str, JoplinReaderPosition]] = field(
+        default_factory=dict
+    )
 
     def selected_for(self, scope: str) -> str | None:
         selected = self.selected_by_scope.get(scope)
@@ -82,6 +95,39 @@ class JoplinPanelState:
     def finish_edit(self, scope: str) -> None:
         self.drafts_by_scope.pop(scope, None)
         self.mode_by_scope[scope] = "read"
+
+    def remember_reader_position(
+        self,
+        scope: str,
+        note_id: str,
+        *,
+        revision: str,
+        scroll_y: float,
+        scroll_target_y: float,
+    ) -> None:
+        if not note_id or not revision:
+            return
+        positions = self.reader_positions_by_scope.setdefault(scope, {})
+        positions.pop(note_id, None)
+        positions[note_id] = JoplinReaderPosition(
+            revision=revision,
+            scroll_y=max(0.0, float(scroll_y)),
+            scroll_target_y=max(0.0, float(scroll_target_y)),
+        )
+        while len(positions) > MAX_READER_POSITIONS_PER_SCOPE:
+            positions.pop(next(iter(positions)))
+
+    def reader_position(
+        self,
+        scope: str,
+        note_id: str,
+        *,
+        revision: str,
+    ) -> JoplinReaderPosition | None:
+        position = self.reader_positions_by_scope.get(scope, {}).get(note_id)
+        if position is None or position.revision != revision:
+            return None
+        return position
 
     def has_dirty_draft(self, scope: str | None = None) -> bool:
         if scope is not None:

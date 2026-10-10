@@ -65,3 +65,28 @@ def test_joplin_panel_tracks_explicit_edit_preview_and_dirty_draft() -> None:
     state.finish_edit("project:demo")
     assert state.mode_for("project:demo") == "read"
     assert state.has_dirty_draft("project:demo") is False
+
+
+def test_joplin_panel_reader_position_requires_same_revision() -> None:
+    state = JoplinPanelState()
+    state.remember_reader_position(
+        "project:demo",
+        "note-1",
+        revision="rev-1",
+        scroll_y=24,
+        scroll_target_y=25,
+    )
+
+    position = state.reader_position(
+        "project:demo",
+        "note-1",
+        revision="rev-1",
+    )
+
+    assert position is not None
+    assert position.scroll_y == 24
+    assert position.scroll_target_y == 25
+    assert (
+        state.reader_position("project:demo", "note-1", revision="rev-2")
+        is None
+    )
