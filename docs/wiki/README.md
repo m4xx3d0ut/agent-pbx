@@ -28,9 +28,27 @@ Before publication, run:
 ```bash
 python scripts/check_docs.py
 python -m pytest -q tests/test_docs.py tests/test_readme.py
+agent-pbx wiki check --source docs/wiki
+agent-pbx wiki stage --source docs/wiki --output artifacts/wiki-stage \
+  --revision "$(git rev-parse HEAD)"
 ```
 
 The checker validates repository-local links, page applicability/review
 markers, public-source hygiene, and every `agent-pbx` command path shown in a
 shell block by running its safe `--help` form.
+
+Review `artifacts/wiki-stage/pages`, `_Sidebar.md`, `manifest.json`, and the
+deterministic `wiki-pages.tar`. Publication is a separate explicit action. The
+confirmation value must exactly match `stage_digest` from the reviewed
+manifest:
+
+```bash
+agent-pbx wiki publish \
+  --stage artifacts/wiki-stage \
+  --remote git@github.com:m4xx3d0ut/agent-pbx.wiki.git \
+  --confirm '<reviewed-stage-digest>'
+```
+
+The publisher updates only the staged page names and preserves unknown remote
+wiki pages. It does not delete or mirror arbitrary remote content.
 

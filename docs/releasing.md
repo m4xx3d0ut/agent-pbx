@@ -166,3 +166,26 @@ Repository wiki source lives under `docs/wiki`. Publish it only after the
 documentation gate, secret/path scan, rendered-page review, and clean-user
 walkthrough. GitHub wiki publication is a separate external action and is not
 performed by package publishing workflows.
+
+Use the guarded wiki workflow to produce the review artifact:
+
+```bash
+agent-pbx wiki check --source docs/wiki
+agent-pbx wiki stage --source docs/wiki --output artifacts/wiki-stage \
+  --revision "$(git rev-parse HEAD)"
+```
+
+Review the generated pages, sidebar, manifest, checksums, and archive. Publish
+only with the exact manifest digest and the explicit `.wiki.git` remote:
+
+```bash
+agent-pbx wiki publish \
+  --stage artifacts/wiki-stage \
+  --remote git@github.com:m4xx3d0ut/agent-pbx.wiki.git \
+  --confirm '<reviewed-stage-digest>'
+```
+
+The publisher preserves unknown remote pages; it stages and commits only the
+versioned Agent PBX page names. An empty or uninitialized GitHub Wiki still
+requires the repository owner to enable/initialize Wiki support before the
+remote can accept a clone or push.

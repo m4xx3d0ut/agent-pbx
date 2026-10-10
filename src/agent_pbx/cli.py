@@ -86,6 +86,7 @@ from .workerbee import (
     env_workerbee_cache_seconds,
     env_workerbee_timeout_seconds,
 )
+from .wiki_publish import check_wiki_source, publish_wiki_stage, stage_wiki
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
@@ -410,6 +411,37 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Must exactly match --run-id.",
     )
+
+    wiki = subcommands.add_parser(
+        "wiki", help="Check, stage, or explicitly publish the project wiki."
+    )
+    wiki_subcommands = wiki.add_subparsers(dest="wiki_command", required=True)
+    wiki_check = wiki_subcommands.add_parser(
+        "check", help="Validate versioned wiki source without external access."
+    )
+    wiki_check.add_argument("--source", type=Path, default=Path("docs/wiki"))
+    wiki_check.add_argument("--json", action="store_true")
+    wiki_stage = wiki_subcommands.add_parser(
+        "stage", help="Create deterministic, reviewable wiki publication artifacts."
+    )
+    wiki_stage.add_argument("--source", type=Path, default=Path("docs/wiki"))
+    wiki_stage.add_argument("--output", type=Path, default=Path("artifacts/wiki-stage"))
+    wiki_stage.add_argument(
+        "--repository-url", default="https://github.com/m4xx3d0ut/agent-pbx"
+    )
+    wiki_stage.add_argument("--revision", default="main")
+    wiki_stage.add_argument("--json", action="store_true")
+    wiki_publish = wiki_subcommands.add_parser(
+        "publish", help="Publish a reviewed stage to an explicit GitHub Wiki remote."
+    )
+    wiki_publish.add_argument(
+        "--stage", type=Path, default=Path("artifacts/wiki-stage")
+    )
+    wiki_publish.add_argument("--remote", required=True)
+    wiki_publish.add_argument("--branch", default="master")
+    wiki_publish.add_argument("--confirm", required=True)
+    wiki_publish.add_argument("--work-root", type=Path, default=None)
+    wiki_publish.add_argument("--json", action="store_true")
 
     codex = subcommands.add_parser("codex", help="Manage Codex integration assets.")
     codex_subcommands = codex.add_subparsers(dest="codex_command", required=True)
@@ -798,6 +830,37 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(result, dict) and result.get("returncode"):
             return int(result["returncode"])
         return 0
+
+    if args.command == "wiki":
+        try:
+            if args.wiki_command == "check":
+                check = check_wiki_source(args.source)
+                result = check.public_dict()
+                exit_code = 0 if check.ready else 1
+            elif args.wiki_command == "stage":
+                result = stage_wiki(
+                    args.source,
+                    args.output,
+                    repository_url=args.repository_url,
+                    revision=args.revision,
+                )
+                exit_code = 0
+            elif args.wiki_command == "publish":
+                result = publish_wiki_stage(
+                    args.stage,
+                    remote=args.remote,
+                    confirm=args.confirm,
+                    branch=args.branch,
+                    work_root=args.work_root,
+                )
+                exit_code = 0
+            else:  # pragma: no cover - argparse enforces subcommands
+                raise ValueError("unknown wiki command")
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return exit_code
 
     if args.command == "codex" and args.codex_command == "theme":
         try:
