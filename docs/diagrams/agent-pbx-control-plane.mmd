@@ -1,0 +1,22 @@
+flowchart LR
+    HUMAN[Engineering operator] --> PBX[Agent PBX control plane]
+
+    PBX --> ID[Durable Agents and Operators]
+    PBX --> POLICY[Policy, routing, approvals, lifecycle, audit]
+    PBX --> UI[TUI, SSH, API, WSS, MCP]
+
+    ID --> TMUX[PBX-managed tmux runtimes]
+    TMUX --> CODEX[Codex root sessions]
+    CODEX --> CHILDREN[Codex subagents]
+
+    PBX <--> WB[WorkerBee, optional]
+    WB <--> STACK[Application, platform, and infrastructure truth]
+
+    classDef primary fill:#101923,stroke:#00e5ff,color:#e6faff,stroke-width:3px;
+    classDef runtime fill:#171329,stroke:#bd7cff,color:#f5eeff,stroke-width:2px;
+    classDef evidence fill:#10231f,stroke:#5de4c7,color:#ebfff9,stroke-width:2px;
+    classDef human fill:#241d10,stroke:#ffcb6b,color:#fff7dd,stroke-width:2px;
+    class HUMAN human;
+    class PBX primary;
+    class ID,POLICY,UI,TMUX,CODEX,CHILDREN runtime;
+    class WB,STACK evidence;

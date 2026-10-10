@@ -3,7 +3,7 @@
 **A runtime-grounded Agentic Engineering Control Plane.**
 
 <p align="center">
-  <img src="docs/assets/agent-pbx-tui.gif" alt="Agent PBX v2 showing an embedded native tmux and Codex runtime, managed Agent and Operator launch, campaigns, model configuration, WorkerBee status, project workflows, and Joplin reading mode" width="1200">
+  <img src="https://raw.githubusercontent.com/m4xx3d0ut/agent-pbx/dev/docs/assets/agent-pbx-tui.gif" alt="Agent PBX v2 showing an embedded native tmux and Codex runtime, managed Agent and Operator launch, campaigns, model configuration, WorkerBee status, project workflows, and Joplin reading mode" width="1200">
 </p>
 
 Agent PBX gives engineering operators one durable control surface for Agents,
@@ -33,21 +33,14 @@ Operations**, or **Agentic StackOps**.
 - **Multiple control surfaces:** use the local TUI, SSH-native attachment,
   scoped remote clients, HTTP/WSS, and MCP against the same durable state.
 
-```mermaid
-flowchart LR
-    HUMAN[Engineering operator] --> PBX[Agent PBX control plane]
+<p align="center">
+  <a href="https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/diagrams/agent-pbx-control-plane.mmd">
+    <img src="https://raw.githubusercontent.com/m4xx3d0ut/agent-pbx/dev/docs/assets/agent-pbx-control-plane.png" alt="Agent PBX control plane connecting an engineering operator to durable Agents and Operators, policy, control surfaces, managed tmux and Codex runtimes, and optional WorkerBee runtime truth" width="1200">
+  </a>
+</p>
 
-    PBX --> ID[Durable Agents and Operators]
-    PBX --> POLICY[Policy, routing, approvals, lifecycle, audit]
-    PBX --> UI[TUI, SSH, API, WSS, MCP]
-
-    ID --> TMUX[PBX-managed tmux runtimes]
-    TMUX --> CODEX[Codex root sessions]
-    CODEX --> CHILDREN[Codex subagents]
-
-    PBX <--> WB[WorkerBee, optional]
-    WB <--> STACK[Application, platform, and infrastructure truth]
-```
+The diagram's maintained [Mermaid source](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/diagrams/agent-pbx-control-plane.mmd)
+is tracked with the repository.
 
 | Layer | Owns |
 |---|---|

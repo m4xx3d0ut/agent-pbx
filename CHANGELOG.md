@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Render the public hero and architecture visuals on PyPI by using absolute
+  HTTPS asset URLs, while retaining the architecture's maintained Mermaid
+  source in the repository.
 - Run Joplin's explicit E2EE decrypt pass while the managed profile is the
   sole owner, restore the validated Data API server after decrypt failures,
   and report password-required and native crypto-worker failures separately.
