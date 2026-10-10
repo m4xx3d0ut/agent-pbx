@@ -31,6 +31,12 @@ Codex. Terminals that encode those combinations as F13 through F24 are also
 recognized. Therefore F2 always means PBX Events and Shift+F2 opens Codex
 warnings.
 
+After F3 focuses the right-side tab row, Shift+F1 through Shift+F11 selects
+Latest, Codex, Thread, Files, Editor, WorkerBee, PRs, Issues, Campaigns, KB, or
+Joplin in that semantic order. The same focused row accepts the portable
+fallback `1` through `9`, `0`, and `-`. These keys are scoped to the tab row;
+inside Codex or a managed editor they retain their child-terminal meaning.
+
 Navigation history is per TUI client and is not persisted. It records stable
 entity and tab identities rather than table row numbers. Hidden, deleted, or
 unavailable destinations are skipped safely. `/navigation back` and
@@ -75,11 +81,20 @@ terminal editor. Save or revert a dirty Textual buffer, then use `Open Term` or
 default; `/editor terminal nvim`, `/editor terminal vim`, and
 `/editor terminal nano` select one explicitly. `/editor terminal close` stops
 only that editor runtime and reloads the file through the guarded Editor path.
+An active Neovim gets a private RPC socket, so opening another approved project
+file reuses the same Neovim process, pane, and project-rooted workspace.
 
 Terminal editor input follows native terminal ownership. Plain function keys
 remain PBX navigation, while modified function keys and ordinary editor input
 reach the embedded editor. Each editor uses an editor-only tmux server and
-cannot reuse or mutate a Codex runtime mapping.
+cannot reuse or mutate a Codex runtime mapping. Agent PBX persists the editor's
+tmux socket, pane, PID/start-time evidence, root, profile, and RPC identity.
+Daemon or TUI restart adopts the runtime only when every identity check still
+matches. A stale mapping cannot signal an arbitrary process; use
+`/editor terminal forget` to remove the verified dead record. Daemon shutdown
+detaches editor runtimes by default. Set
+`AGENT_PBX_TERMINAL_EDITOR_SHUTDOWN_POLICY=stop` only when daemon shutdown
+should explicitly end managed editors.
 
 ## WorkerBee backend transactions
 

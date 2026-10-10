@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Persist managed editor runtime identity across daemon/TUI restarts, adopt
+  verified editor panes safely, and route additional project files into an
+  active Neovim through its private RPC socket.
+- Add a combined Codex/editor runtime-bundle status view and preserve editor
+  processes on daemon shutdown by default while retaining explicit stop and
+  stale-record forget controls.
+- Add focus-scoped right-tab shortcuts: F3 followed by Shift+F1–F11, with a
+  portable `1..9`, `0`, `-` fallback that never captures terminal input.
+
 ## v2.2.0 - 2026-10-10
 
 ### Highlights

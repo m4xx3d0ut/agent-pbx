@@ -477,6 +477,20 @@ AGENT_JUMP_KEYS = {
     "9": 8,
     "0": 9,
 }
+RIGHT_TAB_SHORTCUTS = (
+    ("latest-tab", "Latest"),
+    ("codex-tab", "Codex"),
+    ("thread-tab", "Thread"),
+    ("files-tab", "Files"),
+    ("editor-tab", "Editor"),
+    ("workerbee-tab", "WorkerBee"),
+    ("pull-requests-tab", "PRs"),
+    ("issues-tab", "Issues"),
+    ("campaigns-tab", "Campaigns"),
+    ("operator-kb-tab", "KB"),
+    ("joplin-tab", "Joplin"),
+)
+RIGHT_TAB_PORTABLE_KEYS = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-")
 MOUSE_FOCUS_TARGET_IDS = {
     "agents",
     "operators",
@@ -646,6 +660,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/editor terminal vim",
     "/editor terminal nano",
     "/editor terminal close",
+    "/editor terminal forget",
     "/workerbee",
     "/workerbee preflight",
     "/workerbee switch oss",
@@ -6955,6 +6970,11 @@ class AgentPBXTUI(App[None]):
                 "- Ctrl+T toggles the selected Latest tmux surface",
                 "- Ctrl+P command palette",
                 "",
+                "Right-side tabs after F3 focuses the tab row:",
+                "- Shift+F1..F11 select Latest through Joplin",
+                "- 1..9, 0, - provide the portable tab-row fallback",
+                "- Shift+F keys still reach the child while a terminal owns focus",
+                "",
                 "Codex terminal input:",
                 "- Enter submit",
                 "- Ctrl+J newline (portable canonical binding)",
@@ -7288,6 +7308,12 @@ class AgentPBXTUI(App[None]):
                 ActionDefinition("focus.agents", "Agents", "f1"),
                 ActionDefinition("focus.events", "Events", "f2"),
                 ActionDefinition("focus.tabs", "Tabs", "f3"),
+                ActionDefinition(
+                    "focus.tab_shortcuts",
+                    "Choose right tab",
+                    "F3 then Shift+F1..F11 or 1..0,-",
+                    focus_scope="tabs",
+                ),
                 ActionDefinition("focus.input", "Input", "f4"),
                 ActionDefinition("focus.operators", "Operators", "f5"),
                 ActionDefinition("operator.previous_fork", "Previous Fork", "f6"),
@@ -7976,6 +8002,11 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/editor terminal vim", "Open the current file in Vim", self.palette_editor_terminal_vim)
         yield SystemCommand("/editor terminal nano", "Open the current file in Nano", self.palette_editor_terminal_nano)
         yield SystemCommand("/editor terminal close", "Stop the managed terminal editor", self.palette_editor_terminal_close)
+        yield SystemCommand(
+            "/editor terminal forget",
+            "Forget a stale managed terminal editor mapping",
+            self.palette_editor_terminal_forget,
+        )
         yield SystemCommand("/editor close", "Close the current editor file", self.palette_editor_close)
         yield SystemCommand("/editor focus", "Focus the Editor tab", self.palette_editor_focus)
         yield SystemCommand("/editor reveal", "Reveal the current editor file in Files", self.palette_editor_reveal)
@@ -9081,6 +9112,16 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.stop_terminal_editor(agent_id),
             name="palette-editor-terminal-close",
+            exclusive=True,
+        )
+
+    def palette_editor_terminal_forget(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.forget_terminal_editor(agent_id),
+            name="palette-editor-terminal-forget",
             exclusive=True,
         )
 
@@ -12606,6 +12647,8 @@ class AgentPBXTUI(App[None]):
             focused = None
         if self.handle_function_key_passthrough(event, focused=focused):
             return
+        if self.handle_right_tab_shortcut(event, focused=focused):
+            return
         if self.handle_joplin_shortcut_key(event, focused=focused):
             return
         if event.key == "space" and thread is not None and focused is thread:
@@ -12672,6 +12715,54 @@ class AgentPBXTUI(App[None]):
             name=f"terminal-{translated.child_key}-passthrough",
             exclusive=False,
         )
+        return True
+
+    def handle_right_tab_shortcut(
+        self,
+        event: Key,
+        *,
+        focused: Widget | None = None,
+    ) -> bool:
+        """Select a semantic right-side tab only while the tab row owns focus."""
+
+        tabbed = self.query_one_or_none("#agent-tabs", TabbedContent)
+        if tabbed is None:
+            return False
+        try:
+            tab_row = tabbed.query_one(Tabs)
+        except NoMatches:
+            return False
+        if focused is not tab_row:
+            return False
+
+        target_index: int | None = None
+        translated = self.function_key_passthrough.translate(
+            [event.key, getattr(event, "name", ""), *(event.aliases or [])]
+        )
+        if translated is not None:
+            target_index = int(translated.child_key.removeprefix("f")) - 1
+        else:
+            portable = str(event.character or event.key or "").strip().lower()
+            if portable in RIGHT_TAB_PORTABLE_KEYS:
+                target_index = RIGHT_TAB_PORTABLE_KEYS.index(portable)
+        if target_index is None or not 0 <= target_index < len(RIGHT_TAB_SHORTCUTS):
+            return False
+
+        event.stop()
+        event.prevent_default()
+        tab_id, label = RIGHT_TAB_SHORTCUTS[target_index]
+        agent_id = str(self.selected_agent_id or "").strip()
+        if not agent_id:
+            self.notify("Select an Agent or Operator before choosing a right tab.", severity="warning")
+            return True
+        reason = self.navigation_destination_unavailable_reason(
+            NavigationDestination(agent_id, tab_id)
+        )
+        if reason is not None:
+            self.notify(f"{label} is unavailable: {reason}.", severity="warning")
+            return True
+        self.activate_agent_tab(tab_id)
+        tab_row.focus()
         return True
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
@@ -26728,6 +26819,37 @@ class AgentPBXTUI(App[None]):
             "Managed terminal editor stopped."
             if result.get("stopped")
             else "No managed terminal editor was running."
+        )
+        return True
+
+    async def forget_terminal_editor(self, agent_id: str | None = None) -> bool:
+        """Remove only a server-verified stale or exited editor mapping."""
+
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if not resolved_agent_id:
+            self.notify("Select an Agent or Operator first.", severity="warning")
+            return False
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{resolved_agent_id}/terminal-editor/forget",
+                headers=auth_headers(self.token),
+                timeout=15,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(
+                f"Unable to forget terminal editor mapping: {exc}",
+                severity="error",
+            )
+            return False
+        if self.terminal_editor_agent_id == resolved_agent_id:
+            await self.detach_terminal_editor_surface()
+        self.terminal_editor_runtime_by_agent.pop(resolved_agent_id, None)
+        self.notify(
+            "Stale managed terminal editor mapping forgotten."
+            if result.get("forgotten")
+            else "No managed terminal editor mapping was present."
         )
         return True
 

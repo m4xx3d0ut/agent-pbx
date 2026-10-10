@@ -339,6 +339,100 @@ def test_active_neovim_routes_additional_files_through_managed_rpc(
     assert remote[-3:] == ["--remote", "+9", str(second_path)]
 
 
+def test_stale_editor_mapping_is_never_signaled_and_can_be_forgotten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    editor = tmp_path / "vim"
+    editor.write_text("#!/bin/sh\n", encoding="utf-8")
+    editor.chmod(0o700)
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="agent-1",
+            project="demo",
+            metadata={"cwd": str(root)},
+        )
+    )
+    digest = hashlib.sha256(b"agent-1").hexdigest()[:16]
+    pane = RuntimeTmuxPane(
+        session_name=f"pbx-editor-{digest}",
+        window_id="@8",
+        window_name="editor",
+        pane_id="%41",
+        pane_pid=4241,
+        cwd=str(root),
+        current_command="vim",
+        title="editor",
+    )
+    live = [pane]
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(list(argv))
+        stdout = "%41\n" if "new-session" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.ensure_dedicated_runtime_server",
+        lambda _identity: True,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.restore_dedicated_runtime_exit_policy",
+        lambda _identity: None,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.list_runtime_panes",
+        lambda _identity: tuple(live),
+    )
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.process_start_ticks",
+        lambda pid: 77 if pid == 4241 else 99,
+    )
+    service = ManagedTerminalEditorService(
+        AgentFileService(),
+        runtime_root=tmp_path / "runtimes",
+        store=store,
+        tmux_bin="tmux-test",
+        environ={
+            "AGENT_PBX_TERMINAL_EDITOR_PROFILES": json.dumps(
+                {"vim": {"argv": [str(editor), "+{line}", "--", "{path}"]}}
+            ),
+            "AGENT_PBX_TERMINAL_EDITOR_DEFAULT": "vim",
+        },
+        runner=runner,
+    )
+    service.start(agent(root), path="app.py")
+    with pytest.raises(ValueError, match="cannot forget a live managed editor"):
+        service.forget("agent-1")
+    live[0] = RuntimeTmuxPane(
+        session_name=pane.session_name,
+        window_id=pane.window_id,
+        window_name=pane.window_name,
+        pane_id=pane.pane_id,
+        pane_pid=9999,
+        cwd=pane.cwd,
+        current_command=pane.current_command,
+        title=pane.title,
+    )
+
+    stopped = service.stop("agent-1")
+
+    assert stopped["stopped"] is False
+    assert stopped["state"] == "stale"
+    assert not any("kill-session" in command for command in commands)
+    persisted = store.get_terminal_editor_runtime("agent-1")
+    assert persisted is not None and persisted["state"] == "stale"
+
+    forgotten = service.forget("agent-1")
+    assert forgotten["forgotten"] is True
+    assert store.get_terminal_editor_runtime("agent-1") is None
+
+
 def test_terminal_editor_api_preserves_controller_boundary(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     root.mkdir()

@@ -1002,11 +1002,20 @@ traversal, and regular-file checks as the Textual editor. A dirty Textual buffer
 must be saved or reverted first. Each editor runs on its own editor-only tmux
 server; it cannot attach to, move, stop, or reuse a Codex runtime pane. Use
 `/editor terminal close` to stop that editor runtime and reload the file through
-the normal conflict-aware editor path.
+the normal conflict-aware editor path. Neovim runtimes use a private RPC socket,
+so opening another approved file from Files reuses the existing project editor
+instead of starting a second process. Editor identity is stored in SQLite and
+validated against its tmux socket, pane, PID/start time, project root, and RPC
+socket after daemon or TUI restart. The default daemon shutdown policy is
+`detach`; set it to `stop` to retain the earlier cleanup behavior. If identity
+validation marks a saved mapping stale, `/editor terminal forget` removes the
+record only after the daemon proves the recorded editor is no longer live; it
+never kills an unverified process.
 
 ```bash
 export AGENT_PBX_TERMINAL_EDITOR_PROFILES='{"nvim":{"label":"Neovim","argv":["nvim","+{line}","--","{path}"]}}'
 export AGENT_PBX_TERMINAL_EDITOR_DEFAULT="nvim"
+export AGENT_PBX_TERMINAL_EDITOR_SHUTDOWN_POLICY="detach"
 ```
 
 `Check` runs best-effort diagnostics for the editor file through the daemon.
@@ -1187,7 +1196,7 @@ commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
 `/agents prune stale`, `/agents prune forks`, `/agents prune undo`,
 `/show hidden agents`, `/unhide agent`, `/palette history`,
 `/palette history clear`, `/navigation back`, `/navigation forward`,
-`/editor terminal`, `/editor terminal close`,
+`/editor terminal`, `/editor terminal close`, `/editor terminal forget`,
 `/workerbee switch oss`, `/workerbee switch debug`,
 `/workerbee switch rollback`,
 `/theme minimal`, and `/layout compact`.
@@ -1400,6 +1409,12 @@ Shift+F1–F12 is translated to unmodified child F1–F12. Thus F2
 always focuses Events while Shift+F2 opens Codex warnings. The input layer also
 recognizes xterm F13–F24 aliases, and the key probe documents terminal-specific
 SSH or Termux sequences.
+
+After F3 focuses the right-side tab row, Shift+F1–F11 select the stable Latest,
+Codex, Thread, Files, Editor, WorkerBee, PRs, Issues, Campaigns, KB, and Joplin
+destinations. `1..9`, `0`, and `-` provide a portable fallback while the tab row
+has focus. These shortcuts are focus-scoped: under Codex or Neovim focus,
+Shift+F keys continue to reach the child terminal.
 
 F11/F12 history is private to each TUI process and records stable entity/tab
 identities, not row positions. It skips hidden, deleted, or unavailable

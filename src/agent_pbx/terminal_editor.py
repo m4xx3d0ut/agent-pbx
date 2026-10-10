@@ -435,6 +435,8 @@ class ManagedTerminalEditorService:
             }
         pane, state, reason = self._validate_runtime(runtime)
         if pane is None and state == "stale":
+            runtime = replace(runtime, state=state)
+            self.runtimes[agent_id] = runtime
             self._persist_runtime(runtime, last_error=reason)
             return {
                 **runtime.public_dict(),

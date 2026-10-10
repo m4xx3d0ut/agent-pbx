@@ -2182,6 +2182,83 @@ async def test_tui_function_keys_focus_split_sections() -> None:
         assert app.focused is message
 
 
+async def test_tui_tab_row_shortcuts_are_scoped_and_semantic() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.selected_agent_id = "agent-a"
+        app.navigation_destination_unavailable_reason = (  # type: ignore[method-assign]
+            lambda destination: (
+                "Joplin is unavailable"
+                if destination.tab_id == "joplin-tab"
+                else None
+            )
+        )
+        tabs = app.query_one("#agent-tabs", TabbedContent).query_one(Tabs)
+
+        tabs.focus()
+        await pilot.pause()
+        app.on_key(Key("f14", None))
+        await pilot.pause()
+        assert app.active_agent_tab == "codex-tab"
+        assert app.focused is tabs
+
+        app.on_key(Key("5", "5"))
+        await pilot.pause()
+        assert app.active_agent_tab == "editor-tab"
+        assert app.focused is tabs
+
+        app.on_key(Key("f23", None))
+        await pilot.pause()
+        assert app.active_agent_tab == "editor-tab"
+
+
+async def test_tui_tab_row_portable_keys_do_not_capture_terminal_input() -> None:
+    written: list[bytes] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        app.selected_agent_id = "agent-a"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        terminal = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        terminal.process = FakeProcess()  # type: ignore[assignment]
+        terminal.target = "server:%7"
+        app.embedded_terminal_target = "server:%7"
+        app.apply_tmux_class()
+        terminal.focus()
+        await pilot.pause()
+
+        await app.on_event(Key("5", "5"))
+        await pilot.pause()
+        app.on_key(Key("f17", None))
+        await pilot.pause()
+
+        assert written == [b"5", function_key_sequence(5)]
+        assert app.active_agent_tab == "latest-tab"
+
+
 async def test_tui_shift_f2_alias_passes_unmodified_f2_to_focused_terminal() -> None:
     sent: list[tuple[str, str]] = []
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
@@ -3235,6 +3312,35 @@ async def test_tui_managed_editor_owns_printable_keys_but_not_plain_f_keys(
         assert app.focused.__class__.__name__ == "ContentTabs"
 
     assert terminal.attached is False
+
+
+async def test_tui_forgets_only_through_terminal_editor_recovery_endpoint() -> None:
+    posts: list[str] = []
+    notices: list[str] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"forgotten": True}
+
+    class Client:
+        async def post(self, path: str, **_kwargs: object) -> Response:
+            posts.append(path)
+            return Response()
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.notify = (  # type: ignore[method-assign]
+        lambda message, **_kwargs: notices.append(str(message))
+    )
+    app.terminal_editor_runtime_by_agent["agent-a"] = {"state": "stale"}
+
+    assert await app.forget_terminal_editor("agent-a") is True
+    assert posts == ["/v1/agents/agent-a/terminal-editor/forget"]
+    assert "agent-a" not in app.terminal_editor_runtime_by_agent
+    assert notices == ["Stale managed terminal editor mapping forgotten."]
 
 
 async def test_tui_direct_entity_switch_keeps_native_surface_during_handoff(
