@@ -16,6 +16,9 @@
 - Add bounded, deduplicated command palette history with input-focused Up/Down
   traversal, an inspector and clear action, sensitive-name filtering, and
   opt-in persistence that never stores prompt bodies.
+- Add per-client Agent, Operator, and right-tab navigation history on F11/F12,
+  with Shift-function-key passthrough preserved and safe skipping for stale or
+  hidden logical destinations.
 
 ### Fixed
 

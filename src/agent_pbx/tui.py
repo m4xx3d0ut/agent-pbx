@@ -120,6 +120,7 @@ from .runtime_tmux import (
 from .ui.actions import ActionRegistry
 from .ui.async_jobs import AsyncGenerationGate
 from .ui.focus import FocusGenerationGuard
+from .ui.navigation import NavigationDestination, NavigationHistory
 from .ui.palette_history import (
     PaletteCommandHistory,
     PaletteHistoryScreen,
@@ -707,6 +708,8 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/palette history clear",
     "/palette history persistence on",
     "/palette history persistence off",
+    "/navigation back",
+    "/navigation forward",
     "/agents prune",
     "/agents prune apply",
     "/agents prune stale",
@@ -5482,6 +5485,20 @@ class AgentPBXTUI(App[None]):
             key_display="F10",
             priority=True,
         ),
+        Binding(
+            "f11",
+            "navigation_back",
+            "Navigation Back",
+            key_display="F11",
+            priority=True,
+        ),
+        Binding(
+            "f12",
+            "navigation_forward",
+            "Navigation Forward",
+            key_display="F12",
+            priority=True,
+        ),
         Binding("shift+o", "start_operator", "Start Operator", key_display="O"),
         Binding("y", "operator_history", "Operator History", priority=True),
         Binding("u", "resume_operator", "Resume Operator", priority=True),
@@ -5946,6 +5963,8 @@ class AgentPBXTUI(App[None]):
         self.editor_rendered_agent_id: str | None = None
         self.editor_fullscreen = False
         self.active_agent_tab_by_agent: dict[str, str] = {}
+        self.navigation_history = NavigationHistory()
+        self.navigation_recording_suspended = 0
         self.message_draft_by_agent: dict[str, str] = {}
         self.tmux_message_draft_by_agent: dict[str, str] = {}
         self.tmux_agent_targets = str_map_setting(self.settings, "tmux_agent_targets")
@@ -6768,7 +6787,8 @@ class AgentPBXTUI(App[None]):
                 "",
                 "PBX-owned under every focus:",
                 "- F1 Agents · F2 Events · F3 right tabs · F4 input",
-                "- F5 Operators · F6/F7 forks · F8 next alert · F9 editor · F10 launch",
+                "- F5 Operators · F6/F7 forks · F8 alert · F9 editor · F10 launch",
+                "- F11 navigation back · F12 navigation forward",
                 "- Ctrl+T toggles the selected Latest tmux surface",
                 "- Ctrl+P command palette",
                 "",
@@ -7070,19 +7090,20 @@ class AgentPBXTUI(App[None]):
         )
         text = f"{nav} | Shift+F2 Codex warnings | Enter send | Ctrl+J newline | Ctrl+W word"
         if self.tmux_features_available:
-            text += " | Ctrl+T tmux | F8 alert"
+            text += " | Ctrl+T tmux | F8 alert | F11/F12 nav"
         return text
 
     def tmux_hotkeys_text(self) -> str:
         if self.is_tiny_layout() or self.low_power_enabled:
             return (
                 "a Agt | e Evt | v Tabs | i In | Shift+F2 Codex warnings | "
-                "Enter send | C-J nl | PgUp hist | C-T PBX | F8 alert"
+                "Enter send | C-J nl | PgUp hist | C-T PBX | F8 alert | "
+                "F11/F12 nav"
             )
         return (
             "F1 Agents | F2 Events | Shift+F2 Codex warnings | F3 Tabs | "
             "F4 Input | Ctrl+P Palette | Enter send | Ctrl+J newline | "
-            "PgUp history | Ctrl+T PBX | F8 alert"
+            "PgUp history | Ctrl+T PBX | F8 alert | F11/F12 nav"
         )
 
     def editor_hotkeys_text(self) -> str:
@@ -7116,6 +7137,8 @@ class AgentPBXTUI(App[None]):
                 ),
                 ActionDefinition("editor.fullscreen", "Editor Full", "f9"),
                 ActionDefinition("workspace.launch", "Launch Workspace", "f10"),
+                ActionDefinition("navigation.back", "Navigation Back", "f11"),
+                ActionDefinition("navigation.forward", "Navigation Forward", "f12"),
                 ActionDefinition(
                     "terminal.function_key_passthrough",
                     "Codex function key",
@@ -7871,6 +7894,16 @@ class AgentPBXTUI(App[None]):
             "/palette history persistence off",
             "Keep command history in memory only",
             lambda: self.palette_history_set_persistence(False),
+        )
+        yield SystemCommand(
+            "/navigation back",
+            "Return to the previous Agent, Operator, and tab destination",
+            self.palette_navigation_back,
+        )
+        yield SystemCommand(
+            "/navigation forward",
+            "Advance to the next Agent, Operator, and tab destination",
+            self.palette_navigation_forward,
         )
         yield SystemCommand("/agents prune", "Preview safe pruning for old terminal caller agents", self.palette_agents_prune)
         yield SystemCommand("/agents prune apply", "Apply the latest agent prune preview", self.palette_agents_prune_apply)
@@ -9404,6 +9437,20 @@ class AgentPBXTUI(App[None]):
         state = "enabled" if enabled else "disabled; history is memory-only"
         self.notify(f"Command palette history persistence {state}.")
 
+    def palette_navigation_back(self) -> None:
+        self.run_worker(
+            self.action_navigation_back(),
+            name="navigation-back",
+            exclusive=True,
+        )
+
+    def palette_navigation_forward(self) -> None:
+        self.run_worker(
+            self.action_navigation_forward(),
+            name="navigation-forward",
+            exclusive=True,
+        )
+
     def palette_custom_slash_commands(self) -> Iterable[SystemCommand]:
         for command in self.custom_slash_commands:
             yield SystemCommand(
@@ -10233,6 +10280,96 @@ class AgentPBXTUI(App[None]):
             target = self.query_one_or_none("#detail", TextArea)
         if target is not None:
             target.focus()
+
+    def current_navigation_destination(self) -> NavigationDestination | None:
+        agent_id = str(self.selected_agent_id or "").strip()
+        tab_id = str(self.active_agent_tab or "").strip()
+        if not agent_id or not tab_id:
+            return None
+        return NavigationDestination(agent_id, tab_id)
+
+    def record_navigation_destination(
+        self,
+        destination: NavigationDestination | None = None,
+    ) -> bool:
+        if self.navigation_recording_suspended:
+            return False
+        return self.navigation_history.record(
+            destination or self.current_navigation_destination()
+        )
+
+    def navigation_destination_unavailable_reason(
+        self,
+        destination: NavigationDestination,
+    ) -> str | None:
+        agent = self.agents.get(destination.entity_id)
+        if agent is None:
+            return "entity was deleted or is no longer available"
+        if self.is_hidden_agent(agent):
+            return "entity is hidden"
+        if destination.tab_id == "thread-tab" and not self.legacy_thread_enabled:
+            return "Thread compatibility view is disabled"
+        if destination.tab_id == "joplin-tab" and not self.joplin_configured:
+            return "Joplin is unavailable"
+        if self.query_one_or_none(f"#{destination.tab_id}", TabPane) is None:
+            return "right-pane destination is unavailable"
+        return None
+
+    async def restore_navigation_destination(
+        self,
+        destination: NavigationDestination,
+    ) -> bool:
+        reason = self.navigation_destination_unavailable_reason(destination)
+        if reason is not None:
+            self.notify(
+                f"Skipped navigation stop {destination.entity_id} / "
+                f"{destination.tab_id}: {reason}.",
+                severity="warning",
+            )
+            return False
+        self.navigation_recording_suspended += 1
+        try:
+            await self.select_agent(destination.entity_id)
+            selected_tab = self.activate_agent_tab(destination.tab_id)
+            if selected_tab != destination.tab_id:
+                self.notify(
+                    f"Skipped navigation stop {destination.entity_id} / "
+                    f"{destination.tab_id}: tab activation was rejected.",
+                    severity="warning",
+                )
+                return False
+            self.move_agent_cursor(destination.entity_id, focus=True)
+            return True
+        finally:
+            self.navigation_recording_suspended = max(
+                0,
+                self.navigation_recording_suspended - 1,
+            )
+
+    async def navigate_history(self, direction: str) -> bool:
+        current = self.current_navigation_destination()
+        self.navigation_history.record(current)
+        original_index = self.navigation_history.index
+        if direction == "back":
+            step = self.navigation_history.back
+        elif direction == "forward":
+            step = self.navigation_history.forward
+        else:
+            raise ValueError(f"unknown navigation direction: {direction}")
+        candidate = step()
+        while candidate is not None:
+            if await self.restore_navigation_destination(candidate):
+                return True
+            candidate = step()
+        self.navigation_history.restore_index(original_index)
+        self.notify(f"No {direction} navigation destination is available.")
+        return False
+
+    async def action_navigation_back(self) -> None:
+        await self.navigate_history("back")
+
+    async def action_navigation_forward(self) -> None:
+        await self.navigate_history("forward")
 
     def action_back(self) -> None:
         if self.is_compact_layout() and self.compact_view == "agent":
@@ -12034,24 +12171,33 @@ class AgentPBXTUI(App[None]):
     async def open_agent_latest(self, agent_id: str) -> bool:
         if agent_id not in self.agents:
             return False
-        self.activate_latest_tab()
-        if self.is_compact_layout():
-            self.move_agent_cursor(agent_id, focus=False)
-        await self.select_agent(agent_id)
-        selected_tab = self.active_agent_tab
-        self.activate_latest_tab()
-        if selected_tab != "latest-tab":
-            if self.is_tmux_direct_enabled(agent_id):
-                await self.load_tmux_capture(agent_id)
+        self.record_navigation_destination()
+        self.navigation_recording_suspended += 1
+        try:
+            self.activate_latest_tab()
+            if self.is_compact_layout():
+                self.move_agent_cursor(agent_id, focus=False)
+            await self.select_agent(agent_id)
+            selected_tab = self.active_agent_tab
+            self.activate_latest_tab()
+            if selected_tab != "latest-tab":
+                if self.is_tmux_direct_enabled(agent_id):
+                    await self.load_tmux_capture(agent_id)
+                else:
+                    await self.load_latest_report(agent_id)
+            self.mark_latest_seen(agent_id)
+            if self.is_compact_layout():
+                detail = self.query_one_or_none("#detail", TextArea)
+                if detail is not None:
+                    detail.focus()
             else:
-                await self.load_latest_report(agent_id)
-        self.mark_latest_seen(agent_id)
-        if self.is_compact_layout():
-            detail = self.query_one_or_none("#detail", TextArea)
-            if detail is not None:
-                detail.focus()
-        else:
-            self.focus_agent_row(agent_id)
+                self.focus_agent_row(agent_id)
+        finally:
+            self.navigation_recording_suspended = max(
+                0,
+                self.navigation_recording_suspended - 1,
+            )
+        self.record_navigation_destination()
         return True
 
     async def refresh_events(self) -> None:
@@ -13322,13 +13468,27 @@ class AgentPBXTUI(App[None]):
     ) -> None:
         if event.tabbed_content.id != "agent-tabs":
             return
+        activated_tab = str(event.pane.id)
+        if str(event.tabbed_content.active) != activated_tab:
+            # Programmatic entity/tab transitions may supersede a queued
+            # TabActivated message before Textual dispatches it. Associating
+            # that stale pane with the newly selected entity would create a
+            # navigation stop the operator never visited.
+            return
         prior_tab = self.active_agent_tab
-        if prior_tab == "joplin-tab" and str(event.pane.id) != "joplin-tab":
-            self.remember_joplin_reader_position()
-        self.active_agent_tab = str(event.pane.id)
+        tab_changed = prior_tab != activated_tab
         agent_id = self.selected_agent_id
+        if agent_id and tab_changed:
+            self.record_navigation_destination(
+                NavigationDestination(agent_id, prior_tab)
+            )
+        if prior_tab == "joplin-tab" and activated_tab != "joplin-tab":
+            self.remember_joplin_reader_position()
+        self.active_agent_tab = activated_tab
         if agent_id:
             self.active_agent_tab_by_agent[agent_id] = self.active_agent_tab
+            if tab_changed:
+                self.record_navigation_destination()
         self.save_settings()
         if self.active_agent_tab == "latest-tab" and agent_id:
             self.mark_latest_seen(agent_id)
@@ -13441,6 +13601,8 @@ class AgentPBXTUI(App[None]):
             tmux_message.text = self.tmux_message_draft_by_agent.get(agent_id, "")
 
     def activate_agent_tab(self, tab_id: str) -> str:
+        if self.selected_agent_id:
+            self.record_navigation_destination()
         if tab_id == "joplin-tab" and not self.joplin_configured:
             tab_id = "latest-tab"
         tabs = self.query_one_or_none("#agent-tabs", TabbedContent)
@@ -13453,10 +13615,13 @@ class AgentPBXTUI(App[None]):
         self.active_agent_tab = tab_id
         if self.selected_agent_id:
             self.active_agent_tab_by_agent[self.selected_agent_id] = tab_id
+            self.record_navigation_destination()
         return tab_id
 
     async def select_agent(self, agent_id: str) -> None:
         previous_agent_id = self.selected_agent_id
+        if agent_id != previous_agent_id:
+            self.record_navigation_destination()
         smooth_terminal_handoff = self.should_smooth_terminal_handoff(
             previous_agent_id,
             agent_id,
@@ -13473,7 +13638,14 @@ class AgentPBXTUI(App[None]):
         self.selected_agent_id = agent_id
         self.query_one("#agent-id", Input).value = self.selected_agent_id
         if agent_id != previous_agent_id:
-            self.restore_agent_pane_state(agent_id)
+            self.navigation_recording_suspended += 1
+            try:
+                self.restore_agent_pane_state(agent_id)
+            finally:
+                self.navigation_recording_suspended = max(
+                    0,
+                    self.navigation_recording_suspended - 1,
+                )
         self.update_agent_title()
         self.sync_codex_model_preset_for_agent(agent_id)
         if agent_id not in self.codex_runtime_by_agent and agent_id in self.agents:
@@ -13498,6 +13670,7 @@ class AgentPBXTUI(App[None]):
         )
         if self.active_agent_tab == "latest-tab":
             self.mark_latest_seen(agent_id)
+        self.record_navigation_destination()
         self.save_settings()
 
     def plan_mode_state(self, agent_id: str | None) -> str:

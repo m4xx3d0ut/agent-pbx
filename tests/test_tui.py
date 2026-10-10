@@ -103,6 +103,7 @@ from agent_pbx.workerbee_mcp import (
     WorkerBeeProjectVisibilityDiagnostic,
 )
 from agent_pbx.ui.palette_history import CommandInput, PaletteHistoryScreen
+from agent_pbx.ui.navigation import NavigationDestination
 from textual.app import App, ComposeResult
 from textual.events import Click, Key, MouseDown
 from textual.widgets import (
@@ -316,6 +317,18 @@ def test_tui_constructs() -> None:
     assert any(
         getattr(binding, "key", None) == "f8"
         and getattr(binding, "action", None) == "focus_next_alert"
+        and getattr(binding, "priority", False) is True
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "f11"
+        and getattr(binding, "action", None) == "navigation_back"
+        and getattr(binding, "priority", False) is True
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "f12"
+        and getattr(binding, "action", None) == "navigation_forward"
         and getattr(binding, "priority", False) is True
         for binding in app.BINDINGS
     )
@@ -9902,6 +9915,10 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/codex model default sol-xhigh" in titles
     assert "/workspace launch" in titles
     assert "/agent launch" in titles
+    assert "/palette history" in titles
+    assert "/palette history clear" in titles
+    assert "/navigation back" in titles
+    assert "/navigation forward" in titles
     assert "/tmux" in titles
     assert "/latest" in titles
     assert "/thread" in titles
@@ -10111,6 +10128,57 @@ async def test_tui_f10_launches_workspace_under_terminal_focus() -> None:
 
     assert opened == [True]
     assert written == [function_key_sequence(10)]
+
+
+async def test_tui_f11_f12_navigation_and_shift_passthrough_under_terminal_focus() -> None:
+    directions: list[str] = []
+    written: list[bytes] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    async def fake_navigate(direction: str) -> bool:
+        directions.append(direction)
+        return True
+
+    app.navigate_history = fake_navigate  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-a"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server:%7"
+        terminal = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        terminal.process = FakeProcess()  # type: ignore[assignment]
+        terminal.target = "server:%7"
+        app.apply_tmux_class()
+        terminal.focus()
+        await pilot.pause()
+
+        await pilot.press("f11")
+        await pilot.press("f12")
+        await pilot.pause()
+        app.on_key(Key("f23", None))
+        app.on_key(Key("f24", None))
+        await pilot.pause()
+
+    assert directions == ["back", "forward"]
+    assert written == [function_key_sequence(11), function_key_sequence(12)]
 
 
 async def test_managed_project_picker_dismisses_before_selecting_launched_agent() -> None:
@@ -16781,6 +16849,124 @@ async def test_tui_f8_focuses_and_clears_one_alert_at_a_time() -> None:
 
     assert focused == ["operator-failed", "agent-done"]
     assert app.unseen_latest_agent_ids == set()
+
+
+async def test_tui_navigation_history_composes_with_alert_jump() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async def no_refresh(_agent_id: str) -> None:
+        return None
+
+    app.refresh_selected_agent = no_refresh  # type: ignore[method-assign]
+    app.load_codex_runtime_status = no_refresh  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.agents = {
+            "agent-a": {
+                "agent_id": "agent-a",
+                "agent_type": "caller",
+                "status": "running",
+                "project": "demo",
+                "last_seen_at": 101.0,
+            },
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "status": "running",
+                "project": "demo",
+                "last_seen_at": 102.0,
+                "metadata": {"operator_role": "root"},
+            },
+        }
+        app.render_agents()
+        await app.select_agent("agent-a")
+        app.activate_agent_tab("files-tab")
+        app.unseen_latest_agent_ids = {"operator-0"}
+        app.render_unseen_attention()
+
+        await app.action_focus_next_alert()
+        assert app.selected_agent_id == "operator-0"
+        assert app.active_agent_tab == "latest-tab"
+
+        await app.action_navigation_back()
+        assert app.selected_agent_id == "agent-a"
+        assert app.active_agent_tab == "files-tab"
+        assert app.query_one("#agents", DataTable).has_focus is True
+
+        await app.action_navigation_forward()
+        await pilot.pause()
+        assert app.selected_agent_id == "operator-0"
+        assert app.active_agent_tab == "latest-tab"
+        assert app.query_one("#operators", DataTable).has_focus is True
+        assert app.navigation_history.entries == (
+            NavigationDestination("agent-a", "latest-tab"),
+            NavigationDestination("agent-a", "files-tab"),
+            NavigationDestination("operator-0", "latest-tab"),
+        )
+
+
+async def test_tui_navigation_history_skips_missing_and_hidden_stops() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    notices: list[str] = []
+
+    async def no_refresh(_agent_id: str) -> None:
+        return None
+
+    app.refresh_selected_agent = no_refresh  # type: ignore[method-assign]
+    app.load_codex_runtime_status = no_refresh  # type: ignore[method-assign]
+    app.notify = (  # type: ignore[method-assign]
+        lambda message, **_kwargs: notices.append(str(message))
+    )
+
+    async with app.run_test():
+        app.agents = {
+            "agent-valid": {
+                "agent_id": "agent-valid",
+                "agent_type": "caller",
+                "status": "running",
+                "project": "demo",
+                "last_seen_at": 100.0,
+            },
+            "agent-hidden": {
+                "agent_id": "agent-hidden",
+                "agent_type": "caller",
+                "status": "done",
+                "project": "demo",
+                "last_seen_at": 101.0,
+                "dismissed_at": 1.0,
+            },
+            "agent-current": {
+                "agent_id": "agent-current",
+                "agent_type": "caller",
+                "status": "running",
+                "project": "demo",
+                "last_seen_at": 102.0,
+            },
+        }
+        app.render_agents()
+        app.selected_agent_id = "agent-current"
+        app.active_agent_tab = "latest-tab"
+        for stop in (
+            NavigationDestination("agent-valid", "files-tab"),
+            NavigationDestination("agent-hidden", "latest-tab"),
+            NavigationDestination("agent-deleted", "latest-tab"),
+            NavigationDestination("agent-current", "latest-tab"),
+        ):
+            app.navigation_history.record(stop)
+        order_before = [
+            str(row.key.value) for row in app.query_one("#agents", DataTable).ordered_rows
+        ]
+
+        assert await app.navigate_history("back") is True
+        assert app.selected_agent_id == "agent-valid"
+        assert app.active_agent_tab == "files-tab"
+        order_after = [
+            str(row.key.value) for row in app.query_one("#agents", DataTable).ordered_rows
+        ]
+
+    assert order_after == order_before
+    assert any("agent-deleted" in notice for notice in notices)
+    assert any("agent-hidden" in notice for notice in notices)
 
 
 def test_tui_persisted_latest_seen_prevents_startup_alert() -> None:
