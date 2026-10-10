@@ -25,6 +25,9 @@
 - Keep a revision-scoped reading position for each Joplin note and preview so
   keyboard, mouse, and Termux readers return to the same offset without
   restoring stale positions after content changes.
+- Add explicit Joplin note clipboard copy and edit-only paste actions with
+  stale-target revalidation and metadata-only confirmation for multiline or
+  large clipboard payloads.
 - Run Joplin's explicit E2EE decrypt pass while the managed profile is the
   sole owner, restore the validated Data API server after decrypt failures,
   and report password-required and native crypto-worker failures separately.

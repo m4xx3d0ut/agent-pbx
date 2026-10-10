@@ -374,6 +374,8 @@ JOPLIN_COPY_MODE_COPY_FIRST = "copy_first"
 JOPLIN_COPY_MODE_TRANSCRIPT_FIRST = "transcript_first"
 JOPLIN_COPY_MODE_TMUX_CAPTURE = "tmux_capture"
 DEFAULT_JOPLIN_COPY_MODE = JOPLIN_COPY_MODE_COPY_FIRST
+DEFAULT_JOPLIN_PASTE_CONFIRM_CHARS = 1000
+DEFAULT_JOPLIN_PASTE_CONFIRM_LINES = 2
 JOPLIN_COPY_MODE_CHOICES = (
     ("Fast: /copy → transcript → tmux", JOPLIN_COPY_MODE_COPY_FIRST),
     ("Clean: transcript first", JOPLIN_COPY_MODE_TRANSCRIPT_FIRST),
@@ -652,6 +654,9 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/joplin log start",
     "/joplin log stop",
     "/joplin save",
+    "/joplin note copy",
+    "/joplin note copy source",
+    "/joplin note paste",
     "/joplin sync",
     "/plan",
     "/plan latest",
@@ -746,6 +751,9 @@ JOPLIN_SLASH_ACTIONS = {
     "/joplin save": "save",
     "/joplin edit": "edit",
     "/joplin preview": "preview",
+    "/joplin note copy": "note-copy",
+    "/joplin note copy source": "note-copy-source",
+    "/joplin note paste": "note-paste",
     "/joplin sync": "sync",
 }
 JOPLIN_SHORTCUT_ACTIONS = {
@@ -760,9 +768,11 @@ JOPLIN_SHORTCUT_ACTIONS = {
     "l": ("log-start", "log on"),
     "x": ("log-stop", "log off"),
     "u": ("sync", "sync"),
+    "b": ("note-copy", "note copy"),
+    "v": ("note-paste", "note paste"),
 }
 JOPLIN_SHORTCUT_HINT = (
-    "Joplin keys: Ctrl+G, or j outside note body, then the button key"
+    "Joplin keys: Ctrl+G, or j outside note body, then key · b copy note · v paste"
 )
 WidgetType = TypeVar("WidgetType")
 
@@ -3274,6 +3284,53 @@ class JoplinDeleteConfirmScreen(ModalScreen[None]):
             self.dismiss()
 
 
+class JoplinPasteConfirmScreen(ModalScreen[None]):
+    """Confirm a large Notes paste without rendering clipboard content."""
+
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        note_id: str,
+        text: str,
+        source: str,
+    ) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.note_id = note_id
+        self.text = text
+        self.source = source
+
+    def compose(self) -> ComposeResult:
+        lines = self.text.count("\n") + 1
+        with Vertical(id="joplin-paste-panel"):
+            yield Static("Paste into Joplin Note", id="joplin-paste-title")
+            yield Static(
+                f"{len(self.text)} characters · {lines} lines · {self.source}\n"
+                "Clipboard content is not shown or logged.",
+                id="joplin-paste-detail",
+            )
+            with Horizontal(id="joplin-paste-actions"):
+                yield Button("Paste", id="joplin-paste-confirm", variant="primary")
+                yield Button("Cancel", id="joplin-paste-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "joplin-paste-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "joplin-paste-confirm":
+            event.stop()
+            self.dismiss()
+            self.app.apply_joplin_clipboard_paste(  # type: ignore[attr-defined]
+                self.agent_id,
+                self.note_id,
+                self.text,
+            )
+
+
 class FilePathActionScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Cancel")]
 
@@ -4429,6 +4486,7 @@ class AgentPBXTUI(App[None]):
     JoplinNoteTitleScreen,
     ModelElevationScreen,
     JoplinDeleteConfirmScreen,
+    JoplinPasteConfirmScreen,
     FilePathActionScreen,
     FileDeleteConfirmScreen,
     FileTrashScreen,
@@ -4443,6 +4501,7 @@ class AgentPBXTUI(App[None]):
     #joplin-title-panel,
     #model-elevation-panel,
     #joplin-delete-panel,
+    #joplin-paste-panel,
     #file-path-action-panel,
     #file-delete-panel,
     #file-trash-panel,
@@ -4519,6 +4578,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-modal-title,
     #joplin-delete-title,
+    #joplin-paste-title,
     #file-path-action-title,
     #file-delete-title,
     #file-trash-title,
@@ -4546,6 +4606,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-input,
     #joplin-delete-note-title,
+    #joplin-paste-detail,
     #editor-close-path,
     #editor-close-message,
     #operator-kill-message,
@@ -4589,6 +4650,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-actions,
     #joplin-delete-actions,
+    #joplin-paste-actions,
     #editor-close-actions,
     #operator-kill-actions,
     #operator-history-actions,
@@ -4600,6 +4662,7 @@ class AgentPBXTUI(App[None]):
 
     #joplin-title-actions Button,
     #joplin-delete-actions Button,
+    #joplin-paste-actions Button,
     #editor-close-actions Button,
     #operator-kill-actions Button,
     #operator-history-actions Button,
@@ -5185,17 +5248,19 @@ class AgentPBXTUI(App[None]):
     }
 
     #joplin-actions {
-        height: 10;
+        height: 13;
     }
 
     #joplin-crud-actions,
     #joplin-log-actions,
+    #joplin-clipboard-actions,
     #joplin-conflict-actions {
         height: 3;
     }
 
     #joplin-crud-actions Button,
     #joplin-log-actions Button,
+    #joplin-clipboard-actions Button,
     #joplin-conflict-actions Button {
         width: 1fr;
         min-width: 1;
@@ -5644,6 +5709,22 @@ class AgentPBXTUI(App[None]):
         )
         self.joplin_copy_mode = normalize_joplin_copy_mode(
             self.settings.get("joplin_copy_mode", DEFAULT_JOPLIN_COPY_MODE)
+        )
+        self.joplin_paste_confirm_chars = max(
+            0,
+            int_setting(
+                self.settings,
+                "joplin_paste_confirm_chars",
+                DEFAULT_JOPLIN_PASTE_CONFIRM_CHARS,
+            ),
+        )
+        self.joplin_paste_confirm_lines = max(
+            0,
+            int_setting(
+                self.settings,
+                "joplin_paste_confirm_lines",
+                DEFAULT_JOPLIN_PASTE_CONFIRM_LINES,
+            ),
         )
         self.codex_terminal_mode = normalize_codex_terminal_mode(
             self.settings.get("codex_terminal_mode", DEFAULT_CODEX_TERMINAL_MODE)
@@ -7351,6 +7432,9 @@ class AgentPBXTUI(App[None]):
                                 yield Button("LOG+ l", id="joplin-log-start")
                                 yield Button("LOG- x", id="joplin-log-stop")
                                 yield Button("Sync u", id="joplin-sync")
+                            with Horizontal(id="joplin-clipboard-actions"):
+                                yield Button("Copy Note b", id="joplin-note-copy")
+                                yield Button("Paste Note v", id="joplin-note-paste")
                             with Horizontal(id="joplin-conflict-actions"):
                                 yield Button("Review merge", id="joplin-conflict-merge")
                                 yield Button("Keep Joplin", id="joplin-conflict-keep")
@@ -7655,6 +7739,9 @@ class AgentPBXTUI(App[None]):
             yield SystemCommand("/joplin save", "Save the selected Joplin note body", self.palette_joplin_save)
             yield SystemCommand("/joplin edit", "Edit the selected Joplin note", self.palette_joplin_edit)
             yield SystemCommand("/joplin preview", "Preview the current Joplin draft", self.palette_joplin_preview)
+            yield SystemCommand("/joplin note copy", "Copy selected text or the current note source", self.palette_joplin_note_copy)
+            yield SystemCommand("/joplin note copy source", "Copy the complete current note source", self.palette_joplin_note_copy_source)
+            yield SystemCommand("/joplin note paste", "Paste clipboard text into the active note editor", self.palette_joplin_note_paste)
             yield SystemCommand("/joplin sync", "Queue a Joplin sync job", self.palette_joplin_sync)
         yield SystemCommand("/plan", "Toggle plan mode for the selected agent", self.palette_toggle_plan_mode)
         yield SystemCommand("/plan latest", "Show latest report plan options", self.palette_plan_latest)
@@ -9164,6 +9251,36 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_joplin_note_copy(self) -> None:
+        agent_id = self.palette_joplin_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.copy_joplin_note_to_clipboard(agent_id),
+            name="palette-joplin-note-copy",
+            exclusive=True,
+        )
+
+    def palette_joplin_note_copy_source(self) -> None:
+        agent_id = self.palette_joplin_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.copy_joplin_note_to_clipboard(agent_id, force_source=True),
+            name="palette-joplin-note-copy-source",
+            exclusive=True,
+        )
+
+    def palette_joplin_note_paste(self) -> None:
+        agent_id = self.palette_joplin_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.paste_joplin_note_from_clipboard(agent_id),
+            name="palette-joplin-note-paste",
+            exclusive=True,
+        )
+
     def palette_joplin_sync(self) -> None:
         agent_id = self.palette_joplin_agent_id()
         if agent_id is None:
@@ -9780,6 +9897,12 @@ class AgentPBXTUI(App[None]):
             await self.begin_joplin_edit(agent_id)
         elif action == "preview":
             await self.preview_joplin_draft(agent_id)
+        elif action == "note-copy":
+            await self.copy_joplin_note_to_clipboard(agent_id)
+        elif action == "note-copy-source":
+            await self.copy_joplin_note_to_clipboard(agent_id, force_source=True)
+        elif action == "note-paste":
+            await self.paste_joplin_note_from_clipboard(agent_id)
         elif action == "sync":
             await self.sync_joplin_now(agent_id)
         else:
@@ -15191,6 +15314,8 @@ class AgentPBXTUI(App[None]):
             "joplin-save": "save",
             "joplin-edit": "edit",
             "joplin-preview": "preview",
+            "joplin-note-copy": "note-copy",
+            "joplin-note-paste": "note-paste",
         }
         joplin_action = joplin_button_actions.get(str(event.button.id or ""))
         if joplin_action is not None:
@@ -27197,10 +27322,27 @@ class AgentPBXTUI(App[None]):
             "joplin-conflict-merge",
             "joplin-conflict-copy",
             "joplin-conflict-overwrite",
+            "joplin-note-paste",
         ):
             button = self.query_one_or_none(f"#{button_id}", Button)
             if button is not None:
                 button.disabled = locked
+
+    def update_joplin_clipboard_controls(
+        self,
+        *,
+        active_note: Mapping[str, Any] | None,
+        mode: str,
+        locked: bool,
+    ) -> None:
+        copy_button = self.query_one_or_none("#joplin-note-copy", Button)
+        paste_button = self.query_one_or_none("#joplin-note-paste", Button)
+        if copy_button is not None:
+            copy_button.disabled = active_note is None or locked
+        if paste_button is not None:
+            paste_button.disabled = (
+                active_note is None or locked or mode not in {"edit", "conflict"}
+            )
 
     async def render_joplin_mode(
         self,
@@ -27226,6 +27368,11 @@ class AgentPBXTUI(App[None]):
             self.joplin_panel_state.set_mode(scope, "read")
             mode = "locked"
             draft = None
+        self.update_joplin_clipboard_controls(
+            active_note=active_note,
+            mode=mode,
+            locked=locked,
+        )
         if mode in {"edit", "conflict"} and draft is not None:
             self.remember_joplin_reader_position()
             reader.styles.display = "none"
@@ -27387,6 +27534,11 @@ class AgentPBXTUI(App[None]):
             self.set_selected_joplin_note_for_agent(agent_id, None)
             self.joplin_rendered_list_scope = None
             self.set_joplin_mutation_controls_locked(False)
+            self.update_joplin_clipboard_controls(
+                active_note=None,
+                mode="read",
+                locked=False,
+            )
             await self.update_joplin_reader("No project-scoped Joplin notes yet.")
 
     def render_joplin_notes(
@@ -27760,6 +27912,155 @@ class AgentPBXTUI(App[None]):
         mode = self.joplin_panel_state.mode_for(scope)
         self.joplin_panel_state.set_mode(scope, "edit" if mode == "preview" else "preview")
         await self.render_joplin_mode(agent_id)
+
+    async def copy_joplin_note_to_clipboard(
+        self,
+        agent_id: str,
+        *,
+        force_source: bool = False,
+    ) -> None:
+        scope = self.joplin_selection_key(agent_id)
+        note_id = self.selected_joplin_note_for_agent(agent_id)
+        note = self.current_joplin_note(agent_id, note_id)
+        if not note_id or note is None:
+            self.notify("Select a Joplin note before copying.", severity="warning")
+            return
+        if self.joplin_note_is_locked(note):
+            self.notify(
+                "The selected Joplin note is encrypted and has no readable body.",
+                severity="warning",
+            )
+            return
+        mode = self.joplin_panel_state.mode_for(scope)
+        body = self.query_one_or_none("#joplin-body", TextArea)
+        draft = self.joplin_panel_state.draft_for(scope)
+        selected_text = ""
+        if (
+            not force_source
+            and mode in {"edit", "conflict"}
+            and body is not None
+            and draft is not None
+            and draft.note_id == note_id
+        ):
+            selected_text = str(body.selected_text or "")
+        text = selected_text or (
+            str(body.text)
+            if mode in {"edit", "conflict"}
+            and body is not None
+            and draft is not None
+            and draft.note_id == note_id
+            else str(draft.body)
+            if mode == "preview" and draft is not None and draft.note_id == note_id
+            else str(note.get("body") or "")
+        )
+        if not text:
+            self.notify("The selected Joplin note has no readable text.", severity="warning")
+            return
+        try:
+            source = await asyncio.to_thread(write_clipboard_text, text)
+        except Exception as exc:
+            self.notify(f"Unable to copy Joplin note: {exc}", severity="error")
+            return
+        copied = "selection" if selected_text else "note source"
+        self.notify(f"Copied {copied} via {source}.")
+
+    async def paste_joplin_note_from_clipboard(self, agent_id: str) -> None:
+        target = self.joplin_clipboard_paste_target(agent_id)
+        if target is None:
+            return
+        note_id, _body = target
+        try:
+            text, source = await asyncio.to_thread(read_clipboard_text)
+        except Exception as exc:
+            self.notify(f"Unable to read clipboard: {exc}", severity="error")
+            return
+        if not text:
+            self.notify("Clipboard is empty.", severity="warning")
+            return
+        # Clipboard reads are asynchronous. Revalidate the logical target so a
+        # selection or mode change cannot paste into a different note.
+        current = self.joplin_clipboard_paste_target(agent_id, notify=False)
+        if current is None or current[0] != note_id:
+            self.notify(
+                "Joplin selection changed while reading the clipboard; paste canceled.",
+                severity="warning",
+            )
+            return
+        line_count = text.count("\n") + 1
+        needs_confirmation = (
+            self.joplin_paste_confirm_chars > 0
+            and len(text) >= self.joplin_paste_confirm_chars
+        ) or (
+            self.joplin_paste_confirm_lines > 0
+            and line_count >= self.joplin_paste_confirm_lines
+        )
+        if needs_confirmation:
+            self.push_screen(
+                JoplinPasteConfirmScreen(
+                    agent_id=agent_id,
+                    note_id=note_id,
+                    text=text,
+                    source=source,
+                )
+            )
+            return
+        self.apply_joplin_clipboard_paste(agent_id, note_id, text)
+
+    def joplin_clipboard_paste_target(
+        self,
+        agent_id: str,
+        *,
+        notify: bool = True,
+    ) -> tuple[str, TextArea] | None:
+        scope = self.joplin_selection_key(agent_id)
+        note_id = self.selected_joplin_note_for_agent(agent_id)
+        draft = self.joplin_panel_state.draft_for(scope)
+        mode = self.joplin_panel_state.mode_for(scope)
+        body = self.query_one_or_none("#joplin-body", TextArea)
+        valid = bool(
+            self.selected_agent_id == agent_id
+            and note_id
+            and draft is not None
+            and draft.note_id == note_id
+            and mode in {"edit", "conflict"}
+            and body is not None
+            and body.styles.display != "none"
+            and not body.read_only
+        )
+        if not valid:
+            if notify:
+                self.notify(
+                    "Paste is available only for the active Joplin note in edit mode.",
+                    severity="warning",
+                )
+            return None
+        assert note_id is not None and body is not None
+        return note_id, body
+
+    def apply_joplin_clipboard_paste(
+        self,
+        agent_id: str,
+        note_id: str,
+        text: str,
+    ) -> bool:
+        target = self.joplin_clipboard_paste_target(agent_id, notify=False)
+        if target is None or target[0] != note_id:
+            self.notify(
+                "Joplin paste target is no longer active; paste canceled.",
+                severity="warning",
+            )
+            return False
+        body = target[1]
+        start, end = body.selection
+        body._replace_via_keyboard(text, start, end)
+        scope = self.joplin_selection_key(agent_id)
+        self.joplin_panel_state.update_draft(scope, body.text)
+        self.schedule_joplin_draft_persist(agent_id)
+        body.focus()
+        self.notify(
+            f"Pasted {len(text)} characters into the Joplin draft; save remains explicit."
+        )
+        return True
 
     def schedule_joplin_draft_persist(self, agent_id: str) -> None:
         if self.joplin_draft_timer is not None:
@@ -30787,6 +31088,8 @@ class AgentPBXTUI(App[None]):
             "layout": self.layout_mode,
             "split_percent": self.split_percent,
             "joplin_copy_mode": self.joplin_copy_mode,
+            "joplin_paste_confirm_chars": self.joplin_paste_confirm_chars,
+            "joplin_paste_confirm_lines": self.joplin_paste_confirm_lines,
             "codex_terminal_mode": self.codex_terminal_mode,
             "detached_tmux_width": self.detached_tmux_width,
             "detached_tmux_height": self.detached_tmux_height,

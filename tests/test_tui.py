@@ -32,6 +32,7 @@ from agent_pbx.tui import (
     CODEX_TERMINAL_MODE_SCROLLBACK,
     CustomSlashCommand,
     EditorCloseConfirmScreen,
+    JoplinPasteConfirmScreen,
     ModelElevationScreen,
     ManagedProjectPickerScreen,
     OperatorHistoryScreen,
@@ -2646,6 +2647,135 @@ async def test_tui_joplin_reader_restores_scroll_only_for_unchanged_revision() -
         await app.render_joplin_mode("agent-1", note=changed_note)
         await pilot.pause()
         assert float(reader.scroll_y) == 0
+
+
+async def test_tui_joplin_note_copy_prefers_editor_selection_and_keeps_content_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    copied: list[str] = []
+    notices: list[str] = []
+
+    def fake_write(text: str) -> str:
+        copied.append(text)
+        return "test clipboard"
+
+    monkeypatch.setattr("agent_pbx.tui.write_clipboard_text", fake_write)
+    app.notify = lambda message, **_kwargs: notices.append(str(message))  # type: ignore[method-assign]
+    note = {
+        "id": "note-1",
+        "title": "Private",
+        "body": "secret selection and remainder",
+        "revision": "rev-1",
+    }
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-1"
+        scope = app.joplin_selection_key("agent-1")
+        app.joplin_notes_by_agent[scope] = {"note-1": note}
+        app.set_selected_joplin_note_for_agent("agent-1", "note-1")
+        app.joplin_panel_state.begin_edit(
+            scope,
+            edit={"edit_id": "edit-1", "draft_body": note["body"]},
+            note=note,
+        )
+        await app.render_joplin_mode("agent-1", note=note)
+        await pilot.pause()
+        body = app.query_one("#joplin-body", TextArea)
+        body.selection = type(body.selection)((0, 0), (0, 6))
+
+        await app.copy_joplin_note_to_clipboard("agent-1")
+
+    assert copied == ["secret"]
+    assert all("secret" not in message for message in notices)
+
+
+async def test_tui_joplin_note_paste_requires_current_edit_target_and_confirms_multiline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    clipboard_text = "private first line\nprivate second line"
+    notices: list[str] = []
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_clipboard_text",
+        lambda: (clipboard_text, "test clipboard"),
+    )
+    app.notify = lambda message, **_kwargs: notices.append(str(message))  # type: ignore[method-assign]
+    note = {
+        "id": "note-1",
+        "title": "Draft",
+        "body": "base",
+        "revision": "rev-1",
+    }
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-1"
+        scope = app.joplin_selection_key("agent-1")
+        app.joplin_notes_by_agent[scope] = {"note-1": note}
+        app.set_selected_joplin_note_for_agent("agent-1", "note-1")
+        await app.render_joplin_mode("agent-1", note=note)
+        await pilot.pause()
+        assert app.query_one("#joplin-note-paste", Button).disabled is True
+
+        await app.paste_joplin_note_from_clipboard("agent-1")
+        assert any("edit mode" in message for message in notices)
+        notices.clear()
+
+        app.joplin_panel_state.begin_edit(
+            scope,
+            edit={"edit_id": "edit-1", "draft_body": "base"},
+            note=note,
+        )
+        await app.render_joplin_mode("agent-1", note=note)
+        await pilot.pause()
+        body = app.query_one("#joplin-body", TextArea)
+        body.selection = type(body.selection).cursor((0, 4))
+        assert app.query_one("#joplin-note-paste", Button).disabled is False
+
+        await app.paste_joplin_note_from_clipboard("agent-1")
+        await pilot.pause()
+        assert isinstance(app.screen, JoplinPasteConfirmScreen)
+        confirm = app.screen
+        assert clipboard_text not in str(confirm.query_one("#joplin-paste-detail").renderable)
+
+        app.set_selected_joplin_note_for_agent("agent-1", "note-other")
+        assert app.apply_joplin_clipboard_paste("agent-1", "note-1", clipboard_text) is False
+        assert body.text == "base"
+        assert all("private first line" not in message for message in notices)
+
+
+async def test_tui_joplin_note_small_paste_updates_only_local_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_clipboard_text",
+        lambda: (" inserted", "test clipboard"),
+    )
+    note = {"id": "note-1", "title": "Draft", "body": "base", "revision": "rev-1"}
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-1"
+        scope = app.joplin_selection_key("agent-1")
+        app.joplin_notes_by_agent[scope] = {"note-1": note}
+        app.set_selected_joplin_note_for_agent("agent-1", "note-1")
+        draft = app.joplin_panel_state.begin_edit(
+            scope,
+            edit={"edit_id": "edit-1", "draft_body": "base"},
+            note=note,
+        )
+        await app.render_joplin_mode("agent-1", note=note)
+        await pilot.pause()
+        body = app.query_one("#joplin-body", TextArea)
+        body.selection = type(body.selection).cursor((0, 4))
+        app.schedule_joplin_draft_persist = lambda _agent_id: None  # type: ignore[method-assign]
+
+        await app.paste_joplin_note_from_clipboard("agent-1")
+        await pilot.pause()
+
+        assert body.text == "base inserted"
+        assert draft.body == "base inserted"
+        assert draft.dirty is True
 
 
 async def test_tui_joplin_encrypted_note_renders_locked_and_disables_mutation() -> None:
