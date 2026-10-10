@@ -7603,6 +7603,118 @@ async def test_tui_joplin_managed_sync_preserves_cached_view_during_api_restart(
         assert app.query_one("#joplin-edit", Button).disabled is True
 
 
+def test_tui_joplin_summary_cache_keeps_body_only_for_same_note_version() -> None:
+    cached = {
+        "id": "note-1",
+        "title": "Cached",
+        "body": "Full body",
+        "revision": "rev-1",
+        "body_hash": "body-1",
+        "updated_time": 10,
+        "user_updated_time": 9,
+        "encryption_applied": 0,
+    }
+    unchanged = {
+        "id": "note-1",
+        "title": "Cached",
+        "updated_time": 10,
+        "user_updated_time": 9,
+        "encryption_applied": 0,
+    }
+    changed = {**unchanged, "updated_time": 11}
+
+    merged = AgentPBXTUI.merge_joplin_note_summary(unchanged, cached)
+    invalidated = AgentPBXTUI.merge_joplin_note_summary(changed, cached)
+
+    assert merged["body"] == "Full body"
+    assert merged["revision"] == "rev-1"
+    assert "body" not in invalidated
+    assert "revision" not in invalidated
+
+
+async def test_tui_joplin_refresh_reuses_body_until_summary_revision_changes() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    list_revision = 10
+    detail_calls = 0
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            nonlocal detail_calls
+            if path == "/v1/joplin/status":
+                return Response(
+                    {
+                        "configured": True,
+                        "available": True,
+                        "notebook": "Agent PBX",
+                        "sync": {"enabled": True, "running": 0, "pending": 0},
+                        "error": None,
+                    }
+                )
+            if path == "/v1/projects/agent-1/joplin/notes":
+                return Response(
+                    [
+                        {
+                            "id": "note-1",
+                            "parent_id": "folder-1",
+                            "title": "Cached note",
+                            "updated_time": list_revision,
+                            "user_updated_time": list_revision,
+                            "encryption_applied": 0,
+                        }
+                    ]
+                )
+            if path == "/v1/projects/agent-1/joplin/notes/note-1":
+                detail_calls += 1
+                return Response(
+                    {
+                        "id": "note-1",
+                        "parent_id": "folder-1",
+                        "title": "Cached note",
+                        "body": f"Body revision {list_revision}",
+                        "revision": f"rev-{list_revision}",
+                        "body_hash": f"body-{list_revision}",
+                        "title_hash": "title-1",
+                        "updated_time": list_revision,
+                        "user_updated_time": list_revision,
+                        "encryption_applied": 0,
+                    }
+                )
+            if path in {"/v1/agents", "/v1/events"}:
+                return Response([])
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-1"
+        await app.load_joplin_notes("agent-1")
+        await pilot.pause()
+        reader = app.query_one("#joplin-reader", Markdown)
+        assert getattr(reader, "source_markdown", "") == "Body revision 10"
+        assert detail_calls == 1
+
+        await app.load_joplin_notes("agent-1")
+        await pilot.pause()
+        assert getattr(reader, "source_markdown", "") == "Body revision 10"
+        assert detail_calls == 1
+
+        list_revision = 11
+        await app.load_joplin_notes("agent-1")
+        await pilot.pause()
+        assert getattr(reader, "source_markdown", "") == "Body revision 11"
+        assert detail_calls == 2
+
+
 async def test_tui_joplin_sync_completion_refreshes_visible_panel() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     refreshed: list[str] = []

@@ -5755,6 +5755,10 @@ class AgentPBXTUI(App[None]):
         self.joplin_status: dict[str, Any] = {}
         self.joplin_panel_state = JoplinPanelState()
         self.joplin_notes_by_agent = self.joplin_panel_state.notes_by_scope
+        self.joplin_list_fingerprint_by_scope: dict[
+            str, tuple[tuple[object, ...], ...]
+        ] = {}
+        self.joplin_rendered_list_scope: str | None = None
         self.selected_joplin_note_id = self.joplin_panel_state.selected_note_id
         self.selected_joplin_note_id_by_agent = self.joplin_panel_state.selected_by_scope
         self.joplin_draft_timer: Timer | None = None
@@ -27014,8 +27018,68 @@ class AgentPBXTUI(App[None]):
         reader = self.query_one_or_none("#joplin-reader", Markdown)
         if reader is None:
             return
+        if str(getattr(reader, "source_markdown", "") or "") == markdown:
+            return
         setattr(reader, "source_markdown", markdown)
         await reader.update(markdown)
+
+    @staticmethod
+    def joplin_note_cache_version(note: Mapping[str, Any] | None) -> tuple[object, ...]:
+        if not isinstance(note, Mapping):
+            return ()
+        return (
+            str(note.get("id") or ""),
+            note.get("updated_time"),
+            note.get("user_updated_time"),
+            int_value(note.get("encryption_applied")) or 0,
+            bool(note.get("decryption_pending")),
+        )
+
+    @classmethod
+    def joplin_note_has_cached_body(
+        cls,
+        note: Mapping[str, Any] | None,
+        summary: Mapping[str, Any] | None = None,
+    ) -> bool:
+        if not isinstance(note, Mapping) or "body" not in note:
+            return False
+        if summary is None:
+            return True
+        return cls.joplin_note_cache_version(note) == cls.joplin_note_cache_version(
+            summary
+        )
+
+    @classmethod
+    def merge_joplin_note_summary(
+        cls,
+        summary: Mapping[str, Any],
+        cached: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        merged = dict(summary)
+        if not cls.joplin_note_has_cached_body(cached, summary):
+            return merged
+        assert cached is not None
+        for key in ("body", "revision", "title_hash", "body_hash"):
+            if key in cached:
+                merged[key] = cached[key]
+        return merged
+
+    @staticmethod
+    def joplin_list_fingerprint(
+        notes: list[dict[str, Any]],
+    ) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            (
+                str(note.get("id") or ""),
+                str(note.get("title") or ""),
+                note.get("updated_time"),
+                note.get("user_updated_time"),
+                int_value(note.get("encryption_applied")) or 0,
+                bool(note.get("decryption_pending")),
+            )
+            for note in notes
+            if str(note.get("id") or "")
+        )
 
     @staticmethod
     def joplin_note_is_locked(note: dict[str, Any] | None) -> bool:
@@ -27103,13 +27167,20 @@ class AgentPBXTUI(App[None]):
             )
 
     async def load_joplin_notes(self, agent_id: str) -> None:
-        await self.refresh_joplin_status()
         table = self.query_one_or_none("#joplin-notes", DataTable)
         body = self.query_one_or_none("#joplin-body", TextArea)
         reader = self.query_one_or_none("#joplin-reader", Markdown)
         if table is None or body is None or reader is None:
             return
         cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        cached_notes = list(self.joplin_notes_by_agent.get(cache_agent_id, {}).values())
+        if cached_notes and self.joplin_rendered_list_scope != cache_agent_id:
+            self.render_joplin_notes(agent_id, cached_notes)
+            selected = self.selected_joplin_note_for_agent(agent_id)
+            cached_note = self.current_joplin_note(agent_id, selected)
+            if self.joplin_note_has_cached_body(cached_note):
+                await self.render_joplin_mode(agent_id, note=cached_note)
+        await self.refresh_joplin_status()
         draft = self.joplin_panel_state.draft_for(cache_agent_id)
         reader_markdown_before_load = str(
             getattr(reader, "source_markdown", "") or ""
@@ -27118,6 +27189,7 @@ class AgentPBXTUI(App[None]):
         generation = self.async_generations.start(generation_resource)
         if not self.joplin_configured:
             table.clear()
+            self.joplin_rendered_list_scope = None
             self.set_joplin_mutation_controls_locked(False)
             await self.update_joplin_reader(
                 self.format_joplin_unavailable(self.joplin_status)
@@ -27131,12 +27203,17 @@ class AgentPBXTUI(App[None]):
                 self.schedule_joplin_sync_refresh(agent_id)
                 return
             table.clear()
+            self.joplin_rendered_list_scope = None
             self.set_joplin_mutation_controls_locked(False)
             await self.update_joplin_reader(
                 self.format_joplin_unavailable(self.joplin_status)
             )
             return
-        if not (draft and draft.dirty):
+        selected_before_load = self.selected_joplin_note_for_agent(agent_id)
+        selected_cached_note = self.current_joplin_note(agent_id, selected_before_load)
+        if not (draft and draft.dirty) and not self.joplin_note_has_cached_body(
+            selected_cached_note
+        ):
             await self.update_joplin_reader(
                 f"Loading Joplin notes for {self.joplin_scope_label_for_agent(agent_id)}..."
             )
@@ -27164,6 +27241,7 @@ class AgentPBXTUI(App[None]):
                 self.schedule_joplin_sync_refresh(agent_id)
                 return
             table.clear()
+            self.joplin_rendered_list_scope = None
             await self.update_joplin_reader(
                 f"Unable to load Joplin notes for "
                 f"{self.joplin_scope_label_for_agent(agent_id)}: {exc}"
@@ -27184,9 +27262,15 @@ class AgentPBXTUI(App[None]):
                 in self.joplin_notes_by_agent.get(cache_agent_id, {})
                 else str(notes[0]["id"])
             )
-            await self.select_joplin_note(note_id, agent_id=agent_id)
+            cached_note = self.current_joplin_note(agent_id, note_id)
+            if self.joplin_note_has_cached_body(cached_note):
+                self.set_selected_joplin_note_for_agent(agent_id, note_id)
+                await self.render_joplin_mode(agent_id, note=cached_note)
+            else:
+                await self.select_joplin_note(note_id, agent_id=agent_id)
         else:
             self.set_selected_joplin_note_for_agent(agent_id, None)
+            self.joplin_rendered_list_scope = None
             self.set_joplin_mutation_controls_locked(False)
             await self.update_joplin_reader("No project-scoped Joplin notes yet.")
 
@@ -27196,14 +27280,29 @@ class AgentPBXTUI(App[None]):
         notes: list[dict[str, Any]],
     ) -> None:
         table = self.query_one("#joplin-notes", DataTable)
-        position = self.data_table_position(table)
-        table.clear()
+        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        prior_notes = self.joplin_notes_by_agent.get(cache_agent_id, {})
         note_map: dict[str, dict[str, Any]] = {}
         for note in notes:
             note_id = str(note.get("id") or "")
             if not note_id:
                 continue
-            note_map[note_id] = note
+            note_map[note_id] = self.merge_joplin_note_summary(
+                note,
+                prior_notes.get(note_id),
+            )
+        fingerprint = self.joplin_list_fingerprint(list(note_map.values()))
+        list_changed = (
+            self.joplin_rendered_list_scope != cache_agent_id
+            or self.joplin_list_fingerprint_by_scope.get(cache_agent_id) != fingerprint
+            or table.row_count != len(note_map)
+        )
+        position = self.data_table_position(table) if list_changed else {}
+        if list_changed:
+            table.clear()
+        for note_id, note in note_map.items():
+            if not list_changed:
+                break
             table.add_row(
                 self.format_joplin_time(note.get("updated_time")),
                 (
@@ -27213,12 +27312,13 @@ class AgentPBXTUI(App[None]):
                 ),
                 key=note_id,
             )
-        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
         self.joplin_notes_by_agent[cache_agent_id] = note_map
         if cache_agent_id != agent_id:
             self.joplin_notes_by_agent[agent_id] = note_map
+        self.joplin_list_fingerprint_by_scope[cache_agent_id] = fingerprint
+        self.joplin_rendered_list_scope = cache_agent_id
         selected = self.selected_joplin_note_for_agent(agent_id)
-        if selected and selected in note_map:
+        if list_changed and selected and selected in note_map:
             try:
                 table.move_cursor(
                     row=table.get_row_index(selected),
@@ -27227,7 +27327,8 @@ class AgentPBXTUI(App[None]):
                 )
             except Exception:
                 pass
-        self.restore_data_table_position(table, position)
+        if list_changed:
+            self.restore_data_table_position(table, position)
 
     def joplin_selection_key(self, agent_id: str) -> str:
         return self.joplin_note_cache_agent_id(agent_id)
@@ -27251,6 +27352,7 @@ class AgentPBXTUI(App[None]):
         note_id: str,
         *,
         agent_id: str | None = None,
+        force_refresh: bool = False,
     ) -> None:
         agent_id = agent_id or self.selected_agent_id
         if not agent_id:
@@ -27262,6 +27364,13 @@ class AgentPBXTUI(App[None]):
                 "Save or resolve the current Joplin draft before selecting another note.",
                 severity="warning",
             )
+            return
+        cached_note = self.current_joplin_note(agent_id, note_id)
+        if not force_refresh and self.joplin_note_has_cached_body(cached_note):
+            self.set_selected_joplin_note_for_agent(agent_id, note_id)
+            if draft is None or draft.note_id != note_id:
+                self.joplin_panel_state.set_mode(cache_agent_id, "read")
+            await self.render_joplin_mode(agent_id, note=cached_note)
             return
         generation_resource = f"joplin-note:{cache_agent_id}"
         generation = self.async_generations.start(generation_resource)
