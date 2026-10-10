@@ -26,6 +26,17 @@ from .codex_theme import (
     render_managed_codex_theme_status,
 )
 from .doctor import doctor_json, doctor_markdown, run_platform_doctor
+from .dev_harness import (
+    build_harness_plan,
+    harness_status,
+    load_harness_manifest,
+    purge_harness,
+    render_harness,
+    resolve_harness_manifest,
+    run_in_harness,
+    start_harness,
+    stop_harness,
+)
 from .envfile import load_user_env_defaults
 from .joplin import (
     env_joplin_config,
@@ -338,6 +349,56 @@ def build_parser() -> argparse.ArgumentParser:
         )
         setup_command.add_argument("--config", type=Path, default=None)
         setup_command.add_argument("--json", action="store_true")
+
+    harness = subcommands.add_parser(
+        "harness",
+        help="Manage an isolated Agent PBX development and UAT harness.",
+    )
+    harness_subcommands = harness.add_subparsers(
+        dest="harness_command", required=True
+    )
+
+    def add_harness_identity_flags(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--root", type=Path, default=None)
+        command.add_argument("--run-id", required=True)
+
+    for command_name in ("plan", "start"):
+        command = harness_subcommands.add_parser(
+            command_name,
+            help=(
+                "Preview a new isolated harness."
+                if command_name == "plan"
+                else "Create and start a new isolated harness."
+            ),
+        )
+        add_harness_identity_flags(command)
+        command.add_argument("--source-root", type=Path, default=Path.cwd())
+        command.add_argument("--port", type=int, default=None)
+        command.add_argument("--tmux-bin", default="tmux")
+        command.add_argument(
+            "--workerbee-backend",
+            choices=("fixture", "oss-local", "platform-debug-bound"),
+            default="fixture",
+        )
+        if command_name == "start":
+            command.add_argument("--no-tmux", action="store_true")
+    for command_name in ("status", "stop"):
+        command = harness_subcommands.add_parser(command_name)
+        add_harness_identity_flags(command)
+    harness_run = harness_subcommands.add_parser(
+        "run", help="Run one command inside an existing isolated harness."
+    )
+    add_harness_identity_flags(harness_run)
+    harness_run.add_argument("argv", nargs=argparse.REMAINDER)
+    harness_purge = harness_subcommands.add_parser(
+        "purge", help="Delete a stopped isolated harness and its artifacts."
+    )
+    add_harness_identity_flags(harness_purge)
+    harness_purge.add_argument(
+        "--confirm",
+        required=True,
+        help="Must exactly match --run-id.",
+    )
 
     codex = subcommands.add_parser("codex", help="Manage Codex integration assets.")
     codex_subcommands = codex.add_subparsers(dest="codex_command", required=True)
@@ -675,6 +736,52 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(result, indent=2, sort_keys=True) if args.json else rendered)
         return exit_code
+
+    if args.command == "harness":
+        try:
+            if args.harness_command in {"plan", "start"}:
+                plan = build_harness_plan(
+                    source_root=args.source_root,
+                    harness_root=args.root,
+                    run_id=args.run_id,
+                    port=args.port,
+                    tmux_bin=args.tmux_bin,
+                    workerbee_backend=args.workerbee_backend,
+                )
+                result = (
+                    plan
+                    if args.harness_command == "plan"
+                    else start_harness(plan, start_tmux=not bool(args.no_tmux))
+                )
+            else:
+                manifest_path = resolve_harness_manifest(
+                    harness_root=args.root,
+                    run_id=args.run_id,
+                )
+                manifest = load_harness_manifest(manifest_path)
+                if args.harness_command == "status":
+                    result = harness_status(manifest)
+                elif args.harness_command == "run":
+                    argv = list(args.argv)
+                    if argv[:1] == ["--"]:
+                        argv = argv[1:]
+                    result = run_in_harness(manifest, argv)
+                elif args.harness_command == "stop":
+                    result = stop_harness(manifest)
+                elif args.harness_command == "purge":
+                    if args.confirm != args.run_id:
+                        raise ValueError("--confirm must exactly match --run-id")
+                    removed = purge_harness(manifest)
+                    result = {"purged": True, "path": str(removed)}
+                else:  # pragma: no cover - argparse enforces subcommands
+                    raise ValueError("unknown harness command")
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(render_harness(result))
+        if isinstance(result, dict) and result.get("returncode"):
+            return int(result["returncode"])
+        return 0
 
     if args.command == "codex" and args.codex_command == "theme":
         try:
