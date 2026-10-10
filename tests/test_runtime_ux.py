@@ -121,6 +121,104 @@ def test_runtime_projection_observes_children_without_prompt_or_reasoning(
     assert "prompt" not in serialized
 
 
+def test_runtime_projection_accepts_current_subagent_activity_without_paths_or_roles(
+    tmp_path: Path,
+) -> None:
+    client, app = runtime_client(tmp_path)
+    started = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-root",
+                "item": {
+                    "id": "activity-1",
+                    "type": "subAgentActivity",
+                    "agentThreadId": "thread-child-current",
+                    "agentPath": "/private/.codex/agents/security-reviewer.toml",
+                    "kind": "started",
+                    "model": "gpt-5.6-sol",
+                    "reasoningEffort": "high",
+                },
+            },
+        },
+    )
+    assert started.status_code == 200
+    child = started.json()["children"][0]
+    assert child["child_id"] == "thread-child-current"
+    assert child["parent_id"] == "agent-a"
+    assert child["state"] == "starting"
+    assert child["role"] is None
+
+    completed = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-root",
+                "item": {
+                    "id": "activity-2",
+                    "type": "subAgentActivity",
+                    "agentThreadId": "thread-child-current",
+                    "agentPath": "/private/.codex/agents/security-reviewer.toml",
+                    "kind": "completed",
+                },
+            },
+        },
+    )
+    assert completed.status_code == 200
+    child = completed.json()["children"][0]
+    assert child["state"] == "complete"
+    assert child["finished_at"] is not None
+    serialized = json.dumps(
+        app.state.store.list_subject_events(
+            "agent-a", event_type="codex_runtime_observed"
+        )
+    )
+    assert "security-reviewer.toml" not in serialized
+    assert "/private" not in serialized
+
+
+def test_runtime_projection_degrades_unknown_and_partial_subagent_activity_safely(
+    tmp_path: Path,
+) -> None:
+    client, _app = runtime_client(tmp_path)
+    unknown = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "type": "subAgentActivity",
+                    "agentThreadId": "thread-child-future",
+                    "agentPath": "future",
+                    "kind": "future-kind",
+                }
+            },
+        },
+    )
+    assert unknown.status_code == 200
+    assert unknown.json()["children"][0]["state"] == "unknown"
+
+    partial = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "item/completed",
+            "params": {"item": {"type": "subAgentActivity", "kind": "completed"}},
+        },
+    )
+    assert partial.status_code == 200
+    assert partial.json()["children"][0]["child_id"] == "thread-child-future"
+
+
 def test_runtime_context_and_persisted_projection_restore(tmp_path: Path) -> None:
     client, app = runtime_client(tmp_path)
     response = client.post(

@@ -62,6 +62,13 @@ CHILD_STATUS_STATES = {
     "notFound": CodexRuntimeState.UNKNOWN,
 }
 
+SUBAGENT_ACTIVITY_STATES = {
+    "started": CodexRuntimeState.STARTING,
+    "interacted": CodexRuntimeState.THINKING,
+    "interrupted": CodexRuntimeState.INTERRUPTED,
+    "completed": CodexRuntimeState.COMPLETE,
+}
+
 
 @dataclass
 class RuntimeRecord:
@@ -325,7 +332,11 @@ class CodexRuntimeService:
         if method not in {"item/started", "item/completed"}:
             return False
         item = params.get("item")
-        if not isinstance(item, Mapping) or item.get("type") != "collabAgentToolCall":
+        if not isinstance(item, Mapping):
+            return False
+        if item.get("type") == "subAgentActivity":
+            return self._apply_subagent_activity(record, item, observed_at)
+        if item.get("type") != "collabAgentToolCall":
             return False
         sender = clean_public_value(item.get("senderThreadId"), 240)
         if sender and sender != record.adapter.identity.codex_session_id:
@@ -379,6 +390,44 @@ class CodexRuntimeService:
         if changed:
             record.native_subagents_observed = True
         return changed
+
+    def _apply_subagent_activity(
+        self,
+        record: RuntimeRecord,
+        item: Mapping[str, Any],
+        observed_at: float,
+    ) -> bool:
+        child_id = clean_public_value(item.get("agentThreadId"), 240)
+        if not child_id:
+            return False
+        kind = clean_public_value(item.get("kind"), 80) or ""
+        state = SUBAGENT_ACTIVITY_STATES.get(kind, CodexRuntimeState.UNKNOWN)
+        model = clean_public_value(item.get("model"), 160)
+        effort = clean_public_value(item.get("reasoningEffort"), 80)
+        prior = record.children.get(child_id)
+        record.children[child_id] = CodexChildRuntime(
+            child_id=child_id,
+            parent_id=record.adapter.identity.entity_id,
+            state=state,
+            # agentPath is deliberately not treated as a named role. It can be
+            # a host path and does not prove that a configured role was loaded.
+            role=prior.role if prior else None,
+            task=None,
+            model=model or (prior.model if prior else None),
+            reasoning_effort=effort or (prior.reasoning_effort if prior else None),
+            started_at=prior.started_at if prior else observed_at,
+            finished_at=(
+                observed_at
+                if state
+                in {
+                    CodexRuntimeState.COMPLETE,
+                    CodexRuntimeState.INTERRUPTED,
+                }
+                else None
+            ),
+        )
+        record.native_subagents_observed = True
+        return True
 
     def _snapshot(
         self,
@@ -512,7 +561,7 @@ def safe_event_detail(method: str, params: Mapping[str, Any]) -> dict[str, objec
         if isinstance(item, Mapping):
             detail["item"] = {
                 key: value
-                for key in ("type", "status", "tool")
+                for key in ("type", "status", "tool", "kind")
                 if (value := clean_public_value(item.get(key), 80))
             }
     elif method == "turn/completed":
@@ -555,7 +604,7 @@ def safe_evidence_detail(detail: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(item, Mapping):
         result["item"] = {
             key: value
-            for key in ("type", "status", "tool")
+            for key in ("type", "status", "tool", "kind")
             if (value := clean_public_value(item.get(key), 80))
         }
     if detail.get("fallback") is True:

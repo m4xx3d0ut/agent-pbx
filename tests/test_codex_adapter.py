@@ -143,6 +143,14 @@ def test_current_app_server_event_shapes_normalize_without_ansi_parsing() -> Non
         "item/started",
         {"item": {"type": "collabAgentToolCall", "status": "inProgress"}},
     ) is CodexRuntimeState.DELEGATING
+    assert app_server_event_state(
+        "item/started",
+        {"item": {"type": "subAgentActivity", "kind": "started"}},
+    ) is CodexRuntimeState.DELEGATING
+    assert app_server_event_state(
+        "item/completed",
+        {"item": {"type": "subAgentActivity", "kind": "completed"}},
+    ) is CodexRuntimeState.THINKING
 
 
 def test_adapter_rejects_unrelated_app_server_thread() -> None:

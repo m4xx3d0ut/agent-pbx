@@ -107,6 +107,12 @@ def app_server_event_state(
                 if method == "item/started"
                 else CodexRuntimeState.THINKING
             )
+        if item_type == "subAgentActivity":
+            return (
+                CodexRuntimeState.DELEGATING
+                if method == "item/started"
+                else CodexRuntimeState.THINKING
+            )
         if item_type in EXECUTION_ITEM_TYPES:
             if method == "item/completed" and str(item.get("status") or "") in {
                 "failed",

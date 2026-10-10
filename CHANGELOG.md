@@ -10,6 +10,9 @@
 - Add a guided local setup transaction that previews dependencies and scoped
   project roots, merges private localhost-first configuration atomically, and
   supports idempotent resume and checksum-guarded rollback.
+- Recognize current Codex `subAgentActivity` events in the capability-gated
+  nested runtime tree while keeping child paths, prompts, and inferred roles
+  out of PBX telemetry.
 
 ### Fixed
 
