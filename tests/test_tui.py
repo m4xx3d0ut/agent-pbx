@@ -1508,7 +1508,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert "#workerbee-detail {\n        height: 1fr;" in app.CSS
         assert "#joplin-notes {\n        height: 8;" in app.CSS
         assert "#joplin-body {\n        height: 1fr;" in app.CSS
-        assert "#joplin-actions {\n        height: 10;" in app.CSS
+        assert "#joplin-actions {\n        height: 13;" in app.CSS
         assert "#tmux-message {\n        height: 8;" in app.CSS
         assert "Notification Options" not in app.CSS
         assert message.soft_wrap is True
