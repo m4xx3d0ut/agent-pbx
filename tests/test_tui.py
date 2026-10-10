@@ -102,6 +102,7 @@ from agent_pbx.workerbee_mcp import (
     WorkerBeeBackendProvenance,
     WorkerBeeProjectVisibilityDiagnostic,
 )
+from agent_pbx.ui.palette_history import CommandInput, PaletteHistoryScreen
 from textual.app import App, ComposeResult
 from textual.events import Click, Key, MouseDown
 from textual.widgets import (
@@ -2494,6 +2495,97 @@ async def test_tui_ctrl_p_opens_palette_instead_of_writing_to_terminal() -> None
 
         assert app.screen.id == "--command-palette"
         assert written == []
+
+
+async def test_tui_palette_up_down_traverses_history_only_in_palette_input() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.palette_history.record("/refresh")
+    app.palette_history.record("/latest")
+
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        palette_input = app.screen.query_one(CommandInput)
+        palette_input.value = "/draft"
+        palette_input.cursor_position = len(palette_input.value)
+
+        await pilot.press("up")
+        assert palette_input.value == "/latest"
+        await pilot.press("up")
+        assert palette_input.value == "/refresh"
+
+        palette_input.value = "/edited"
+        await pilot.press("down")
+        assert palette_input.value == "/latest"
+        await pilot.press("down")
+        assert palette_input.value == "/draft"
+
+    assert app.palette_history.entries == ("/refresh", "/latest")
+
+
+async def test_tui_palette_records_the_selected_command_name() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        palette_input = app.screen.query_one(CommandInput)
+        palette_input.value = "/latest"
+        palette_input.cursor_position = len(palette_input.value)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert app.palette_history.entries == ("/latest",)
+
+
+async def test_tui_palette_history_persistence_is_opt_in_and_clearable(
+    tmp_path: Path,
+) -> None:
+    settings_file = tmp_path / "tui-settings.json"
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        settings_file=settings_file,
+    )
+    app.palette_history.record("/refresh")
+
+    app.save_settings()
+    settings = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert settings["palette_history_persist"] is False
+    assert "palette_history" not in settings
+
+    app.palette_history_set_persistence(True)
+    settings = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert settings["palette_history"] == ["/refresh"]
+
+    restored = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        settings_file=settings_file,
+    )
+    assert restored.palette_history.entries == ("/refresh",)
+
+    restored.palette_history_clear()
+    assert restored.palette_history.entries == ()
+    settings = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert settings["palette_history"] == []
+
+    restored.palette_history_set_persistence(False)
+    settings = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert "palette_history" not in settings
+
+
+async def test_tui_palette_history_view_is_expandable() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.palette_history.record("/refresh")
+
+    async with app.run_test() as pilot:
+        app.palette_history_show()
+        await pilot.pause()
+        assert isinstance(app.screen, PaletteHistoryScreen)
+        table = app.screen.query_one("#palette-history-table", DataTable)
+        assert table.row_count == 1
 
 
 async def test_tui_tabs_into_embedded_terminal_and_arrows_reach_tmux_client() -> None:

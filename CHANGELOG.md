@@ -13,6 +13,9 @@
 - Recognize current Codex `subAgentActivity` events in the capability-gated
   nested runtime tree while keeping child paths, prompts, and inferred roles
   out of PBX telemetry.
+- Add bounded, deduplicated command palette history with input-focused Up/Down
+  traversal, an inspector and clear action, sensitive-name filtering, and
+  opt-in persistence that never stores prompt bodies.
 
 ### Fixed
 

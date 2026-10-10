@@ -120,6 +120,11 @@ from .runtime_tmux import (
 from .ui.actions import ActionRegistry
 from .ui.async_jobs import AsyncGenerationGate
 from .ui.focus import FocusGenerationGuard
+from .ui.palette_history import (
+    PaletteCommandHistory,
+    PaletteHistoryScreen,
+    PbxCommandPalette,
+)
 from .ui.panels.editor import EditorPanelState
 from .ui.panels.joplin import JoplinPanelState
 from .ui.panels.operators import OperatorPanelState
@@ -698,6 +703,10 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/gitpush",
     "/gitstageandcommit",
     "/commands reload",
+    "/palette history",
+    "/palette history clear",
+    "/palette history persistence on",
+    "/palette history persistence off",
     "/agents prune",
     "/agents prune apply",
     "/agents prune stale",
@@ -4487,6 +4496,7 @@ class AgentPBXTUI(App[None]):
     ModelElevationScreen,
     JoplinDeleteConfirmScreen,
     JoplinPasteConfirmScreen,
+    PaletteHistoryScreen,
     FilePathActionScreen,
     FileDeleteConfirmScreen,
     FileTrashScreen,
@@ -4502,6 +4512,7 @@ class AgentPBXTUI(App[None]):
     #model-elevation-panel,
     #joplin-delete-panel,
     #joplin-paste-panel,
+    #palette-history-panel,
     #file-path-action-panel,
     #file-delete-panel,
     #file-trash-panel,
@@ -4574,6 +4585,37 @@ class AgentPBXTUI(App[None]):
         max-width: 96%;
         height: 26;
         max-height: 90%;
+    }
+
+    #palette-history-panel {
+        width: 96;
+        max-width: 94%;
+        height: 24;
+        max-height: 90%;
+    }
+
+    #palette-history-title {
+        height: 1;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #palette-history-summary {
+        height: 2;
+        color: $secondary;
+        content-align: center middle;
+    }
+
+    #palette-history-table {
+        height: 1fr;
+    }
+
+    #palette-history-actions {
+        height: 3;
+    }
+
+    #palette-history-actions Button {
+        width: 1fr;
     }
 
     #joplin-title-modal-title,
@@ -5549,6 +5591,18 @@ class AgentPBXTUI(App[None]):
             else env_settings_file()
         )
         self.settings = load_tui_settings(self.settings_file)
+        self.palette_history_persist = bool_setting(
+            self.settings,
+            "palette_history_persist",
+            False,
+        )
+        stored_palette_history = self.settings.get("palette_history", [])
+        if not self.palette_history_persist or not isinstance(
+            stored_palette_history,
+            list,
+        ):
+            stored_palette_history = []
+        self.palette_history = PaletteCommandHistory(stored_palette_history)
         self.slash_commands_file = env_slash_commands_file()
         (
             self.custom_slash_commands,
@@ -7579,6 +7633,18 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def action_command_palette(self) -> None:
+        """Open the PBX palette while preserving Textual's native providers."""
+
+        if self.use_command_palette and not PbxCommandPalette.is_open(self):
+            self.push_screen(
+                PbxCommandPalette(
+                    self.palette_history,
+                    on_record=self.palette_history_recorded,
+                    id="--command-palette",
+                )
+            )
+
     def get_system_commands(self, screen: Any) -> Iterable[SystemCommand]:
         yield from super().get_system_commands(screen)
         yield SystemCommand("/refresh", "Refresh agents, events, and selected agent", self.palette_refresh)
@@ -7786,6 +7852,26 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator kb retire", "Retire the selected active KB entry", self.palette_operator_kb_retire)
         yield SystemCommand("/operator project spawn", "Launch the oldest pending review project spawn", self.palette_operator_project_spawn)
         yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
+        yield SystemCommand(
+            "/palette history",
+            "Show command-name history and persistence status",
+            self.palette_history_show,
+        )
+        yield SystemCommand(
+            "/palette history clear",
+            "Clear command palette history",
+            self.palette_history_clear,
+        )
+        yield SystemCommand(
+            "/palette history persistence on",
+            "Persist safe command names across TUI restarts",
+            lambda: self.palette_history_set_persistence(True),
+        )
+        yield SystemCommand(
+            "/palette history persistence off",
+            "Keep command history in memory only",
+            lambda: self.palette_history_set_persistence(False),
+        )
         yield SystemCommand("/agents prune", "Preview safe pruning for old terminal caller agents", self.palette_agents_prune)
         yield SystemCommand("/agents prune apply", "Apply the latest agent prune preview", self.palette_agents_prune_apply)
         yield SystemCommand("/agents prune stale", "Preview stale nonterminal caller pruning", self.palette_agents_prune_stale)
@@ -9293,6 +9379,30 @@ class AgentPBXTUI(App[None]):
 
     def palette_reload_custom_slash_commands(self) -> None:
         self.reload_custom_slash_commands(notify=True)
+
+    def palette_history_recorded(self) -> None:
+        if self.palette_history_persist:
+            self.save_settings()
+
+    def palette_history_show(self) -> None:
+        self.push_screen(
+            PaletteHistoryScreen(
+                self.palette_history,
+                persistence_enabled=self.palette_history_persist,
+                on_clear=self.palette_history_clear,
+            )
+        )
+
+    def palette_history_clear(self) -> None:
+        self.palette_history.clear()
+        self.save_settings()
+        self.notify("Command palette history cleared.")
+
+    def palette_history_set_persistence(self, enabled: bool) -> None:
+        self.palette_history_persist = bool(enabled)
+        self.save_settings()
+        state = "enabled" if enabled else "disabled; history is memory-only"
+        self.notify(f"Command palette history persistence {state}.")
 
     def palette_custom_slash_commands(self) -> Iterable[SystemCommand]:
         for command in self.custom_slash_commands:
@@ -31090,6 +31200,7 @@ class AgentPBXTUI(App[None]):
             "joplin_copy_mode": self.joplin_copy_mode,
             "joplin_paste_confirm_chars": self.joplin_paste_confirm_chars,
             "joplin_paste_confirm_lines": self.joplin_paste_confirm_lines,
+            "palette_history_persist": self.palette_history_persist,
             "codex_terminal_mode": self.codex_terminal_mode,
             "detached_tmux_width": self.detached_tmux_width,
             "detached_tmux_height": self.detached_tmux_height,
@@ -31117,6 +31228,8 @@ class AgentPBXTUI(App[None]):
             "legacy_terminal_capture_enabled": self.legacy_terminal_capture_enabled,
             "remote_client_id": self.remote_client_id,
         }
+        if self.palette_history_persist:
+            self.settings["palette_history"] = list(self.palette_history.entries)
         try:
             self.settings_file.parent.mkdir(parents=True, exist_ok=True)
             self.settings_file.write_text(
