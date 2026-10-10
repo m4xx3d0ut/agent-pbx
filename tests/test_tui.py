@@ -97,6 +97,10 @@ from agent_pbx.runtime_tmux import (
     RuntimeTmuxClient,
     TmuxServerIdentity,
 )
+from agent_pbx.workerbee_mcp import (
+    WorkerBeeBackendProvenance,
+    WorkerBeeProjectVisibilityDiagnostic,
+)
 from textual.app import App, ComposeResult
 from textual.events import Click, Key, MouseDown
 from textual.widgets import (
@@ -6647,6 +6651,39 @@ def test_tui_formats_workerbee_status() -> None:
     assert "Global Dashboard" in rendered
     assert "Dashboard Warning" in rendered
     assert "Code: WORKERBEE_TIMEOUT" in rendered
+
+
+def test_tui_formats_workerbee_backend_and_path_provenance() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    backend = WorkerBeeBackendProvenance(
+        code="WORKERBEE_SWITCHER_READY",
+        configured=True,
+        ready=True,
+        backend="platform_debug",
+        endpoint="http://127.0.0.1:8765/mcp",
+        server_name="K1S WorkerBee",
+        server_version="1.30.0",
+        config_path="/home/test/.config/workerbee/wb-mcp-switch.env",
+        message="WorkerBee switcher selected platform_debug.",
+    )
+    visibility = WorkerBeeProjectVisibilityDiagnostic(
+        code="WORKERBEE_PATH_VISIBILITY_MISMATCH",
+        ready=False,
+        host_cwd="/workspace/repo",
+        host_git_root="/workspace/repo",
+        workerbee_git_root=None,
+        workerbee_repo_exists=False,
+        message="The host sees a Git checkout that WorkerBee did not resolve.",
+        remediation="Check the backend mount mapping.",
+    )
+
+    rendered_backend = app.format_workerbee_backend_provenance(backend)
+    rendered_visibility = app.format_workerbee_project_visibility(visibility)
+
+    assert "Backend: platform_debug" in rendered_backend
+    assert "Server: K1S WorkerBee 1.30.0" in rendered_backend
+    assert "Code: WORKERBEE_PATH_VISIBILITY_MISMATCH" in rendered_visibility
+    assert "Host Git root: /workspace/repo" in rendered_visibility
 
 
 def test_tui_workerbee_does_not_poll_while_active() -> None:

@@ -82,7 +82,11 @@ from .project_spawn import (
     validate_sibling_project_target,
 )
 from .workerbee_mcp import (
+    WorkerBeeBackendProvenance,
     WorkerBeeMcpPreflight,
+    WorkerBeeProjectVisibilityDiagnostic,
+    inspect_workerbee_project_visibility,
+    inspect_workerbee_switcher,
     inspect_workerbee_mcp,
 )
 from .contracts import ActionDefinition
@@ -5773,6 +5777,8 @@ class AgentPBXTUI(App[None]):
         self.joplin_copy_locks: dict[str, asyncio.Lock] = {}
         self.codex_session_repairs_in_flight: set[tuple[str, str]] = set()
         self.workerbee_mcp_preflight: WorkerBeeMcpPreflight | None = None
+        self.workerbee_backend_provenance: WorkerBeeBackendProvenance | None = None
+        self.workerbee_project_visibility: WorkerBeeProjectVisibilityDiagnostic | None = None
         self.joplin_copy_fingerprints_by_agent = string_record_map_setting(
             self.settings,
             "joplin_copy_fingerprints_by_agent",
@@ -29944,8 +29950,18 @@ class AgentPBXTUI(App[None]):
         self.workerbee_status_by_agent[agent_id] = status
         if render_detail and detail is not None:
             rendered = self.format_workerbee_status(status)
+            if self.workerbee_backend_provenance is not None:
+                rendered = (
+                    f"{rendered}\n\n"
+                    f"{self.format_workerbee_backend_provenance(self.workerbee_backend_provenance)}"
+                )
             if self.workerbee_mcp_preflight is not None:
                 rendered = f"{rendered}\n\n{self.format_workerbee_mcp_preflight(self.workerbee_mcp_preflight)}"
+            if self.workerbee_project_visibility is not None:
+                rendered = (
+                    f"{rendered}\n\n"
+                    f"{self.format_workerbee_project_visibility(self.workerbee_project_visibility)}"
+                )
             detail.text = rendered
         if self.selected_agent_id == agent_id:
             self.render_codex_runtime_surface()
@@ -29962,11 +29978,43 @@ class AgentPBXTUI(App[None]):
 
     async def refresh_workerbee_mcp_preflight(self) -> WorkerBeeMcpPreflight:
         endpoint = self.workerbee_mcp_endpoint()
+        prior_provenance = self.workerbee_backend_provenance
+        provenance = await asyncio.to_thread(
+            inspect_workerbee_switcher,
+            expected_endpoint=endpoint,
+        )
+        self.workerbee_backend_provenance = provenance
+        if (
+            prior_provenance is not None
+            and prior_provenance.fingerprint != provenance.fingerprint
+        ):
+            self.workerbee_status_by_agent.clear()
+            self.workerbee_project_visibility = None
+            self.notify(
+                "WorkerBee backend changed; cached capability and project evidence was cleared.",
+                severity="warning",
+            )
         result = await inspect_workerbee_mcp(
             endpoint,
             enabled_tools=REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS,
         )
         self.workerbee_mcp_preflight = result
+        visibility: WorkerBeeProjectVisibilityDiagnostic | None = None
+        agent = self.agents.get(self.selected_agent_id or "")
+        metadata = (
+            agent.get("metadata")
+            if isinstance(agent, dict) and isinstance(agent.get("metadata"), dict)
+            else {}
+        )
+        cwd = str(
+            metadata.get("work_root")
+            or metadata.get("cwd")
+            or metadata.get("source_cwd")
+            or ""
+        ).strip()
+        if result.ready and cwd:
+            visibility = await inspect_workerbee_project_visibility(endpoint, cwd)
+        self.workerbee_project_visibility = visibility
         detail = self.query_one_or_none("#workerbee-detail", TextArea)
         if detail is not None:
             agent_id = self.selected_agent_id
@@ -29974,7 +30022,16 @@ class AgentPBXTUI(App[None]):
             base = self.format_workerbee_status(status) if isinstance(status, dict) else ""
             detail.text = "\n\n".join(
                 item
-                for item in (base, self.format_workerbee_mcp_preflight(result))
+                for item in (
+                    base,
+                    self.format_workerbee_backend_provenance(provenance),
+                    self.format_workerbee_mcp_preflight(result),
+                    (
+                        self.format_workerbee_project_visibility(visibility)
+                        if visibility is not None
+                        else ""
+                    ),
+                )
                 if item
             )
         self.notify(
@@ -29982,6 +30039,43 @@ class AgentPBXTUI(App[None]):
             severity="information" if result.ready else "warning",
         )
         return result
+
+    def format_workerbee_backend_provenance(
+        self,
+        provenance: WorkerBeeBackendProvenance,
+    ) -> str:
+        lines = [
+            "WorkerBee Backend",
+            f"Code: {provenance.code}",
+            f"Switcher: {'configured' if provenance.configured else 'not configured'}",
+            f"Backend: {provenance.backend or '-'}",
+            f"Endpoint: {provenance.endpoint or '-'}",
+            f"Server: {provenance.server_name or '-'} {provenance.server_version}".rstrip(),
+            f"Detail: {provenance.message}",
+        ]
+        if provenance.config_path:
+            lines.append(f"Config: {provenance.config_path}")
+        if provenance.remediation:
+            lines.append(f"Remediation: {provenance.remediation}")
+        return "\n".join(lines)
+
+    def format_workerbee_project_visibility(
+        self,
+        result: WorkerBeeProjectVisibilityDiagnostic,
+    ) -> str:
+        lines = [
+            "WorkerBee Project Visibility",
+            f"Code: {result.code}",
+            f"Ready: {'yes' if result.ready else 'no'}",
+            f"Host cwd: {result.host_cwd}",
+            f"Host Git root: {result.host_git_root or '-'}",
+            f"WorkerBee Git root: {result.workerbee_git_root or '-'}",
+            f"WorkerBee repo exists: {result.workerbee_repo_exists}",
+            f"Detail: {result.message}",
+        ]
+        if result.remediation:
+            lines.append(f"Remediation: {result.remediation}")
+        return "\n".join(lines)
 
     def format_workerbee_mcp_preflight(self, result: WorkerBeeMcpPreflight) -> str:
         parsed = urlparse(result.endpoint)

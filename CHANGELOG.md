@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- Report versioned WorkerBee backend provenance, endpoint alignment, server
+  identity, and host-to-WorkerBee project visibility through doctor and the
+  TUI without changing the selected backend.
+
 ### Fixed
 
 - Render the public hero and architecture visuals on PyPI by using absolute

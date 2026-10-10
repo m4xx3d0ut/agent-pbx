@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass
 import json
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -17,6 +19,10 @@ WORKERBEE_REQUIRED_BOOTSTRAP_TOOLS = (
     "workerbee_v1_session_start",
 )
 MINIMUM_WORKERBEE_BOOTSTRAP_VERSION = "0.1.7"
+WORKERBEE_SWITCHER_STATUS_BIN_ENV = "AGENT_PBX_WORKERBEE_SWITCHER_STATUS_BIN"
+WORKERBEE_PRODUCT_URL = "https://bee.cosmec.co"
+WORKERBEE_SWITCHER_CONFIG_API_VERSION = "workerbee.mcp_switch_config/v1"
+WORKERBEE_SWITCHER_STATUS_API_VERSION = "workerbee.mcp_switch_status/v1"
 
 
 @dataclass(frozen=True)
@@ -49,17 +55,173 @@ class WorkerBeeProjectVisibilityDiagnostic:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class WorkerBeeBackendProvenance:
+    code: str
+    configured: bool
+    ready: bool
+    backend: str = ""
+    endpoint: str = ""
+    server_name: str = ""
+    server_version: str = ""
+    config_path: str = ""
+    message: str = ""
+    remediation: str = ""
+
+    @property
+    def fingerprint(self) -> tuple[str, ...]:
+        return (
+            self.backend,
+            self.endpoint,
+            self.server_name,
+            self.server_version,
+            self.config_path,
+        )
+
+    def public_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def inspect_workerbee_switcher(
+    *,
+    status_bin: str | Path | None = None,
+    expected_endpoint: str = "",
+    timeout_seconds: float = 5.0,
+    which: Callable[[str], str | None] = shutil.which,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> WorkerBeeBackendProvenance:
+    configured = str(status_bin or os.getenv(WORKERBEE_SWITCHER_STATUS_BIN_ENV) or "").strip()
+    candidate = configured or str(which("wb-mcp-status") or "").strip()
+    if not candidate:
+        return WorkerBeeBackendProvenance(
+            code="WORKERBEE_SWITCHER_NOT_CONFIGURED",
+            configured=False,
+            ready=True,
+            message="No WorkerBee MCP switcher status command is configured.",
+            remediation=(
+                "Direct WorkerBee MCP configuration remains supported. See "
+                f"{WORKERBEE_PRODUCT_URL} for WorkerBee setup guidance."
+            ),
+        )
+    try:
+        result = runner(
+            [candidate],
+            capture_output=True,
+            text=True,
+            timeout=max(0.1, timeout_seconds),
+        )
+    except Exception as exc:  # noqa: BLE001 - diagnostics normalize host failures
+        return WorkerBeeBackendProvenance(
+            code="WORKERBEE_SWITCHER_UNAVAILABLE",
+            configured=True,
+            ready=False,
+            message=f"WorkerBee MCP switcher status failed ({type(exc).__name__}).",
+            remediation="Correct the switcher status executable and rerun the preflight.",
+        )
+    if result.returncode != 0:
+        return WorkerBeeBackendProvenance(
+            code="WORKERBEE_SWITCHER_FAILED",
+            configured=True,
+            ready=False,
+            message=f"WorkerBee MCP switcher status exited {result.returncode}.",
+            remediation="Run the switcher status command directly and resolve its diagnostic.",
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return WorkerBeeBackendProvenance(
+            code="WORKERBEE_SWITCHER_INVALID_JSON",
+            configured=True,
+            ready=False,
+            message="WorkerBee MCP switcher returned invalid JSON.",
+            remediation="Use a switcher status command that emits its versioned JSON contract.",
+        )
+    if not isinstance(payload, dict):
+        return WorkerBeeBackendProvenance(
+            code="WORKERBEE_SWITCHER_INVALID_PAYLOAD",
+            configured=True,
+            ready=False,
+            message="WorkerBee MCP switcher returned a non-object payload.",
+            remediation="Upgrade or repair the switcher status command.",
+        )
+    status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    config_api_version = str(config.get("api_version") or "").strip()
+    status_api_version = str(status.get("api_version") or "").strip()
+    if (
+        config_api_version != WORKERBEE_SWITCHER_CONFIG_API_VERSION
+        or status_api_version != WORKERBEE_SWITCHER_STATUS_API_VERSION
+    ):
+        return WorkerBeeBackendProvenance(
+            code="WORKERBEE_SWITCHER_UNSUPPORTED_CONTRACT",
+            configured=True,
+            ready=False,
+            message=(
+                "WorkerBee MCP switcher uses an unsupported status contract "
+                f"(config={config_api_version or '-'}, status={status_api_version or '-'})."
+            ),
+            remediation=(
+                "Upgrade Agent PBX or select a switcher that emits "
+                f"{WORKERBEE_SWITCHER_CONFIG_API_VERSION} and "
+                f"{WORKERBEE_SWITCHER_STATUS_API_VERSION}."
+            ),
+        )
+    mcp = status.get("mcp") if isinstance(status.get("mcp"), dict) else {}
+    server_info = (
+        mcp.get("server_info") if isinstance(mcp.get("server_info"), dict) else {}
+    )
+    backend = str(status.get("backend") or "").strip()
+    endpoint = str(status.get("mcp_endpoint") or "").strip()
+    mcp_status = str(mcp.get("status") or "").strip().lower()
+    provenance = WorkerBeeBackendProvenance(
+        code="WORKERBEE_SWITCHER_READY",
+        configured=True,
+        ready=bool(backend and endpoint and mcp_status == "ready"),
+        backend=backend,
+        endpoint=endpoint,
+        server_name=str(server_info.get("name") or "").strip(),
+        server_version=str(server_info.get("version") or "").strip(),
+        config_path=str(config.get("path") or "").strip(),
+        message=(
+            f"WorkerBee switcher selected {backend}."
+            if backend
+            else "WorkerBee switcher did not report an active backend."
+        ),
+        remediation=(
+            ""
+            if backend and endpoint and mcp_status == "ready"
+            else "Repair or select a ready WorkerBee backend, then rerun the preflight."
+        ),
+    )
+    if not provenance.ready:
+        return WorkerBeeBackendProvenance(
+            **{
+                **provenance.public_dict(),
+                "code": "WORKERBEE_SWITCHER_NOT_READY",
+            }
+        )
+    if expected_endpoint and endpoint.rstrip("/") != expected_endpoint.rstrip("/"):
+        return WorkerBeeBackendProvenance(
+            **{
+                **provenance.public_dict(),
+                "code": "WORKERBEE_SWITCHER_ENDPOINT_MISMATCH",
+                "ready": False,
+                "message": "The selected switcher backend and Codex MCP endpoint differ.",
+                "remediation": (
+                    "Align the Codex workerbee MCP URL with the active switcher endpoint "
+                    "before launching new sessions."
+                ),
+            }
+        )
+    return provenance
+
+
 def diagnose_workerbee_project_visibility(
     cwd: str | Path,
     session_payload: dict[str, Any],
 ) -> WorkerBeeProjectVisibilityDiagnostic:
     host_cwd = str(Path(cwd).expanduser().resolve())
-    result = subprocess.run(
-        ["git", "-C", host_cwd, "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-    )
-    host_git_root = result.stdout.strip() if result.returncode == 0 else None
+    host_git_root = _host_git_root(host_cwd)
     data = (
         session_payload.get("data")
         if isinstance(session_payload.get("data"), dict)
@@ -233,6 +395,70 @@ async def inspect_workerbee_mcp(
             remediation="Check the configured endpoint and WorkerBee daemon, then retry.",
             endpoint=endpoint,
         )
+
+
+async def inspect_workerbee_project_visibility(
+    endpoint: str,
+    cwd: str | Path,
+    *,
+    timeout_seconds: float = 5.0,
+) -> WorkerBeeProjectVisibilityDiagnostic:
+    host_cwd = str(Path(cwd).expanduser().resolve())
+
+    async def inspect() -> WorkerBeeProjectVisibilityDiagnostic:
+        async with streamablehttp_client(endpoint) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                inventory = await session.list_tools()
+                listed = {tool.name for tool in inventory.tools}
+                if "workerbee_v1_session_start" not in listed:
+                    return WorkerBeeProjectVisibilityDiagnostic(
+                        code="WORKERBEE_SESSION_START_UNAVAILABLE",
+                        ready=False,
+                        host_cwd=host_cwd,
+                        host_git_root=_host_git_root(host_cwd),
+                        workerbee_git_root=None,
+                        workerbee_repo_exists=None,
+                        message="WorkerBee does not expose project session discovery.",
+                        remediation=(
+                            "Upgrade WorkerBee or select a backend that exposes "
+                            "workerbee_v1_session_start."
+                        ),
+                    )
+                result = await session.call_tool(
+                    "workerbee_v1_session_start",
+                    {
+                        "cwd": host_cwd,
+                        "goal": "Agent PBX project visibility preflight; start no workload.",
+                    },
+                )
+                return diagnose_workerbee_project_visibility(
+                    host_cwd,
+                    _tool_result_payload(result),
+                )
+
+    try:
+        return await asyncio.wait_for(inspect(), timeout=max(0.1, timeout_seconds))
+    except Exception as exc:  # noqa: BLE001 - diagnostics normalize transports
+        return WorkerBeeProjectVisibilityDiagnostic(
+            code="WORKERBEE_VISIBILITY_PROBE_FAILED",
+            ready=False,
+            host_cwd=host_cwd,
+            host_git_root=_host_git_root(host_cwd),
+            workerbee_git_root=None,
+            workerbee_repo_exists=None,
+            message=f"WorkerBee project visibility probe failed ({type(exc).__name__}).",
+            remediation="Check the active WorkerBee endpoint and retry the preflight.",
+        )
+
+
+def _host_git_root(cwd: str | Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def _tool_result_payload(result: object) -> dict[str, Any]:

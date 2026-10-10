@@ -23,6 +23,7 @@ from .store import SCHEMA_VERSION
 from .tmux_binary import configured_tmux_binary, resolve_tmux_binary
 from .runtime_tmux import RUNTIME_TMUX_SOCKET_ENV, tmux_socket_from_environment
 from .ui.theme import terminal_color_depth
+from .workerbee_mcp import inspect_workerbee_switcher
 
 
 DOCTOR_API_VERSION = "agent-pbx.doctor/v2"
@@ -128,6 +129,7 @@ def run_platform_doctor(
     checks.append(_codex_check(codex_command, timeout))
     checks.append(_codex_theme_check())
     checks.append(_workerbee_check(config, which, timeout))
+    checks.append(_workerbee_switcher_check(which, timeout))
     checks.append(_joplin_check(config, timeout, probe_services=probe_services))
     checks.append(_clipboard_check(which))
     return DoctorReport(
@@ -558,6 +560,45 @@ def _workerbee_check(
         "pass" if result.returncode == 0 else "warn",
         version or candidate,
         detail="Run the MCP path-visibility diagnostic before automatic project skill injection.",
+    )
+
+
+def _workerbee_switcher_check(
+    which: Callable[[str], str | None],
+    timeout: float,
+) -> DoctorCheck:
+    provenance = inspect_workerbee_switcher(
+        timeout_seconds=timeout,
+        which=which,
+    )
+    if not provenance.configured:
+        return DoctorCheck(
+            "workerbee-mcp-switcher",
+            "pass",
+            "not configured; direct WorkerBee MCP configuration is supported",
+            remediation=provenance.remediation,
+        )
+    detail = " · ".join(
+        item
+        for item in (
+            provenance.endpoint,
+            (
+                f"{provenance.server_name} {provenance.server_version}".strip()
+                if provenance.server_name or provenance.server_version
+                else ""
+            ),
+            provenance.config_path,
+        )
+        if item
+    )
+    return DoctorCheck(
+        "workerbee-mcp-switcher",
+        "pass" if provenance.ready else "warn",
+        (
+            f"{provenance.backend or 'unknown'} ({provenance.code})"
+        ),
+        detail=detail,
+        remediation=provenance.remediation,
     )
 
 
