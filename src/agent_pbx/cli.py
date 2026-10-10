@@ -52,6 +52,13 @@ from .migration import (
 from .remote import exec_runtime_attach, local_runtime_attach_command, ssh_attach_plan
 from .sim_agent import run_sim_agent
 from .sim_client import run_sim_client
+from .setup_assistant import (
+    apply_setup,
+    build_setup_plan,
+    render_setup_plan,
+    resume_setup,
+    rollback_setup,
+)
 from .store import Store
 from .tui import run_tui
 from .uat import (
@@ -288,6 +295,49 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--no-service-probes", action="store_true")
     doctor.add_argument("--strict", action="store_true", help="Treat warnings as failures.")
     doctor.add_argument("--json", action="store_true")
+
+    setup = subcommands.add_parser(
+        "setup",
+        help="Plan, apply, resume, or roll back a safe local workstation setup.",
+    )
+    setup_subcommands = setup.add_subparsers(dest="setup_command", required=True)
+
+    def add_setup_plan_flags(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--config", type=Path, default=None)
+        command.add_argument(
+            "--project-root",
+            type=Path,
+            action="append",
+            default=None,
+            help="Approved Git parent directory; repeat for multiple roots.",
+        )
+        command.add_argument(
+            "--runtime-server-mode",
+            choices=("dedicated", "outer_if_present", "outer_required"),
+            default=None,
+        )
+        command.add_argument("--theme", default=None)
+        command.add_argument("--json", action="store_true")
+
+    setup_plan = setup_subcommands.add_parser(
+        "plan", help="Inspect dependencies and preview local config changes."
+    )
+    add_setup_plan_flags(setup_plan)
+    setup_apply = setup_subcommands.add_parser(
+        "apply", help="Atomically apply a ready setup plan with rollback evidence."
+    )
+    add_setup_plan_flags(setup_apply)
+    for setup_command_name in ("resume", "rollback"):
+        setup_command = setup_subcommands.add_parser(
+            setup_command_name,
+            help=(
+                "Resume an interrupted setup transaction."
+                if setup_command_name == "resume"
+                else "Restore the config state saved before the latest setup apply."
+            ),
+        )
+        setup_command.add_argument("--config", type=Path, default=None)
+        setup_command.add_argument("--json", action="store_true")
 
     codex = subcommands.add_parser("codex", help="Manage Codex integration assets.")
     codex_subcommands = codex.add_subparsers(dest="codex_command", required=True)
@@ -592,6 +642,39 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(doctor_json(report) if args.json else doctor_markdown(report))
         return 1 if report.failure_count or (args.strict and report.warning_count) else 0
+
+    if args.command == "setup":
+        try:
+            if args.setup_command in {"plan", "apply"}:
+                plan = build_setup_plan(
+                    config_path=args.config,
+                    project_roots=args.project_root,
+                    runtime_server_mode=args.runtime_server_mode,
+                    theme=args.theme,
+                )
+                if args.setup_command == "plan":
+                    result = plan.public_dict()
+                    rendered = render_setup_plan(plan)
+                    exit_code = 0 if plan.ready else 1
+                else:
+                    result = apply_setup(plan)
+                    rendered = json.dumps(result, indent=2, sort_keys=True)
+                    exit_code = 0
+            elif args.setup_command == "resume":
+                result = resume_setup(args.config)
+                rendered = json.dumps(result, indent=2, sort_keys=True)
+                exit_code = 0
+            elif args.setup_command == "rollback":
+                result = rollback_setup(args.config)
+                rendered = json.dumps(result, indent=2, sort_keys=True)
+                exit_code = 0
+            else:  # pragma: no cover - argparse enforces subcommands
+                raise ValueError("unknown setup command")
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, indent=2, sort_keys=True) if args.json else rendered)
+        return exit_code
 
     if args.command == "codex" and args.codex_command == "theme":
         try:

@@ -7,6 +7,9 @@
 - Report versioned WorkerBee backend provenance, endpoint alignment, server
   identity, and host-to-WorkerBee project visibility through doctor and the
   TUI without changing the selected backend.
+- Add a guided local setup transaction that previews dependencies and scoped
+  project roots, merges private localhost-first configuration atomically, and
+  supports idempotent resume and checksum-guarded rollback.
 
 ### Fixed
 

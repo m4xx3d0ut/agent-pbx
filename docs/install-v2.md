@@ -48,6 +48,39 @@ brew install python git tmux
 Agent PBX reports missing packages and commands but does not install operating
 system software. Run `agent-pbx doctor` after host preparation.
 
+### Guided local setup
+
+After installing Git, tmux, and Codex, preview the private user configuration
+that Agent PBX would create. The project root limits the repositories offered
+by the `F10` workspace launcher:
+
+```bash
+agent-pbx setup plan --project-root "$HOME/git"
+agent-pbx setup apply --project-root "$HOME/git"
+agent-pbx doctor
+agent-pbx mcp start
+agent-pbx tui
+```
+
+The assistant defaults to loopback service URLs, the dedicated v2 runtime tmux
+server, the embedded terminal, and the event stream. It updates only its known
+keys in `${XDG_CONFIG_HOME:-~/.config}/agent-pbx/local.env`, preserves unrelated
+values, writes files with mode `0600`, and records an exact pre-change backup.
+It does not install host packages, edit shell startup files, start services, or
+write credentials.
+
+An interrupted write can be resumed idempotently. Rollback restores the exact
+pre-setup file and refuses to overwrite edits made after apply:
+
+```bash
+agent-pbx setup resume
+agent-pbx setup rollback
+```
+
+Use `--runtime-server-mode outer_if_present` only on a workstation where Agent
+PBX should share a validated outer tmux server. The committed clean-user default
+remains `dedicated`, which also works when the TUI is launched outside tmux.
+
 ## Remote TUI client
 
 Install the Agent PBX wheelhouse on the thin client and configure an HTTPS/WSS
