@@ -410,7 +410,12 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 yield
             finally:
                 with suppress(Exception):
-                    await asyncio.to_thread(app.state.terminal_editor.stop_all)
+                    shutdown_editor = getattr(
+                        app.state.terminal_editor,
+                        "shutdown",
+                        app.state.terminal_editor.stop_all,
+                    )
+                    await asyncio.to_thread(shutdown_editor)
                 if joplin_sync_task is not None:
                     joplin_sync_task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -444,6 +449,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.terminal_editor = ManagedTerminalEditorService(
         app.state.files,
         runtime_root=resolved_config.db_path.parent / "editor-runtimes",
+        store=store,
     )
     app.state.joplin = joplin
     app.state.workerbee = WorkerBeeStatusService(
@@ -2758,6 +2764,55 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         if store.get_agent(agent_id) is None:
             raise HTTPException(status_code=404, detail="agent not registered")
         return await asyncio.to_thread(request.app.state.terminal_editor.stop, agent_id)
+
+    @app.post(
+        "/v1/agents/{agent_id}/terminal-editor/forget",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_controller)],
+    )
+    async def forget_terminal_editor(
+        agent_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        if store.get_agent(agent_id) is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.terminal_editor.forget,
+                agent_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get(
+        "/v1/agents/{agent_id}/runtime-bundle",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_token)],
+    )
+    async def agent_runtime_bundle(
+        agent_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        if store.get_agent(agent_id) is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        editor = await asyncio.to_thread(
+            request.app.state.terminal_editor.status,
+            agent_id,
+        )
+        codex = store.get_tmux_runtime_mapping(agent_id)
+        codex_ready = bool(codex and str(codex.get("state") or "") == "ready")
+        editor_ready = bool(editor.get("running"))
+        return {
+            "api_version": "agent-pbx.runtime-bundle/v1",
+            "agent_id": agent_id,
+            "codex": codex,
+            "editor": editor,
+            "codex_ready": codex_ready,
+            "editor_ready": editor_ready,
+            "ready": codex_ready and editor_ready,
+        }
 
     @app.get(
         "/v1/agents/{agent_id}/files/preview",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -11,6 +12,8 @@ from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
 from agent_pbx.files import AgentFileService, FileBrowserError
 from agent_pbx.runtime_tmux import RuntimeTmuxPane
+from agent_pbx.schemas import AgentRegisterRequest
+from agent_pbx.store import Store
 from agent_pbx.terminal_editor import (
     ManagedTerminalEditorService,
     terminal_editor_profiles,
@@ -102,7 +105,9 @@ def test_managed_terminal_editor_lifecycle_isolated_from_codex(
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     pane = RuntimeTmuxPane(
-        session_name="pbx-editor-placeholder",
+        session_name=(
+            "pbx-editor-" + hashlib.sha256(b"agent-1").hexdigest()[:16]
+        ),
         window_id="@8",
         window_name="editor",
         pane_id="%41",
@@ -152,7 +157,7 @@ def test_managed_terminal_editor_lifecycle_isolated_from_codex(
     assert "exec" in launch[-1] and str(target) in launch[-1]
     assert "codex" not in " ".join(launch)
 
-    with pytest.raises(ValueError, match="already running"):
+    with pytest.raises(ValueError, match="cannot open another file"):
         other = root / "other.py"
         other.write_text("pass\n", encoding="utf-8")
         service.start(agent(root), path="other.py")
@@ -161,6 +166,177 @@ def test_managed_terminal_editor_lifecycle_isolated_from_codex(
     assert stopped["stopped"] is True
     assert any("kill-session" in command for command in commands)
     assert service.status("agent-1")["running"] is False
+
+
+def test_terminal_editor_persists_and_adopts_after_daemon_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("print('ok')\n", encoding="utf-8")
+    editor = tmp_path / "vim"
+    editor.write_text("#!/bin/sh\n", encoding="utf-8")
+    editor.chmod(0o700)
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="agent-1",
+            project="demo",
+            metadata={"cwd": str(root)},
+        )
+    )
+    digest = hashlib.sha256(b"agent-1").hexdigest()[:16]
+    pane = RuntimeTmuxPane(
+        session_name=f"pbx-editor-{digest}",
+        window_id="@8",
+        window_name="editor",
+        pane_id="%41",
+        pane_pid=4241,
+        cwd=str(root),
+        current_command="vim",
+        title="editor",
+    )
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(list(argv))
+        stdout = "%41\n" if "new-session" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.ensure_dedicated_runtime_server",
+        lambda _identity: True,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.restore_dedicated_runtime_exit_policy",
+        lambda _identity: None,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.list_runtime_panes", lambda _identity: (pane,)
+    )
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.process_start_ticks", lambda _pid: 77
+    )
+    env = {
+        "AGENT_PBX_TERMINAL_EDITOR_PROFILES": json.dumps(
+            {"vim": {"argv": [str(editor), "+{line}", "--", "{path}"]}}
+        ),
+        "AGENT_PBX_TERMINAL_EDITOR_DEFAULT": "vim",
+    }
+    first = ManagedTerminalEditorService(
+        AgentFileService(),
+        runtime_root=tmp_path / "runtimes",
+        store=store,
+        tmux_bin="tmux-test",
+        environ=env,
+        runner=runner,
+    )
+    started = first.start(agent(root), path="app.py")
+    detached = first.shutdown()
+
+    assert started["running"] is True
+    assert detached[0]["detached"] is True
+    assert not any("kill-session" in command for command in commands)
+    persisted = store.get_terminal_editor_runtime("agent-1")
+    assert persisted is not None and persisted["state"] == "detached"
+
+    second = ManagedTerminalEditorService(
+        AgentFileService(),
+        runtime_root=tmp_path / "runtimes",
+        store=store,
+        tmux_bin="tmux-test",
+        environ=env,
+        runner=runner,
+    )
+    adopted = second.status("agent-1")
+
+    assert adopted["running"] is True
+    assert adopted["adopted"] is True
+    assert adopted["root"] == str(root)
+    assert store.get_terminal_editor_runtime("agent-1")["state"] == "ready"
+
+
+def test_active_neovim_routes_additional_files_through_managed_rpc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    first_path = root / "app.py"
+    second_path = root / "other.py"
+    first_path.write_text("print('one')\n", encoding="utf-8")
+    second_path.write_text("print('two')\n", encoding="utf-8")
+    nvim = tmp_path / "nvim"
+    nvim.write_text("#!/bin/sh\n", encoding="utf-8")
+    nvim.chmod(0o700)
+    digest = hashlib.sha256(b"agent-1").hexdigest()[:16]
+    pane = RuntimeTmuxPane(
+        session_name=f"pbx-editor-{digest}",
+        window_id="@8",
+        window_name="editor",
+        pane_id="%41",
+        pane_pid=4241,
+        cwd=str(root),
+        current_command="nvim",
+        title="editor",
+    )
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(list(argv))
+        stdout = "%41\n" if "new-session" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.ensure_dedicated_runtime_server",
+        lambda _identity: True,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.restore_dedicated_runtime_exit_policy",
+        lambda _identity: None,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.list_runtime_panes", lambda _identity: (pane,)
+    )
+    monkeypatch.setattr(
+        "agent_pbx.terminal_editor.process_start_ticks", lambda _pid: 77
+    )
+    monkeypatch.setattr(
+        ManagedTerminalEditorService,
+        "_wait_for_rpc_socket",
+        lambda _self, _path: True,
+    )
+    monkeypatch.setattr(
+        ManagedTerminalEditorService,
+        "_rpc_socket_is_safe",
+        lambda _self, _path: True,
+    )
+    service = ManagedTerminalEditorService(
+        AgentFileService(),
+        runtime_root=tmp_path / "runtimes",
+        tmux_bin="tmux-test",
+        environ={
+            "AGENT_PBX_TERMINAL_EDITOR_PROFILES": json.dumps(
+                {"nvim": {"argv": [str(nvim), "+{line}", "--", "{path}"]}}
+            ),
+            "AGENT_PBX_TERMINAL_EDITOR_DEFAULT": "nvim",
+        },
+        runner=runner,
+    )
+
+    started = service.start(agent(root), path="app.py", line=3)
+    opened = service.start(agent(root), path="other.py", line=9)
+
+    launch = next(command for command in commands if "new-session" in command)
+    remote = next(command for command in commands if "--server" in command)
+    assert "--listen" in launch[-1]
+    assert started["rpc_enabled"] is True
+    assert opened["started"] is False and opened["opened"] is True
+    assert opened["path"] == str(second_path)
+    assert remote[-3:] == ["--remote", "+9", str(second_path)]
 
 
 def test_terminal_editor_api_preserves_controller_boundary(tmp_path: Path) -> None:
@@ -185,6 +361,9 @@ def test_terminal_editor_api_preserves_controller_boundary(tmp_path: Path) -> No
         def stop(self, agent_id: str) -> dict[str, object]:
             return {"stopped": True, "agent_id": agent_id}
 
+        def forget(self, agent_id: str) -> dict[str, object]:
+            return {"forgotten": True, "agent_id": agent_id}
+
         def stop_all(self) -> list[object]:
             return []
 
@@ -207,9 +386,14 @@ def test_terminal_editor_api_preserves_controller_boundary(tmp_path: Path) -> No
             json={"path": "app.py"},
         )
         status = client.get("/v1/agents/agent-1/terminal-editor")
+        bundle = client.get("/v1/agents/agent-1/runtime-bundle")
         stopped = client.delete("/v1/agents/agent-1/terminal-editor")
+        forgotten = client.post("/v1/agents/agent-1/terminal-editor/forget")
 
     assert preview.status_code == 200 and preview.json()["profile_id"] == "vim"
     assert started.status_code == 200 and started.json()["running"] is True
     assert status.status_code == 200 and status.json()["agent_id"] == "agent-1"
+    assert bundle.status_code == 200 and bundle.json()["editor_ready"] is True
+    assert bundle.json()["codex_ready"] is False
     assert stopped.status_code == 200 and stopped.json()["stopped"] is True
+    assert forgotten.status_code == 200 and forgotten.json()["forgotten"] is True

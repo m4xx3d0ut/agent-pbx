@@ -65,6 +65,58 @@ def test_register_agent_merges_metadata_without_dropping_cwd(tmp_path: Path) -> 
     }
 
 
+def test_terminal_editor_runtime_records_are_durable_and_agent_scoped(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="agent-1",
+            project="demo",
+            metadata={"cwd": str(tmp_path)},
+        )
+    )
+    runtime = {
+        "runtime_id": "editor-1",
+        "agent_id": "agent-1",
+        "project": "demo",
+        "access_mode": "edit",
+        "profile_id": "nvim",
+        "path": str(tmp_path / "app.py"),
+        "root": str(tmp_path),
+        "socket_path": str(tmp_path / "tmux.sock"),
+        "rpc_socket_path": str(tmp_path / "nvim.sock"),
+        "rpc_enabled": True,
+        "server_id": "server-1",
+        "session_name": "pbx-editor-one",
+        "window_id": "@1",
+        "pane_id": "%1",
+        "pane_pid": 123,
+        "process_start_ticks": 456,
+        "tmux_bin": "/usr/bin/tmux",
+        "state": "ready",
+    }
+
+    stored = store.upsert_terminal_editor_runtime(
+        runtime,
+        metadata={"owner": "agent-pbx"},
+        verified=True,
+    )
+    detached = store.update_terminal_editor_runtime_state(
+        "agent-1",
+        state="detached",
+    )
+
+    assert stored["rpc_enabled"] is True
+    assert stored["metadata"] == {"owner": "agent-pbx"}
+    assert stored["last_verified_at"] is not None
+    assert detached is not None and detached["state"] == "detached"
+    assert store.list_terminal_editor_runtimes()[0]["runtime_id"] == "editor-1"
+    assert store.delete_terminal_editor_runtime("agent-1") is True
+    assert store.get_terminal_editor_runtime("agent-1") is None
+
+
 def test_register_agent_empty_cwd_does_not_clear_existing_cwd(tmp_path: Path) -> None:
     store = Store(tmp_path / "pbx.sqlite")
     store.init()
