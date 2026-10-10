@@ -79,6 +79,12 @@ class WorkerBeeStatusService:
                 self._locks[cache_key] = lock
             return lock
 
+    def clear_cache(self) -> None:
+        """Discard backend-sensitive status snapshots after a switch."""
+
+        with self._lock_guard:
+            self._cache.clear()
+
     def _status_for_agent_uncached(
         self,
         agent_id: str,

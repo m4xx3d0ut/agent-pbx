@@ -1862,6 +1862,22 @@ class TerminalEditorStartRequest(BaseModel):
     line: int | None = Field(default=None, ge=1, le=10_000_000)
 
 
+class WorkerBeeSwitchPreviewRequest(BaseModel):
+    target: Literal["oss", "platform_debug"]
+
+
+class WorkerBeeSwitchApplyRequest(BaseModel):
+    transaction_id: str = Field(min_length=24, max_length=24)
+    preview_token: str = Field(min_length=16, max_length=256)
+    confirm_target: Literal["oss", "platform_debug"]
+    confirm_privileged: bool = False
+
+
+class WorkerBeeSwitchRollbackRequest(BaseModel):
+    transaction_id: str = Field(min_length=24, max_length=24)
+    confirm: bool = False
+
+
 class FileDiagnostic(BaseModel):
     path: str
     line: int

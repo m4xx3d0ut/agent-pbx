@@ -630,7 +630,27 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/latest",
     "/thread",
     "/files",
+    "/editor",
+    "/editor open",
+    "/editor save",
+    "/editor revert",
+    "/editor check",
+    "/editor copy path",
+    "/editor copy text",
+    "/editor fullscreen",
+    "/editor close",
+    "/editor focus",
+    "/editor reveal",
+    "/editor terminal",
+    "/editor terminal nvim",
+    "/editor terminal vim",
+    "/editor terminal nano",
+    "/editor terminal close",
     "/workerbee",
+    "/workerbee preflight",
+    "/workerbee switch oss",
+    "/workerbee switch debug",
+    "/workerbee switch rollback",
     "/campaigns",
     "/campaign monitor",
     "/campaign report",
@@ -3773,6 +3793,85 @@ class OperatorHistoryScreen(ModalScreen[None]):
             self.resume_candidate()
 
 
+class WorkerBeeSwitchConfirmScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(
+        self,
+        *,
+        transaction: dict[str, Any],
+        action: str = "apply",
+    ) -> None:
+        super().__init__()
+        self.transaction = transaction
+        self.action = action
+
+    def expected_confirmation(self) -> str:
+        if self.action == "rollback":
+            return f"rollback {self.transaction.get('transaction_id')}"
+        return f"switch {self.transaction.get('target')}"
+
+    def compose(self) -> ComposeResult:
+        before = self.transaction.get("before") or {}
+        target = str(self.transaction.get("target") or "-")
+        expected = self.expected_confirmation()
+        title = "Rollback WorkerBee Backend" if self.action == "rollback" else "Switch WorkerBee Backend"
+        with Vertical(id="workerbee-switch-panel"):
+            yield Static(title, id="workerbee-switch-title")
+            yield Static(
+                "\n".join(
+                    (
+                        f"Current: {before.get('backend') or '-'}",
+                        f"Target: {target}",
+                        "Existing Codex sessions remain pinned; this affects future sessions.",
+                        f'Type "{expected}" to confirm.',
+                    )
+                ),
+                id="workerbee-switch-summary",
+            )
+            yield Input(placeholder=expected, id="workerbee-switch-confirm")
+            with Horizontal(id="workerbee-switch-actions"):
+                yield Button(
+                    "Rollback" if self.action == "rollback" else "Apply Switch",
+                    id="workerbee-switch-run",
+                    variant="error",
+                )
+                yield Button("Cancel", id="workerbee-switch-cancel")
+
+    def submit(self) -> None:
+        confirmation = self.query_one("#workerbee-switch-confirm", Input).value
+        if self.action == "rollback":
+            work = self.app.rollback_workerbee_switch(  # type: ignore[attr-defined]
+                self.transaction,
+                confirmation=confirmation,
+            )
+        else:
+            work = self.app.apply_workerbee_switch(  # type: ignore[attr-defined]
+                self.transaction,
+                confirmation=confirmation,
+            )
+        self.app.run_worker(  # type: ignore[attr-defined]
+            work,
+            name=f"workerbee-switch-{self.action}",
+            exclusive=True,
+        )
+        self.dismiss()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "workerbee-switch-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "workerbee-switch-run":
+            event.stop()
+            self.submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "workerbee-switch-confirm":
+            event.stop()
+            self.submit()
+
+
 class PullRequestMergeConfirmScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Close")]
 
@@ -4510,6 +4609,7 @@ class AgentPBXTUI(App[None]):
     EditorCloseConfirmScreen,
     OperatorKillConfirmScreen,
     OperatorHistoryScreen,
+    WorkerBeeSwitchConfirmScreen,
     PullRequestMergeConfirmScreen,
     IssueClearConfirmScreen {
         align: center middle;
@@ -4526,6 +4626,7 @@ class AgentPBXTUI(App[None]):
     #editor-close-panel,
     #operator-kill-panel,
     #operator-history-panel,
+    #workerbee-switch-panel,
     #pr-merge-panel,
     #issue-clear-panel {
         width: 64;
@@ -4634,6 +4735,7 @@ class AgentPBXTUI(App[None]):
     #editor-close-title,
     #operator-kill-title,
     #operator-history-title,
+    #workerbee-switch-title,
     #pr-merge-title,
     #issue-clear-title {
         height: 1;
@@ -4648,6 +4750,12 @@ class AgentPBXTUI(App[None]):
         content-align: center middle;
     }
 
+    #workerbee-switch-summary {
+        height: auto;
+        margin-top: 1;
+        color: $warning;
+    }
+
     #operator-history-table {
         height: 1fr;
         margin-top: 1;
@@ -4659,6 +4767,7 @@ class AgentPBXTUI(App[None]):
     #editor-close-path,
     #editor-close-message,
     #operator-kill-message,
+    #workerbee-switch-confirm,
     #pr-merge-confirm,
     #issue-clear-confirm {
         height: 3;
@@ -4703,6 +4812,7 @@ class AgentPBXTUI(App[None]):
     #editor-close-actions,
     #operator-kill-actions,
     #operator-history-actions,
+    #workerbee-switch-actions,
     #pr-merge-actions,
     #issue-clear-actions {
         height: 3;
@@ -4715,6 +4825,7 @@ class AgentPBXTUI(App[None]):
     #editor-close-actions Button,
     #operator-kill-actions Button,
     #operator-history-actions Button,
+    #workerbee-switch-actions Button,
     #pr-merge-actions Button,
     #issue-clear-actions Button {
         width: 1fr;
@@ -5953,6 +6064,7 @@ class AgentPBXTUI(App[None]):
         self.workerbee_mcp_preflight: WorkerBeeMcpPreflight | None = None
         self.workerbee_backend_provenance: WorkerBeeBackendProvenance | None = None
         self.workerbee_project_visibility: WorkerBeeProjectVisibilityDiagnostic | None = None
+        self.workerbee_switch_transaction: dict[str, Any] | None = None
         self.joplin_copy_fingerprints_by_agent = string_record_map_setting(
             self.settings,
             "joplin_copy_fingerprints_by_agent",
@@ -7476,6 +7588,9 @@ class AgentPBXTUI(App[None]):
                         yield NavigationTextArea(id="workerbee-detail", read_only=True)
                         with Horizontal(id="workerbee-actions"):
                             yield Button("Refresh WorkerBee", id="workerbee-refresh")
+                            yield Button("Switch OSS", id="workerbee-switch-oss")
+                            yield Button("Switch Debug", id="workerbee-switch-debug")
+                            yield Button("Rollback", id="workerbee-switch-rollback")
                     with TabPane("PRs", id="pull-requests-tab"):
                         yield Static("Pull Requests: checking...", id="pull-request-status")
                         yield DataTable(
@@ -7866,6 +7981,9 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/editor reveal", "Reveal the current editor file in Files", self.palette_editor_reveal)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         yield SystemCommand("/workerbee preflight", "Check WorkerBee MCP bootstrap capability", self.palette_workerbee_preflight)
+        yield SystemCommand("/workerbee switch oss", "Preview switching future sessions to OSS WorkerBee", self.palette_workerbee_switch_oss)
+        yield SystemCommand("/workerbee switch debug", "Preview switching future sessions to platform-debug WorkerBee", self.palette_workerbee_switch_debug)
+        yield SystemCommand("/workerbee switch rollback", "Preview rollback of the last verified WorkerBee switch", self.palette_workerbee_switch_rollback)
         yield SystemCommand("/campaigns", "Open and refresh operator campaigns", self.palette_campaigns)
         yield SystemCommand("/campaign monitor", "Ask the root operator to monitor selected campaign", self.palette_campaign_monitor)
         yield SystemCommand("/campaign report", "View the selected campaign report", self.palette_campaign_report)
@@ -9005,6 +9123,30 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.refresh_workerbee_mcp_preflight(),
             name="workerbee-mcp-preflight",
+            exclusive=True,
+        )
+
+    def palette_workerbee_switch_oss(self) -> None:
+        self.activate_agent_tab("workerbee-tab")
+        self.run_worker(
+            self.preview_workerbee_switch("oss"),
+            name="workerbee-switch-oss-preview",
+            exclusive=True,
+        )
+
+    def palette_workerbee_switch_debug(self) -> None:
+        self.activate_agent_tab("workerbee-tab")
+        self.run_worker(
+            self.preview_workerbee_switch("platform_debug"),
+            name="workerbee-switch-debug-preview",
+            exclusive=True,
+        )
+
+    def palette_workerbee_switch_rollback(self) -> None:
+        self.activate_agent_tab("workerbee-tab")
+        self.run_worker(
+            self.preview_workerbee_switch_rollback(),
+            name="workerbee-switch-rollback-preview",
             exclusive=True,
         )
 
@@ -15719,6 +15861,15 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "workerbee-refresh":
             if self.selected_agent_id:
                 await self.load_workerbee_status(self.selected_agent_id)
+            return
+        if event.button.id == "workerbee-switch-oss":
+            await self.preview_workerbee_switch("oss")
+            return
+        if event.button.id == "workerbee-switch-debug":
+            await self.preview_workerbee_switch("platform_debug")
+            return
+        if event.button.id == "workerbee-switch-rollback":
+            await self.preview_workerbee_switch_rollback()
             return
         if event.button.id == "pr-refresh":
             if self.selected_agent_id:
@@ -31220,6 +31371,128 @@ class AgentPBXTUI(App[None]):
             ).get("workerbee", {})
         )
         return str(config.get("url") or "http://127.0.0.1:8765/mcp").strip()
+
+    async def preview_workerbee_switch(self, target: str) -> None:
+        try:
+            response = await self.api_client().post(
+                "/v1/workerbee/switch/preview",
+                json={"target": target},
+                headers=auth_headers(self.token),
+                timeout=60,
+            )
+            response.raise_for_status()
+            transaction = response.json()
+        except Exception as exc:
+            self.notify(f"WorkerBee switch preview failed: {exc}", severity="error")
+            return
+        self.workerbee_switch_transaction = dict(transaction)
+        self.push_screen(WorkerBeeSwitchConfirmScreen(transaction=transaction))
+
+    async def apply_workerbee_switch(
+        self,
+        transaction: dict[str, Any],
+        *,
+        confirmation: str,
+    ) -> None:
+        target = str(transaction.get("target") or "")
+        if confirmation.strip() != f"switch {target}":
+            self.notify("WorkerBee switch confirmation did not match.", severity="warning")
+            return
+        try:
+            response = await self.api_client().post(
+                "/v1/workerbee/switch/apply",
+                json={
+                    "transaction_id": transaction.get("transaction_id"),
+                    "preview_token": transaction.get("preview_token"),
+                    "confirm_target": target,
+                    "confirm_privileged": target == "platform_debug",
+                },
+                headers=auth_headers(self.token),
+                timeout=240,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"WorkerBee switch failed: {exc}", severity="error")
+            return
+        self.workerbee_switch_transaction = dict(result)
+        self.workerbee_status_by_agent.clear()
+        self.workerbee_project_visibility = None
+        phase = str(result.get("phase") or "unknown")
+        severity = "information" if phase in {"verified", "verified_noop"} else "error"
+        self.notify(f"WorkerBee switch result: {phase}.", severity=severity)
+        await self.refresh_workerbee_mcp_preflight()
+        if self.selected_agent_id:
+            await self.load_workerbee_status(self.selected_agent_id)
+
+    async def preview_workerbee_switch_rollback(self) -> None:
+        transaction = self.workerbee_switch_transaction
+        status: dict[str, Any] = {}
+        if not transaction or transaction.get("phase") not in {"verified", "verified_noop"}:
+            try:
+                response = await self.api_client().get(
+                    "/v1/workerbee/switch",
+                    headers=auth_headers(self.token),
+                    timeout=15,
+                )
+                response.raise_for_status()
+                status = response.json()
+            except Exception as exc:
+                self.notify(f"WorkerBee rollback status failed: {exc}", severity="error")
+                return
+            transaction = status.get("last_transaction")
+        if not isinstance(transaction, dict) or transaction.get("phase") not in {
+            "verified",
+            "verified_noop",
+        }:
+            self.notify("No verified WorkerBee switch is available to roll back.", severity="warning")
+            return
+        display = dict(transaction)
+        active = status.get("active") if isinstance(status.get("active"), dict) else {}
+        display.setdefault("before", active)
+        display["target"] = str(
+            display.get("rollback_backend")
+            or display.get("before_backend")
+            or (display.get("before") or {}).get("backend")
+            or "prior backend"
+        )
+        self.push_screen(
+            WorkerBeeSwitchConfirmScreen(transaction=display, action="rollback")
+        )
+
+    async def rollback_workerbee_switch(
+        self,
+        transaction: dict[str, Any],
+        *,
+        confirmation: str,
+    ) -> None:
+        transaction_id = str(transaction.get("transaction_id") or "")
+        if confirmation.strip() != f"rollback {transaction_id}":
+            self.notify("WorkerBee rollback confirmation did not match.", severity="warning")
+            return
+        try:
+            response = await self.api_client().post(
+                "/v1/workerbee/switch/rollback",
+                json={"transaction_id": transaction_id, "confirm": True},
+                headers=auth_headers(self.token),
+                timeout=240,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"WorkerBee rollback failed: {exc}", severity="error")
+            return
+        self.workerbee_switch_transaction = dict(result)
+        self.workerbee_status_by_agent.clear()
+        self.workerbee_project_visibility = None
+        phase = str(result.get("phase") or "unknown")
+        self.notify(
+            f"WorkerBee rollback result: {phase}.",
+            severity="information" if phase == "rolled_back" else "error",
+        )
+        await self.refresh_workerbee_mcp_preflight()
+        if self.selected_agent_id:
+            await self.load_workerbee_status(self.selected_agent_id)
 
     async def refresh_workerbee_mcp_preflight(self) -> WorkerBeeMcpPreflight:
         endpoint = self.workerbee_mcp_endpoint()

@@ -43,6 +43,7 @@ from agent_pbx.tui import (
     OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     TMUX_LIVENESS_IDLE_SECONDS,
+    WorkerBeeSwitchConfirmScreen,
     DEFAULT_SPLIT_PERCENT,
     JOPLIN_COPY_MODE_COPY_FIRST,
     JOPLIN_COPY_MODE_TRANSCRIPT_FIRST,
@@ -10586,6 +10587,32 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/agents prune undo",
     } <= names
     assert {"/show hidden agents", "/unhide agent"} <= names
+
+
+def test_workerbee_switch_palette_and_confirmation_contract() -> None:
+    names = built_in_palette_command_names()
+    transaction = {
+        "transaction_id": "a" * 24,
+        "target": "platform_debug",
+        "before": {"backend": "oss"},
+    }
+
+    assert {
+        "/workerbee switch oss",
+        "/workerbee switch debug",
+        "/workerbee switch rollback",
+    } <= names
+    assert (
+        WorkerBeeSwitchConfirmScreen(transaction=transaction).expected_confirmation()
+        == "switch platform_debug"
+    )
+    assert (
+        WorkerBeeSwitchConfirmScreen(
+            transaction=transaction,
+            action="rollback",
+        ).expected_confirmation()
+        == f"rollback {'a' * 24}"
+    )
 
 
 def test_tui_load_custom_slash_commands_from_file(tmp_path: Path) -> None:

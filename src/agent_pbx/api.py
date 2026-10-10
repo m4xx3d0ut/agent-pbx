@@ -53,6 +53,7 @@ from .codex.skills import ManagedSkillPackService, PersonalityOverlay
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
 from .terminal_editor import ManagedTerminalEditorService
+from .workerbee_switcher import WorkerBeeSwitchService
 from .events import EventClientRegistry, EventStreamService
 from .codex.runtime import CodexRuntimeService
 from .joplin import (
@@ -130,6 +131,9 @@ from .schemas import (
     EventStreamEnvelope,
     FileDiagnosticsRequest,
     TerminalEditorStartRequest,
+    WorkerBeeSwitchApplyRequest,
+    WorkerBeeSwitchPreviewRequest,
+    WorkerBeeSwitchRollbackRequest,
     FileDiagnosticsResponse,
     FileCreateRequest,
     FileDeleteRequest,
@@ -446,6 +450,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         workerbee_bin=resolved_config.workerbee_bin,
         timeout_seconds=resolved_config.workerbee_timeout_seconds,
         cache_seconds=resolved_config.workerbee_cache_seconds,
+    )
+    app.state.workerbee_switcher = WorkerBeeSwitchService(
+        state_root=resolved_config.db_path.parent / "workerbee-switch",
+        cache_invalidator=app.state.workerbee.clear_cache,
     )
     app.state.pull_requests = pull_requests
     app.state.issues = issues
@@ -1697,6 +1705,69 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="agent not registered")
         workerbee = request.app.state.workerbee
         return await asyncio.to_thread(workerbee.status_for_agent, agent)
+
+    @app.get(
+        "/v1/workerbee/switch",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_token)],
+    )
+    async def workerbee_switch_status(request: Request) -> dict[str, Any]:
+        return await asyncio.to_thread(request.app.state.workerbee_switcher.status)
+
+    @app.post(
+        "/v1/workerbee/switch/preview",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_controller)],
+    )
+    async def preview_workerbee_switch(
+        payload: WorkerBeeSwitchPreviewRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_switcher.preview,
+                payload.target,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v1/workerbee/switch/apply",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_controller)],
+    )
+    async def apply_workerbee_switch(
+        payload: WorkerBeeSwitchApplyRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_switcher.apply,
+                payload.transaction_id,
+                preview_token=payload.preview_token,
+                confirm_target=payload.confirm_target,
+                confirm_privileged=payload.confirm_privileged,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v1/workerbee/switch/rollback",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_controller)],
+    )
+    async def rollback_workerbee_switch(
+        payload: WorkerBeeSwitchRollbackRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_switcher.rollback,
+                payload.transaction_id,
+                confirm=payload.confirm,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get(
         "/v1/agents/{agent_id}/pull-requests/status",
