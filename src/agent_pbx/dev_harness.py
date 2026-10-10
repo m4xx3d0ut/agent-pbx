@@ -21,6 +21,7 @@ from .mcp_daemon import (
     stop_mcp_daemon,
 )
 from .paths import default_state_root
+from .workerbee_harness import prepare_workerbee_harness_binding
 
 
 HARNESS_API_VERSION = "agent-pbx.dev-harness/v1"
@@ -154,6 +155,7 @@ class HarnessManifest:
     updated_at: float = field(default_factory=time.time)
     daemon: dict[str, Any] = field(default_factory=dict)
     tmux: dict[str, Any] = field(default_factory=dict)
+    workerbee: dict[str, Any] = field(default_factory=dict)
     runs: list[dict[str, Any]] = field(default_factory=list)
     cleanup: dict[str, Any] = field(default_factory=dict)
 
@@ -166,6 +168,7 @@ class HarnessManifest:
             "updated_at": self.updated_at,
             "daemon": self.daemon,
             "tmux": self.tmux,
+            "workerbee": self.workerbee,
             "runs": self.runs,
             "cleanup": self.cleanup,
         }
@@ -259,6 +262,7 @@ def load_harness_manifest(path: Path) -> HarnessManifest:
         updated_at=float(payload.get("updated_at") or 0),
         daemon=dict(payload.get("daemon") or {}),
         tmux=dict(payload.get("tmux") or {}),
+        workerbee=dict(payload.get("workerbee") or {}),
         runs=list(payload.get("runs") or []),
         cleanup=dict(payload.get("cleanup") or {}),
     )
@@ -387,12 +391,23 @@ def start_harness(
     plan: HarnessPlan,
     *,
     start_tmux: bool = True,
+    allow_platform_debug: bool = False,
     daemon_starter: Callable[..., dict[str, Any]] = start_mcp_daemon,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> HarnessManifest:
     manifest = materialize_harness(plan)
     env = harness_environment(plan)
     try:
+        manifest.workerbee = prepare_workerbee_harness_binding(
+            backend=plan.workerbee_backend,
+            project=plan.project,
+            source_root=plan.source_root,
+            source_commit=plan.source_commit,
+            source_dirty=plan.source_dirty,
+            artifacts_root=plan.paths.artifacts,
+            allow_platform_debug=allow_platform_debug,
+        ).public_dict()
+        write_harness_manifest(manifest)
         if start_tmux:
             if not shutil.which(plan.tmux_bin):
                 raise RuntimeError(f"tmux executable is unavailable: {plan.tmux_bin}")

@@ -382,6 +382,11 @@ def build_parser() -> argparse.ArgumentParser:
         )
         if command_name == "start":
             command.add_argument("--no-tmux", action="store_true")
+            command.add_argument(
+                "--allow-platform-debug",
+                action="store_true",
+                help="Authorize staging a task-owned binding for a live platform-debug endpoint.",
+            )
     for command_name in ("status", "stop"):
         command = harness_subcommands.add_parser(command_name)
         add_harness_identity_flags(command)
@@ -751,7 +756,11 @@ def main(argv: list[str] | None = None) -> int:
                 result = (
                     plan
                     if args.harness_command == "plan"
-                    else start_harness(plan, start_tmux=not bool(args.no_tmux))
+                    else start_harness(
+                        plan,
+                        start_tmux=not bool(args.no_tmux),
+                        allow_platform_debug=bool(args.allow_platform_debug),
+                    )
                 )
             else:
                 manifest_path = resolve_harness_manifest(

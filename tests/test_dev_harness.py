@@ -83,6 +83,7 @@ def test_harness_start_stop_and_purge_use_only_owned_resources(
     assert manifest.status == "running"
     assert str(plan.paths.tmux_socket) in commands[0]
     assert manifest.daemon["process_start_ticks"] is None
+    assert manifest.workerbee["status"] == "fixture_ready"
 
     stopped = dev_harness.stop_harness(
         manifest,
