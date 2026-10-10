@@ -44,7 +44,6 @@ htmlcov/
 *.mp4
 .cache
 docs/export/*
-docs/wiki/*
 content-prep/
 cip-series/
 libpod

@@ -54,3 +54,18 @@ memory.
 CI uses two workers because hosted runners have fewer cores and less predictable
 resource limits. Release qualification retains a complete sequential parity
 run where the release process requires it.
+
+## Documentation checks
+
+Run the repository-local documentation gate with:
+
+```bash
+python scripts/check_docs.py
+python -m pytest -q tests/test_docs.py tests/test_readme.py
+```
+
+The gate checks local Markdown links, required wiki version/review markers,
+public-source hygiene, and the `--help` surface of every Agent PBX command path
+shown in shell examples. It does not start, stop, attach, migrate, publish, or
+otherwise mutate a live service. Package README tests separately enforce
+PyPI-safe public image URLs and retained architecture source.

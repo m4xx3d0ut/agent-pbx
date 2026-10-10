@@ -97,6 +97,7 @@ from this manual rehearsal.
    ```bash
    scripts/test_full.sh
    python -m pytest -q tests/test_release_packaging.py tests/test_release_validation.py
+   python scripts/check_docs.py
    git diff --check
    ```
 
@@ -160,3 +161,8 @@ After the first successful production Trusted Publishing release, revoke any
 legacy PyPI token used for manual GitHub uploads. Keep account recovery codes
 outside the repository and require two-factor authentication for package
 maintainers.
+
+Repository wiki source lives under `docs/wiki`. Publish it only after the
+documentation gate, secret/path scan, rendered-page review, and clean-user
+walkthrough. GitHub wiki publication is a separate external action and is not
+performed by package publishing workflows.

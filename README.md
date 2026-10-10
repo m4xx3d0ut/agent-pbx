@@ -52,6 +52,7 @@ is tracked with the repository.
 | TUI | Operator interaction and rendering; closing it does not stop the managed runtime |
 
 See [the architecture overview](docs/architecture.md),
+[the versioned project wiki](docs/wiki/Home.md),
 [the v2.1 release notes](docs/releases/v2.1.0.md), and
 [the accepted architecture decisions](docs/adr/README.md) for the complete
 control-plane and compatibility boundaries.
@@ -173,7 +174,8 @@ See [v2 installation and upgrade](docs/install-v2.md) for Linux/macOS host
 requirements, remote clients, verified/offline wheelhouses, migration, and
 rollback. Maintainers should follow the
 [Trusted Publishing release procedure](docs/releasing.md) for TestPyPI and
-production PyPI releases.
+production PyPI releases. Repository documentation and wiki source can be
+checked without touching services by running `python scripts/check_docs.py`.
 
 ## Local Environment
 
@@ -673,7 +675,9 @@ delivery.
 
 Set `AGENT_PBX_WORKERBEE_BIN` before starting the Agent PBX daemon to enable
 the read-only WorkerBee tab in the TUI. The daemon runs WorkerBee status
-commands; the TUI only renders the API result.
+commands; the TUI only renders the API result. When a versioned backend status
+helper is configured, doctor and the tab also show backend provenance, endpoint
+alignment, server identity, and PBX-host versus WorkerBee-visible project paths.
 
 ```bash
 export AGENT_PBX_WORKERBEE_BIN=/home/m4xx3d0ut/git/k1s-wt/k1s-workerbee/.venv/bin/workerbee
@@ -691,6 +695,12 @@ tab does not start, stop, deploy, or mutate WorkerBee projects.
 projects` can take more than ten seconds on hosts with many projects. Agent PBX
 also serializes same-agent WorkerBee checks and caches results briefly to avoid
 WorkerBee project-lock collisions from repeated refreshes.
+
+A valid PBX project reported missing by WorkerBee is treated as a path-
+visibility diagnostic rather than evidence that the WorkerBee server needs a
+patch. Omitted launch tools, unavailable endpoints, older servers, and path
+mismatches produce distinct diagnostics. See the
+[WorkerBee wiki guide](docs/wiki/WorkerBee-Integration.md).
 
 ## Pull Request Review
 
@@ -825,6 +835,13 @@ and `/joplin sync` queues a manual sync job.
 The Joplin tab buttons show their shortcut key directly, such as `New n` and
 `Copy c`. Press `Ctrl+G` then that key; when focus is outside an editable note
 body, `j` can be used instead of `Ctrl+G`.
+
+The rendered reading view is keyboard-focusable and keeps a revision-scoped
+position for each note and preview. Arrow keys and Page Up/Page Down therefore
+work over desktop, SSH, and Termux without unchanged refreshes snapping back to
+the top. Explicit Copy actions can copy selected Markdown or the whole note.
+Paste is edit-only, revalidates the selected note revision, and confirms large
+or multiline clipboard payloads using metadata rather than echoing their text.
 
 In tmux direct mode, `/joplin copy` first reads the active Codex transcript when
 Agent PBX knows the session id. If transcript capture is unavailable, it uses
@@ -1113,8 +1130,9 @@ commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
 `/joplin rename`, `/joplin delete`, `/joplin copy`,
 `/joplin copy report`, `/agents prune`, `/agents prune apply`,
 `/agents prune stale`, `/agents prune forks`, `/agents prune undo`,
-`/show hidden agents`, `/unhide agent`, `/theme minimal`, and
-`/layout compact`.
+`/show hidden agents`, `/unhide agent`, `/palette history`,
+`/palette history clear`, `/navigation back`, `/navigation forward`,
+`/theme minimal`, and `/layout compact`.
 `/cancel` marks a stale or abandoned session canceled in PBX; it does not send
 an Escape key. Use `/esc` when you need a real Escape key event. In tmux direct
 mode, `/esc` sends `tmux send-keys Escape` to the selected Codex pane. Outside
@@ -1206,6 +1224,13 @@ Each command needs a slash-prefixed `name` and a non-empty `prompt`. Built-in
 palette names win over custom names, and duplicate custom names are skipped.
 `{arg}` is the only supported placeholder; commands that use it open a small
 input prompt before sending.
+
+The palette keeps a bounded, deduplicated history of selected command names.
+Up and Down traverse that history only while the palette input owns focus.
+Prompt bodies and command arguments are never recorded, sensitive command
+classes are excluded, and persistence is off by default. Use `/palette history`
+to inspect it, `/palette history clear` to erase it, and `/palette history
+persistence on|off` to control private local persistence.
 
 ### Custom Theme Creation Guide
 
@@ -1309,13 +1334,19 @@ the API URL is remote. Use `agent-pbx remote ssh-attach` for full-fidelity remot
 terminal access; the WSS client is the observer/control path.
 
 Plain configured function keys remain global PBX navigation even under terminal
-focus: `F1` Agents, `F2` Events, `F3` view, `F4` input, `F6/F7` fork navigation,
-`F8` next alert, `F9` editor, and `F10` workspace launch. Repeated F8 presses
+focus: `F1` Agents, `F2` Events, `F3` view, `F4` input, `F5` Operators,
+`F6/F7` fork navigation, `F8` next alert, `F9` editor, `F10` workspace launch,
+and `F11/F12` navigation back/forward. Repeated F8 presses
 focus and acknowledge one displayed Agent/Operator alert at a time.
 Shift+F1–F12 is translated to unmodified child F1–F12. Thus F2
 always focuses Events while Shift+F2 opens Codex warnings. The input layer also
 recognizes xterm F13–F24 aliases, and the key probe documents terminal-specific
 SSH or Termux sequences.
+
+F11/F12 history is private to each TUI process and records stable entity/tab
+identities, not row positions. It skips hidden, deleted, or unavailable
+destinations safely. `/navigation back` and `/navigation forward` expose the
+same traversal from the palette.
 
 Managed sessions pin Enter to submit and `Ctrl+J` to editor newline. The
 embedded terminal normalizes Shift+Enter, Alt+Enter, and Ctrl+Enter to that
@@ -1337,6 +1368,13 @@ The retained capture fallback uses `AGENT_PBX_TUI_TMUX_CAPTURE_LINES` and
 confirmed on that host. `AGENT_PBX_COMPAT_POLLING` and
 `AGENT_PBX_TUI_COMPAT_THREAD` independently gate the other retained v2.0 paths.
 Doctor and `/healthz` report this compatibility posture.
+
+When the attached Codex CLI emits qualified `subAgentActivity` events, the
+right-side runtime tree shows bounded child lifecycle beneath the owning Agent
+or Operator. It remains hidden until capability is observed and excludes child
+prompts, paths, hidden reasoning, and inferred roles. Qualification evidence is
+recorded in
+[the v2.1.2 subagent activity note](docs/acceptance/v2.1.2-subagent-activity.md).
 
 On tiny terminals the existing compact controls remain available. Android
 Termux can emit F8 with `Volume Up+8`; terminals that cannot distinguish shifted

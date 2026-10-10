@@ -89,9 +89,10 @@ running on a child PTY. The runtime tmux server owns the real Codex pane and its
 history; Textual renders the resulting terminal grid inside `Latest`.
 
 Plain configured function keys remain Agent PBX navigation even when the
-terminal is focused. Shift plus a function key sends the corresponding
-unmodified function key to Codex. Ordinary keys, paste, mouse input, Escape,
-Ctrl+C, and Ctrl+P belong to the terminal while it holds focus.
+terminal is focused. F11 and F12 traverse per-client logical navigation
+history. Shift plus a function key sends the corresponding unmodified function
+key to Codex. Ordinary keys, paste, mouse input, Escape, and Ctrl+C belong to
+the terminal while it holds focus; Ctrl+P opens the PBX command palette.
 
 See [ADR 0002](adr/0002-tmux-terminal-topology.md) and
 [ADR 0007](adr/0007-terminal-engine.md) for the terminal and rendering
@@ -115,7 +116,7 @@ client.
 
 Agent PBX v2 prefers native tmux and sequenced events for local clients. Report
 mode, explicit nohup polling, the Thread tab, HTTP refresh, and terminal capture
-remain compatibility paths in Agent PBX 2.1.0. Their eventual removal requires
+remain compatibility paths in Agent PBX 2.1.x. Their eventual removal requires
 measured parity, migration evidence, a supported migration path, and published
 notice.
 
@@ -123,4 +124,5 @@ The accepted architecture decisions are indexed in
 [docs/adr/README.md](adr/README.md). Installation and migration guidance is in
 [docs/install-v2.md](install-v2.md), and release acceptance evidence is in
 [docs/acceptance/v2-uat.md](acceptance/v2-uat.md) and
-[docs/acceptance/v2.1-uat.md](acceptance/v2.1-uat.md).
+[docs/acceptance/v2.1-uat.md](acceptance/v2.1-uat.md). The expanded operator
+documentation begins at the [versioned project wiki](wiki/Home.md).

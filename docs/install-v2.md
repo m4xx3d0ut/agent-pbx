@@ -155,6 +155,11 @@ agent-pbx doctor
 serving. `migrate apply` and `migrate rollback` refuse to run while the managed
 daemon is active. Apply creates another backup before any schema change.
 
+The migration preserves durable Agent and Operator records, stars, Codex
+session evidence, and runtime mappings. Retention days describe how long a
+backup should be kept; they do not authorize automatic pruning. Review a prune
+preview and confirm it separately after the retention period.
+
 The backup directory is mode `0700`; copied database and configuration files
 are mode `0600`. It may contain the local Agent PBX environment and Codex
 configuration, including credentials. Keep it on trusted encrypted storage and
@@ -180,7 +185,18 @@ or project trash created after the selected backup.
 ## Compatibility posture
 
 V2 keeps nohup polling, the Thread tab, HTTP refresh, and the capture-based
-terminal fallback in Agent PBX 2.1.0. Native tmux and the v2 event stream are
+terminal fallback in Agent PBX 2.1.x. Native tmux and the v2 event stream are
 the preferred local path. Legacy removal requires measured usage, parity, a
 tested migration path, and a later release with published notice; calendar age
 alone does not trigger removal.
+
+The shipped launch commands are `agent-pbx tui` and `agent-pbx-tui`. A short
+name such as `apbx` is a site-local shell alias, not a separate package command.
+For emergency access outside the TUI, use the entity's verified mapping:
+
+```bash
+agent-pbx runtime attach --entity operator-0 --read-only
+```
+
+See the [versioned project wiki](wiki/Home.md) for the keymap, runtime topology,
+Joplin E2EE diagnostics, and recovery decision tree.

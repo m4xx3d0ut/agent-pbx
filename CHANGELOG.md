@@ -19,6 +19,10 @@
 - Add per-client Agent, Operator, and right-tab navigation history on F11/F12,
   with Shift-function-key passthrough preserved and safe skipping for stale or
   hidden logical destinations.
+- Add a versioned repository wiki for setup, control-plane concepts, keymaps,
+  managed tmux operations, Codex profiles, WorkerBee, Joplin, security,
+  recovery, and releases, plus automated link, public-source, and documented
+  command checks.
 
 ### Fixed
 
