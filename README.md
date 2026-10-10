@@ -681,7 +681,7 @@ helper is configured, doctor and the tab also show backend provenance, endpoint
 alignment, server identity, and PBX-host versus WorkerBee-visible project paths.
 
 ```bash
-export AGENT_PBX_WORKERBEE_BIN=/home/m4xx3d0ut/git/k1s-wt/k1s-workerbee/.venv/bin/workerbee
+export AGENT_PBX_WORKERBEE_BIN="$HOME/git/k1s-workerbee/.venv/bin/workerbee"
 export AGENT_PBX_WORKERBEE_TIMEOUT_SECONDS=20
 agent-pbx mcp restart --token dev-token
 agent-pbx tui --token dev-token
