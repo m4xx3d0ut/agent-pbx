@@ -185,7 +185,7 @@ or project trash created after the selected backup.
 ## Compatibility posture
 
 V2 keeps nohup polling, the Thread tab, HTTP refresh, and the capture-based
-terminal fallback in Agent PBX 2.1.x. Native tmux and the v2 event stream are
+terminal fallback in Agent PBX 2.2.x. Native tmux and the v2 event stream are
 the preferred local path. Legacy removal requires measured usage, parity, a
 tested migration path, and a later release with published notice; calendar age
 alone does not trigger removal.

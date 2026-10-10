@@ -1,6 +1,6 @@
 # TUI and Keymap
 
-> **Applies to:** Agent PBX 2.1.x  
+> **Applies to:** Agent PBX 2.2.x
 > **Last reviewed:** 2026-10-10
 
 The v2 TUI retains the v1 left/right composition. Agents, Operators, and Events
@@ -66,6 +66,29 @@ History is bounded, deduplicated, and memory-only by default.
   memory-only behavior.
 
 Sensitive command classes are excluded even when persistence is enabled.
+
+## Managed terminal editor
+
+The Editor tab supports its Textual buffer and an optional managed native
+terminal editor. Save or revert a dirty Textual buffer, then use `Open Term` or
+`/editor terminal`. Installed Neovim, Vim, and Nano profiles are discovered by
+default; `/editor terminal nvim`, `/editor terminal vim`, and
+`/editor terminal nano` select one explicitly. `/editor terminal close` stops
+only that editor runtime and reloads the file through the guarded Editor path.
+
+Terminal editor input follows native terminal ownership. Plain function keys
+remain PBX navigation, while modified function keys and ordinary editor input
+reach the embedded editor. Each editor uses an editor-only tmux server and
+cannot reuse or mutate a Codex runtime mapping.
+
+## WorkerBee backend transactions
+
+When the host configures compatible WorkerBee status and switch helpers, the
+WorkerBee tab exposes preview actions for OSS, platform-debug, and rollback.
+Palette equivalents are `/workerbee switch oss`, `/workerbee switch debug`,
+and `/workerbee switch rollback`. Every apply is bound to the displayed preview
+and typed confirmation. A switch affects future sessions; running Codex
+sessions retain their current MCP binding.
 
 ## Focus and refresh behavior
 

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v2.2.0 - 2026-10-10
+
+### Highlights
+
+- Adds an isolated development harness with private runtime state, deterministic
+  cleanup, and WorkerBee workspace-binding receipts so integration work can be
+  qualified without interrupting production Agents or Operators.
+- Adds allowlisted native terminal editors inside the Editor tab, each on an
+  editor-only tmux runtime that never shares Codex pane topology.
+- Adds preview-bound WorkerBee backend switching with typed confirmation,
+  capability verification, automatic recovery, and explicit rollback for
+  future sessions.
+- Adds deterministic repository-wiki validation, staging, checksums, and a
+  digest-confirmed publisher that preserves unrelated wiki pages.
+- Completes setup, navigation and palette history, Codex child activity,
+  responsive layouts, and Joplin clipboard actions for the 2.2 cycle.
+
 ### Added
 
 - Report versioned WorkerBee backend provenance, endpoint alignment, server
@@ -23,6 +40,32 @@
   managed tmux operations, Codex profiles, WorkerBee, Joplin, security,
   recovery, and releases, plus automated link, public-source, and documented
   command checks.
+- Add an isolated development harness with loopback-only services, private
+  HOME/XDG/state roots, dedicated tmux sockets, atomic manifests, guarded
+  cleanup, and reproducible fixture integrations.
+- Add versioned WorkerBee harness-binding receipts that preserve source
+  revision and content-digest evidence, reject workspace drift, and keep local
+  snapshots unbound until the active endpoint proves an allowed import path.
+- Add managed terminal editor profiles using structured executable arguments,
+  shared project file policy, dedicated editor-only tmux runtimes, API/TUI
+  lifecycle controls, and native Editor-tab rendering.
+- Add transactional WorkerBee backend switching with dry-run previews,
+  expiring private tokens, active-backend drift checks, typed privileged
+  confirmation, MCP capability verification, and automatic/manual rollback.
+- Add guarded wiki `check`, `stage`, and `publish` commands with revision-pinned
+  repository links, generated navigation, per-page checksums, deterministic
+  archives, exact digest confirmation, and preservation of unknown pages.
+
+### Changed
+
+- Treat WorkerBee backend selection as a future-session boundary. Existing
+  Codex sessions retain their current MCP binding and are never rewritten by a
+  backend switch transaction.
+- Keep managed terminal editors separate from Codex runtime mappings and apply
+  the same root, sensitive-path, traversal, symlink, and regular-file checks as
+  the Textual editor.
+- Update the versioned project wiki, public README, environment template, and
+  release guidance for Agent PBX 2.2.
 
 ### Fixed
 
@@ -54,6 +97,8 @@
   and report password-required and native crypto-worker failures separately.
 - Preserve targeted Joplin write success when its verified note is plaintext
   even if an unrelated encrypted profile item cannot yet be decrypted.
+- Force a capable terminal type for managed editor runtimes when an inherited
+  noninteractive environment reports `TERM=dumb`.
 
 ## v2.1.1 - 2026-10-09
 

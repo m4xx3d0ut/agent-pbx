@@ -1,6 +1,6 @@
 # Packaging, Releases, and Upgrades
 
-> **Applies to:** Agent PBX 2.1.x  
+> **Applies to:** Agent PBX 2.2.x
 > **Last reviewed:** 2026-10-10
 
 Agent PBX publishes a Python wheel and source distribution through PyPI Trusted
@@ -57,6 +57,28 @@ The repository README is the package-index long description, so it uses
 absolute public image URLs and static architecture media. Mermaid source stays
 versioned under `docs/diagrams`. Wiki source stays under `docs/wiki` and is
 published only after link, command, public-data, and rendered-page review.
+
+Create the review artifact without publishing:
+
+```bash
+agent-pbx wiki check --source docs/wiki
+agent-pbx wiki stage --source docs/wiki --output artifacts/wiki-stage \
+  --revision "$(git rev-parse HEAD)"
+```
+
+Review the generated pages, sidebar, manifest, checksums, deterministic archive,
+and `stage_digest`. Publication requires that exact digest and an explicit
+`.wiki.git` remote:
+
+```bash
+agent-pbx wiki publish \
+  --stage artifacts/wiki-stage \
+  --remote git@github.com:owner/agent-pbx.wiki.git \
+  --confirm '<reviewed-stage-digest>'
+```
+
+The publisher updates only managed page names and preserves unknown remote
+pages. Package publication never publishes the wiki implicitly.
 
 See the complete [release procedure](../releasing.md),
 [installation and rollback guide](../install-v2.md), and

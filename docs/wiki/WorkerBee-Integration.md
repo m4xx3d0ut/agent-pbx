@@ -1,6 +1,6 @@
 # WorkerBee Integration
 
-> **Applies to:** Agent PBX 2.1.x  
+> **Applies to:** Agent PBX 2.2.x
 > **Last reviewed:** 2026-10-10
 
 WorkerBee is an optional runtime-truth plane. Agent PBX remains the authority
@@ -8,7 +8,7 @@ for Agent/Operator identity, routing, lifecycle, policy, and audit. WorkerBee
 adds project discovery, application and infrastructure status, simulation,
 deployment evidence, ingress checks, and validation where configured.
 
-## Enable read-only posture
+## Enable status posture
 
 Set the WorkerBee executable in private host configuration, restart the daemon,
 and run doctor. The TUI never receives host credentials; the daemon invokes the
@@ -49,6 +49,30 @@ WorkerBee planner guidance should be used for runtime, manifest, ingress,
 database, queue, security, deployment, and validation work.
 
 Backend switching remains a separate live operation. Inspecting provenance and
-path visibility is safe; changing the active MCP backend can affect running
-Operators and requires explicit operational review.
+path visibility is safe. To enable the guarded switch controls, configure both
+versioned helpers in private host configuration:
+
+```bash
+export AGENT_PBX_WORKERBEE_SWITCHER_STATUS_BIN="$HOME/.local/bin/wb-mcp-status"
+export AGENT_PBX_WORKERBEE_SWITCHER_BIN="$HOME/.local/bin/wb-mcp-switch"
+agent-pbx mcp restart
+```
+
+Use `/workerbee switch oss` or `/workerbee switch debug` to open a preview. The
+preview runs the switch helper's real `--dry-run`, binds the target and active
+backend fingerprint to a private expiring transaction, and shows the exact
+confirmation requirement. Platform-debug requires an additional privileged
+confirmation. Agent PBX verifies backend provenance and MCP capabilities after
+apply and attempts to restore the prior backend when verification fails.
+
+`/workerbee switch rollback` reviews and rolls back the last verified
+transaction. Existing Codex sessions remain pinned to the MCP binding they
+started with; a switch selects the backend for future sessions. Operators
+should therefore review active work before applying a transaction even though
+Agent PBX does not rewrite running sessions.
+
+The status helper and switch helper are separate contracts. Do not substitute
+a command named `precheck` unless its implementation is proven observational;
+the Agent PBX preview path intentionally calls only the switcher's true
+non-mutating `--dry-run` mode.
 

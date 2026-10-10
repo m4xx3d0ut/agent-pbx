@@ -1,6 +1,6 @@
 # Joplin Notes
 
-> **Applies to:** Agent PBX 2.1.x  
+> **Applies to:** Agent PBX 2.2.x
 > **Last reviewed:** 2026-10-10
 
 Agent PBX provides project-scoped Joplin reading, editing, response capture,

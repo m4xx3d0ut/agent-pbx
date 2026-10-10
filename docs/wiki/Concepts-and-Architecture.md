@@ -1,6 +1,6 @@
 # Concepts and Architecture
 
-> **Applies to:** Agent PBX 2.1.x  
+> **Applies to:** Agent PBX 2.2.x
 > **Last reviewed:** 2026-10-10
 
 ## Durable ownership
@@ -51,7 +51,7 @@ features so a Codex update cannot silently enable an unqualified path.
 
 Native tmux and sequenced events are the preferred local v2 paths. Explicit
 nohup polling, Thread, HTTP refresh, and captured-terminal fallback remain
-compatibility features in 2.1.x. Removal requires measured parity, migration
+compatibility features in 2.2.x. Removal requires measured parity, migration
 evidence, and published notice.
 
 See the maintained [architecture overview](../architecture.md) and

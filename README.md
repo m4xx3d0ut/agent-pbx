@@ -53,7 +53,7 @@ is tracked with the repository.
 
 See [the architecture overview](docs/architecture.md),
 [the versioned project wiki](docs/wiki/Home.md),
-[the v2.1 release notes](docs/releases/v2.1.0.md), and
+[the v2.2 release notes](docs/releases/v2.2.0.md), and
 [the accepted architecture decisions](docs/adr/README.md) for the complete
 control-plane and compatibility boundaries.
 
@@ -175,7 +175,8 @@ requirements, remote clients, verified/offline wheelhouses, migration, and
 rollback. Maintainers should follow the
 [Trusted Publishing release procedure](docs/releasing.md) for TestPyPI and
 production PyPI releases. Repository documentation and wiki source can be
-checked without touching services by running `python scripts/check_docs.py`.
+checked without touching services by running `python scripts/check_docs.py`
+and `agent-pbx wiki check --source docs/wiki`.
 
 ## Local Environment
 
@@ -674,7 +675,7 @@ delivery.
 ## WorkerBee TUI Status
 
 Set `AGENT_PBX_WORKERBEE_BIN` before starting the Agent PBX daemon to enable
-the read-only WorkerBee tab in the TUI. The daemon runs WorkerBee status
+the WorkerBee status tab in the TUI. The daemon runs WorkerBee status
 commands; the TUI only renders the API result. When a versioned backend status
 helper is configured, doctor and the tab also show backend provenance, endpoint
 alignment, server identity, and PBX-host versus WorkerBee-visible project paths.
@@ -689,8 +690,8 @@ agent-pbx tui --token dev-token
 Agents must register with `metadata.cwd` set to their project directory. When
 the selected agent is in a WorkerBee project, the tab shows the WorkerBee
 project name, mode, running state, dashboard URLs, app readiness, latest
-deployment metadata, ingress URLs, workloads, and validation findings. The v1
-tab does not start, stop, deploy, or mutate WorkerBee projects.
+deployment metadata, ingress URLs, workloads, and validation findings. These
+project-status views do not start, stop, deploy, or mutate WorkerBee projects.
 `AGENT_PBX_WORKERBEE_TIMEOUT_SECONDS` defaults to `20` because `workerbee
 projects` can take more than ten seconds on hosts with many projects. Agent PBX
 also serializes same-agent WorkerBee checks and caches results briefly to avoid
@@ -701,6 +702,23 @@ visibility diagnostic rather than evidence that the WorkerBee server needs a
 patch. Omitted launch tools, unavailable endpoints, older servers, and path
 mismatches produce distinct diagnostics. See the
 [WorkerBee wiki guide](docs/wiki/WorkerBee-Integration.md).
+
+When both versioned switch helpers are configured, the WorkerBee tab and
+palette can preview a change between OSS and platform-debug MCP backends:
+
+```bash
+export AGENT_PBX_WORKERBEE_SWITCHER_STATUS_BIN="$HOME/.local/bin/wb-mcp-status"
+export AGENT_PBX_WORKERBEE_SWITCHER_BIN="$HOME/.local/bin/wb-mcp-switch"
+```
+
+`/workerbee switch oss` and `/workerbee switch debug` always begin with the
+switcher's real non-mutating `--dry-run` result. Apply requires an unexpired
+private transaction, unchanged backend evidence, exact typed confirmation, and
+an additional privileged confirmation for platform-debug. Agent PBX verifies
+both backend provenance and WorkerBee MCP capabilities after apply, attempts
+automatic restoration on failure, and provides `/workerbee switch rollback`
+for the last verified transaction. The change applies only to future sessions;
+running Codex sessions remain pinned to their existing MCP binding.
 
 ## Pull Request Review
 
@@ -975,6 +993,22 @@ reports a write conflict if the file changed on disk. `Revert` reloads the file
 from the daemon. `F9` or `Full F9` toggles an editor-fullscreen layout that keeps
 the TUI title and footer visible.
 
+`Open Term` or `/editor terminal` opens the clean current file in a managed
+native terminal editor inside the Editor tab. Agent PBX discovers Neovim, Vim,
+and Nano by default, or reads allowlisted structured argument profiles from
+`AGENT_PBX_TERMINAL_EDITOR_PROFILES`. It executes the selected argv directly,
+without a shell, after applying the same project-root, sensitive-name, symlink,
+traversal, and regular-file checks as the Textual editor. A dirty Textual buffer
+must be saved or reverted first. Each editor runs on its own editor-only tmux
+server; it cannot attach to, move, stop, or reuse a Codex runtime pane. Use
+`/editor terminal close` to stop that editor runtime and reload the file through
+the normal conflict-aware editor path.
+
+```bash
+export AGENT_PBX_TERMINAL_EDITOR_PROFILES='{"nvim":{"label":"Neovim","argv":["nvim","+{line}","--","{path}"]}}'
+export AGENT_PBX_TERMINAL_EDITOR_DEFAULT="nvim"
+```
+
 `Check` runs best-effort diagnostics for the editor file through the daemon.
 Agent PBX currently supports `ruff` and `mypy` when installed on the daemon host;
 `auto` prefers the first available supported tool and returns a structured
@@ -1153,6 +1187,9 @@ commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
 `/agents prune stale`, `/agents prune forks`, `/agents prune undo`,
 `/show hidden agents`, `/unhide agent`, `/palette history`,
 `/palette history clear`, `/navigation back`, `/navigation forward`,
+`/editor terminal`, `/editor terminal close`,
+`/workerbee switch oss`, `/workerbee switch debug`,
+`/workerbee switch rollback`,
 `/theme minimal`, and `/layout compact`.
 `/cancel` marks a stale or abandoned session canceled in PBX; it does not send
 an Escape key. Use `/esc` when you need a real Escape key event. In tmux direct
@@ -1327,7 +1364,7 @@ loopback daemon and `tmux` is available. `Latest` embeds a PTY-backed normal
 tmux client attached to the selected PBX-managed runtime. Codex keeps its native
 selectors, warning view, approvals, paste, mouse, resize, cursor state, and tmux
 scrollback. The captured pane renderer and separate input remain available as a
-compatibility fallback in Agent PBX 2.1.0. Legacy-path removal still requires
+compatibility fallback in Agent PBX 2.2.0. Legacy-path removal still requires
 measured parity, a supported migration path, and published notice.
 
 The committed runtime-server default is `dedicated`, which works whether or not

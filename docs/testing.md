@@ -30,8 +30,10 @@ fixtures run once per xdist worker unless they implement explicit interprocess
 coordination.
 
 The outer-tmux conformance test is both opt-in through
-`AGENT_PBX_TEST_OUTER_TMUX` and serial. Real tmux tests that create unique
-private sockets remain eligible for parallel execution.
+`AGENT_PBX_TEST_OUTER_TMUX` and serial. Most real tmux tests that create unique
+private sockets remain eligible for parallel execution. The retained-pane
+respawn rollback test stays in the serial tail because a heavily loaded tmux
+server can delay publishing `pane_dead_status` even after `pane_dead` changes.
 
 ## 2026-10-06 local qualification
 

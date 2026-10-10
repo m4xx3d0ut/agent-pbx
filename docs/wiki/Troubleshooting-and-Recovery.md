@@ -1,6 +1,6 @@
 # Troubleshooting and Recovery
 
-> **Applies to:** Agent PBX 2.1.x  
+> **Applies to:** Agent PBX 2.2.x
 > **Last reviewed:** 2026-10-10
 
 Start with read-only posture and preserve runtime evidence:

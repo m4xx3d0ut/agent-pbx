@@ -116,7 +116,7 @@ client.
 
 Agent PBX v2 prefers native tmux and sequenced events for local clients. Report
 mode, explicit nohup polling, the Thread tab, HTTP refresh, and terminal capture
-remain compatibility paths in Agent PBX 2.1.x. Their eventual removal requires
+remain compatibility paths in Agent PBX 2.2.x. Their eventual removal requires
 measured parity, migration evidence, a supported migration path, and published
 notice.
 

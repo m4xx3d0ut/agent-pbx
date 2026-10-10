@@ -503,6 +503,7 @@ def test_tmux_pane_dead_status_parses_retained_exit_status(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux unavailable")
+@pytest.mark.serial
 def test_tmux_retains_failed_respawn_for_same_pane_rollback() -> None:
     tmux_executable = shutil.which("tmux") or "tmux"
     socket_dir = tempfile.TemporaryDirectory(prefix="apbx-respawn-", dir="/tmp")
