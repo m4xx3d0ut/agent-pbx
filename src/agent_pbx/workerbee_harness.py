@@ -24,6 +24,7 @@ class WorkerBeeHarnessBinding:
     source_root: str
     source_commit: str
     source_dirty: bool
+    snapshot_path: str
     workspace_path: str
     workspace_sha256: str
     task_owned: bool
@@ -38,6 +39,11 @@ class WorkerBeeHarnessBinding:
         }
 
     def session_start_args(self, *, goal: str) -> dict[str, Any]:
+        if not self.workspace_path:
+            raise ValueError(
+                "WorkerBee-visible workspace path is unbound; stage the snapshot under "
+                "the endpoint import root and record that path first"
+            )
         return {
             "cwd": self.workspace_path,
             "goal": goal,
@@ -129,6 +135,7 @@ def prepare_workerbee_harness_binding(
     source_dirty: bool,
     artifacts_root: Path,
     allow_platform_debug: bool = False,
+    workerbee_workspace_path: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
 ) -> WorkerBeeHarnessBinding:
     if backend not in WORKERBEE_HARNESS_BACKENDS:
@@ -170,13 +177,23 @@ def prepare_workerbee_harness_binding(
         status = "snapshot_ready"
 
     digest = content_sha256(workspace)
+    visible_workspace = (
+        str(workerbee_workspace_path)
+        if workerbee_workspace_path is not None
+        else ("" if backend == "platform-debug-bound" else str(workspace.resolve()))
+    )
+    if workerbee_workspace_path is not None and backend != "platform-debug-bound":
+        raise ValueError("an external WorkerBee workspace path is only valid for platform-debug")
+    if backend == "platform-debug-bound":
+        status = "binding_ready" if visible_workspace else "snapshot_ready_unbound"
     binding = WorkerBeeHarnessBinding(
         backend=backend,
         project=selected_project,
         source_root=str(source_root.resolve()),
         source_commit=source_commit,
         source_dirty=source_dirty,
-        workspace_path=str(workspace.resolve()),
+        snapshot_path=str(workspace.resolve()),
+        workspace_path=visible_workspace,
         workspace_sha256=digest,
         task_owned=True,
         live_endpoint_required=backend == "platform-debug-bound",
@@ -197,6 +214,6 @@ def load_workerbee_harness_binding(path: Path) -> WorkerBeeHarnessBinding:
         raise ValueError("unsupported WorkerBee harness binding receipt")
     binding = WorkerBeeHarnessBinding(**payload)
     _validate_project(binding.project)
-    if content_sha256(Path(binding.workspace_path)) != binding.workspace_sha256:
+    if content_sha256(Path(binding.snapshot_path)) != binding.workspace_sha256:
         raise ValueError("WorkerBee harness workspace content does not match its receipt")
     return binding

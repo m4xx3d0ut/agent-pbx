@@ -51,7 +51,7 @@ def test_fixture_binding_is_task_owned_and_content_verified(tmp_path) -> None:
     assert binding.status == "fixture_ready"
     assert binding.task_owned is True
     assert binding.live_endpoint_required is False
-    assert content_sha256(Path(binding.workspace_path)) == binding.workspace_sha256
+    assert content_sha256(Path(binding.snapshot_path)) == binding.workspace_sha256
     assert load_workerbee_harness_binding(Path(binding.receipt_path)) == binding
     payload = json.loads(Path(binding.receipt_path).read_text(encoding="utf-8"))
     assert payload["api_version"] == WORKERBEE_BINDING_API_VERSION
@@ -69,7 +69,7 @@ def test_committed_snapshot_is_content_addressed(tmp_path) -> None:
         artifacts_root=tmp_path / "artifacts",
     )
 
-    workspace = Path(binding.workspace_path)
+    workspace = Path(binding.snapshot_path)
     assert (workspace / "README.md").read_text(encoding="utf-8") == "committed\n"
     assert not (workspace / ".git").exists()
     assert binding.status == "snapshot_ready"
@@ -100,10 +100,12 @@ def test_platform_debug_receipt_supplies_required_session_binding(tmp_path) -> N
         source_dirty=False,
         artifacts_root=tmp_path / "artifacts",
         allow_platform_debug=True,
+        workerbee_workspace_path=Path("/imports/agent-pbx-harness-platform"),
     )
 
     arguments = binding.session_start_args(goal="Validate Agent PBX 2.2")
     assert binding.live_endpoint_required is True
+    assert binding.status == "binding_ready"
     assert arguments["project"] == "agent-pbx-harness-platform"
     assert arguments["workspace_path"] == binding.workspace_path
     assert arguments["workspace_sha256"] == binding.workspace_sha256
@@ -122,6 +124,24 @@ def test_live_binding_rejects_dirty_source_and_unowned_project(tmp_path) -> None
             source_dirty=True,
             artifacts_root=tmp_path / "dirty-artifacts",
         )
+
+
+def test_platform_snapshot_stays_unbound_until_import_path_is_supplied(tmp_path) -> None:
+    source, commit = committed_source(tmp_path)
+    binding = prepare_workerbee_harness_binding(
+        backend="platform-debug-bound",
+        project="agent-pbx-harness-unbound",
+        source_root=source,
+        source_commit=commit,
+        source_dirty=False,
+        artifacts_root=tmp_path / "artifacts",
+        allow_platform_debug=True,
+    )
+
+    assert binding.status == "snapshot_ready_unbound"
+    assert binding.workspace_path == ""
+    with pytest.raises(ValueError, match="import root"):
+        binding.session_start_args(goal="test")
     with pytest.raises(ValueError, match="task-owned"):
         prepare_workerbee_harness_binding(
             backend="fixture",
@@ -143,7 +163,7 @@ def test_receipt_detects_workspace_drift(tmp_path) -> None:
         source_dirty=False,
         artifacts_root=tmp_path / "artifacts",
     )
-    (Path(binding.workspace_path) / "README.md").write_text("changed\n", encoding="utf-8")
+    (Path(binding.snapshot_path) / "README.md").write_text("changed\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="does not match"):
         load_workerbee_harness_binding(Path(binding.receipt_path))

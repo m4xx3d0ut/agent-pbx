@@ -392,6 +392,7 @@ def start_harness(
     *,
     start_tmux: bool = True,
     allow_platform_debug: bool = False,
+    workerbee_workspace_path: Path | None = None,
     daemon_starter: Callable[..., dict[str, Any]] = start_mcp_daemon,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> HarnessManifest:
@@ -406,6 +407,7 @@ def start_harness(
             source_dirty=plan.source_dirty,
             artifacts_root=plan.paths.artifacts,
             allow_platform_debug=allow_platform_debug,
+            workerbee_workspace_path=workerbee_workspace_path,
         ).public_dict()
         write_harness_manifest(manifest)
         if start_tmux:

@@ -387,6 +387,12 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="Authorize staging a task-owned binding for a live platform-debug endpoint.",
             )
+            command.add_argument(
+                "--workerbee-workspace-path",
+                type=Path,
+                default=None,
+                help="WorkerBee-visible path after the snapshot is staged under its import root.",
+            )
     for command_name in ("status", "stop"):
         command = harness_subcommands.add_parser(command_name)
         add_harness_identity_flags(command)
@@ -760,6 +766,7 @@ def main(argv: list[str] | None = None) -> int:
                         plan,
                         start_tmux=not bool(args.no_tmux),
                         allow_platform_debug=bool(args.allow_platform_debug),
+                        workerbee_workspace_path=args.workerbee_workspace_path,
                     )
                 )
             else:
