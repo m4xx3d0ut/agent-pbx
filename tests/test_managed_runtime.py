@@ -135,6 +135,10 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     monkeypatch.setattr("agent_pbx.managed_runtime.list_runtime_panes", lambda _identity: (pane,))
     monkeypatch.setattr("agent_pbx.managed_runtime.process_start_ticks", lambda _pid: 99)
     monkeypatch.setattr(runtime, "_runtime_session_name", lambda _agent_id: pane.session_name)
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.managed_tmux_launch_environment",
+        lambda env, *_args, **_kwargs: {**env, "PATH": "/private/bin:/usr/bin"},
+    )
 
     result = runtime.launch(project_path=str(repo), token="secret")
 
@@ -142,6 +146,7 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     assert store.get_agent("codex-demo")["metadata"]["tmux_pane_id"] == "%17"  # type: ignore[index]
     assert store.get_tmux_runtime_mapping("codex-demo")["process_start_ticks"] == 99  # type: ignore[index]
     assert any("AGENT_PBX_AGENT_ID=codex-demo" in item for item in commands[0])
+    assert any("PATH=/private/bin:/usr/bin" in item for item in commands[0])
 
 
 def test_managed_launch_failure_kills_session_without_orphan_agent(
@@ -173,6 +178,10 @@ def test_managed_launch_failure_kills_session_without_orphan_agent(
     )
     monkeypatch.setattr("agent_pbx.managed_runtime.validate_tmux_socket", lambda _path: (True, ""))
     monkeypatch.setattr("agent_pbx.managed_runtime.list_runtime_panes", lambda _identity: ())
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.managed_tmux_launch_environment",
+        lambda env, *_args, **_kwargs: dict(env),
+    )
 
     with pytest.raises(RuntimeError, match="not visible"):
         runtime.launch(project_path=str(repo))

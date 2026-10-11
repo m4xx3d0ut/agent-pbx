@@ -20,7 +20,11 @@ from .codex_theme import MANAGED_CODEX_THEME_NAME, managed_codex_theme_status
 from .compat import compatibility_posture
 from .mcp_daemon import MCPDaemonConfig, lan_auth_guard, mcp_daemon_status
 from .store import SCHEMA_VERSION
-from .tmux_binary import configured_tmux_binary, resolve_tmux_binary
+from .tmux_binary import (
+    configured_tmux_binary,
+    managed_tmux_shim_status,
+    resolve_tmux_binary,
+)
 from .runtime_tmux import RUNTIME_TMUX_SOCKET_ENV, tmux_socket_from_environment
 from .ui.theme import terminal_color_depth
 from .workerbee_mcp import inspect_workerbee_switcher
@@ -121,6 +125,7 @@ def run_platform_doctor(
     checks.append(_dependency_check())
     checks.extend(_executable_checks(which))
     checks.append(_tmux_check(which, timeout))
+    checks.append(_managed_tmux_command_check(config.resolved_state_root, which))
     checks.append(_terminal_check())
     checks.append(_database_check(config.resolved_db_path))
     checks.append(_daemon_check(config))
@@ -337,6 +342,32 @@ def _tmux_server_diagnostic(
         "color_term": color_term or None,
         "description": description,
     }
+
+
+def _managed_tmux_command_check(
+    state_root: Path,
+    which: Callable[[str], str | None],
+) -> DoctorCheck:
+    status = managed_tmux_shim_status(state_root=state_root, which=which)
+    ready = bool(status.get("ready"))
+    state = str(status.get("state") or "unknown")
+    return DoctorCheck(
+        "managed-tmux-command",
+        "pass" if ready else "warn",
+        "managed panes resolve the configured tmux binary"
+        if ready
+        else f"managed tmux command is {state}",
+        detail=(
+            f"shim={status.get('path')}; target={status.get('target') or '-'}; "
+            f"shim_target={status.get('shim_target') or '-'}"
+        ),
+        remediation=(
+            "Restart the Agent PBX daemon to install the private runtime tmux shim; "
+            "then restart/resume affected managed sessions at a safe turn boundary."
+            if not ready
+            else ""
+        ),
+    )
 
 
 def _terminal_check() -> DoctorCheck:

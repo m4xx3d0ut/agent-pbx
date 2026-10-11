@@ -18,6 +18,7 @@ from . import __version__
 from .compat import POLLING_ENV
 from .paths import default_state_root
 from .store import Store
+from .tmux_binary import ensure_managed_tmux_shim, managed_tmux_shim_status
 from .joplin import (
     JOPLIN_API_URL_ENV,
     JOPLIN_BIN_ENV,
@@ -343,6 +344,16 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
 
     config.global_dir.mkdir(parents=True, exist_ok=True)
     config.resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        ensure_managed_tmux_shim(state_root=config.resolved_state_root)
+        tmux_shim = managed_tmux_shim_status(state_root=config.resolved_state_root)
+    except Exception as exc:  # noqa: BLE001 - tmux is optional for API-only installs
+        tmux_shim = {
+            "ready": False,
+            "state": "install_failed",
+            "path": str(config.resolved_state_root / "runtime-bin" / "tmux"),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     child_env = _child_env(config)
 
     argv = _serve_argv(config)
@@ -414,6 +425,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "log_file": str(config.log_file),
         "metadata_file": str(config.metadata_file),
         "codex_command": config.codex_command,
+        "managed_tmux_shim": tmux_shim,
         "started_at": time.time(),
     }
     _write_metadata(config.metadata_file, metadata)

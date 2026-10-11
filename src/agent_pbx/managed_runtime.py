@@ -31,7 +31,7 @@ from .runtime_tmux import (
 )
 from .schemas import AgentRegisterRequest
 from .store import Store
-from .tmux_binary import configured_tmux_binary
+from .tmux_binary import configured_tmux_binary, managed_tmux_launch_environment
 
 
 PROJECT_ROOTS_ENV = "AGENT_PBX_PROJECT_ROOTS"
@@ -97,6 +97,7 @@ class ManagedRuntimeService:
         project_roots: Iterable[Path] | None = None,
         codex_bin: str | None = None,
         tmux_bin: str | None = None,
+        state_root: Path | None = None,
         catalog_loader: Callable[[str], tuple[CodexModelOption, ...]] | None = None,
     ) -> None:
         self.store = store
@@ -106,6 +107,9 @@ class ManagedRuntimeService:
         )
         self.codex_bin = codex_bin or shutil.which("codex") or "codex"
         self.tmux_bin = configured_tmux_binary(tmux_bin)
+        self.state_root = (state_root or self.store.path.parent).expanduser().resolve(
+            strict=False
+        )
         self.catalog_loader = catalog_loader or (
             lambda command: inspect_codex_model_catalog(command)
         )
@@ -221,6 +225,11 @@ class ManagedRuntimeService:
         }
         if token:
             env["AGENT_PBX_TOKEN"] = token
+        env = managed_tmux_launch_environment(
+            env,
+            identity.tmux_bin or self.tmux_bin,
+            state_root=self.state_root,
+        )
         command = [
             self.tmux_bin,
             "-S",

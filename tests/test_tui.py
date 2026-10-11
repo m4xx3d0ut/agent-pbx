@@ -12,6 +12,7 @@ import pytest
 from rich.text import Text
 
 from agent_pbx import tmux as tmux_support
+from agent_pbx.tmux_binary import resolve_tmux_binary
 from agent_pbx.codex_cli import (
     CODEX_MODEL_ENV,
     CODEX_REASONING_EFFORT_ENV,
@@ -14297,6 +14298,8 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
     assert "secret" not in json.dumps(metadata)
     assert posts[1]["path"] == "/v1/agents/register"
     assert posts[1]["json"]["metadata"]["tmux_pane_id"] == "%42"  # type: ignore[index]
+    expected_tmux = resolve_tmux_binary()
+    assert expected_tmux is not None
     assert launches[0]["env"] == {
             "AGENT_PBX_SERVER_URL": "http://127.0.0.1:8765",
             "AGENT_PBX_MCP_URL": "http://127.0.0.1:8765/mcp",
@@ -14316,6 +14319,7 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
         "AGENT_PBX_CODEX_REASONING_SUMMARY": "detailed",
         "AGENT_PBX_CODEX_VERBOSITY": "high",
         "AGENT_PBX_TOKEN": "secret",
+        "AGENT_PBX_TMUX_BIN": expected_tmux,
     }
     assert app.tmux_agent_targets["operator-0"] == "%42"
     assert sent[0][0] == "%42"

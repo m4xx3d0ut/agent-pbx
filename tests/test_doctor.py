@@ -9,6 +9,7 @@ from agent_pbx.doctor import (
     DoctorCheck,
     DoctorReport,
     _database_check,
+    _managed_tmux_command_check,
     _codex_theme_check,
     _security_check,
     _tmux_server_diagnostic,
@@ -178,3 +179,20 @@ def test_tmux_server_diagnostic_reports_server_binary_and_plugin_contamination(
     assert result["executable"] == "/usr/bin/tmux"
     assert result["plugin_contaminated"] is True
     assert calls[0][:3] == ["/opt/tmux-3.7c", "-S", "/tmp/tmux.sock"]
+
+
+def test_doctor_reports_managed_tmux_command_state(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "tmux-3.7c"
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target.chmod(0o755)
+    monkeypatch.setenv("AGENT_PBX_TMUX_BIN", str(target))
+
+    missing = _managed_tmux_command_check(tmp_path / "state", lambda _: str(target))
+    from agent_pbx.tmux_binary import ensure_managed_tmux_shim
+
+    ensure_managed_tmux_shim(state_root=tmp_path / "state")
+    ready = _managed_tmux_command_check(tmp_path / "state", lambda _: str(target))
+
+    assert missing.status == "warn"
+    assert "Restart the Agent PBX daemon" in missing.remediation
+    assert ready.status == "pass"

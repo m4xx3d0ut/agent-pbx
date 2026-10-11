@@ -131,7 +131,11 @@ from .ui.panels.joplin import JoplinPanelState
 from .ui.panels.operators import OperatorPanelState
 from .ui.runtime import runtime_header, runtime_topology
 from .ui.theme import PBX_PALETTE, terminal_color_depth, textual_palette
-from .tmux_binary import configured_tmux_binary, resolve_tmux_binary
+from .tmux_binary import (
+    configured_tmux_binary,
+    managed_tmux_launch_environment,
+    resolve_tmux_binary,
+)
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
@@ -20230,7 +20234,7 @@ class AgentPBXTUI(App[None]):
                 env["AGENT_PBX_CODEX_VERBOSITY"] = model_preset.verbosity
         if self.token:
             env[AGENT_PBX_TOKEN_ENV] = self.token
-        return env
+        return managed_tmux_launch_environment(env, install=False)
 
     async def ensure_operator_auth_ready(self) -> bool:
         try:
@@ -20479,7 +20483,7 @@ class AgentPBXTUI(App[None]):
             env["AGENT_PBX_SOURCE_CWD"] = source_cwd
         if self.token:
             env[AGENT_PBX_TOKEN_ENV] = self.token
-        return env
+        return managed_tmux_launch_environment(env, install=False)
 
     async def register_spawned_project_caller(
         self,
