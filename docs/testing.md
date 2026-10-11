@@ -19,6 +19,11 @@ scripts/test_full.sh --serial
 for diagnosis. Worker restarts are disabled so a worker crash fails the run
 instead of silently retrying a test in a fresh process.
 
+Use the repository runner or an explicit qualified worker bound. Raw
+`pytest -n auto` is not a release command: it can overcommit a many-core
+workstation and turn event-loop/tmux timing into nondeterministic failures that
+do not reproduce serially.
+
 ## Parallel-safety contract
 
 Parallel tests must own all mutable resources they use. Prefer `tmp_path`,

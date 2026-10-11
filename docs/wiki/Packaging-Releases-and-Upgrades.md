@@ -33,6 +33,13 @@ reused.
 
 ## Upgrade transaction
 
+`agent-pbx mcp start` and `agent-pbx mcp restart` inspect the database in
+read-only mode before changing the running service. An older, newer, corrupt,
+or unreadable schema sets `start_blocked=true` in `agent-pbx mcp status` and
+returns exact migration commands. A blocked restart does not stop the currently
+healthy daemon, rotate its log, write new process metadata, or spawn a partial
+replacement.
+
 Create and retain a reviewable backup before stopping the daemon:
 
 ```bash

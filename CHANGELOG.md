@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Coalesce embedded-terminal paints under sustained output while continuing to
+  read and parse every PTY byte, expose bounded performance counters, and avoid
+  rebuilding terminal rows whose final cell presentation is unchanged.
+- Pin `tmux` command resolution inside managed runtimes through a private,
+  validated state-root shim so Codex follow-up tools use the same qualified
+  binary as Agent PBX even when the parent shell resolves another tmux version.
+- Refuse daemon start or restart before stopping a healthy older daemon when
+  the database schema is older, newer, corrupt, or unreadable, and report the
+  exact dry-run/apply/verify remediation commands through status.
+- Cover repeated WebSocket failure and TUI unmount cleanup. Isolated stress
+  qualification found bounded descriptors and no growing transport leak, so
+  this change preserves the existing transport architecture.
 - Persist managed editor runtime identity across daemon/TUI restarts, adopt
   verified editor panes safely, and route additional project files into an
   active Neovim through its private RPC socket.

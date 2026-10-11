@@ -17,12 +17,29 @@ recorded tmux binary and socket instead of the daemon's inherited shell tmux.
 This is essential when the host shell and managed runtime use different tmux
 versions.
 
+When `AGENT_PBX_TMUX_BIN` selects a qualified absolute binary, daemon startup
+creates a private `runtime-bin/tmux` shim under the Agent PBX state root and
+prepends that directory to managed-runtime `PATH`. This also makes an ordinary
+`tmux` command launched from Codex resolve to the qualified binary. Agent PBX
+validates ownership, executable mode, and write permissions before replacing
+the shim. `agent-pbx doctor` reports the result as
+`managed-tmux-command`. Existing runtime processes acquire the updated
+environment at their next safe restart/resume; they are never restarted solely
+to refresh the shim.
+
 ## Embedded terminal
 
 `Latest` runs a normal tmux client on a child PTY and renders its virtual
 terminal grid inside Textual. The disposable embedded client holds a single
 writer lease. Closing the TUI or disabling native mode detaches that client and
 releases the lease; it does not stop Codex.
+
+The terminal drains and parses every available PTY byte, but coalesces Textual
+paint requests during sustained output. The default maximum paint rate is 15
+frames per second. `AGENT_PBX_TERMINAL_MAX_PAINT_FPS` may set a qualified local
+value from 5 through 60; raising it trades more CPU for intermediate-frame
+smoothness. The performance snapshot records byte, poll, feed, paint, render,
+and row-reuse counters for diagnosis without storing prompt contents.
 
 The runtime server owns scrollback. Managed Codex profiles use inline terminal
 behavior so tmux can retain history. Page Up or `/tmux scrollback` enters copy
