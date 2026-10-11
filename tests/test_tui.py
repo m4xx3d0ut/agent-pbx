@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import os
@@ -838,6 +839,91 @@ async def test_tui_event_stream_worker_uses_isolated_group() -> None:
             "exit_on_error": False,
         }
     ]
+
+
+async def test_tui_event_stream_releases_each_forced_websocket_close(
+    monkeypatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    entered = 0
+    exited = 0
+
+    class ClosedWebSocket:
+        def __aiter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __anext__(self):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(0)
+            raise StopAsyncIteration
+
+    class Connection:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            nonlocal entered
+            entered += 1
+            return ClosedWebSocket()
+
+        async def __aexit__(self, *_args: object) -> None:
+            nonlocal exited
+            exited += 1
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.websocket_connect",
+        lambda *_args, **_kwargs: Connection(),
+    )
+
+    task = asyncio.create_task(app.stream_events_v2())
+    while entered < 25:
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert entered == exited == 25
+
+
+async def test_tui_unmount_closes_shared_http_client_and_event_worker(
+    tmp_path: Path,
+) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        settings_file=tmp_path / "settings.json",
+    )
+    event_started = asyncio.Event()
+    event_closed = asyncio.Event()
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    client = FakeClient()
+
+    async def quiet_refresh() -> None:
+        return None
+
+    async def event_stream() -> None:
+        event_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            event_closed.set()
+
+    app.http_client = client  # type: ignore[assignment]
+    app.refresh_joplin_status = quiet_refresh  # type: ignore[method-assign]
+    app.load_codex_config = quiet_refresh  # type: ignore[method-assign]
+    app.refresh_agents = quiet_refresh  # type: ignore[method-assign]
+    app.refresh_events = quiet_refresh  # type: ignore[method-assign]
+    app.refresh_codex_posture = quiet_refresh  # type: ignore[method-assign]
+    app.stream_events = event_stream  # type: ignore[method-assign]
+
+    async with app.run_test():
+        await asyncio.wait_for(event_started.wait(), timeout=1)
+
+    await asyncio.wait_for(event_closed.wait(), timeout=1)
+    assert client.closed is True
+    assert app.http_client is None
 
 
 def test_tui_event_stream_parser_ignores_keepalive_and_bad_data() -> None:
