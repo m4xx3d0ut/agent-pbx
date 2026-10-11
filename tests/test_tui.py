@@ -6644,7 +6644,11 @@ async def test_tui_workerbee_open_keeps_agent_selection_and_loads_status() -> No
     async def fake_load_thread(agent_id: str) -> None:
         return None
 
-    async def fake_load_workerbee_status(agent_id: str) -> None:
+    async def fake_load_workerbee_status(
+        agent_id: str,
+        *,
+        render_detail: bool = True,
+    ) -> None:
         loaded.append(agent_id)
 
     app.load_latest_report = fake_load_latest_report  # type: ignore[method-assign]
@@ -6699,7 +6703,11 @@ async def test_tui_preserves_per_agent_tab_and_drafts() -> None:
     async def fake_load_thread(agent_id: str) -> None:
         return None
 
-    async def fake_load_workerbee_status(agent_id: str) -> None:
+    async def fake_load_workerbee_status(
+        agent_id: str,
+        *,
+        render_detail: bool = True,
+    ) -> None:
         return None
 
     async def fake_load_pull_requests(agent_id: str) -> None:

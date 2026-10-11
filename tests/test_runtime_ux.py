@@ -374,3 +374,88 @@ async def test_tui_runtime_surface_is_outer_and_capability_gated() -> None:
         assert topology.has_class("has-subagents")
         assert "child-12" in str(topology.renderable)
         assert "EXECUTING" in str(topology.renderable)
+
+
+async def test_tui_agent_selection_preloads_workerbee_runtime_status() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    loaded: list[tuple[str, bool]] = []
+
+    async def no_refresh(_agent_id: str) -> None:
+        return None
+
+    async def load_workerbee(
+        agent_id: str,
+        *,
+        render_detail: bool = True,
+    ) -> None:
+        loaded.append((agent_id, render_detail))
+        app.workerbee_status_by_agent[agent_id] = {
+            "available": True,
+            "running": False,
+        }
+        if app.selected_agent_id == agent_id:
+            app.render_codex_runtime_surface()
+
+    app.refresh_selected_agent = no_refresh  # type: ignore[method-assign]
+    app.load_codex_runtime_status = no_refresh  # type: ignore[method-assign]
+    app.load_workerbee_status = load_workerbee  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.agents = {
+            "agent-a": {
+                "agent_id": "agent-a",
+                "project": "demo",
+                "status": "working",
+                "last_seen_at": 100.0,
+                "metadata": {},
+            }
+        }
+        await app.select_agent("agent-a")
+        await pilot.pause()
+
+        assert loaded == [("agent-a", False)]
+        assert "WB ◇" in str(app.query_one("#codex-runtime-status").renderable)
+
+        await app.select_agent("agent-a")
+        await pilot.pause()
+
+        assert loaded == [("agent-a", False)]
+
+
+async def test_tui_restored_selection_preloads_workerbee_runtime_status() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    loaded: list[tuple[str, bool]] = []
+
+    async def load_workerbee(
+        agent_id: str,
+        *,
+        render_detail: bool = True,
+    ) -> None:
+        loaded.append((agent_id, render_detail))
+        app.workerbee_status_by_agent[agent_id] = {
+            "available": True,
+            "running": False,
+        }
+
+    app.load_workerbee_status = load_workerbee  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.agents = {
+            "agent-a": {
+                "agent_id": "agent-a",
+                "project": "demo",
+                "status": "working",
+                "last_seen_at": 100.0,
+                "metadata": {},
+            }
+        }
+        app.pending_remote_view_state = {
+            "selected_agent_id": "agent-a",
+            "active_agent_tab": "latest-tab",
+        }
+
+        app.apply_pending_remote_view_state()
+        await pilot.pause()
+
+        assert app.selected_agent_id == "agent-a"
+        assert loaded == [("agent-a", False)]

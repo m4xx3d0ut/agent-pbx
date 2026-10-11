@@ -14069,6 +14069,7 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
             exit_on_error=False,
         )
+        self.schedule_workerbee_header_status(agent_id)
         if self.active_agent_tab == "latest-tab":
             self.mark_latest_seen(agent_id)
         self.record_navigation_destination()
@@ -14114,6 +14115,19 @@ class AgentPBXTUI(App[None]):
                 self.codex_runtime_by_agent[agent_id] = self.local_runtime_snapshot(agent)
         if self.selected_agent_id == agent_id:
             self.render_codex_runtime_surface()
+
+    def schedule_workerbee_header_status(self, agent_id: str | None) -> None:
+        """Load one selected entity's WorkerBee token without polling or panel churn."""
+
+        if not agent_id or agent_id in self.workerbee_status_by_agent:
+            return
+        self.run_async_worker(
+            lambda: self.load_workerbee_status(agent_id, render_detail=False),
+            name=f"workerbee-runtime-{agent_id}",
+            group="workerbee-runtime",
+            exclusive=True,
+            exit_on_error=False,
+        )
 
     def local_runtime_snapshot(self, agent: Mapping[str, Any]) -> dict[str, Any]:
         metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
@@ -32431,6 +32445,7 @@ class AgentPBXTUI(App[None]):
             agent_input = self.query_one_or_none("#agent-id", Input)
             if agent_input is not None:
                 agent_input.value = selected
+            self.schedule_workerbee_header_status(selected)
         tab_id = str(state.get("active_agent_tab") or "").strip()
         if tab_id:
             self.activate_agent_tab(tab_id)
