@@ -110,10 +110,11 @@ def terminal_editor_profiles(
                 raise ValueError(f"terminal editor profile {profile_id} has invalid argv")
             executable = argv[0]
             if Path(executable).is_absolute():
-                executable_path = Path(executable).expanduser().resolve()
+                executable_path = Path(executable).expanduser()
+                executable_target = executable_path.resolve()
                 resolved = (
                     str(executable_path)
-                    if executable_path.is_file()
+                    if executable_target.is_file()
                     and os.access(executable_path, os.X_OK)
                     else ""
                 )

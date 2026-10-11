@@ -53,6 +53,27 @@ def test_terminal_editor_profiles_use_structured_executable_argv(tmp_path: Path)
     )
 
 
+def test_terminal_editor_profile_preserves_executable_symlink_name(
+    tmp_path: Path,
+) -> None:
+    dispatcher = tmp_path / "dispatcher"
+    dispatcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    dispatcher.chmod(0o700)
+    editor = tmp_path / "nvim"
+    editor.symlink_to(dispatcher)
+
+    profiles = terminal_editor_profiles(
+        environ={
+            "AGENT_PBX_TERMINAL_EDITOR_PROFILES": json.dumps(
+                {"nvim": {"argv": [str(editor), "+{line}", "--", "{path}"]}}
+            )
+        }
+    )
+
+    assert len(profiles) == 1
+    assert profiles[0].argv[0] == str(editor)
+
+
 @pytest.mark.parametrize(
     "payload",
     ["[]", '{"Bad ID": {"argv": ["vim"]}}', '{"vim": {"argv": []}}'],
