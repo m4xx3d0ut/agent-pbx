@@ -57,9 +57,10 @@ verified.
 
 ## Codex children
 
-The runtime tree appears only after native child activity has been observed for
-the attached session. It shows lifecycle state and non-sensitive identifiers;
-it does not expose prompts, hidden reasoning, child filesystem paths, or
-unproved role labels. See the
+The runtime tree appears above `Latest` only after the daemon's read-only Codex
+event bridge associates native child activity with the exact attached session.
+It shows lifecycle state, non-sensitive identifiers, and explicit structured
+role labels; it does not expose prompts, hidden reasoning, child filesystem
+paths, tool content, or roles inferred from paths. See the
 [subagent qualification record](../acceptance/v2.1.2-subagent-activity.md).
 

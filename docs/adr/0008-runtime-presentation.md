@@ -19,6 +19,13 @@ animation bytes into the Codex PTY. Child topology is hidden until an associated
 app-server `collabAgentToolCall` proves native subagent behavior for that
 session.
 
+A daemon-owned read-only bridge produces that projection. It negotiates the
+shared app-server's user-local WebSocket when available and otherwise uses one passive local
+reader. Discovery is limited to indexed subagent thread metadata and recent
+items for exact PBX-bound root thread IDs. Duplicate or ambiguous PBX/session
+mappings are not observed. The bridge does not invoke any mutating thread or
+turn method and does not answer app-server requests.
+
 One semantic palette supplies Textual colors, declarative tmux options, and a
 generated Codex TextMate syntax theme. Every state also has a distinct symbol
 and text label, with explicit 16-color, 256-color, and true-color mappings.

@@ -1442,11 +1442,14 @@ confirmed on that host. `AGENT_PBX_COMPAT_POLLING` and
 `AGENT_PBX_TUI_COMPAT_THREAD` independently gate the other retained v2.0 paths.
 Doctor and `/healthz` report this compatibility posture.
 
-When the attached Codex CLI emits qualified `subAgentActivity` events, the
-right-side runtime tree shows bounded child lifecycle beneath the owning Agent
-or Operator. It remains hidden until capability is observed and excludes child
-prompts, paths, hidden reasoning, and inferred roles. Qualification evidence is
-recorded in
+The daemon's read-only Codex event bridge associates structured subagent
+threads and recent lifecycle items with the exact Codex thread already bound to
+an Agent or Operator. The right-side runtime tree above `Latest` then shows the
+bounded child lifecycle beneath that owner. It remains hidden until capability
+is observed and excludes child prompts, paths, hidden reasoning, tool content,
+and path-derived roles. `AGENT_PBX_CODEX_EVENT_BRIDGE=0` disables the bridge;
+`AGENT_PBX_CODEX_EVENT_BRIDGE_TRANSPORT=sidecar` bypasses shared-daemon
+probing. Qualification evidence is recorded in
 [the v2.1.2 subagent activity note](docs/acceptance/v2.1.2-subagent-activity.md).
 
 On tiny terminals the existing compact controls remain available. Android

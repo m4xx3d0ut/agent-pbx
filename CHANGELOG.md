@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a daemon-owned, read-only Codex app-server bridge that associates native
+  subagent threads and lifecycle items with exact PBX session mappings, drives
+  the existing nested runtime tree, and degrades without affecting Codex or
+  tmux when structured observation is unavailable.
 - Coalesce embedded-terminal paints under sustained output while continuing to
   read and parse every PTY byte, expose bounded performance counters, and avoid
   rebuilding terminal rows whose final cell presentation is unchanged.
