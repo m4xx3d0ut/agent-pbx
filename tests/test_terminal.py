@@ -22,6 +22,7 @@ from agent_pbx.terminal.widget import (
     EMBEDDED_SCROLL_MODE_CHILD,
     PbxTerminalSurface,
     TerminalScrollRequested,
+    normalize_terminal_max_paint_fps,
     terminal_key_bytes,
 )
 from agent_pbx.runtime_tmux import tmux_client_attach_command
@@ -302,6 +303,52 @@ def test_terminal_surface_reuses_clean_rendered_rows() -> None:
     assert rendered.plain.splitlines()[1].startswith("changed")
     assert surface._rendered_rows[0] is cached[0]
     assert surface._rendered_rows[1] is not cached[1]
+
+
+def test_terminal_surface_reuses_dirty_row_when_final_cells_are_unchanged() -> None:
+    surface = PbxTerminalSurface()
+    surface.terminal = VirtualTerminal(30, 4)
+    surface.terminal.feed(b"\x1b[1;1Hstable")
+    surface.render()
+    cached = surface._rendered_rows[0]
+
+    surface.terminal.feed(b"\x1b[1;1Hstable")
+    surface.render()
+
+    assert surface._rendered_rows[0] is cached
+    assert surface.performance_snapshot().rows_reused >= surface.terminal.rows
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, 15.0),
+        ("bad", 15.0),
+        (1, 5.0),
+        (15, 15.0),
+        (120, 60.0),
+    ],
+)
+def test_terminal_paint_rate_is_bounded(value: object, expected: float) -> None:
+    assert normalize_terminal_max_paint_fps(value) == expected
+
+
+def test_terminal_surface_coalesces_burst_paints_and_flushes_final_frame() -> None:
+    surface = PbxTerminalSurface(max_paint_fps=10)
+    refreshes: list[float] = []
+    surface.refresh = lambda *args, **kwargs: refreshes.append(1.0)  # type: ignore[method-assign]
+
+    surface._request_terminal_paint(now=1.0)
+    surface._request_terminal_paint(now=1.02)
+    surface._request_terminal_paint(now=1.05)
+
+    assert len(refreshes) == 1
+    assert surface._flush_pending_terminal_paint(now=1.09) is False
+    assert surface._flush_pending_terminal_paint(now=1.10) is True
+    assert len(refreshes) == 2
+    snapshot = surface.performance_snapshot()
+    assert snapshot.paint_requests == 3
+    assert snapshot.paint_suppressed == 2
 
 
 def test_terminal_surface_reports_poll_feed_paint_and_render_metrics() -> None:

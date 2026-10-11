@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from math import floor
 import os
 from pathlib import Path
 import re
@@ -70,6 +71,24 @@ TerminalStyleKey = tuple[
     bool,
     bool,
 ]
+TerminalRowFingerprint = tuple[tuple[object | None, ...], int]
+
+DEFAULT_TERMINAL_MAX_PAINT_FPS = 15.0
+MIN_TERMINAL_MAX_PAINT_FPS = 5.0
+MAX_TERMINAL_MAX_PAINT_FPS = 60.0
+
+
+def normalize_terminal_max_paint_fps(value: object) -> float:
+    """Return a bounded embedded-terminal paint rate."""
+
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError):
+        resolved = DEFAULT_TERMINAL_MAX_PAINT_FPS
+    return min(
+        MAX_TERMINAL_MAX_PAINT_FPS,
+        max(MIN_TERMINAL_MAX_PAINT_FPS, resolved),
+    )
 
 
 @dataclass(frozen=True)
@@ -168,11 +187,22 @@ class PbxTerminalSurface(Widget):
         history: int = 4_000,
         poll_interval: float = 0.03,
         scroll_mode: str = EMBEDDED_SCROLL_MODE_TMUX,
+        max_paint_fps: float | None = None,
     ) -> None:
         super().__init__(id=id)
         self.history = max(0, int(history))
         self.poll_interval = max(0.01, float(poll_interval))
         self.scroll_mode = normalize_embedded_scroll_mode(scroll_mode)
+        configured_paint_fps: object = max_paint_fps
+        if configured_paint_fps is None:
+            configured_paint_fps = os.environ.get(
+                "AGENT_PBX_TERMINAL_MAX_PAINT_FPS",
+                DEFAULT_TERMINAL_MAX_PAINT_FPS,
+            )
+        self.max_paint_fps = normalize_terminal_max_paint_fps(configured_paint_fps)
+        self._paint_interval = 1.0 / self.max_paint_fps
+        self._next_paint_at = 0.0
+        self._paint_pending = False
         self.terminal = VirtualTerminal(80, 24, history=self.history)
         self.process: PtyProcess | None = None
         self.target = ""
@@ -181,6 +211,7 @@ class PbxTerminalSurface(Widget):
         self._transition_message = ""
         self._poll_timer: Timer | None = None
         self._rendered_rows: dict[int, Text] = {}
+        self._row_fingerprints: dict[int, TerminalRowFingerprint] = {}
         self._render_screen = self.terminal.screen
         self._render_geometry = (self.terminal.columns, self.terminal.rows)
         self._render_cursor: tuple[bool, bool, int, int] | None = None
@@ -251,6 +282,8 @@ class PbxTerminalSurface(Widget):
         self.read_only_client = read_only
         self.total_pty_bytes = 0
         self.reset_performance_metrics()
+        self._next_paint_at = 0.0
+        self._paint_pending = False
         if self._poll_timer is not None:
             self._poll_timer.resume()
         self.poll_pty()
@@ -301,8 +334,9 @@ class PbxTerminalSurface(Widget):
             self._performance_feed_seconds += perf_counter() - feed_started
             self._performance_feed_batches += 1
             self._transition_message = ""
-            self._performance_paint_requests += 1
-            self.refresh()
+            self._request_terminal_paint(now=perf_counter())
+        else:
+            self._flush_pending_terminal_paint(now=perf_counter())
         if not process.alive and self._poll_timer is not None:
             self._poll_timer.pause()
 
@@ -464,6 +498,9 @@ class PbxTerminalSurface(Widget):
     def render(self) -> Text:
         render_started = perf_counter()
         self._performance_render_calls += 1
+        # Another Textual invalidation can satisfy a paint we previously
+        # deferred.  Do not schedule a redundant trailing frame in that case.
+        self._paint_pending = False
         try:
             if self._transition_message:
                 return Text(
@@ -495,7 +532,14 @@ class PbxTerminalSurface(Widget):
             rendered_rows = 0
             for row_index in dirty_rows:
                 if 0 <= row_index < self.terminal.rows:
+                    fingerprint = self._row_fingerprint(row_index, cursor)
+                    if (
+                        row_index in self._rendered_rows
+                        and self._row_fingerprints.get(row_index) == fingerprint
+                    ):
+                        continue
                     self._rendered_rows[row_index] = self._render_row(row_index, cursor)
+                    self._row_fingerprints[row_index] = fingerprint
                     rendered_rows += 1
             self._performance_rows_rendered += rendered_rows
             self._performance_rows_reused += max(0, self.terminal.rows - rendered_rows)
@@ -510,6 +554,46 @@ class PbxTerminalSurface(Widget):
             return result
         finally:
             self._performance_render_seconds += perf_counter() - render_started
+
+    def _request_terminal_paint(self, *, now: float) -> None:
+        """Paint immediately when due, otherwise coalesce the next frame."""
+
+        self._performance_paint_requests += 1
+        if self._next_paint_at <= 0.0 or now >= self._next_paint_at:
+            self._paint_terminal(now=now)
+            return
+        self._paint_pending = True
+        self._performance_paint_suppressed += 1
+
+    def _flush_pending_terminal_paint(self, *, now: float) -> bool:
+        if not self._paint_pending or now < self._next_paint_at:
+            return False
+        self._paint_terminal(now=now)
+        return True
+
+    def _paint_terminal(self, *, now: float) -> None:
+        self._paint_pending = False
+        if self._next_paint_at <= 0.0:
+            self._next_paint_at = now + self._paint_interval
+        else:
+            intervals = floor(max(0.0, now - self._next_paint_at) / self._paint_interval) + 1
+            self._next_paint_at += intervals * self._paint_interval
+        self.refresh()
+
+    def _row_fingerprint(
+        self,
+        row_index: int,
+        cursor: tuple[bool, bool, int, int],
+    ) -> TerminalRowFingerprint:
+        row = self.terminal.screen.buffer.get(row_index, {})
+        focused, cursor_hidden, cursor_y, cursor_x = cursor
+        visible_cursor = (
+            cursor_x if focused and not cursor_hidden and row_index == cursor_y else -1
+        )
+        return (
+            tuple(row.get(column) for column in range(self.terminal.columns)),
+            visible_cursor,
+        )
 
     def reset_performance_metrics(self) -> None:
         """Reset counters used by terminal qualification and diagnostics."""
@@ -559,14 +643,13 @@ class PbxTerminalSurface(Widget):
         focused, cursor_hidden, cursor_y, cursor_x = cursor
         for column in range(self.terminal.columns):
             char = row.get(column)
-            value = str(getattr(char, "data", " ") or " ")
             cursor_cell = (
                 focused
                 and not cursor_hidden
                 and row_index == cursor_y
                 and column == cursor_x
             )
-            style_key = self._rich_style_key(char, cursor=cursor_cell)
+            value, style_key = self._cell_presentation(char, cursor=cursor_cell)
             if run_key is not None and style_key != run_key:
                 result.append("".join(run_chars), style=_cached_rich_style(run_key))
                 run_chars = []
@@ -578,6 +661,7 @@ class PbxTerminalSurface(Widget):
 
     def _invalidate_render_cache(self) -> None:
         self._rendered_rows.clear()
+        self._row_fingerprints.clear()
         self._render_screen = self.terminal.screen
         self._render_geometry = (self.terminal.columns, self.terminal.rows)
         self._render_cursor = None
@@ -604,6 +688,19 @@ class PbxTerminalSurface(Widget):
             cursor or bool(getattr(char, "reverse", False)),
             bool(getattr(char, "blink", False)),
             bool(getattr(char, "strikethrough", False)),
+        )
+
+    @classmethod
+    @lru_cache(maxsize=4096)
+    def _cell_presentation(
+        cls,
+        char: object | None,
+        *,
+        cursor: bool = False,
+    ) -> tuple[str, TerminalStyleKey]:
+        return (
+            str(getattr(char, "data", " ") or " "),
+            cls._rich_style_key(char, cursor=cursor),
         )
 
     @staticmethod
