@@ -304,6 +304,45 @@ def test_terminal_surface_reuses_clean_rendered_rows() -> None:
     assert surface._rendered_rows[1] is not cached[1]
 
 
+def test_terminal_surface_reports_poll_feed_paint_and_render_metrics() -> None:
+    chunks = [b"\x1b[1;1Hfirst\x1b[2;1Hsecond", b""]
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return chunks.pop(0)
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    surface = PbxTerminalSurface()
+    surface.process = FakeProcess()  # type: ignore[assignment]
+    surface.target = "diagnostic:%1"
+    surface.reset_performance_metrics()
+
+    surface.poll_pty()
+    surface.render()
+    surface.render()
+    snapshot = surface.performance_snapshot()
+
+    assert snapshot.poll_count == 1
+    assert snapshot.polls_with_output == 1
+    assert snapshot.pty_bytes == len(b"\x1b[1;1Hfirst\x1b[2;1Hsecond")
+    assert snapshot.feed_batches == 1
+    assert snapshot.paint_requests == 1
+    assert snapshot.paint_suppressed == 0
+    assert snapshot.render_calls == 2
+    assert snapshot.rows_rendered >= surface.terminal.rows
+    assert snapshot.rows_reused >= surface.terminal.rows
+    assert snapshot.read_seconds >= 0
+    assert snapshot.feed_seconds >= 0
+    assert snapshot.render_seconds >= 0
+
+
 def test_terminal_surface_transition_covers_stale_frame_and_blocks_input() -> None:
     written: list[bytes] = []
 

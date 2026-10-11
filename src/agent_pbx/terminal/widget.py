@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 import os
 from pathlib import Path
 import re
+from time import perf_counter
 from typing import Mapping, Sequence
 
 from rich.style import Style
@@ -68,6 +70,31 @@ TerminalStyleKey = tuple[
     bool,
     bool,
 ]
+
+
+@dataclass(frozen=True)
+class TerminalPerformanceSnapshot:
+    """Low-overhead counters for one embedded-terminal attachment.
+
+    The values deliberately describe work performed by the terminal surface,
+    rather than process-wide CPU.  This makes before/after render comparisons
+    useful in the conformance harness without requiring platform-specific
+    process accounting.
+    """
+
+    elapsed_seconds: float
+    poll_count: int
+    polls_with_output: int
+    pty_bytes: int
+    read_seconds: float
+    feed_batches: int
+    feed_seconds: float
+    paint_requests: int
+    paint_suppressed: int
+    render_calls: int
+    render_seconds: float
+    rows_rendered: int
+    rows_reused: int
 
 
 @lru_cache(maxsize=512)
@@ -157,6 +184,7 @@ class PbxTerminalSurface(Widget):
         self._render_screen = self.terminal.screen
         self._render_geometry = (self.terminal.columns, self.terminal.rows)
         self._render_cursor: tuple[bool, bool, int, int] | None = None
+        self.reset_performance_metrics()
 
     @property
     def attached(self) -> bool:
@@ -222,6 +250,7 @@ class PbxTerminalSurface(Widget):
         self.target = target
         self.read_only_client = read_only
         self.total_pty_bytes = 0
+        self.reset_performance_metrics()
         if self._poll_timer is not None:
             self._poll_timer.resume()
         self.poll_pty()
@@ -258,12 +287,21 @@ class PbxTerminalSurface(Widget):
         process = self.process
         if process is None:
             return
+        self._performance_poll_count += 1
         self.sync_geometry()
+        read_started = perf_counter()
         chunk = process.read_available(timeout=0.0, limit=262_144)
+        self._performance_read_seconds += perf_counter() - read_started
         if chunk:
+            self._performance_polls_with_output += 1
+            self._performance_pty_bytes += len(chunk)
             self.total_pty_bytes += len(chunk)
+            feed_started = perf_counter()
             self.terminal.feed(chunk)
+            self._performance_feed_seconds += perf_counter() - feed_started
+            self._performance_feed_batches += 1
             self._transition_message = ""
+            self._performance_paint_requests += 1
             self.refresh()
         if not process.alive and self._poll_timer is not None:
             self._poll_timer.pause()
@@ -424,45 +462,90 @@ class PbxTerminalSurface(Widget):
         )
 
     def render(self) -> Text:
-        if self._transition_message:
-            return Text(
-                f"\n  {self._transition_message}",
-                style=Style(color="cyan", italic=True),
-                no_wrap=True,
-                overflow="crop",
+        render_started = perf_counter()
+        self._performance_render_calls += 1
+        try:
+            if self._transition_message:
+                return Text(
+                    f"\n  {self._transition_message}",
+                    style=Style(color="cyan", italic=True),
+                    no_wrap=True,
+                    overflow="crop",
+                )
+            screen = self.terminal.screen
+            geometry = (self.terminal.columns, self.terminal.rows)
+            if screen is not self._render_screen or geometry != self._render_geometry:
+                self._invalidate_render_cache()
+            cursor = (
+                self.has_focus,
+                bool(screen.cursor.hidden),
+                int(screen.cursor.y),
+                int(screen.cursor.x),
             )
-        screen = self.terminal.screen
-        geometry = (self.terminal.columns, self.terminal.rows)
-        if screen is not self._render_screen or geometry != self._render_geometry:
-            self._invalidate_render_cache()
-        cursor = (
-            self.has_focus,
-            bool(screen.cursor.hidden),
-            int(screen.cursor.y),
-            int(screen.cursor.x),
-        )
-        dirty_rows = set(screen.dirty)
-        if self._render_cursor != cursor:
-            if self._render_cursor is not None:
-                dirty_rows.add(self._render_cursor[2])
-            dirty_rows.add(cursor[2])
-        dirty_rows.update(
-            row_index
-            for row_index in range(self.terminal.rows)
-            if row_index not in self._rendered_rows
-        )
-        for row_index in dirty_rows:
-            if 0 <= row_index < self.terminal.rows:
-                self._rendered_rows[row_index] = self._render_row(row_index, cursor)
-        screen.dirty.clear()
-        self._render_cursor = cursor
+            dirty_rows = set(screen.dirty)
+            if self._render_cursor != cursor:
+                if self._render_cursor is not None:
+                    dirty_rows.add(self._render_cursor[2])
+                dirty_rows.add(cursor[2])
+            dirty_rows.update(
+                row_index
+                for row_index in range(self.terminal.rows)
+                if row_index not in self._rendered_rows
+            )
+            rendered_rows = 0
+            for row_index in dirty_rows:
+                if 0 <= row_index < self.terminal.rows:
+                    self._rendered_rows[row_index] = self._render_row(row_index, cursor)
+                    rendered_rows += 1
+            self._performance_rows_rendered += rendered_rows
+            self._performance_rows_reused += max(0, self.terminal.rows - rendered_rows)
+            screen.dirty.clear()
+            self._render_cursor = cursor
 
-        result = Text(no_wrap=True, overflow="crop")
-        for row_index in range(self.terminal.rows):
-            result.append_text(self._rendered_rows[row_index])
-            if row_index < self.terminal.rows - 1:
-                result.append("\n")
-        return result
+            result = Text(no_wrap=True, overflow="crop")
+            for row_index in range(self.terminal.rows):
+                result.append_text(self._rendered_rows[row_index])
+                if row_index < self.terminal.rows - 1:
+                    result.append("\n")
+            return result
+        finally:
+            self._performance_render_seconds += perf_counter() - render_started
+
+    def reset_performance_metrics(self) -> None:
+        """Reset counters used by terminal qualification and diagnostics."""
+
+        self._performance_started_at = perf_counter()
+        self._performance_poll_count = 0
+        self._performance_polls_with_output = 0
+        self._performance_pty_bytes = 0
+        self._performance_read_seconds = 0.0
+        self._performance_feed_batches = 0
+        self._performance_feed_seconds = 0.0
+        self._performance_paint_requests = 0
+        self._performance_paint_suppressed = 0
+        self._performance_render_calls = 0
+        self._performance_render_seconds = 0.0
+        self._performance_rows_rendered = 0
+        self._performance_rows_reused = 0
+
+    def performance_snapshot(self) -> TerminalPerformanceSnapshot:
+        """Return a stable snapshot without resetting the live counters."""
+
+        return TerminalPerformanceSnapshot(
+            elapsed_seconds=max(0.0, perf_counter() - self._performance_started_at),
+            poll_count=self._performance_poll_count,
+            polls_with_output=self._performance_polls_with_output,
+            pty_bytes=self._performance_pty_bytes,
+            read_seconds=self._performance_read_seconds,
+            feed_batches=self._performance_feed_batches,
+            feed_seconds=self._performance_feed_seconds,
+            paint_requests=self._performance_paint_requests,
+            paint_suppressed=self._performance_paint_suppressed,
+            render_calls=self._performance_render_calls,
+            render_seconds=self._performance_render_seconds,
+            rows_rendered=self._performance_rows_rendered,
+            rows_reused=self._performance_rows_reused,
+        )
 
     def _render_row(
         self,
