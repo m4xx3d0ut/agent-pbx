@@ -18,6 +18,12 @@ from urllib.request import urlopen
 
 from . import __version__
 from .compat import POLLING_ENV
+from .codex.event_bridge import (
+    CODEX_EVENT_BRIDGE_BIN_ENV,
+    CODEX_EVENT_BRIDGE_ENV,
+    CODEX_EVENT_BRIDGE_POLL_SECONDS_ENV,
+    CODEX_EVENT_BRIDGE_TRANSPORT_ENV,
+)
 from .paths import default_state_root
 from .store import SCHEMA_VERSION, Store
 from .tmux_binary import ensure_managed_tmux_shim, managed_tmux_shim_status
@@ -83,6 +89,10 @@ MANAGED_CHILD_ENV_VARS = {
     JOPLIN_WEBDAV_USERNAME_ENV,
     JOPLIN_WEBDAV_PASSWORD_ENV,
     POLLING_ENV,
+    CODEX_EVENT_BRIDGE_ENV,
+    CODEX_EVENT_BRIDGE_POLL_SECONDS_ENV,
+    CODEX_EVENT_BRIDGE_TRANSPORT_ENV,
+    CODEX_EVENT_BRIDGE_BIN_ENV,
 }
 
 
@@ -105,6 +115,10 @@ class MCPDaemonConfig:
     debug: bool = False
     debug_smoke: bool = False
     log_level: str | None = None
+    codex_event_bridge_enabled: bool = True
+    codex_event_bridge_poll_seconds: float = 5.0
+    codex_event_bridge_transport: str = "auto"
+    codex_bin: str = "codex"
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
@@ -253,6 +267,10 @@ def config_from_args(
     debug: bool = False,
     debug_smoke: bool = False,
     log_level: str | None = None,
+    codex_event_bridge_enabled: bool = True,
+    codex_event_bridge_poll_seconds: float = 5.0,
+    codex_event_bridge_transport: str = "auto",
+    codex_bin: str = "codex",
     workerbee_bin: Path | None = None,
     workerbee_timeout_seconds: float = 20.0,
     workerbee_cache_seconds: float = 10.0,
@@ -296,6 +314,10 @@ def config_from_args(
         debug=debug,
         debug_smoke=debug_smoke,
         log_level=log_level,
+        codex_event_bridge_enabled=codex_event_bridge_enabled,
+        codex_event_bridge_poll_seconds=max(0.25, codex_event_bridge_poll_seconds),
+        codex_event_bridge_transport=codex_event_bridge_transport,
+        codex_bin=codex_bin,
         workerbee_bin=workerbee_bin.expanduser() if workerbee_bin else None,
         workerbee_timeout_seconds=workerbee_timeout_seconds,
         workerbee_cache_seconds=workerbee_cache_seconds,
@@ -407,6 +429,10 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "debug": config.debug,
         "rotated_logs": [str(path) for path in rotated_logs],
         "debug_smoke": config.debug_smoke,
+        "codex_event_bridge_enabled": config.codex_event_bridge_enabled,
+        "codex_event_bridge_poll_seconds": config.codex_event_bridge_poll_seconds,
+        "codex_event_bridge_transport": config.codex_event_bridge_transport,
+        "codex_bin": config.codex_bin,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,
@@ -459,6 +485,14 @@ def _child_env(config: MCPDaemonConfig) -> dict[str, str]:
 
     if config.token:
         child_env[TOKEN_ENV] = config.token
+    child_env[CODEX_EVENT_BRIDGE_ENV] = (
+        "1" if config.codex_event_bridge_enabled else "0"
+    )
+    child_env[CODEX_EVENT_BRIDGE_POLL_SECONDS_ENV] = str(
+        config.codex_event_bridge_poll_seconds
+    )
+    child_env[CODEX_EVENT_BRIDGE_TRANSPORT_ENV] = config.codex_event_bridge_transport
+    child_env[CODEX_EVENT_BRIDGE_BIN_ENV] = config.codex_bin
     if config.workerbee_bin:
         child_env[WORKERBEE_BIN_ENV] = str(config.workerbee_bin.expanduser())
     child_env[WORKERBEE_TIMEOUT_ENV] = str(config.workerbee_timeout_seconds)
@@ -757,6 +791,10 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "log_file": str(config.log_file),
         "metadata_file": str(config.metadata_file),
         "codex_command": config.codex_command,
+        "codex_event_bridge_enabled": config.codex_event_bridge_enabled,
+        "codex_event_bridge_poll_seconds": config.codex_event_bridge_poll_seconds,
+        "codex_event_bridge_transport": config.codex_event_bridge_transport,
+        "codex_bin": config.codex_bin,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,

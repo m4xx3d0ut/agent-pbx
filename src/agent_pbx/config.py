@@ -24,6 +24,10 @@ class ServerConfig:
     debug_smoke_duration_seconds: float = 300.0
     debug_smoke_min_interval_seconds: float = 30.0
     debug_smoke_max_interval_seconds: float = 60.0
+    codex_event_bridge_enabled: bool = False
+    codex_event_bridge_poll_seconds: float = 5.0
+    codex_event_bridge_transport: str = "auto"
+    codex_bin: str = "codex"
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0

@@ -25,6 +25,12 @@ from .codex_theme import (
     managed_codex_theme_status,
     render_managed_codex_theme_status,
 )
+from .codex.event_bridge import (
+    CODEX_EVENT_BRIDGE_BIN_ENV,
+    CODEX_EVENT_BRIDGE_TRANSPORT_ENV,
+    env_bridge_enabled,
+    env_bridge_poll_seconds,
+)
 from .doctor import doctor_json, doctor_markdown, run_platform_doctor
 from .dev_harness import (
     build_harness_plan,
@@ -1104,6 +1110,16 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         debug_smoke=bool(getattr(args, "debug_smoke", False))
         or env_flag("AGENT_PBX_DEBUG_SMOKE"),
         log_level=getattr(args, "log_level", None),
+        codex_event_bridge_enabled=env_bridge_enabled(),
+        codex_event_bridge_poll_seconds=env_bridge_poll_seconds(),
+        codex_event_bridge_transport=env_text(
+            CODEX_EVENT_BRIDGE_TRANSPORT_ENV,
+            "auto",
+        ),
+        codex_bin=env_text(
+            CODEX_EVENT_BRIDGE_BIN_ENV,
+            env_text("AGENT_PBX_TUI_CODEX_BIN", "codex"),
+        ),
         workerbee_bin=env_workerbee_bin(),
         workerbee_timeout_seconds=getattr(
             args,
@@ -1217,6 +1233,12 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         legacy_polling_enabled=daemon_config.legacy_polling_enabled,
         debug=daemon_config.debug,
         debug_smoke=daemon_config.debug_smoke,
+        codex_event_bridge_enabled=daemon_config.codex_event_bridge_enabled,
+        codex_event_bridge_poll_seconds=(
+            daemon_config.codex_event_bridge_poll_seconds
+        ),
+        codex_event_bridge_transport=daemon_config.codex_event_bridge_transport,
+        codex_bin=daemon_config.codex_bin,
         workerbee_bin=daemon_config.workerbee_bin,
         workerbee_timeout_seconds=daemon_config.workerbee_timeout_seconds,
         workerbee_cache_seconds=daemon_config.workerbee_cache_seconds,
@@ -1280,6 +1302,10 @@ def _print_mcp_status(result: dict[str, object]) -> None:
         "log_file",
         "metadata_file",
         "codex_command",
+        "codex_event_bridge_enabled",
+        "codex_event_bridge_poll_seconds",
+        "codex_event_bridge_transport",
+        "codex_bin",
         "workerbee_bin",
         "workerbee_timeout_seconds",
         "workerbee_cache_seconds",

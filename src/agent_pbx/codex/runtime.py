@@ -146,6 +146,118 @@ class CodexRuntimeService:
             )
             return snapshot
 
+    def observe_historical_item(
+        self,
+        agent_id: str,
+        *,
+        thread_id: str,
+        method: str,
+        params: Mapping[str, Any],
+        observed_at: float,
+    ) -> dict[str, Any]:
+        """Project a persisted child item without changing the root's live state.
+
+        A passive app-server reader can page item history for a Codex thread
+        that is executing in another process. Those persisted lifecycle items
+        are authoritative for child topology, but an old item must not outrank
+        a newer PBX report and make the root look as though it is delegating
+        again after a daemon restart.
+        """
+
+        if method not in {"item/started", "item/completed"}:
+            raise ValueError(f"unsupported historical Codex item method: {method}")
+        agent = self.store.get_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        with self._lock:
+            record = self._record(agent)
+            if not record.adapter.association.bind_app_server(
+                thread_id,
+                source="passive_history",
+            ):
+                raise ValueError(
+                    "Codex runtime event thread does not match the active PBX session"
+                )
+            if not self._apply_children(record, method, params, observed_at):
+                raise ValueError(
+                    "Codex runtime event did not contain a supported child projection"
+                )
+            return self._persist_snapshot(
+                agent,
+                record,
+                method=f"history:{method}",
+                observed_at=observed_at,
+            )
+
+    def observe_discovered_child(
+        self,
+        agent_id: str,
+        *,
+        thread_id: str,
+        child_id: str,
+        state: CodexRuntimeState,
+        role: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        started_at: float | None = None,
+        finished_at: float | None = None,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Project a child returned by read-only app-server thread discovery."""
+
+        agent = self.store.get_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        current = observed_at if observed_at is not None else time.time()
+        with self._lock:
+            record = self._record(agent)
+            if not record.adapter.association.bind_app_server(
+                thread_id,
+                source="passive_thread_list",
+            ):
+                raise ValueError(
+                    "Codex runtime event thread does not match the active PBX session"
+                )
+            resolved_child_id = clean_public_value(child_id, 240)
+            if not resolved_child_id:
+                raise ValueError("Codex child thread id is required")
+            prior = record.children.get(resolved_child_id)
+            resolved_state = (
+                prior.state
+                if state is CodexRuntimeState.UNKNOWN and prior is not None
+                else state
+            )
+            resolved_started_at = started_at if started_at is not None else current
+            if prior is not None and prior.started_at is not None:
+                resolved_started_at = prior.started_at
+            resolved_finished_at = finished_at
+            if resolved_finished_at is None and prior is not None:
+                resolved_finished_at = prior.finished_at
+            child = CodexChildRuntime(
+                child_id=resolved_child_id,
+                parent_id=record.adapter.identity.entity_id,
+                state=resolved_state,
+                role=clean_public_value(role, 120) or (prior.role if prior else None),
+                task=None,
+                model=clean_public_value(model, 160) or (prior.model if prior else None),
+                reasoning_effort=(
+                    clean_public_value(reasoning_effort, 80)
+                    or (prior.reasoning_effort if prior else None)
+                ),
+                started_at=resolved_started_at,
+                finished_at=resolved_finished_at,
+            )
+            record.native_subagents_observed = True
+            if child == prior:
+                return self._snapshot(agent, record)
+            record.children[resolved_child_id] = child
+            return self._persist_snapshot(
+                agent,
+                record,
+                method="thread/list:subagent",
+                observed_at=current,
+            )
+
     def observe_report(
         self,
         agent_id: str,
@@ -404,14 +516,16 @@ class CodexRuntimeService:
         state = SUBAGENT_ACTIVITY_STATES.get(kind, CodexRuntimeState.UNKNOWN)
         model = clean_public_value(item.get("model"), 160)
         effort = clean_public_value(item.get("reasoningEffort"), 80)
+        explicit_role = clean_public_value(item.get("agentRole"), 120)
         prior = record.children.get(child_id)
         record.children[child_id] = CodexChildRuntime(
             child_id=child_id,
             parent_id=record.adapter.identity.entity_id,
             state=state,
-            # agentPath is deliberately not treated as a named role. It can be
-            # a host path and does not prove that a configured role was loaded.
-            role=prior.role if prior else None,
+            # agentRole is a structured protocol field. agentPath remains
+            # deliberately excluded because a host path is not proof that a
+            # named role was loaded.
+            role=explicit_role or (prior.role if prior else None),
             task=None,
             model=model or (prior.model if prior else None),
             reasoning_effort=effort or (prior.reasoning_effort if prior else None),
@@ -463,6 +577,28 @@ class CodexRuntimeService:
             "children": [child_dict(item) for item in children],
             "updated_at": evidence.observed_at if evidence else None,
         }
+
+    def _persist_snapshot(
+        self,
+        agent: dict[str, Any],
+        record: RuntimeRecord,
+        *,
+        method: str,
+        observed_at: float,
+    ) -> dict[str, Any]:
+        snapshot = self._snapshot(agent, record)
+        self.store.append_event(
+            RUNTIME_EVENT_TYPE,
+            {
+                "agent_id": record.adapter.identity.entity_id,
+                "session_id": record.adapter.identity.codex_session_id,
+                "method": method,
+                "observed_at": observed_at,
+                "snapshot": snapshot,
+            },
+            record.adapter.identity.entity_id,
+        )
+        return snapshot
 
     def _branch(self, cwd: str | None) -> str | None:
         if not cwd:

@@ -43,6 +43,7 @@ from .codex_sessions import enrich_codex_session_metadata
 from .codex_config import load_codex_config_view, patch_codex_config
 from .codex_cli import inspect_codex_model_catalog, update_codex_cli_package
 from .codex.capabilities import CodexCapabilityProbe
+from .codex.event_bridge import CodexAppServerEventBridge
 from .codex.profiles import (
     DEFAULT_CALLER_PROFILE_ID,
     DEFAULT_OPERATOR_PROFILE_ID,
@@ -406,9 +407,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     run_joplin_sync_worker(store, joplin),
                     name="agent-pbx-joplin-sync",
                 )
+            await app.state.codex_event_bridge.start()
             try:
                 yield
             finally:
+                await app.state.codex_event_bridge.stop()
                 with suppress(Exception):
                     shutdown_editor = getattr(
                         app.state.terminal_editor,
@@ -445,6 +448,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         cache_path=resolved_config.db_path.parent / "codex-capabilities-v2.json"
     )
     app.state.codex_runtime = CodexRuntimeService(store)
+    app.state.codex_event_bridge = CodexAppServerEventBridge(
+        store,
+        app.state.codex_runtime,
+        codex_bin=resolved_config.codex_bin,
+        enabled=resolved_config.codex_event_bridge_enabled,
+        poll_seconds=resolved_config.codex_event_bridge_poll_seconds,
+        transport=resolved_config.codex_event_bridge_transport,
+    )
     app.state.files = AgentFileService()
     app.state.terminal_editor = ManagedTerminalEditorService(
         app.state.files,
@@ -480,6 +491,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             "compatibility": compatibility_posture(
                 polling=resolved_config.legacy_polling_enabled
             ).public_dict(),
+            "codex_event_bridge": app.state.codex_event_bridge.public_status(),
         }
 
     @app.get("/v1/auth/check", dependencies=[Depends(require_token)])
@@ -561,6 +573,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             use_cache=not refresh,
         )
         return snapshot.as_dict()
+
+    @app.get(
+        "/v2/codex/event-bridge",
+        dependencies=[Depends(require_token)],
+    )
+    async def get_codex_event_bridge() -> dict[str, object]:
+        return app.state.codex_event_bridge.status()
 
     @app.get(
         "/v2/agents/{agent_id}/codex-runtime",
