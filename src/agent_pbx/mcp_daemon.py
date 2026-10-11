@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -17,7 +19,7 @@ from urllib.request import urlopen
 from . import __version__
 from .compat import POLLING_ENV
 from .paths import default_state_root
-from .store import Store
+from .store import SCHEMA_VERSION, Store
 from .tmux_binary import ensure_managed_tmux_shim, managed_tmux_shim_status
 from .joplin import (
     JOPLIN_API_URL_ENV,
@@ -332,6 +334,17 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
     if status.get("stale"):
         _cleanup_stale_metadata(config)
 
+    schema_preflight = daemon_database_preflight(config)
+    if not schema_preflight["ok"]:
+        return {
+            **_base_status(config),
+            "ok": False,
+            "started": False,
+            "running": False,
+            "error": schema_preflight["error"],
+            "schema_preflight": schema_preflight,
+        }
+
     port_check = _mcp_port_available(config)
     if not port_check["ok"]:
         return {
@@ -539,6 +552,17 @@ def restart_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dic
     if auth_guard is not None:
         start = {**_base_status(config), "ok": False, "started": False, "error": auth_guard}
         return {"ok": False, "stop": None, "start": start, "port_release": None}
+    schema_preflight = daemon_database_preflight(config)
+    if not schema_preflight["ok"]:
+        start = {
+            **_base_status(config),
+            "ok": False,
+            "started": False,
+            "running": False,
+            "error": schema_preflight["error"],
+            "schema_preflight": schema_preflight,
+        }
+        return {"ok": False, "stop": None, "start": start, "port_release": None}
     stop = stop_mcp_daemon(config, timeout=min(max(timeout, 1.0), 10.0))
     port_release = _wait_for_port_release(config, timeout=min(max(timeout, 1.0), 10.0))
     if not port_release["ok"]:
@@ -557,8 +581,15 @@ def restart_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dic
 def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
     metadata = _read_metadata(config.metadata_file)
     status = _base_status(config)
+    schema_preflight = daemon_database_preflight(config)
     if not metadata:
-        return {**status, "running": False, "stale": False}
+        return {
+            **status,
+            "running": False,
+            "stale": False,
+            "start_blocked": not bool(schema_preflight["ok"]),
+            "schema_preflight": schema_preflight,
+        }
     pid = _metadata_pid(metadata)
     running = bool(pid and _pid_alive(pid) and _pid_matches_metadata(pid, config, metadata))
     return {
@@ -567,6 +598,150 @@ def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "pid": pid,
         "running": running,
         "stale": bool(pid and not running),
+        "start_blocked": not bool(schema_preflight["ok"]),
+        "schema_preflight": schema_preflight,
+    }
+
+
+def daemon_database_preflight(config: MCPDaemonConfig) -> dict[str, Any]:
+    """Inspect daemon schema compatibility without mutating SQLite state."""
+
+    path = config.resolved_db_path
+    if not path.exists():
+        return {
+            "ok": True,
+            "state": "new",
+            "database_path": str(path),
+            "current_schema": None,
+            "required_schema": SCHEMA_VERSION,
+            "integrity": None,
+        }
+    try:
+        uri = f"file:{path}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            # Startup needs a bounded corruption signal, while the explicit
+            # migration verify command owns the full integrity/foreign-key
+            # audit.  ``quick_check(1)`` avoids making every status/start call
+            # perform the more expensive exhaustive index validation.
+            integrity_row = conn.execute("PRAGMA quick_check(1)").fetchone()
+            integrity = str(integrity_row[0]) if integrity_row else "unknown"
+            metadata_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'metadata'"
+            ).fetchone()
+            schema_row = (
+                conn.execute(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'"
+                ).fetchone()
+                if metadata_exists
+                else None
+            )
+            schema = int(schema_row[0]) if schema_row else 0
+    except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+        return _schema_preflight_failure(
+            config,
+            code="MCP_DATABASE_INSPECTION_FAILED",
+            message="Agent PBX database could not be inspected safely",
+            current_schema=None,
+            integrity=None,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+    if integrity != "ok":
+        return _schema_preflight_failure(
+            config,
+            code="MCP_DATABASE_INTEGRITY_FAILED",
+            message="Agent PBX database failed integrity verification",
+            current_schema=schema,
+            integrity=integrity,
+            detail="restore a verified backup before attempting migration",
+        )
+    if schema < SCHEMA_VERSION:
+        return _schema_preflight_failure(
+            config,
+            code="MCP_SCHEMA_MIGRATION_REQUIRED",
+            message=(
+                f"Agent PBX database schema {schema} must be migrated to "
+                f"{SCHEMA_VERSION} before daemon start"
+            ),
+            current_schema=schema,
+            integrity=integrity,
+            detail="the daemon was not spawned and existing metadata was not replaced",
+        )
+    if schema > SCHEMA_VERSION:
+        return _schema_preflight_failure(
+            config,
+            code="MCP_SCHEMA_NEWER_THAN_RUNTIME",
+            message=(
+                f"Agent PBX database schema {schema} is newer than this runtime "
+                f"supports ({SCHEMA_VERSION})"
+            ),
+            current_schema=schema,
+            integrity=integrity,
+            detail="install the matching Agent PBX version or restore a compatible backup",
+        )
+    return {
+        "ok": True,
+        "state": "current",
+        "database_path": str(path),
+        "current_schema": schema,
+        "required_schema": SCHEMA_VERSION,
+        "integrity": integrity,
+    }
+
+
+def _schema_preflight_failure(
+    config: MCPDaemonConfig,
+    *,
+    code: str,
+    message: str,
+    current_schema: int | None,
+    integrity: str | None,
+    detail: str,
+) -> dict[str, Any]:
+    commands = _migration_commands(config)
+    remediation_lines = [detail]
+    if code == "MCP_SCHEMA_MIGRATION_REQUIRED":
+        remediation_lines.extend(
+            [
+                f"1. {commands['dry_run']}",
+                f"2. {commands['apply']}",
+                f"3. {commands['verify']}",
+                "4. Restart the daemon after verification passes.",
+            ]
+        )
+    elif code == "MCP_SCHEMA_NEWER_THAN_RUNTIME":
+        remediation_lines.append(f"Verify without mutation: {commands['verify']}")
+    return {
+        "ok": False,
+        "state": "blocked",
+        "database_path": str(config.resolved_db_path),
+        "current_schema": current_schema,
+        "required_schema": SCHEMA_VERSION,
+        "integrity": integrity,
+        "commands": commands,
+        "error": {
+            "code": code,
+            "message": message,
+            "details": {
+                "database_path": str(config.resolved_db_path),
+                "current_schema": current_schema,
+                "required_schema": SCHEMA_VERSION,
+                "integrity": integrity,
+                "commands": commands,
+            },
+            "retryable": code == "MCP_SCHEMA_MIGRATION_REQUIRED",
+            "remediation": "\n".join(remediation_lines),
+        },
+    }
+
+
+def _migration_commands(config: MCPDaemonConfig) -> dict[str, str]:
+    state = shlex.quote(str(config.resolved_state_root))
+    database = shlex.quote(str(config.resolved_db_path))
+    base = f"--state-root {state} --db {database}"
+    return {
+        "dry_run": f"agent-pbx migrate dry-run {base} --json",
+        "apply": f"agent-pbx migrate apply {base} --retention-days 7 --json",
+        "verify": f"agent-pbx migrate verify {base} --json",
     }
 
 

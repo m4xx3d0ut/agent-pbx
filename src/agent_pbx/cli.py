@@ -1304,8 +1304,20 @@ def _print_mcp_status(result: dict[str, object]) -> None:
         "pid",
         "running",
         "stale",
+        "start_blocked",
         "started",
         "stopped",
     ):
         if key in result and result[key] is not None:
             print(f"{key}: {result[key]}")
+    schema = result.get("schema_preflight")
+    if isinstance(schema, dict):
+        print(f"schema_state: {schema.get('state', 'unknown')}")
+        print(f"schema_current: {schema.get('current_schema')}")
+        print(f"schema_required: {schema.get('required_schema')}")
+        schema_error = schema.get("error")
+        if isinstance(schema_error, dict) and not isinstance(error, dict):
+            print(f"schema_error: {schema_error.get('code', 'ERROR')}")
+            remediation = schema_error.get("remediation")
+            if remediation:
+                print(f"schema_remediation: {remediation}")

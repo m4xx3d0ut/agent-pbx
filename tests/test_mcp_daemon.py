@@ -8,6 +8,7 @@ from agent_pbx.cli import _daemon_config, build_parser, main
 from agent_pbx.mcp_daemon import (
     MCPDaemonConfig,
     config_from_args,
+    daemon_database_preflight,
     mcp_daemon_status,
     restart_mcp_daemon,
     start_mcp_daemon,
@@ -16,6 +17,7 @@ from agent_pbx.mcp_daemon import (
     _pid_matches_metadata,
 )
 from agent_pbx.paths import default_state_root
+from agent_pbx.store import SCHEMA_VERSION, Store
 
 
 REMOTE_BIND_HOST = "0.0.0.0"  # noqa: S104 - explicit LAN bind fixture
@@ -255,6 +257,133 @@ def test_start_mcp_daemon_fails_fast_when_port_is_in_use(
     assert result["ok"] is False
     assert result["started"] is False
     assert result["error"]["code"] == "MCP_PORT_IN_USE"
+
+
+def test_start_mcp_daemon_blocks_old_schema_before_spawn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, port=9876)
+    store = Store(config.resolved_db_path)
+    store.init()
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION - 1),),
+        )
+
+    def fail_popen(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("daemon must not spawn before explicit migration")
+
+    monkeypatch.setattr("agent_pbx.mcp_daemon.subprocess.Popen", fail_popen)
+
+    result = start_mcp_daemon(config, timeout=1)
+
+    assert result["ok"] is False
+    assert result["started"] is False
+    assert result["error"]["code"] == "MCP_SCHEMA_MIGRATION_REQUIRED"
+    assert result["schema_preflight"]["current_schema"] == SCHEMA_VERSION - 1
+    commands = result["error"]["details"]["commands"]
+    assert commands["dry_run"].startswith("agent-pbx migrate dry-run")
+    assert commands["apply"].startswith("agent-pbx migrate apply")
+    assert commands["verify"].startswith("agent-pbx migrate verify")
+    assert str(config.resolved_db_path) in commands["apply"]
+    assert not config.metadata_file.exists()
+    assert not config.log_file.exists()
+
+
+def test_restart_mcp_daemon_checks_schema_before_stopping_old_daemon(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, port=9876)
+    store = Store(config.resolved_db_path)
+    store.init()
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION - 1),),
+        )
+
+    def fail_stop(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("existing daemon must remain running when preflight blocks")
+
+    monkeypatch.setattr("agent_pbx.mcp_daemon.stop_mcp_daemon", fail_stop)
+
+    result = restart_mcp_daemon(config, timeout=1)
+
+    assert result["ok"] is False
+    assert result["stop"] is None
+    assert result["start"]["error"]["code"] == "MCP_SCHEMA_MIGRATION_REQUIRED"
+
+
+def test_daemon_schema_preflight_reports_new_current_newer_and_corrupt(
+    tmp_path: Path,
+) -> None:
+    missing_config = MCPDaemonConfig(state_root=tmp_path / "missing")
+    assert daemon_database_preflight(missing_config)["state"] == "new"
+
+    current_config = MCPDaemonConfig(state_root=tmp_path / "current")
+    current_store = Store(current_config.resolved_db_path)
+    current_store.init()
+    current = daemon_database_preflight(current_config)
+    assert current["ok"] is True
+    assert current["current_schema"] == SCHEMA_VERSION
+
+    with current_store.connect() as conn:
+        conn.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION + 1),),
+        )
+    newer = daemon_database_preflight(current_config)
+    assert newer["ok"] is False
+    assert newer["error"]["code"] == "MCP_SCHEMA_NEWER_THAN_RUNTIME"
+    assert newer["error"]["retryable"] is False
+
+    corrupt_config = MCPDaemonConfig(state_root=tmp_path / "corrupt")
+    corrupt_config.resolved_db_path.parent.mkdir(parents=True)
+    corrupt_config.resolved_db_path.write_bytes(b"not sqlite")
+    corrupt = daemon_database_preflight(corrupt_config)
+    assert corrupt["ok"] is False
+    assert corrupt["error"]["code"] == "MCP_DATABASE_INSPECTION_FAILED"
+
+
+def test_mcp_status_surfaces_schema_start_blocker(tmp_path: Path) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, port=9876)
+    store = Store(config.resolved_db_path)
+    store.init()
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION - 1),),
+        )
+
+    status = mcp_daemon_status(config)
+
+    assert status["running"] is False
+    assert status["start_blocked"] is True
+    assert status["schema_preflight"]["error"]["code"] == (
+        "MCP_SCHEMA_MIGRATION_REQUIRED"
+    )
+
+
+def test_mcp_status_cli_prints_schema_start_blocker(tmp_path: Path, capsys) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, port=9876)
+    store = Store(config.resolved_db_path)
+    store.init()
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION - 1),),
+        )
+
+    result = main(["mcp", "status", "--state-root", str(tmp_path), "--port", "9876"])
+    output = capsys.readouterr().out
+
+    assert result == 0
+    assert "start_blocked: True" in output
+    assert "schema_error: MCP_SCHEMA_MIGRATION_REQUIRED" in output
+    assert "agent-pbx migrate dry-run" in output
 
 
 def test_start_mcp_daemon_refuses_lan_without_token(
