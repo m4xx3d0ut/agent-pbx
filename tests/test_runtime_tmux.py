@@ -460,6 +460,20 @@ def test_runtime_mapping_preserves_legacy_binary(monkeypatch: pytest.MonkeyPatch
     assert runtime_mapping_server_identity(mapping).command_prefix[0] == "/usr/bin/tmux"
 
 
+def test_runtime_mapping_uses_top_level_editor_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_PBX_TMUX_BIN", "/opt/agent-pbx/tmux")
+    mapping = {
+        "socket_path": "/tmp/pbx-editor.sock",
+        "session_name": "pbx-editor-agent-a",
+        "pane_id": "%1",
+        "tmux_bin": "/opt/agent-pbx/tmux-3.7c",
+    }
+
+    assert tmux_client_attach_command(mapping)[0] == "/opt/agent-pbx/tmux-3.7c"
+
+
 def test_tmux_client_attach_falls_back_to_session_for_legacy_mapping() -> None:
     assert tmux_client_attach_command(
         {

@@ -642,9 +642,9 @@ def runtime_mapping_server_identity(
 
 
 def runtime_mapping_tmux_binary(mapping: Mapping[str, Any]) -> str:
+    configured = str(mapping.get("tmux_bin") or "").strip()
     metadata = mapping.get("metadata")
-    configured = ""
-    if isinstance(metadata, Mapping):
+    if not configured and isinstance(metadata, Mapping):
         configured = str(metadata.get("tmux_bin") or "").strip()
     return configured_tmux_binary(configured or None)
 
