@@ -17,6 +17,7 @@ from .contract import DEMO_SCENARIO_ID, public_demo_contract
 from .policy import (
     build_public_demo_environment,
     ensure_private_directory,
+    replaced_environment,
     validate_web_binding,
 )
 
@@ -210,6 +211,7 @@ def build_public_demo_server(
             self.session_ttl_seconds = session_ttl_seconds
             self.active_sessions = 0
             self._session_lock: asyncio.Lock | None = None
+            self.public_demo_environment = dict(child_environment)
 
         async def _make_app(self) -> Any:
             app = await super()._make_app()
@@ -344,7 +346,8 @@ def serve_public_demo(**kwargs: Any) -> int:
     debug = bool(kwargs.pop("debug", False))
     server, web_root = build_public_demo_server(**kwargs)
     try:
-        server.serve(debug=debug)
+        with replaced_environment(server.public_demo_environment):
+            server.serve(debug=debug)
         return 0
     finally:
         shutil.rmtree(web_root, ignore_errors=True)

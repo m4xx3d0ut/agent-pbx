@@ -97,6 +97,9 @@ async def test_public_demo_server_exposes_health_contract_and_origin_guard() -> 
         max_sessions=2,
         session_ttl_seconds=60,
     )
+    assert "AGENT_PBX_TOKEN" not in server.public_demo_environment
+    assert "OPENAI_API_KEY" not in server.public_demo_environment
+    assert "TMUX" not in server.public_demo_environment
     client = TestClient(TestServer(await server._make_app()))
     try:
         await client.start_server()
