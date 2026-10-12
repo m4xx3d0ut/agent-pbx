@@ -1467,6 +1467,8 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         files_copy_path = app.query_one("#files-copy-path", Button)
         files_copy_text = app.query_one("#files-copy-text", Button)
         files_open_editor = app.query_one("#files-open-editor", Button)
+        files_open_text = app.query_one("#files-open-text", Button)
+        files_open_terminal = app.query_one("#files-open-terminal", Button)
         files_create_file = app.query_one("#files-create-file", Button)
         files_create_directory = app.query_one("#files-create-directory", Button)
         files_move = app.query_one("#files-move", Button)
@@ -1480,6 +1482,9 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         editor_copy_path = app.query_one("#editor-copy-path", Button)
         editor_copy_text = app.query_one("#editor-copy-text", Button)
         editor_check = app.query_one("#editor-check", Button)
+        editor_text = app.query_one("#editor-text", Button)
+        editor_terminal = app.query_one("#editor-terminal", Button)
+        editor_terminal_stop = app.query_one("#editor-terminal-stop", Button)
         editor_close = app.query_one("#editor-close", Button)
         editor_fullscreen = app.query_one("#editor-fullscreen", Button)
         editor_hotkeys = app.query_one("#editor-hotkeys", Static)
@@ -1546,7 +1551,9 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert files_up.label.plain == "Up"
         assert files_copy_path.label.plain == "Copy Path"
         assert files_copy_text.label.plain == "Copy Text"
-        assert files_open_editor.label.plain == "Open Editor"
+        assert files_open_editor.label.plain == "Open Default"
+        assert files_open_text.label.plain == "Open Text"
+        assert files_open_terminal.label.plain == "Open Native"
         assert files_create_file.label.plain == "New File"
         assert files_create_directory.label.plain == "New Dir"
         assert files_move.label.plain == "Move"
@@ -1560,6 +1567,9 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert editor_copy_path.label.plain == "Copy Path"
         assert editor_copy_text.label.plain == "Copy Text"
         assert editor_check.label.plain == "Check"
+        assert editor_text.label.plain == "Text"
+        assert editor_terminal.label.plain == "Native"
+        assert editor_terminal_stop.label.plain == "Stop Native"
         assert editor_close.label.plain == "Close"
         assert editor_fullscreen.label.plain == "Full F9"
         assert "Close" in str(editor_hotkeys.renderable)
@@ -3362,7 +3372,7 @@ async def test_tui_managed_editor_owns_printable_keys_but_not_plain_f_keys(
             self.columns = columns
             self.rows = rows
 
-    async def no_status(_agent_id: str) -> None:
+    async def no_status(_agent_id: str, **_kwargs: object) -> None:
         return None
 
     app.load_terminal_editor_status = no_status  # type: ignore[method-assign]
@@ -3375,6 +3385,7 @@ async def test_tui_managed_editor_owns_printable_keys_but_not_plain_f_keys(
     async with app.run_test() as pilot:
         await pilot.resize_terminal(120, 32)
         app.selected_agent_id = "agent-a"
+        app.editor_surface_by_agent["agent-a"] = "terminal"
         app.terminal_editor_agent_id = "agent-a"
         terminal = app.query_one("#pbx-editor-terminal", PbxTerminalSurface)
         terminal.process = FakeProcess()  # type: ignore[assignment]
@@ -3399,6 +3410,171 @@ async def test_tui_managed_editor_owns_printable_keys_but_not_plain_f_keys(
         assert app.focused.__class__.__name__ == "ContentTabs"
 
     assert terminal.attached is False
+
+
+async def test_tui_terminal_default_routes_files_without_textual_staging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_PBX_EDITOR_DEFAULT_SURFACE", "terminal")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    posts: list[tuple[str, dict[str, object]]] = []
+    attached: list[tuple[str, dict[str, object]]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "running": True,
+                "profile_id": "nvim",
+                "root": "/tmp/project",
+                "path": "src/app.py",
+                "pane_id": "%41",
+            }
+
+    class Client:
+        async def post(
+            self,
+            path: str,
+            *,
+            json: dict[str, object],
+            **_kwargs: object,
+        ) -> Response:
+            posts.append((path, dict(json)))
+            return Response()
+
+    async def attach(agent_id: str, runtime: dict[str, object]) -> bool:
+        attached.append((agent_id, dict(runtime)))
+        app.terminal_editor_pending_agent_id = None
+        return True
+
+    async def no_status(_agent_id: str, **_kwargs: object) -> None:
+        return None
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.attach_terminal_editor = attach  # type: ignore[method-assign]
+    app.load_terminal_editor_status = no_status  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-a"
+        app.selected_file_path_by_agent["agent-a"] = "src/app.py"
+        app.selected_file_line_by_agent["agent-a"] = 17
+
+        await app.open_selected_file_in_editor("agent-a")
+        await pilot.pause()
+
+    assert posts == [
+        (
+            "/v1/agents/agent-a/terminal-editor",
+            {"path": "src/app.py", "line": 17},
+        )
+    ]
+    assert attached and attached[0][0] == "agent-a"
+    assert app.editor_surface_by_agent["agent-a"] == "terminal"
+    assert app.editor_document_for_agent("agent-a") is None
+
+
+async def test_tui_terminal_default_lazily_starts_empty_editor_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_PBX_EDITOR_DEFAULT_SURFACE", "terminal")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    posts: list[dict[str, object]] = []
+
+    class Response:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.payload
+
+    class Client:
+        async def get(self, _path: str, **_kwargs: object) -> Response:
+            return Response({"running": False})
+
+        async def post(
+            self,
+            _path: str,
+            *,
+            json: dict[str, object],
+            **_kwargs: object,
+        ) -> Response:
+            posts.append(dict(json))
+            return Response(
+                {
+                    "running": True,
+                    "profile_id": "nvim",
+                    "root": "/tmp/project",
+                    "path": "",
+                    "workspace": True,
+                    "pane_id": "%41",
+                }
+            )
+
+    async def attach(_agent_id: str, _runtime: dict[str, object]) -> bool:
+        app.terminal_editor_pending_agent_id = None
+        return True
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.attach_terminal_editor = attach  # type: ignore[method-assign]
+
+    app.selected_agent_id = "agent-a"
+    app.active_agent_tab = "editor-tab"
+    app.activate_agent_tab = lambda _tab: None  # type: ignore[method-assign]
+    app.set_editor_status = lambda _text: None  # type: ignore[method-assign]
+    app.apply_terminal_editor_class = lambda: None  # type: ignore[method-assign]
+
+    await app.load_terminal_editor_status("agent-a", start_if_missing=True)
+
+    assert posts == [{}]
+    assert app.editor_surface_by_agent["agent-a"] == "terminal"
+
+
+async def test_tui_explicit_text_editor_refreshes_clean_native_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_PBX_EDITOR_DEFAULT_SURFACE", "terminal")
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    fetches: list[tuple[str, str]] = []
+
+    async def fetch(agent_id: str, path: str) -> dict[str, object]:
+        fetches.append((agent_id, path))
+        return {
+            "path": path,
+            "text": "updated from nvim\n",
+            "sha256": "new-hash",
+            "mtime": 2.0,
+            "language": "python",
+            "line_count": 1,
+        }
+
+    async def no_status(_agent_id: str, **_kwargs: object) -> None:
+        return None
+
+    app.fetch_agent_file_document = fetch  # type: ignore[method-assign]
+    app.load_terminal_editor_status = no_status  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        app.selected_agent_id = "agent-a"
+        app.selected_file_path_by_agent["agent-a"] = "src/app.py"
+        app.editor_documents_by_agent["agent-a"] = {
+            "path": "src/app.py",
+            "text": "old\n",
+            "current_text": "old\n",
+            "sha256": "old-hash",
+            "mtime": 1.0,
+        }
+
+        await app.open_selected_file_in_text_editor("agent-a")
+        await pilot.pause()
+
+    assert fetches == [("agent-a", "src/app.py")]
+    assert app.editor_surface_by_agent["agent-a"] == "textual"
+    assert app.editor_documents_by_agent["agent-a"]["sha256"] == "new-hash"
 
 
 async def test_tui_forgets_only_through_terminal_editor_recovery_endpoint() -> None:

@@ -75,14 +75,29 @@ Sensitive command classes are excluded even when persistence is enabled.
 
 ## Managed terminal editor
 
-The Editor tab supports its Textual buffer and an optional managed native
-terminal editor. Save or revert a dirty Textual buffer, then use `Open Term` or
-`/editor terminal`. Installed Neovim, Vim, and Nano profiles are discovered by
-default; `/editor terminal nvim`, `/editor terminal vim`, and
-`/editor terminal nano` select one explicitly. `/editor terminal close` stops
-only that editor runtime and reloads the file through the guarded Editor path.
-An active Neovim gets a private RPC socket, so opening another approved project
-file reuses the same Neovim process, pane, and project-rooted workspace.
+The Editor tab supports its Textual buffer and a managed native project
+workspace. Files offers `Open Default`, `Open Text`, and `Open Native`.
+`AGENT_PBX_EDITOR_DEFAULT_SURFACE=terminal` makes the Editor tab lazily start or
+attach an empty project-rooted native workspace; the default remains `textual`
+when this setting is absent. `Native` or `/editor terminal` opens the native
+workspace without staging a file through Textual. `/editor workspace` follows
+the configured default surface.
+
+Installed Neovim, Vim, and Nano profiles are discovered by default;
+`/editor terminal nvim`, `/editor terminal vim`, and `/editor terminal nano`
+select one explicitly. Configured profiles may provide `workspace_argv` for
+their fileless startup command. An active Neovim gets a private RPC socket.
+`Open Native` and `/editor terminal open` route the selected approved file with
+tab-drop behavior: the first file uses the empty tab, new files get tabs, and an
+already-visible file is reused. Existing buffers and plugin state remain owned
+by that Neovim process.
+
+`Text` or `/editor text` switches to the guarded Textual buffer without stopping
+Neovim. Clean buffers are refetched so native writes appear immediately; dirty
+Textual content must be saved or reverted before native editing starts. `/editor
+terminal close` stops only the managed editor runtime. Review-readonly sessions
+require a registered cwd that exactly matches their writable
+`metadata.work_root`.
 
 Terminal editor input follows native terminal ownership. Plain function keys
 remain PBX navigation, while modified function keys and ordinary editor input

@@ -437,6 +437,14 @@ class AgentFileService:
             return FileBrowserError("NOT_A_FILE", f"path is not a regular file: {display_path}")
         return root, target
 
+    def resolve_terminal_editor_workspace(
+        self,
+        agent: dict[str, Any],
+    ) -> Path | FileBrowserError:
+        """Resolve the registered project root for an empty editor workspace."""
+
+        return self._agent_root(agent)
+
     def write_document_for_agent(
         self,
         agent: dict[str, Any],

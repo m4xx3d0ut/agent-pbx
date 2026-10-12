@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +18,7 @@ from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import Store
 from agent_pbx.terminal_editor import (
     ManagedTerminalEditorService,
+    TerminalEditorRuntime,
     terminal_editor_profiles,
 )
 
@@ -33,6 +36,7 @@ def test_terminal_editor_profiles_use_structured_executable_argv(tmp_path: Path)
             "safe": {
                 "label": "Safe editor",
                 "argv": [str(editor), "--line", "{line}", "--", "{path}"],
+                "workspace_argv": [str(editor), "--workspace"],
             },
             "missing": {"argv": [str(tmp_path / "missing"), "{path}"]},
         }
@@ -51,6 +55,7 @@ def test_terminal_editor_profiles_use_structured_executable_argv(tmp_path: Path)
         "--",
         str(tmp_path / "file name.py"),
     )
+    assert profiles[0].workspace_command() == (str(editor), "--workspace")
 
 
 def test_terminal_editor_profile_preserves_executable_symlink_name(
@@ -255,10 +260,11 @@ def test_terminal_editor_persists_and_adopts_after_daemon_restart(
         environ=env,
         runner=runner,
     )
-    started = first.start(agent(root), path="app.py")
+    started = first.start(agent(root))
     detached = first.shutdown()
 
     assert started["running"] is True
+    assert started["workspace"] is True and started["path"] == ""
     assert detached[0]["detached"] is True
     assert not any("kill-session" in command for command in commands)
     persisted = store.get_terminal_editor_runtime("agent-1")
@@ -277,6 +283,7 @@ def test_terminal_editor_persists_and_adopts_after_daemon_restart(
     assert adopted["running"] is True
     assert adopted["adopted"] is True
     assert adopted["root"] == str(root)
+    assert adopted["workspace"] is True
     assert store.get_terminal_editor_runtime("agent-1")["state"] == "ready"
 
 
@@ -341,23 +348,197 @@ def test_active_neovim_routes_additional_files_through_managed_rpc(
         tmux_bin="tmux-test",
         environ={
             "AGENT_PBX_TERMINAL_EDITOR_PROFILES": json.dumps(
-                {"nvim": {"argv": [str(nvim), "+{line}", "--", "{path}"]}}
+                {
+                    "nvim": {
+                        "argv": [str(nvim), "+{line}", "--", "{path}"],
+                        "workspace_argv": [str(nvim)],
+                    }
+                }
             ),
             "AGENT_PBX_TERMINAL_EDITOR_DEFAULT": "nvim",
+            "AGENT_PBX_EDITOR_DEFAULT_SURFACE": "terminal",
         },
         runner=runner,
     )
 
-    started = service.start(agent(root), path="app.py", line=3)
+    started = service.start(agent(root))
+    first = service.start(agent(root), path="app.py", line=3)
     opened = service.start(agent(root), path="other.py", line=9)
+    reused = service.start(agent(root), path="other.py", line=4)
 
     launch = next(command for command in commands if "new-session" in command)
-    remote = next(command for command in commands if "--server" in command)
+    remotes = [command for command in commands if "--server" in command]
     assert "--listen" in launch[-1]
+    assert str(first_path) not in launch[-1]
     assert started["rpc_enabled"] is True
+    assert started["workspace"] is True and started["opened"] is False
+    assert first["path"] == str(first_path)
     assert opened["started"] is False and opened["opened"] is True
     assert opened["path"] == str(second_path)
-    assert remote[-3:] == ["--remote", "+9", str(second_path)]
+    assert reused["reused"] is True
+    assert [command[-2] for command in remotes] == ["--remote-expr"] * 3
+    assert str(first_path) in remotes[0][-1] and "cursor(3, 1)" in remotes[0][-1]
+    assert str(second_path) in remotes[1][-1] and "cursor(9, 1)" in remotes[1][-1]
+    assert str(second_path) in remotes[2][-1] and "cursor(4, 1)" in remotes[2][-1]
+    assert service.profile_view()["default_surface"] == "terminal"
+
+
+def test_neovim_tab_drop_routes_real_files_without_replacing_workspace(
+    tmp_path: Path,
+) -> None:
+    nvim = shutil.which("nvim")
+    if nvim is None:
+        pytest.skip("Neovim is not installed")
+    root = tmp_path / "repo"
+    runtime_root = tmp_path / "runtimes"
+    root.mkdir()
+    runtime_root.mkdir()
+    first = root / "one.txt"
+    second = root / "file 'two' with spaces.txt"
+    first.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    second.write_text(
+        "\n".join(f"line {number}" for number in range(1, 12)) + "\n",
+        encoding="utf-8",
+    )
+    rpc_socket = runtime_root / "nvim.sock"
+    process = subprocess.Popen(
+        [nvim, "--clean", "--headless", "--listen", str(rpc_socket)],
+        cwd=root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(100):
+            if rpc_socket.exists():
+                break
+            time.sleep(0.02)
+        assert rpc_socket.exists()
+        service = ManagedTerminalEditorService(
+            AgentFileService(),
+            runtime_root=runtime_root,
+            tmux_bin="tmux",
+            environ={
+                "AGENT_PBX_TERMINAL_EDITOR_PROFILES": json.dumps(
+                    {
+                        "nvim": {
+                            "argv": [nvim, "+{line}", "--", "{path}"],
+                            "workspace_argv": [nvim],
+                        }
+                    }
+                ),
+                "AGENT_PBX_TERMINAL_EDITOR_DEFAULT": "nvim",
+            },
+        )
+        runtime = TerminalEditorRuntime(
+            agent_id="agent-1",
+            runtime_id="editor-real",
+            project="demo",
+            access_mode="edit",
+            profile_id="nvim",
+            path="",
+            root=str(root),
+            socket_path=str(runtime_root / "tmux.sock"),
+            rpc_socket_path=str(rpc_socket),
+            rpc_enabled=True,
+            server_id="editor-test",
+            session_name="editor-test",
+            window_id="@1",
+            pane_id="%1",
+            pane_pid=process.pid,
+            process_start_ticks=None,
+            tmux_bin="tmux",
+        )
+
+        def state() -> dict[str, object]:
+            result = subprocess.run(
+                [
+                    nvim,
+                    "--server",
+                    str(rpc_socket),
+                    "--remote-expr",
+                    (
+                        "json_encode({'tabs':tabpagenr('$'),'path':expand('%:p'),"
+                        "'line':line('.'),'cwd':getcwd()})"
+                    ),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return json.loads(result.stdout)
+
+        service._route_file(runtime, path=first, line=2)
+        first_state = state()
+        service._route_file(runtime, path=second, line=7)
+        second_state = state()
+        service._route_file(runtime, path=second, line=4)
+        reused_state = state()
+
+        assert first_state == {
+            "cwd": str(root),
+            "path": str(first),
+            "line": 2,
+            "tabs": 1,
+        }
+        assert second_state == {
+            "cwd": str(root),
+            "path": str(second),
+            "line": 7,
+            "tabs": 2,
+        }
+        assert reused_state == {
+            "cwd": str(root),
+            "path": str(second),
+            "line": 4,
+            "tabs": 2,
+        }
+    finally:
+        if rpc_socket.exists():
+            subprocess.run(
+                [nvim, "--server", str(rpc_socket), "--remote-expr", "execute('qa!')"],
+                capture_output=True,
+                timeout=5,
+            )
+        process.wait(timeout=5)
+
+
+def test_review_readonly_editor_requires_matching_work_root(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    work = tmp_path / "review-work"
+    source.mkdir()
+    work.mkdir()
+    editor = tmp_path / "nvim"
+    editor.write_text("#!/bin/sh\n", encoding="utf-8")
+    editor.chmod(0o700)
+    service = ManagedTerminalEditorService(
+        AgentFileService(),
+        runtime_root=tmp_path / "runtimes",
+        tmux_bin="tmux-test",
+        environ={
+            "AGENT_PBX_TERMINAL_EDITOR_PROFILES": json.dumps(
+                {"nvim": {"argv": [str(editor), "{path}"]}}
+            )
+        },
+    )
+    missing_work_root = agent(source)
+    missing_work_root["metadata"]["access_mode"] = "review_readonly"  # type: ignore[index]
+    mismatched = agent(source)
+    mismatched["metadata"].update(  # type: ignore[union-attr]
+        {"access_mode": "review_readonly", "work_root": str(work)}
+    )
+    allowed = agent(work)
+    allowed["metadata"].update(  # type: ignore[union-attr]
+        {"access_mode": "review_readonly", "work_root": str(work)}
+    )
+
+    missing = service.preview(missing_work_root)
+    mismatch = service.preview(mismatched)
+    ready = service.preview(allowed)
+
+    assert missing["error"]["code"] == "TERMINAL_EDITOR_READ_ONLY"
+    assert mismatch["error"]["code"] == "TERMINAL_EDITOR_READ_ONLY"
+    assert ready["ready"] is True and ready["workspace"] is True
 
 
 def test_stale_editor_mapping_is_never_signaled_and_can_be_forgotten(
@@ -500,6 +681,10 @@ def test_terminal_editor_api_preserves_controller_boundary(tmp_path: Path) -> No
             "/v1/agents/agent-1/terminal-editor",
             json={"path": "app.py"},
         )
+        workspace = client.post(
+            "/v1/agents/agent-1/terminal-editor",
+            json={},
+        )
         status = client.get("/v1/agents/agent-1/terminal-editor")
         bundle = client.get("/v1/agents/agent-1/runtime-bundle")
         stopped = client.delete("/v1/agents/agent-1/terminal-editor")
@@ -507,6 +692,7 @@ def test_terminal_editor_api_preserves_controller_boundary(tmp_path: Path) -> No
 
     assert preview.status_code == 200 and preview.json()["profile_id"] == "vim"
     assert started.status_code == 200 and started.json()["running"] is True
+    assert workspace.status_code == 200 and workspace.json()["path"] is None
     assert status.status_code == 200 and status.json()["agent_id"] == "agent-1"
     assert bundle.status_code == 200 and bundle.json()["editor_ready"] is True
     assert bundle.json()["codex_ready"] is False

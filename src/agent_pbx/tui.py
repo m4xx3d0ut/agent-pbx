@@ -136,6 +136,12 @@ from .tmux_binary import (
     managed_tmux_launch_environment,
     resolve_tmux_binary,
 )
+from .terminal_editor import (
+    EDITOR_DEFAULT_SURFACE_ENV,
+    EDITOR_SURFACE_TERMINAL,
+    EDITOR_SURFACE_TEXTUAL,
+    normalize_editor_surface,
+)
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
@@ -648,8 +654,13 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/latest",
     "/thread",
     "/files",
+    "/files open editor",
+    "/files open terminal",
+    "/files open text",
     "/editor",
     "/editor open",
+    "/editor workspace",
+    "/editor text",
     "/editor save",
     "/editor revert",
     "/editor check",
@@ -660,6 +671,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/editor focus",
     "/editor reveal",
     "/editor terminal",
+    "/editor terminal open",
     "/editor terminal nvim",
     "/editor terminal vim",
     "/editor terminal nano",
@@ -6115,8 +6127,14 @@ class AgentPBXTUI(App[None]):
         self.editor_rendering = False
         self.editor_rendered_agent_id: str | None = None
         self.editor_fullscreen = False
+        self.editor_default_surface = normalize_editor_surface(
+            os.getenv(EDITOR_DEFAULT_SURFACE_ENV)
+            or self.settings.get("editor_default_surface")
+        )
+        self.editor_surface_by_agent: dict[str, str] = {}
         self.terminal_editor_runtime_by_agent: dict[str, dict[str, Any]] = {}
         self.terminal_editor_agent_id: str | None = None
+        self.terminal_editor_pending_agent_id: str | None = None
         self.active_agent_tab_by_agent: dict[str, str] = {}
         self.navigation_history = NavigationHistory()
         self.navigation_recording_suspended = 0
@@ -7578,7 +7596,9 @@ class AgentPBXTUI(App[None]):
                                 yield Button("Up", id="files-up")
                                 yield Button("Copy Path", id="files-copy-path")
                                 yield Button("Copy Text", id="files-copy-text")
-                                yield Button("Open Editor", id="files-open-editor")
+                                yield Button("Open Default", id="files-open-editor")
+                                yield Button("Open Text", id="files-open-text")
+                                yield Button("Open Native", id="files-open-terminal")
                             with Horizontal(id="file-crud-actions"):
                                 yield Button("New File", id="files-create-file")
                                 yield Button("New Dir", id="files-create-directory")
@@ -7609,8 +7629,9 @@ class AgentPBXTUI(App[None]):
                             yield Button("Copy Path", id="editor-copy-path")
                             yield Button("Copy Text", id="editor-copy-text")
                             yield Button("Check", id="editor-check")
-                            yield Button("Terminal", id="editor-terminal")
-                            yield Button("Stop Term", id="editor-terminal-stop")
+                            yield Button("Text", id="editor-text")
+                            yield Button("Native", id="editor-terminal")
+                            yield Button("Stop Native", id="editor-terminal-stop")
                             yield Button("Close", id="editor-close")
                             yield Button("Full F9", id="editor-fullscreen")
                         yield Static(self.editor_hotkeys_text(), id="editor-hotkeys")
@@ -7992,19 +8013,24 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/files search clear", "Clear file search results", self.palette_files_search_clear)
         yield SystemCommand("/files copy path", "Copy the selected file path", self.palette_files_copy_path)
         yield SystemCommand("/files copy text", "Copy the selected file text", self.palette_files_copy_text)
-        yield SystemCommand("/files open editor", "Open the selected file in the Editor tab", self.palette_editor)
-        yield SystemCommand("/editor", "Open the selected file in the Editor tab", self.palette_editor)
-        yield SystemCommand("/editor open", "Open the selected file in the Editor tab", self.palette_editor)
+        yield SystemCommand("/files open editor", "Open the selected file in the configured editor", self.palette_editor)
+        yield SystemCommand("/files open terminal", "Open the selected file in the managed native editor", self.palette_editor_terminal_open)
+        yield SystemCommand("/files open text", "Open the selected file in the Textual editor", self.palette_editor_text)
+        yield SystemCommand("/editor", "Open the selected file in the configured editor", self.palette_editor)
+        yield SystemCommand("/editor open", "Open the selected file in the configured editor", self.palette_editor)
+        yield SystemCommand("/editor workspace", "Open the configured project editor workspace", self.palette_editor_workspace)
+        yield SystemCommand("/editor text", "Open the selected file in the Textual editor", self.palette_editor_text)
         yield SystemCommand("/editor save", "Save the current editor file", self.palette_editor_save)
         yield SystemCommand("/editor revert", "Revert the current editor file from disk", self.palette_editor_revert)
         yield SystemCommand("/editor check", "Run diagnostics for the current editor file", self.palette_editor_check)
         yield SystemCommand("/editor copy path", "Copy the current editor file path", self.palette_editor_copy_path)
         yield SystemCommand("/editor copy text", "Copy the current editor text", self.palette_editor_copy_text)
         yield SystemCommand("/editor fullscreen", "Toggle editor fullscreen", self.palette_editor_fullscreen)
-        yield SystemCommand("/editor terminal", "Open the current file in a managed terminal editor", self.palette_editor_terminal)
-        yield SystemCommand("/editor terminal nvim", "Open the current file in Neovim", self.palette_editor_terminal_nvim)
-        yield SystemCommand("/editor terminal vim", "Open the current file in Vim", self.palette_editor_terminal_vim)
-        yield SystemCommand("/editor terminal nano", "Open the current file in Nano", self.palette_editor_terminal_nano)
+        yield SystemCommand("/editor terminal", "Open or attach the managed native workspace", self.palette_editor_terminal)
+        yield SystemCommand("/editor terminal open", "Open the selected file in the managed native editor", self.palette_editor_terminal_open)
+        yield SystemCommand("/editor terminal nvim", "Open or attach the Neovim workspace", self.palette_editor_terminal_nvim)
+        yield SystemCommand("/editor terminal vim", "Open or attach the Vim workspace", self.palette_editor_terminal_vim)
+        yield SystemCommand("/editor terminal nano", "Open or attach the Nano workspace", self.palette_editor_terminal_nano)
         yield SystemCommand("/editor terminal close", "Stop the managed terminal editor", self.palette_editor_terminal_close)
         yield SystemCommand(
             "/editor terminal forget",
@@ -9037,6 +9063,31 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_editor_text(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_selected_file_in_text_editor(agent_id),
+            name="palette-editor-text",
+            exclusive=True,
+        )
+
+    def palette_editor_workspace(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        if self.editor_default_surface == EDITOR_SURFACE_TERMINAL:
+            self.run_worker(
+                self.start_terminal_editor(agent_id),
+                name="palette-editor-workspace",
+                exclusive=True,
+            )
+            return
+        self.editor_surface_by_agent[agent_id] = EDITOR_SURFACE_TEXTUAL
+        self.activate_agent_tab("editor-tab")
+        self.render_editor_for_agent(agent_id)
+
     def palette_editor_save(self) -> None:
         agent_id = self.palette_agent_id()
         if agent_id is None:
@@ -9089,6 +9140,16 @@ class AgentPBXTUI(App[None]):
 
     def palette_editor_terminal(self) -> None:
         self._palette_editor_terminal_profile(None)
+
+    def palette_editor_terminal_open(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_selected_file_in_terminal_editor(agent_id),
+            name="palette-editor-terminal-open",
+            exclusive=True,
+        )
 
     def palette_editor_terminal_nvim(self) -> None:
         self._palette_editor_terminal_profile("nvim")
@@ -13931,9 +13992,26 @@ class AgentPBXTUI(App[None]):
                 exclusive=True,
             )
         if self.active_agent_tab == "editor-tab" and agent_id:
-            self.render_editor_for_agent(agent_id)
+            terminal_surface = (
+                self.editor_surface_for_agent(agent_id) == EDITOR_SURFACE_TERMINAL
+            )
+            start_terminal_if_missing = bool(
+                terminal_surface
+                and self.terminal_editor_pending_agent_id != agent_id
+            )
+            if terminal_surface:
+                self.terminal_editor_pending_agent_id = agent_id
+                self.set_editor_status("Editor: opening native project workspace...")
+                self.apply_terminal_editor_class()
+            else:
+                self.render_editor_for_agent(agent_id)
             self.run_async_worker(
-                lambda agent_id=agent_id: self.load_terminal_editor_status(agent_id),
+                lambda agent_id=agent_id, start=start_terminal_if_missing: (
+                    self.load_terminal_editor_status(
+                        agent_id,
+                        start_if_missing=start,
+                    )
+                ),
                 name="terminal-editor-status",
                 exclusive=True,
             )
@@ -14226,8 +14304,22 @@ class AgentPBXTUI(App[None]):
         if self.active_agent_tab == "files-tab":
             await self.load_agent_files(agent_id)
         elif self.active_agent_tab == "editor-tab":
-            self.render_editor_for_agent(agent_id)
-            await self.load_terminal_editor_status(agent_id)
+            terminal_surface = (
+                self.editor_surface_for_agent(agent_id) == EDITOR_SURFACE_TERMINAL
+            )
+            start_terminal_if_missing = bool(
+                terminal_surface
+                and self.terminal_editor_pending_agent_id != agent_id
+            )
+            if terminal_surface:
+                self.terminal_editor_pending_agent_id = agent_id
+                self.apply_terminal_editor_class()
+            else:
+                self.render_editor_for_agent(agent_id)
+            await self.load_terminal_editor_status(
+                agent_id,
+                start_if_missing=start_terminal_if_missing,
+            )
         elif self.active_agent_tab == "workerbee-tab":
             await self.load_workerbee_status(agent_id)
         elif self.active_agent_tab == "pull-requests-tab":
@@ -15925,6 +16017,12 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "files-open-editor":
             await self.open_selected_file_in_editor(self.selected_agent_id)
             return
+        if event.button.id == "files-open-text":
+            await self.open_selected_file_in_text_editor(self.selected_agent_id)
+            return
+        if event.button.id == "files-open-terminal":
+            await self.open_selected_file_in_terminal_editor(self.selected_agent_id)
+            return
         if event.button.id == "files-create-file":
             self.open_file_path_action("create_file")
             return
@@ -15960,6 +16058,9 @@ class AgentPBXTUI(App[None]):
             return
         if event.button.id == "editor-terminal":
             await self.start_terminal_editor(self.selected_agent_id)
+            return
+        if event.button.id == "editor-text":
+            await self.show_text_editor(self.selected_agent_id)
             return
         if event.button.id == "editor-terminal-stop":
             await self.stop_terminal_editor(self.selected_agent_id)
@@ -26603,7 +26704,41 @@ class AgentPBXTUI(App[None]):
             except Exception:
                 pass
 
+    def editor_surface_for_agent(self, agent_id: str | None = None) -> str:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if not resolved_agent_id:
+            return self.editor_default_surface
+        return normalize_editor_surface(
+            self.editor_surface_by_agent.get(
+                resolved_agent_id,
+                self.editor_default_surface,
+            )
+        )
+
+    async def show_text_editor(self, agent_id: str | None = None) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        if not resolved_agent_id:
+            self.notify("Select an Agent or Operator first.", severity="warning")
+            return
+        self.editor_surface_by_agent[resolved_agent_id] = EDITOR_SURFACE_TEXTUAL
+        self.terminal_editor_pending_agent_id = None
+        if self.terminal_editor_agent_id == resolved_agent_id:
+            await self.detach_terminal_editor_surface()
+        self.activate_agent_tab("editor-tab")
+        self.render_editor_for_agent(resolved_agent_id)
+        self.apply_terminal_editor_class()
+        self.focus_right_pane_content()
+
     async def open_selected_file_in_editor(self, agent_id: str | None = None) -> None:
+        if self.editor_default_surface == EDITOR_SURFACE_TERMINAL:
+            await self.open_selected_file_in_terminal_editor(agent_id)
+            return
+        await self.open_selected_file_in_text_editor(agent_id)
+
+    async def open_selected_file_in_text_editor(
+        self,
+        agent_id: str | None = None,
+    ) -> None:
         resolved_agent_id = agent_id or self.selected_agent_id
         path = self.selected_file_path(resolved_agent_id)
         if not resolved_agent_id or not path:
@@ -26612,6 +26747,21 @@ class AgentPBXTUI(App[None]):
         line = self.selected_file_line_by_agent.get(resolved_agent_id)
         await self.open_editor_for_agent(resolved_agent_id, path=path, line=line)
 
+    async def open_selected_file_in_terminal_editor(
+        self,
+        agent_id: str | None = None,
+    ) -> None:
+        resolved_agent_id = agent_id or self.selected_agent_id
+        path = self.selected_file_path(resolved_agent_id)
+        if not resolved_agent_id or not path:
+            self.notify("Select a file or search result first.", severity="warning")
+            return
+        await self.start_terminal_editor(
+            resolved_agent_id,
+            path=path,
+            line=self.selected_file_line_by_agent.get(resolved_agent_id),
+        )
+
     async def open_editor_for_agent(
         self,
         agent_id: str,
@@ -26619,6 +26769,23 @@ class AgentPBXTUI(App[None]):
         path: str,
         line: int | None = None,
     ) -> None:
+        existing = self.editor_document_for_agent(agent_id)
+        if existing is not None:
+            self.capture_editor_buffer(agent_id)
+        if agent_id in self.editor_dirty_agent_ids:
+            existing_path = str((existing or {}).get("path") or "")
+            if existing_path == path:
+                await self.show_text_editor(agent_id)
+                self.notify(
+                    "Showing the existing unsaved Textual buffer.",
+                    severity="warning",
+                )
+            else:
+                self.notify(
+                    "Save or revert Textual editor changes before opening another file.",
+                    severity="warning",
+                )
+            return
         self.set_editor_status(f"Editor: loading {path}...")
         try:
             payload = await self.fetch_agent_file_document(agent_id, path)
@@ -26640,6 +26807,10 @@ class AgentPBXTUI(App[None]):
             self.set_editor_status("Editor: selected file has no readable text")
             self.notify("Selected file has no readable text.", severity="warning")
             return
+        self.editor_surface_by_agent[agent_id] = EDITOR_SURFACE_TEXTUAL
+        self.terminal_editor_pending_agent_id = None
+        if self.terminal_editor_agent_id == agent_id:
+            await self.detach_terminal_editor_surface()
         payload["current_text"] = text
         self.editor_documents_by_agent[agent_id] = payload
         self.editor_dirty_agent_ids.discard(agent_id)
@@ -26660,9 +26831,16 @@ class AgentPBXTUI(App[None]):
         active = bool(
             self.active_agent_tab == "editor-tab"
             and self.selected_agent_id
-            and self.terminal_editor_agent_id == self.selected_agent_id
-            and surface is not None
-            and surface.attached
+            and self.editor_surface_for_agent(self.selected_agent_id)
+            == EDITOR_SURFACE_TERMINAL
+            and (
+                self.terminal_editor_pending_agent_id == self.selected_agent_id
+                or (
+                    self.terminal_editor_agent_id == self.selected_agent_id
+                    and surface is not None
+                    and surface.attached
+                )
+            )
         )
         try:
             screens = list(self.screen_stack)
@@ -26700,6 +26878,7 @@ class AgentPBXTUI(App[None]):
         if agent_id != self.selected_agent_id or self.active_agent_tab != "editor-tab":
             return False
         self.terminal_editor_agent_id = agent_id
+        self.terminal_editor_pending_agent_id = agent_id
         self.terminal_editor_runtime_by_agent[agent_id] = dict(runtime)
         try:
             # Reveal the terminal before starting its PTY so the nested tmux
@@ -26721,12 +26900,16 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             surface.detach()
             self.terminal_editor_agent_id = None
+            self.terminal_editor_pending_agent_id = None
             self.apply_terminal_editor_class()
             self.notify(f"Unable to attach terminal editor: {exc}", severity="error")
             return False
+        self.terminal_editor_pending_agent_id = None
         self.apply_terminal_editor_class()
+        path = str(runtime.get("path") or "")
+        location = path or "project workspace"
         self.set_editor_status(
-            f"Editor: terminal {runtime.get('profile_id')} · {runtime.get('path')}"
+            f"Editor: {runtime.get('profile_id') or 'native'} · {location}"
         )
         surface.focus()
         return True
@@ -26738,9 +26921,15 @@ class AgentPBXTUI(App[None]):
         if surface is not None:
             surface.detach()
         self.terminal_editor_agent_id = None
+        self.terminal_editor_pending_agent_id = None
         self.apply_terminal_editor_class()
 
-    async def load_terminal_editor_status(self, agent_id: str) -> None:
+    async def load_terminal_editor_status(
+        self,
+        agent_id: str,
+        *,
+        start_if_missing: bool = False,
+    ) -> None:
         try:
             response = await self.api_client().get(
                 f"/v1/agents/{agent_id}/terminal-editor",
@@ -26750,27 +26939,49 @@ class AgentPBXTUI(App[None]):
             response.raise_for_status()
             runtime = response.json()
         except Exception as exc:
+            if self.terminal_editor_pending_agent_id == agent_id:
+                self.terminal_editor_pending_agent_id = None
+                self.apply_terminal_editor_class()
             self.notify(f"Unable to load terminal editor: {exc}", severity="warning")
             return
         if not runtime.get("running"):
             self.terminal_editor_runtime_by_agent.pop(agent_id, None)
             if self.terminal_editor_agent_id == agent_id:
                 await self.detach_terminal_editor_surface()
+            if (
+                start_if_missing
+                and self.editor_surface_for_agent(agent_id) == EDITOR_SURFACE_TERMINAL
+                and agent_id == self.selected_agent_id
+                and self.active_agent_tab == "editor-tab"
+            ):
+                await self.start_terminal_editor(agent_id)
+                return
+            if self.terminal_editor_pending_agent_id == agent_id:
+                self.terminal_editor_pending_agent_id = None
+                self.apply_terminal_editor_class()
             return
         self.terminal_editor_runtime_by_agent[agent_id] = dict(runtime)
-        if agent_id == self.selected_agent_id and self.active_agent_tab == "editor-tab":
+        if (
+            agent_id == self.selected_agent_id
+            and self.active_agent_tab == "editor-tab"
+            and self.editor_surface_for_agent(agent_id) == EDITOR_SURFACE_TERMINAL
+        ):
             await self.attach_terminal_editor(agent_id, runtime)
+        elif self.terminal_editor_pending_agent_id == agent_id:
+            self.terminal_editor_pending_agent_id = None
+            self.apply_terminal_editor_class()
 
     async def start_terminal_editor(
         self,
         agent_id: str | None = None,
         *,
         profile_id: str | None = None,
+        path: str | None = None,
+        line: int | None = None,
     ) -> bool:
         resolved_agent_id = agent_id or self.selected_agent_id
-        document = self.editor_document_for_agent(resolved_agent_id)
-        if not resolved_agent_id or document is None:
-            self.notify("Open a file in the editor first.", severity="warning")
+        if not resolved_agent_id:
+            self.notify("Select an Agent or Operator first.", severity="warning")
             return False
         self.capture_editor_buffer(resolved_agent_id)
         if resolved_agent_id in self.editor_dirty_agent_ids:
@@ -26779,16 +26990,17 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return False
-        path = str(document.get("path") or "")
-        if not path:
-            self.notify("Editor file path is missing.", severity="warning")
-            return False
-        payload: dict[str, Any] = {
-            "path": path,
-            "line": self.selected_file_line_by_agent.get(resolved_agent_id),
-        }
+        payload: dict[str, Any] = {}
+        if path:
+            payload["path"] = path
+            payload["line"] = line
         if profile_id:
             payload["profile_id"] = profile_id
+        self.editor_surface_by_agent[resolved_agent_id] = EDITOR_SURFACE_TERMINAL
+        self.terminal_editor_pending_agent_id = resolved_agent_id
+        self.activate_agent_tab("editor-tab")
+        self.set_editor_status("Editor: opening native project workspace...")
+        self.apply_terminal_editor_class()
         try:
             response = await self.api_client().post(
                 f"/v1/agents/{resolved_agent_id}/terminal-editor",
@@ -26799,10 +27011,19 @@ class AgentPBXTUI(App[None]):
             response.raise_for_status()
             runtime = response.json()
         except Exception as exc:
+            self.terminal_editor_pending_agent_id = None
+            self.apply_terminal_editor_class()
             self.notify(f"Unable to start terminal editor: {exc}", severity="error")
             return False
+        error = runtime.get("error") if isinstance(runtime.get("error"), dict) else None
+        if runtime.get("ready") is False or error:
+            self.terminal_editor_pending_agent_id = None
+            self.apply_terminal_editor_class()
+            code = str((error or {}).get("code") or "TERMINAL_EDITOR_UNAVAILABLE")
+            message = str((error or {}).get("message") or "native editor unavailable")
+            self.notify(f"{code}: {message}", severity="warning")
+            return False
         self.terminal_editor_runtime_by_agent[resolved_agent_id] = dict(runtime)
-        self.activate_agent_tab("editor-tab")
         attached = await self.attach_terminal_editor(resolved_agent_id, runtime)
         if attached:
             self.notify(
@@ -26828,6 +27049,8 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             self.notify(f"Unable to stop terminal editor: {exc}", severity="error")
             return False
+        self.editor_surface_by_agent[resolved_agent_id] = EDITOR_SURFACE_TEXTUAL
+        self.terminal_editor_pending_agent_id = None
         if self.terminal_editor_agent_id == resolved_agent_id:
             await self.detach_terminal_editor_surface()
         self.terminal_editor_runtime_by_agent.pop(resolved_agent_id, None)

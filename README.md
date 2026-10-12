@@ -984,36 +984,52 @@ results can be selected to preview a match. `Copy Path` copies the selected
 project-relative path, and `Copy Text` copies the full bounded text document for
 the selected file through the same guarded API.
 
-`Open Editor` opens the selected file or search result in the native `Editor`
-tab. The editor is a Textual text buffer with syntax highlighting when Textual
-has a language parser available. Buffers are cached per agent, so unsaved edits
-survive moving between tabs and selected agents during the TUI session. `Save`
-writes UTF-8 through an optimistic lock using the loaded file hash or mtime and
-reports a write conflict if the file changed on disk. `Revert` reloads the file
-from the daemon. `F9` or `Full F9` toggles an editor-fullscreen layout that keeps
-the TUI title and footer visible.
+The Files tab provides `Open Default`, `Open Text`, and `Open Native`. `Open
+Default` follows `AGENT_PBX_EDITOR_DEFAULT_SURFACE`; the committed fallback is
+`textual`. `Open Text` always loads the guarded Textual editor, while `Open
+Native` routes the selected file directly into the managed terminal editor.
 
-`Open Term` or `/editor terminal` opens the clean current file in a managed
-native terminal editor inside the Editor tab. Agent PBX discovers Neovim, Vim,
-and Nano by default, or reads allowlisted structured argument profiles from
-`AGENT_PBX_TERMINAL_EDITOR_PROFILES`. It executes the selected argv directly,
-without a shell, after applying the same project-root, sensitive-name, symlink,
-traversal, and regular-file checks as the Textual editor. A dirty Textual buffer
-must be saved or reverted first. Each editor runs on its own editor-only tmux
-server; it cannot attach to, move, stop, or reuse a Codex runtime pane. Use
-`/editor terminal close` to stop that editor runtime and reload the file through
-the normal conflict-aware editor path. Neovim runtimes use a private RPC socket,
-so opening another approved file from Files reuses the existing project editor
-instead of starting a second process. Editor identity is stored in SQLite and
-validated against its tmux socket, pane, PID/start time, project root, and RPC
-socket after daemon or TUI restart. The default daemon shutdown policy is
-`detach`; set it to `stop` to retain the earlier cleanup behavior. If identity
-validation marks a saved mapping stale, `/editor terminal forget` removes the
-record only after the daemon proves the recorded editor is no longer live; it
-never kills an unverified process.
+The Textual editor provides syntax highlighting when Textual has a language
+parser available. Buffers are cached per Agent or Operator, so unsaved edits
+survive moving between tabs during the TUI session. `Save` writes UTF-8 through
+an optimistic lock using the loaded file hash or mtime and reports a conflict if
+the file changed on disk. Returning from Neovim to a clean Textual buffer
+refetches the file, so native-editor writes do not leave a stale editable copy.
+A dirty Textual buffer must be saved or reverted before its project can open in
+the native editor. `F9` or `Full F9` toggles an editor-fullscreen layout that
+keeps the TUI title and footer visible.
+
+`Native` or `/editor terminal` starts or attaches a project-rooted managed
+editor without requiring a file to be staged in Textual. `/editor workspace`
+uses the configured default surface. When terminal is the configured default,
+selecting the Editor tab or running `/editor workspace` lazily opens that empty
+project workspace. Agent PBX discovers Neovim, Vim, and Nano, or reads
+allowlisted structured argument profiles from
+`AGENT_PBX_TERMINAL_EDITOR_PROFILES`. `workspace_argv` defines the fileless
+startup command; older profiles derive a compatible prefix before `{line}` or
+`{path}`. Agent PBX executes argv directly without a shell.
+
+Neovim runtimes use a private RPC socket. Files selected through `Open Native`
+or `/editor terminal open` use `tab drop`: the initial empty buffer receives the
+first file, a new file opens in another tab, and a file already visible is
+reused without disturbing other buffers or tabs. Paths still pass the same
+project-root, sensitive-name, symlink, traversal, and regular-file checks as the
+Textual editor. Review-readonly sessions may open a managed editor only when
+their registered cwd is the explicit writable `metadata.work_root`.
+
+Each editor runs on its own editor-only tmux server and cannot attach to, move,
+stop, or reuse a Codex runtime pane. `/editor terminal close` stops only that
+editor. Editor identity is stored in SQLite and validated against its tmux
+socket, pane, PID/start time, project root, and RPC socket after daemon or TUI
+restart. The default daemon shutdown policy is `detach`; set it to `stop` when
+daemon shutdown should end editor runtimes. If identity validation marks a saved
+mapping stale, `/editor terminal forget` removes the record only after the
+daemon proves the recorded editor is no longer live; it never kills an
+unverified process.
 
 ```bash
-export AGENT_PBX_TERMINAL_EDITOR_PROFILES='{"nvim":{"label":"Neovim","argv":["nvim","+{line}","--","{path}"]}}'
+export AGENT_PBX_EDITOR_DEFAULT_SURFACE="terminal"
+export AGENT_PBX_TERMINAL_EDITOR_PROFILES='{"nvim":{"label":"Neovim","argv":["nvim","+{line}","--","{path}"],"workspace_argv":["nvim"]}}'
 export AGENT_PBX_TERMINAL_EDITOR_DEFAULT="nvim"
 export AGENT_PBX_TERMINAL_EDITOR_SHUTDOWN_POLICY="detach"
 ```

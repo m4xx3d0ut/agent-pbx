@@ -33,8 +33,19 @@ TERMINAL_EDITOR_API_VERSION = "agent-pbx.terminal-editor/v1"
 TERMINAL_EDITOR_PROFILES_ENV = "AGENT_PBX_TERMINAL_EDITOR_PROFILES"
 TERMINAL_EDITOR_DEFAULT_ENV = "AGENT_PBX_TERMINAL_EDITOR_DEFAULT"
 TERMINAL_EDITOR_SHUTDOWN_POLICY_ENV = "AGENT_PBX_TERMINAL_EDITOR_SHUTDOWN_POLICY"
+EDITOR_DEFAULT_SURFACE_ENV = "AGENT_PBX_EDITOR_DEFAULT_SURFACE"
 PROFILE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 TERMINAL_EDITOR_SHUTDOWN_POLICIES = {"detach", "stop"}
+EDITOR_SURFACE_TEXTUAL = "textual"
+EDITOR_SURFACE_TERMINAL = "terminal"
+EDITOR_SURFACES = {EDITOR_SURFACE_TEXTUAL, EDITOR_SURFACE_TERMINAL}
+
+
+def normalize_editor_surface(value: object) -> str:
+    surface = str(value or "").strip().casefold().replace("-", "_")
+    if surface in {"terminal", "native", "nvim", "vim"}:
+        return EDITOR_SURFACE_TERMINAL
+    return EDITOR_SURFACE_TEXTUAL
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,9 +53,14 @@ class TerminalEditorProfile:
     profile_id: str
     label: str
     argv: tuple[str, ...]
+    workspace_argv: tuple[str, ...]
 
     def public_dict(self) -> dict[str, Any]:
-        return {**asdict(self), "argv": list(self.argv)}
+        return {
+            **asdict(self),
+            "argv": list(self.argv),
+            "workspace_argv": list(self.workspace_argv),
+        }
 
     def command(self, *, path: Path, line: int | None = None) -> tuple[str, ...]:
         rendered = tuple(
@@ -55,9 +71,12 @@ class TerminalEditorProfile:
             rendered = (*rendered, str(path))
         return rendered
 
+    def workspace_command(self) -> tuple[str, ...]:
+        return self.workspace_argv
+
     @property
     def supports_rpc(self) -> bool:
-        return self.profile_id == "nvim" or Path(self.argv[0]).name == "nvim"
+        return self.profile_id == "nvim" or Path(self.workspace_argv[0]).name == "nvim"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +101,52 @@ class TerminalEditorRuntime:
     state: str = "ready"
 
     def public_dict(self) -> dict[str, Any]:
-        return {"api_version": TERMINAL_EDITOR_API_VERSION, **asdict(self)}
+        return {
+            "api_version": TERMINAL_EDITOR_API_VERSION,
+            **asdict(self),
+            "workspace": not bool(self.path),
+        }
+
+
+def _derived_workspace_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """Keep profile startup flags that precede file/line placeholders."""
+
+    parts: list[str] = []
+    for part in argv:
+        if "{path}" in part or "{line}" in part:
+            break
+        parts.append(part)
+    while len(parts) > 1 and parts[-1] == "--":
+        parts.pop()
+    return tuple(parts or argv[:1])
+
+
+def _resolved_profile_argv(
+    value: object,
+    *,
+    profile_id: str,
+    field: str,
+    which: Callable[[str], str | None],
+) -> tuple[str, ...] | None:
+    if not isinstance(value, list):
+        raise ValueError(f"terminal editor profile {profile_id} requires {field}")
+    argv = tuple(str(part) for part in value)
+    if not argv or len(argv) > 32 or any(not part or "\x00" in part for part in argv):
+        raise ValueError(f"terminal editor profile {profile_id} has invalid {field}")
+    executable = argv[0]
+    if Path(executable).is_absolute():
+        executable_path = Path(executable).expanduser()
+        executable_target = executable_path.resolve()
+        resolved = (
+            str(executable_path)
+            if executable_target.is_file() and os.access(executable_path, os.X_OK)
+            else ""
+        )
+    else:
+        resolved = str(which(executable) or "")
+    if not resolved:
+        return None
+    return (resolved, *argv[1:])
 
 
 def terminal_editor_profiles(
@@ -105,28 +169,33 @@ def terminal_editor_profiles(
                 raise ValueError(f"invalid terminal editor profile id: {profile_id}")
             if not isinstance(item, dict) or not isinstance(item.get("argv"), list):
                 raise ValueError(f"terminal editor profile {profile_id} requires argv")
-            argv = tuple(str(part) for part in item["argv"])
-            if not argv or len(argv) > 32 or any(not part or "\x00" in part for part in argv):
-                raise ValueError(f"terminal editor profile {profile_id} has invalid argv")
-            executable = argv[0]
-            if Path(executable).is_absolute():
-                executable_path = Path(executable).expanduser()
-                executable_target = executable_path.resolve()
-                resolved = (
-                    str(executable_path)
-                    if executable_target.is_file()
-                    and os.access(executable_path, os.X_OK)
-                    else ""
+            argv = _resolved_profile_argv(
+                item["argv"],
+                profile_id=str(profile_id),
+                field="argv",
+                which=which,
+            )
+            if argv is None:
+                continue
+            workspace_value = item.get("workspace_argv")
+            workspace_argv = (
+                _resolved_profile_argv(
+                    workspace_value,
+                    profile_id=str(profile_id),
+                    field="workspace_argv",
+                    which=which,
                 )
-            else:
-                resolved = str(which(executable) or "")
-            if not resolved:
+                if workspace_value is not None
+                else _derived_workspace_argv(argv)
+            )
+            if workspace_argv is None:
                 continue
             profiles.append(
                 TerminalEditorProfile(
                     str(profile_id),
                     str(item.get("label") or profile_id),
-                    (resolved, *argv[1:]),
+                    argv,
+                    workspace_argv,
                 )
             )
     else:
@@ -138,7 +207,12 @@ def terminal_editor_profiles(
             executable = which(profile_id)
             if executable:
                 profiles.append(
-                    TerminalEditorProfile(profile_id, label, (executable, *extra))
+                    TerminalEditorProfile(
+                        profile_id,
+                        label,
+                        (executable, *extra),
+                        (executable,),
+                    )
                 )
     return tuple(profiles)
 
@@ -169,6 +243,9 @@ class ManagedTerminalEditorService:
         self.default_profile = str(
             self.environ.get(TERMINAL_EDITOR_DEFAULT_ENV) or ""
         ).strip()
+        self.default_surface = normalize_editor_surface(
+            self.environ.get(EDITOR_DEFAULT_SURFACE_ENV)
+        )
         self.shutdown_policy = str(
             self.environ.get(TERMINAL_EDITOR_SHUTDOWN_POLICY_ENV) or "detach"
         ).strip().lower()
@@ -187,7 +264,8 @@ class ManagedTerminalEditorService:
             "api_version": TERMINAL_EDITOR_API_VERSION,
             "default_profile": selected or None,
             "profiles": [profile.public_dict() for profile in self.profiles.values()],
-            "native_editor_default": True,
+            "default_surface": self.default_surface,
+            "native_editor_default": self.default_surface == EDITOR_SURFACE_TERMINAL,
             "shutdown_policy": self.shutdown_policy,
             "durable_runtime": self.store is not None,
         }
@@ -196,21 +274,42 @@ class ManagedTerminalEditorService:
         self,
         agent: dict[str, Any],
         *,
-        path: str,
+        path: str | None = None,
         profile_id: str | None = None,
         line: int | None = None,
     ) -> dict[str, Any]:
         profile = self._profile(profile_id)
-        resolved = self.files.resolve_terminal_editor_target(agent, path=path)
-        if isinstance(resolved, FileBrowserError):
+        root_result = self.files.resolve_terminal_editor_workspace(agent)
+        if isinstance(root_result, FileBrowserError):
             return {
                 "api_version": TERMINAL_EDITOR_API_VERSION,
                 "ready": False,
-                "error": resolved.as_dict(),
+                "error": root_result.as_dict(),
             }
-        root, target = resolved
+        root = root_result
+        access_error = self._workspace_access_error(agent, root)
+        if access_error is not None:
+            return {
+                "api_version": TERMINAL_EDITOR_API_VERSION,
+                "ready": False,
+                "error": access_error.as_dict(),
+            }
+        target: Path | None = None
+        if path is not None:
+            resolved = self.files.resolve_terminal_editor_target(agent, path=path)
+            if isinstance(resolved, FileBrowserError):
+                return {
+                    "api_version": TERMINAL_EDITOR_API_VERSION,
+                    "ready": False,
+                    "error": resolved.as_dict(),
+                }
+            root, target = resolved
         metadata = agent.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
+        if target is None or profile.supports_rpc:
+            command = profile.workspace_command()
+        else:
+            command = profile.command(path=target, line=line)
         return {
             "api_version": TERMINAL_EDITOR_API_VERSION,
             "ready": True,
@@ -223,18 +322,19 @@ class ManagedTerminalEditorService:
             ),
             "profile": profile.public_dict(),
             "root": str(root),
-            "path": str(target),
+            "path": str(target) if target is not None else "",
+            "workspace": target is None,
             "line": max(1, line or 1),
-            "command": list(profile.command(path=target, line=line)),
+            "command": list(command),
             "rpc_enabled": profile.supports_rpc,
-            "native_editor_default": True,
+            "native_editor_default": self.default_surface == EDITOR_SURFACE_TERMINAL,
         }
 
     def start(
         self,
         agent: dict[str, Any],
         *,
-        path: str,
+        path: str | None = None,
         profile_id: str | None = None,
         line: int | None = None,
     ) -> dict[str, Any]:
@@ -252,10 +352,12 @@ class ManagedTerminalEditorService:
                 raise ValueError(
                     "stop the active managed editor before changing profiles"
                 )
-            if existing.get("path") == preview["path"]:
+            if not preview["path"]:
                 return {**existing, "started": False, "opened": False}
             runtime = self.runtimes[agent_id]
             if not runtime.rpc_enabled:
+                if existing.get("path") == preview["path"]:
+                    return {**existing, "started": False, "opened": False}
                 raise ValueError(
                     "this editor profile cannot open another file in the active runtime"
                 )
@@ -272,6 +374,7 @@ class ManagedTerminalEditorService:
                 "running": True,
                 "started": False,
                 "opened": True,
+                "reused": existing.get("path") == preview["path"],
             }
         if existing.get("state") == "stale":
             raise ValueError(
@@ -380,13 +483,25 @@ class ManagedTerminalEditorService:
             process_start_ticks=process_start_ticks(pane.pane_pid),
             tmux_bin=self.tmux_bin,
         )
+        if profile.supports_rpc and preview["path"]:
+            try:
+                self._route_file(
+                    runtime,
+                    path=Path(str(preview["path"])),
+                    line=max(1, line or 1),
+                )
+            except Exception:
+                self._kill_session(identity, session_name)
+                if rpc_socket_path is not None:
+                    rpc_socket_path.unlink(missing_ok=True)
+                raise
         self.runtimes[agent_id] = runtime
         self._persist_runtime(runtime, verified=True)
         return {
             **runtime.public_dict(),
             "running": True,
             "started": True,
-            "opened": True,
+            "opened": bool(preview["path"]),
         }
 
     def status(self, agent_id: str) -> dict[str, Any]:
@@ -629,18 +744,61 @@ class ManagedTerminalEditorService:
         if not self._rpc_socket_is_safe(Path(runtime.rpc_socket_path)):
             raise RuntimeError("the managed Neovim RPC socket is unavailable or unsafe")
         command = [
-            profile.argv[0],
+            profile.workspace_argv[0],
             "--server",
             runtime.rpc_socket_path,
-            "--remote",
-            f"+{max(1, line)}",
-            str(path),
+            "--remote-expr",
+            self._neovim_tab_drop_expression(path, line=max(1, line)),
         ]
         result = self.runner(command, capture_output=True, text=True, timeout=10)
         if result.returncode != 0:
             raise RuntimeError(
                 (result.stderr or result.stdout or "Neovim remote-open failed").strip()
             )
+
+    @staticmethod
+    def _neovim_tab_drop_expression(path: Path, *, line: int) -> str:
+        # Vim single-quoted strings preserve backslashes and escape a quote by
+        # doubling it.  fnameescape then protects Ex separators and whitespace.
+        path_literal = "'" + str(path).replace("'", "''") + "'"
+        return (
+            "[execute('tab drop ' . fnameescape("
+            f"{path_literal})), cursor({max(1, line)}, 1)][-1]"
+        )
+
+    @staticmethod
+    def _workspace_access_error(
+        agent: Mapping[str, Any],
+        root: Path,
+    ) -> FileBrowserError | None:
+        metadata = agent.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        access_mode = str(
+            metadata.get("access_mode") or agent.get("access_mode") or "edit"
+        ).strip().casefold()
+        if access_mode != "review_readonly":
+            return None
+        work_root_value = str(metadata.get("work_root") or "").strip()
+        if not work_root_value:
+            return FileBrowserError(
+                "TERMINAL_EDITOR_READ_ONLY",
+                "review-readonly sessions require an explicit writable work_root",
+                "Use the review work_root or route source edits to an edit-capable Agent.",
+            )
+        try:
+            work_root = Path(work_root_value).expanduser().resolve(strict=True)
+        except OSError:
+            return FileBrowserError(
+                "TERMINAL_EDITOR_WORK_ROOT_UNAVAILABLE",
+                "the review work_root is unavailable",
+            )
+        if work_root != root:
+            return FileBrowserError(
+                "TERMINAL_EDITOR_READ_ONLY",
+                "the registered cwd is not the approved review work_root",
+                "Open the managed editor from the review work_root.",
+            )
+        return None
 
     def _wait_for_rpc_socket(self, path: Path) -> bool:
         for _ in range(40):
