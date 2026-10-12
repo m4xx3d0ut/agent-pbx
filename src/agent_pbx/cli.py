@@ -632,6 +632,44 @@ def build_parser() -> argparse.ArgumentParser:
     sim_client.add_argument("--agent-id", default=None)
     sim_client.add_argument("--message", default=None)
     sim_client.add_argument("--transcript", type=Path, default=None)
+
+    demo = subcommands.add_parser(
+        "demo",
+        help="Inspect or run the isolated interactive Agent PBX product demo.",
+    )
+    demo_subcommands = demo.add_subparsers(dest="demo_command", required=True)
+    demo_subcommands.add_parser(
+        "contract", help="Print the versioned product-site integration contract."
+    )
+    demo_doctor = demo_subcommands.add_parser(
+        "doctor", help="Check local browser-demo dependencies without starting services."
+    )
+    demo_doctor.add_argument("--tmux-bin", default="tmux")
+    demo_doctor.add_argument("--json", action="store_true")
+    demo_session = demo_subcommands.add_parser(
+        "tui-session",
+        help="Run one disposable TUI session (normally launched by the web service).",
+    )
+    demo_session.add_argument("--root", type=Path, default=None)
+    demo_session.add_argument("--keep", action="store_true")
+    demo_session.add_argument("--scenario", default="product-tour-v1")
+    demo_session.add_argument("--ttl-seconds", type=int, default=900)
+    demo_session.add_argument("--tmux-bin", default="tmux")
+    demo_session.add_argument("--theme", default="cyberpunk")
+    demo_session.add_argument("--layout", default="adaptive")
+    demo_web = demo_subcommands.add_parser(
+        "web", help="Serve a new isolated Agent PBX TUI for each browser connection."
+    )
+    demo_web.add_argument("--host", default="127.0.0.1")
+    demo_web.add_argument("--port", type=int, default=8000)
+    demo_web.add_argument("--public-url", default=None)
+    demo_web.add_argument("--allowed-origin", action="append", default=None)
+    demo_web.add_argument("--allow-public-bind", action="store_true")
+    demo_web.add_argument("--max-sessions", type=int, default=8)
+    demo_web.add_argument("--session-ttl-seconds", type=int, default=900)
+    demo_web.add_argument("--tmux-bin", default="tmux")
+    demo_web.add_argument("--debug", action="store_true")
+
     token_helper = subcommands.add_parser(
         "token-helper", help="Run a short-lived token pairing helper."
     )
@@ -646,6 +684,67 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     load_user_env_defaults()
     args = build_parser().parse_args(argv)
+    if args.command == "demo":
+        from .demo.contract import public_demo_contract
+        from .demo.policy import PublicDemoPolicyError
+        from .demo.session import (
+            DemoSessionConfig,
+            DemoSessionError,
+            run_demo_tui_session,
+        )
+        from .demo.web import (
+            DemoWebDependencyError,
+            public_demo_doctor,
+            render_public_demo_doctor,
+            serve_public_demo,
+        )
+
+        try:
+            if args.demo_command == "contract":
+                print(json.dumps(public_demo_contract(), indent=2, sort_keys=True))
+                return 0
+            if args.demo_command == "doctor":
+                result = public_demo_doctor(tmux_bin=args.tmux_bin)
+                print(
+                    json.dumps(result, indent=2, sort_keys=True)
+                    if args.json
+                    else render_public_demo_doctor(result)
+                )
+                return 0 if result["ok"] else 1
+            if args.demo_command == "tui-session":
+                return run_demo_tui_session(
+                    DemoSessionConfig(
+                        root=args.root,
+                        keep=bool(args.keep),
+                        scenario=args.scenario,
+                        ttl_seconds=args.ttl_seconds,
+                        tmux_bin=args.tmux_bin,
+                        theme=args.theme,
+                        layout=args.layout,
+                    )
+                )
+            if args.demo_command == "web":
+                return serve_public_demo(
+                    host=args.host,
+                    port=args.port,
+                    public_url=args.public_url,
+                    allowed_origins=tuple(args.allowed_origin or ()),
+                    allow_public_bind=bool(args.allow_public_bind),
+                    max_sessions=args.max_sessions,
+                    session_ttl_seconds=args.session_ttl_seconds,
+                    tmux_bin=args.tmux_bin,
+                    debug=bool(args.debug),
+                )
+        except (
+            DemoSessionError,
+            DemoWebDependencyError,
+            PublicDemoPolicyError,
+            OSError,
+            ValueError,
+        ) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if args.command == "serve":
         return _serve_foreground(args)
 

@@ -32,6 +32,9 @@ dependencies = [
 images = [
     "Pillow>=10,<12",
 ]
+web-demo = [
+    "textual-serve>=1.1.3,<2",
+]
 dev = [
     "build>=1,<2",
     "pytest>=8,<9",

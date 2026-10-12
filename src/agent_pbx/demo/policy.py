@@ -194,9 +194,9 @@ def validate_web_binding(
     if not parsed.netloc or parsed.username or parsed.password:
         raise PublicDemoPolicyError("public demo URL must be an absolute URL without credentials")
     normalized_url = public_url.rstrip("/")
+    service_origin = f"{parsed.scheme}://{parsed.netloc}"
     origins = tuple(origin.rstrip("/") for origin in allowed_origins if origin.strip())
-    if not origins:
-        origins = (normalized_url,)
+    origins = tuple(dict.fromkeys((service_origin, *origins)))
     for origin in origins:
         candidate = urlparse(origin)
         if candidate.scheme not in {"http", "https"} or not candidate.netloc:

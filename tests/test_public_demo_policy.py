@@ -125,4 +125,7 @@ def test_web_binding_is_local_by_default_and_explicit_when_public() -> None:
         public_url="https://demo.example/",
         allowed_origins=("https://www.example/",),
         allow_public_bind=True,
-    ) == ("https://demo.example", ("https://www.example",))
+    ) == (
+        "https://demo.example",
+        ("https://demo.example", "https://www.example"),
+    )
