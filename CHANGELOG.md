@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add an optional, repository-owned interactive browser demo that runs the real
+  Textual TUI in one disposable Agent PBX daemon, database, Git project set,
+  fixture integration set, and managed tmux runtime per visitor. The public
+  adapter uses an allowlisted environment, exact origins, bounded sessions,
+  timeout/disconnect cleanup, rootless container packaging, and a versioned
+  product-site handoff contract without access to live workstation state.
 - Add a daemon-owned, read-only Codex app-server bridge that associates native
   subagent threads and lifecycle items with exact PBX session mappings, drives
   the existing nested runtime tree, and degrades without affecting Codex or

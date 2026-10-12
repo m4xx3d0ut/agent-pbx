@@ -42,6 +42,23 @@ Operations**, or **Agentic StackOps**.
 The diagram's maintained [Mermaid source](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/diagrams/agent-pbx-control-plane.mmd)
 is tracked with the repository.
 
+### Interactive browser demo
+
+The optional browser demo runs the real Agent PBX TUI against a fresh,
+deterministic daemon, database, Git projects, integrations, and tmux server for
+each visitor. It does not connect to workstation Agents, credentials, projects,
+or runtime state.
+
+```bash
+python -m pip install -e ".[web-demo]"
+agent-pbx demo doctor
+agent-pbx demo web --host 127.0.0.1 --port 8000
+```
+
+See the [interactive browser demo guide](docs/public-browser-demo.md) for the
+rootless container, HTTPS reverse-proxy boundary, resource controls, public
+origin policy, and versioned product-site contract.
+
 | Layer | Owns |
 |---|---|
 | Agent PBX | Durable identity, workspace ownership, topology, routing, policy, approvals, lifecycle, campaigns, handoffs, and audit |

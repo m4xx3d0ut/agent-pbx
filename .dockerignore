@@ -1,5 +1,11 @@
 .git
 .venv
+.codex
+.local
+.ruff_cache
+.sentry-native
+.env
+.env.*
 __pycache__
 *.pyc
 .pytest_cache
@@ -10,6 +16,11 @@ state
 artifacts
 runs
 .workerbee
+build
+dist
+*.egg-info
+tmp
+temp
 local.env
 local.env.*
 !local.env.example
