@@ -702,6 +702,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/joplin new",
     "/joplin rename",
     "/joplin delete",
+    "/joplin prompt",
     "/joplin copy",
     "/joplin copy force",
     "/joplin copy report",
@@ -3000,6 +3001,24 @@ class FollowUpTextArea(TextArea):
         await super()._on_key(event)
 
 
+class JoplinReferencePromptTextArea(FollowUpTextArea):
+    """PBX-owned prompt input used when the native terminal owns raw ``@``."""
+
+    def __init__(self, *, agent_id: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.agent_id = agent_id
+
+    async def _on_key(self, event: Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            submit = getattr(self.screen, "submit", None)
+            if submit is not None:
+                submit()
+            return
+        await super()._on_key(event)
+
+
 class NavigationTextArea(TextArea):
     async def _on_key(self, event: Key) -> None:
         handle_joplin_shortcut = getattr(self.app, "handle_joplin_shortcut_key", None)
@@ -3188,6 +3207,72 @@ class CustomSlashCommandArgScreen(ModalScreen[None]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "palette-custom-command-arg":
+            event.stop()
+            self.submit()
+
+
+class JoplinReferencePromptScreen(ModalScreen[None]):
+    """Compose a PBX-expanded Joplin prompt without intercepting Codex input."""
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, *, agent_id: str) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="joplin-reference-prompt-panel"):
+            yield Static(
+                f"Joplin Reference Prompt: {self.agent_id}",
+                id="joplin-reference-prompt-title",
+            )
+            yield Static(
+                "Type @joplin:<note> and press Tab to complete. Enter sends; "
+                "Ctrl+J inserts a newline. Raw @ in the native Codex pane remains "
+                "Codex-owned.",
+                id="joplin-reference-prompt-help",
+            )
+            yield JoplinReferencePromptTextArea(
+                agent_id=self.agent_id,
+                id="joplin-reference-prompt-input",
+                soft_wrap=True,
+            )
+            with Horizontal(id="joplin-reference-prompt-actions"):
+                yield Button(
+                    "Expand & Send",
+                    id="joplin-reference-prompt-send",
+                    variant="primary",
+                )
+                yield Button("Cancel", id="joplin-reference-prompt-cancel")
+
+    def submit(self) -> None:
+        text_area = self.query_one(
+            "#joplin-reference-prompt-input",
+            JoplinReferencePromptTextArea,
+        )
+        if not text_area.text.strip():
+            self.notify("Enter a prompt containing @joplin:<note>.", severity="warning")
+            return
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self._send(text_area.text),
+            name=f"joplin-reference-prompt-{slugify(self.agent_id)}",
+            exclusive=True,
+        )
+
+    async def _send(self, message: str) -> None:
+        sent = await self.app.send_joplin_reference_prompt(  # type: ignore[attr-defined]
+            self.agent_id,
+            message,
+        )
+        if sent:
+            self.dismiss()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "joplin-reference-prompt-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "joplin-reference-prompt-send":
             event.stop()
             self.submit()
 
@@ -4592,7 +4677,8 @@ class AgentPBXTUI(App[None]):
         width: 1fr;
     }
 
-    CustomSlashCommandArgScreen {
+    CustomSlashCommandArgScreen,
+    JoplinReferencePromptScreen {
         align: center middle;
     }
 
@@ -4626,6 +4712,43 @@ class AgentPBXTUI(App[None]):
     }
 
     #palette-custom-command-actions Button {
+        width: 1fr;
+    }
+
+    #joplin-reference-prompt-panel {
+        width: 88;
+        max-width: 94%;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #joplin-reference-prompt-title {
+        height: 1;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #joplin-reference-prompt-help {
+        height: auto;
+        color: $secondary;
+        margin-bottom: 1;
+    }
+
+    #joplin-reference-prompt-input {
+        height: 10;
+        min-height: 6;
+        max-height: 18;
+        border: tall $accent;
+    }
+
+    #joplin-reference-prompt-actions {
+        height: 3;
+        margin-top: 1;
+    }
+
+    #joplin-reference-prompt-actions Button {
         width: 1fr;
     }
 
@@ -8066,6 +8189,11 @@ class AgentPBXTUI(App[None]):
             yield SystemCommand("/joplin new", "Create a scoped Joplin note", self.palette_joplin_new)
             yield SystemCommand("/joplin rename", "Rename the selected Joplin note", self.palette_joplin_rename)
             yield SystemCommand("/joplin delete", "Delete the selected Joplin note", self.palette_joplin_delete)
+            yield SystemCommand(
+                "/joplin prompt",
+                "Compose a PBX-expanded Joplin prompt for the native Codex pane",
+                self.palette_joplin_prompt,
+            )
             yield SystemCommand("/joplin copy", "Copy latest tmux response or report to Joplin", self.palette_joplin_copy)
             yield SystemCommand("/joplin copy force", "Copy even when the latest response was already saved", self.palette_joplin_copy_force)
             yield SystemCommand("/joplin copy report", "Copy latest PBX report to Joplin", self.palette_joplin_copy_report)
@@ -9653,6 +9781,12 @@ class AgentPBXTUI(App[None]):
         if agent_id is None:
             return
         self.confirm_delete_joplin_note(agent_id)
+
+    def palette_joplin_prompt(self) -> None:
+        agent_id = self.palette_tmux_agent_id()
+        if agent_id is None:
+            return
+        self.push_screen(JoplinReferencePromptScreen(agent_id=agent_id))
 
     def palette_joplin_copy(self) -> None:
         agent_id = self.palette_joplin_agent_id()
@@ -13043,6 +13177,9 @@ class AgentPBXTUI(App[None]):
             self.tmux_message_draft_by_agent[agent_id] = text
 
     def sent_history_agent_id(self, text_area: TextArea) -> str | None:
+        prompt_agent_id = str(getattr(text_area, "agent_id", "") or "").strip()
+        if prompt_agent_id:
+            return prompt_agent_id
         if text_area.id == "tmux-message":
             agent_id = self.selected_agent_id
             if agent_id:
@@ -16459,6 +16596,50 @@ class AgentPBXTUI(App[None]):
     async def send_tmux_input(self) -> None:
         message_input = self.query_one("#tmux-message", TextArea)
         await self.send_tmux_text_area_input(message_input)
+
+    async def send_joplin_reference_prompt(
+        self,
+        agent_id: str,
+        message: str,
+    ) -> bool:
+        """Expand a scoped Joplin reference and send it to a native tmux session.
+
+        The embedded terminal deliberately remains a transparent terminal: raw
+        ``@`` input belongs to Codex and is never buffered or rewritten here.
+        """
+
+        if not self.is_tmux_direct_enabled(agent_id):
+            self.notify(
+                f"Enable tmux direct mode for {agent_id} before composing a Joplin prompt.",
+                severity="warning",
+            )
+            return False
+        if JOPLIN_NOTE_REF_PATTERN.search(message) is None:
+            self.notify(
+                "Include at least one @joplin:<note> reference before sending.",
+                severity="warning",
+            )
+            return False
+        routed_agent_id = await self.route_operator_prompt_to_fork(agent_id, message)
+        if routed_agent_id is None:
+            return False
+        expanded_message = await self.expand_prompt_references(
+            routed_agent_id,
+            message,
+        )
+        if expanded_message is None:
+            return False
+        sent = await self.send_text_to_tmux(routed_agent_id, expanded_message)
+        if not sent:
+            return False
+        self.record_sent_message(routed_agent_id, message)
+        await self.record_tmux_joplin_interaction(
+            routed_agent_id,
+            expanded_message,
+        )
+        self.notify(f"Expanded Joplin prompt sent to {routed_agent_id}.")
+        await self.load_tmux_capture(routed_agent_id)
+        return True
 
     async def send_tmux_text_area_input(self, message_input: TextArea) -> None:
         agent_id = self.sent_history_agent_id(message_input) or ""

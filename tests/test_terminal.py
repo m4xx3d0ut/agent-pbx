@@ -54,6 +54,7 @@ def test_plain_function_key_is_not_passthrough() -> None:
         ("alt+enter", None, b"\n"),
         ("ctrl+enter", None, b"\n"),
         ("alt+x", None, b"\x1bx"),
+        ("@", "@", b"@"),
         ("x", "λ", "λ".encode()),
     ],
 )

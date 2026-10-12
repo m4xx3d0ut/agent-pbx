@@ -1040,10 +1040,12 @@ Agent PBX currently supports `ruff` and `mypy` when installed on the daemon host
 unavailable result when neither is present. Diagnostics are bounded by timeout
 and remain scoped to the selected agent's registered cwd.
 
-The Latest input can complete project paths with `@`. Type a project-relative
-reference such as `@README` or `@src/ag` and press `Tab`; Agent PBX loads the
-needed project directory before completing. The same completion works in tmux
-direct input.
+The Agent PBX prompt composer can complete project paths with `@`. Type a
+project-relative reference such as `@README` or `@src/ag` and press `Tab`;
+Agent PBX loads the needed project directory before completing. In native tmux
+mode, the embedded Codex terminal remains transparent and Codex owns raw `@`
+input. Open `Ctrl+P`, choose `/joplin prompt`, and compose there when PBX must
+expand a scoped reference before sending it to Codex.
 
 Joplin project notes can be referenced with `@joplin:`. Type
 `@joplin:Release` and press `Tab` to complete project note titles; if the
@@ -1054,6 +1056,9 @@ fresh and appends a `Joplin Note References` Markdown section to the prompt, so
 gives Codex both note bodies in one message. If a referenced note cannot be
 resolved inside the selected project scope, the prompt is not sent. Reference
 tokens are exact note slugs; use `Tab` completion when title wording is unclear.
+With a native Codex pane focused, use `Ctrl+P` → `/joplin prompt`; typing
+`@joplin:` directly into Codex invokes Codex's own `@` behavior and is not
+intercepted by Agent PBX.
 
 Operator prompts can reference caller agents with `@caller:`. Select an
 operator agent, type `@caller:project` or `@caller:Backend`, and press `Tab` to
@@ -1238,7 +1243,7 @@ operators and forks can be relaunched automatically; caller panes require a know
 Codex session id and restart through the current configured shell `codex` command
 when no pinned command is stored.
 
-In the Latest input, type `/` and press `Tab` to complete slash commands inline,
+In the Agent PBX prompt composer, type `/` and press `Tab` to complete slash commands inline,
 or type `@` and press `Tab` to complete project paths. Type `@joplin:` and
 press `Tab` to complete project-scoped Joplin note titles from cache, with lazy
 loading on first use. In operator prompts, `@joplin:` completion uses the
@@ -1249,6 +1254,10 @@ request and issue numbers; operator completion uses the nearest preceding
 operator is selected to complete caller agent references. Repeated `Tab` cycles
 matches; exact local commands such as `/esc` or `/theme minimal` execute
 locally on `Enter` instead of being sent to the agent.
+
+When `Latest` contains the native embedded Codex terminal, open the PBX command
+palette with `Ctrl+P` and choose `/joplin prompt` for `@joplin:` completion and
+expansion. Raw `/` and `@` typed in the terminal remain native Codex input.
 
 Use `/plan` to toggle Codex plan mode for the selected agent. In tmux direct
 mode, Agent PBX types `/plan` with tmux key events so Codex handles it as an

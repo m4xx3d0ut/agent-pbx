@@ -34,6 +34,7 @@ from agent_pbx.tui import (
     CODEX_TERMINAL_MODE_SCROLLBACK,
     CustomSlashCommand,
     EditorCloseConfirmScreen,
+    JoplinReferencePromptScreen,
     JoplinPasteConfirmScreen,
     ModelElevationScreen,
     ManagedProjectPickerScreen,
@@ -10323,6 +10324,104 @@ async def test_tui_tmux_input_expands_joplin_note_references() -> None:
     assert app.sent_message_history_by_agent["agent-1"] == ["Apply @joplin:Runbook"]
 
 
+async def test_tui_joplin_reference_prompt_expands_before_native_send() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    sent: list[tuple[str, str]] = []
+    logged: list[tuple[str, str]] = []
+    captured: list[str] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            if path == "/v1/joplin/status":
+                return Response(
+                    {
+                        "configured": True,
+                        "available": True,
+                        "notebook": "Agent PBX",
+                    }
+                )
+            if path == "/v1/projects/demo/joplin/notes":
+                return Response([{"id": "note-1", "title": "Runbook"}])
+            if path == "/v1/projects/demo/joplin/notes/note-1":
+                return Response(
+                    {
+                        "id": "note-1",
+                        "title": "Runbook",
+                        "body": "Use the staged workflow.",
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    async def fake_load_tmux_capture(agent_id: str) -> None:
+        captured.append(agent_id)
+
+    async def fake_record_tmux_joplin_interaction(
+        agent_id: str,
+        message: str,
+    ) -> None:
+        logged.append((agent_id, message))
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.record_tmux_joplin_interaction = fake_record_tmux_joplin_interaction  # type: ignore[method-assign]
+    app.tmux_features_available = True
+    app.tmux_direct_enabled = True
+    app.selected_agent_id = "agent-1"
+    app.agents = {"agent-1": {"agent_id": "agent-1", "project": "demo"}}
+
+    assert await app.send_joplin_reference_prompt(
+        "agent-1",
+        "Apply @joplin:Runbook",
+    )
+
+    assert len(sent) == 1
+    assert sent[0][0] == "agent-1"
+    assert "Apply @joplin:Runbook" in sent[0][1]
+    assert "## Joplin Note References" in sent[0][1]
+    assert "Use the staged workflow." in sent[0][1]
+    assert logged == sent
+    assert captured == ["agent-1"]
+
+
+async def test_tui_joplin_prompt_palette_opens_native_reference_composer() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.selected_agent_id = "agent-1"
+        app.agents = {"agent-1": {"agent_id": "agent-1", "project": "demo"}}
+        app.tmux_direct_enabled = True
+        app.palette_joplin_prompt()
+        await pilot.pause()
+
+        assert isinstance(app.screen, JoplinReferencePromptScreen)
+        prompt = app.screen.query_one("#joplin-reference-prompt-input", TextArea)
+        assert getattr(prompt, "agent_id") == "agent-1"
+        app.joplin_notes_by_agent["agent-1"] = {
+            "note-1": {"id": "note-1", "title": "Runbook"}
+        }
+        prompt.text = "Apply @joplin:Run"
+        prompt.move_cursor((0, len(prompt.text)))
+        await prompt._on_key(Key("tab", "\t"))
+
+        assert prompt.text == "Apply @joplin:Runbook"
+
+
 def test_tui_formats_image_file_preview_as_rendered_text() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -10931,6 +11030,7 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/joplin new",
         "/joplin rename",
         "/joplin delete",
+        "/joplin prompt",
         "/joplin copy",
         "/joplin copy force",
         "/joplin copy report",
