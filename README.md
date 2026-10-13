@@ -729,14 +729,50 @@ export AGENT_PBX_WORKERBEE_SWITCHER_STATUS_BIN="$HOME/.local/bin/wb-mcp-status"
 export AGENT_PBX_WORKERBEE_SWITCHER_BIN="$HOME/.local/bin/wb-mcp-switch"
 ```
 
+Agent PBX treats backend selection, access policy, and workspace placement as
+separate controls. Exactly one backend is selected at a time:
+
+| Backend | Workspace domain | Current posture |
+|---|---|---|
+| `oss` | The exact host Git root | Supported |
+| `platform_debug` | A content-addressed import under the debug appliance workspace | Supported |
+| `user_appliance` | A separate managed appliance volume | Contract reserved; live image qualification deferred |
+
+Every TUI-launched or resumed Agent, Operator, edit fork, and review fork gets a
+private gateway lease bound to the selected backend fingerprint, generation,
+project, and workspace receipt. A backend change invalidates the old lease;
+restart or resume the affected Codex session through Agent PBX to materialize
+and verify a fresh binding. The daemon does not merge host OSS status into an
+appliance-backed session.
+
+Platform-debug needs the repository-installed materializer plus the private
+WorkerBee staging contract:
+
+```bash
+export AGENT_PBX_WORKERBEE_WORKSPACE_HELPER_BIN="$(command -v agent-pbx-workerbee-workspace)"
+export AGENT_PBX_WORKERBEE_DEBUG_STAGE_PYTHON="/path/to/k1s-workerbee-private/.venv/bin/python"
+export AGENT_PBX_WORKERBEE_DEBUG_STAGE_SCRIPT="/path/to/k1s-workerbee-private/scripts/dev/stage_platform_debug_workspace.py"
+export AGENT_PBX_WORKERBEE_DEBUG_CONTAINER="workerbee-mcp-debug"
+export AGENT_PBX_WORKERBEE_DEBUG_IMPORT_ROOT="/workspace/imports"
+```
+
+The three access profiles are `observe-local`, `review-readonly`, and
+`local-deploy`. Deployment authority requires durable entity metadata that
+explicitly sets `workerbee_mcp_profile=local-deploy`; a launch candidate cannot
+self-select that profile. Review forks always receive the read-only profile.
+Gateway bearer tokens are passed only in the child process environment and are
+not stored in Agent or Operator metadata.
+
 `/workerbee switch oss` and `/workerbee switch debug` always begin with the
 switcher's real non-mutating `--dry-run` result. Apply requires an unexpired
 private transaction, unchanged backend evidence, exact typed confirmation, and
 an additional privileged confirmation for platform-debug. Agent PBX verifies
 both backend provenance and WorkerBee MCP capabilities after apply, attempts
 automatic restoration on failure, and provides `/workerbee switch rollback`
-for the last verified transaction. The change applies only to future sessions;
-running Codex sessions remain pinned to their existing MCP binding.
+for the last verified transaction. Switching is blocked while a gateway
+mutation is active. Existing generation-bound sessions fail closed with a
+rebind diagnostic after a completed switch; Agent PBX never silently retargets
+a running session to the new backend.
 
 ## Pull Request Review
 

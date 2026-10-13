@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- Bind every Agent, Operator, edit fork, and review fork launch or resume to the
+  one selected WorkerBee backend generation and an exact workspace receipt.
+  Appliance sessions now use an Agent PBX policy gateway instead of inheriting
+  host OSS paths, and backend changes fail closed until affected sessions are
+  rebound.
+- Keep OSS, platform-debug, and future user-appliance workspace domains
+  separate. Platform-debug uses content-addressed imports in its own appliance
+  volume; the unqualified user-appliance materializer remains unavailable.
+- Read WorkerBee status from the selected appliance and its bound workspace
+  without blending in the host OSS CLI registry.
 - Preserve an explicitly assigned, task-scoped WorkerBee caller policy across
   Codex restart/resume operations. The new `local-deploy` profile permits only
   the bounded local build, manifest validation/deployment, ingress, status,
@@ -11,6 +21,13 @@
   inherit global WorkerBee configuration without a PBX override.
 - Restore caller Agent PBX identity and bearer-token environment when Codex is
   respawned in an existing managed tmux pane.
+
+### Added
+
+- Add generation-bound WorkerBee workspace and gateway lease APIs, scoped
+  `observe-local`, `review-readonly`, and `local-deploy` tool profiles, active
+  mutation guards for backend switching, and doctor diagnostics for runtime
+  generation and materializer readiness.
 
 ## v2.2.0 - 2026-10-13
 
