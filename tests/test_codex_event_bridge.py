@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 import sys
+import tempfile
 from typing import Any
 
 import pytest
@@ -307,10 +308,7 @@ for line in sys.stdin:
 
 
 @pytest.mark.asyncio
-async def test_shared_websocket_client_uses_user_local_unix_socket(
-    tmp_path: Path,
-) -> None:
-    socket_path = tmp_path / "app-server.sock"
+async def test_shared_websocket_client_uses_user_local_unix_socket() -> None:
     methods: list[str] = []
 
     async def handler(websocket: Any) -> None:
@@ -331,11 +329,13 @@ async def test_shared_websocket_client_uses_user_local_unix_socket(
             )
             await websocket.send(json.dumps({"id": request["id"], "result": result}))
 
-    async with websockets.unix_serve(handler, str(socket_path)):
-        client = AppServerWebSocketClient(socket_path, request_timeout=2.0)
-        await client.start()
-        result = await client.request("thread/list", {"limit": 1})
-        await client.close()
+    with tempfile.TemporaryDirectory(prefix="apbx-ws-", dir="/tmp") as socket_dir:
+        socket_path = Path(socket_dir) / "app-server.sock"
+        async with websockets.unix_serve(handler, str(socket_path)):
+            client = AppServerWebSocketClient(socket_path, request_timeout=2.0)
+            await client.start()
+            result = await client.request("thread/list", {"limit": 1})
+            await client.close()
 
     assert result == {"data": [], "nextCursor": None}
     assert methods == ["initialize", "initialized", "thread/list"]

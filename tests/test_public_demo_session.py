@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import shutil
 import subprocess
-import tempfile
 
 import pytest
 
@@ -12,9 +10,8 @@ from agent_pbx.demo.session import DemoSession, DemoSessionConfig, DemoSessionEr
 
 
 def test_demo_session_prepare_uses_disposable_paths_and_fake_integrations() -> None:
-    root = Path(tempfile.mkdtemp(prefix="apbx-demo-prepare-"))
-    root.rmdir()
-    session = DemoSession(DemoSessionConfig(root=root, ttl_seconds=60))
+    session = DemoSession(DemoSessionConfig(ttl_seconds=60))
+    root = session.root
     try:
         session.prepare()
         assert session.environment["HOME"] == str(root / "home")
@@ -45,8 +42,8 @@ def test_demo_session_rejects_unknown_scenario_and_unbounded_ttl() -> None:
     reason="public demo integration requires tmux and git",
 )
 def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
-    root = Path(tempfile.mkdtemp(prefix="apbx-demo-test-"))
-    session = DemoSession(DemoSessionConfig(root=root, keep=True, ttl_seconds=60))
+    session = DemoSession(DemoSessionConfig(keep=True, ttl_seconds=60))
+    root = session.root
     try:
         session.start()
         assert session.daemon_process is not None

@@ -77,9 +77,17 @@ class DemoSession:
         if self.config.ttl_seconds < 30 or self.config.ttl_seconds > 3600:
             raise DemoSessionError("demo session TTL must be between 30 and 3600 seconds")
         self.session_id = uuid.uuid4().hex
+        temporary_parent = (
+            Path("/tmp")
+            if os.name == "posix" and Path("/tmp").is_dir()
+            else None
+        )
         self.root = Path(
             self.config.root
-            or tempfile.mkdtemp(prefix=f"agent-pbx-demo-{self.session_id[:8]}-")
+            or tempfile.mkdtemp(
+                prefix=f"agent-pbx-demo-{self.session_id[:8]}-",
+                dir=temporary_parent,
+            )
         ).expanduser().resolve(strict=False)
         if self.config.root is not None and self.root.exists() and any(self.root.iterdir()):
             raise DemoSessionError(f"explicit demo root is not empty: {self.root}")

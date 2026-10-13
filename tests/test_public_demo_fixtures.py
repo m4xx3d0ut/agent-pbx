@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 import urllib.request
 
 from agent_pbx.demo.fixtures import prepare_demo_fixtures
@@ -64,10 +65,15 @@ def test_fake_joplin_serves_and_updates_notes(unused_tcp_port: int) -> None:
             str(unused_tcp_port),
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     try:
-        for _ in range(50):
+        folders = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
             try:
                 with urllib.request.urlopen(
                     f"http://127.0.0.1:{unused_tcp_port}/folders", timeout=0.2
@@ -75,11 +81,12 @@ def test_fake_joplin_serves_and_updates_notes(unused_tcp_port: int) -> None:
                     folders = json.loads(response.read())
                 break
             except OSError:
-                import time
-
-                time.sleep(0.02)
-        else:
-            raise AssertionError("fake Joplin did not start")
+                time.sleep(0.05)
+        if folders is None:
+            stderr = process.stderr.read() if process.stderr is not None else ""
+            raise AssertionError(
+                f"fake Joplin did not start (exit={process.poll()}): {stderr.strip()}"
+            )
         assert folders["items"][0]["title"] == "Agent PBX"
 
         request = urllib.request.Request(
@@ -92,5 +99,6 @@ def test_fake_joplin_serves_and_updates_notes(unused_tcp_port: int) -> None:
             note = json.loads(response.read())
         assert note["body"] == "# Updated"
     finally:
-        process.terminate()
+        if process.poll() is None:
+            process.terminate()
         process.wait(timeout=5)

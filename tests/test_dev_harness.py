@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -27,7 +28,7 @@ def make_plan(monkeypatch, tmp_path: Path, *, run_id: str = "run-1"):
         harness_root=tmp_path / "harness",
         run_id=run_id,
         port=28765,
-        tmux_bin="/bin/true",
+        tmux_bin=str(shutil.which("true") or "/usr/bin/true"),
     )
 
 
