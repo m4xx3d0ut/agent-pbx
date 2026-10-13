@@ -6,7 +6,13 @@ import subprocess
 
 import pytest
 
-from agent_pbx.demo.session import DemoSession, DemoSessionConfig, DemoSessionError
+from agent_pbx.demo.session import (
+    DEMO_NATIVE_TERMINAL_ENTITY_IDS,
+    DEMO_REPORT_ENTITY_IDS,
+    DemoSession,
+    DemoSessionConfig,
+    DemoSessionError,
+)
 
 
 def test_demo_session_prepare_uses_disposable_paths_and_fake_integrations() -> None:
@@ -22,6 +28,17 @@ def test_demo_session_prepare_uses_disposable_paths_and_fake_integrations() -> N
         assert "SSH_AUTH_SOCK" not in session.environment
         assert session.fixtures is not None
         assert session.fixtures.codex_bin.is_file()
+        tui_environment = session.tui_environment()
+        assert tui_environment["TMUX"] == f"{session.runtime_socket},0,0"
+        settings = json.loads(session.tui_settings_path.read_text(encoding="utf-8"))
+        assert settings["tmux_direct"] is True
+        assert settings["embedded_terminal_v2"] is True
+        assert settings["legacy_terminal_capture_enabled"] is False
+        assert settings["tmux_direct_agent_modes"] == {
+            **{agent_id: True for agent_id in DEMO_NATIVE_TERMINAL_ENTITY_IDS},
+            **{agent_id: False for agent_id in DEMO_REPORT_ENTITY_IDS},
+        }
+        assert session.tui_settings_path.stat().st_mode & 0o777 == 0o600
     finally:
         session.close()
     assert not root.exists()
@@ -67,6 +84,17 @@ def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
         mapping_text = json.dumps(mappings)
         assert "platform-agent" in mapping_text
         assert str(root) in mapping_text
+        mapped_entities = {
+            str(mapping["entity_id"])
+            for mapping in mappings
+            if isinstance(mapping, dict) and mapping.get("entity_id")
+        }
+        assert mapped_entities == set(DEMO_NATIVE_TERMINAL_ENTITY_IDS)
+
+        for agent_id in DEMO_REPORT_ENTITY_IDS:
+            reports = session.request("GET", f"/v1/agents/{agent_id}/reports?limit=1")
+            assert isinstance(reports, list)
+            assert reports
 
         tmux = subprocess.run(
             [
@@ -85,6 +113,24 @@ def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
         )
         pane_commands = tmux.stdout.lower()
         assert "python" in pane_commands or "codex" in pane_commands
+
+        implicit_tmux = subprocess.run(
+            [
+                session.config.tmux_bin,
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name} #{pane_id}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=session.tui_environment(),
+        )
+        implicit_panes = implicit_tmux.stdout.strip().splitlines()
+        assert len(implicit_panes) == 1
+        assert implicit_panes[0].startswith("agent-pbx-platform-agent-")
     finally:
         session.close()
         shutil.rmtree(root, ignore_errors=True)

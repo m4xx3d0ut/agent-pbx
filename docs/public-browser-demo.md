@@ -36,6 +36,14 @@ The local conformance path requires `git` and `tmux`. It does not use the
 operator's daemon, database, projects, Codex credentials, integration secrets,
 outer tmux server, or local Agent/Operator mappings.
 
+The product-tour scenario creates one real managed tmux/Codex fixture for
+`platform-agent`. `release-review`, `operator-0`, and the seeded Operator forks
+are durable report, plan, campaign, and topology fixtures. Their `Latest` views
+show PBX reports rather than pretending that each visitor owns several native
+Codex runtimes. This keeps the tour representative while bounding process and
+memory use. A report fixture showing a tmux compatibility warning is a demo
+configuration defect.
+
 ## Public reverse-proxy mode
 
 Agent PBX refuses a non-loopback bind until all publication settings are
@@ -57,6 +65,12 @@ automatically allows that service origin for its own WebSocket and uses each
 additional `--allowed-origin` as an approved embedding origin and CSP
 `frame-ancestors` source. The reverse proxy must terminate TLS and preserve
 WebSocket upgrades for `/ws`.
+
+The Origin check is a browser embedding guard, not client authentication. A
+direct WebSocket client can supply an allowed Origin value. Treat the endpoint
+as public untrusted input and enforce admission, rate, process, memory, CPU,
+file-descriptor, and network-egress controls outside the application before an
+Internet deployment.
 
 The service exposes:
 

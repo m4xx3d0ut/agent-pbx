@@ -12,6 +12,11 @@ GitHub, and Joplin fixtures, and a dedicated tmux server.
 The demo cannot attach to live Agents, Operators, credentials, repositories,
 Codex state, PBX state, or host tmux sockets.
 
+The seeded `platform-agent` owns the tour's one real managed tmux/Codex
+runtime. The release-review Agent, root Operator, and Operator forks use
+durable PBX report surfaces. This is intentional: it demonstrates both runtime
+and control-plane behavior without multiplying process cost for each visitor.
+
 ## Local qualification
 
 Install the optional delivery dependency and run the nonmutating checks:
@@ -50,6 +55,11 @@ and exact embedding origins. The reverse proxy must terminate TLS and preserve
 WebSocket upgrades for `/ws`. Run the container as an unprivileged user with a
 read-only root filesystem, temporary writable storage, resource and connection
 limits, bounded concurrency, and a short session lifetime.
+
+Origin validation limits browser embedding but is not authentication against a
+purpose-built WebSocket client. An Internet-facing deployment must therefore
+apply ingress admission and rate limits in addition to the in-process session
+cap and TTL.
 
 Do not mount a real home directory, Docker socket, SSH agent, Kubernetes
 configuration, Codex home, Agent PBX state, provider credential, or host tmux

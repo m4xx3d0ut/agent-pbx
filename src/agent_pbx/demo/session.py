@@ -31,6 +31,15 @@ from .policy import (
 )
 
 
+DEMO_NATIVE_TERMINAL_ENTITY_IDS = ("platform-agent",)
+DEMO_REPORT_ENTITY_IDS = (
+    "release-review",
+    "operator-0",
+    "operator-0-fork-platform-agent-demo",
+    "operator-0-fork-release-review-demo",
+)
+
+
 class DemoSessionError(RuntimeError):
     """Raised when an isolated demo session cannot reach a safe ready state."""
 
@@ -116,6 +125,40 @@ class DemoSession:
     def runtime_socket(self) -> Path:
         return self.runtime_dir / "agent-pbx" / "runtime-tmux.sock"
 
+    @property
+    def tui_settings_path(self) -> Path:
+        return self.root / "tui-settings.json"
+
+    def _write_tui_settings(self) -> None:
+        """Declare which seeded entities own a native terminal surface.
+
+        The product tour intentionally runs one real managed tmux/Codex fixture.
+        The other identities demonstrate durable reports, plans, campaigns, and
+        fork topology.  Explicit per-entity modes keep those report fixtures from
+        inheriting the global native-terminal default and displaying a misleading
+        compatibility warning for a pane they are not designed to own.
+        """
+
+        terminal_modes = {
+            **{agent_id: True for agent_id in DEMO_NATIVE_TERMINAL_ENTITY_IDS},
+            **{agent_id: False for agent_id in DEMO_REPORT_ENTITY_IDS},
+        }
+        self.tui_settings_path.write_text(
+            json.dumps(
+                {
+                    "embedded_terminal_v2": True,
+                    "legacy_terminal_capture_enabled": False,
+                    "tmux_direct": True,
+                    "tmux_direct_agent_modes": terminal_modes,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.tui_settings_path.chmod(0o600)
+
     def prepare(self) -> None:
         if len(os.fsencode(self.runtime_socket)) >= 104:
             raise DemoSessionError(
@@ -151,6 +194,7 @@ class DemoSession:
                 "AGENT_PBX_DAEMON_ACCESS_LOG": "0",
             }
         )
+        self._write_tui_settings()
 
     def _open_log(self, name: str) -> Any:
         handle = (self.logs_dir / name).open("ab", buffering=0)
@@ -415,6 +459,18 @@ class DemoSession:
                     "metadata": {"demo": True},
                 },
             )
+            self._report(
+                fork_id,
+                "agent-pbx-operator",
+                status="working",
+                summary=summary,
+                detail=(
+                    "This bounded Operator fork is represented by durable PBX "
+                    "state in the product tour. Select Campaigns, KB, or Thread "
+                    "to inspect its coordinated work without creating another "
+                    "visitor runtime."
+                ),
+            )
         self.request(
             "POST",
             "/v1/operator/campaigns",
@@ -476,7 +532,7 @@ class DemoSession:
             {
                 "AGENT_PBX_SERVER_URL": self.server_url,
                 "AGENT_PBX_TOKEN": self.token,
-                "AGENT_PBX_TUI_SETTINGS_FILE": str(self.root / "tui-settings.json"),
+                "AGENT_PBX_TUI_SETTINGS_FILE": str(self.tui_settings_path),
                 "AGENT_PBX_TUI_THEME": self.config.theme,
                 "AGENT_PBX_TUI_LAYOUT": self.config.layout,
                 "AGENT_PBX_TUI_FLASH": "1",
@@ -487,6 +543,12 @@ class DemoSession:
                 "AGENT_PBX_TUI_TMUX_RUNTIME_SERVER_MODE": "dedicated",
                 "AGENT_PBX_TUI_COMPAT_TERMINAL_CAPTURE": "0",
                 "AGENT_PBX_TUI_CODEX_BIN": str(self.fixtures.codex_bin),
+                # TUI compatibility helpers still issue ordinary tmux commands
+                # without an explicit -S argument. Pin those commands to this
+                # visitor's private server. Merely removing an inherited TMUX
+                # value lets a same-UID local demo discover the workstation's
+                # default tmux socket under /tmp.
+                "TMUX": f"{self.runtime_socket},0,0",
             }
         )
         result.pop("NO_COLOR", None)
