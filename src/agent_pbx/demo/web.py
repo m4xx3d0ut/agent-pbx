@@ -24,6 +24,8 @@ from .policy import (
 
 PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_PATH = "/agent-pbx-terminal-resize.js"
 PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_ID = "agent-pbx-terminal-resize-sync"
+PUBLIC_DEMO_INITIAL_RESIZE_TIMEOUT_SECONDS = 1.0
+PUBLIC_DEMO_INITIAL_MESSAGE_LIMIT = 16
 PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT = r"""
 (() => {
   "use strict";
@@ -101,6 +103,91 @@ PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT = r"""
   );
 })();
 """.strip()
+
+
+def _bounded_public_demo_terminal_size(
+    data: dict[str, Any],
+    *,
+    fallback_width: int,
+    fallback_height: int,
+) -> tuple[int, int]:
+    def bounded(value: Any, fallback: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            parsed = fallback
+        return min(maximum, max(minimum, parsed))
+
+    return (
+        bounded(data.get("width"), fallback_width, 40, 300),
+        bounded(data.get("height"), fallback_height, 12, 120),
+    )
+
+
+def _public_demo_message_envelope(message: Any, ws_msg_type: Any) -> list[Any] | None:
+    if message.type != ws_msg_type.TEXT:
+        return None
+    try:
+        envelope = message.json()
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(envelope, list) or len(envelope) != 2:
+        return None
+    return envelope
+
+
+async def _receive_initial_public_demo_terminal_size(
+    websocket: Any,
+    ws_msg_type: Any,
+    *,
+    fallback_width: int,
+    fallback_height: int,
+    timeout_seconds: float = PUBLIC_DEMO_INITIAL_RESIZE_TIMEOUT_SECONDS,
+) -> tuple[int, int, tuple[Any, ...], bool]:
+    """Wait for the browser's authoritative post-open terminal dimensions.
+
+    Textual Serve includes provisional dimensions in the WebSocket URL, then
+    calls ``fit()`` and sends a resize envelope after the socket opens. Starting
+    Textual from the URL dimensions can paint a small framebuffer before the
+    authoritative resize arrives. Buffer unrelated initial input until the app
+    process starts and fall back to the sanitized URL dimensions on timeout.
+    """
+
+    fallback_width, fallback_height = _bounded_public_demo_terminal_size(
+        {"width": fallback_width, "height": fallback_height},
+        fallback_width=120,
+        fallback_height=40,
+    )
+    buffered_messages: list[Any] = []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout_seconds)
+    closed_types = {
+        ws_msg_type.CLOSE,
+        ws_msg_type.CLOSED,
+        ws_msg_type.ERROR,
+    }
+    for _ in range(PUBLIC_DEMO_INITIAL_MESSAGE_LIMIT):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            message = await asyncio.wait_for(websocket.receive(), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
+        if message.type in closed_types:
+            return fallback_width, fallback_height, tuple(buffered_messages), False
+        envelope = _public_demo_message_envelope(message, ws_msg_type)
+        if envelope is not None:
+            type_, data = envelope
+            if type_ == "resize" and isinstance(data, dict):
+                width, height = _bounded_public_demo_terminal_size(
+                    data,
+                    fallback_width=fallback_width,
+                    fallback_height=fallback_height,
+                )
+                return width, height, tuple(buffered_messages), True
+        buffered_messages.append(message)
+    return fallback_width, fallback_height, tuple(buffered_messages), True
 
 
 def inject_public_demo_terminal_resize_bootstrap(html: str) -> str:
@@ -382,30 +469,41 @@ def build_public_demo_server(
                 response.headers["Access-Control-Allow-Origin"] = origin
             return response
 
-        async def _process_messages(self, websocket: Any, app_service: Any) -> None:
+        async def _process_message(
+            self, websocket: Any, app_service: Any, message: Any
+        ) -> None:
+            envelope = _public_demo_message_envelope(message, WSMsgType)
+            if envelope is None:
+                return
+            type_, data = envelope
+            if type_ == "stdin" and isinstance(data, str):
+                if len(data.encode("utf-8")) <= 16_384:
+                    await app_service.send_bytes(data.encode("utf-8"))
+            elif type_ == "resize" and isinstance(data, dict):
+                width, height = _bounded_public_demo_terminal_size(
+                    data,
+                    fallback_width=80,
+                    fallback_height=24,
+                )
+                await app_service.set_terminal_size(width, height)
+            elif type_ == "ping":
+                await websocket.send_json(["pong", data])
+            elif type_ == "blur":
+                await app_service.blur()
+            elif type_ == "focus":
+                await app_service.focus()
+
+        async def _process_messages(
+            self,
+            websocket: Any,
+            app_service: Any,
+            *,
+            initial_messages: tuple[Any, ...] = (),
+        ) -> None:
+            for message in initial_messages:
+                await self._process_message(websocket, app_service, message)
             async for message in websocket:
-                if message.type != WSMsgType.TEXT:
-                    continue
-                try:
-                    envelope = message.json()
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    continue
-                if not isinstance(envelope, list) or len(envelope) != 2:
-                    continue
-                type_, data = envelope
-                if type_ == "stdin" and isinstance(data, str):
-                    if len(data.encode("utf-8")) <= 16_384:
-                        await app_service.send_bytes(data.encode("utf-8"))
-                elif type_ == "resize" and isinstance(data, dict):
-                    width = min(300, max(40, int(data.get("width", 80))))
-                    height = min(120, max(12, int(data.get("height", 24))))
-                    await app_service.set_terminal_size(width, height)
-                elif type_ == "ping":
-                    await websocket.send_json(["pong", data])
-                elif type_ == "blur":
-                    await app_service.blur()
-                elif type_ == "focus":
-                    await app_service.focus()
+                await self._process_message(websocket, app_service, message)
 
         async def handle_websocket(self, request: Any) -> Any:
             origin = str(request.headers.get("Origin") or "").rstrip("/")
@@ -428,6 +526,16 @@ def build_public_demo_server(
             expiry_task: asyncio.Task[None] | None = None
             try:
                 await websocket.prepare(request)
+                width, height, initial_messages, connected = (
+                    await _receive_initial_public_demo_terminal_size(
+                        websocket,
+                        WSMsgType,
+                        fallback_width=width,
+                        fallback_height=height,
+                    )
+                )
+                if not connected:
+                    return websocket
                 app_service = PublicDemoAppService(
                     "agent-pbx demo tui-session",
                     write_bytes=websocket.send_bytes,
@@ -445,7 +553,11 @@ def build_public_demo_server(
                     )
 
                 expiry_task = asyncio.create_task(expire_session())
-                await self._process_messages(websocket, app_service)
+                await self._process_messages(
+                    websocket,
+                    app_service,
+                    initial_messages=initial_messages,
+                )
             except asyncio.CancelledError:
                 await websocket.close()
             finally:

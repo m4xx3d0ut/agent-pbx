@@ -45,6 +45,8 @@ def test_public_demo_environment_uses_allowlist_and_private_roots(
     source = {
         "PATH": "/usr/bin",
         "LANG": "en_US.UTF-8",
+        "COLUMNS": "181",
+        "ROWS": "61",
         "OPENAI_API_KEY": "must-not-leak",
         "AGENT_PBX_TOKEN": "must-not-leak",
         "SSH_AUTH_SOCK": "/tmp/agent.sock",
@@ -63,8 +65,56 @@ def test_public_demo_environment_uses_allowlist_and_private_roots(
     assert result["XDG_RUNTIME_DIR"] == str(runtime)
     assert result["PATH"] == f"{fixture_bin}{os.pathsep}/usr/bin"
     assert result["AGENT_PBX_PUBLIC_DEMO"] == "1"
+    assert result["COLUMNS"] == "181"
+    assert result["ROWS"] == "61"
     assert not sensitive_environment_names(result)
     assert "UNRELATED_VALUE" not in result
+
+
+def test_public_demo_environment_bounds_terminal_geometry(tmp_path: Path) -> None:
+    home = ensure_private_directory(tmp_path / "home")
+    runtime = ensure_private_directory(tmp_path / "runtime")
+
+    bounded = build_public_demo_environment(
+        {"COLUMNS": "9999", "ROWS": "1"},
+        home=home,
+        runtime_dir=runtime,
+    )
+    malformed = build_public_demo_environment(
+        {"COLUMNS": "wide", "ROWS": "tall"},
+        home=home,
+        runtime_dir=runtime,
+    )
+
+    assert bounded["COLUMNS"] == "300"
+    assert bounded["ROWS"] == "12"
+    assert "COLUMNS" not in malformed
+    assert "ROWS" not in malformed
+
+
+def test_public_demo_environment_preserves_geometry_across_session_sanitization(
+    tmp_path: Path,
+) -> None:
+    web_home = ensure_private_directory(tmp_path / "web-home")
+    web_runtime = ensure_private_directory(tmp_path / "web-runtime")
+    session_home = ensure_private_directory(tmp_path / "session-home")
+    session_runtime = ensure_private_directory(tmp_path / "session-runtime")
+
+    web_environment = build_public_demo_environment(
+        {"PATH": "/usr/bin", "COLUMNS": "151", "ROWS": "62"},
+        home=web_home,
+        runtime_dir=web_runtime,
+    )
+    session_environment = build_public_demo_environment(
+        web_environment,
+        home=session_home,
+        runtime_dir=session_runtime,
+    )
+
+    assert session_environment["COLUMNS"] == "151"
+    assert session_environment["ROWS"] == "62"
+    assert session_environment["HOME"] == str(session_home)
+    assert session_environment["XDG_RUNTIME_DIR"] == str(session_runtime)
 
 
 def test_public_demo_environment_rejects_credentials_and_wrong_roots(

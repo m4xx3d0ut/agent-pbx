@@ -7,10 +7,14 @@
 - Resynchronize the public web demo with its browser terminal after the
   terminal element, web font, iframe, or visual viewport settles. Textual
   startup now waits for the initial font and layout frames, preventing the
-  provisional small framebuffer from remaining over the correctly sized
-  interface. Embedded and dedicated sessions adopt their full viewport
-  without a manual resize while the upstream Textual Serve bundle remains
-  untouched.
+  provisional browser geometry from opening the application. The server also
+  waits briefly for Textual Serve's authoritative post-open resize envelope
+  before launching the Textual process, buffering any earlier input and safely
+  falling back to sanitized URL dimensions. Those bounded dimensions now pass
+  through the disposable session's environment allowlist so Textual's web
+  driver receives them before its first render. Embedded and dedicated sessions
+  therefore start from one framebuffer at their full viewport without a manual
+  resize while the upstream Textual Serve bundle remains untouched.
 - Refresh a platform-debug content-addressed workspace when an approved
   `local-deploy` session repeats `workerbee_v1_session_start`. The existing
   Codex thread, gateway lease, token, and backend generation remain in place;

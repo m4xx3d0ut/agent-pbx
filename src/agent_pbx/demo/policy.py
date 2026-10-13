@@ -60,6 +60,10 @@ SAFE_HOST_ENV_NAMES = frozenset(
         "TZ",
     }
 )
+SAFE_TERMINAL_DIMENSIONS = {
+    "COLUMNS": (40, 300),
+    "ROWS": (12, 120),
+}
 
 
 def sensitive_environment_names(environ: Mapping[str, str]) -> tuple[str, ...]:
@@ -95,6 +99,12 @@ def build_public_demo_environment(
         for name in SAFE_HOST_ENV_NAMES
         if str(environ.get(name) or "").strip()
     }
+    for name, (minimum, maximum) in SAFE_TERMINAL_DIMENSIONS.items():
+        try:
+            value = int(str(environ.get(name) or ""))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        result[name] = str(min(maximum, max(minimum, value)))
     path = str(result.get("PATH") or os.defpath)
     if path_prefix is not None:
         path = f"{path_prefix}{os.pathsep}{path}"

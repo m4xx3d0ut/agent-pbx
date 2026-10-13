@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import shutil
@@ -9,10 +10,38 @@ import pytest
 from agent_pbx.cli import main
 from agent_pbx.demo.contract import DEMO_CONTRACT_VERSION
 from agent_pbx.demo.web import (
+    _receive_initial_public_demo_terminal_size,
     build_public_demo_server,
     inject_public_demo_terminal_resize_bootstrap,
     public_demo_doctor,
 )
+
+
+class _FakeWSMsgType:
+    TEXT = "text"
+    CLOSE = "close"
+    CLOSED = "closed"
+    ERROR = "error"
+
+
+class _FakeWSMessage:
+    def __init__(self, type_: str, value: object = None) -> None:
+        self.type = type_
+        self.value = value
+
+    def json(self) -> object:
+        return self.value
+
+
+class _FakeWebSocket:
+    def __init__(self, messages: list[_FakeWSMessage]) -> None:
+        self.messages = list(messages)
+
+    async def receive(self) -> _FakeWSMessage:
+        if self.messages:
+            return self.messages.pop(0)
+        await asyncio.sleep(60)
+        raise AssertionError("unreachable")
 
 
 def test_demo_contract_cli_emits_versioned_json(capsys: pytest.CaptureFixture[str]) -> None:
@@ -92,6 +121,69 @@ def test_public_demo_terminal_resize_bootstrap_is_idempotent() -> None:
     assert injected.count('id="agent-pbx-terminal-resize-sync"') == 1
     assert 'src="/agent-pbx-terminal-resize.js"' in injected
     assert inject_public_demo_terminal_resize_bootstrap(injected) == injected
+
+
+async def test_initial_terminal_handshake_uses_authoritative_resize() -> None:
+    ping = _FakeWSMessage(_FakeWSMsgType.TEXT, ["ping", "before-resize"])
+    websocket = _FakeWebSocket(
+        [
+            ping,
+            _FakeWSMessage(
+                _FakeWSMsgType.TEXT,
+                ["resize", {"width": 181, "height": 61}],
+            ),
+        ]
+    )
+
+    width, height, buffered, connected = (
+        await _receive_initial_public_demo_terminal_size(
+            websocket,
+            _FakeWSMsgType,
+            fallback_width=80,
+            fallback_height=24,
+            timeout_seconds=0.1,
+        )
+    )
+
+    assert (width, height) == (181, 61)
+    assert buffered == (ping,)
+    assert connected is True
+
+
+async def test_initial_terminal_handshake_falls_back_after_timeout() -> None:
+    websocket = _FakeWebSocket([])
+
+    width, height, buffered, connected = (
+        await _receive_initial_public_demo_terminal_size(
+            websocket,
+            _FakeWSMsgType,
+            fallback_width=999,
+            fallback_height=2,
+            timeout_seconds=0.01,
+        )
+    )
+
+    assert (width, height) == (300, 12)
+    assert buffered == ()
+    assert connected is True
+
+
+async def test_initial_terminal_handshake_stops_on_disconnect() -> None:
+    websocket = _FakeWebSocket([_FakeWSMessage(_FakeWSMsgType.CLOSED)])
+
+    width, height, buffered, connected = (
+        await _receive_initial_public_demo_terminal_size(
+            websocket,
+            _FakeWSMsgType,
+            fallback_width=120,
+            fallback_height=40,
+            timeout_seconds=0.1,
+        )
+    )
+
+    assert (width, height) == (120, 40)
+    assert buffered == ()
+    assert connected is False
 
 
 @pytest.mark.skipif(
@@ -198,6 +290,7 @@ async def test_browser_connection_starts_real_tui_and_cleans_up() -> None:
         websocket = await client.ws_connect(
             "/ws?width=120&height=40", headers={"Origin": origin}
         )
+        await websocket.send_json(["resize", {"width": 140, "height": 44}])
         received_terminal_frame = False
         for _ in range(100):
             try:
