@@ -135,6 +135,11 @@ async def test_public_demo_server_exposes_health_contract_and_origin_guard() -> 
         assert "document.fonts?.ready" in resize_script_text
         assert "window.visualViewport" in resize_script_text
         assert "requestAnimationFrame(() => requestAnimationFrame" in resize_script_text
+        assert "const upstreamLoad = window.onload" in resize_script_text
+        assert "window.onload = null" in resize_script_text
+        assert "await document.fonts.ready" in resize_script_text
+        assert resize_script_text.count("await nextPaint()") == 2
+        assert "upstreamLoad.call(window, event)" in resize_script_text
         assert 'typeof window.onresize !== "function"' in resize_script_text
         assert "setInterval" not in resize_script_text
 

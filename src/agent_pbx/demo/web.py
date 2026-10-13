@@ -31,9 +31,14 @@ PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT = r"""
   if (window.__agentPbxTerminalResizeSyncInstalled) return;
   window.__agentPbxTerminalResizeSyncInstalled = true;
 
+  const upstreamLoad = window.onload;
+  window.onload = null;
+
   let scheduled = false;
   let lastGeometry = "";
   let terminalObserver = null;
+
+  const nextPaint = () => new Promise((resolve) => requestAnimationFrame(resolve));
 
   const synchronize = () => {
     scheduled = false;
@@ -50,7 +55,7 @@ PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT = r"""
     requestAnimationFrame(() => requestAnimationFrame(synchronize));
   };
 
-  const start = () => {
+  const startResizeSync = () => {
     const terminal = document.querySelector(".textual-terminal");
     if (!terminal) return;
 
@@ -66,9 +71,6 @@ PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT = r"""
       terminalObserver.observe(terminal);
     }
 
-    if (document.fonts?.ready) {
-      document.fonts.ready.then(schedule, () => undefined);
-    }
     if (window.visualViewport) {
       window.visualViewport.addEventListener("resize", schedule, { passive: true });
     }
@@ -76,7 +78,27 @@ PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT = r"""
     schedule();
   };
 
-  window.addEventListener("load", start, { once: true });
+  const startAfterLayoutSettles = async (event) => {
+    if (document.fonts?.ready) {
+      try {
+        await document.fonts.ready;
+      } catch (_error) {
+        // Font loading failure must not prevent the isolated demo from starting.
+      }
+    }
+    await nextPaint();
+    await nextPaint();
+    if (typeof upstreamLoad === "function") {
+      upstreamLoad.call(window, event);
+    }
+    startResizeSync();
+  };
+
+  window.addEventListener(
+    "load",
+    (event) => void startAfterLayoutSettles(event),
+    { once: true },
+  );
 })();
 """.strip()
 
