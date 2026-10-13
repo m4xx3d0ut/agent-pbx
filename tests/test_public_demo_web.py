@@ -94,6 +94,7 @@ async def test_public_demo_server_exposes_health_contract_and_origin_guard() -> 
         host="127.0.0.1",
         port=8123,
         public_url="http://127.0.0.1:8123",
+        allowed_origins=("https://www.example",),
         max_sessions=2,
         session_ttl_seconds=60,
     )
@@ -108,9 +109,25 @@ async def test_public_demo_server_exposes_health_contract_and_origin_guard() -> 
         assert (await health.json())["max_sessions"] == 2
         assert health.headers["X-Content-Type-Options"] == "nosniff"
 
-        contract = await client.get("/demo-contract.json")
+        contract = await client.get(
+            "/demo-contract.json", headers={"Origin": "https://www.example"}
+        )
         assert contract.status == 200
         assert (await contract.json())["api_version"] == DEMO_CONTRACT_VERSION
+        assert contract.headers["Access-Control-Allow-Origin"] == "https://www.example"
+        assert contract.headers["Vary"] == "Origin"
+
+        denied_contract = await client.get(
+            "/demo-contract.json", headers={"Origin": "https://denied.example"}
+        )
+        assert denied_contract.status == 200
+        assert "Access-Control-Allow-Origin" not in denied_contract.headers
+        assert denied_contract.headers["Vary"] == "Origin"
+
+        same_origin_contract = await client.get("/demo-contract.json")
+        assert same_origin_contract.status == 200
+        assert "Access-Control-Allow-Origin" not in same_origin_contract.headers
+        assert same_origin_contract.headers["Vary"] == "Origin"
 
         forbidden = await client.get("/ws")
         assert forbidden.status == 403

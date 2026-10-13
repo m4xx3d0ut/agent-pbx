@@ -257,8 +257,13 @@ def build_public_demo_server(
                 }
             )
 
-        async def handle_contract(self, _request: Any) -> Any:
-            return web.json_response(public_demo_contract())
+        async def handle_contract(self, request: Any) -> Any:
+            response = web.json_response(public_demo_contract())
+            response.headers["Vary"] = "Origin"
+            origin = str(request.headers.get("Origin") or "").rstrip("/")
+            if origin in self.allowed_origins:
+                response.headers["Access-Control-Allow-Origin"] = origin
+            return response
 
         async def _process_messages(self, websocket: Any, app_service: Any) -> None:
             async for message in websocket:
