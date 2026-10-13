@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed
+
+- Preserve an explicitly assigned, task-scoped WorkerBee caller policy across
+  Codex restart/resume operations. The new `local-deploy` profile permits only
+  the bounded local build, manifest validation/deployment, ingress, status,
+  logging, and security-review tools; ordinary caller sessions continue to
+  inherit global WorkerBee configuration without a PBX override.
+- Restore caller Agent PBX identity and bearer-token environment when Codex is
+  respawned in an existing managed tmux pane.
+
 ## v2.2.0 - 2026-10-13
 
 ### Highlights

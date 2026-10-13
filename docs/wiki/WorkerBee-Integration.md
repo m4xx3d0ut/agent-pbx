@@ -48,6 +48,20 @@ Review forks retain read-only restrictions and do not receive mutation tools.
 WorkerBee planner guidance should be used for runtime, manifest, ingress,
 database, queue, security, deployment, and validation work.
 
+Direct callers preserve the user's global WorkerBee configuration by default.
+For bounded local deployment work, Agent PBX can assign the caller metadata
+profile `workerbee_mcp_profile=local-deploy`. That explicit profile approves
+project discovery, image builds, manifest preparation and validation, local
+manifest deployment, ingress route operations and probes, status/log access,
+and project security review. It excludes remote k1s deployment, CA
+regeneration, generic execution, and unrelated destructive operations.
+
+The profile is part of the durable caller record. Restarting or resuming that
+caller through the TUI re-emits the same narrow WorkerBee policy together with
+the caller's Agent PBX report policy, identity, token environment, Codex thread,
+cwd, and model profile. Unknown profile names fail closed. Removing the
+metadata value returns future restarts to the normal global-config behavior.
+
 Backend switching remains a separate live operation. Inspecting provenance and
 path visibility is safe. To enable the guarded switch controls, configure both
 versioned helpers in private host configuration:

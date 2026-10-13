@@ -54,6 +54,7 @@ from agent_pbx.tui import (
     agent_pbx_mcp_url,
     built_in_palette_command_names,
     caller_agent_config_overrides,
+    caller_workerbee_mcp_config_overrides,
     clipboard_reader_environment,
     contains_codex_copy_picker,
     codex_copy_response_option,
@@ -4226,6 +4227,7 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
                     "cwd": str(project),
                     "codex_session_id": "session-a",
                     "codex_command": "codex",
+                    "workerbee_mcp_profile": "local-deploy",
                 },
             }
         }
@@ -4248,6 +4250,14 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
     assert "session-a" in str(respawn_calls[-1]["command"])
     assert 'model="gpt-5.6-terra"' in str(respawn_calls[-1]["command"])
     assert 'model_reasoning_effort="max"' in str(respawn_calls[-1]["command"])
+    assert "mcp_servers.workerbee=" in str(respawn_calls[-1]["command"])
+    assert "workerbee_v1_manifest_deploy_local" in str(
+        respawn_calls[-1]["command"]
+    )
+    assert "workerbee_v1_manifest_deploy_remote_k1s" not in str(
+        respawn_calls[-1]["command"]
+    )
+    assert launch_env["AGENT_PBX_WORKERBEE_MCP_PROFILE"] == "local-deploy"
     assert remain_on_exit_calls == [("%8", True), ("%9", True), ("%9", False)]
     assert posts[0] == "/v2/tmux/runtimes/agent-a"
     assert app.tmux_runtime_mapping_by_agent["agent-a"]["pane_id"] == "%9"
@@ -15075,6 +15085,7 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
                 "metadata": {
                     "cwd": str(Path.cwd()),
                     "codex_session_id": "session-1",
+                    "workerbee_mcp_profile": "local-deploy",
                 },
             }
         }
@@ -15108,12 +15119,26 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
     assert 'model_reasoning_effort="high"' in config_values
     assert 'model_reasoning_summary="detailed"' in config_values
     assert 'model_verbosity="high"' in config_values
+    workerbee_config = next(
+        item for item in config_values if item.startswith("mcp_servers.workerbee=")
+    )
+    assert 'default_tools_approval_mode = "approve"' in workerbee_config
+    assert "workerbee_v1_image_build" in workerbee_config
+    assert "workerbee_v1_manifest_deploy_local" in workerbee_config
+    assert "workerbee_v1_manifest_deploy_remote_k1s" not in workerbee_config
+    assert "workerbee_v1_ingress_ca_regenerate" not in workerbee_config
+    assert "workerbee_v1_exec" not in workerbee_config
+    restart_env = respawns[0]["env"]
+    assert isinstance(restart_env, dict)
+    assert restart_env["AGENT_PBX_AGENT_ID"] == "agent-1"
+    assert restart_env["AGENT_PBX_WORKERBEE_MCP_PROFILE"] == "local-deploy"
     assert app.tmux_agent_targets["agent-1"] == "%10"
     assert posts[0]["path"] == "/v1/agents/register"
     metadata = posts[0]["json"]["metadata"]  # type: ignore[index]
     assert metadata["tmux_pane_id"] == "%10"
     assert metadata["codex_command"] == "codex --search"
     assert metadata["last_tmux_restart_mode"] == "in_place"
+    assert metadata["workerbee_mcp_profile"] == "local-deploy"
     assert captures == ["agent-1"]
 
 
@@ -21699,6 +21724,29 @@ def test_tui_direct_caller_launch_preserves_global_workerbee_config() -> None:
     )
 
     assert not any(item.startswith("mcp_servers.workerbee=") for item in overrides)
+
+
+def test_tui_caller_local_deploy_profile_is_bounded() -> None:
+    overrides = caller_workerbee_mcp_config_overrides(
+        "local-deploy",
+        server_configs={"workerbee": {"url": "http://127.0.0.1:8765/mcp"}},
+    )
+
+    assert len(overrides) == 1
+    workerbee_config = overrides[0]
+    assert workerbee_config.startswith("mcp_servers.workerbee=")
+    assert 'default_tools_approval_mode = "approve"' in workerbee_config
+    assert "workerbee_v1_capabilities" in workerbee_config
+    assert "workerbee_v1_session_start" in workerbee_config
+    assert "workerbee_v1_image_build" in workerbee_config
+    assert "workerbee_v1_manifest_validate" in workerbee_config
+    assert "workerbee_v1_manifest_deploy_local" in workerbee_config
+    assert "workerbee_v1_ingress_route_apply" in workerbee_config
+    assert "workerbee_v1_ingress_probe" in workerbee_config
+    assert "workerbee_v1_manifest_deploy_remote_k1s" not in workerbee_config
+    assert "workerbee_v1_ingress_ca_regenerate" not in workerbee_config
+    assert "workerbee_v1_exec" not in workerbee_config
+    assert caller_workerbee_mcp_config_overrides("unknown") == []
 
 
 def test_tui_role_launches_use_distinct_sol_reasoning_defaults(

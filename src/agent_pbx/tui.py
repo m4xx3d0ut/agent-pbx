@@ -320,6 +320,26 @@ CALLER_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_joplin_status",
     "pbx_joplin_create_document",
 )
+CALLER_WORKERBEE_PROFILE_METADATA_KEY = "workerbee_mcp_profile"
+CALLER_WORKERBEE_LOCAL_DEPLOY_PROFILE = "local-deploy"
+CALLER_WORKERBEE_LOCAL_DEPLOY_APPROVED_TOOLS = (
+    "workerbee_v1_capabilities",
+    "workerbee_v1_session_start",
+    "workerbee_v1_project_runbook_status",
+    "workerbee_v1_project_status",
+    "workerbee_v1_secret_policy_status",
+    "workerbee_v1_profile_workload_status",
+    "workerbee_v1_edge_link_status",
+    "workerbee_v1_logs",
+    "workerbee_v1_image_build",
+    "workerbee_v1_manifest_prepare",
+    "workerbee_v1_manifest_validate",
+    "workerbee_v1_manifest_deploy_local",
+    "workerbee_v1_ingress_status",
+    "workerbee_v1_ingress_route_apply",
+    "workerbee_v1_ingress_probe",
+    "workerbee_v1_security_review_project",
+)
 REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS = (
     "workerbee_v1_capabilities",
     "workerbee_v1_session_start",
@@ -1686,11 +1706,59 @@ def agent_pbx_mcp_config_override(
     )
 
 
+def caller_workerbee_mcp_config_overrides(
+    profile: str | None,
+    *,
+    codex_home: Path | None = None,
+    server_configs: Mapping[str, Mapping[str, object]] | None = None,
+) -> list[str]:
+    """Return an explicit, task-scoped WorkerBee policy for a caller.
+
+    Direct callers otherwise inherit the user's global WorkerBee configuration.
+    A recognized metadata profile opts one caller into a bounded mutation set;
+    unknown values fail closed without broadening global policy.
+    """
+
+    normalized_profile = str(profile or "").strip().lower()
+    if normalized_profile != CALLER_WORKERBEE_LOCAL_DEPLOY_PROFILE:
+        return []
+
+    configured_servers = {
+        "workerbee": dict(DEFAULT_REVIEW_OPERATOR_MCP_SERVER_CONFIGS["workerbee"])
+    }
+    configured_servers.update(load_codex_mcp_server_configs(codex_home, ("workerbee",)))
+    if server_configs and "workerbee" in server_configs:
+        configured_servers["workerbee"] = {
+            **configured_servers["workerbee"],
+            **dict(server_configs["workerbee"]),
+        }
+    transport_config = {
+        key: value
+        for key, value in configured_servers["workerbee"].items()
+        if key in CODEX_MCP_SERVER_TRANSPORT_KEYS
+    }
+    if not transport_config.get("url") and not transport_config.get("command"):
+        return []
+    transport_config["enabled_tools"] = list(
+        CALLER_WORKERBEE_LOCAL_DEPLOY_APPROVED_TOOLS
+    )
+    transport_config["default_tools_approval_mode"] = "approve"
+    return [
+        codex_config_override(
+            "mcp_servers.workerbee",
+            transport_config,
+        )
+    ]
+
+
 def caller_agent_config_overrides(
     *,
     mcp_url: str | None = None,
     work_root: str | None = None,
     terminal_mode: str = CODEX_TERMINAL_MODE_DEFAULT,
+    workerbee_profile: str | None = None,
+    codex_home: Path | None = None,
+    server_configs: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[str]:
     overrides = [
         agent_pbx_mcp_config_override(
@@ -1698,6 +1766,13 @@ def caller_agent_config_overrides(
             mcp_url=mcp_url,
         )
     ]
+    overrides.extend(
+        caller_workerbee_mcp_config_overrides(
+            workerbee_profile,
+            codex_home=codex_home,
+            server_configs=server_configs,
+        )
+    )
     trust_override = codex_project_trust_config_override(work_root)
     if trust_override:
         overrides.append(trust_override)
@@ -18322,11 +18397,33 @@ class AgentPBXTUI(App[None]):
             replacing_pane_id=pane.pane_id,
         ):
             return False
+        mcp_url = agent_pbx_mcp_url(self.server)
+        workerbee_profile = str(
+            metadata.get(CALLER_WORKERBEE_PROFILE_METADATA_KEY) or ""
+        ).strip()
+        config_overrides = caller_agent_config_overrides(
+            mcp_url=mcp_url,
+            work_root=cwd,
+            terminal_mode=self.codex_terminal_mode,
+            workerbee_profile=workerbee_profile,
+            codex_home=self.codex_home_dir(),
+        )
+        config_overrides.extend(
+            codex_model_preset_config_overrides(effective_model_preset)
+        )
         command = self.operator_resume_command(
             codex_command,
             session_id,
             cd=cwd,
-            config_overrides=codex_model_preset_config_overrides(effective_model_preset),
+            config_overrides=config_overrides,
+        )
+        env = self.caller_runtime_env(
+            agent_id=agent_id,
+            project=str(agent.get("project") or Path(cwd).name),
+            cwd=cwd,
+            mcp_url=mcp_url,
+            model_preset=effective_model_preset,
+            workerbee_profile=workerbee_profile,
         )
         try:
             rollback_command = await self.restart_rollback_command(
@@ -18338,6 +18435,7 @@ class AgentPBXTUI(App[None]):
                 command=command,
                 label=agent_id,
                 cwd=cwd,
+                env=env,
                 rollback_command=rollback_command,
                 rollback_cwd=pane.cwd or cwd,
                 **runtime_kwargs,
@@ -18675,23 +18773,24 @@ class AgentPBXTUI(App[None]):
                     model_preset=preset,
                 )
         else:
+            workerbee_profile = str(
+                metadata.get(CALLER_WORKERBEE_PROFILE_METADATA_KEY) or ""
+            ).strip()
             overrides = caller_agent_config_overrides(
                 mcp_url=mcp_url,
                 work_root=cwd,
                 terminal_mode=self.codex_terminal_mode,
+                workerbee_profile=workerbee_profile,
+                codex_home=self.codex_home_dir(),
             )
-            env = {
-                AGENT_PBX_SERVER_URL_ENV: self.server,
-                AGENT_PBX_MCP_URL_ENV: mcp_url,
-                "AGENT_PBX_AGENT_ID": agent_id,
-                "AGENT_PBX_REPORTING_AGENT_ID": agent_id,
-                "AGENT_PBX_AGENT_TYPE": CALLER_AGENT_TYPE,
-                "AGENT_PBX_AGENT_PROJECT": str(agent.get("project") or Path(cwd).name),
-                "AGENT_PBX_PBX_MODE": PBX_REPORT_MODE,
-                "AGENT_PBX_CWD": cwd,
-            }
-            if self.token:
-                env[AGENT_PBX_TOKEN_ENV] = self.token
+            env = self.caller_runtime_env(
+                agent_id=agent_id,
+                project=str(agent.get("project") or Path(cwd).name),
+                cwd=cwd,
+                mcp_url=mcp_url,
+                model_preset=preset,
+                workerbee_profile=workerbee_profile,
+            )
         overrides.extend(codex_model_preset_config_overrides(preset))
         env["PATH"] = codex_launch_path
         env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = session_id
@@ -20749,14 +20848,15 @@ class AgentPBXTUI(App[None]):
             ]
         )
 
-    def caller_launch_env(
+    def caller_runtime_env(
         self,
         *,
         agent_id: str,
         project: str,
         cwd: str,
         mcp_url: str,
-        request: dict[str, Any],
+        model_preset: CodexModelPreset | None = None,
+        workerbee_profile: str | None = None,
     ) -> dict[str, str]:
         env = {
             AGENT_PBX_SERVER_URL_ENV: self.server,
@@ -20767,19 +20867,55 @@ class AgentPBXTUI(App[None]):
             "AGENT_PBX_AGENT_PROJECT": project,
             "AGENT_PBX_PBX_MODE": PBX_REPORT_MODE,
             "AGENT_PBX_CWD": cwd,
+        }
+        if model_preset is not None:
+            env["AGENT_PBX_CODEX_MODEL_PRESET"] = model_preset.key
+            env["AGENT_PBX_CODEX_MODEL"] = model_preset.model
+            env["AGENT_PBX_CODEX_REASONING_EFFORT"] = (
+                model_preset.reasoning_effort
+            )
+            if model_preset.reasoning_summary:
+                env["AGENT_PBX_CODEX_REASONING_SUMMARY"] = (
+                    model_preset.reasoning_summary
+                )
+            if model_preset.verbosity:
+                env["AGENT_PBX_CODEX_VERBOSITY"] = model_preset.verbosity
+        normalized_workerbee_profile = str(workerbee_profile or "").strip()
+        if normalized_workerbee_profile == CALLER_WORKERBEE_LOCAL_DEPLOY_PROFILE:
+            env["AGENT_PBX_WORKERBEE_MCP_PROFILE"] = normalized_workerbee_profile
+        if self.token:
+            env[AGENT_PBX_TOKEN_ENV] = self.token
+        return managed_tmux_launch_environment(env, install=False)
+
+    def caller_launch_env(
+        self,
+        *,
+        agent_id: str,
+        project: str,
+        cwd: str,
+        mcp_url: str,
+        request: dict[str, Any],
+    ) -> dict[str, str]:
+        env = self.caller_runtime_env(
+            agent_id=agent_id,
+            project=project,
+            cwd=cwd,
+            mcp_url=mcp_url,
+        )
+        env.update(
+            {
             "AGENT_PBX_PROJECT_SPAWN_REQUEST_ID": str(
                 request.get("spawn_request_id") or ""
             ),
-        }
+            }
+        )
         source_caller = str(request.get("source_caller_agent_id") or "").strip()
         if source_caller:
             env["AGENT_PBX_SOURCE_CALLER_AGENT_ID"] = source_caller
         source_cwd = str(request.get("source_cwd") or "").strip()
         if source_cwd:
             env["AGENT_PBX_SOURCE_CWD"] = source_cwd
-        if self.token:
-            env[AGENT_PBX_TOKEN_ENV] = self.token
-        return managed_tmux_launch_environment(env, install=False)
+        return env
 
     async def register_spawned_project_caller(
         self,
