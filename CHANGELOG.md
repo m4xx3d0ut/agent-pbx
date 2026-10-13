@@ -2,41 +2,7 @@
 
 ## Unreleased
 
-- Add an optional, repository-owned interactive browser demo that runs the real
-  Textual TUI in one disposable Agent PBX daemon, database, Git project set,
-  fixture integration set, and managed tmux runtime per visitor. The public
-  adapter uses an allowlisted environment, exact origins, bounded sessions,
-  timeout/disconnect cleanup, rootless container packaging, and a versioned
-  product-site handoff contract without access to live workstation state.
-- Add a daemon-owned, read-only Codex app-server bridge that associates native
-  subagent threads and lifecycle items with exact PBX session mappings, drives
-  the existing nested runtime tree, and degrades without affecting Codex or
-  tmux when structured observation is unavailable.
-- Coalesce embedded-terminal paints under sustained output while continuing to
-  read and parse every PTY byte, expose bounded performance counters, and avoid
-  rebuilding terminal rows whose final cell presentation is unchanged.
-- Pin `tmux` command resolution inside managed runtimes through a private,
-  validated state-root shim so Codex follow-up tools use the same qualified
-  binary as Agent PBX even when the parent shell resolves another tmux version.
-- Refuse daemon start or restart before stopping a healthy older daemon when
-  the database schema is older, newer, corrupt, or unreadable, and report the
-  exact dry-run/apply/verify remediation commands through status.
-- Cover repeated WebSocket failure and TUI unmount cleanup. Isolated stress
-  qualification found bounded descriptors and no growing transport leak, so
-  this change preserves the existing transport architecture.
-- Persist managed editor runtime identity across daemon/TUI restarts, adopt
-  verified editor panes safely, and route additional project files into an
-  active Neovim through its private RPC socket.
-- Add a combined Codex/editor runtime-bundle status view and preserve editor
-  processes on daemon shutdown by default while retaining explicit stop and
-  stale-record forget controls.
-- Add focus-scoped right-tab shortcuts: F3 followed by Shift+F1–F11, with a
-  portable `1..9`, `0`, `-` fallback that never captures terminal input.
-- Follow the Git wiki remote's advertised default branch during publication so
-  Gitea `main` and GitHub `master` wikis remain visible without host-specific
-  defaults.
-
-## v2.2.0 - 2026-10-10
+## v2.2.0 - 2026-10-13
 
 ### Highlights
 
@@ -50,6 +16,10 @@
   future sessions.
 - Adds deterministic repository-wiki validation, staging, checksums, and a
   digest-confirmed publisher that preserves unrelated wiki pages.
+- Adds a repository-owned interactive browser demo that runs the real Textual
+  TUI in a disposable, isolated Agent PBX environment for each visitor.
+- Adds a daemon-owned, read-only Codex app-server bridge for exact-mapping
+  subagent activity without making structured observation a runtime dependency.
 - Completes setup, navigation and palette history, Codex child activity,
   responsive layouts, and Joplin clipboard actions for the 2.2 cycle.
 
@@ -89,6 +59,16 @@
 - Add guarded wiki `check`, `stage`, and `publish` commands with revision-pinned
   repository links, generated navigation, per-page checksums, deterministic
   archives, exact digest confirmation, and preservation of unknown pages.
+- Add an optional interactive browser demo with per-visitor daemon, database,
+  Git fixtures, integrations, tmux runtime, bounded lifecycle, exact origin
+  policy, rootless container packaging, and a versioned product-site contract.
+- Add a daemon-owned, read-only Codex app-server bridge that associates native
+  subagent threads and lifecycle items with exact PBX session mappings and
+  drives the existing nested runtime tree when structured evidence is observed.
+- Add a combined Codex/editor runtime-bundle status view with explicit editor
+  stop and stale-record forget controls.
+- Add focus-scoped right-tab shortcuts: F3 followed by Shift+F1–F11, with a
+  portable `1..9`, `0`, `-` fallback that never captures terminal input.
 
 ### Changed
 
@@ -98,6 +78,15 @@
 - Keep managed terminal editors separate from Codex runtime mappings and apply
   the same root, sensitive-path, traversal, symlink, and regular-file checks as
   the Textual editor.
+- Coalesce embedded-terminal paints under sustained output while continuing to
+  read and parse every PTY byte, expose bounded performance counters, and avoid
+  rebuilding rows whose final cell presentation is unchanged.
+- Persist managed editor runtime identity across daemon/TUI restarts, adopt
+  verified editor panes safely, route approved files into active Neovim tabs
+  through its private RPC socket, and preserve editor processes by default on
+  daemon shutdown.
+- Follow each Git wiki remote's advertised default branch during publication so
+  Gitea `main` and GitHub `master` remain visible without host-specific defaults.
 - Update the versioned project wiki, public README, environment template, and
   release guidance for Agent PBX 2.2.
 
@@ -133,6 +122,14 @@
   even if an unrelated encrypted profile item cannot yet be decrypted.
 - Force a capable terminal type for managed editor runtimes when an inherited
   noninteractive environment reports `TERM=dumb`.
+- Pin `tmux` command resolution inside managed runtimes through a private,
+  validated state-root shim so Codex follow-up tools use the same qualified
+  binary as Agent PBX even when the parent shell resolves another tmux version.
+- Refuse daemon start or restart before stopping a healthy older daemon when
+  the database schema is older, newer, corrupt, or unreadable, and report the
+  exact dry-run/apply/verify remediation commands through status.
+- Close repeated WebSocket failure and TUI unmount paths cleanly; isolated
+  stress qualification found bounded descriptors and no growing transport leak.
 
 ## v2.1.1 - 2026-10-09
 
