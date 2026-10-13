@@ -28,6 +28,17 @@ from .tmux_binary import (
 from .runtime_tmux import RUNTIME_TMUX_SOCKET_ENV, tmux_socket_from_environment
 from .ui.theme import terminal_color_depth
 from .workerbee_mcp import inspect_workerbee_switcher
+from .workerbee_runtime import (
+    WORKERBEE_BACKEND_PLATFORM_DEBUG,
+    WORKERBEE_BACKEND_USER_APPLIANCE,
+    WorkerBeeRuntimeRegistry,
+    canonical_workerbee_backend,
+)
+from .workerbee_workspace import WORKERBEE_WORKSPACE_HELPER_ENV
+from .workerbee_materializer import (
+    DEBUG_STAGE_PYTHON_ENV,
+    DEBUG_STAGE_SCRIPT_ENV,
+)
 
 
 DOCTOR_API_VERSION = "agent-pbx.doctor/v2"
@@ -135,6 +146,7 @@ def run_platform_doctor(
     checks.append(_codex_theme_check())
     checks.append(_workerbee_check(config, which, timeout))
     checks.append(_workerbee_switcher_check(which, timeout))
+    checks.append(_workerbee_runtime_binding_check(config, which, timeout))
     checks.append(_joplin_check(config, timeout, probe_services=probe_services))
     checks.append(_clipboard_check(which))
     return DoctorReport(
@@ -631,6 +643,123 @@ def _workerbee_switcher_check(
         detail=detail,
         remediation=provenance.remediation,
     )
+
+
+def _workerbee_runtime_binding_check(
+    config: MCPDaemonConfig,
+    which: Callable[[str], str | None],
+    timeout: float,
+) -> DoctorCheck:
+    """Report the selected backend generation and appliance materializer posture."""
+
+    provenance = inspect_workerbee_switcher(
+        timeout_seconds=timeout,
+        which=which,
+    )
+    if not provenance.configured:
+        return DoctorCheck(
+            "workerbee-runtime-binding",
+            "pass",
+            "direct WorkerBee configuration; runtime generation binding is inactive",
+        )
+    if not provenance.ready:
+        return DoctorCheck(
+            "workerbee-runtime-binding",
+            "warn",
+            "selected WorkerBee runtime is unavailable",
+            remediation=provenance.remediation,
+        )
+    registry = WorkerBeeRuntimeRegistry(
+        config.resolved_db_path.parent / "workerbee-runtime"
+    )
+    selected = registry.selected()
+    if selected is None:
+        return DoctorCheck(
+            "workerbee-runtime-binding",
+            "warn",
+            f"{provenance.backend or 'unknown'} selected but no runtime generation is recorded",
+            detail=provenance.endpoint,
+            remediation="Start or restart the Agent PBX daemon to record the selected WorkerBee runtime generation.",
+        )
+    backend = canonical_workerbee_backend(provenance.backend)
+    if backend != selected.backend or provenance.endpoint.rstrip("/") != selected.endpoint.rstrip("/"):
+        return DoctorCheck(
+            "workerbee-runtime-binding",
+            "warn",
+            "selected WorkerBee runtime differs from the recorded session-binding generation",
+            detail=(
+                f"selector={backend} {provenance.endpoint}; "
+                f"recorded={selected.backend} {selected.endpoint} generation={selected.generation}"
+            ),
+            remediation="Restart the Agent PBX daemon, then restart or resume affected Codex sessions through Agent PBX.",
+        )
+    if selected.backend == WORKERBEE_BACKEND_USER_APPLIANCE:
+        return DoctorCheck(
+            "workerbee-runtime-binding",
+            "warn",
+            f"user_appliance generation {selected.generation} is selected but not qualified",
+            detail=selected.endpoint,
+            remediation="Use OSS or platform-debug until the user-appliance workspace image is qualified.",
+        )
+    details = [
+        selected.endpoint,
+        f"strategy={selected.workspace_strategy}",
+        f"instance={selected.instance_id}",
+    ]
+    if selected.backend == WORKERBEE_BACKEND_PLATFORM_DEBUG:
+        missing: list[str] = []
+        helper = _resolve_executable_setting(
+            os.getenv(WORKERBEE_WORKSPACE_HELPER_ENV, ""),
+            "agent-pbx-workerbee-workspace",
+            which,
+        )
+        stage_python = _resolve_executable_setting(
+            os.getenv(DEBUG_STAGE_PYTHON_ENV, ""),
+            "",
+            which,
+        )
+        stage_script = Path(os.getenv(DEBUG_STAGE_SCRIPT_ENV, "")).expanduser()
+        if not helper:
+            missing.append(WORKERBEE_WORKSPACE_HELPER_ENV)
+        if not stage_python:
+            missing.append(DEBUG_STAGE_PYTHON_ENV)
+        if not stage_script.is_file():
+            missing.append(DEBUG_STAGE_SCRIPT_ENV)
+        if missing:
+            return DoctorCheck(
+                "workerbee-runtime-binding",
+                "warn",
+                f"platform_debug generation {selected.generation} lacks workspace materializer prerequisites",
+                detail="missing: " + ", ".join(missing),
+                remediation="Configure the platform-debug staging helper, Python environment, and staging script in the private host environment.",
+            )
+        details.extend(
+            (
+                f"helper={helper}",
+                f"stage_python={stage_python}",
+                f"stage_script={stage_script}",
+            )
+        )
+    return DoctorCheck(
+        "workerbee-runtime-binding",
+        "pass",
+        f"{selected.backend} generation {selected.generation} ready",
+        detail=" · ".join(details),
+    )
+
+
+def _resolve_executable_setting(
+    configured: str,
+    fallback: str,
+    which: Callable[[str], str | None],
+) -> str:
+    candidate = str(configured or "").strip()
+    if candidate:
+        path = Path(candidate).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        return str(which(candidate) or "")
+    return str(which(fallback) or "") if fallback else ""
 
 
 def _joplin_check(

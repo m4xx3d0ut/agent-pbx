@@ -10,6 +10,8 @@ from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
 from agent_pbx.workerbee_gateway import (
     WORKERBEE_PROFILE_LOCAL_DEPLOY,
+    WORKERBEE_PROFILE_OBSERVE,
+    WORKERBEE_PROFILE_REVIEW,
     WorkerBeeGatewayError,
     WorkerBeeGatewayService,
 )
@@ -215,3 +217,215 @@ def test_gateway_api_prepares_workspace_and_issues_one_time_token(
         )
         assert revoked.status_code == 200
         assert revoked.json()["status"] == "revoked"
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [WORKERBEE_PROFILE_OBSERVE, WORKERBEE_PROFILE_REVIEW],
+)
+def test_gateway_api_allows_pre_registration_read_only_launch_candidates(
+    tmp_path: Path,
+    profile: str,
+) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {
+                "active": {
+                    "ready": True,
+                    "backend": "oss",
+                    "endpoint": "http://127.0.0.1:8765/mcp",
+                    "server_name": "K1S WorkerBee",
+                    "server_version": "1.30.0",
+                    "config_path": "/tmp/selector.env",
+                }
+            }
+
+    app.state.workerbee_switcher = Selector()
+    with TestClient(app) as client:
+        prepared = client.post(
+            "/v2/agents/new-launch/workerbee/workspaces",
+            json={"project": "demo", "source_root": str(repo)},
+        )
+        assert prepared.status_code == 200
+
+        issued = client.post(
+            "/v2/agents/new-launch/workerbee/leases",
+            json={
+                "profile": profile,
+                "workspace_binding_id": prepared.json()["binding_id"],
+            },
+        )
+        assert issued.status_code == 200
+        assert issued.json()["lease"]["profile"] == profile
+
+
+def test_gateway_api_rejects_pre_registration_local_deploy_candidate(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {
+                "active": {
+                    "ready": True,
+                    "backend": "oss",
+                    "endpoint": "http://127.0.0.1:8765/mcp",
+                    "server_name": "K1S WorkerBee",
+                    "server_version": "1.30.0",
+                }
+            }
+
+    app.state.workerbee_switcher = Selector()
+    with TestClient(app) as client:
+        prepared = client.post(
+            "/v2/agents/new-launch/workerbee/workspaces",
+            json={"project": "demo", "source_root": str(repo)},
+        )
+        assert prepared.status_code == 200
+
+        issued = client.post(
+            "/v2/agents/new-launch/workerbee/leases",
+            json={
+                "profile": WORKERBEE_PROFILE_LOCAL_DEPLOY,
+                "workspace_binding_id": prepared.json()["binding_id"],
+            },
+        )
+        assert issued.status_code == 409
+        assert "not approved" in issued.json()["detail"]
+
+
+def test_selected_appliance_status_requires_binding_without_host_cli_fallback(
+    tmp_path: Path,
+) -> None:
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {
+                "active": {
+                    "ready": True,
+                    "backend": "platform_debug",
+                    "endpoint": "http://127.0.0.1:8765/mcp",
+                    "server_name": "K1S WorkerBee Debug",
+                    "server_version": "1.30.0",
+                }
+            }
+
+    class HostCliMustNotRun:
+        def status_for_agent(self, _agent):  # type: ignore[no-untyped-def]
+            raise AssertionError("host OSS CLI status must not be merged into appliance status")
+
+    app.state.workerbee_switcher = Selector()
+    app.state.workerbee = HostCliMustNotRun()
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "debug-agent",
+                "project": "demo",
+                "metadata": {"cwd": str(tmp_path)},
+            },
+        ).status_code == 200
+
+        response = client.get("/v1/agents/debug-agent/workerbee")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status_source"] == "selected_mcp"
+        assert payload["selected_runtime"]["backend"] == "platform_debug"
+        assert payload["error"]["code"] == "WORKERBEE_WORKSPACE_BINDING_REQUIRED"
+
+
+def test_selected_appliance_status_uses_bound_selected_mcp(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {
+                "active": {
+                    "ready": True,
+                    "backend": "platform_debug",
+                    "endpoint": "http://127.0.0.1:8765/mcp",
+                    "server_name": "K1S WorkerBee Debug",
+                    "server_version": "1.30.0",
+                }
+            }
+
+    class Binding:
+        project = "demo"
+
+        def public_dict(self):  # type: ignore[no-untyped-def]
+            return {
+                "binding_id": "wb-binding",
+                "project": self.project,
+                "backend": "platform_debug",
+                "runtime_workspace_path": "/workspace/imports/wb-binding",
+            }
+
+    class Workspaces:
+        def load(self, binding_id):  # type: ignore[no-untyped-def]
+            assert binding_id == "wb-binding"
+            return Binding()
+
+        def verify_runtime(self, _binding, runtime):  # type: ignore[no-untyped-def]
+            assert runtime.backend == "platform_debug"
+
+    class HostCliMustNotRun:
+        def status_for_agent(self, _agent):  # type: ignore[no-untyped-def]
+            raise AssertionError("host OSS CLI status must not be merged into appliance status")
+
+    async def selected_call(endpoint, tool, arguments):  # type: ignore[no-untyped-def]
+        calls.append((endpoint, tool, arguments))
+        return {
+            "data": {
+                "mode": "lazy",
+                "project_status": {
+                    "running": False,
+                    "status_kind": "ready",
+                    "state_dir": "/var/lib/workerbee/demo",
+                },
+            }
+        }
+
+    monkeypatch.setattr("agent_pbx.api.call_workerbee_mcp_tool", selected_call)
+    app.state.workerbee_switcher = Selector()
+    app.state.workerbee_workspaces = Workspaces()
+    app.state.workerbee = HostCliMustNotRun()
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "debug-agent",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(tmp_path),
+                    "workerbee_workspace_binding_id": "wb-binding",
+                },
+            },
+        ).status_code == 200
+
+        response = client.get("/v1/agents/debug-agent/workerbee")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["available"] is True
+        assert payload["status_source"] == "selected_mcp"
+        assert payload["workspace_binding"]["runtime_workspace_path"] == (
+            "/workspace/imports/wb-binding"
+        )
+        assert calls == [
+            (
+                "http://127.0.0.1:8765/mcp",
+                "workerbee_v1_project_status",
+                {"project": "demo"},
+            )
+        ]

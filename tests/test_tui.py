@@ -4040,6 +4040,25 @@ def configure_managed_resume_test_codex(
     return binary
 
 
+async def prepared_workerbee_gateway_fixture(**kwargs: object) -> dict[str, object]:
+    profile = str(kwargs.get("profile") or "observe-local")
+    return {
+        "gateway_url": "http://127.0.0.1:8765/workerbee-mcp/fixturelease",
+        "bearer_token_env_var": "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN",
+        "token": "apbx_fixture-token",
+        "lease": {
+            "lease_id": "fixturelease",
+            "profile": profile,
+            "backend": "platform_debug",
+            "backend_generation": 4,
+        },
+        "workspace_binding": {
+            "binding_id": "wb-fixture",
+            "state": "ready",
+        },
+    }
+
+
 def test_tui_resolves_managed_codex_command_and_explicit_launch_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4109,6 +4128,7 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
         False,
         tmux_bin="/opt/tmux-3.7c",
     )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     launch_calls: list[dict[str, object]] = []
     respawn_calls: list[dict[str, object]] = []
     remain_on_exit_calls: list[tuple[str, bool]] = []
@@ -14500,6 +14520,7 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
         token="secret",
         tmux_direct=True,
     )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     configured: list[tuple[str, str]] = []
     launches: list[dict[str, object]] = []
@@ -14612,6 +14633,11 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
         "AGENT_PBX_CODEX_REASONING_EFFORT": "xhigh",
         "AGENT_PBX_CODEX_REASONING_SUMMARY": "detailed",
         "AGENT_PBX_CODEX_VERBOSITY": "high",
+        "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN": "apbx_fixture-token",
+        "AGENT_PBX_WORKERBEE_MCP_PROFILE": "observe-local",
+        "AGENT_PBX_WORKERBEE_BACKEND": "platform_debug",
+        "AGENT_PBX_WORKERBEE_BACKEND_GENERATION": "4",
+        "AGENT_PBX_WORKERBEE_WORKSPACE_BINDING_ID": "wb-fixture",
         "AGENT_PBX_TOKEN": "secret",
         "AGENT_PBX_TMUX_BIN": expected_tmux,
     }
@@ -14989,6 +15015,7 @@ async def test_tui_operator_history_modal_resumes_highlighted_candidate() -> Non
 
 async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     respawns: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -15767,6 +15794,7 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
         token="secret",
         tmux_direct=True,
     )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     respawns: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -16316,6 +16344,7 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
         token="secret",
         tmux_direct=True,
     )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     respawns: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -16537,6 +16566,7 @@ async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_
         token="secret",
         tmux_direct=True,
     )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     respawns: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -17029,6 +17059,7 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
         token="secret",
         tmux_direct=True,
     )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     launches: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -21749,6 +21780,152 @@ def test_tui_caller_local_deploy_profile_is_bounded() -> None:
     assert caller_workerbee_mcp_config_overrides("unknown") == []
 
 
+def test_tui_workerbee_gateway_binding_replaces_direct_transport_and_sets_env() -> None:
+    binding = {
+        "gateway_url": "http://127.0.0.1:8765/workerbee-mcp/lease-1",
+        "bearer_token_env_var": "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN",
+        "token": "apbx_secret",
+        "lease": {
+            "lease_id": "lease-1",
+            "profile": "local-deploy",
+            "backend": "platform_debug",
+            "backend_generation": 8,
+        },
+        "workspace_binding": {"binding_id": "wb-binding", "state": "ready"},
+    }
+    overrides = caller_workerbee_mcp_config_overrides(
+        "local-deploy",
+        server_configs={"workerbee": {"url": "http://127.0.0.1:8765/mcp"}},
+        gateway_binding=binding,
+    )
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    env = app.caller_runtime_env(
+        agent_id="agent-1",
+        project="demo",
+        cwd="/tmp/demo",
+        mcp_url="http://127.0.0.1:8765/mcp",
+        workerbee_profile="local-deploy",
+        workerbee_gateway_binding=binding,
+    )
+
+    assert len(overrides) == 1
+    assert 'url = "http://127.0.0.1:8765/workerbee-mcp/lease-1"' in overrides[0]
+    assert 'bearer_token_env_var = "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN"' in overrides[0]
+    assert "http://127.0.0.1:8765/mcp" not in overrides[0]
+    assert env["AGENT_PBX_WORKERBEE_GATEWAY_TOKEN"] == "apbx_secret"
+    assert env["AGENT_PBX_WORKERBEE_BACKEND"] == "platform_debug"
+    assert env["AGENT_PBX_WORKERBEE_BACKEND_GENERATION"] == "8"
+    assert env["AGENT_PBX_WORKERBEE_WORKSPACE_BINDING_ID"] == "wb-binding"
+
+
+@pytest.mark.asyncio
+async def test_tui_workerbee_gateway_launch_is_optional_without_selected_runtime() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"selected": None}
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            calls.append(("GET", path))
+            return Response()
+
+        async def post(self, path: str, **_kwargs: object) -> Response:
+            calls.append(("POST", path))
+            raise AssertionError("workspace preparation must not run without a selection")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    result = await app.prepare_workerbee_gateway_launch(
+        agent_id="agent-1",
+        project="demo",
+        codex_session_id="thread-1",
+        profile="observe-local",
+        source_root="/tmp/demo",
+    )
+
+    assert result is None
+    assert calls == [("GET", "/v2/workerbee/runtime")]
+
+
+@pytest.mark.asyncio
+async def test_tui_workerbee_gateway_launch_uses_selected_runtime_binding() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    posts: list[tuple[str, dict[str, object]]] = []
+
+    class Response:
+        def __init__(self, payload: dict[str, object], status_code: int = 200) -> None:
+            self.payload = payload
+            self.status_code = status_code
+
+        def raise_for_status(self) -> None:
+            assert self.status_code == 200
+
+        def json(self) -> dict[str, object]:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            assert path == "/v2/workerbee/runtime"
+            return Response({"selected": {"backend": "platform_debug"}})
+
+        async def post(
+            self,
+            path: str,
+            json: dict[str, object],
+            **_kwargs: object,
+        ) -> Response:
+            posts.append((path, json))
+            if path.endswith("/workspaces"):
+                return Response({"binding_id": "wb-binding", "state": "ready"})
+            return Response(
+                {
+                    "gateway_url": "http://127.0.0.1:8765/workerbee-mcp/lease",
+                    "token": "apbx_token",
+                    "lease": {
+                        "lease_id": "lease",
+                        "profile": "observe-local",
+                    },
+                }
+            )
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    result = await app.prepare_workerbee_gateway_launch(
+        agent_id="agent-1",
+        project="demo",
+        codex_session_id="thread-1",
+        profile="observe-local",
+        source_root="/tmp/demo",
+    )
+
+    assert result is not None
+    assert result["workspace_binding"]["binding_id"] == "wb-binding"
+    assert posts == [
+        (
+            "/v2/agents/agent-1/workerbee/workspaces",
+            {"project": "demo", "source_root": "/tmp/demo"},
+        ),
+        (
+            "/v2/agents/agent-1/workerbee/leases",
+            {
+                "codex_session_id": "thread-1",
+                "profile": "observe-local",
+                "workspace_binding_id": "wb-binding",
+            },
+        ),
+    ]
+
+
 def test_tui_role_launches_use_distinct_sol_reasoning_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -21959,6 +22136,7 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
         token="secret",
         tmux_direct=True,
     )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     launches: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -22186,6 +22364,7 @@ async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
         token="secret",
         tmux_direct=True,
     )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     launches: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -22352,6 +22531,7 @@ async def test_tui_start_review_operator_fork_uses_prior_failed_source_dispositi
         token="secret",
         tmux_direct=True,
     )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     launches: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -22803,6 +22983,7 @@ async def test_tui_launch_pending_project_spawn_starts_registered_caller(
         token="secret",
         tmux_direct=True,
     )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     launches: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []

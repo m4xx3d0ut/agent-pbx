@@ -1908,10 +1908,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         request: Request,
         store: Store = Depends(get_store),
     ) -> dict[str, Any]:
-        agent = require_agent(store, agent_id)
-        cwd = agent_cwd(agent)
+        agent = store.get_agent(agent_id)
+        cwd = agent_cwd(agent) if agent is not None else payload.source_root
         if not cwd:
-            raise HTTPException(status_code=409, detail="agent has no scoped cwd")
+            raise HTTPException(
+                status_code=409,
+                detail="agent has no scoped cwd and no launch source root was supplied",
+            )
         await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
         runtime = request.app.state.workerbee_runtime.selected()
         if runtime is None:
@@ -1919,7 +1922,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 status_code=409,
                 detail="no verified WorkerBee backend is selected",
             )
-        project = str(payload.project or agent.get("project") or "").strip()
+        project = str(
+            payload.project or (agent.get("project") if agent is not None else "") or ""
+        ).strip()
         try:
             binding = await asyncio.to_thread(
                 request.app.state.workerbee_workspaces.prepare,
@@ -1943,8 +1948,12 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         request: Request,
         store: Store = Depends(get_store),
     ) -> dict[str, Any]:
-        agent = require_agent(store, agent_id)
-        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        agent = store.get_agent(agent_id)
+        metadata = (
+            agent.get("metadata")
+            if agent is not None and isinstance(agent.get("metadata"), dict)
+            else {}
+        )
         if (
             str(metadata.get("access_mode") or "").strip() == "review_readonly"
             and payload.profile != "review-readonly"
@@ -1955,8 +1964,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             )
         if (
             payload.profile == "local-deploy"
-            and str(metadata.get("workerbee_mcp_profile") or "").strip()
-            != "local-deploy"
+            and (
+                agent is None
+                or str(metadata.get("workerbee_mcp_profile") or "").strip()
+                != "local-deploy"
+            )
         ):
             raise HTTPException(
                 status_code=409,

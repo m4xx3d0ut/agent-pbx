@@ -14,12 +14,15 @@ from agent_pbx.doctor import (
     _security_check,
     _tmux_server_diagnostic,
     _compatibility_check,
+    _workerbee_runtime_binding_check,
     doctor_json,
     doctor_markdown,
     run_platform_doctor,
 )
 from agent_pbx.mcp_daemon import MCPDaemonConfig
 from agent_pbx.store import SCHEMA_VERSION, Store
+from agent_pbx.workerbee_mcp import WorkerBeeBackendProvenance
+from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
 
 
 def test_doctor_report_formats_machine_and_human_output() -> None:
@@ -196,3 +199,72 @@ def test_doctor_reports_managed_tmux_command_state(tmp_path: Path, monkeypatch) 
     assert missing.status == "warn"
     assert "Restart the Agent PBX daemon" in missing.remediation
     assert ready.status == "pass"
+
+
+def test_doctor_reports_platform_debug_runtime_generation_and_helper(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path / "state")
+    helper = tmp_path / "agent-pbx-workerbee-workspace"
+    stage_python = tmp_path / "python"
+    stage_script = tmp_path / "stage.py"
+    for executable in (helper, stage_python):
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+    stage_script.write_text("# fixture\n", encoding="utf-8")
+    monkeypatch.setenv("AGENT_PBX_WORKERBEE_WORKSPACE_HELPER_BIN", str(helper))
+    monkeypatch.setenv("AGENT_PBX_WORKERBEE_DEBUG_STAGE_PYTHON", str(stage_python))
+    monkeypatch.setenv("AGENT_PBX_WORKERBEE_DEBUG_STAGE_SCRIPT", str(stage_script))
+    provenance = WorkerBeeBackendProvenance(
+        code="WORKERBEE_SWITCHER_READY",
+        configured=True,
+        ready=True,
+        backend="platform_debug",
+        endpoint="http://127.0.0.1:8765/mcp",
+        server_name="K1S WorkerBee Debug",
+        server_version="1.30.0",
+    )
+    monkeypatch.setattr(
+        "agent_pbx.doctor.inspect_workerbee_switcher",
+        lambda **_kwargs: provenance,
+    )
+    WorkerBeeRuntimeRegistry(
+        config.resolved_db_path.parent / "workerbee-runtime"
+    ).observe(provenance.public_dict())
+
+    result = _workerbee_runtime_binding_check(config, lambda _name: None, 2.0)
+
+    assert result.status == "pass"
+    assert result.summary == "platform_debug generation 1 ready"
+    assert f"helper={helper}" in result.detail
+
+
+def test_doctor_warns_when_debug_materializer_is_incomplete(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path / "state")
+    provenance = WorkerBeeBackendProvenance(
+        code="WORKERBEE_SWITCHER_READY",
+        configured=True,
+        ready=True,
+        backend="platform_debug",
+        endpoint="http://127.0.0.1:8765/mcp",
+    )
+    monkeypatch.setattr(
+        "agent_pbx.doctor.inspect_workerbee_switcher",
+        lambda **_kwargs: provenance,
+    )
+    monkeypatch.delenv("AGENT_PBX_WORKERBEE_WORKSPACE_HELPER_BIN", raising=False)
+    monkeypatch.delenv("AGENT_PBX_WORKERBEE_DEBUG_STAGE_PYTHON", raising=False)
+    monkeypatch.delenv("AGENT_PBX_WORKERBEE_DEBUG_STAGE_SCRIPT", raising=False)
+    WorkerBeeRuntimeRegistry(
+        config.resolved_db_path.parent / "workerbee-runtime"
+    ).observe(provenance.public_dict())
+
+    result = _workerbee_runtime_binding_check(config, lambda _name: None, 2.0)
+
+    assert result.status == "warn"
+    assert "materializer prerequisites" in result.summary
+    assert "AGENT_PBX_WORKERBEE_WORKSPACE_HELPER_BIN" in result.detail

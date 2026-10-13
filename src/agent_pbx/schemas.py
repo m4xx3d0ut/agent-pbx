@@ -1883,6 +1883,7 @@ class WorkerBeeSwitchRollbackRequest(BaseModel):
 
 class WorkerBeeWorkspacePrepareRequest(BaseModel):
     project: str | None = Field(default=None, min_length=1, max_length=128)
+    source_root: str | None = Field(default=None, min_length=1, max_length=4096)
     include_paths: list[str] = Field(default_factory=list, max_length=64)
 
 
