@@ -83,7 +83,8 @@ def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
             text=True,
             timeout=5,
         )
-        assert "python" in tmux.stdout or "codex" in tmux.stdout
+        pane_commands = tmux.stdout.lower()
+        assert "python" in pane_commands or "codex" in pane_commands
     finally:
         session.close()
         shutil.rmtree(root, ignore_errors=True)
