@@ -83,9 +83,14 @@ def test_fake_joplin_serves_and_updates_notes(unused_tcp_port: int) -> None:
             except OSError:
                 time.sleep(0.05)
         if folders is None:
-            stderr = process.stderr.read() if process.stderr is not None else ""
+            exit_code = process.poll()
+            stderr = (
+                process.stderr.read()
+                if exit_code is not None and process.stderr is not None
+                else "process remained alive past the readiness deadline"
+            )
             raise AssertionError(
-                f"fake Joplin did not start (exit={process.poll()}): {stderr.strip()}"
+                f"fake Joplin did not start (exit={exit_code}): {stderr.strip()}"
             )
         assert folders["items"][0]["title"] == "Agent PBX"
 
