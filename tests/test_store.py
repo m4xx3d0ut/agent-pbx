@@ -65,6 +65,35 @@ def test_register_agent_merges_metadata_without_dropping_cwd(tmp_path: Path) -> 
     }
 
 
+def test_merge_agent_metadata_journals_controller_update_atomically(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="agent-1",
+            project="demo",
+            metadata={"cwd": str(tmp_path), "existing": "value"},
+        )
+    )
+
+    agent = store.merge_agent_metadata(
+        "agent-1",
+        {"workerbee_workspace_binding_id": "wb-next"},
+        event_type="workerbee_workspace_refreshed",
+        event_payload={"previous_binding_id": "wb-old", "workspace_binding_id": "wb-next"},
+    )
+
+    assert agent is not None
+    assert agent["metadata"]["existing"] == "value"
+    assert agent["metadata"]["workerbee_workspace_binding_id"] == "wb-next"
+    event = store.list_events(limit=1)[0]
+    assert event["type"] == "workerbee_workspace_refreshed"
+    assert event["subject_id"] == "agent-1"
+    assert event["payload"]["workspace_binding_id"] == "wb-next"
+
+
 def test_terminal_editor_runtime_records_are_durable_and_agent_scoped(
     tmp_path: Path,
 ) -> None:

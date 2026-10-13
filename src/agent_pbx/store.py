@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .schemas import (
     AgentRegisterRequest,
@@ -3224,6 +3224,47 @@ class Store:
         if fork_row is not None:
             self._hydrate_operator_fork_agent(agent, fork_row)
         return agent
+
+    def merge_agent_metadata(
+        self,
+        agent_id: str,
+        metadata: Mapping[str, Any],
+        *,
+        event_type: str | None = None,
+        event_payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Merge controller metadata and optionally journal it in one transaction."""
+
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT metadata_json FROM agents WHERE agent_id = ?",
+                (agent_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            merged = self._merged_agent_metadata(
+                row["metadata_json"],
+                dict(metadata),
+            )
+            conn.execute(
+                "UPDATE agents SET metadata_json = ? WHERE agent_id = ?",
+                (json.dumps(merged), agent_id),
+            )
+            if event_type is not None:
+                conn.execute(
+                    """
+                    INSERT INTO events(type, subject_id, payload_json, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        event_type,
+                        agent_id,
+                        json.dumps(dict(event_payload or {})),
+                        now_ts(),
+                    ),
+                )
+        return self.get_agent(agent_id)
 
     def list_agents(self, *, include_hidden: bool = False) -> list[dict[str, Any]]:
         where_clause = "" if include_hidden else "WHERE dismissed_at IS NULL"

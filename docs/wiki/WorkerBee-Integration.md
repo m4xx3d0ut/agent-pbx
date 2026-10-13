@@ -100,6 +100,31 @@ allowed only when the appliance marker exactly matches that evidence. The
 helper refuses the user-appliance backend until its separate image and volume
 contract pass qualification.
 
+### Refresh source without restarting Codex
+
+A `local-deploy` session may update its source checkout after launch. Before a
+build, manifest preparation, deployment, restart, or ingress mutation, repeat
+`workerbee_v1_session_start`. Agent PBX compares the current checkout and its
+host-approved includes with the lease's content-addressed binding. When content
+changed, it stages and verifies a new platform-debug snapshot, then atomically
+updates that same lease before forwarding `session_start` to WorkerBee.
+
+The refresh preserves the Codex process and thread, gateway URL, bearer token,
+backend selection, generation, project, and access profile. The prior binding
+is retained for recovery. An unchanged checkout is a no-op. If staging or PBX
+metadata reconciliation fails, the prior lease binding remains authoritative.
+
+Other mutating tools never refresh implicitly. If the checkout changed since
+the last binding, they return `WORKERBEE_WORKSPACE_REFRESH_REQUIRED` and direct
+the caller to repeat `workerbee_v1_session_start`. This prevents a deployment
+from silently using an older appliance snapshot. Observe and review profiles
+remain fixed to their existing read-only snapshot, and OSS `direct_host`
+sessions continue to use the exact host checkout without snapshot staging.
+
+Source refresh does not authorize backend, generation, project, source-root,
+or access-profile changes. Those boundaries still require a reviewed Agent PBX
+restart or resume with a new lease.
+
 ## Tool policy
 
 Direct Agents, root Operators, edit forks, and review forks can receive

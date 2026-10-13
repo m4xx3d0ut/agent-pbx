@@ -846,6 +846,30 @@ async def test_tui_event_stream_worker_uses_isolated_group() -> None:
     ]
 
 
+async def test_tui_reapplies_initial_layout_after_first_refresh() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    settled = 0
+
+    async def fake_refresh_agents() -> None:
+        return None
+
+    async def fake_refresh_events() -> None:
+        return None
+
+    def settle() -> None:
+        nonlocal settled
+        settled += 1
+
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
+    app.settle_initial_layout_geometry = settle  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+    assert settled == 1
+
+
 async def test_tui_event_stream_releases_each_forced_websocket_close(
     monkeypatch,
 ) -> None:
@@ -2150,6 +2174,9 @@ async def test_tui_resize_restores_tmux_stream_tail_when_at_bottom() -> None:
     app.call_after_refresh = fake_call_after_refresh  # type: ignore[method-assign]
 
     async with app.run_test() as pilot:
+        # Ignore the intentional one-shot mount geometry settlement; this test
+        # covers the callback requested by the later resize.
+        callbacks.clear()
         await pilot.resize_terminal(100, 20)
         await pilot.pause()
         stream = app.query_one("#tmux-stream", TextArea)
@@ -2176,6 +2203,9 @@ async def test_tui_resize_preserves_manual_tmux_scrollback() -> None:
     app.call_after_refresh = fake_call_after_refresh  # type: ignore[method-assign]
 
     async with app.run_test() as pilot:
+        # Ignore the intentional one-shot mount geometry settlement; this test
+        # covers whether a later resize preserves manual scrollback.
+        callbacks.clear()
         await pilot.resize_terminal(100, 20)
         await pilot.pause()
         stream = app.query_one("#tmux-stream", TextArea)

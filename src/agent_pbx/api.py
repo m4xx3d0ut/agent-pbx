@@ -57,11 +57,16 @@ from .terminal_editor import ManagedTerminalEditorService
 from .workerbee import WorkerBeeStatusService, agent_cwd
 from .workerbee_gateway import (
     WorkerBeeGatewayError,
+    WorkerBeeGatewayLease,
     WorkerBeeGatewayService,
     create_workerbee_gateway_app,
 )
 from .workerbee_runtime import WorkerBeeRuntimeRegistry
-from .workerbee_workspace import WorkerBeeWorkspaceError, WorkerBeeWorkspaceService
+from .workerbee_workspace import (
+    WorkerBeeWorkspaceBinding,
+    WorkerBeeWorkspaceError,
+    WorkerBeeWorkspaceService,
+)
 from .workerbee_mcp import call_workerbee_mcp_tool
 from .workerbee_switcher import WorkerBeeSwitchService
 from .events import EventClientRegistry, EventStreamService
@@ -374,6 +379,19 @@ async def selected_workerbee_status_for_agent(
     cwd = agent_cwd(agent)
     metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
     binding_id = str(metadata.get("workerbee_workspace_binding_id") or "").strip()
+    lease_id = str(metadata.get("workerbee_gateway_lease_id") or "").strip()
+    if lease_id:
+        try:
+            lease = await asyncio.to_thread(app.state.workerbee_gateway.load, lease_id)
+        except WorkerBeeGatewayError:
+            lease = None
+        if (
+            lease is not None
+            and lease.agent_id == agent_id
+            and lease.status == "active"
+            and lease.revoked_at is None
+        ):
+            binding_id = lease.workspace_binding_id
     base: dict[str, Any] = {
         "configured": True,
         "available": False,
@@ -530,10 +548,47 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     workerbee_workspaces = WorkerBeeWorkspaceService(
         workerbee_state_root / "workspaces"
     )
+
+    def record_workerbee_workspace_refresh(
+        previous_lease: WorkerBeeGatewayLease,
+        refreshed_lease: WorkerBeeGatewayLease,
+        binding: WorkerBeeWorkspaceBinding,
+    ) -> None:
+        refreshed_at = time.time()
+        event_payload = {
+            "agent_id": refreshed_lease.agent_id,
+            "lease_id": refreshed_lease.lease_id,
+            "previous_binding_id": previous_lease.workspace_binding_id,
+            "workspace_binding_id": binding.binding_id,
+            "backend": refreshed_lease.backend,
+            "backend_generation": refreshed_lease.backend_generation,
+            "project": binding.project,
+            "source_commit": binding.source_commit,
+            "source_dirty": binding.source_dirty,
+            "refreshed_at": refreshed_at,
+        }
+        agent = store.merge_agent_metadata(
+            refreshed_lease.agent_id,
+            {
+                "workerbee_workspace_binding_id": binding.binding_id,
+                "workerbee_workspace_previous_binding_id": (
+                    previous_lease.workspace_binding_id
+                ),
+                "workerbee_workspace_refreshed_at": refreshed_at,
+                "workerbee_backend": refreshed_lease.backend,
+                "workerbee_backend_generation": refreshed_lease.backend_generation,
+            },
+            event_type="workerbee_workspace_refreshed",
+            event_payload=event_payload,
+        )
+        if agent is None:
+            raise RuntimeError("WorkerBee lease Agent is no longer registered")
+
     workerbee_gateway = WorkerBeeGatewayService(
         workerbee_state_root / "gateway",
         workerbee_runtime,
         workerbee_workspaces,
+        binding_refreshed=record_workerbee_workspace_refresh,
     )
     workerbee_gateway_app = create_workerbee_gateway_app(workerbee_gateway)
     workerbee_switcher = WorkerBeeSwitchService(

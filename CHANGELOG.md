@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- Refresh a platform-debug content-addressed workspace when an approved
+  `local-deploy` session repeats `workerbee_v1_session_start`. The existing
+  Codex thread, gateway lease, token, and backend generation remain in place;
+  subsequent mutating tools fail closed if source changes again before refresh.
+- Reapply responsive TUI geometry after the browser demo's first painted frame
+  so the Agents, Operators, and Events stack no longer requires a manual window
+  resize to adopt its intended initial proportions.
 - Bind platform-debug switching to an explicit loopback or native-LAN posture.
   Preview, no-op detection, verification, rollback, and status now include that
   posture so a backend recreation cannot silently replace qualified LAN DNS and

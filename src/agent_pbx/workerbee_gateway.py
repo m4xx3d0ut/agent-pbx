@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -22,8 +23,18 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .security import constant_time_equal, generate_token, hash_secret
-from .workerbee_runtime import WorkerBeeRuntimeRegistry
-from .workerbee_workspace import WorkerBeeWorkspaceService
+from .workerbee_runtime import (
+    WORKERBEE_WORKSPACE_DIRECT_HOST,
+    WorkerBeeRuntimeRegistry,
+    WorkerBeeRuntimeSelection,
+)
+from .workerbee_workspace import (
+    WorkerBeeWorkspaceBinding,
+    WorkerBeeWorkspaceError,
+    WorkerBeeWorkspaceIncludePolicyError,
+    WorkerBeeWorkspaceService,
+    configured_workerbee_workspace_include_paths,
+)
 
 WORKERBEE_GATEWAY_API_VERSION = "agent-pbx.workerbee-gateway/v1"
 WORKERBEE_GATEWAY_TOKEN_ENV = "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN"
@@ -157,11 +168,17 @@ class WorkerBeeGatewayService:
         workspace_service: WorkerBeeWorkspaceService,
         *,
         clock: Callable[[], float] = time.time,
+        binding_refreshed: Callable[
+            [WorkerBeeGatewayLease, WorkerBeeGatewayLease, WorkerBeeWorkspaceBinding],
+            None,
+        ]
+        | None = None,
     ) -> None:
         self.state_root = state_root.expanduser().resolve()
         self.runtime_registry = runtime_registry
         self.workspace_service = workspace_service
         self.clock = clock
+        self.binding_refreshed = binding_refreshed
         self._mutation_lock = threading.Lock()
         self._active_mutations: dict[str, int] = {}
 
@@ -353,6 +370,155 @@ class WorkerBeeGatewayService:
             supplied.setdefault("project", binding.project)
         return supplied
 
+    def refresh_workspace(
+        self,
+        lease: WorkerBeeGatewayLease,
+    ) -> tuple[WorkerBeeGatewayLease, WorkerBeeWorkspaceBinding, bool]:
+        """Refresh a local-deploy snapshot without replacing its session lease."""
+
+        current = self.load(lease.lease_id)
+        runtime, binding = self._refresh_context(current)
+        if (
+            current.profile != WORKERBEE_PROFILE_LOCAL_DEPLOY
+            or binding.workspace_strategy == WORKERBEE_WORKSPACE_DIRECT_HOST
+        ):
+            return current, binding, False
+        include_paths = self._workspace_include_paths(current, binding)
+        expected_binding_id = self.workspace_service.expected_binding_id(
+            runtime=runtime,
+            project=binding.project,
+            source_root=binding.source_root,
+            include_paths=include_paths,
+        )
+        if expected_binding_id == binding.binding_id:
+            return current, binding, False
+        try:
+            refreshed_binding = self.workspace_service.prepare(
+                runtime=runtime,
+                project=binding.project,
+                source_root=binding.source_root,
+                include_paths=include_paths,
+            )
+            self.workspace_service.verify_runtime(refreshed_binding, runtime)
+            verified_binding_id = self.workspace_service.expected_binding_id(
+                runtime=runtime,
+                project=binding.project,
+                source_root=binding.source_root,
+                include_paths=include_paths,
+            )
+        except WorkerBeeWorkspaceError as exc:
+            raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
+        if (
+            refreshed_binding.binding_id != expected_binding_id
+            or refreshed_binding.binding_id != verified_binding_id
+            or refreshed_binding.project != current.project
+            or refreshed_binding.source_root != binding.source_root
+        ):
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_REFRESH_INVALID",
+                "WorkerBee workspace refresh returned different session scope.",
+                "Retain the current binding and review the materializer receipt.",
+            )
+        refreshed_lease = WorkerBeeGatewayLease(
+            **{
+                **asdict(current),
+                "workspace_binding_id": refreshed_binding.binding_id,
+            }
+        )
+        lease_path = self._lease_path(current.lease_id)
+        _atomic_private_json(lease_path, refreshed_lease.private_dict())
+        try:
+            if self.binding_refreshed is not None:
+                self.binding_refreshed(current, refreshed_lease, refreshed_binding)
+        except Exception as exc:  # noqa: BLE001 - preserve the known-good lease
+            _atomic_private_json(lease_path, current.private_dict())
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_REFRESH_RECONCILE_FAILED",
+                "WorkerBee workspace refreshed but Agent PBX could not reconcile its session mapping.",
+                "The prior lease binding was restored; review daemon events before retrying.",
+            ) from exc
+        return refreshed_lease, refreshed_binding, True
+
+    def require_current_workspace(self, lease: WorkerBeeGatewayLease) -> None:
+        """Reject appliance mutations when the host checkout changed after binding."""
+
+        current = self.load(lease.lease_id)
+        runtime, binding = self._refresh_context(current)
+        if (
+            current.profile != WORKERBEE_PROFILE_LOCAL_DEPLOY
+            or binding.workspace_strategy == WORKERBEE_WORKSPACE_DIRECT_HOST
+        ):
+            return
+        include_paths = self._workspace_include_paths(current, binding)
+        try:
+            expected_binding_id = self.workspace_service.expected_binding_id(
+                runtime=runtime,
+                project=binding.project,
+                source_root=binding.source_root,
+                include_paths=include_paths,
+            )
+        except WorkerBeeWorkspaceError as exc:
+            raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
+        if expected_binding_id != binding.binding_id:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_REFRESH_REQUIRED",
+                "The host checkout changed after this WorkerBee workspace snapshot was bound.",
+                (
+                    "Call workerbee_v1_session_start again to refresh the same session "
+                    "lease before running a mutating WorkerBee tool."
+                ),
+            )
+
+    def _refresh_context(
+        self,
+        lease: WorkerBeeGatewayLease,
+    ) -> tuple[WorkerBeeRuntimeSelection, WorkerBeeWorkspaceBinding]:
+        runtime = self.runtime_registry.selected()
+        if runtime is None:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_RUNTIME_UNSELECTED",
+                "No verified WorkerBee runtime is selected.",
+            )
+        if (
+            lease.backend != runtime.backend
+            or lease.backend_instance_id != runtime.instance_id
+            or lease.backend_generation != runtime.generation
+            or lease.backend_fingerprint != runtime.fingerprint
+        ):
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_BACKEND_REBIND_REQUIRED",
+                "The selected WorkerBee backend no longer matches this session lease.",
+                "Restart or resume the session through Agent PBX after reviewing the backend change.",
+            )
+        binding = self.workspace_service.load(lease.workspace_binding_id)
+        try:
+            self.workspace_service.verify_runtime(binding, runtime)
+        except WorkerBeeWorkspaceError as exc:
+            raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
+        if binding.project != lease.project:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_PROJECT_SCOPE_MISMATCH",
+                "WorkerBee lease and workspace binding target different projects.",
+            )
+        return runtime, binding
+
+    @staticmethod
+    def _workspace_include_paths(
+        lease: WorkerBeeGatewayLease,
+        binding: WorkerBeeWorkspaceBinding,
+    ) -> tuple[str, ...]:
+        try:
+            return configured_workerbee_workspace_include_paths(
+                agent_id=lease.agent_id,
+                source_root=binding.source_root,
+            )
+        except WorkerBeeWorkspaceIncludePolicyError as exc:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_INCLUDE_INVALID",
+                f"WorkerBee workspace include policy {exc}.",
+                "Correct the host-owned include policy before refreshing this session.",
+            ) from exc
+
     @asynccontextmanager
     async def mutation(self, lease: WorkerBeeGatewayLease, tool_name: str) -> AsyncIterator[None]:
         mutating = tool_name in WORKERBEE_MUTATING_TOOLS
@@ -394,6 +560,7 @@ class WorkerBeeGatewayService:
 class WorkerBeeGatewayProxy:
     def __init__(self, service: WorkerBeeGatewayService) -> None:
         self.service = service
+        self._lease_locks: dict[str, asyncio.Lock] = {}
 
     async def list_tools(self, lease: WorkerBeeGatewayLease) -> list[types.Tool]:
         runtime = self.service.runtime_registry.selected()
@@ -414,21 +581,41 @@ class WorkerBeeGatewayProxy:
         tool_name: str,
         arguments: Mapping[str, Any] | None,
     ) -> types.CallToolResult:
-        prepared = self.service.prepare_arguments(lease, tool_name, arguments)
-        runtime = self.service.runtime_registry.selected()
-        if runtime is None:
-            raise WorkerBeeGatewayError(
-                "WORKERBEE_RUNTIME_UNSELECTED", "No WorkerBee runtime is selected."
-            )
-        async with self.service.mutation(lease, tool_name):
-            async with streamablehttp_client(runtime.endpoint) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    return await session.call_tool(
-                        tool_name,
-                        prepared,
-                        read_timeout_seconds=timedelta(seconds=300),
+        lock = self._lease_locks.setdefault(lease.lease_id, asyncio.Lock())
+        async with lock:
+            current = self.service.load(lease.lease_id)
+            # Validate tool and project scope before doing any staging work.
+            self.service.prepare_arguments(current, tool_name, arguments)
+            async with self.service.mutation(current, tool_name):
+                if tool_name == "workerbee_v1_session_start":
+                    current, _binding, _changed = await asyncio.to_thread(
+                        self.service.refresh_workspace,
+                        current,
                     )
+                elif tool_name in WORKERBEE_MUTATING_TOOLS:
+                    await asyncio.to_thread(
+                        self.service.require_current_workspace,
+                        current,
+                    )
+                prepared = self.service.prepare_arguments(
+                    current,
+                    tool_name,
+                    arguments,
+                )
+                runtime = self.service.runtime_registry.selected()
+                if runtime is None:
+                    raise WorkerBeeGatewayError(
+                        "WORKERBEE_RUNTIME_UNSELECTED",
+                        "No WorkerBee runtime is selected.",
+                    )
+                async with streamablehttp_client(runtime.endpoint) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        return await session.call_tool(
+                            tool_name,
+                            prepared,
+                            read_timeout_seconds=timedelta(seconds=300),
+                        )
 
 
 class WorkerBeeGatewayAuthMiddleware:

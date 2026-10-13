@@ -8065,6 +8065,11 @@ class AgentPBXTUI(App[None]):
         self.apply_theme_class()
         self.update_effective_layout()
         self.apply_layout_class()
+        # The web driver can mount with the browser's final dimensions before
+        # child regions have completed their first layout. Re-apply the
+        # height-dependent left-pane split on the first painted frame so the
+        # demo does not need a synthetic browser resize to settle its panes.
+        self.call_after_refresh(self.settle_initial_layout_geometry)
         self.apply_tmux_class()
         agents = self.query_one("#agents", DataTable)
         self.render_agent_columns(agents)
@@ -8134,6 +8139,12 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
             exit_on_error=False,
         )
+
+    def settle_initial_layout_geometry(self) -> None:
+        if self.update_effective_layout(self.size.width, self.size.height):
+            self.apply_layout_class()
+        else:
+            self.apply_layout_dimensions()
 
     async def on_unmount(self) -> None:
         self.stop_refresh_timers()

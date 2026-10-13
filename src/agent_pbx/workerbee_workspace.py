@@ -276,6 +276,51 @@ class WorkerBeeWorkspaceService:
         _atomic_private_json(self._receipt_path(binding.binding_id), binding.public_dict())
         return binding
 
+    def source_identity(
+        self,
+        *,
+        runtime: WorkerBeeRuntimeSelection,
+        source_root: str | Path,
+        include_paths: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """Return the identity used to address one backend workspace snapshot."""
+
+        try:
+            normalized_include_paths = normalize_workerbee_workspace_include_paths(
+                include_paths
+            )
+        except WorkerBeeWorkspaceIncludePolicyError as exc:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_WORKSPACE_INCLUDE_INVALID",
+                f"WorkerBee workspace include policy {exc}.",
+                "Use at most 64 safe source-root-relative paths without .git or traversal.",
+            ) from exc
+        source = Path(source_root).expanduser().resolve()
+        return self._source_identity(
+            source,
+            materialized=(
+                canonical_workerbee_backend(runtime.backend) != WORKERBEE_BACKEND_OSS
+            ),
+            include_paths=normalized_include_paths,
+        )
+
+    def expected_binding_id(
+        self,
+        *,
+        runtime: WorkerBeeRuntimeSelection,
+        project: str,
+        source_root: str | Path,
+        include_paths: tuple[str, ...] = (),
+    ) -> str:
+        """Return the binding ID represented by the checkout's current content."""
+
+        identity = self.source_identity(
+            runtime=runtime,
+            source_root=source_root,
+            include_paths=include_paths,
+        )
+        return self._binding_id(runtime, self._safe_project(project), identity)
+
     def load(self, binding_id: str) -> WorkerBeeWorkspaceBinding:
         path = self._receipt_path(binding_id)
         try:

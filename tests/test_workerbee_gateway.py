@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,7 @@ from agent_pbx.workerbee_gateway import (
     WORKERBEE_PROFILE_REVIEW,
     WorkerBeeGatewayAuthMiddleware,
     WorkerBeeGatewayError,
+    WorkerBeeGatewayProxy,
     WorkerBeeGatewayService,
 )
 from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
@@ -49,6 +53,71 @@ def services(tmp_path: Path):
     return runtime, workspace, binding, gateway
 
 
+def platform_services(tmp_path: Path, *, binding_refreshed=None, failing_stage=False):
+    runtime = WorkerBeeRuntimeRegistry(tmp_path / "runtime")
+    selected = runtime.observe(
+        {
+            "backend": "platform_debug",
+            "endpoint": "http://127.0.0.1:8765/mcp",
+            "server_name": "K1S WorkerBee Debug",
+            "server_version": "1.30.0",
+        }
+    )
+    source = tmp_path / "repo"
+    git_repo(source)
+
+    def runner(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if failing_stage and (source / "FAIL_STAGE").exists():
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="stage failed")
+        binding_id = command[command.index("--binding-id") + 1]
+        commit = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "-C", str(source), "status", "--porcelain=v1", "-z"],
+                check=True,
+                capture_output=True,
+            ).stdout
+        )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "backend": "platform_debug",
+                    "runtime_workspace_path": f"/workspace/imports/{binding_id}",
+                    "content_sha256": hashlib.sha256(binding_id.encode()).hexdigest(),
+                    "source_commit": commit,
+                    "source_dirty": dirty,
+                    "receipt_path": f"/private/{binding_id}.json",
+                }
+            ),
+            stderr="",
+        )
+
+    workspace = WorkerBeeWorkspaceService(
+        tmp_path / "workspaces",
+        helper_bin="/helper",
+        runner=runner,
+    )
+    binding = workspace.prepare(
+        runtime=selected,
+        project="demo",
+        source_root=source,
+    )
+    gateway = WorkerBeeGatewayService(
+        tmp_path / "gateway",
+        runtime,
+        workspace,
+        binding_refreshed=binding_refreshed,
+    )
+    return runtime, workspace, source, binding, gateway
+
+
 def test_gateway_lease_is_private_and_scoped_to_binding(tmp_path: Path) -> None:
     _runtime, _workspace, binding, gateway = services(tmp_path)
     lease, token = gateway.issue(
@@ -65,6 +134,193 @@ def test_gateway_lease_is_private_and_scoped_to_binding(tmp_path: Path) -> None:
     with pytest.raises(WorkerBeeGatewayError) as wrong_token:
         gateway.validate(lease.lease_id, "wrong")
     assert wrong_token.value.code == "WORKERBEE_GATEWAY_AUTH_FAILED"
+
+
+def test_gateway_session_start_refreshes_platform_snapshot_on_same_lease(
+    tmp_path: Path,
+) -> None:
+    refreshes: list[tuple[str, str]] = []
+
+    def record(previous, refreshed, _binding):  # type: ignore[no-untyped-def]
+        refreshes.append(
+            (previous.workspace_binding_id, refreshed.workspace_binding_id)
+        )
+
+    _runtime, _workspace, source, binding, gateway = platform_services(
+        tmp_path,
+        binding_refreshed=record,
+    )
+    lease, token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    (source / "README.md").write_text("refreshed\n", encoding="utf-8")
+
+    refreshed, refreshed_binding, changed = gateway.refresh_workspace(lease)
+
+    assert changed is True
+    assert refreshed.lease_id == lease.lease_id
+    assert refreshed.token_hash == lease.token_hash
+    assert refreshed.workspace_binding_id != binding.binding_id
+    assert refreshed_binding.binding_id == refreshed.workspace_binding_id
+    assert gateway.validate(lease.lease_id, token) == refreshed
+    assert gateway.prepare_arguments(
+        refreshed,
+        "workerbee_v1_session_start",
+        {"goal": "deploy r3"},
+    )["workspace_path"] == refreshed_binding.runtime_workspace_path
+    assert refreshes == [(binding.binding_id, refreshed_binding.binding_id)]
+
+
+def test_gateway_workspace_refresh_is_noop_when_source_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    _runtime, _workspace, _source, binding, gateway = platform_services(tmp_path)
+    lease, _token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+
+    refreshed, refreshed_binding, changed = gateway.refresh_workspace(lease)
+
+    assert changed is False
+    assert refreshed == lease
+    assert refreshed_binding == binding
+
+
+def test_gateway_rejects_stale_platform_mutation_until_session_refresh(
+    tmp_path: Path,
+) -> None:
+    _runtime, _workspace, source, binding, gateway = platform_services(tmp_path)
+    lease, _token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    (source / "README.md").write_text("pending deployment\n", encoding="utf-8")
+
+    with pytest.raises(WorkerBeeGatewayError) as stale:
+        gateway.require_current_workspace(lease)
+
+    assert stale.value.code == "WORKERBEE_WORKSPACE_REFRESH_REQUIRED"
+    assert "workerbee_v1_session_start" in stale.value.remediation
+
+
+def test_gateway_failed_platform_refresh_preserves_prior_lease(
+    tmp_path: Path,
+) -> None:
+    _runtime, _workspace, source, binding, gateway = platform_services(
+        tmp_path,
+        failing_stage=True,
+    )
+    lease, token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    (source / "README.md").write_text("pending deployment\n", encoding="utf-8")
+    (source / "FAIL_STAGE").write_text("1\n", encoding="utf-8")
+
+    with pytest.raises(WorkerBeeGatewayError) as failure:
+        gateway.refresh_workspace(lease)
+
+    assert failure.value.code == "WORKERBEE_WORKSPACE_STAGE_FAILED"
+    assert gateway.validate(lease.lease_id, token) == lease
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [WORKERBEE_PROFILE_OBSERVE, WORKERBEE_PROFILE_REVIEW],
+)
+def test_gateway_read_only_profiles_do_not_refresh_platform_snapshot(
+    tmp_path: Path,
+    profile: str,
+) -> None:
+    _runtime, _workspace, source, binding, gateway = platform_services(tmp_path)
+    lease, _token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=profile,
+        workspace_binding_id=binding.binding_id,
+    )
+    (source / "README.md").write_text("changed\n", encoding="utf-8")
+
+    refreshed, refreshed_binding, changed = gateway.refresh_workspace(lease)
+
+    assert changed is False
+    assert refreshed == lease
+    assert refreshed_binding == binding
+
+
+@pytest.mark.asyncio
+async def test_gateway_proxy_session_start_uses_refreshed_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _runtime, _workspace, source, binding, gateway = platform_services(tmp_path)
+    lease, _token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    (source / "README.md").write_text("r3\n", encoding="utf-8")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    @asynccontextmanager
+    async def fake_transport(endpoint):  # type: ignore[no-untyped-def]
+        assert endpoint == "http://127.0.0.1:8765/mcp"
+        yield object(), object(), None
+
+    class FakeSession:
+        def __init__(self, _read, _write):  # type: ignore[no-untyped-def]
+            pass
+
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def call_tool(self, name, arguments, **_kwargs):  # type: ignore[no-untyped-def]
+            calls.append((name, arguments))
+            return object()
+
+    monkeypatch.setattr(
+        "agent_pbx.workerbee_gateway.streamablehttp_client",
+        fake_transport,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.workerbee_gateway.ClientSession",
+        FakeSession,
+    )
+
+    await WorkerBeeGatewayProxy(gateway).call_tool(
+        lease,
+        "workerbee_v1_session_start",
+        {"goal": "deploy r3"},
+    )
+
+    refreshed = gateway.load(lease.lease_id)
+    assert refreshed.workspace_binding_id != binding.binding_id
+    refreshed_binding = gateway.workspace_service.load(
+        refreshed.workspace_binding_id
+    )
+    assert calls == [
+        (
+            "workerbee_v1_session_start",
+            refreshed_binding.session_start_args(goal="deploy r3"),
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -469,19 +725,34 @@ def test_selected_appliance_status_uses_bound_selected_mcp(
 
         def public_dict(self):  # type: ignore[no-untyped-def]
             return {
-                "binding_id": "wb-binding",
+                "binding_id": "wb-binding-refreshed",
                 "project": self.project,
                 "backend": "platform_debug",
-                "runtime_workspace_path": "/workspace/imports/wb-binding",
+                "runtime_workspace_path": "/workspace/imports/wb-binding-refreshed",
             }
 
     class Workspaces:
         def load(self, binding_id):  # type: ignore[no-untyped-def]
-            assert binding_id == "wb-binding"
+            assert binding_id == "wb-binding-refreshed"
             return Binding()
 
         def verify_runtime(self, _binding, runtime):  # type: ignore[no-untyped-def]
             assert runtime.backend == "platform_debug"
+
+    class Gateway:
+        def impact(self):  # type: ignore[no-untyped-def]
+            return {"active_leases": [], "active_mutations": {}, "mutation_count": 0}
+
+        def load(self, lease_id):  # type: ignore[no-untyped-def]
+            assert lease_id == "lease-1"
+
+            class Lease:
+                agent_id = "debug-agent"
+                status = "active"
+                revoked_at = None
+                workspace_binding_id = "wb-binding-refreshed"
+
+            return Lease()
 
     class HostCliMustNotRun:
         def status_for_agent(self, _agent):  # type: ignore[no-untyped-def]
@@ -503,6 +774,7 @@ def test_selected_appliance_status_uses_bound_selected_mcp(
     monkeypatch.setattr("agent_pbx.api.call_workerbee_mcp_tool", selected_call)
     app.state.workerbee_switcher = Selector()
     app.state.workerbee_workspaces = Workspaces()
+    app.state.workerbee_gateway = Gateway()
     app.state.workerbee = HostCliMustNotRun()
     with TestClient(app) as client:
         assert client.post(
@@ -512,7 +784,8 @@ def test_selected_appliance_status_uses_bound_selected_mcp(
                 "project": "demo",
                 "metadata": {
                     "cwd": str(tmp_path),
-                    "workerbee_workspace_binding_id": "wb-binding",
+                    "workerbee_workspace_binding_id": "wb-binding-old",
+                    "workerbee_gateway_lease_id": "lease-1",
                 },
             },
         ).status_code == 200
@@ -523,7 +796,7 @@ def test_selected_appliance_status_uses_bound_selected_mcp(
         assert payload["available"] is True
         assert payload["status_source"] == "selected_mcp"
         assert payload["workspace_binding"]["runtime_workspace_path"] == (
-            "/workspace/imports/wb-binding"
+            "/workspace/imports/wb-binding-refreshed"
         )
         assert calls == [
             (

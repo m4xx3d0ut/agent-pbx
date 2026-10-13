@@ -28,6 +28,9 @@ agent-pbx demo web --host 127.0.0.1 --port 8000
 Open `http://127.0.0.1:8000`. Each WebSocket connection starts one private
 session and removes it on disconnect or after the default 15-minute limit.
 Use `--max-sessions` and `--session-ttl-seconds` to lower the resource ceiling.
+The TUI applies the browser's requested terminal dimensions at process start
+and performs one post-paint geometry pass so the left-side pane proportions are
+correct without requiring a manual browser resize.
 
 The local conformance path requires `git` and `tmux`. It does not use the
 operator's daemon, database, projects, Codex credentials, integration secrets,
