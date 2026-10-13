@@ -756,6 +756,20 @@ export AGENT_PBX_WORKERBEE_DEBUG_CONTAINER="workerbee-mcp-debug"
 export AGENT_PBX_WORKERBEE_DEBUG_IMPORT_ROOT="/workspace/imports"
 ```
 
+Tracked files, including initialized submodule trees, are staged automatically.
+If a session deliberately needs dirty or untracked submodule content, approve
+only the required paths in private host configuration. The policy is bound to
+both Agent ID and exact source root and is never read from Agent-controlled
+registration metadata:
+
+```bash
+export AGENT_PBX_WORKERBEE_WORKSPACE_INCLUDES_JSON='{"agent-id":{"source_root":"/absolute/project","include_paths":["business-site/product-pages/agent-pbx","business-site/docs/agent-pbx-product-site.md"]}}'
+```
+
+The snapshot rejects `.git`, secret-sensitive paths, escaping links, special
+files, commit-mismatched or nested submodules, and paths outside that explicit
+allowlist. Ordinary tracked repository content requires no include policy.
+
 The three access profiles are `observe-local`, `review-readonly`, and
 `local-deploy`. Deployment authority requires durable entity metadata that
 explicitly sets `workerbee_mcp_profile=local-deploy`; a launch candidate cannot

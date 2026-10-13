@@ -95,6 +95,10 @@ from .workerbee_gateway import (
     WORKERBEE_PROFILE_OBSERVE,
     WORKERBEE_PROFILE_REVIEW,
 )
+from .workerbee_workspace import (
+    WorkerBeeWorkspaceIncludePolicyError,
+    configured_workerbee_workspace_include_paths,
+)
 from .contracts import ActionDefinition
 from .terminal import (
     EMBEDDED_SCROLL_MODE_CHILD,
@@ -21126,9 +21130,38 @@ class AgentPBXTUI(App[None]):
                 runtime_posture.get("selected"), dict
             ):
                 return None
+            effective_source_root = str(source_root or "").strip()
+            if not effective_source_root:
+                agent = self.agents.get(agent_id) or {}
+                metadata = self.agent_metadata(agent)
+                effective_source_root = str(metadata.get("cwd") or "").strip()
+            include_paths: tuple[str, ...] = ()
+            if effective_source_root:
+                try:
+                    include_paths = configured_workerbee_workspace_include_paths(
+                        agent_id=agent_id,
+                        source_root=effective_source_root,
+                    )
+                except WorkerBeeWorkspaceIncludePolicyError as exc:
+                    raise WorkerBeeLaunchPreflightError(
+                        agent_id=agent_id,
+                        phase="workspace include policy",
+                        code="WORKERBEE_WORKSPACE_INCLUDE_POLICY_INVALID",
+                        message=str(exc),
+                        remediation=(
+                            "Correct the host-owned include policy and retry the "
+                            "restart at a safe turn boundary."
+                        ),
+                    ) from exc
+            workspace_payload: dict[str, object] = {
+                "project": project,
+                "source_root": source_root,
+            }
+            if include_paths:
+                workspace_payload["include_paths"] = list(include_paths)
             workspace_response = await self.api_client().post(
                 f"/v2/agents/{quote(agent_id, safe='')}/workerbee/workspaces",
-                json={"project": project, "source_root": source_root},
+                json=workspace_payload,
                 headers=auth_headers(self.token),
                 timeout=330,
             )

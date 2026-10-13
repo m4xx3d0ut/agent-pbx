@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
-from dataclasses import asdict, dataclass
-from datetime import timedelta
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import threading
 import time
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass
+from datetime import timedelta
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Mapping
 
 from mcp import ClientSession, types
@@ -24,8 +23,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .security import constant_time_equal, generate_token, hash_secret
 from .workerbee_runtime import WorkerBeeRuntimeRegistry
-from .workerbee_workspace import WorkerBeeWorkspaceBinding, WorkerBeeWorkspaceService
-
+from .workerbee_workspace import WorkerBeeWorkspaceService
 
 WORKERBEE_GATEWAY_API_VERSION = "agent-pbx.workerbee-gateway/v1"
 WORKERBEE_GATEWAY_TOKEN_ENV = "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN"
@@ -440,7 +438,7 @@ class WorkerBeeGatewayAuthMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        lease_id = str(scope.get("path") or "").strip("/").split("/", 1)[0]
+        lease_id = self._route_lease_id(scope)
         token = self._bearer_token(scope)
         try:
             self.service.validate(lease_id, token or "")
@@ -449,13 +447,26 @@ class WorkerBeeGatewayAuthMiddleware:
             await JSONResponse(exc.public_dict(), status_code=status)(scope, receive, send)
             return
         rewritten = dict(scope)
-        rewritten["path"] = "/"
-        rewritten["raw_path"] = b"/"
+        root_path = str(scope.get("root_path") or "").rstrip("/")
+        rewritten_path = f"{root_path}/" if root_path else "/"
+        rewritten["path"] = rewritten_path
+        rewritten["raw_path"] = rewritten_path.encode("utf-8")
         context_token = _CURRENT_LEASE_ID.set(lease_id)
         try:
             await self.app(rewritten, receive, send)
         finally:
             _CURRENT_LEASE_ID.reset(context_token)
+
+    @staticmethod
+    def _route_lease_id(scope: Scope) -> str:
+        """Extract one lease segment from mounted or standalone ASGI scopes."""
+
+        path = str(scope.get("path") or "")
+        root_path = str(scope.get("root_path") or "").rstrip("/")
+        if root_path and (path == root_path or path.startswith(f"{root_path}/")):
+            path = path[len(root_path) :]
+        segments = [segment for segment in path.split("/") if segment]
+        return segments[0] if len(segments) == 1 else ""
 
     @staticmethod
     def _bearer_token(scope: Scope) -> str | None:

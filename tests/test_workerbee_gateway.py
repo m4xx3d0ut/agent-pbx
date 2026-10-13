@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +12,7 @@ from agent_pbx.workerbee_gateway import (
     WORKERBEE_PROFILE_LOCAL_DEPLOY,
     WORKERBEE_PROFILE_OBSERVE,
     WORKERBEE_PROFILE_REVIEW,
+    WorkerBeeGatewayAuthMiddleware,
     WorkerBeeGatewayError,
     WorkerBeeGatewayService,
 )
@@ -63,6 +64,58 @@ def test_gateway_lease_is_private_and_scoped_to_binding(tmp_path: Path) -> None:
     with pytest.raises(WorkerBeeGatewayError) as wrong_token:
         gateway.validate(lease.lease_id, "wrong")
     assert wrong_token.value.code == "WORKERBEE_GATEWAY_AUTH_FAILED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "root_path", "expected_rewritten"),
+    [
+        ("/abc123", "", "/"),
+        ("/workerbee-mcp/abc123", "/workerbee-mcp", "/workerbee-mcp/"),
+    ],
+)
+async def test_gateway_auth_resolves_mounted_lease_path_and_rewrites_transport_root(
+    path: str,
+    root_path: str,
+    expected_rewritten: str,
+) -> None:
+    validated: list[tuple[str, str]] = []
+    downstream_scopes: list[dict[str, object]] = []
+
+    class Service:
+        @staticmethod
+        def validate(lease_id: str, token: str) -> None:
+            validated.append((lease_id, token))
+
+    async def downstream(scope, _receive, _send):
+        downstream_scopes.append(dict(scope))
+
+    middleware = WorkerBeeGatewayAuthMiddleware(downstream, Service())  # type: ignore[arg-type]
+    scope = {
+        "type": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": root_path,
+        "headers": [(b"authorization", b"Bearer test-token")],
+    }
+
+    await middleware(scope, None, None)  # type: ignore[arg-type]
+
+    assert validated == [("abc123", "test-token")]
+    assert downstream_scopes[0]["path"] == expected_rewritten
+    assert downstream_scopes[0]["raw_path"] == expected_rewritten.encode()
+
+
+def test_gateway_auth_rejects_missing_or_extra_route_segments() -> None:
+    assert WorkerBeeGatewayAuthMiddleware._route_lease_id(  # noqa: SLF001
+        {"path": "/workerbee-mcp", "root_path": "/workerbee-mcp"}  # type: ignore[arg-type]
+    ) == ""
+    assert WorkerBeeGatewayAuthMiddleware._route_lease_id(  # noqa: SLF001
+        {
+            "path": "/workerbee-mcp/abc123/extra",
+            "root_path": "/workerbee-mcp",
+        }  # type: ignore[arg-type]
+    ) == ""
 
 
 def test_gateway_injects_exact_session_binding_and_project_scope(tmp_path: Path) -> None:

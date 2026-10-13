@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import secrets
+import stat
 import subprocess
 import time
+from dataclasses import asdict, dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
 
 from .workerbee_runtime import (
@@ -21,9 +22,11 @@ from .workerbee_runtime import (
     workspace_strategy_for_backend,
 )
 
-
 WORKERBEE_WORKSPACE_BINDING_API_VERSION = "agent-pbx.workerbee-workspace-binding/v2"
 WORKERBEE_WORKSPACE_HELPER_ENV = "AGENT_PBX_WORKERBEE_WORKSPACE_HELPER_BIN"
+WORKERBEE_WORKSPACE_INCLUDE_POLICY_ENV = (
+    "AGENT_PBX_WORKERBEE_WORKSPACE_INCLUDES_JSON"
+)
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
@@ -40,6 +43,106 @@ class WorkerBeeWorkspaceError(RuntimeError):
             "message": self.message,
             "remediation": self.remediation,
         }
+
+
+class WorkerBeeWorkspaceIncludePolicyError(ValueError):
+    """A host-owned workspace include policy is malformed or mismatched."""
+
+
+def configured_workerbee_workspace_include_paths(
+    *,
+    agent_id: str,
+    source_root: str | Path,
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return explicitly approved extra paths for one Agent and exact checkout.
+
+    The policy is deliberately host configuration rather than Agent metadata:
+    Agents can refresh their own registration metadata, while only the local
+    controller should be able to broaden a content-addressed workspace import.
+    """
+
+    values = os.environ if env is None else env
+    raw = str(values.get(WORKERBEE_WORKSPACE_INCLUDE_POLICY_ENV) or "").strip()
+    if not raw:
+        return ()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise WorkerBeeWorkspaceIncludePolicyError(
+            f"{WORKERBEE_WORKSPACE_INCLUDE_POLICY_ENV} must be valid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise WorkerBeeWorkspaceIncludePolicyError(
+            f"{WORKERBEE_WORKSPACE_INCLUDE_POLICY_ENV} must be a JSON object"
+        )
+    selected = payload.get(agent_id)
+    if selected is None:
+        return ()
+    if not isinstance(selected, dict) or set(selected) != {
+        "source_root",
+        "include_paths",
+    }:
+        raise WorkerBeeWorkspaceIncludePolicyError(
+            f"workspace include policy for {agent_id} must contain only "
+            "source_root and include_paths"
+        )
+    configured_root = str(selected.get("source_root") or "").strip()
+    actual_root = Path(source_root).expanduser()
+    expected_root = Path(configured_root).expanduser()
+    if not configured_root or not expected_root.is_absolute():
+        raise WorkerBeeWorkspaceIncludePolicyError(
+            f"workspace include policy for {agent_id} requires an absolute source_root"
+        )
+    if not actual_root.is_absolute():
+        raise WorkerBeeWorkspaceIncludePolicyError(
+            f"workspace source root for {agent_id} must be absolute"
+        )
+    if actual_root.resolve(strict=False) != expected_root.resolve(strict=False):
+        raise WorkerBeeWorkspaceIncludePolicyError(
+            f"workspace include policy source_root does not match {agent_id}"
+        )
+    configured_paths = selected.get("include_paths")
+    if not isinstance(configured_paths, list):
+        raise WorkerBeeWorkspaceIncludePolicyError(
+            f"workspace include policy for {agent_id} requires at most 64 paths"
+        )
+    try:
+        return normalize_workerbee_workspace_include_paths(configured_paths)
+    except WorkerBeeWorkspaceIncludePolicyError as exc:
+        raise WorkerBeeWorkspaceIncludePolicyError(
+            f"workspace include policy for {agent_id} {exc}"
+        ) from exc
+
+
+def normalize_workerbee_workspace_include_paths(
+    configured_paths: list[object] | tuple[object, ...],
+) -> tuple[str, ...]:
+    """Normalize a bounded set of lexical source-root-relative include paths."""
+
+    if len(configured_paths) > 64:
+        raise WorkerBeeWorkspaceIncludePolicyError("requires at most 64 paths")
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in configured_paths:
+        value = str(item).strip() if isinstance(item, str) else ""
+        raw_parts = value.split("/")
+        path = PurePosixPath(value)
+        if (
+            not value
+            or len(value) > 4096
+            or "\\" in value
+            or "\x00" in value
+            or path.is_absolute()
+            or any(part in {"", ".", ".."} for part in raw_parts)
+            or ".git" in path.parts
+        ):
+            raise WorkerBeeWorkspaceIncludePolicyError("contains an unsafe path")
+        normalized = path.as_posix()
+        if normalized not in seen:
+            result.append(normalized)
+            seen.add(normalized)
+    return tuple(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,8 +234,22 @@ class WorkerBeeWorkspaceService:
     ) -> WorkerBeeWorkspaceBinding:
         selected_project = self._safe_project(project)
         source = Path(source_root).expanduser().resolve()
-        identity = self._source_identity(source)
         backend = canonical_workerbee_backend(runtime.backend)
+        try:
+            normalized_include_paths = normalize_workerbee_workspace_include_paths(
+                include_paths
+            )
+        except WorkerBeeWorkspaceIncludePolicyError as exc:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_WORKSPACE_INCLUDE_INVALID",
+                f"WorkerBee workspace include policy {exc}.",
+                "Use at most 64 safe source-root-relative paths without .git or traversal.",
+            ) from exc
+        identity = self._source_identity(
+            source,
+            materialized=(backend != WORKERBEE_BACKEND_OSS),
+            include_paths=normalized_include_paths,
+        )
         if backend == WORKERBEE_BACKEND_OSS:
             binding = self._direct_binding(
                 runtime=runtime,
@@ -149,7 +266,7 @@ class WorkerBeeWorkspaceService:
                 project=selected_project,
                 source=source,
                 identity=identity,
-                include_paths=include_paths,
+                include_paths=normalized_include_paths,
             )
         else:  # pragma: no cover - runtime selection validates this first
             raise WorkerBeeWorkspaceError(
@@ -422,7 +539,12 @@ class WorkerBeeWorkspaceService:
         return selected
 
     @staticmethod
-    def _source_identity(source: Path) -> dict[str, Any]:
+    def _source_identity(
+        source: Path,
+        *,
+        materialized: bool = False,
+        include_paths: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
         if not source.is_dir():
             raise WorkerBeeWorkspaceError(
                 "WORKERBEE_SOURCE_UNAVAILABLE",
@@ -445,11 +567,97 @@ class WorkerBeeWorkspaceService:
                 "WORKERBEE_SOURCE_GIT_INVALID",
                 "Unable to inspect WorkerBee source status.",
             )
-        return {
+        identity = {
             "source_commit": commit,
             "source_dirty": bool(result.stdout),
             "source_status_sha256": hashlib.sha256(result.stdout).hexdigest(),
         }
+        if materialized:
+            identity["materialization_sha256"] = (
+                WorkerBeeWorkspaceService._materialization_identity(
+                    source,
+                    include_paths=include_paths,
+                )
+            )
+        return identity
+
+    @staticmethod
+    def _materialization_identity(
+        source: Path,
+        *,
+        include_paths: tuple[str, ...],
+    ) -> str:
+        """Fingerprint dirty tracked/submodule state and explicit extra content.
+
+        WorkerBee remains authoritative for validating and hashing the staged
+        snapshot. This host-side fingerprint only prevents two different dirty
+        snapshots from being assigned the same content-addressed import path.
+        """
+
+        diff = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "diff",
+                "--binary",
+                "--submodule=diff",
+                "HEAD",
+                "--",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if diff.returncode != 0:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_SOURCE_GIT_INVALID",
+                "Unable to fingerprint WorkerBee materialized source changes.",
+            )
+        digest = hashlib.sha256()
+        digest.update(diff.stdout)
+        for configured in sorted(set(include_paths)):
+            encoded = configured.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+            WorkerBeeWorkspaceService._hash_explicit_include(
+                digest,
+                source=source,
+                relative=Path(configured),
+            )
+        return digest.hexdigest()
+
+    @staticmethod
+    def _hash_explicit_include(
+        digest: Any,
+        *,
+        source: Path,
+        relative: Path,
+    ) -> None:
+        selected = source / relative
+        candidates = [selected]
+        if selected.is_dir() and not selected.is_symlink():
+            candidates.extend(sorted(selected.rglob("*")))
+        for path in candidates:
+            path_relative = path.relative_to(source).as_posix().encode("utf-8")
+            digest.update(len(path_relative).to_bytes(8, "big"))
+            digest.update(path_relative)
+            try:
+                path_stat = path.lstat()
+            except FileNotFoundError:
+                digest.update(b"missing")
+                continue
+            digest.update(stat.S_IFMT(path_stat.st_mode).to_bytes(8, "big"))
+            if stat.S_ISLNK(path_stat.st_mode):
+                link = os.readlink(path).encode("utf-8", errors="surrogateescape")
+                digest.update(len(link).to_bytes(8, "big"))
+                digest.update(link)
+                continue
+            if not stat.S_ISREG(path_stat.st_mode):
+                continue
+            digest.update(path_stat.st_size.to_bytes(8, "big"))
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
 
     @staticmethod
     def _binding_id(
@@ -457,16 +665,17 @@ class WorkerBeeWorkspaceService:
         project: str,
         identity: Mapping[str, Any],
     ) -> str:
-        seed = "\0".join(
-            (
-                runtime.backend,
-                runtime.instance_id,
-                str(runtime.generation),
-                project,
-                str(identity["source_commit"]),
-                str(identity["source_status_sha256"]),
-            )
-        )
+        seed_parts = [
+            runtime.backend,
+            runtime.instance_id,
+            str(runtime.generation),
+            project,
+            str(identity["source_commit"]),
+            str(identity["source_status_sha256"]),
+        ]
+        if identity.get("materialization_sha256"):
+            seed_parts.append(str(identity["materialization_sha256"]))
+        seed = "\0".join(seed_parts)
         return f"wb-{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
 
 

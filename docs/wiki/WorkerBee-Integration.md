@@ -81,6 +81,19 @@ export AGENT_PBX_WORKERBEE_DEBUG_CONTAINER="workerbee-mcp-debug"
 export AGENT_PBX_WORKERBEE_DEBUG_IMPORT_ROOT="/workspace/imports"
 ```
 
+Initialized Git submodules are flattened into the content-addressed snapshot
+without copying `.git` metadata. Tracked submodule files are automatic. Dirty
+or untracked submodule files require a private, host-owned allowlist bound to
+the Agent ID and exact source checkout:
+
+```bash
+export AGENT_PBX_WORKERBEE_WORKSPACE_INCLUDES_JSON='{"agent-id":{"source_root":"/absolute/project","include_paths":["business-site/product-pages/agent-pbx"]}}'
+```
+
+Keep entries narrow. The controller rejects traversal, `.git`, malformed
+selection, source-root drift, and more than 64 configured paths before it asks
+WorkerBee to stage or replace a Codex process.
+
 The staging helper records the source commit, dirty state, status digest,
 content digest, backend generation, and appliance path. Reusing a binding is
 allowed only when the appliance marker exactly matches that evidence. The

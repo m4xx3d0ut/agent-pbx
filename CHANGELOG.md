@@ -8,6 +8,10 @@
   launch preflight. The TUI now identifies the failed binding phase, presents
   remediation, and states explicitly that the existing Codex process was not
   started or replaced instead of reducing the response to an HTTP conflict.
+- Resolve gateway lease identities from Starlette's mounted ASGI `root_path`
+  before authenticating the request, then rewrite the authenticated route to
+  the Streamable HTTP transport root. Live gateway URLs no longer fail as an
+  invalid lease before WorkerBee receives the MCP handshake.
 - Bind every Agent, Operator, edit fork, and review fork launch or resume to the
   one selected WorkerBee backend generation and an exact workspace receipt.
   Appliance sessions now use an Agent PBX policy gateway instead of inheriting
@@ -28,6 +32,10 @@
 
 ### Added
 
+- Add host-owned, Agent-and-source-bound workspace include policies for
+  explicitly selected dirty or untracked Git-submodule content. Materialized
+  binding identities now incorporate dirty submodule diffs and approved include
+  bytes so changed snapshots cannot reuse a stale appliance import path.
 - Add generation-bound WorkerBee workspace and gateway lease APIs, scoped
   `observe-local`, `review-readonly`, and `local-deploy` tool profiles, active
   mutation guards for backend switching, and doctor diagnostics for runtime

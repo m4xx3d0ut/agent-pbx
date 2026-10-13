@@ -21932,6 +21932,136 @@ async def test_tui_workerbee_gateway_launch_uses_selected_runtime_binding() -> N
 
 
 @pytest.mark.asyncio
+async def test_tui_workerbee_gateway_launch_forwards_host_approved_includes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    source_root = "/tmp/demo"
+    monkeypatch.setenv(
+        "AGENT_PBX_WORKERBEE_WORKSPACE_INCLUDES_JSON",
+        json.dumps(
+            {
+                "agent-1": {
+                    "source_root": source_root,
+                    "include_paths": [
+                        "business-site/product-pages/agent-pbx",
+                        "business-site/docs/agent-pbx-product-site.md",
+                    ],
+                }
+            }
+        ),
+    )
+    posts: list[tuple[str, dict[str, object]]] = []
+
+    class Response:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.status_code = 200
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.payload
+
+    class Client:
+        async def get(self, _path: str, **_kwargs: object) -> Response:
+            return Response({"selected": {"backend": "platform_debug"}})
+
+        async def post(
+            self,
+            path: str,
+            json: dict[str, object],
+            **_kwargs: object,
+        ) -> Response:
+            posts.append((path, json))
+            if path.endswith("/workspaces"):
+                return Response({"binding_id": "wb-binding", "state": "ready"})
+            return Response(
+                {
+                    "gateway_url": "http://127.0.0.1:8765/workerbee-mcp/lease",
+                    "token": "apbx_token",
+                    "lease": {"lease_id": "lease", "profile": "observe-local"},
+                }
+            )
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    await app.prepare_workerbee_gateway_launch(
+        agent_id="agent-1",
+        project="demo",
+        codex_session_id="thread-1",
+        profile="observe-local",
+        source_root=source_root,
+    )
+
+    assert posts[0] == (
+        "/v2/agents/agent-1/workerbee/workspaces",
+        {
+            "project": "demo",
+            "source_root": source_root,
+            "include_paths": [
+                "business-site/product-pages/agent-pbx",
+                "business-site/docs/agent-pbx-product-site.md",
+            ],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_tui_workerbee_invalid_include_policy_stops_before_workspace_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    monkeypatch.setenv(
+        "AGENT_PBX_WORKERBEE_WORKSPACE_INCLUDES_JSON",
+        json.dumps(
+            {
+                "agent-1": {
+                    "source_root": "/tmp/other",
+                    "include_paths": ["site"],
+                }
+            }
+        ),
+    )
+    posts: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"selected": {"backend": "platform_debug"}}
+
+    class Client:
+        async def get(self, _path: str, **_kwargs: object) -> Response:
+            return Response()
+
+        async def post(self, path: str, **_kwargs: object) -> Response:
+            posts.append(path)
+            return Response()
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    with pytest.raises(WorkerBeeLaunchPreflightError) as failure:
+        await app.prepare_workerbee_gateway_launch(
+            agent_id="agent-1",
+            project="demo",
+            codex_session_id="thread-1",
+            profile="observe-local",
+            source_root="/tmp/demo",
+        )
+
+    assert failure.value.code == "WORKERBEE_WORKSPACE_INCLUDE_POLICY_INVALID"
+    assert failure.value.phase == "workspace include policy"
+    assert posts == []
+
+
+@pytest.mark.asyncio
 async def test_tui_workerbee_gateway_launch_preserves_structured_preflight_error() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     posts: list[str] = []
