@@ -63,8 +63,11 @@ def service(
     *,
     capability_ready: bool = True,
     invalidated: list[str] | None = None,
+    impact: dict[str, object] | None = None,
+    selections: list[dict[str, object]] | None = None,
 ) -> WorkerBeeSwitchService:
     invalidation_sink = invalidated if invalidated is not None else []
+    selection_sink = selections if selections is not None else []
     return WorkerBeeSwitchService(
         state_root=tmp_path / "switch-state",
         switch_bin="switch-test",
@@ -76,13 +79,23 @@ def service(
             "endpoint": endpoint,
         },
         cache_invalidator=lambda: invalidation_sink.append("cleared"),
+        impact_provider=lambda: dict(impact or {}),
+        selection_recorder=lambda provenance, **kwargs: selection_sink.append(
+            {"provenance": dict(provenance), **kwargs}
+        ),
     )
 
 
 def test_workerbee_switch_preview_apply_and_rollback(tmp_path: Path) -> None:
     switcher = FakeSwitcher()
     invalidated: list[str] = []
-    manager = service(tmp_path, switcher, invalidated=invalidated)
+    selections: list[dict[str, object]] = []
+    manager = service(
+        tmp_path,
+        switcher,
+        invalidated=invalidated,
+        selections=selections,
+    )
 
     preview = manager.preview("platform_debug")
     receipt = (
@@ -112,12 +125,17 @@ def test_workerbee_switch_preview_apply_and_rollback(tmp_path: Path) -> None:
     assert "preview_token" not in applied
     assert switcher.backend == "platform_debug"
     assert invalidated == ["cleared"]
+    assert selections[-1]["reason"] == "switch"
+    assert selections[-1]["force_generation"] is True
+    assert selections[-1]["provenance"]["backend"] == "platform_debug"
 
     rolled_back = manager.rollback(preview["transaction_id"], confirm=True)
     assert rolled_back["phase"] == "rolled_back"
     assert rolled_back["rollback"]["after"]["backend"] == "oss"
     assert switcher.backend == "oss"
     assert invalidated == ["cleared", "cleared"]
+    assert selections[-1]["reason"] == "rollback"
+    assert selections[-1]["provenance"]["backend"] == "oss"
 
 
 def test_workerbee_switch_requires_matching_fresh_privileged_preview(tmp_path: Path) -> None:
@@ -196,15 +214,43 @@ def test_workerbee_switch_command_failure_records_unchanged_backend(
     assert switcher.backend == "oss"
 
 
-def test_workerbee_switch_status_marks_existing_sessions_pinned(tmp_path: Path) -> None:
+def test_workerbee_switch_status_requires_generation_guard(tmp_path: Path) -> None:
     manager = service(tmp_path, FakeSwitcher("platform_debug"))
 
     result = manager.status()
 
     assert result["available"] is True
     assert result["active"]["backend"] == "platform_debug"
-    assert result["existing_sessions_pinned"] is True
+    assert result["existing_sessions_pinned"] is False
+    assert result["generation_guard_required"] is True
     assert result["targets"] == ["oss", "platform_debug"]
+    user_appliance = next(
+        item
+        for item in result["backend_catalog"]
+        if item["backend"] == "user_appliance"
+    )
+    assert user_appliance["available"] is False
+    assert "deferred" in user_appliance["unavailable_reason"].lower()
+
+
+def test_workerbee_switch_blocks_active_mutations(tmp_path: Path) -> None:
+    impact = {"mutation_count": 1, "mutation_leases": ["lease-1"]}
+    manager = service(tmp_path, FakeSwitcher(), impact=impact)
+
+    with pytest.raises(ValueError, match="active mutating"):
+        manager.preview("platform_debug")
+
+    impact["mutation_count"] = 0
+    preview = manager.preview("platform_debug")
+    impact["mutation_count"] = 1
+
+    with pytest.raises(ValueError, match="active mutating"):
+        manager.apply(
+            preview["transaction_id"],
+            preview_token=preview["preview_token"],
+            confirm_target="platform_debug",
+            confirm_privileged=True,
+        )
 
 
 def test_workerbee_switch_api_preserves_preview_apply_boundary(tmp_path: Path) -> None:

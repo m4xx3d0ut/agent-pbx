@@ -18,6 +18,7 @@ from .workerbee_mcp import (
     inspect_workerbee_mcp,
     inspect_workerbee_switcher,
 )
+from .workerbee_runtime import canonical_workerbee_backend
 
 
 WORKERBEE_SWITCH_API_VERSION = "agent-pbx.workerbee-switch/v1"
@@ -29,12 +30,7 @@ DEFAULT_PREVIEW_TTL_SECONDS = 15 * 60
 
 
 def _canonical_backend(value: object) -> str:
-    normalized = str(value or "").strip().lower().replace("-", "_")
-    if normalized in {"oss", "oss_local", "local", "workerbee_oss"}:
-        return "oss"
-    if normalized in {"debug", "platform", "platform_debug", "platform_admin"}:
-        return "platform_debug"
-    return normalized
+    return canonical_workerbee_backend(value)
 
 
 def _provenance_dict(value: WorkerBeeBackendProvenance) -> dict[str, Any]:
@@ -81,6 +77,8 @@ class WorkerBeeSwitchService:
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         capability_probe: Callable[[str], Mapping[str, Any]] | None = None,
         cache_invalidator: Callable[[], None] | None = None,
+        impact_provider: Callable[[], Mapping[str, Any]] | None = None,
+        selection_recorder: Callable[..., Mapping[str, Any] | None] | None = None,
         preview_ttl_seconds: int = DEFAULT_PREVIEW_TTL_SECONDS,
         clock: Callable[[], float] = time.time,
         which: Callable[[str], str | None] = shutil.which,
@@ -90,6 +88,8 @@ class WorkerBeeSwitchService:
         self.clock = clock
         self.preview_ttl_seconds = max(30, int(preview_ttl_seconds))
         self.cache_invalidator = cache_invalidator or (lambda: None)
+        self.impact_provider = impact_provider or (lambda: {})
+        self.selection_recorder = selection_recorder
         self.capability_probe = capability_probe or self._default_capability_probe
         configured_switch = str(
             switch_bin or os.getenv(WORKERBEE_SWITCH_BIN_ENV) or ""
@@ -103,13 +103,34 @@ class WorkerBeeSwitchService:
 
     def status(self) -> dict[str, Any]:
         provenance = self._inspect()
+        impact = dict(self.impact_provider() or {})
         return {
             "api_version": WORKERBEE_SWITCH_API_VERSION,
             "available": bool(self.switch_bin and self.status_bin),
             "targets": list(WORKERBEE_SWITCH_TARGETS),
             "active": _provenance_dict(provenance),
             "last_transaction": self._last_transaction_summary(),
-            "existing_sessions_pinned": True,
+            "existing_sessions_pinned": False,
+            "generation_guard_required": True,
+            "impact": impact,
+            "backend_catalog": [
+                {
+                    "backend": "oss",
+                    "available": True,
+                    "workspace_strategy": "direct_host",
+                },
+                {
+                    "backend": "user_appliance",
+                    "available": False,
+                    "workspace_strategy": "managed_appliance_volume",
+                    "unavailable_reason": "Live user-appliance image qualification is deferred.",
+                },
+                {
+                    "backend": "platform_debug",
+                    "available": True,
+                    "workspace_strategy": "content_addressed_import",
+                },
+            ],
         }
 
     def preview(self, target: str) -> dict[str, Any]:
@@ -120,6 +141,11 @@ class WorkerBeeSwitchService:
             if not before.get("ready"):
                 raise ValueError(
                     "WorkerBee status is not ready; repair the active backend before switching"
+                )
+            impact = dict(self.impact_provider() or {})
+            if int(impact.get("mutation_count") or 0) > 0:
+                raise ValueError(
+                    "WorkerBee backend switch is blocked by active mutating tool calls"
                 )
             plan = self._run_switch(resolved_target, dry_run=True)
             now = self.clock()
@@ -138,8 +164,10 @@ class WorkerBeeSwitchService:
                 "plan_digest": hashlib.sha256(plan.encode()).hexdigest(),
                 "plan_summary": self._plan_summary(plan),
                 "requires_privileged_confirmation": resolved_target == "platform_debug",
-                "existing_sessions_pinned": True,
+                "existing_sessions_pinned": False,
                 "future_sessions_only": True,
+                "generation_guard_required": True,
+                "impact": impact,
             }
             self._save(record)
             return dict(record)
@@ -161,6 +189,11 @@ class WorkerBeeSwitchService:
                 confirm_privileged=confirm_privileged,
             )
             before_now = _provenance_dict(self._inspect())
+            impact = dict(self.impact_provider() or {})
+            if int(impact.get("mutation_count") or 0) > 0:
+                raise ValueError(
+                    "WorkerBee backend switch is blocked by active mutating tool calls"
+                )
             if _fingerprint(before_now) != record["before_fingerprint"]:
                 raise ValueError(
                     "WorkerBee backend changed after preview; create a fresh switch preview"
@@ -174,6 +207,7 @@ class WorkerBeeSwitchService:
                     capability={"ready": True, "code": "UNCHANGED_BACKEND"},
                 )
                 self._save(record)
+                self._record_selection(before_now, reason="verified_noop", force_generation=False)
                 return self._public_record(record)
             try:
                 self._run_switch(target, dry_run=False)
@@ -231,6 +265,7 @@ class WorkerBeeSwitchService:
             )
             self._save(record)
             self.cache_invalidator()
+            self._record_selection(result["after"], reason="switch", force_generation=True)
             return self._public_record(record)
 
     def rollback(
@@ -261,7 +296,27 @@ class WorkerBeeSwitchService:
             self._save(record)
             if result.get("verified"):
                 self.cache_invalidator()
+                self._record_selection(
+                    result.get("after") or {},
+                    reason="rollback",
+                    force_generation=True,
+                )
             return self._public_record(record)
+
+    def _record_selection(
+        self,
+        provenance: Mapping[str, Any],
+        *,
+        reason: str,
+        force_generation: bool,
+    ) -> None:
+        if self.selection_recorder is None:
+            return
+        self.selection_recorder(
+            provenance,
+            reason=reason,
+            force_generation=force_generation,
+        )
 
     def _restore_backend(self, backend: str) -> dict[str, Any]:
         if backend not in WORKERBEE_SWITCH_TARGETS:
