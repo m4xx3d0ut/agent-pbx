@@ -78,4 +78,3 @@ API recovery without printing secret values or ciphertext.
 See the repository [Joplin migration note](../migrations/v2-checkpoint-11-joplin.md)
 and the Joplin section of the [README](../../README.md) for configuration keys
 and conflict semantics.
-

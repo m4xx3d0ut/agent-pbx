@@ -63,4 +63,3 @@ files must not expose its text.
 Managed skill packs use manifests, hashes, preview/apply/rollback, drift
 detection, and context-budget checks. Project-authored files outside managed
 markers are not overwritten.
-

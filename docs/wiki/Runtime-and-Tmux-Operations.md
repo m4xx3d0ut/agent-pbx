@@ -86,4 +86,3 @@ agent-pbx remote ssh-attach \
   verifies it, and retains rollback evidence.
 - Extensive terminal replay is unnecessary; Codex resume history and current
   runtime readiness are the required recovery state.
-

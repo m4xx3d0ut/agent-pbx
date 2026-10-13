@@ -56,4 +56,3 @@ evidence, and published notice.
 
 See the maintained [architecture overview](../architecture.md) and
 [architecture decision records](../adr/README.md) for formal boundaries.
-

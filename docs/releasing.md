@@ -46,20 +46,20 @@ maintainer cannot approve the deployment.
 Production releases use all of these matching values:
 
 ```text
-src/agent_pbx/__init__.py       2.1.1
-Git tag                         v2.1.1
-CHANGELOG.md heading            ## v2.1.1 - YYYY-MM-DD
-Release document                docs/releases/v2.1.1.md
-GitHub Release tag              v2.1.1
+src/agent_pbx/__init__.py       X.Y.Z
+Git tag                         vX.Y.Z
+CHANGELOG.md heading            ## vX.Y.Z - YYYY-MM-DD
+Release document                docs/releases/vX.Y.Z.md
+GitHub Release tag              vX.Y.Z
 ```
 
 TestPyPI rehearsals use a strict release-candidate form:
 
 ```text
-src/agent_pbx/__init__.py       2.1.1rc1
-Git tag                         v2.1.1rc1
-CHANGELOG.md heading            ## v2.1.1rc1 - YYYY-MM-DD
-Release document                docs/releases/v2.1.1rc1.md
+src/agent_pbx/__init__.py       X.Y.Zrc1
+Git tag                         vX.Y.Zrc1
+CHANGELOG.md heading            ## vX.Y.Zrc1 - YYYY-MM-DD
+Release document                docs/releases/vX.Y.Zrc1.md
 ```
 
 The validator rejects other tag forms, mismatched versions, an untagged
@@ -73,8 +73,8 @@ already present on the target package index.
 3. Create and push an annotated prerelease tag:
 
    ```bash
-   git tag -a v2.1.1rc1 -m "Agent PBX 2.1.1rc1"
-   git push github v2.1.1rc1
+   git tag -a vX.Y.Zrc1 -m "Agent PBX X.Y.Zrc1"
+   git push github vX.Y.Zrc1
    ```
 
 4. In GitHub Actions, open **publish Agent PBX to TestPyPI**.
@@ -189,5 +189,7 @@ The publisher preserves unknown remote pages; it stages and commits only the
 versioned Agent PBX page names. By default it publishes to the branch advertised
 by the remote wiki's `HEAD`, which preserves GitHub `master` and Gitea `main`
 conventions. Use `--branch` only for an intentional override. An empty or
-uninitialized wiki still requires the repository owner to enable or initialize
-Wiki support before the remote can accept a clone or push.
+uninitialized wiki still requires the repository owner to enable Wiki support
+and create its first page before the `.wiki.git` remote can accept a clone or
+push. Replace that seed through the guarded publisher only after the reviewed
+repository revision is available on the same host.

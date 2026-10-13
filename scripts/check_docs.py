@@ -37,6 +37,10 @@ PRIVATE_WIKI_PATTERNS = {
         r"\b(?:gh[opusr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,})\b"
     ),
 }
+WIKI_REVIEW_DATE_RE = re.compile(
+    r"^> \*\*Last reviewed:\*\* \d{4}-\d{2}-\d{2}$",
+    re.MULTILINE,
+)
 
 
 @dataclass(frozen=True)
@@ -89,7 +93,7 @@ def validate_wiki() -> list[str]:
         relative = page.relative_to(ROOT)
         if "**Applies to:** Agent PBX 2.2.x" not in body:
             errors.append(f"{relative}: missing version applicability marker")
-        if "**Last reviewed:** 2026-10-10" not in body:
+        if WIKI_REVIEW_DATE_RE.search(body) is None:
             errors.append(f"{relative}: missing review-date marker")
         for label, pattern in PRIVATE_WIKI_PATTERNS.items():
             if pattern.search(body):

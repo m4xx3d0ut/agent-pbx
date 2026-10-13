@@ -1,7 +1,7 @@
 # Security and Remote Access
 
 > **Applies to:** Agent PBX 2.2.x
-> **Last reviewed:** 2026-10-10
+> **Last reviewed:** 2026-10-12
 
 ## Default boundary
 
@@ -27,6 +27,12 @@ agent-pbx doctor --strict
 Never expose a raw tmux socket or raw Codex app-server endpoint to the LAN. SSH
 keeps terminal transport inside a mature authenticated channel; Agent PBX can
 generate the exact runtime attach command.
+
+The optional public browser demo is a separate synthetic runtime, not a remote
+view into the operator control plane. Each visitor gets private temporary
+state, deterministic fixtures, a loopback daemon, and a dedicated tmux server.
+See [Interactive Browser Demo](Interactive-Browser-Demo.md) for its publication
+and isolation requirements.
 
 ## Remote credentials
 
@@ -54,4 +60,3 @@ tmux movement, remote controls, merge/issue mutation, lifecycle deletion, and
 credential changes require typed actions and audit evidence. Destructive
 operations use preview and exact confirmation where the change cannot be
 reversed directly.
-

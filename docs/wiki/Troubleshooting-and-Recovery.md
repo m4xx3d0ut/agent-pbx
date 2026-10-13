@@ -86,4 +86,3 @@ agent-pbx doctor
 Add `--restore-config` only when the matching configuration must also be
 restored. Rollback creates a safety backup first and does not delete later
 project work, transcripts, Joplin notes, or trash entries.
-

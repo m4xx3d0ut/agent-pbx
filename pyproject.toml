@@ -15,6 +15,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
 ]
+
 dependencies = [
     "fastapi>=0.110,<0.137",
     "httpx>=0.27,<1",
@@ -27,6 +28,13 @@ dependencies = [
     "uvicorn[standard]>=0.29,<0.48",
     "websockets>=14,<17",
 ]
+
+[project.urls]
+Homepage = "https://github.com/m4xx3d0ut/agent-pbx"
+Documentation = "https://github.com/m4xx3d0ut/agent-pbx/wiki"
+Repository = "https://github.com/m4xx3d0ut/agent-pbx"
+Issues = "https://github.com/m4xx3d0ut/agent-pbx/issues"
+Changelog = "https://github.com/m4xx3d0ut/agent-pbx/blob/dev/CHANGELOG.md"
 
 [project.optional-dependencies]
 images = [

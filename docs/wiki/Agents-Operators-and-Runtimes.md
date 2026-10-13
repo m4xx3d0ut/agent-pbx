@@ -63,4 +63,3 @@ It shows lifecycle state, non-sensitive identifiers, and explicit structured
 role labels; it does not expose prompts, hidden reasoning, child filesystem
 paths, tool content, or roles inferred from paths. See the
 [subagent qualification record](../acceptance/v2.1.2-subagent-activity.md).
-

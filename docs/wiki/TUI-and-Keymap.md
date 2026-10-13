@@ -131,4 +131,3 @@ painting unchanged frames.
 Use `[` and `]` to change the split width and `0` to reset it. Adaptive,
 split, compact, and tiny layouts are available; compact modes retain keyboard
 access to the same right-side tabs.
-

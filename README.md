@@ -50,12 +50,13 @@ each visitor. It does not connect to workstation Agents, credentials, projects,
 or runtime state.
 
 ```bash
-python -m pip install -e ".[web-demo]"
+python -m pip install "agent-pbx[web-demo]"
 agent-pbx demo doctor
 agent-pbx demo web --host 127.0.0.1 --port 8000
 ```
 
-See the [interactive browser demo guide](docs/public-browser-demo.md) for the
+Source contributors can use `python -m pip install -e ".[web-demo]"` from a
+checkout. See the [interactive browser demo guide](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/public-browser-demo.md) for the
 rootless container, HTTPS reverse-proxy boundary, resource controls, public
 origin policy, and versioned product-site contract.
 
@@ -68,10 +69,10 @@ origin policy, and versioned product-site contract.
 | WorkerBee | Optional application, infrastructure, simulation, deployment, and runtime truth |
 | TUI | Operator interaction and rendering; closing it does not stop the managed runtime |
 
-See [the architecture overview](docs/architecture.md),
-[the versioned project wiki](docs/wiki/Home.md),
-[the v2.2 release notes](docs/releases/v2.2.0.md), and
-[the accepted architecture decisions](docs/adr/README.md) for the complete
+See [the architecture overview](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/architecture.md),
+[the project wiki](https://github.com/m4xx3d0ut/agent-pbx/wiki),
+[the v2.2 release notes](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/releases/v2.2.0.md), and
+[the accepted architecture decisions](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/adr/README.md) for the complete
 control-plane and compatibility boundaries.
 
 ### Why PBX?
@@ -178,7 +179,7 @@ the large Textual test module can be distributed by test instead of being
 pinned to one worker. Run `scripts/test_full.sh --serial` for a complete
 single-process parity check. Tests marked `serial` are excluded from all xdist
 workers and run afterward in the controller process. See
-[test execution and qualification](docs/testing.md) for worker-count evidence,
+[test execution and qualification](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/testing.md) for worker-count evidence,
 resource-isolation rules, and failure reproduction.
 
 The server defaults to localhost. LAN binding requires bearer authentication,
@@ -187,10 +188,10 @@ controller roles, audience and expiry, optional client/Agent binding, immediate
 revocation, and audit. Agent-scoped controllers cannot use global legacy API,
 credential-administration, audit, or MCP surfaces.
 
-See [v2 installation and upgrade](docs/install-v2.md) for Linux/macOS host
+See [v2 installation and upgrade](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/install-v2.md) for Linux/macOS host
 requirements, remote clients, verified/offline wheelhouses, migration, and
 rollback. Maintainers should follow the
-[Trusted Publishing release procedure](docs/releasing.md) for TestPyPI and
+[Trusted Publishing release procedure](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/releasing.md) for TestPyPI and
 production PyPI releases. Repository documentation and wiki source can be
 checked without touching services by running `python scripts/check_docs.py`
 and `agent-pbx wiki check --source docs/wiki`.
@@ -245,7 +246,7 @@ export AGENT_PBX_TUI_EVENT_STREAM_V2=1
 agent-pbx remote ssh-attach --host user@pbx-host --entity agent-id --read-only
 ```
 
-See [Checkpoint 14 remote access](docs/migrations/v2-checkpoint-14-remote.md)
+See [Checkpoint 14 remote access](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/migrations/v2-checkpoint-14-remote.md)
 for the credential, TLS, revocation, snapshot, and rollback model.
 
 For the common local workflow:
@@ -718,7 +719,7 @@ A valid PBX project reported missing by WorkerBee is treated as a path-
 visibility diagnostic rather than evidence that the WorkerBee server needs a
 patch. Omitted launch tools, unavailable endpoints, older servers, and path
 mismatches produce distinct diagnostics. See the
-[WorkerBee wiki guide](docs/wiki/WorkerBee-Integration.md).
+[WorkerBee wiki guide](https://github.com/m4xx3d0ut/agent-pbx/wiki/WorkerBee-Integration).
 
 When both versioned switch helpers are configured, the WorkerBee tab and
 palette can preview a change between OSS and platform-debug MCP backends:
@@ -1492,7 +1493,7 @@ is observed and excludes child prompts, paths, hidden reasoning, tool content,
 and path-derived roles. `AGENT_PBX_CODEX_EVENT_BRIDGE=0` disables the bridge;
 `AGENT_PBX_CODEX_EVENT_BRIDGE_TRANSPORT=sidecar` bypasses shared-daemon
 probing. Qualification evidence is recorded in
-[the v2.1.2 subagent activity note](docs/acceptance/v2.1.2-subagent-activity.md).
+[the v2.1.2 subagent activity note](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/acceptance/v2.1.2-subagent-activity.md).
 
 On tiny terminals the existing compact controls remain available. Android
 Termux can emit F8 with `Volume Up+8`; terminals that cannot distinguish shifted

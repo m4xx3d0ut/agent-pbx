@@ -7,13 +7,17 @@ provide the surrounding presentation.
 
 ## Install and inspect
 
-Install the optional delivery dependency and run the nonmutating doctor:
+Install the optional delivery dependency from PyPI and run the nonmutating
+doctor:
 
 ```bash
-python -m pip install -e ".[web-demo]"
+python -m pip install "agent-pbx[web-demo]"
 agent-pbx demo doctor
 agent-pbx demo contract
 ```
+
+Source contributors can instead install the current checkout with
+`python -m pip install -e ".[web-demo]"`.
 
 The default command binds only to loopback:
 

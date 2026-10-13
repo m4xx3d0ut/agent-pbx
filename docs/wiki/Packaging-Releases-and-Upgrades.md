@@ -92,4 +92,3 @@ specific default. Package publication never publishes the wiki implicitly.
 See the complete [release procedure](../releasing.md),
 [installation and rollback guide](../install-v2.md), and
 [test qualification](../testing.md).
-

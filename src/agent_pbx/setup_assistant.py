@@ -329,4 +329,3 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
 
 def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
-

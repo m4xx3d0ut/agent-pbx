@@ -1,7 +1,7 @@
 # Agent PBX
 
 > **Applies to:** Agent PBX 2.2.x
-> **Last reviewed:** 2026-10-10
+> **Last reviewed:** 2026-10-12
 
 Agent PBX is a **runtime-grounded Agentic Engineering Control Plane**. It gives
 an engineering operator one durable system for operating Agent and Operator
@@ -30,6 +30,7 @@ and iteration while preserving the ownership of every managed runtime.
 - Codex model and profile management: [Models, Profiles, and Codex](Models-Profiles-and-Codex.md)
 - Optional runtime truth: [WorkerBee Integration](WorkerBee-Integration.md)
 - Scoped knowledge and response capture: [Joplin Notes](Joplin-Notes.md)
+- Isolated product tour: [Interactive Browser Demo](Interactive-Browser-Demo.md)
 - Network and client boundaries: [Security and Remote Access](Security-and-Remote-Access.md)
 - Failure diagnosis: [Troubleshooting and Recovery](Troubleshooting-and-Recovery.md)
 - Maintainer and upgrade flow: [Packaging, Releases, and Upgrades](Packaging-Releases-and-Upgrades.md)
@@ -37,4 +38,3 @@ and iteration while preserving the ownership of every managed runtime.
 The repository [README](../../README.md), [architecture overview](../architecture.md),
 and [architecture decisions](../adr/README.md) remain the canonical concise
 references. This wiki expands their operational guidance.
-

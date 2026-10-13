@@ -1,7 +1,7 @@
 # Agent PBX wiki source
 
 > **Applies to:** Agent PBX 2.2.x
-> **Last reviewed:** 2026-10-10
+> **Last reviewed:** 2026-10-12
 
 This directory is the versioned source for the Agent PBX project wiki. The
 pages are useful directly in the repository and can later be copied to the
@@ -19,9 +19,10 @@ Start with [Home](Home.md). The recommended page order is:
 6. [Models, Profiles, and Codex](Models-Profiles-and-Codex.md)
 7. [WorkerBee Integration](WorkerBee-Integration.md)
 8. [Joplin Notes](Joplin-Notes.md)
-9. [Security and Remote Access](Security-and-Remote-Access.md)
-10. [Troubleshooting and Recovery](Troubleshooting-and-Recovery.md)
-11. [Packaging, Releases, and Upgrades](Packaging-Releases-and-Upgrades.md)
+9. [Interactive Browser Demo](Interactive-Browser-Demo.md)
+10. [Security and Remote Access](Security-and-Remote-Access.md)
+11. [Troubleshooting and Recovery](Troubleshooting-and-Recovery.md)
+12. [Packaging, Releases, and Upgrades](Packaging-Releases-and-Upgrades.md)
 
 Before publication, run:
 
@@ -53,4 +54,3 @@ The publisher updates only the staged page names and preserves unknown remote
 wiki pages. It follows the remote wiki's advertised default branch unless an
 explicit `--branch` override is supplied. It does not delete or mirror arbitrary
 remote content.
-

@@ -75,4 +75,3 @@ The status helper and switch helper are separate contracts. Do not substitute
 a command named `precheck` unless its implementation is proven observational;
 the Agent PBX preview path intentionally calls only the switcher's true
 non-mutating `--dry-run` mode.
-
