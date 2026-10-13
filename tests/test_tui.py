@@ -14594,6 +14594,7 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
         return True
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
     app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
@@ -14719,6 +14720,7 @@ async def test_tui_start_operator_does_not_bind_stale_caller_when_operator_selec
         return True
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
     app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
@@ -14861,6 +14863,7 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
         ]
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.ensure_operator_auth_ready = fake_auth_ready  # type: ignore[method-assign]
     app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
     app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]

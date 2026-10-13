@@ -116,7 +116,12 @@ class WorkerBeeDebugMaterializer:
             ]
             for value in include_paths:
                 command.extend(("--include", str(value)))
-            self._run(command, timeout=300, label="workspace staging")
+            self._run(
+                command,
+                timeout=300,
+                label="workspace staging",
+                env=self._stage_environment(),
+            )
             receipt = self._read_json(staged_receipt)
             expected = self._normalized_receipt(receipt)
             existing = self._container_marker(runtime_path, required=False)
@@ -133,6 +138,22 @@ class WorkerBeeDebugMaterializer:
                     [self.docker_bin, "cp", f"{staged}/.", f"{self.container}:{runtime_path}"],
                     timeout=300,
                     label="debug workspace import",
+                )
+                uid, gid = self._container_identity()
+                self._run(
+                    [
+                        self.docker_bin,
+                        "exec",
+                        "-u",
+                        "0",
+                        self.container,
+                        "chown",
+                        "-R",
+                        f"{uid}:{gid}",
+                        runtime_path,
+                    ],
+                    timeout=60,
+                    label="debug workspace ownership normalization",
                 )
                 imported = self._container_marker(runtime_path, required=True)
                 self._require_marker_match(imported or {}, expected)
@@ -233,6 +254,25 @@ class WorkerBeeDebugMaterializer:
             )
         return payload
 
+    def _container_identity(self) -> tuple[str, str]:
+        values: list[str] = []
+        for flag in ("-u", "-g"):
+            result = self.runner(
+                [self.docker_bin, "exec", self.container, "id", flag],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            value = str(result.stdout or "").strip()
+            if result.returncode != 0 or not value.isdigit():
+                detail = (result.stderr or result.stdout or "identity unavailable").strip()
+                raise WorkerBeeMaterializerError(
+                    f"Unable to determine debug appliance user identity: {detail}"
+                )
+            values.append(value)
+        return values[0], values[1]
+
     @staticmethod
     def _normalized_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         required = ("content_sha256", "source_commit", "source_dirty")
@@ -266,13 +306,38 @@ class WorkerBeeDebugMaterializer:
         root.chmod(0o700)
         return root
 
-    def _run(self, command: list[str], *, timeout: float, label: str) -> None:
+    def _stage_environment(self) -> dict[str, str]:
+        """Make a source-checkout staging script importable without installing it."""
+
+        env = dict(os.environ)
+        try:
+            repository_root = self.stage_script.resolve().parents[2]
+        except IndexError:
+            return env
+        source_root = repository_root / "src"
+        if not source_root.is_dir():
+            return env
+        existing = str(env.get("PYTHONPATH") or "").strip()
+        env["PYTHONPATH"] = (
+            f"{source_root}{os.pathsep}{existing}" if existing else str(source_root)
+        )
+        return env
+
+    def _run(
+        self,
+        command: list[str],
+        *,
+        timeout: float,
+        label: str,
+        env: dict[str, str] | None = None,
+    ) -> None:
         result = self.runner(
             command,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
+            **({"env": env} if env is not None else {}),
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "command failed").strip()

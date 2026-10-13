@@ -46,6 +46,10 @@ def test_debug_materializer_stages_and_verifies_isolated_import(tmp_path: Path) 
             if marker is None:
                 return subprocess.CompletedProcess(command, 1, "", "missing")
             return subprocess.CompletedProcess(command, 0, json.dumps(marker), "")
+        if command[1:3] == ["exec", "debug"] and command[3:5] == ["id", "-u"]:
+            return subprocess.CompletedProcess(command, 0, "65532\n", "")
+        if command[1:3] == ["exec", "debug"] and command[3:5] == ["id", "-g"]:
+            return subprocess.CompletedProcess(command, 0, "65532\n", "")
         if command[1] == "cp":
             marker = {
                 "content_sha256": digest,
@@ -75,6 +79,17 @@ def test_debug_materializer_stages_and_verifies_isolated_import(tmp_path: Path) 
     assert result["source_commit"] == commit
     assert result["reused"] is False
     assert any(command[1] == "cp" for command in commands if command[0] == "docker")
+    assert [
+        "docker",
+        "exec",
+        "-u",
+        "0",
+        "debug",
+        "chown",
+        "-R",
+        "65532:65532",
+        f"/workspace/imports/wb-{'1' * 32}",
+    ] in commands
     receipt = Path(str(result["receipt_path"]))
     assert receipt.stat().st_mode & 0o777 == 0o600
 
@@ -137,3 +152,21 @@ def test_debug_materializer_release_requires_exact_path_and_digest(tmp_path: Pat
     )
     assert result["released"] is True
     assert commands[-1][-2:] == ["--", runtime_path]
+
+
+def test_debug_materializer_adds_checkout_src_to_staging_pythonpath(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "workerbee-private"
+    stage_script = repository / "scripts" / "dev" / "stage.py"
+    stage_script.parent.mkdir(parents=True)
+    stage_script.write_text("# fixture\n", encoding="utf-8")
+    (repository / "src" / "workerbee").mkdir(parents=True)
+    materializer = WorkerBeeDebugMaterializer(
+        stage_script=stage_script,
+        stage_python="/fixture/python",
+    )
+
+    env = materializer._stage_environment()
+
+    assert env["PYTHONPATH"].split(":")[0] == str(repository / "src")
