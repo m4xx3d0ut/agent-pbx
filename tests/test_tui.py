@@ -8,6 +8,7 @@ import subprocess
 import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from rich.text import Text
 
@@ -46,6 +47,7 @@ from agent_pbx.tui import (
     OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     TMUX_LIVENESS_IDLE_SECONDS,
+    WorkerBeeLaunchPreflightError,
     WorkerBeeSwitchConfirmScreen,
     DEFAULT_SPLIT_PERCENT,
     JOPLIN_COPY_MODE_COPY_FIRST,
@@ -21926,6 +21928,135 @@ async def test_tui_workerbee_gateway_launch_uses_selected_runtime_binding() -> N
                 "workspace_binding_id": "wb-binding",
             },
         ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tui_workerbee_gateway_launch_preserves_structured_preflight_error() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    posts: list[str] = []
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> httpx.Response:
+            request = httpx.Request("GET", f"http://127.0.0.1:8765{path}")
+            return httpx.Response(
+                200,
+                json={"selected": {"backend": "platform_debug"}},
+                request=request,
+            )
+
+        async def post(
+            self,
+            path: str,
+            **_kwargs: object,
+        ) -> httpx.Response:
+            posts.append(path)
+            request = httpx.Request("POST", f"http://127.0.0.1:8765{path}")
+            return httpx.Response(
+                409,
+                json={
+                    "detail": {
+                        "code": "WORKERBEE_WORKSPACE_STAGE_FAILED",
+                        "message": "Tracked symlink could not be staged.",
+                        "remediation": "Flatten or safely materialize the link.",
+                    }
+                },
+                request=request,
+            )
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    with pytest.raises(WorkerBeeLaunchPreflightError) as failure:
+        await app.prepare_workerbee_gateway_launch(
+            agent_id="agent-1",
+            project="demo",
+            codex_session_id="thread-1",
+            profile="observe-local",
+            source_root="/tmp/demo",
+        )
+
+    assert failure.value.code == "WORKERBEE_WORKSPACE_STAGE_FAILED"
+    assert failure.value.phase == "workspace staging"
+    assert failure.value.status_code == 409
+    assert str(failure.value) == (
+        "WorkerBee workspace staging preflight failed for agent-1: "
+        "WORKERBEE_WORKSPACE_STAGE_FAILED: Tracked symlink could not be staged. "
+        "Remediation: Flatten or safely materialize the link. "
+        "No Codex process was started or replaced."
+    )
+    assert posts == ["/v2/agents/agent-1/workerbee/workspaces"]
+
+
+@pytest.mark.asyncio
+async def test_tui_workerbee_preflight_failure_does_not_replace_running_caller() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    notifications: list[tuple[str, str]] = []
+    replacements: list[str] = []
+    pane = tmux_support.TmuxPane(
+        "agent-pbx-runtime-agent-1",
+        "0",
+        "0",
+        "%10",
+        True,
+        "node",
+        "agent-1",
+        "/tmp/demo",
+        100,
+        30,
+        200,
+        window_name="agent-1",
+    )
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "agent_type": "caller",
+            "project": "demo",
+            "metadata": {
+                "cwd": "/tmp/demo",
+                "codex_session_id": "thread-1",
+            },
+        }
+    }
+    app.tmux_agent_targets["agent-1"] = "%10"
+
+    async def codex_command(*_args: object, **_kwargs: object) -> str:
+        return "codex"
+
+    async def session_available(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def fail_preflight(**_kwargs: object) -> dict[str, object]:
+        raise WorkerBeeLaunchPreflightError(
+            agent_id="agent-1",
+            phase="workspace staging",
+            code="WORKERBEE_WORKSPACE_STAGE_FAILED",
+            message="Tracked symlink could not be staged.",
+        )
+
+    async def replace(*_args: object, **_kwargs: object) -> str:
+        replacements.append("respawn")
+        return "%10"
+
+    app.codex_command_for_agent_restart = codex_command  # type: ignore[method-assign]
+    app.ensure_codex_resume_session_available = session_available  # type: ignore[method-assign]
+    app.prepare_workerbee_gateway_launch = fail_preflight  # type: ignore[method-assign]
+    app.respawn_restart_pane = replace  # type: ignore[method-assign]
+    app.notify = lambda message, *, severity="information", **_kwargs: notifications.append(  # type: ignore[method-assign]
+        (str(message), severity)
+    )
+
+    restarted = await app.relaunch_caller_codex("agent-1", pane)
+
+    assert restarted is False
+    assert replacements == []
+    assert app.tmux_agent_targets["agent-1"] == "%10"
+    assert notifications == [
+        (
+            "WorkerBee workspace staging preflight failed for agent-1: "
+            "WORKERBEE_WORKSPACE_STAGE_FAILED: Tracked symlink could not be staged. "
+            "No Codex process was started or replaced.",
+            "error",
+        )
     ]
 
 

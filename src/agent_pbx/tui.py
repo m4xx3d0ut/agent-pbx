@@ -1093,6 +1093,66 @@ class CodexSessionLeaseConflictError(RuntimeError):
     """A resumed Codex session is still leased by another client."""
 
 
+class WorkerBeeLaunchPreflightError(RuntimeError):
+    """WorkerBee rejected launch preparation before Codex was changed."""
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        phase: str,
+        code: str,
+        message: str,
+        remediation: str = "",
+        status_code: int | None = None,
+    ) -> None:
+        self.agent_id = agent_id
+        self.phase = phase
+        self.code = code
+        self.message = message
+        self.remediation = remediation
+        self.status_code = status_code
+        detail = f"{code}: {message}" if code else message
+        if remediation:
+            detail = f"{detail} Remediation: {remediation}"
+        super().__init__(
+            f"WorkerBee {phase} preflight failed for {agent_id}: {detail} "
+            "No Codex process was started or replaced."
+        )
+
+    @classmethod
+    def from_response(
+        cls,
+        response: httpx.Response,
+        *,
+        agent_id: str,
+        phase: str,
+    ) -> WorkerBeeLaunchPreflightError:
+        status_code = int(response.status_code)
+        code = f"WORKERBEE_HTTP_{status_code}"
+        message = f"WorkerBee returned HTTP {status_code}."
+        remediation = ""
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            payload = None
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, dict):
+            code = str(detail.get("code") or code).strip() or code
+            message = str(detail.get("message") or message).strip() or message
+            remediation = str(detail.get("remediation") or "").strip()
+        elif isinstance(detail, str) and detail.strip():
+            message = detail.strip()
+        return cls(
+            agent_id=agent_id,
+            phase=phase,
+            code=code,
+            message=message,
+            remediation=remediation,
+            status_code=status_code,
+        )
+
+
 @dataclass(frozen=True)
 class CodexResumeSessionOwner:
     pane_id: str
@@ -21054,6 +21114,12 @@ class AgentPBXTUI(App[None]):
             )
             if runtime_response.status_code == 404:
                 return None
+            if runtime_response.status_code >= 400:
+                raise WorkerBeeLaunchPreflightError.from_response(
+                    runtime_response,
+                    agent_id=agent_id,
+                    phase="runtime discovery",
+                )
             runtime_response.raise_for_status()
             runtime_posture = runtime_response.json()
             if not isinstance(runtime_posture, dict) or not isinstance(
@@ -21068,6 +21134,12 @@ class AgentPBXTUI(App[None]):
             )
             if workspace_response.status_code == 404:
                 return None
+            if workspace_response.status_code >= 400:
+                raise WorkerBeeLaunchPreflightError.from_response(
+                    workspace_response,
+                    agent_id=agent_id,
+                    phase="workspace staging",
+                )
             workspace_response.raise_for_status()
             workspace = workspace_response.json()
             lease_response = await self.api_client().post(
@@ -21080,11 +21152,20 @@ class AgentPBXTUI(App[None]):
                 headers=auth_headers(self.token),
                 timeout=30,
             )
+            if lease_response.status_code >= 400:
+                raise WorkerBeeLaunchPreflightError.from_response(
+                    lease_response,
+                    agent_id=agent_id,
+                    phase="gateway lease",
+                )
             lease_response.raise_for_status()
             binding = lease_response.json()
+        except WorkerBeeLaunchPreflightError:
+            raise
         except Exception as exc:
             raise RuntimeError(
-                f"WorkerBee runtime binding failed for {agent_id}: {exc}"
+                f"WorkerBee launch preflight failed for {agent_id}: {exc}. "
+                "No Codex process was started or replaced."
             ) from exc
         if not isinstance(binding, dict) or not isinstance(workspace, dict):
             raise RuntimeError("WorkerBee runtime binding returned invalid data")

@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Preserve structured WorkerBee workspace and gateway error codes during Codex
+  launch preflight. The TUI now identifies the failed binding phase, presents
+  remediation, and states explicitly that the existing Codex process was not
+  started or replaced instead of reducing the response to an HTTP conflict.
 - Bind every Agent, Operator, edit fork, and review fork launch or resume to the
   one selected WorkerBee backend generation and an exact workspace receipt.
   Appliance sessions now use an Agent PBX policy gateway instead of inheriting
