@@ -248,7 +248,9 @@ class ManagedRuntimeService:
         ]
         for key, value in env.items():
             command.extend(("-e", f"{key}={value}"))
-        command.append(shlex.join(str(item) for item in preview["command"]))
+        command.append(
+            shlex.join(["exec", *(str(item) for item in preview["command"])])
+        )
         try:
             launched = subprocess.run(command, capture_output=True, text=True)
             if dedicated_server_started:

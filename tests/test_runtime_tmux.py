@@ -26,6 +26,7 @@ from agent_pbx.runtime_tmux import (
     recursive_attachment_reason,
     resolve_invoking_outer_client,
     reconcile_dedicated_runtime_color_environment,
+    reconcile_dedicated_runtime_shell,
     resolve_runtime_tmux_server,
     runtime_mapping_server_identity,
     runtime_pop_plan,
@@ -243,6 +244,16 @@ def test_dedicated_server_starts_without_session_environment(
     assert "tmux-continuum" not in body
     assert "tmux-resurrect" not in body
     assert "history-limit 100000" in body
+    assert 'default-shell "/bin/sh"' in body
+    assert [
+        "tmux-test",
+        "-S",
+        str(socket_path),
+        "set-option",
+        "-g",
+        "default-shell",
+        "/bin/sh",
+    ] in calls
 
 
 def test_dedicated_runtime_config_is_private_and_plugin_free(tmp_path: Path) -> None:
@@ -264,6 +275,42 @@ def test_dedicated_runtime_config_is_private_and_plugin_free(tmp_path: Path) -> 
     assert "mouse on" in body
     assert "set-clipboard external" in body
     assert "@plugin" not in body
+
+
+def test_dedicated_runtime_shell_reconciliation_overrides_nologin_account_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-a",
+        "/tmp/pbx.sock",
+        True,
+        False,
+        tmux_bin="tmux-test",
+    )
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("agent_pbx.runtime_tmux.subprocess.run", run)
+
+    result = reconcile_dedicated_runtime_shell(identity)
+
+    assert result == {"reconciled": True, "default_shell": "/bin/sh"}
+    assert calls == [
+        [
+            "tmux-test",
+            "-S",
+            "/tmp/pbx.sock",
+            "set-option",
+            "-g",
+            "default-shell",
+            "/bin/sh",
+        ]
+    ]
 
 
 def test_dedicated_runtime_config_override_must_be_absolute(tmp_path: Path) -> None:

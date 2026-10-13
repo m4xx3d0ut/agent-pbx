@@ -147,6 +147,7 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     assert store.get_tmux_runtime_mapping("codex-demo")["process_start_ticks"] == 99  # type: ignore[index]
     assert any("AGENT_PBX_AGENT_ID=codex-demo" in item for item in commands[0])
     assert any("PATH=/private/bin:/usr/bin" in item for item in commands[0])
+    assert commands[0][-1].startswith("exec ")
 
 
 def test_managed_launch_failure_kills_session_without_orphan_agent(
@@ -196,6 +197,7 @@ def test_managed_launch_on_real_dedicated_tmux_server(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("SHELL", "/bin/false")
     root = tmp_path / "git"
     repo = init_repo(root / "demo")
     fake_codex = tmp_path / "codex-test"
