@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 import subprocess
-import sys
-import time
+import threading
 import urllib.request
 
+from agent_pbx.demo.fake_joplin import JoplinFixtureHandler, NOTES
 from agent_pbx.demo.fixtures import prepare_demo_fixtures
 
 
@@ -53,49 +54,21 @@ def test_prepare_demo_fixtures_creates_private_repositories_and_tools(
     assert json.loads(github.stdout)[0]["number"] == 12
 
 
-def test_fake_joplin_serves_and_updates_notes(unused_tcp_port: int) -> None:
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "agent_pbx.demo.fake_joplin",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(unused_tcp_port),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+def test_fake_joplin_serves_and_updates_notes() -> None:
+    original_note = dict(NOTES["architecture"])
+    server = ThreadingHTTPServer(("127.0.0.1", 0), JoplinFixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = int(server.server_address[1])
     try:
-        folders = None
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                break
-            try:
-                with urllib.request.urlopen(
-                    f"http://127.0.0.1:{unused_tcp_port}/folders", timeout=0.2
-                ) as response:
-                    folders = json.loads(response.read())
-                break
-            except OSError:
-                time.sleep(0.05)
-        if folders is None:
-            exit_code = process.poll()
-            stderr = (
-                process.stderr.read()
-                if exit_code is not None and process.stderr is not None
-                else "process remained alive past the readiness deadline"
-            )
-            raise AssertionError(
-                f"fake Joplin did not start (exit={exit_code}): {stderr.strip()}"
-            )
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/folders", timeout=5
+        ) as response:
+            folders = json.loads(response.read())
         assert folders["items"][0]["title"] == "Agent PBX"
 
         request = urllib.request.Request(
-            f"http://127.0.0.1:{unused_tcp_port}/notes/architecture",
+            f"http://127.0.0.1:{port}/notes/architecture",
             data=json.dumps({"body": "# Updated"}).encode(),
             headers={"Content-Type": "application/json"},
             method="PUT",
@@ -104,6 +77,8 @@ def test_fake_joplin_serves_and_updates_notes(unused_tcp_port: int) -> None:
             note = json.loads(response.read())
         assert note["body"] == "# Updated"
     finally:
-        if process.poll() is None:
-            process.terminate()
-        process.wait(timeout=5)
+        NOTES["architecture"] = original_note
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()

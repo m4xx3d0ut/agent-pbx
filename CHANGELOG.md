@@ -131,8 +131,8 @@
 - Close repeated WebSocket failure and TUI unmount paths cleanly; isolated
   stress qualification found bounded descriptors and no growing transport leak.
 - Keep disposable public-demo and test UNIX sockets below macOS path limits,
-  resolve portable host utility paths, and give subprocess fixtures a bounded
-  readiness window with actionable startup diagnostics.
+  resolve portable host utility paths, and exercise the HTTP fixture without
+  a subprocess startup race under parallel macOS qualification.
 
 ## v2.1.1 - 2026-10-09
 
