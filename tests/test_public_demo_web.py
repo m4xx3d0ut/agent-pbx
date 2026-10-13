@@ -10,6 +10,7 @@ from agent_pbx.cli import main
 from agent_pbx.demo.contract import DEMO_CONTRACT_VERSION
 from agent_pbx.demo.web import (
     build_public_demo_server,
+    inject_public_demo_terminal_resize_bootstrap,
     public_demo_doctor,
 )
 
@@ -83,6 +84,16 @@ def test_demo_web_cli_passes_only_explicit_public_configuration(
     }
 
 
+def test_public_demo_terminal_resize_bootstrap_is_idempotent() -> None:
+    html = "<html><head><title>Demo</title></head><body></body></html>"
+
+    injected = inject_public_demo_terminal_resize_bootstrap(html)
+
+    assert injected.count('id="agent-pbx-terminal-resize-sync"') == 1
+    assert 'src="/agent-pbx-terminal-resize.js"' in injected
+    assert inject_public_demo_terminal_resize_bootstrap(injected) == injected
+
+
 @pytest.mark.skipif(
     importlib.util.find_spec("textual_serve") is None,
     reason="requires the optional web-demo dependency",
@@ -108,6 +119,24 @@ async def test_public_demo_server_exposes_health_contract_and_origin_guard() -> 
         assert health.status == 200
         assert (await health.json())["max_sessions"] == 2
         assert health.headers["X-Content-Type-Options"] == "nosniff"
+
+        index = await client.get("/")
+        index_text = await index.text()
+        assert index.status == 200
+        assert index_text.count('id="agent-pbx-terminal-resize-sync"') == 1
+        assert 'src="/agent-pbx-terminal-resize.js"' in index_text
+
+        resize_script = await client.get("/agent-pbx-terminal-resize.js")
+        resize_script_text = await resize_script.text()
+        assert resize_script.status == 200
+        assert resize_script.content_type == "application/javascript"
+        assert resize_script.headers["Cache-Control"] == "no-cache"
+        assert "ResizeObserver" in resize_script_text
+        assert "document.fonts?.ready" in resize_script_text
+        assert "window.visualViewport" in resize_script_text
+        assert "requestAnimationFrame(() => requestAnimationFrame" in resize_script_text
+        assert 'typeof window.onresize !== "function"' in resize_script_text
+        assert "setInterval" not in resize_script_text
 
         contract = await client.get(
             "/demo-contract.json", headers={"Origin": "https://www.example"}

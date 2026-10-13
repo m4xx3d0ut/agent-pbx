@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Resynchronize the public web demo with its browser terminal after the
+  terminal element, web font, iframe, or visual viewport settles. Initial
+  embedded and dedicated sessions now adopt their full viewport without a
+  manual resize, while the upstream Textual Serve bundle remains untouched.
 - Refresh a platform-debug content-addressed workspace when an approved
   `local-deploy` session repeats `workerbee_v1_session_start`. The existing
   Codex thread, gateway lease, token, and backend generation remain in place;

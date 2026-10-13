@@ -22,6 +22,80 @@ from .policy import (
 )
 
 
+PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_PATH = "/agent-pbx-terminal-resize.js"
+PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_ID = "agent-pbx-terminal-resize-sync"
+PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT = r"""
+(() => {
+  "use strict";
+
+  if (window.__agentPbxTerminalResizeSyncInstalled) return;
+  window.__agentPbxTerminalResizeSyncInstalled = true;
+
+  let scheduled = false;
+  let lastGeometry = "";
+  let terminalObserver = null;
+
+  const synchronize = () => {
+    scheduled = false;
+    const terminal = document.querySelector(".textual-terminal");
+    if (!terminal || typeof window.onresize !== "function") return;
+    const bounds = terminal.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    window.dispatchEvent(new Event("resize"));
+  };
+
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => requestAnimationFrame(synchronize));
+  };
+
+  const start = () => {
+    const terminal = document.querySelector(".textual-terminal");
+    if (!terminal) return;
+
+    if (typeof ResizeObserver === "function") {
+      terminalObserver = new ResizeObserver((entries) => {
+        const bounds = entries[0]?.contentRect;
+        if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+        const geometry = `${Math.round(bounds.width)}x${Math.round(bounds.height)}`;
+        if (geometry === lastGeometry) return;
+        lastGeometry = geometry;
+        schedule();
+      });
+      terminalObserver.observe(terminal);
+    }
+
+    if (document.fonts?.ready) {
+      document.fonts.ready.then(schedule, () => undefined);
+    }
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", schedule, { passive: true });
+    }
+    window.addEventListener("pageshow", schedule, { passive: true });
+    schedule();
+  };
+
+  window.addEventListener("load", start, { once: true });
+})();
+""".strip()
+
+
+def inject_public_demo_terminal_resize_bootstrap(html: str) -> str:
+    """Add the Agent PBX geometry synchronizer to Textual Serve's index."""
+
+    if f'id="{PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_ID}"' in html:
+        return html
+    closing_head = "</head>"
+    if closing_head not in html:
+        return html
+    script_tag = (
+        f'<script id="{PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_ID}" defer '
+        f'src="{PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_PATH}"></script>'
+    )
+    return html.replace(closing_head, f"    {script_tag}\n  {closing_head}", 1)
+
+
 class DemoWebDependencyError(RuntimeError):
     """Raised when the optional browser-demo dependency is unavailable."""
 
@@ -219,6 +293,15 @@ def build_public_demo_server(
             @web.middleware
             async def security_headers(request: Any, handler: Any) -> Any:
                 response = await handler(request)
+                if (
+                    request.path == "/"
+                    and isinstance(response, web.Response)
+                    and response.content_type == "text/html"
+                    and response.text
+                ):
+                    response.text = inject_public_demo_terminal_resize_bootstrap(
+                        response.text
+                    )
                 response.headers["X-Content-Type-Options"] = "nosniff"
                 response.headers["Referrer-Policy"] = "no-referrer"
                 response.headers["Permissions-Policy"] = (
@@ -236,6 +319,11 @@ def build_public_demo_server(
             app.add_routes(
                 [
                     web.get("/healthz", self.handle_health, name="health"),
+                    web.get(
+                        PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_PATH,
+                        self.handle_terminal_resize_script,
+                        name="agent-pbx-terminal-resize-script",
+                    ),
                     web.get(
                         "/demo-contract.json",
                         self.handle_contract,
@@ -255,6 +343,13 @@ def build_public_demo_server(
                     "active_sessions": self.active_sessions,
                     "max_sessions": self.max_sessions,
                 }
+            )
+
+        async def handle_terminal_resize_script(self, _request: Any) -> Any:
+            return web.Response(
+                text=PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT,
+                content_type="application/javascript",
+                headers={"Cache-Control": "no-cache"},
             )
 
         async def handle_contract(self, request: Any) -> Any:
