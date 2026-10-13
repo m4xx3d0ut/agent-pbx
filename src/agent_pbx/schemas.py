@@ -1390,6 +1390,9 @@ class WorkerBeeStatusResponse(BaseModel):
     dashboard_error: dict[str, Any] | None = None
     app_status: dict[str, Any] | None = None
     latest_deployment: dict[str, Any] | None = None
+    status_source: str = "host_cli"
+    selected_runtime: dict[str, Any] | None = None
+    workspace_binding: dict[str, Any] | None = None
 
 
 class PullRequestStatusResponse(BaseModel):
@@ -1876,6 +1879,18 @@ class WorkerBeeSwitchApplyRequest(BaseModel):
 class WorkerBeeSwitchRollbackRequest(BaseModel):
     transaction_id: str = Field(min_length=24, max_length=24)
     confirm: bool = False
+
+
+class WorkerBeeWorkspacePrepareRequest(BaseModel):
+    project: str | None = Field(default=None, min_length=1, max_length=128)
+    include_paths: list[str] = Field(default_factory=list, max_length=64)
+
+
+class WorkerBeeGatewayLeaseRequest(BaseModel):
+    codex_session_id: str = Field(default="", max_length=240)
+    profile: Literal["observe-local", "review-readonly", "local-deploy"]
+    workspace_binding_id: str = Field(min_length=1, max_length=160)
+    ttl_seconds: float | None = Field(default=None, ge=30, le=86_400)
 
 
 class FileDiagnostic(BaseModel):

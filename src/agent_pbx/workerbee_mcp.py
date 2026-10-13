@@ -397,6 +397,32 @@ async def inspect_workerbee_mcp(
         )
 
 
+async def call_workerbee_mcp_tool(
+    endpoint: str,
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    timeout_seconds: float = 20.0,
+) -> dict[str, Any]:
+    """Call one selected WorkerBee MCP tool and normalize its structured payload."""
+
+    async def invoke() -> dict[str, Any]:
+        async with streamablehttp_client(endpoint) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, dict(arguments or {}))
+                if bool(getattr(result, "isError", False)) or bool(
+                    getattr(result, "is_error", False)
+                ):
+                    payload = _tool_result_payload(result)
+                    raise RuntimeError(
+                        str(payload.get("message") or payload.get("error") or "WorkerBee tool failed")
+                    )
+                return _tool_result_payload(result)
+
+    return await asyncio.wait_for(invoke(), timeout=max(0.1, timeout_seconds))
+
+
 async def inspect_workerbee_project_visibility(
     endpoint: str,
     cwd: str | Path,

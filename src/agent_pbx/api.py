@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -54,6 +54,15 @@ from .codex.skills import ManagedSkillPackService, PersonalityOverlay
 from .debug_smoke import DebugSmokeConfig, run_debug_smoke_reports
 from .files import AgentFileService
 from .terminal_editor import ManagedTerminalEditorService
+from .workerbee import WorkerBeeStatusService, agent_cwd
+from .workerbee_gateway import (
+    WorkerBeeGatewayError,
+    WorkerBeeGatewayService,
+    create_workerbee_gateway_app,
+)
+from .workerbee_runtime import WorkerBeeRuntimeRegistry
+from .workerbee_workspace import WorkerBeeWorkspaceError, WorkerBeeWorkspaceService
+from .workerbee_mcp import call_workerbee_mcp_tool
 from .workerbee_switcher import WorkerBeeSwitchService
 from .events import EventClientRegistry, EventStreamService
 from .codex.runtime import CodexRuntimeService
@@ -133,8 +142,10 @@ from .schemas import (
     FileDiagnosticsRequest,
     TerminalEditorStartRequest,
     WorkerBeeSwitchApplyRequest,
+    WorkerBeeGatewayLeaseRequest,
     WorkerBeeSwitchPreviewRequest,
     WorkerBeeSwitchRollbackRequest,
+    WorkerBeeWorkspacePrepareRequest,
     FileDiagnosticsResponse,
     FileCreateRequest,
     FileDeleteRequest,
@@ -267,7 +278,6 @@ from .schemas import (
 )
 from .security import generate_pairing_code, generate_token
 from .store import Store
-from .workerbee import WorkerBeeStatusService
 
 
 logger = logging.getLogger("agent_pbx.api")
@@ -321,6 +331,134 @@ async def inspect_tmux_runtime_mapping_live(
         panes,
         observed_start_ticks=ticks,
     ).public_dict()
+
+
+def refresh_workerbee_runtime_selection(app: FastAPI) -> dict[str, Any]:
+    """Observe the configured selector and return one authoritative runtime posture."""
+
+    switch_status = app.state.workerbee_switcher.status()
+    active = (
+        switch_status.get("active")
+        if isinstance(switch_status.get("active"), dict)
+        else {}
+    )
+    if (
+        active.get("ready")
+        and str(active.get("backend") or "").strip()
+        and str(active.get("endpoint") or "").strip()
+    ):
+        app.state.workerbee_runtime.observe(active, reason="selector_status")
+    posture = app.state.workerbee_runtime.posture()
+    posture["selector"] = switch_status
+    posture["gateway_impact"] = app.state.workerbee_gateway.impact()
+    return posture
+
+
+async def selected_workerbee_status_for_agent(
+    app: FastAPI,
+    agent: dict[str, Any],
+) -> dict[str, Any]:
+    """Read status from the selected backend without mixing appliance and host state."""
+
+    posture = await asyncio.to_thread(refresh_workerbee_runtime_selection, app)
+    selected = posture.get("selected") if isinstance(posture.get("selected"), dict) else None
+    if selected is None or selected.get("backend") == "oss":
+        result = await asyncio.to_thread(app.state.workerbee.status_for_agent, agent)
+        result["status_source"] = "selected_oss_cli" if selected else "host_cli"
+        result["selected_runtime"] = selected
+        result["workspace_binding"] = None
+        return result
+
+    agent_id = str(agent.get("agent_id") or "")
+    project = str(agent.get("project") or "")
+    cwd = agent_cwd(agent)
+    metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+    binding_id = str(metadata.get("workerbee_workspace_binding_id") or "").strip()
+    base: dict[str, Any] = {
+        "configured": True,
+        "available": False,
+        "agent_id": agent_id,
+        "agent_project": project or None,
+        "cwd": cwd,
+        "workerbee_bin": None,
+        "checked_at": time.time(),
+        "project": project or None,
+        "mode": None,
+        "running": None,
+        "status_kind": None,
+        "dashboard_url": None,
+        "state_dir": None,
+        "description": None,
+        "error": None,
+        "project_status": None,
+        "project_card": None,
+        "global_dashboard": None,
+        "dashboard_error": None,
+        "app_status": None,
+        "latest_deployment": None,
+        "status_source": "selected_mcp",
+        "selected_runtime": selected,
+        "workspace_binding": None,
+    }
+    if not binding_id:
+        base["error"] = {
+            "code": "WORKERBEE_WORKSPACE_BINDING_REQUIRED",
+            "message": "This session has not been bound to the selected WorkerBee appliance workspace.",
+            "remediation": "Restart or resume the session through Agent PBX to prepare a verified workspace binding.",
+        }
+        return base
+    try:
+        binding = await asyncio.to_thread(app.state.workerbee_workspaces.load, binding_id)
+        runtime = app.state.workerbee_runtime.selected()
+        if runtime is None:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_RUNTIME_UNSELECTED",
+                "No verified WorkerBee runtime is selected.",
+            )
+        await asyncio.to_thread(
+            app.state.workerbee_workspaces.verify_runtime,
+            binding,
+            runtime,
+        )
+        base["workspace_binding"] = binding.public_dict()
+        base["project"] = binding.project
+        payload = await call_workerbee_mcp_tool(
+            runtime.endpoint,
+            "workerbee_v1_project_status",
+            {"project": binding.project},
+        )
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        project_status = (
+            data.get("project_status")
+            if isinstance(data.get("project_status"), dict)
+            else data
+        )
+        app_status = (
+            project_status.get("app_status")
+            if isinstance(project_status.get("app_status"), dict)
+            else data.get("app_status")
+        )
+        base.update(
+            available=True,
+            mode=data.get("mode"),
+            running=project_status.get("running"),
+            status_kind=(data.get("status_kind") or project_status.get("status_kind")),
+            dashboard_url=data.get("dashboard_url"),
+            state_dir=project_status.get("state_dir"),
+            description=(
+                app_status.get("message") if isinstance(app_status, dict) else None
+            ),
+            project_status=project_status,
+            app_status=app_status if isinstance(app_status, dict) else None,
+            latest_deployment=project_status.get("latest_deployment"),
+        )
+    except (WorkerBeeWorkspaceError, OSError, RuntimeError, ValueError) as exc:
+        base["error"] = {
+            "code": str(getattr(exc, "code", "WORKERBEE_SELECTED_STATUS_FAILED")),
+            "message": str(exc),
+            "remediation": str(getattr(exc, "remediation", "Retry after verifying the selected backend and binding.")),
+        }
+    return base
 
 
 def create_app(config: ServerConfig | None = None) -> FastAPI:
@@ -382,10 +520,34 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         pull_requests=pull_requests,
         issues=issues,
     )
+    workerbee_state_root = resolved_config.db_path.parent / "workerbee-runtime"
+    workerbee = WorkerBeeStatusService(
+        workerbee_bin=resolved_config.workerbee_bin,
+        timeout_seconds=resolved_config.workerbee_timeout_seconds,
+        cache_seconds=resolved_config.workerbee_cache_seconds,
+    )
+    workerbee_runtime = WorkerBeeRuntimeRegistry(workerbee_state_root)
+    workerbee_workspaces = WorkerBeeWorkspaceService(
+        workerbee_state_root / "workspaces"
+    )
+    workerbee_gateway = WorkerBeeGatewayService(
+        workerbee_state_root / "gateway",
+        workerbee_runtime,
+        workerbee_workspaces,
+    )
+    workerbee_gateway_app = create_workerbee_gateway_app(workerbee_gateway)
+    workerbee_switcher = WorkerBeeSwitchService(
+        state_root=resolved_config.db_path.parent / "workerbee-switch",
+        cache_invalidator=workerbee.clear_cache,
+        impact_provider=workerbee_gateway.impact,
+        selection_recorder=workerbee_runtime.observe,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        async with mcp_server.session_manager.run():
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(mcp_server.session_manager.run())
+            await stack.enter_async_context(workerbee_gateway_app.session_manager.run())
             smoke_task: asyncio.Task[None] | None = None
             joplin_sync_task: asyncio.Task[None] | None = None
             if resolved_config.debug_smoke:
@@ -463,15 +625,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         store=store,
     )
     app.state.joplin = joplin
-    app.state.workerbee = WorkerBeeStatusService(
-        workerbee_bin=resolved_config.workerbee_bin,
-        timeout_seconds=resolved_config.workerbee_timeout_seconds,
-        cache_seconds=resolved_config.workerbee_cache_seconds,
-    )
-    app.state.workerbee_switcher = WorkerBeeSwitchService(
-        state_root=resolved_config.db_path.parent / "workerbee-switch",
-        cache_invalidator=app.state.workerbee.clear_cache,
-    )
+    app.state.workerbee = workerbee
+    app.state.workerbee_runtime = workerbee_runtime
+    app.state.workerbee_workspaces = workerbee_workspaces
+    app.state.workerbee_gateway = workerbee_gateway
+    app.state.workerbee_switcher = workerbee_switcher
     app.state.pull_requests = pull_requests
     app.state.issues = issues
     app.state.operator_service = OperatorService(store)
@@ -481,6 +639,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     if resolved_config.debug:
         app.add_middleware(DebugRequestLogMiddleware)
     app.mount("/mcp", mcp_asgi_app)
+    app.mount("/workerbee-mcp", workerbee_gateway_app.app)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
@@ -1728,8 +1887,124 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         agent = store.get_agent(agent_id)
         if agent is None:
             raise HTTPException(status_code=404, detail="agent not registered")
-        workerbee = request.app.state.workerbee
-        return await asyncio.to_thread(workerbee.status_for_agent, agent)
+        return await selected_workerbee_status_for_agent(request.app, agent)
+
+    @app.get(
+        "/v2/workerbee/runtime",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_token)],
+    )
+    async def workerbee_runtime_status(request: Request) -> dict[str, Any]:
+        return await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+
+    @app.post(
+        "/v2/agents/{agent_id}/workerbee/workspaces",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_controller)],
+    )
+    async def prepare_workerbee_workspace(
+        agent_id: str,
+        payload: WorkerBeeWorkspacePrepareRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        agent = require_agent(store, agent_id)
+        cwd = agent_cwd(agent)
+        if not cwd:
+            raise HTTPException(status_code=409, detail="agent has no scoped cwd")
+        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        runtime = request.app.state.workerbee_runtime.selected()
+        if runtime is None:
+            raise HTTPException(
+                status_code=409,
+                detail="no verified WorkerBee backend is selected",
+            )
+        project = str(payload.project or agent.get("project") or "").strip()
+        try:
+            binding = await asyncio.to_thread(
+                request.app.state.workerbee_workspaces.prepare,
+                runtime=runtime,
+                project=project,
+                source_root=cwd,
+                include_paths=tuple(payload.include_paths),
+            )
+        except WorkerBeeWorkspaceError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+        return binding.public_dict()
+
+    @app.post(
+        "/v2/agents/{agent_id}/workerbee/leases",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_controller)],
+    )
+    async def issue_workerbee_gateway_lease(
+        agent_id: str,
+        payload: WorkerBeeGatewayLeaseRequest,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        agent = require_agent(store, agent_id)
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        if (
+            str(metadata.get("access_mode") or "").strip() == "review_readonly"
+            and payload.profile != "review-readonly"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="read-only review forks require the review-readonly WorkerBee profile",
+            )
+        if (
+            payload.profile == "local-deploy"
+            and str(metadata.get("workerbee_mcp_profile") or "").strip()
+            != "local-deploy"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="local-deploy was not approved in this entity's WorkerBee policy",
+            )
+        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        try:
+            lease, token = await asyncio.to_thread(
+                request.app.state.workerbee_gateway.issue,
+                agent_id=agent_id,
+                codex_session_id=payload.codex_session_id,
+                profile=payload.profile,
+                workspace_binding_id=payload.workspace_binding_id,
+                ttl_seconds=payload.ttl_seconds,
+            )
+        except WorkerBeeGatewayError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+        gateway_url = (
+            str(request.base_url).rstrip("/")
+            + f"/workerbee-mcp/{lease.lease_id}"
+        )
+        return {
+            "lease": lease.public_dict(),
+            "token": token,
+            "gateway_url": gateway_url,
+            "bearer_token_env_var": "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN",
+        }
+
+    @app.delete(
+        "/v2/agents/{agent_id}/workerbee/leases/{lease_id}",
+        response_model=dict[str, Any],
+        dependencies=[Depends(require_controller)],
+    )
+    async def revoke_workerbee_gateway_lease(
+        agent_id: str,
+        lease_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        try:
+            lease = await asyncio.to_thread(request.app.state.workerbee_gateway.load, lease_id)
+            if lease.agent_id != agent_id:
+                raise HTTPException(status_code=404, detail="WorkerBee lease not found")
+            revoked = await asyncio.to_thread(request.app.state.workerbee_gateway.revoke, lease_id)
+        except WorkerBeeGatewayError as exc:
+            raise HTTPException(status_code=404, detail=exc.public_dict()) from exc
+        return revoked.public_dict()
 
     @app.get(
         "/v1/workerbee/switch",

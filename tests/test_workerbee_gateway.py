@@ -4,7 +4,10 @@ from pathlib import Path
 import subprocess
 
 import pytest
+from fastapi.testclient import TestClient
 
+from agent_pbx.api import create_app
+from agent_pbx.config import ServerConfig
 from agent_pbx.workerbee_gateway import (
     WORKERBEE_PROFILE_LOCAL_DEPLOY,
     WorkerBeeGatewayError,
@@ -138,3 +141,77 @@ async def test_gateway_tracks_active_mutations(tmp_path: Path) -> None:
     async with gateway.mutation(lease, "workerbee_v1_manifest_deploy_local"):
         assert gateway.impact()["mutation_count"] == 1
     assert gateway.impact()["mutation_count"] == 0
+
+
+def test_gateway_api_prepares_workspace_and_issues_one_time_token(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {
+                "active": {
+                    "ready": True,
+                    "backend": "oss",
+                    "endpoint": "http://127.0.0.1:8765/mcp",
+                    "server_name": "K1S WorkerBee",
+                    "server_version": "1.30.0",
+                    "config_path": "/tmp/selector.env",
+                }
+            }
+
+    app.state.workerbee_switcher = Selector()
+    with TestClient(app) as client:
+        registered = client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "demo-agent",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(repo),
+                    "workerbee_mcp_profile": "local-deploy",
+                },
+            },
+        )
+        assert registered.status_code == 200
+
+        prepared = client.post(
+            "/v2/agents/demo-agent/workerbee/workspaces",
+            json={},
+        )
+        assert prepared.status_code == 200
+        binding = prepared.json()
+        assert binding["backend"] == "oss"
+        assert binding["runtime_workspace_path"] == str(repo)
+
+        issued = client.post(
+            "/v2/agents/demo-agent/workerbee/leases",
+            json={
+                "codex_session_id": "thread-1",
+                "profile": "local-deploy",
+                "workspace_binding_id": binding["binding_id"],
+            },
+        )
+        assert issued.status_code == 200
+        lease_payload = issued.json()
+        assert lease_payload["token"].startswith("apbx_")
+        assert lease_payload["gateway_url"].endswith(
+            f"/workerbee-mcp/{lease_payload['lease']['lease_id']}"
+        )
+        receipt = (
+            tmp_path
+            / "workerbee-runtime"
+            / "gateway"
+            / "leases"
+            / f"{lease_payload['lease']['lease_id']}.json"
+        ).read_text(encoding="utf-8")
+        assert lease_payload["token"] not in receipt
+
+        revoked = client.delete(
+            f"/v2/agents/demo-agent/workerbee/leases/{lease_payload['lease']['lease_id']}"
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["status"] == "revoked"

@@ -1465,6 +1465,10 @@ def test_agent_workerbee_status_endpoint(tmp_path: Path, monkeypatch) -> None:
         "agent_pbx.workerbee.WorkerBeeStatusService.status_for_agent",
         fake_status_for_agent,
     )
+    monkeypatch.setattr(
+        "agent_pbx.workerbee_switcher.WorkerBeeSwitchService.status",
+        lambda self: {"active": {"ready": False}},  # noqa: ARG005
+    )
     client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
     client.post(
         "/v1/agents/register",
