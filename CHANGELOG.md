@@ -131,8 +131,8 @@
 - Close repeated WebSocket failure and TUI unmount paths cleanly; isolated
   stress qualification found bounded descriptors and no growing transport leak.
 - Keep disposable public-demo and test UNIX sockets below macOS path limits,
-  resolve portable host utility paths, and exercise the HTTP fixture without
-  a subprocess startup race under parallel macOS qualification.
+  resolve portable host utility paths, and host each demo's isolated in-memory
+  Joplin API on a dedicated thread without a macOS subprocess startup race.
 
 ## v2.1.1 - 2026-10-09
 

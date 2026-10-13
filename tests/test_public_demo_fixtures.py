@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 import subprocess
 import threading
 import urllib.request
 
-from agent_pbx.demo.fake_joplin import JoplinFixtureHandler, NOTES
+from agent_pbx.demo.fake_joplin import create_joplin_fixture_server
 from agent_pbx.demo.fixtures import prepare_demo_fixtures
 
 
@@ -55,11 +54,14 @@ def test_prepare_demo_fixtures_creates_private_repositories_and_tools(
 
 
 def test_fake_joplin_serves_and_updates_notes() -> None:
-    original_note = dict(NOTES["architecture"])
-    server = ThreadingHTTPServer(("127.0.0.1", 0), JoplinFixtureHandler)
+    server = create_joplin_fixture_server()
+    other_server = create_joplin_fixture_server()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
+    other_thread = threading.Thread(target=other_server.serve_forever, daemon=True)
     thread.start()
+    other_thread.start()
     port = int(server.server_address[1])
+    other_port = int(other_server.server_address[1])
     try:
         with urllib.request.urlopen(
             f"http://127.0.0.1:{port}/folders", timeout=5
@@ -76,9 +78,17 @@ def test_fake_joplin_serves_and_updates_notes() -> None:
         with urllib.request.urlopen(request, timeout=1) as response:
             note = json.loads(response.read())
         assert note["body"] == "# Updated"
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{other_port}/notes/architecture", timeout=1
+        ) as response:
+            other_note = json.loads(response.read())
+        assert other_note["body"].startswith("# Runtime Architecture")
     finally:
-        NOTES["architecture"] = original_note
         server.shutdown()
         server.server_close()
+        other_server.shutdown()
+        other_server.server_close()
         thread.join(timeout=5)
+        other_thread.join(timeout=5)
         assert not thread.is_alive()
+        assert not other_thread.is_alive()

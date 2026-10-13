@@ -48,8 +48,9 @@ def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
         session.start()
         assert session.daemon_process is not None
         assert session.daemon_process.poll() is None
-        assert session.joplin_process is not None
-        assert session.joplin_process.poll() is None
+        assert session.joplin_server is not None
+        assert session.joplin_thread is not None
+        assert session.joplin_thread.is_alive()
 
         health = session.request("GET", "/healthz")
         assert health["ok"] is True
@@ -88,4 +89,5 @@ def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
     assert session.daemon_process is None
-    assert session.joplin_process is None
+    assert session.joplin_server is None
+    assert session.joplin_thread is None

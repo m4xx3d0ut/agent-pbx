@@ -22,6 +22,7 @@ import uuid
 from agent_pbx.tui import run_tui
 
 from .contract import DEMO_SCENARIO_ID
+from .fake_joplin import create_joplin_fixture_server
 from .fixtures import DemoFixturePaths, prepare_demo_fixtures
 from .policy import (
     build_public_demo_environment,
@@ -105,7 +106,8 @@ class DemoSession:
         self.fixtures: DemoFixturePaths | None = None
         self.environment: dict[str, str] = {}
         self.daemon_process: subprocess.Popen[bytes] | None = None
-        self.joplin_process: subprocess.Popen[bytes] | None = None
+        self.joplin_server: Any | None = None
+        self.joplin_thread: threading.Thread | None = None
         self._log_handles: list[Any] = []
         self._started = False
         self._stop_event = threading.Event()
@@ -171,18 +173,16 @@ class DemoSession:
             return
         self.prepare()
         assert self.fixtures is not None
-        self.joplin_process = self._spawn(
-            [
-                sys.executable,
-                "-m",
-                "agent_pbx.demo.fake_joplin",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(self.joplin_port),
-            ],
-            log_name="joplin.log",
+        self.joplin_server = create_joplin_fixture_server("127.0.0.1", 0)
+        self.joplin_port = int(self.joplin_server.server_address[1])
+        self.joplin_url = f"http://127.0.0.1:{self.joplin_port}"
+        self.environment["AGENT_PBX_JOPLIN_API_URL"] = self.joplin_url
+        self.joplin_thread = threading.Thread(
+            target=self.joplin_server.serve_forever,
+            daemon=True,
+            name=f"agent-pbx-demo-joplin-{self.session_id[:8]}",
         )
+        self.joplin_thread.start()
         self._wait_json(f"{self.joplin_url}/folders", timeout=10)
         self.daemon_process = self._spawn(
             [
@@ -546,9 +546,14 @@ class DemoSession:
                     timeout=5,
                 )
         _terminate_process(self.daemon_process)
-        _terminate_process(self.joplin_process)
         self.daemon_process = None
-        self.joplin_process = None
+        if self.joplin_server is not None:
+            self.joplin_server.shutdown()
+            self.joplin_server.server_close()
+        if self.joplin_thread is not None:
+            self.joplin_thread.join(timeout=5)
+        self.joplin_server = None
+        self.joplin_thread = None
         for handle in self._log_handles:
             with suppress(OSError):
                 handle.close()

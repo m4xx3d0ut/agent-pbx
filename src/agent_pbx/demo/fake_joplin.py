@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import time
@@ -9,12 +10,12 @@ from urllib.parse import urlparse
 import uuid
 
 
-FOLDERS = [
+FOLDER_FIXTURES = [
     {"id": "root", "parent_id": "", "title": "Agent PBX"},
     {"id": "project", "parent_id": "root", "title": "platform-console"},
     {"id": "agent", "parent_id": "project", "title": "platform-agent"},
 ]
-NOTES: dict[str, dict[str, Any]] = {
+NOTE_FIXTURES: dict[str, dict[str, Any]] = {
     "architecture": {
         "id": "architecture",
         "parent_id": "project",
@@ -58,6 +59,9 @@ def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
 
 
 class JoplinFixtureHandler(BaseHTTPRequestHandler):
+    folders: list[dict[str, Any]] = []
+    notes: dict[str, dict[str, Any]] = {}
+
     def log_message(self, *_args: object) -> None:
         return
 
@@ -74,13 +78,13 @@ class JoplinFixtureHandler(BaseHTTPRequestHandler):
         if path == "/ping":
             self.send_json({"status": "ok"})
         elif path == "/folders":
-            self.send_json({"items": FOLDERS, "has_more": False})
+            self.send_json({"items": self.folders, "has_more": False})
         elif path == "/folders/project/notes":
-            self.send_json({"items": list(NOTES.values()), "has_more": False})
+            self.send_json({"items": list(self.notes.values()), "has_more": False})
         elif path == "/folders/agent/notes":
             self.send_json({"items": [], "has_more": False})
         elif path.startswith("/notes/"):
-            note = NOTES.get(path.rsplit("/", 1)[-1])
+            note = self.notes.get(path.rsplit("/", 1)[-1])
             self.send_json(note or {"error": "not found"}, 200 if note else 404)
         else:
             self.send_json({"items": [], "has_more": False})
@@ -94,7 +98,7 @@ class JoplinFixtureHandler(BaseHTTPRequestHandler):
                 "parent_id": str(value.get("parent_id") or "root"),
                 "title": str(value.get("title") or "Demo Notes"),
             }
-            FOLDERS.append(folder)
+            self.folders.append(folder)
             self.send_json(folder)
             return
         if path == "/notes":
@@ -107,7 +111,7 @@ class JoplinFixtureHandler(BaseHTTPRequestHandler):
                 "created_time": _now_ms(),
                 "updated_time": _now_ms(),
             }
-            NOTES[note_id] = note
+            self.notes[note_id] = note
             self.send_json(note)
             return
         self.send_json({})
@@ -116,7 +120,7 @@ class JoplinFixtureHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path.startswith("/notes/"):
             note_id = path.rsplit("/", 1)[-1]
-            note = NOTES.get(note_id)
+            note = self.notes.get(note_id)
             if note is None:
                 self.send_json({"error": "not found"}, 404)
                 return
@@ -129,8 +133,27 @@ class JoplinFixtureHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
         if path.startswith("/notes/"):
-            NOTES.pop(path.rsplit("/", 1)[-1], None)
+            self.notes.pop(path.rsplit("/", 1)[-1], None)
         self.send_json({})
+
+
+def create_joplin_fixture_server(
+    host: str = "127.0.0.1",
+    port: int = 0,
+) -> ThreadingHTTPServer:
+    """Create one isolated in-memory Joplin API fixture."""
+
+    scoped_handler = type(
+        "ScopedJoplinFixtureHandler",
+        (JoplinFixtureHandler,),
+        {
+            "folders": deepcopy(FOLDER_FIXTURES),
+            "notes": deepcopy(NOTE_FIXTURES),
+        },
+    )
+    server = ThreadingHTTPServer((host, port), scoped_handler)
+    server.daemon_threads = True
+    return server
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -138,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", required=True, type=int)
     args = parser.parse_args(argv)
-    ThreadingHTTPServer((args.host, args.port), JoplinFixtureHandler).serve_forever()
+    create_joplin_fixture_server(args.host, args.port).serve_forever()
     return 0
 
 
