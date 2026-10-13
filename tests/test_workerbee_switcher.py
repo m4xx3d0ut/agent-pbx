@@ -13,8 +13,9 @@ from agent_pbx.config import ServerConfig
 from agent_pbx.workerbee_switcher import WorkerBeeSwitchService
 
 
-def status_payload(backend: str) -> str:
+def status_payload(backend: str, posture: str = "loopback") -> str:
     endpoint = "http://127.0.0.1:8765/mcp"
+    reported_posture = posture.replace("_", "-")
     return json.dumps(
         {
             "config": {
@@ -24,6 +25,12 @@ def status_payload(backend: str) -> str:
             "status": {
                 "api_version": "workerbee.mcp_switch_status/v1",
                 "backend": backend,
+                "configured_posture": {
+                    "posture": reported_posture,
+                    "explicit": posture == "native_lan",
+                },
+                "expected_posture": {"posture": reported_posture},
+                "observed_posture": {"posture": reported_posture},
                 "mcp_endpoint": endpoint,
                 "mcp": {
                     "status": "ready",
@@ -35,17 +42,42 @@ def status_payload(backend: str) -> str:
 
 
 class FakeSwitcher:
-    def __init__(self, backend: str = "oss") -> None:
+    def __init__(
+        self,
+        backend: str = "oss",
+        posture: str = "loopback",
+        configured_posture: str = "loopback",
+        fail_posture_mismatch: bool = False,
+    ) -> None:
         self.backend = backend
+        self.posture = posture
+        self.configured_posture = configured_posture
+        self.fail_posture_mismatch = fail_posture_mismatch
         self.commands: list[list[str]] = []
 
     def __call__(self, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         self.commands.append(list(command))
         if command == ["status-test"]:
-            return subprocess.CompletedProcess(command, 0, status_payload(self.backend), "")
+            return subprocess.CompletedProcess(
+                command,
+                (
+                    3
+                    if self.fail_posture_mismatch
+                    and self.backend == "platform_debug"
+                    and self.posture != self.configured_posture
+                    else 0
+                ),
+                status_payload(self.backend, self.posture),
+                "",
+            )
         if command[0] != "switch-test":
             return subprocess.CompletedProcess(command, 2, "", "unexpected executable")
-        target = "platform_debug" if command[1] == "switch-debug" else "oss"
+        target = (
+            "platform_debug"
+            if command[1] in {"switch-debug", "switch-debug-lan"}
+            else "oss"
+        )
+        target_posture = self.configured_posture
         if "--dry-run" in command:
             return subprocess.CompletedProcess(
                 command,
@@ -54,6 +86,8 @@ class FakeSwitcher:
                 "",
             )
         self.backend = target
+        if target == "platform_debug":
+            self.posture = target_posture
         return subprocess.CompletedProcess(command, 0, json.dumps({"backend": target}), "")
 
 
@@ -65,6 +99,7 @@ def service(
     invalidated: list[str] | None = None,
     impact: dict[str, object] | None = None,
     selections: list[dict[str, object]] | None = None,
+    platform_debug_posture: str = "loopback",
 ) -> WorkerBeeSwitchService:
     invalidation_sink = invalidated if invalidated is not None else []
     selection_sink = selections if selections is not None else []
@@ -72,6 +107,7 @@ def service(
         state_root=tmp_path / "switch-state",
         switch_bin="switch-test",
         status_bin="status-test",
+        platform_debug_posture=platform_debug_posture,
         runner=switcher,
         capability_probe=lambda endpoint: {
             "ready": capability_ready,
@@ -231,6 +267,141 @@ def test_workerbee_switch_status_requires_generation_guard(tmp_path: Path) -> No
     )
     assert user_appliance["available"] is False
     assert "deferred" in user_appliance["unavailable_reason"].lower()
+
+
+def test_workerbee_native_lan_posture_is_previewed_applied_and_verified(
+    tmp_path: Path,
+) -> None:
+    switcher = FakeSwitcher(configured_posture="native_lan")
+    manager = service(
+        tmp_path,
+        switcher,
+        platform_debug_posture="native_lan",
+    )
+
+    preview = manager.preview("platform_debug")
+    assert preview["target_platform_debug_posture"] == "native_lan"
+    assert ["switch-test", "switch-debug", "--dry-run"] == switcher.commands[-1][
+        :3
+    ]
+
+    applied = manager.apply(
+        preview["transaction_id"],
+        preview_token=preview["preview_token"],
+        confirm_target="platform_debug",
+        confirm_privileged=True,
+    )
+
+    assert applied["phase"] == "verified"
+    assert applied["after"]["platform_debug_posture"] == "native_lan"
+    assert applied["platform_debug_posture"] == {
+        "expected": "native_lan",
+        "observed": "native_lan",
+        "ready": True,
+    }
+    assert any(
+        len(command) > 1 and command[1] == "switch-debug"
+        for command in switcher.commands
+    )
+
+
+def test_workerbee_same_backend_posture_drift_is_not_a_noop(tmp_path: Path) -> None:
+    switcher = FakeSwitcher(
+        "platform_debug",
+        posture="loopback",
+        configured_posture="native_lan",
+    )
+    manager = service(
+        tmp_path,
+        switcher,
+        platform_debug_posture="native_lan",
+    )
+
+    status = manager.status()
+    assert status["platform_debug_posture"] == {
+        "expected": "native_lan",
+        "observed": "loopback",
+        "ready": False,
+    }
+    preview = manager.preview("platform_debug")
+    applied = manager.apply(
+        preview["transaction_id"],
+        preview_token=preview["preview_token"],
+        confirm_target="platform_debug",
+        confirm_privileged=True,
+    )
+
+    assert applied["phase"] == "verified"
+    assert switcher.posture == "native_lan"
+    assert any(
+        len(command) > 1
+        and command[1] == "switch-debug"
+        and "--dry-run" not in command
+        for command in switcher.commands
+    )
+
+
+def test_workerbee_native_lan_drift_can_repair_failed_doctor_status(
+    tmp_path: Path,
+) -> None:
+    switcher = FakeSwitcher(
+        "platform_debug",
+        posture="loopback",
+        configured_posture="native_lan",
+        fail_posture_mismatch=True,
+    )
+    manager = service(
+        tmp_path,
+        switcher,
+        platform_debug_posture="native_lan",
+    )
+
+    preview = manager.preview("platform_debug")
+    assert preview["repairs_posture_drift"] is True
+
+    applied = manager.apply(
+        preview["transaction_id"],
+        preview_token=preview["preview_token"],
+        confirm_target="platform_debug",
+        confirm_privileged=True,
+    )
+
+    assert applied["phase"] == "verified"
+    assert applied["after"]["ready"] is True
+    assert applied["after"]["platform_debug_posture"] == "native_lan"
+
+
+def test_workerbee_rollback_restores_configured_debug_posture(tmp_path: Path) -> None:
+    switcher = FakeSwitcher(
+        "platform_debug",
+        posture="native_lan",
+        configured_posture="native_lan",
+    )
+    manager = service(
+        tmp_path,
+        switcher,
+        platform_debug_posture="native_lan",
+    )
+
+    preview = manager.preview("oss")
+    applied = manager.apply(
+        preview["transaction_id"],
+        preview_token=preview["preview_token"],
+        confirm_target="oss",
+    )
+    assert applied["phase"] == "verified"
+
+    rolled_back = manager.rollback(preview["transaction_id"], confirm=True)
+
+    assert rolled_back["phase"] == "rolled_back"
+    assert switcher.backend == "platform_debug"
+    assert switcher.posture == "native_lan"
+    assert any(
+        len(command) > 1
+        and command[1] == "switch-debug"
+        and "--dry-run" not in command
+        for command in switcher.commands
+    )
 
 
 def test_workerbee_switch_blocks_active_mutations(tmp_path: Path) -> None:

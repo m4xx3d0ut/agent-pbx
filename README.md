@@ -788,6 +788,25 @@ mutation is active. Existing generation-bound sessions fail closed with a
 rebind diagnostic after a completed switch; Agent PBX never silently retargets
 a running session to the new backend.
 
+Platform-debug posture is a separate, host-owned setting. The committed
+default remains loopback-only. A workstation whose qualified debug appliance
+owns local LAN DNS and HTTPS may opt in explicitly:
+
+```bash
+export AGENT_PBX_WORKERBEE_PLATFORM_DEBUG_POSTURE="native_lan"
+```
+
+The setting is included in preview and rollback evidence and must agree with
+the source-owned switcher's durable platform-debug profile. The normal
+`switch-debug` transaction consumes that profile, and the observed posture must
+match before Agent PBX marks the switch verified. Selecting the same backend no
+longer hides a loopback/native-LAN posture drift.
+
+This is an Agent PBX host-control setting. It does not select a different
+WorkerBee appliance for clients, alter the OSS/PaaS protocol, or affect PaaS
+users that do not run Agent PBX. A user-appliance rollout remains a separate
+WorkerBee release decision.
+
 ## Pull Request Review
 
 Set `AGENT_PBX_PR_ENABLED=1` before starting the daemon to enable the `PRs` tab

@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Bind platform-debug switching to an explicit loopback or native-LAN posture.
+  Preview, no-op detection, verification, rollback, and status now include that
+  posture so a backend recreation cannot silently replace qualified LAN DNS and
+  HTTPS with a loopback-only appliance.
 - Preserve structured WorkerBee workspace and gateway error codes during Codex
   launch preflight. The TUI now identifies the failed binding phase, presents
   remediation, and states explicitly that the existing Codex process was not
