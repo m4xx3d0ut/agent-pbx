@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
 from agent_pbx.workerbee_gateway import (
+    WORKERBEE_MUTATING_TOOLS,
     WORKERBEE_PROFILE_LOCAL_DEPLOY,
     WORKERBEE_PROFILE_OBSERVE,
     WORKERBEE_PROFILE_REVIEW,
@@ -160,6 +161,40 @@ def test_gateway_rejects_tools_outside_profile(tmp_path: Path) -> None:
     assert denied.value.code == "WORKERBEE_TOOL_NOT_ALLOWED"
 
 
+def test_gateway_local_deploy_allows_scoped_restart_only_for_mutating_profile(
+    tmp_path: Path,
+) -> None:
+    _runtime, _workspace, binding, gateway = services(tmp_path)
+    local_lease, _token = gateway.issue(
+        agent_id="deploy-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    observe_lease, _token = gateway.issue(
+        agent_id="observe-agent",
+        codex_session_id="thread-2",
+        profile=WORKERBEE_PROFILE_OBSERVE,
+        workspace_binding_id=binding.binding_id,
+    )
+
+    restart_args = gateway.prepare_arguments(
+        local_lease,
+        "workerbee_v1_workload_restart",
+        {"app": "web"},
+    )
+    assert restart_args == {"app": "web", "project": "demo"}
+    assert "workerbee_v1_workload_restart" in WORKERBEE_MUTATING_TOOLS
+
+    with pytest.raises(WorkerBeeGatewayError) as denied:
+        gateway.prepare_arguments(
+            observe_lease,
+            "workerbee_v1_workload_restart",
+            {"app": "web"},
+        )
+    assert denied.value.code == "WORKERBEE_TOOL_NOT_ALLOWED"
+
+
 def test_gateway_generation_change_requires_rebind(tmp_path: Path) -> None:
     runtime, _workspace, binding, gateway = services(tmp_path)
     lease, token = gateway.issue(
@@ -194,6 +229,21 @@ async def test_gateway_tracks_active_mutations(tmp_path: Path) -> None:
     )
 
     async with gateway.mutation(lease, "workerbee_v1_manifest_deploy_local"):
+        assert gateway.impact()["mutation_count"] == 1
+    assert gateway.impact()["mutation_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_tracks_workload_restart_as_mutation(tmp_path: Path) -> None:
+    _runtime, _workspace, binding, gateway = services(tmp_path)
+    lease, _token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+
+    async with gateway.mutation(lease, "workerbee_v1_workload_restart"):
         assert gateway.impact()["mutation_count"] == 1
     assert gateway.impact()["mutation_count"] == 0
 

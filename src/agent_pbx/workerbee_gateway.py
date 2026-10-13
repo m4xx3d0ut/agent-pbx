@@ -47,6 +47,7 @@ WORKERBEE_LOCAL_DEPLOY_TOOLS = (
     "workerbee_v1_manifest_prepare",
     "workerbee_v1_manifest_validate",
     "workerbee_v1_manifest_deploy_local",
+    "workerbee_v1_workload_restart",
     "workerbee_v1_ingress_status",
     "workerbee_v1_ingress_route_apply",
     "workerbee_v1_ingress_probe",
@@ -63,6 +64,7 @@ WORKERBEE_MUTATING_TOOLS = frozenset(
         "workerbee_v1_image_build",
         "workerbee_v1_manifest_prepare",
         "workerbee_v1_manifest_deploy_local",
+        "workerbee_v1_workload_restart",
         "workerbee_v1_ingress_route_apply",
     }
 )

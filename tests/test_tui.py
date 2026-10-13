@@ -21777,6 +21777,7 @@ def test_tui_caller_local_deploy_profile_is_bounded() -> None:
     assert "workerbee_v1_image_build" in workerbee_config
     assert "workerbee_v1_manifest_validate" in workerbee_config
     assert "workerbee_v1_manifest_deploy_local" in workerbee_config
+    assert "workerbee_v1_workload_restart" in workerbee_config
     assert "workerbee_v1_ingress_route_apply" in workerbee_config
     assert "workerbee_v1_ingress_probe" in workerbee_config
     assert "workerbee_v1_manifest_deploy_remote_k1s" not in workerbee_config
