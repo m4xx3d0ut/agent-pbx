@@ -54,6 +54,11 @@
 
 ### Added
 
+- Expand each isolated public-demo visitor topology with distinct native tmux
+  runtimes for the root Operator and both Operator forks while retaining Release
+  Review as a report-mode Agent. Each fake-Codex identity has an independent
+  pane and runtime mapping on the visitor-private socket, preserving the public
+  demo's no-credentials, no-host-tmux security boundary.
 - Add host-owned, Agent-and-source-bound workspace include policies for
   explicitly selected dirty or untracked Git-submodule content. Materialized
   binding identities now incorporate dirty submodule diffs and approved include

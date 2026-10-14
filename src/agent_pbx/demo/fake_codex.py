@@ -139,6 +139,7 @@ def _register_when_ready() -> None:
     if not project:
         project = "agent-pbx-operator" if agent_type == "operator" else Path(cwd).name
     role = os.getenv("AGENT_PBX_OPERATOR_ROLE", "").strip()
+    name = os.getenv("AGENT_PBX_AGENT_NAME", "").strip() or agent_id
     session_id = f"demo-session-{agent_id}"
     metadata: dict[str, object] = {
         "cwd": cwd,
@@ -165,7 +166,7 @@ def _register_when_ready() -> None:
             {
                 "agent_id": agent_id,
                 "project": project,
-                "name": agent_id,
+                "name": name,
                 "agent_type": agent_type,
                 "metadata": metadata,
             },
@@ -211,7 +212,10 @@ class DemoTerminal:
             "xhigh" if self.agent_type == "operator" else "high",
         )
         self.input = ""
-        self.last_prompt = "Review the v2 runtime and report readiness."
+        self.last_prompt = os.getenv(
+            "AGENT_PBX_DEMO_PROMPT",
+            "Review the v2 runtime and report readiness.",
+        )
         self.running = True
         self.frame = 0
         self.old_termios: list[object] | None = None

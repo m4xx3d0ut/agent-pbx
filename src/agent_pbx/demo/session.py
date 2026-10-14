@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -31,13 +32,13 @@ from .policy import (
 )
 
 
-DEMO_NATIVE_TERMINAL_ENTITY_IDS = ("platform-agent",)
-DEMO_REPORT_ENTITY_IDS = (
-    "release-review",
+DEMO_NATIVE_TERMINAL_ENTITY_IDS = (
+    "platform-agent",
     "operator-0",
     "operator-0-fork-platform-agent-demo",
     "operator-0-fork-release-review-demo",
 )
+DEMO_REPORT_ENTITY_IDS = ("release-review",)
 
 
 class DemoSessionError(RuntimeError):
@@ -132,11 +133,11 @@ class DemoSession:
     def _write_tui_settings(self) -> None:
         """Declare which seeded entities own a native terminal surface.
 
-        The product tour intentionally runs one real managed tmux/Codex fixture.
-        The other identities demonstrate durable reports, plans, campaigns, and
-        fork topology.  Explicit per-entity modes keep those report fixtures from
-        inheriting the global native-terminal default and displaying a misleading
-        compatibility warning for a pane they are not designed to own.
+        The product tour runs one managed Agent plus a root Operator and two
+        bounded Operator forks as real tmux/Codex fixtures. Release Review stays
+        on the durable report surface. Explicit per-entity modes keep that report
+        fixture from inheriting the global native-terminal default and displaying
+        a misleading compatibility warning for a pane it is not designed to own.
         """
 
         terminal_modes = {
@@ -325,6 +326,146 @@ class DemoSession:
             },
         )
 
+    @staticmethod
+    def _demo_runtime_session_name(entity_id: str) -> str:
+        suffix = uuid.uuid5(uuid.NAMESPACE_URL, f"agent-pbx-demo:{entity_id}").hex[:8]
+        return f"agent-pbx-demo-{entity_id[:72]}-{suffix}"
+
+    def _kill_demo_runtime_session(self, session_name: str) -> None:
+        with suppress(OSError, subprocess.TimeoutExpired):
+            subprocess.run(
+                [
+                    self.config.tmux_bin,
+                    "-S",
+                    str(self.runtime_socket),
+                    "kill-session",
+                    "-t",
+                    f"={session_name}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=self.environment,
+            )
+
+    def _launch_demo_operator_runtime(
+        self,
+        *,
+        entity_id: str,
+        name: str,
+        role: str,
+        cwd: Path,
+        prompt: str,
+    ) -> dict[str, object]:
+        """Launch and map one deterministic Operator runtime for the public demo.
+
+        This deliberately bypasses ``ManagedRuntimeService`` because that service
+        creates caller Agents. The entity must already exist as a PBX Operator;
+        this helper only gives that demo identity a private fake-Codex tmux pane.
+        """
+
+        assert self.fixtures is not None
+        if role not in {"root", "fork"}:
+            raise DemoSessionError(f"unsupported demo Operator role: {role}")
+        agents = self.request("GET", "/v1/agents?include_hidden=true")
+        operator = next(
+            (
+                item
+                for item in agents
+                if isinstance(item, dict) and item.get("agent_id") == entity_id
+            ),
+            None,
+        )
+        if not isinstance(operator, dict) or operator.get("agent_type") != "operator":
+            raise DemoSessionError(
+                f"demo Operator must be registered before runtime launch: {entity_id}"
+            )
+
+        session_name = self._demo_runtime_session_name(entity_id)
+        pane_environment = {
+            "AGENT_PBX_AGENT_ID": entity_id,
+            "AGENT_PBX_AGENT_NAME": name,
+            "AGENT_PBX_AGENT_TYPE": "operator",
+            "AGENT_PBX_OPERATOR_ROLE": role,
+            "AGENT_PBX_LOGICAL_OPERATOR_ID": "operator-0",
+            "AGENT_PBX_AGENT_PROJECT": "agent-pbx-operator",
+            "AGENT_PBX_CWD": str(cwd),
+            "AGENT_PBX_SERVER_URL": self.server_url,
+            "AGENT_PBX_TOKEN": self.token,
+            "AGENT_PBX_MODE": "report",
+            "AGENT_PBX_CODEX_MODEL": "gpt-5.6-sol",
+            "AGENT_PBX_CODEX_REASONING_EFFORT": "xhigh",
+            "AGENT_PBX_DEMO_PROMPT": prompt,
+        }
+        command = [
+            self.config.tmux_bin,
+            "-S",
+            str(self.runtime_socket),
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-s",
+            session_name,
+            "-n",
+            "codex",
+            "-c",
+            str(cwd),
+        ]
+        for key, value in pane_environment.items():
+            command.extend(("-e", f"{key}={value}"))
+        command.append(shlex.join(["exec", str(self.fixtures.codex_bin)]))
+        launched = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self.environment,
+        )
+        if launched.returncode != 0:
+            raise DemoSessionError(
+                (
+                    launched.stderr
+                    or launched.stdout
+                    or f"failed to launch demo Operator runtime {entity_id}"
+                ).strip()
+            )
+        pane_id = launched.stdout.strip().splitlines()[-1] if launched.stdout.strip() else ""
+        if not pane_id:
+            self._kill_demo_runtime_session(session_name)
+            raise DemoSessionError(f"tmux returned no pane id for demo Operator {entity_id}")
+
+        session_id = f"demo-session-{entity_id}"
+        try:
+            mapping = self.request(
+                "POST",
+                f"/v2/tmux/runtimes/{entity_id}",
+                {
+                    "server_mode": "dedicated",
+                    "socket_path": str(self.runtime_socket),
+                    "session_name": session_name,
+                    "pane_id": pane_id,
+                    "codex_session_id": session_id,
+                    "metadata": {
+                        "demo": True,
+                        "managed_launch": True,
+                        "launched_by": "agent-pbx-public-demo",
+                        "profile_id": "sol-xhigh",
+                        "tmux_bin": self.config.tmux_bin,
+                        "agent_type": "operator",
+                        "operator_role": role,
+                    },
+                },
+            )
+        except Exception:
+            self._kill_demo_runtime_session(session_name)
+            raise
+        if not isinstance(mapping, dict):
+            self._kill_demo_runtime_session(session_name)
+            raise DemoSessionError(f"invalid runtime mapping for demo Operator {entity_id}")
+        return mapping
+
     def seed(self) -> None:
         assert self.fixtures is not None
         self.request(
@@ -355,6 +496,25 @@ class DemoSession:
             time.sleep(0.1)
         else:
             raise DemoSessionError("managed demo Codex runtime did not register")
+        platform_mapping = self.request(
+            "GET", "/v2/tmux/runtimes/platform-agent"
+        )
+        if not isinstance(platform_mapping, dict):
+            raise DemoSessionError("managed demo runtime mapping is unavailable")
+        self.request(
+            "POST",
+            "/v2/tmux/runtimes/platform-agent",
+            {
+                "server_mode": platform_mapping["server_mode"],
+                "socket_path": platform_mapping["socket_path"],
+                "session_name": platform_mapping["session_name"],
+                "pane_id": platform_mapping["pane_id"],
+                "pane_pid": platform_mapping.get("pane_pid"),
+                "process_start_ticks": platform_mapping.get("process_start_ticks"),
+                "codex_session_id": "demo-session-platform-agent",
+                "metadata": platform_mapping.get("metadata") or {},
+            },
+        )
 
         self.request(
             "POST",
@@ -389,6 +549,13 @@ class DemoSession:
                     "codex_session_id": "demo-session-operator-0",
                 },
             },
+        )
+        self._launch_demo_operator_runtime(
+            entity_id="operator-0",
+            name="Architecture Operator",
+            role="root",
+            cwd=self.fixtures.platform_project,
+            prompt="Coordinate the native runtime and release-review campaign.",
         )
         self._report(
             "platform-agent",
@@ -433,16 +600,18 @@ class DemoSession:
                 "the project-specific work."
             ),
         )
-        for source, fork_id, summary in (
+        for source, fork_id, summary, prompt in (
             (
                 "platform-agent",
                 "operator-0-fork-platform-agent-demo",
                 "Native runtime validation fork is ready.",
+                "Validate the platform Agent runtime and terminal evidence.",
             ),
             (
                 "release-review",
                 "operator-0-fork-release-review-demo",
                 "Release review fork is ready.",
+                "Inspect release evidence and prepare a bounded review.",
             ),
         ):
             self.request(
@@ -460,16 +629,43 @@ class DemoSession:
                     "metadata": {"demo": True},
                 },
             )
+            mapping = self._launch_demo_operator_runtime(
+                entity_id=fork_id,
+                name=fork_id,
+                role="fork",
+                cwd=(
+                    self.fixtures.platform_project
+                    if source == "platform-agent"
+                    else self.fixtures.release_project
+                ),
+                prompt=prompt,
+            )
+            self.request(
+                "POST",
+                "/v1/operator/forks/ensure",
+                {
+                    "operator_agent_id": "operator-0",
+                    "source_caller_agent_id": source,
+                    "fork_agent_id": fork_id,
+                    "fork_track_id": "default",
+                    "fork_purpose": "edit",
+                    "access_mode": "edit",
+                    "tmux_pane_id": mapping["pane_id"],
+                    "fork_codex_session_id": f"demo-session-{fork_id}",
+                    "status": "running",
+                    "summary": summary,
+                    "metadata": {"demo": True, "native_terminal": True},
+                },
+            )
             self._report(
                 fork_id,
                 "agent-pbx-operator",
                 status="working",
                 summary=summary,
                 detail=(
-                    "This bounded Operator fork is represented by durable PBX "
-                    "state in the product tour. Select Campaigns, KB, or Thread "
-                    "to inspect its coordinated work without creating another "
-                    "visitor runtime."
+                    "This bounded Operator fork owns a distinct deterministic "
+                    "Codex fixture in the visitor-private tmux server. Select it "
+                    "to inspect native terminal behavior without host access."
                 ),
             )
         self.request(

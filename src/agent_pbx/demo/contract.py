@@ -48,8 +48,9 @@ def public_demo_contract() -> dict[str, Any]:
         },
         "seeded_surfaces": [
             "managed Agent and native tmux runtime",
-            "Agent and Operator reports",
-            "Operator forks and campaign",
+            "report-mode Release Review",
+            "native root Operator and fork runtimes",
+            "Operator campaign and topology",
             "Codex posture",
             "scoped project files and editor",
             "WorkerBee runtime truth",

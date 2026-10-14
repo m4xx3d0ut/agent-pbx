@@ -36,13 +36,14 @@ The local conformance path requires `git` and `tmux`. It does not use the
 operator's daemon, database, projects, Codex credentials, integration secrets,
 outer tmux server, or local Agent/Operator mappings.
 
-The product-tour scenario creates one real managed tmux/Codex fixture for
-`platform-agent`. `release-review`, `operator-0`, and the seeded Operator forks
-are durable report, plan, campaign, and topology fixtures. Their `Latest` views
-show PBX reports rather than pretending that each visitor owns several native
-Codex runtimes. This keeps the tour representative while bounding process and
-memory use. A report fixture showing a tmux compatibility warning is a demo
-configuration defect.
+The product-tour scenario creates distinct visitor-private tmux/Codex fixtures
+for `platform-agent`, root `operator-0`, and both seeded Operator forks.
+`release-review` remains a durable report and plan fixture. This mixed topology
+demonstrates native Agent and Operator terminals beside the control plane's
+report workflow without using real Codex credentials or host tmux sessions.
+Every native identity has its own pane and runtime mapping; selecting one never
+shows another identity's terminal. A report fixture showing a tmux compatibility
+warning is a demo configuration defect.
 
 ## Public reverse-proxy mode
 

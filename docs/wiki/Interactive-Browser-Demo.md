@@ -12,10 +12,11 @@ GitHub, and Joplin fixtures, and a dedicated tmux server.
 The demo cannot attach to live Agents, Operators, credentials, repositories,
 Codex state, PBX state, or host tmux sockets.
 
-The seeded `platform-agent` owns the tour's one real managed tmux/Codex
-runtime. The release-review Agent, root Operator, and Operator forks use
-durable PBX report surfaces. This is intentional: it demonstrates both runtime
-and control-plane behavior without multiplying process cost for each visitor.
+The seeded `platform-agent`, root Operator, and both Operator forks own distinct
+visitor-private tmux/Codex runtimes. The release-review Agent stays in durable
+report mode. This mixed topology demonstrates native Agent and Operator
+interaction alongside PBX report, plan, campaign, and topology state without
+exposing host tmux sessions or real Codex credentials.
 
 ## Local qualification
 
