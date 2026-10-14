@@ -4323,6 +4323,7 @@ async def test_tui_managed_resume_reports_exhausted_lease_retries(
     project = tmp_path / "demo"
     project.mkdir()
     app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret", tmux_direct=True)
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_runtime_server = TmuxServerIdentity(
         RuntimeServerMode.DEDICATED,
         RuntimeServerMode.DEDICATED,
@@ -4404,6 +4405,7 @@ async def test_tui_managed_resume_refuses_active_thread_writer_lock(
     project = tmp_path / "demo"
     project.mkdir()
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_runtime_server = TmuxServerIdentity(
         RuntimeServerMode.DEDICATED,
         RuntimeServerMode.DEDICATED,
@@ -4460,6 +4462,7 @@ async def test_tui_managed_resume_retains_exit_diagnostic_without_retry(
     project = tmp_path / "demo"
     project.mkdir()
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_runtime_server = TmuxServerIdentity(
         RuntimeServerMode.DEDICATED,
         RuntimeServerMode.DEDICATED,
@@ -15517,6 +15520,7 @@ async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_com
     monkeypatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     respawns: list[dict[str, object]] = []
     captures: list[str] = []
@@ -16101,6 +16105,7 @@ async def test_tui_sol_restart_rolls_back_when_codex_reports_external_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     notifications: list[str] = []
     respawns: list[dict[str, object]] = []
     configured: list[dict[str, object]] = []
@@ -16192,6 +16197,7 @@ async def test_tui_fork_restart_replaces_stale_source_resume_with_codex_fork(
     work_root = tmp_path / "fork"
     work_root.mkdir()
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     respawns: list[dict[str, object]] = []
     records: list[dict[str, object]] = []
     fork_pane = tmux_support.TmuxPane(
@@ -16307,6 +16313,7 @@ async def test_tui_resume_leaves_external_lease_dialog_unregistered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     notifications: list[str] = []
     sent: list[tuple[str, str]] = []
