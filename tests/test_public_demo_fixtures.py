@@ -7,6 +7,7 @@ import threading
 import urllib.request
 
 from agent_pbx.demo.fake_joplin import create_joplin_fixture_server
+from agent_pbx.demo import fixtures as fixture_module
 from agent_pbx.demo.fixtures import prepare_demo_fixtures
 
 
@@ -51,6 +52,34 @@ def test_prepare_demo_fixtures_creates_private_repositories_and_tools(
         text=True,
     )
     assert json.loads(github.stdout)[0]["number"] == 12
+
+
+def test_demo_fixtures_link_to_installed_entrypoints_when_available(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    entrypoint = tmp_path / "installed" / "agent-pbx-demo-codex"
+    entrypoint.parent.mkdir()
+    entrypoint.write_text("#!/bin/sh\nprintf 'codex-cli installed-demo\\n'\n")
+    entrypoint.chmod(0o755)
+    real_which = fixture_module.shutil.which
+
+    def fake_which(command: str) -> str | None:
+        if command == "agent-pbx-demo-codex":
+            return str(entrypoint)
+        return real_which(command)
+
+    monkeypatch.setattr(fixture_module.shutil, "which", fake_which)
+    fixtures = prepare_demo_fixtures(tmp_path / "fixture")
+
+    assert fixtures.codex_bin.is_symlink()
+    assert fixtures.codex_bin.resolve() == entrypoint.resolve()
+    result = subprocess.run(
+        [str(fixtures.codex_bin), "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == "codex-cli installed-demo"
 
 
 def test_fake_joplin_serves_and_updates_notes() -> None:

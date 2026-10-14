@@ -386,3 +386,16 @@ def test_managed_runtime_api_discovers_projects_and_persists_migration(
     listed = client.get("/v2/runtime-migrations", headers=headers)
     assert listed.status_code == 200
     assert listed.json()["batches"][0]["batch_id"] == migration.json()["batch_id"]
+
+
+def test_api_propagates_configured_codex_command_to_managed_runtime(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        ServerConfig(
+            db_path=tmp_path / "pbx.sqlite",
+            codex_bin="/opt/agent-pbx/demo-codex",
+        )
+    )
+
+    assert app.state.managed_runtime.codex_bin == "/opt/agent-pbx/demo-codex"

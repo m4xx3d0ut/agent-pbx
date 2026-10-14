@@ -37,6 +37,23 @@ def _write_executable(path: Path, module: str) -> None:
     path.chmod(0o700)
 
 
+def _install_executable_alias(path: Path, *, entrypoint: str, module: str) -> None:
+    """Install a fixture command that also works below a noexec session root.
+
+    The public container deliberately mounts its disposable ``/tmp`` tree with
+    ``noexec``.  A symlink below that tree may still invoke an immutable entry
+    point installed in the image, while a generated script cannot execute.
+    Source checkouts without installed demo entry points retain the generated
+    wrapper used by local development and tests.
+    """
+
+    installed = shutil.which(entrypoint)
+    if installed:
+        path.symlink_to(Path(installed).resolve())
+        return
+    _write_executable(path, module)
+
+
 def _initialize_repository(path: Path, files: dict[str, str]) -> None:
     path.mkdir(parents=True, exist_ok=True)
     for relative, body in files.items():
@@ -128,9 +145,21 @@ def prepare_demo_fixtures(root: Path) -> DemoFixturePaths:
     codex_bin = bin_dir / "codex"
     workerbee_bin = bin_dir / "workerbee"
     github_bin = bin_dir / "gh"
-    _write_executable(codex_bin, "agent_pbx.demo.fake_codex")
-    _write_executable(workerbee_bin, "agent_pbx.demo.fake_workerbee")
-    _write_executable(github_bin, "agent_pbx.demo.fake_github")
+    _install_executable_alias(
+        codex_bin,
+        entrypoint="agent-pbx-demo-codex",
+        module="agent_pbx.demo.fake_codex",
+    )
+    _install_executable_alias(
+        workerbee_bin,
+        entrypoint="agent-pbx-demo-workerbee",
+        module="agent_pbx.demo.fake_workerbee",
+    )
+    _install_executable_alias(
+        github_bin,
+        entrypoint="agent-pbx-demo-gh",
+        module="agent_pbx.demo.fake_github",
+    )
     return DemoFixturePaths(
         root=resolved,
         bin_dir=bin_dir,

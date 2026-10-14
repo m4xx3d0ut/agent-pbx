@@ -688,7 +688,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.pull_requests = pull_requests
     app.state.issues = issues
     app.state.operator_service = OperatorService(store)
-    app.state.managed_runtime = ManagedRuntimeService(store)
+    app.state.managed_runtime = ManagedRuntimeService(
+        store,
+        codex_bin=resolved_config.codex_bin,
+    )
     app.state.agent_pane_adoption = AgentPaneAdoptionService(store)
     app.state.lifecycle = LifecycleService(store)
     if resolved_config.debug:

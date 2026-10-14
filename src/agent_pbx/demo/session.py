@@ -182,6 +182,7 @@ class DemoSession:
         self.environment.update(
             {
                 "AGENT_PBX_PROJECT_ROOTS": str(self.fixtures.project_root),
+                "AGENT_PBX_CODEX_BIN": str(self.fixtures.codex_bin),
                 "AGENT_PBX_TMUX_BIN": self.config.tmux_bin,
                 "AGENT_PBX_WORKERBEE_BIN": str(self.fixtures.workerbee_bin),
                 "AGENT_PBX_GH_BIN": str(self.fixtures.github_bin),

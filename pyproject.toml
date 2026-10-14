@@ -55,6 +55,9 @@ dev = [
 agent-pbx = "agent_pbx.cli:main"
 agent-pbx-tui = "agent_pbx.tui_cli:main"
 agent-pbx-workerbee-workspace = "agent_pbx.workerbee_materializer:main"
+agent-pbx-demo-codex = "agent_pbx.demo.fake_codex:main"
+agent-pbx-demo-gh = "agent_pbx.demo.fake_github:main"
+agent-pbx-demo-workerbee = "agent_pbx.demo.fake_workerbee:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "agent_pbx.__version__"}
