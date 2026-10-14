@@ -24,8 +24,316 @@ from .policy import (
 
 PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_PATH = "/agent-pbx-terminal-resize.js"
 PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_ID = "agent-pbx-terminal-resize-sync"
+PUBLIC_DEMO_LOADING_SCRIPT_PATH = "/agent-pbx-loading.js"
+PUBLIC_DEMO_LOADING_SCRIPT_ID = "agent-pbx-loading-controller"
+PUBLIC_DEMO_LOADING_STYLE_ID = "agent-pbx-loading-style"
+PUBLIC_DEMO_LOADING_OVERLAY_ID = "agent-pbx-demo-loading"
 PUBLIC_DEMO_INITIAL_RESIZE_TIMEOUT_SECONDS = 1.0
 PUBLIC_DEMO_INITIAL_MESSAGE_LIMIT = 16
+PUBLIC_DEMO_LOADING_STYLE = r"""
+#agent-pbx-demo-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  min-width: 100vw;
+  min-height: 100vh;
+  padding: clamp(18px, 4vw, 48px);
+  overflow: hidden;
+  color: #d8f7f7;
+  background:
+    linear-gradient(rgba(0, 229, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 43, 214, 0.025) 1px, transparent 1px),
+    radial-gradient(circle at 50% 38%, rgba(0, 229, 255, 0.1), transparent 34%),
+    #05080d;
+  background-size: 28px 28px, 28px 28px, auto, auto;
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 220ms ease, visibility 220ms ease;
+  box-sizing: border-box;
+  font-family: "Roboto Mono", Menlo, Consolas, monospace;
+}
+
+body.-first-byte #agent-pbx-demo-loading {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.agent-pbx-loader-panel {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  width: min(560px, 100%);
+  padding: clamp(30px, 6vw, 54px);
+  overflow: hidden;
+  border: 1px solid rgba(0, 229, 255, 0.48);
+  border-radius: 8px;
+  background: rgba(8, 14, 22, 0.94);
+  box-shadow:
+    0 0 0 1px rgba(255, 43, 214, 0.12) inset,
+    0 0 48px rgba(0, 229, 255, 0.1);
+  text-align: center;
+}
+
+.agent-pbx-loader-panel::before,
+.agent-pbx-loader-panel::after {
+  position: absolute;
+  width: 38px;
+  height: 2px;
+  content: "";
+  background: #ff2bd6;
+  box-shadow: 0 0 12px rgba(255, 43, 214, 0.7);
+}
+
+.agent-pbx-loader-panel::before {
+  top: 0;
+  left: 18px;
+}
+
+.agent-pbx-loader-panel::after {
+  right: 18px;
+  bottom: 0;
+  background: #00e5ff;
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.7);
+}
+
+.agent-pbx-loader-mark {
+  position: relative;
+  width: 104px;
+  height: 104px;
+  margin-bottom: 28px;
+}
+
+.agent-pbx-loader-ring,
+.agent-pbx-loader-core {
+  position: absolute;
+  border-radius: 50%;
+}
+
+.agent-pbx-loader-ring {
+  inset: 0;
+  border: 2px solid transparent;
+  border-top-color: #00e5ff;
+  border-right-color: rgba(0, 229, 255, 0.34);
+  box-shadow: 0 0 18px rgba(0, 229, 255, 0.18);
+  animation: agent-pbx-loader-spin 1.35s linear infinite;
+}
+
+.agent-pbx-loader-ring--inner {
+  inset: 14px;
+  border-top-color: #ff2bd6;
+  border-right-color: transparent;
+  border-bottom-color: rgba(255, 43, 214, 0.4);
+  box-shadow: 0 0 14px rgba(255, 43, 214, 0.16);
+  animation-direction: reverse;
+  animation-duration: 0.95s;
+}
+
+.agent-pbx-loader-core {
+  inset: 31px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(216, 247, 247, 0.25);
+  color: #d8f7f7;
+  background: #0c1620;
+  box-shadow: 0 0 20px rgba(0, 229, 255, 0.12) inset;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+}
+
+.agent-pbx-loader-kicker {
+  margin: 0 0 11px;
+  color: #00e5ff;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.agent-pbx-loader-title {
+  max-width: 440px;
+  margin: 0;
+  color: #f1ffff;
+  background: transparent;
+  font-size: clamp(1.02rem, 2.8vw, 1.42rem);
+  line-height: 1.35;
+}
+
+.agent-pbx-loader-status {
+  min-height: 2.8em;
+  max-width: 440px;
+  margin: 16px 0 0;
+  color: #91aeb8;
+  font-size: clamp(0.72rem, 2vw, 0.84rem);
+  line-height: 1.6;
+}
+
+.agent-pbx-loader-dots {
+  display: flex;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.agent-pbx-loader-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #00e5ff;
+  box-shadow: 0 0 9px rgba(0, 229, 255, 0.65);
+  animation: agent-pbx-loader-pulse 1.2s ease-in-out infinite;
+}
+
+.agent-pbx-loader-dots span:nth-child(2) {
+  animation-delay: 160ms;
+}
+
+.agent-pbx-loader-dots span:nth-child(3) {
+  animation-delay: 320ms;
+}
+
+.agent-pbx-loader-retry {
+  display: none;
+  margin-top: 22px;
+  padding: 10px 18px;
+  border: 1px solid #ffb020;
+  border-radius: 4px;
+  color: #fff4d4;
+  background: #22190d;
+  font: 700 0.78rem/1.2 "Roboto Mono", Menlo, Consolas, monospace;
+  cursor: pointer;
+}
+
+#agent-pbx-demo-loading.is-error .agent-pbx-loader-ring {
+  border-top-color: #ffb020;
+  border-right-color: rgba(255, 176, 32, 0.35);
+  animation-play-state: paused;
+}
+
+#agent-pbx-demo-loading.is-error .agent-pbx-loader-dots {
+  display: none;
+}
+
+#agent-pbx-demo-loading.is-error .agent-pbx-loader-retry {
+  display: inline-block;
+}
+
+@keyframes agent-pbx-loader-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes agent-pbx-loader-pulse {
+  0%, 100% { opacity: 0.28; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-3px); }
+}
+
+@media (max-width: 560px) {
+  .agent-pbx-loader-panel {
+    padding: 28px 22px;
+  }
+
+  .agent-pbx-loader-mark {
+    width: 86px;
+    height: 86px;
+    margin-bottom: 22px;
+  }
+
+  .agent-pbx-loader-core {
+    inset: 26px;
+    font-size: 0.6rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #agent-pbx-demo-loading,
+  .agent-pbx-loader-ring,
+  .agent-pbx-loader-dots span {
+    animation: none;
+    transition: none;
+  }
+
+  .agent-pbx-loader-ring {
+    border-color: rgba(0, 229, 255, 0.35);
+    border-top-color: #00e5ff;
+  }
+
+  .agent-pbx-loader-ring--inner {
+    border-color: rgba(255, 43, 214, 0.35);
+    border-bottom-color: #ff2bd6;
+  }
+}
+""".strip()
+PUBLIC_DEMO_LOADING_MARKUP = r"""
+<div id="agent-pbx-demo-loading" role="status" aria-live="polite" aria-atomic="true">
+  <div class="agent-pbx-loader-panel">
+    <div class="agent-pbx-loader-mark" aria-hidden="true">
+      <span class="agent-pbx-loader-ring"></span>
+      <span class="agent-pbx-loader-ring agent-pbx-loader-ring--inner"></span>
+      <span class="agent-pbx-loader-core">PBX</span>
+    </div>
+    <p class="agent-pbx-loader-kicker">Initializing Agent PBX</p>
+    <h1 class="agent-pbx-loader-title" data-agent-pbx-loader-title>Preparing an isolated engineering console</h1>
+    <p class="agent-pbx-loader-status" data-agent-pbx-loader-status>Allocating a private demo session…</p>
+    <div class="agent-pbx-loader-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+    <button class="agent-pbx-loader-retry" type="button" data-agent-pbx-loader-retry>Retry demo</button>
+  </div>
+</div>
+""".strip()
+PUBLIC_DEMO_LOADING_SCRIPT = r"""
+(() => {
+  "use strict";
+
+  const overlay = document.getElementById("agent-pbx-demo-loading");
+  const title = overlay?.querySelector("[data-agent-pbx-loader-title]");
+  const status = overlay?.querySelector("[data-agent-pbx-loader-status]");
+  const retry = overlay?.querySelector("[data-agent-pbx-loader-retry]");
+  if (!overlay || !title || !status || !retry) return;
+
+  const stages = [
+    [1800, "Starting the Agent PBX control plane…"],
+    [3900, "Binding disposable tmux runtimes…"],
+    [6200, "Rendering the engineering operator console…"],
+    [10000, "First launch can take a few seconds. Your session remains private and isolated."],
+  ];
+  const timers = stages.map(([delay, message]) => window.setTimeout(() => {
+    if (!document.body.classList.contains("-first-byte") && !overlay.classList.contains("is-error")) {
+      status.textContent = message;
+    }
+  }, delay));
+
+  const stopTimers = () => {
+    for (const timer of timers) window.clearTimeout(timer);
+  };
+
+  const synchronizeState = () => {
+    if (document.body.classList.contains("-first-byte")) {
+      stopTimers();
+      overlay.setAttribute("aria-hidden", "true");
+      observer.disconnect();
+      return;
+    }
+    if (document.body.classList.contains("-closed")) {
+      stopTimers();
+      overlay.classList.add("is-error");
+      title.textContent = "The demo session could not start";
+      status.textContent = "Please retry in a moment. No workstation data or credentials were connected.";
+    }
+  };
+
+  const observer = new MutationObserver(synchronizeState);
+  observer.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+  retry.addEventListener("click", () => {
+    if (typeof window.refresh === "function") {
+      window.refresh();
+    } else {
+      window.location.reload();
+    }
+  });
+  synchronizeState();
+})();
+""".strip()
 PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT = r"""
 (() => {
   "use strict";
@@ -203,6 +511,36 @@ def inject_public_demo_terminal_resize_bootstrap(html: str) -> str:
         f'src="{PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_PATH}"></script>'
     )
     return html.replace(closing_head, f"    {script_tag}\n  {closing_head}", 1)
+
+
+def inject_public_demo_loading_experience(html: str) -> str:
+    """Add an accessible Agent PBX loader until Textual paints its first frame."""
+
+    if f'id="{PUBLIC_DEMO_LOADING_OVERLAY_ID}"' in html:
+        return html
+    closing_head = "</head>"
+    closing_body = "</body>"
+    if closing_head not in html or closing_body not in html:
+        return html
+    style_tag = (
+        f'<style id="{PUBLIC_DEMO_LOADING_STYLE_ID}">\n'
+        f"{PUBLIC_DEMO_LOADING_STYLE}\n"
+        "</style>"
+    )
+    script_tag = (
+        f'<script id="{PUBLIC_DEMO_LOADING_SCRIPT_ID}" defer '
+        f'src="{PUBLIC_DEMO_LOADING_SCRIPT_PATH}"></script>'
+    )
+    html = html.replace(
+        closing_head,
+        f"    {style_tag}\n    {script_tag}\n  {closing_head}",
+        1,
+    )
+    return html.replace(
+        closing_body,
+        f"    {PUBLIC_DEMO_LOADING_MARKUP}\n  {closing_body}",
+        1,
+    )
 
 
 class DemoWebDependencyError(RuntimeError):
@@ -408,8 +746,8 @@ def build_public_demo_server(
                     and response.content_type == "text/html"
                     and response.text
                 ):
-                    response.text = inject_public_demo_terminal_resize_bootstrap(
-                        response.text
+                    response.text = inject_public_demo_loading_experience(
+                        inject_public_demo_terminal_resize_bootstrap(response.text)
                     )
                 response.headers["X-Content-Type-Options"] = "nosniff"
                 response.headers["Referrer-Policy"] = "no-referrer"
@@ -432,6 +770,11 @@ def build_public_demo_server(
                         PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT_PATH,
                         self.handle_terminal_resize_script,
                         name="agent-pbx-terminal-resize-script",
+                    ),
+                    web.get(
+                        PUBLIC_DEMO_LOADING_SCRIPT_PATH,
+                        self.handle_loading_script,
+                        name="agent-pbx-loading-script",
                     ),
                     web.get(
                         "/demo-contract.json",
@@ -457,6 +800,13 @@ def build_public_demo_server(
         async def handle_terminal_resize_script(self, _request: Any) -> Any:
             return web.Response(
                 text=PUBLIC_DEMO_TERMINAL_RESIZE_SCRIPT,
+                content_type="application/javascript",
+                headers={"Cache-Control": "no-cache"},
+            )
+
+        async def handle_loading_script(self, _request: Any) -> Any:
+            return web.Response(
+                text=PUBLIC_DEMO_LOADING_SCRIPT,
                 content_type="application/javascript",
                 headers={"Cache-Control": "no-cache"},
             )

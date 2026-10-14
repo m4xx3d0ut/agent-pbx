@@ -110,6 +110,12 @@ directories. Do not mount a real home directory, Docker socket, SSH agent,
 Kubernetes configuration, Codex home, Agent PBX state root, or integration
 credential into this container.
 
+The browser displays an Agent PBX loading surface while the disposable daemon,
+tmux runtimes, and Textual session start. The surface follows Textual Serve's
+first-terminal-frame signal rather than the initial HTML response, so it also
+works when the demo is embedded in a product page. A session that closes before
+its first frame receives a retry action instead of an indefinite spinner.
+
 ## Development and qualification
 
 The focused repository tests exercise policy, fixtures, the private daemon and

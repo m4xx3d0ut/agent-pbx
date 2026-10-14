@@ -12,6 +12,7 @@ from agent_pbx.demo.contract import DEMO_CONTRACT_VERSION
 from agent_pbx.demo.web import (
     _receive_initial_public_demo_terminal_size,
     build_public_demo_server,
+    inject_public_demo_loading_experience,
     inject_public_demo_terminal_resize_bootstrap,
     public_demo_doctor,
 )
@@ -123,6 +124,24 @@ def test_public_demo_terminal_resize_bootstrap_is_idempotent() -> None:
     assert inject_public_demo_terminal_resize_bootstrap(injected) == injected
 
 
+def test_public_demo_loading_experience_is_accessible_and_idempotent() -> None:
+    html = "<html><head><title>Demo</title></head><body></body></html>"
+
+    injected = inject_public_demo_loading_experience(html)
+
+    assert injected.count('id="agent-pbx-demo-loading"') == 1
+    assert injected.count('id="agent-pbx-loading-style"') == 1
+    assert injected.count('id="agent-pbx-loading-controller"') == 1
+    assert 'src="/agent-pbx-loading.js"' in injected
+    assert 'role="status"' in injected
+    assert 'aria-live="polite"' in injected
+    assert "prefers-reduced-motion: reduce" in injected
+    assert "body.-first-byte #agent-pbx-demo-loading" in injected
+    assert ".agent-pbx-loader-title" in injected
+    assert "background: transparent" in injected
+    assert inject_public_demo_loading_experience(injected) == injected
+
+
 async def test_initial_terminal_handshake_uses_authoritative_resize() -> None:
     ping = _FakeWSMessage(_FakeWSMsgType.TEXT, ["ping", "before-resize"])
     websocket = _FakeWebSocket(
@@ -217,6 +236,10 @@ async def test_public_demo_server_exposes_health_contract_and_origin_guard() -> 
         assert index.status == 200
         assert index_text.count('id="agent-pbx-terminal-resize-sync"') == 1
         assert 'src="/agent-pbx-terminal-resize.js"' in index_text
+        assert index_text.count('id="agent-pbx-demo-loading"') == 1
+        assert index_text.count('id="agent-pbx-loading-controller"') == 1
+        assert 'src="/agent-pbx-loading.js"' in index_text
+        assert "prefers-reduced-motion: reduce" in index_text
 
         resize_script = await client.get("/agent-pbx-terminal-resize.js")
         resize_script_text = await resize_script.text()
@@ -234,6 +257,18 @@ async def test_public_demo_server_exposes_health_contract_and_origin_guard() -> 
         assert "upstreamLoad.call(window, event)" in resize_script_text
         assert 'typeof window.onresize !== "function"' in resize_script_text
         assert "setInterval" not in resize_script_text
+
+        loading_script = await client.get("/agent-pbx-loading.js")
+        loading_script_text = await loading_script.text()
+        assert loading_script.status == 200
+        assert loading_script.content_type == "application/javascript"
+        assert loading_script.headers["Cache-Control"] == "no-cache"
+        assert 'document.body.classList.contains("-first-byte")' in loading_script_text
+        assert 'document.body.classList.contains("-closed")' in loading_script_text
+        assert "MutationObserver" in loading_script_text
+        assert "Binding disposable tmux runtimes" in loading_script_text
+        assert "window.refresh()" in loading_script_text
+        assert "setInterval" not in loading_script_text
 
         contract = await client.get(
             "/demo-contract.json", headers={"Origin": "https://www.example"}

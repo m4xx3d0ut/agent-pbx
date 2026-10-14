@@ -54,6 +54,10 @@
 
 ### Added
 
+- Add an Agent PBX styled first-frame loading surface to the public browser
+  demo. It reports staged private-session startup progress, yields when Textual
+  paints the first terminal frame, honors reduced-motion preferences, and
+  offers a safe retry when the disposable session closes before startup.
 - Expand each isolated public-demo visitor topology with distinct native tmux
   runtimes for the root Operator and both Operator forks while retaining Release
   Review as a report-mode Agent. Each fake-Codex identity has an independent
