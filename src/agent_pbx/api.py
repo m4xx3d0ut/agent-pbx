@@ -620,6 +620,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     name="agent-pbx-debug-smoke",
                 )
             if joplin.config.configured:
+                await bootstrap_joplin_server(store, joplin)
                 joplin_sync_task = asyncio.create_task(
                     run_joplin_sync_worker(store, joplin),
                     name="agent-pbx-joplin-sync",
@@ -5614,6 +5615,36 @@ async def run_joplin_sync_worker(
             str(job["sync_id"]),
         )
         logger.debug("Joplin sync job succeeded: %s", completed or job)
+
+
+async def bootstrap_joplin_server(
+    store: Store,
+    joplin: JoplinGateway,
+) -> dict[str, Any] | None:
+    """Restore a configured managed Joplin server without blocking PBX startup."""
+
+    try:
+        result = await asyncio.to_thread(joplin.bootstrap_server)
+    except Exception as exc:  # noqa: BLE001 - PBX remains usable without Joplin
+        payload = {
+            "state": "failed",
+            "started": False,
+            "error_code": str(
+                getattr(exc, "code", "JOPLIN_PROFILE_BOOTSTRAP_FAILED")
+            ),
+            "message": str(exc),
+        }
+        store.append_event("joplin_server_bootstrap_failed", payload, "joplin")
+        logger.warning("Joplin managed server bootstrap failed: %s", exc)
+        return None
+
+    event_type = (
+        "joplin_server_bootstrap_started"
+        if result.get("started")
+        else "joplin_server_bootstrap_checked"
+    )
+    store.append_event(event_type, result, "joplin")
+    return result
 
 
 class DebugRequestLogMiddleware(BaseHTTPMiddleware):

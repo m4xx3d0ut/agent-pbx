@@ -12,7 +12,11 @@ import httpx
 from fastapi.testclient import TestClient
 import pytest
 
-from agent_pbx.api import create_app, run_joplin_sync_worker
+from agent_pbx.api import (
+    bootstrap_joplin_server,
+    create_app,
+    run_joplin_sync_worker,
+)
 from agent_pbx.config import ServerConfig
 from agent_pbx.mcp_tools import build_mcp_server
 from agent_pbx.joplin import (
@@ -628,6 +632,122 @@ def test_joplin_profile_coordinator_external_mode_refuses_live_server(
     assert sync_calls == []
 
 
+def test_joplin_profile_coordinator_bootstrap_skips_external_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=tmp_path / "profile",
+            profile_owner_mode="external",
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    monkeypatch.setattr(
+        coordinator,
+        "_start_server",
+        lambda _profile: pytest.fail("external profiles must not be started"),
+    )
+
+    assert coordinator.ensure_server() == {
+        "state": "skipped",
+        "started": False,
+        "reason": "external_profile_owner",
+    }
+
+
+def test_joplin_profile_coordinator_bootstrap_keeps_validated_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "profile"
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=profile,
+            profile_owner_mode="managed_cli",
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    monkeypatch.setattr(coordinator, "_validated_server_pid", lambda _profile: 321)
+    monkeypatch.setattr(coordinator, "_api_server_reachable", lambda: True)
+    monkeypatch.setattr(
+        coordinator,
+        "_start_server",
+        lambda _profile: pytest.fail("validated server must not be duplicated"),
+    )
+
+    assert coordinator.ensure_server() == {
+        "state": "ready",
+        "started": False,
+        "pid": 321,
+        "profile": str(profile.resolve()),
+    }
+
+
+def test_joplin_profile_coordinator_bootstrap_starts_missing_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "profile"
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=profile,
+            profile_owner_mode="managed_cli",
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    pids = iter([None, 654])
+    starts: list[Path] = []
+    monkeypatch.setattr(coordinator, "_validated_server_pid", lambda _profile: next(pids))
+    monkeypatch.setattr(coordinator, "_api_server_reachable", lambda: False)
+    monkeypatch.setattr(coordinator, "_start_server", starts.append)
+
+    assert coordinator.ensure_server() == {
+        "state": "started",
+        "started": True,
+        "pid": 654,
+        "profile": str(profile.resolve()),
+    }
+    assert starts == [profile.resolve()]
+
+
+def test_joplin_profile_coordinator_bootstrap_refuses_unverified_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=tmp_path / "profile",
+            profile_owner_mode="managed_cli",
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    monkeypatch.setattr(coordinator, "_validated_server_pid", lambda _profile: None)
+    monkeypatch.setattr(coordinator, "_api_server_reachable", lambda: True)
+    monkeypatch.setattr(
+        coordinator,
+        "_start_server",
+        lambda _profile: pytest.fail("unverified API must not be replaced"),
+    )
+
+    with pytest.raises(JoplinProfileInUseError) as caught:
+        coordinator.ensure_server()
+
+    assert caught.value.code == "JOPLIN_PROFILE_SERVER_UNVERIFIED"
+
+
 def test_joplin_profile_coordinator_managed_mode_stops_syncs_and_restores(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -915,6 +1035,39 @@ def test_joplin_sync_profile_lock_reports_actionable_error(tmp_path: Path) -> No
         with pytest.raises(JoplinSyncLockError) as caught:
             gateway.run_sync_job({"sync_id": "sync-1"})
     assert caught.value.code == "JOPLIN_SYNC_LOCKED"
+
+
+def test_joplin_server_bootstrap_defers_to_profile_sync_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "profile"
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=profile,
+            profile_owner_mode="managed_cli",
+        )
+    )
+    gateway = JoplinGateway(make_store(tmp_path), service)
+    monkeypatch.setattr(
+        gateway.profile_coordinator,
+        "ensure_server",
+        lambda: pytest.fail("bootstrap must wait for the active profile sync"),
+    )
+    gateway.sync_lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with gateway.sync_lock_path.open("a+", encoding="utf-8") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = gateway.bootstrap_server()
+
+    assert result == {
+        "state": "sync_in_progress",
+        "started": False,
+        "reason": "profile_sync_lock_held",
+    }
 
 
 def test_joplin_api_two_client_conflict_has_recovery_actions(
@@ -1781,6 +1934,80 @@ async def test_joplin_sync_worker_records_failure_status_and_event(
     assert failed["error"] == "sync failed"
     assert events[-1]["type"] == "joplin_sync_failed"
     assert events[-1]["payload"]["sync_id"] == job["sync_id"]
+
+
+@pytest.mark.asyncio
+async def test_joplin_server_bootstrap_records_success_event(tmp_path: Path) -> None:
+    class ReadyGateway:
+        def bootstrap_server(self) -> dict[str, object]:
+            return {"state": "started", "started": True, "pid": 4321}
+
+    store = make_store(tmp_path)
+
+    result = await bootstrap_joplin_server(
+        store,
+        ReadyGateway(),  # type: ignore[arg-type]
+    )
+
+    assert result == {"state": "started", "started": True, "pid": 4321}
+    event = store.list_events()[-1]
+    assert event["type"] == "joplin_server_bootstrap_started"
+    assert event["payload"]["pid"] == 4321
+
+
+@pytest.mark.asyncio
+async def test_joplin_server_bootstrap_failure_does_not_escape(
+    tmp_path: Path,
+) -> None:
+    class FailingGateway:
+        def bootstrap_server(self) -> dict[str, object]:
+            raise JoplinProfileInUseError(
+                "server is unverified",
+                code="JOPLIN_PROFILE_SERVER_UNVERIFIED",
+            )
+
+    store = make_store(tmp_path)
+
+    result = await bootstrap_joplin_server(
+        store,
+        FailingGateway(),  # type: ignore[arg-type]
+    )
+
+    assert result is None
+    event = store.list_events()[-1]
+    assert event["type"] == "joplin_server_bootstrap_failed"
+    assert event["payload"]["error_code"] == "JOPLIN_PROFILE_SERVER_UNVERIFIED"
+
+
+def test_api_lifespan_bootstraps_managed_joplin_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def bootstrap(_gateway: JoplinGateway) -> dict[str, object]:
+        calls.append("bootstrap")
+        return {"state": "started", "started": True, "pid": 7654}
+
+    monkeypatch.setattr(JoplinGateway, "bootstrap_server", bootstrap)
+    app = create_app(
+        ServerConfig(
+            db_path=tmp_path / "pbx.sqlite",
+            joplin_api_url="http://joplin.local",
+            joplin_token="secret",
+            joplin_bin=tmp_path / "joplin",
+            joplin_profile=tmp_path / "profile",
+            joplin_profile_owner_mode="managed_cli",
+        )
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+
+    assert calls == ["bootstrap"]
+    event = app.state.store.list_events()[-1]
+    assert event["type"] == "joplin_server_bootstrap_started"
+    assert event["payload"]["pid"] == 7654
 
 
 @pytest.mark.asyncio

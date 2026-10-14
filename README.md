@@ -1021,6 +1021,15 @@ never stops an ambiguous or foreign process. Unrelated encrypted items remain
 visible as a separate profile-health warning without failing a verified targeted
 write.
 
+At daemon startup, `managed_cli` also verifies the configured profile's Data API
+process and starts it when the recorded process is absent and the API is not
+reachable. This restores Joplin after a host restart without a competing service
+manager. An already-live server must pass the same PID, owner, executable,
+command, and profile checks; an unverified listener or process fails closed and
+does not block the rest of Agent PBX from starting. Do not run an independent
+restart loop against the same managed profile because it could relaunch the Data
+API server during Agent PBX's exclusive CLI sync window.
+
 The managed decrypt pass uses only Joplin's own cached master-key credential.
 Agent PBX does not receive or persist the E2EE password. If the credential is
 missing or Joplin's crypto worker fails, the validated API server is restored

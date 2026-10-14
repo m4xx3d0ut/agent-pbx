@@ -1327,6 +1327,75 @@ class JoplinProfileCoordinator:
         self.service = service
         self.config = service.config
 
+    def ensure_server(self) -> dict[str, Any]:
+        """Start a missing managed-profile Data API server without running sync.
+
+        Agent PBX owns the server lifecycle only in ``managed_cli`` mode.  An
+        external profile remains entirely caller-managed.  Existing managed
+        processes must pass the same PID, owner, executable, command, and
+        profile checks used by the sync coordinator before they are accepted.
+        """
+
+        mode = str(
+            getattr(self.config, "profile_owner_mode", "external") or "external"
+        ).strip().lower()
+        if mode not in JOPLIN_PROFILE_OWNER_MODES:
+            raise JoplinApiError(
+                f"unsupported Joplin profile owner mode: {mode}",
+                code="JOPLIN_PROFILE_OWNER_MODE_INVALID",
+                retryable=False,
+            )
+        if mode != "managed_cli":
+            return {
+                "state": "skipped",
+                "started": False,
+                "reason": "external_profile_owner",
+            }
+
+        profile = self.config.profile
+        if profile is None:
+            raise JoplinProfileInUseError(
+                "managed Joplin profile ownership requires an explicit profile path",
+                code="JOPLIN_PROFILE_REQUIRED",
+            )
+        profile = profile.expanduser().resolve()
+        server_pid = self._validated_server_pid(profile)
+        if server_pid is not None:
+            if not self._api_server_reachable():
+                raise JoplinProfileInUseError(
+                    "the validated Joplin Data API process is running but its API "
+                    "is unavailable; refusing to launch a duplicate server",
+                    code="JOPLIN_PROFILE_SERVER_UNAVAILABLE",
+                )
+            return {
+                "state": "ready",
+                "started": False,
+                "pid": server_pid,
+                "profile": str(profile),
+            }
+
+        if self._api_server_reachable():
+            raise JoplinProfileInUseError(
+                "Joplin Data API is reachable without a validated same-profile "
+                "server process; refusing managed bootstrap",
+                code="JOPLIN_PROFILE_SERVER_UNVERIFIED",
+            )
+
+        self._start_server(profile)
+        server_pid = self._validated_server_pid(profile)
+        if server_pid is None:
+            raise JoplinProfileInUseError(
+                "Joplin Data API became reachable but its managed profile process "
+                "could not be validated",
+                code="JOPLIN_PROFILE_RECOVERY_FAILED",
+            )
+        return {
+            "state": "started",
+            "started": True,
+            "pid": server_pid,
+            "profile": str(profile),
+        }
+
     def run_sync(
         self,
         *,
@@ -1649,6 +1718,41 @@ class JoplinGateway:
             "sync_on_write": self.sync_on_write,
             **self.store.joplin_sync_status(),
         }
+
+    def bootstrap_server(self) -> dict[str, Any]:
+        """Bootstrap a managed Data API server under the profile sync lock."""
+
+        mode = str(
+            getattr(self.config, "profile_owner_mode", "external") or "external"
+        ).strip().lower()
+        if mode != "managed_cli":
+            return self.profile_coordinator.ensure_server()
+
+        self.sync_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.sync_lock_path.open("a+", encoding="utf-8") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return {
+                    "state": "sync_in_progress",
+                    "started": False,
+                    "reason": "profile_sync_lock_held",
+                }
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "action": "server_bootstrap",
+                        "profile_key": self.profile_key,
+                        "started_at": self.clock(),
+                    },
+                    sort_keys=True,
+                )
+            )
+            lock_file.flush()
+            return self.profile_coordinator.ensure_server()
 
     def request_sync(
         self,

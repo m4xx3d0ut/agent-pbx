@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Restore the configured Joplin Data API server when Agent PBX starts in
+  `managed_cli` profile ownership mode. Bootstrap uses the existing exclusive
+  profile lock and validates PID, owner, executable, command, and profile before
+  accepting a live process, while unverified listeners fail closed without
+  preventing the rest of Agent PBX from starting.
 - Resynchronize the public web demo with its browser terminal after the
   terminal element, web font, iframe, or visual viewport settles. Textual
   startup now waits for the initial font and layout frames, preventing the
