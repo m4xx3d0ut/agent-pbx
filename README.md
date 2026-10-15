@@ -897,8 +897,10 @@ after writes, enable `AGENT_PBX_JOPLIN_SYNC_ON_WRITE=1` and provide a Joplin CLI
 path/profile. After each create, edit, delete, COPY note, or LOG append, Agent
 PBX records a durable SQLite sync job and a background worker runs
 `joplin --profile <profile> sync`. Note writes return before WebDAV sync
-finishes. Leave this off if a separate Joplin client or background process
-already syncs the profile.
+finishes. In managed-profile mode the status surface reports the queued sync
+before the worker briefly stops the Data API, preserves the locally saved note
+in the Joplin tab, and restores the API after success or failure. Leave this off
+if a separate Joplin client or background process already syncs the profile.
 If WebDAV sync uses E2EE, the dedicated profile must have its master key loaded;
 otherwise Joplin may exit successfully while reporting `Master key is not
 loaded`, and Agent PBX will surface that as a sync failure.
@@ -927,7 +929,10 @@ validation, for example `Writes: ok | Profile: E2EE locked 17`. Press
 `Validate` or use `/joplin validate profile` to run the strict whole-profile
 check. `/joplin sync` remains a compatibility alias. Historical failures remain
 in Agent PBX status/events for audit; they do not roll back a note write that
-completed successfully.
+completed successfully. After correcting a remote write failure, use
+`/joplin retry write` to requeue the selected Agent or Operator's latest failed
+targeted write without creating a duplicate note or invoking strict
+whole-profile E2EE validation.
 
 Encrypted items are shown as `🔒 decryption pending`, never as empty notes.
 Agent PBX does not return encrypted payloads through its API and blocks edit,

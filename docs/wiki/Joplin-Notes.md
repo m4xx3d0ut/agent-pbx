@@ -67,6 +67,14 @@ reports write health separately from profile E2EE posture. `Validate` or
 `/joplin validate profile` runs the strict profile-wide check; `/joplin sync`
 remains a compatibility alias and still reports unresolved E2EE items.
 
+In managed-profile mode, queued and running sync jobs are explicit transition
+states. Agent PBX keeps Joplin configured, retains the note list and current
+reader content, and temporarily locks mutations while the dedicated Data API is
+stopped for CLI synchronization. A copied note is visible as soon as its local
+write succeeds. If its remote sync later fails, correct the remote service and
+use `/joplin retry write` to retry the selected Agent or Operator's latest
+failed targeted write without creating another note.
+
 ## Credential boundary
 
 Configure WebDAV and E2EE inside the dedicated Joplin profile. Agent PBX does

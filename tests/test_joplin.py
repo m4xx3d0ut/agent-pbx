@@ -961,6 +961,7 @@ def test_joplin_gateway_records_two_client_conflict_and_rebases_merge(
 
 def test_joplin_sync_jobs_coalesce_only_redundant_work(tmp_path: Path) -> None:
     store = make_store(tmp_path)
+    store.register_agent(AgentRegisterRequest(agent_id="agent-2", project="demo"))
     first = store.enqueue_joplin_sync(
         reason="note_update",
         agent_id="agent-1",
@@ -977,11 +978,18 @@ def test_joplin_sync_jobs_coalesce_only_redundant_work(tmp_path: Path) -> None:
         reason="manual",
         profile_key="profile-a",
     )
+    other_agent = store.enqueue_joplin_sync(
+        reason="note_update",
+        agent_id="agent-2",
+        note_id="note-3",
+        profile_key="profile-a",
+    )
 
     assert second["sync_id"] == first["sync_id"]
     assert second["coalesced"] is True
     assert set(second["note_ids"]) == {"note-1", "note-2"}
     assert manual["sync_id"] != first["sync_id"]
+    assert other_agent["sync_id"] != first["sync_id"]
 
 
 def test_joplin_sync_status_separates_writes_from_profile_validation(
@@ -1599,6 +1607,107 @@ def test_joplin_gateway_sync_on_write_enqueues_durable_job(tmp_path: Path) -> No
     assert reopened.joplin_sync_status()["pending"] == 1
 
 
+def test_joplin_gateway_managed_sync_status_does_not_probe_data_api(
+    tmp_path: Path,
+) -> None:
+    def reject_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected Joplin Data API request: {request.url}")
+
+    store = make_store(tmp_path)
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://joplin.local",
+            token="secret",
+            profile_owner_mode="managed_cli",
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(reject_request)),
+    )
+    gateway = JoplinGateway(store, service, sync_on_write=True)
+    queued = store.enqueue_joplin_sync(
+        reason="note_copy_create",
+        agent_id="agent-1",
+        note_id="note-1",
+        profile_key=gateway.profile_key,
+    )
+
+    pending = gateway.status()
+    claimed = store.claim_next_joplin_sync_job()
+    running = gateway.status()
+
+    assert pending["configured"] is True
+    assert pending["available"] is False
+    assert pending["error"]["code"] == "JOPLIN_SYNC_QUEUED"
+    assert pending["sync"]["pending"] == 1
+    assert claimed is not None
+    assert claimed["sync_id"] == queued["sync_id"]
+    assert running["configured"] is True
+    assert running["available"] is False
+    assert running["error"]["code"] == "JOPLIN_DATA_API_RESTARTING"
+    assert running["sync"]["running"] == 1
+
+
+def test_joplin_gateway_retries_latest_failed_targeted_write(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    gateway = JoplinGateway(
+        store,
+        JoplinService(JoplinConfig(api_url="http://joplin.local", token="secret")),
+        sync_on_write=True,
+    )
+    original = store.enqueue_joplin_sync(
+        reason="note_copy_create",
+        agent_id="agent-1",
+        note_id="note-1",
+        profile_key=gateway.profile_key,
+    )
+    claimed = store.claim_next_joplin_sync_job()
+    assert claimed is not None
+    store.complete_joplin_sync_job(
+        str(claimed["sync_id"]),
+        success=False,
+        error="remote write failed",
+        error_code="JOPLIN_SYNC_CLI_ERROR",
+    )
+
+    retried = gateway.retry_latest_failed_write("agent-1")
+
+    assert retried["status"] == "queued"
+    assert retried["reason"] == "note_copy_create"
+    assert retried["agent_id"] == "agent-1"
+    assert retried["note_ids"] == ["note-1"]
+    assert retried["sync_id"] != original["sync_id"]
+    event = store.list_events()[-1]
+    assert event["type"] == "joplin_sync_retried"
+    assert event["payload"]["source_sync_id"] == original["sync_id"]
+
+
+def test_joplin_gateway_retry_is_scoped_to_selected_agent(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.register_agent(AgentRegisterRequest(agent_id="agent-2", project="demo"))
+    gateway = JoplinGateway(
+        store,
+        JoplinService(JoplinConfig(api_url="http://joplin.local", token="secret")),
+        sync_on_write=True,
+    )
+    store.enqueue_joplin_sync(
+        reason="note_copy_create",
+        agent_id="agent-2",
+        note_id="note-2",
+        profile_key=gateway.profile_key,
+    )
+    claimed = store.claim_next_joplin_sync_job()
+    assert claimed is not None
+    store.complete_joplin_sync_job(
+        str(claimed["sync_id"]),
+        success=False,
+        error="remote write failed",
+    )
+
+    with pytest.raises(JoplinApiError) as caught:
+        gateway.retry_latest_failed_write("agent-1")
+
+    assert caught.value.code == "JOPLIN_SYNC_RETRY_NOT_FOUND"
+
+
 def test_joplin_service_lists_notes_with_folder_scoped_endpoint() -> None:
     fake = FakeJoplinApi()
     service = make_service(fake)
@@ -1895,6 +2004,46 @@ def test_joplin_api_sync_status_manual_and_sync_on_write(
     assert status.json()["write_sync"]["current_status"] == "queued"
     assert status.json()["profile_validation"]["current_status"] == "queued"
     assert {"note_note_create", "manual"}.issubset(reasons)
+
+
+def test_joplin_api_retries_latest_failed_write_for_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeJoplinService()
+    monkeypatch.setattr("agent_pbx.api.JoplinService", lambda _config: fake)
+    app = create_app(
+        ServerConfig(
+            db_path=tmp_path / "pbx.sqlite",
+            joplin_api_url="http://joplin.local",
+            joplin_token="secret",
+            joplin_sync_on_write=True,
+        )
+    )
+    app.state.store.register_agent(
+        AgentRegisterRequest(agent_id="agent-1", project="demo")
+    )
+    failed = app.state.store.enqueue_joplin_sync(
+        reason="note_copy_create",
+        agent_id="agent-1",
+        note_id="note-1",
+        profile_key=app.state.joplin.profile_key,
+    )
+    claimed = app.state.store.claim_next_joplin_sync_job()
+    assert claimed is not None
+    app.state.store.complete_joplin_sync_job(
+        str(claimed["sync_id"]),
+        success=False,
+        error="remote write failed",
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/v1/agents/agent-1/joplin/sync/retry")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    assert response.json()["note_ids"] == ["note-1"]
+    assert response.json()["sync_id"] != failed["sync_id"]
 
 
 @pytest.mark.asyncio

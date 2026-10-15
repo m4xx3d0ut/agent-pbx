@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Keep managed Joplin sync transitions responsive and visible. Status now reads
+  durable queued/running state before probing the deliberately stopped Data API,
+  the TUI preserves known configuration and cached notes through transient
+  restart failures, locally completed `jc` copies render immediately, and write
+  jobs from different Agents no longer coalesce under one owner.
 - Recognize a live Codex descendant beneath a managed tmux shell launcher when
   routing Operator campaign assignments and follow-ups. Delivery remains bound
   to the exact recorded pane PID, process start evidence, session, window, and
@@ -66,6 +71,9 @@
 
 ### Added
 
+- Add `/joplin retry write` and an Agent-scoped API action to requeue the
+  selected Agent or Operator's latest failed targeted write without creating a
+  duplicate note or invoking strict whole-profile E2EE validation.
 - Add an Agent PBX styled first-frame loading surface to the public browser
   demo. It reports staged private-session startup progress, yields when Textual
   paints the first terminal frame, honors reduced-motion preferences, and

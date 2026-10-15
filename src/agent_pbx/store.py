@@ -4490,10 +4490,11 @@ class Store:
                 SELECT sync_id, note_ids_json, reasons_json, generation
                 FROM joplin_sync_jobs
                 WHERE status = 'queued' AND profile_key = ? AND reason = ?
+                  AND COALESCE(agent_id, '') = COALESCE(?, '')
                 ORDER BY created_at ASC, sync_id ASC
                 LIMIT 1
                 """,
-                (profile_key, reason),
+                (profile_key, reason, agent_id),
             ).fetchone()
             if existing is not None:
                 note_ids = self._json_list(existing["note_ids_json"])
@@ -4647,6 +4648,61 @@ class Store:
                 (safe_limit,),
             ).fetchall()
         return [self._joplin_sync_job_from_row(row) for row in rows]
+
+    def latest_failed_joplin_write(self, agent_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT sync_id, status, reason, agent_id, note_id, error,
+                       created_at, started_at, finished_at, attempts,
+                       profile_key, note_ids_json, reasons_json, generation,
+                       progress_json, error_code
+                FROM joplin_sync_jobs
+                WHERE status = 'failed' AND agent_id = ?
+                  AND (
+                    COALESCE(note_id, '') <> ''
+                    OR COALESCE(note_ids_json, '[]') NOT IN ('', '[]', 'null')
+                  )
+                ORDER BY COALESCE(finished_at, started_at, created_at) DESC,
+                         sync_id DESC
+                LIMIT 1
+                """,
+                (agent_id,),
+            ).fetchone()
+        return self._joplin_sync_job_from_row(row) if row else None
+
+    def active_joplin_write_for_targets(
+        self,
+        *,
+        agent_id: str,
+        reason: str,
+        note_ids: list[str],
+    ) -> dict[str, Any] | None:
+        expected = {str(note_id).strip() for note_id in note_ids if str(note_id).strip()}
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT sync_id, status, reason, agent_id, note_id, error,
+                       created_at, started_at, finished_at, attempts,
+                       profile_key, note_ids_json, reasons_json, generation,
+                       progress_json, error_code
+                FROM joplin_sync_jobs
+                WHERE status IN ('queued', 'running')
+                  AND agent_id = ? AND reason = ?
+                ORDER BY created_at ASC, sync_id ASC
+                """,
+                (agent_id, reason),
+            ).fetchall()
+        for row in rows:
+            job = self._joplin_sync_job_from_row(row)
+            targets = {
+                str(note_id).strip()
+                for note_id in job.get("note_ids", [])
+                if str(note_id).strip()
+            }
+            if expected <= targets:
+                return job
+        return None
 
     def joplin_sync_status(self) -> dict[str, Any]:
         def lane_status(

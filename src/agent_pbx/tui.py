@@ -749,6 +749,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/joplin note copy source",
     "/joplin note paste",
     "/joplin promote conflict",
+    "/joplin retry write",
     "/joplin sync",
     "/joplin validate profile",
     "/plan",
@@ -854,6 +855,7 @@ JOPLIN_SLASH_ACTIONS = {
     "/joplin note copy source": "note-copy-source",
     "/joplin note paste": "note-paste",
     "/joplin promote conflict": "promote-conflict",
+    "/joplin retry write": "retry-write",
     "/joplin sync": "sync",
     "/joplin validate profile": "sync",
 }
@@ -8407,6 +8409,11 @@ class AgentPBXTUI(App[None]):
                 self.palette_joplin_promote_conflict,
             )
             yield SystemCommand(
+                "/joplin retry write",
+                "Retry the selected Agent's latest failed targeted Joplin write",
+                self.palette_joplin_retry_write,
+            )
+            yield SystemCommand(
                 "/joplin sync",
                 "Validate the complete Joplin profile, including E2EE",
                 self.palette_joplin_sync,
@@ -10101,6 +10108,16 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_joplin_retry_write(self) -> None:
+        agent_id = self.palette_joplin_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.joplin_action_for_agent(agent_id, "retry-write"),
+            name="palette-joplin-retry-write",
+            exclusive=True,
+        )
+
     def palette_joplin_sync(self) -> None:
         agent_id = self.palette_joplin_agent_id()
         if agent_id is None:
@@ -10763,6 +10780,8 @@ class AgentPBXTUI(App[None]):
             await self.paste_joplin_note_from_clipboard(agent_id)
         elif action == "promote-conflict":
             await self.promote_joplin_native_conflict(agent_id)
+        elif action == "retry-write":
+            await self.retry_failed_joplin_write(agent_id)
         elif action == "sync":
             await self.sync_joplin_now(agent_id)
         else:
@@ -28315,13 +28334,17 @@ class AgentPBXTUI(App[None]):
             if not isinstance(status, dict):
                 raise ValueError("Joplin status response was not an object")
         except Exception as exc:
+            previous = self.joplin_status if isinstance(self.joplin_status, dict) else {}
             status = {
-                "configured": False,
+                **previous,
+                "configured": bool(previous.get("configured"))
+                or self.joplin_configured,
                 "available": False,
-                "notebook": "Agent PBX",
+                "notebook": previous.get("notebook") or "Agent PBX",
                 "error": {
                     "code": "JOPLIN_STATUS_UNAVAILABLE",
                     "message": str(exc),
+                    "retryable": True,
                 },
             }
         self.joplin_status = status
@@ -28351,10 +28374,15 @@ class AgentPBXTUI(App[None]):
         sync = status.get("sync") if isinstance(status.get("sync"), dict) else None
         sync_running = self.joplin_sync_in_progress(status)
         if not status.get("available") and sync_running:
+            transition = (
+                "Data API restarting"
+                if int((sync or {}).get("running") or 0)
+                else "Data API restart queued"
+            )
             return (
                 f"Joplin: {status.get('notebook') or 'Agent PBX'}"
                 f" | {self.format_joplin_sync_summary(sync)}"
-                " | Data API restarting"
+                f" | {transition}"
             )
         if status.get("available"):
             sync_text = f" | {self.format_joplin_sync_summary(sync)}" if sync else ""
@@ -28376,7 +28404,10 @@ class AgentPBXTUI(App[None]):
     @staticmethod
     def joplin_sync_in_progress(status: dict[str, Any]) -> bool:
         sync = status.get("sync") if isinstance(status.get("sync"), dict) else {}
-        return bool(int(sync.get("running") or 0))
+        return bool(
+            int(sync.get("running") or 0)
+            or int(sync.get("pending") or 0)
+        )
 
     def schedule_joplin_sync_refresh(self, agent_id: str) -> None:
         if self.joplin_sync_refresh_timer is not None:
@@ -31283,12 +31314,33 @@ class AgentPBXTUI(App[None]):
         if not isinstance(note, dict):
             self.notify("Joplin copy returned an invalid note record.", severity="error")
             return None
+        note_id = str(note.get("id") or "").strip()
+        cache_agent_id = self.joplin_note_cache_agent_id(agent_id)
+        if note_id:
+            self.joplin_notes_by_agent.setdefault(cache_agent_id, {})[note_id] = note
+            if cache_agent_id != agent_id:
+                self.joplin_notes_by_agent.setdefault(agent_id, {})[note_id] = note
         self.set_selected_joplin_note_for_agent(
             agent_id,
-            str(note.get("id") or "").strip() or None,
+            note_id or None,
         )
-        self.notify(success_message)
-        await self.load_joplin_notes(agent_id)
+        if self.query_one_or_none("#joplin-notes", DataTable) is not None:
+            self.render_joplin_notes(
+                agent_id,
+                list(self.joplin_notes_by_agent.get(cache_agent_id, {}).values()),
+            )
+            await self.render_joplin_mode(agent_id, note=note)
+        await self.refresh_joplin_status()
+        if self.joplin_sync_in_progress(self.joplin_status):
+            self.set_joplin_mutation_controls_locked(True)
+            if (
+                self.selected_agent_id == agent_id
+                and self.active_agent_tab == "joplin-tab"
+            ):
+                self.schedule_joplin_sync_refresh(agent_id)
+            self.notify(f"{success_message.rstrip('.')} Saved locally; sync queued.")
+        else:
+            self.notify(success_message)
         return note
 
     async def copy_latest_report_to_joplin(self, agent_id: str) -> None:
@@ -31370,6 +31422,30 @@ class AgentPBXTUI(App[None]):
             return
         sync_id = str(job.get("sync_id") or "")
         self.notify(f"Joplin profile validation queued {sync_id[:8]}.")
+        await self.refresh_joplin_status()
+
+    async def retry_failed_joplin_write(self, agent_id: str) -> None:
+        if not await self.ensure_joplin_available():
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v1/agents/{quote(agent_id, safe='')}/joplin/sync/retry",
+                headers=auth_headers(self.token),
+                timeout=20,
+            )
+            response.raise_for_status()
+            job = response.json()
+        except Exception as exc:
+            self.notify(f"Joplin write retry failed to queue: {exc}", severity="error")
+            return
+        sync_id = str(job.get("sync_id") or "")
+        note_ids = [
+            str(note_id)
+            for note_id in job.get("note_ids", [])
+            if str(note_id).strip()
+        ]
+        target = f" for {len(note_ids)} note(s)" if note_ids else ""
+        self.notify(f"Joplin write retry queued {sync_id[:8]}{target}.")
         await self.refresh_joplin_status()
 
     async def ensure_joplin_available(self) -> bool:
@@ -33688,6 +33764,19 @@ class AgentPBXTUI(App[None]):
             and selected_agent_id
             and self.active_agent_tab == "joplin-tab"
         ):
+            payload = event.get("payload")
+            if (
+                event_type == "joplin_sync_failed"
+                and isinstance(payload, dict)
+                and payload.get("note_id")
+                and str(payload.get("agent_id") or "") == selected_agent_id
+            ):
+                code = str(payload.get("error_code") or "JOPLIN_SYNC_ERROR")
+                self.notify(
+                    f"Joplin note remains saved locally; remote sync failed ({code}). "
+                    "Use /joplin retry write after correcting the remote service.",
+                    severity="error",
+                )
             self.cancel_joplin_sync_refresh()
             self.run_worker(
                 self.load_joplin_notes(selected_agent_id),

@@ -310,7 +310,14 @@ class JoplinService:
         self._encryption_lock = threading.Lock()
         self._encryption_cache: tuple[float, dict[str, Any]] | None = None
 
-    def status(self) -> dict[str, Any]:
+    def configuration_status(self) -> dict[str, Any]:
+        """Return status that never contacts the Joplin Data API."""
+
+        cached_encryption = (
+            dict(self._encryption_cache[1])
+            if self._encryption_cache is not None
+            else None
+        )
         base = {
             "configured": self.config.configured,
             "available": False,
@@ -325,6 +332,8 @@ class JoplinService:
             "webdav_password_configured": self.config.webdav_password_configured,
             "checked_at": self.clock(),
             "root_notebook_id": self._root_notebook_id,
+            "encryption": cached_encryption,
+            "encryption_error": None,
             "error": None,
         }
         if not self.config.configured:
@@ -342,6 +351,12 @@ class JoplinService:
                     ),
                 },
             }
+        return base
+
+    def status(self) -> dict[str, Any]:
+        base = self.configuration_status()
+        if not self.config.configured:
+            return base
         try:
             root_id = self.find_folder_id(self.config.notebook, parent_id=None)
         except Exception as exc:  # noqa: BLE001 - status should explain any failure
@@ -1707,9 +1722,31 @@ class JoplinGateway:
         return cls(store, service, sync_on_write=config.sync_on_write, clock=clock)
 
     def status(self) -> dict[str, Any]:
-        payload = dict(self.service.status())
+        sync = self.sync_status()
+        mode = str(
+            getattr(self.config, "profile_owner_mode", "external") or "external"
+        ).strip().lower()
+        running = int(sync.get("running") or 0)
+        pending = int(sync.get("pending") or 0)
+        if mode == "managed_cli" and (running or pending):
+            payload = dict(self.service.configuration_status())
+            payload["error"] = {
+                "code": (
+                    "JOPLIN_DATA_API_RESTARTING"
+                    if running
+                    else "JOPLIN_SYNC_QUEUED"
+                ),
+                "message": (
+                    "The managed Joplin Data API is restarting for synchronization."
+                    if running
+                    else "A managed Joplin synchronization is queued."
+                ),
+                "retryable": True,
+            }
+        else:
+            payload = dict(self.service.status())
         payload["sync_on_write"] = self.sync_on_write
-        payload["sync"] = self.sync_status()
+        payload["sync"] = sync
         return payload
 
     def sync_status(self) -> dict[str, Any]:
@@ -1780,6 +1817,65 @@ class JoplinGateway:
             agent_id or note_id or job["sync_id"],
         )
         return job
+
+    def retry_latest_failed_write(self, agent_id: str) -> dict[str, Any]:
+        if not getattr(self.config, "configured", False):
+            raise JoplinApiError(
+                "Joplin is not configured",
+                status_code=404,
+                code="JOPLIN_NOT_CONFIGURED",
+                retryable=True,
+            )
+        failed = self.store.latest_failed_joplin_write(agent_id)
+        if failed is None:
+            raise JoplinApiError(
+                f"no failed targeted Joplin write exists for {agent_id}",
+                status_code=404,
+                code="JOPLIN_SYNC_RETRY_NOT_FOUND",
+                retryable=False,
+            )
+        note_ids = [
+            str(note_id).strip()
+            for note_id in failed.get("note_ids", [])
+            if str(note_id).strip()
+        ]
+        fallback_note_id = str(failed.get("note_id") or "").strip()
+        if fallback_note_id and fallback_note_id not in note_ids:
+            note_ids.append(fallback_note_id)
+        reason = str(failed.get("reason") or "note_update")
+        active = self.store.active_joplin_write_for_targets(
+            agent_id=agent_id,
+            reason=reason,
+            note_ids=note_ids,
+        )
+        if active is not None:
+            return active
+        retried: dict[str, Any] | None = None
+        for note_id in note_ids:
+            retried = self.request_sync(
+                reason=reason,
+                agent_id=agent_id,
+                note_id=note_id,
+            )
+        if retried is None:
+            raise JoplinApiError(
+                "failed Joplin write did not contain a retryable note target",
+                status_code=409,
+                code="JOPLIN_SYNC_RETRY_INVALID",
+                retryable=False,
+            )
+        self.store.append_event(
+            "joplin_sync_retried",
+            {
+                "source_sync_id": str(failed.get("sync_id") or ""),
+                "sync_id": str(retried.get("sync_id") or ""),
+                "reason": reason,
+                "agent_id": agent_id,
+                "note_ids": note_ids,
+            },
+            agent_id,
+        )
+        return retried
 
     def run_sync_job(self, job: dict[str, Any]) -> None:
         self.sync_lock_path.parent.mkdir(parents=True, exist_ok=True)

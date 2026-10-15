@@ -8608,6 +8608,165 @@ async def test_tui_joplin_managed_sync_preserves_cached_view_during_api_restart(
         assert app.query_one("#joplin-edit", Button).disabled is True
 
 
+def test_tui_joplin_pending_sync_is_a_managed_transition() -> None:
+    status = {
+        "configured": True,
+        "available": False,
+        "sync": {"enabled": True, "pending": 1, "running": 0},
+    }
+
+    assert AgentPBXTUI.joplin_sync_in_progress(status) is True
+
+
+async def test_tui_joplin_status_timeout_preserves_known_configuration() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> object:
+            if path == "/v1/joplin/status":
+                raise TimeoutError("status timed out")
+            raise AssertionError(f"unexpected GET {path}")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    async with app.run_test():
+        app.joplin_status = {
+            "configured": True,
+            "available": True,
+            "notebook": "Agent PBX",
+            "sync": {"enabled": True, "pending": 0, "running": 0},
+        }
+        app.joplin_configured = True
+
+        await app.refresh_joplin_status()
+
+        assert app.joplin_configured is True
+        assert app.joplin_available is False
+        assert app.joplin_status["error"]["code"] == "JOPLIN_STATUS_UNAVAILABLE"
+        assert app.joplin_status["sync"]["enabled"] is True
+
+
+async def test_tui_joplin_copy_caches_local_note_without_list_reload() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+    calls: list[tuple[str, str]] = []
+    notices: list[str] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            calls.append(("GET", path))
+            if path == "/v1/joplin/status":
+                return Response(
+                    {
+                        "configured": True,
+                        "available": False,
+                        "notebook": "Agent PBX",
+                        "sync": {"enabled": True, "pending": 1, "running": 0},
+                        "error": {
+                            "code": "JOPLIN_SYNC_QUEUED",
+                            "message": "sync queued",
+                        },
+                    }
+                )
+            raise AssertionError(f"unexpected GET {path}")
+
+        async def post(self, path: str, **_kwargs: object) -> Response:
+            calls.append(("POST", path))
+            assert path == "/v1/agents/agent-1/joplin/copy"
+            return Response(
+                {
+                    "id": "note-1",
+                    "parent_id": "folder-1",
+                    "title": "Copied response",
+                    "body": "Complete copied body",
+                    "created_time": 1,
+                    "updated_time": 1,
+                    "user_updated_time": 1,
+                    "revision": "rev-1",
+                    "title_hash": "title-1",
+                    "body_hash": "body-1",
+                }
+            )
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.notify = lambda message, **_: notices.append(str(message))  # type: ignore[method-assign]
+
+    async def available() -> bool:
+        return True
+
+    app.ensure_joplin_available = available  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.active_agent_tab = "joplin-tab"
+
+        note = await app.create_manual_joplin_copy(
+            "agent-1",
+            title="Copied response",
+            body="Complete copied body",
+            success_message="Copied response to Joplin.",
+        )
+
+        assert note is not None
+        assert app.current_joplin_note("agent-1", "note-1")["body"] == (
+            "Complete copied body"
+        )
+        assert app.selected_joplin_note_for_agent("agent-1") == "note-1"
+        assert ("POST", "/v1/agents/agent-1/joplin/copy") in calls
+        assert all("/joplin/notes" not in path for method, path in calls if method == "GET")
+        assert any("Saved locally; sync queued" in notice for notice in notices)
+
+
+async def test_tui_joplin_retry_write_targets_selected_agent() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+    posts: list[str] = []
+    notices: list[str] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "sync_id": "retry-sync-1",
+                "status": "queued",
+                "reason": "note_copy_create",
+                "agent_id": "agent-1",
+                "note_id": "note-1",
+                "note_ids": ["note-1"],
+            }
+
+    class Client:
+        async def post(self, path: str, **_kwargs: object) -> Response:
+            posts.append(path)
+            return Response()
+
+    async def available() -> bool:
+        return True
+
+    async def refresh() -> None:
+        return None
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.ensure_joplin_available = available  # type: ignore[method-assign]
+    app.refresh_joplin_status = refresh  # type: ignore[method-assign]
+    app.notify = lambda message, **_: notices.append(str(message))  # type: ignore[method-assign]
+
+    await app.retry_failed_joplin_write("agent-1")
+
+    assert posts == ["/v1/agents/agent-1/joplin/sync/retry"]
+    assert any("retry-sync-1"[:8] in notice for notice in notices)
+
+
 def test_tui_joplin_summary_cache_keeps_body_only_for_same_note_version() -> None:
     cached = {
         "id": "note-1",
@@ -12240,7 +12399,7 @@ async def test_tui_joplin_copy_tmux_response_uses_codex_copy_clipboard(
 
     assert sent == [("%copy", "/copy")]
     assert captures == ["agent-1"]
-    assert loaded == ["agent-1"]
+    assert loaded == []
     assert posts[0]["path"] == "/v1/agents/agent-1/joplin/copy"
     payload = posts[0]["json"]
     assert isinstance(payload, dict)
@@ -12413,7 +12572,7 @@ async def test_tui_joplin_copy_duplicate_guard_and_force_create_intentional_note
     assert posts[0]["path"] == "/v1/agents/agent-1/joplin/copy"
     assert app.selected_joplin_note_for_agent("agent-1") == "forced-note"
     assert app.joplin_copy_fingerprints_by_agent["agent-1"]["note_id"] == "forced-note"
-    assert loads == ["agent-1", "agent-1", "agent-1"]
+    assert loads == ["agent-1", "agent-1"]
 
 
 async def test_tui_joplin_copy_title_prefers_prompt_associated_with_transcript(

@@ -2575,6 +2575,20 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         joplin = require_joplin(request)
         return await run_joplin_call(joplin.request_sync, reason="manual")
 
+    @app.post(
+        "/v1/agents/{agent_id}/joplin/sync/retry",
+        response_model=JoplinSyncJobResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def retry_agent_joplin_write_sync(
+        agent_id: str,
+        request: Request,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        require_agent(store, agent_id)
+        joplin = request.app.state.joplin
+        return await run_joplin_call(joplin.retry_latest_failed_write, agent_id)
+
     @app.put(
         "/v1/joplin/edits/{edit_id}/draft",
         response_model=dict[str, Any],
