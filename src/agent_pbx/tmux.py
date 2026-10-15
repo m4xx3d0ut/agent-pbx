@@ -636,6 +636,43 @@ def pane_in_copy_mode(
     return result.stdout.strip() == "1"
 
 
+def exit_pane_mode(
+    target: str,
+    *,
+    socket_path: str | None = None,
+    tmux_bin: str = "tmux",
+) -> bool:
+    """Return an exact runtime pane to application input before automation.
+
+    Tmux routes ``send-keys`` to an active pane mode before the child process.
+    A PBX prompt can therefore be pasted into Codex while its submit key is
+    consumed by copy mode. Automated prompt delivery must leave that mode
+    before it pastes or submits text.
+    """
+
+    if not pane_in_copy_mode(
+        target,
+        socket_path=socket_path,
+        tmux_bin=tmux_bin,
+    ):
+        return False
+    prefix = _runtime_tmux_command_prefix(
+        tmux_bin=tmux_bin,
+        socket_path=socket_path,
+    )
+    result = subprocess.run(
+        [*prefix, "send-keys", "-X", "-t", target, "cancel"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (
+            result.stderr or result.stdout or "tmux pane mode exit failed"
+        ).strip()
+        raise RuntimeError(message)
+    return True
+
+
 def enter_pane_copy_mode(
     target: str,
     *,
@@ -1044,7 +1081,12 @@ def send_text(
     bracketed_paste: bool | None = None,
     submit: bool = True,
     socket_path: str | None = None,
-) -> None:
+) -> bool:
+    mode_cleared = exit_pane_mode(
+        target,
+        socket_path=socket_path,
+        tmux_bin=tmux_bin,
+    )
     buffer_name = f"agent-pbx-{os.getpid()}"
     prefix = _runtime_tmux_command_prefix(tmux_bin=tmux_bin, socket_path=socket_path)
     subprocess.run(
@@ -1073,6 +1115,7 @@ def send_text(
             check=True,
             text=True,
         )
+    return mode_cleared
 
 
 def send_literal_keys(

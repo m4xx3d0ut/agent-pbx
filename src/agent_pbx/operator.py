@@ -72,6 +72,7 @@ class _TmuxDeliveryTarget:
     runtime_mapped: bool = False
     codex_like_target: bool = False
     codex_detection: str | None = None
+    pane_mode_cleared: bool = False
 
 
 REVIEW_FORK_PURPOSE = "review"
@@ -3361,6 +3362,7 @@ class OperatorService:
         payload["tmux_target_window"] = pane.window_name
         payload["tmux_target_codex_like"] = delivery_target.codex_like_target
         payload["tmux_target_codex_detection"] = delivery_target.codex_detection
+        payload["tmux_target_mode_cleared"] = delivery_target.pane_mode_cleared
         return self.store.create_command(
             CommandCreateRequest(
                 agent_id=str(fork["fork_agent_id"]),
@@ -3417,6 +3419,9 @@ class OperatorService:
         )
         command_payload["tmux_target_codex_detection"] = (
             delivery_target.codex_detection
+        )
+        command_payload["tmux_target_mode_cleared"] = (
+            delivery_target.pane_mode_cleared
         )
         return self.store.create_command(
             CommandCreateRequest(
@@ -3479,6 +3484,7 @@ class OperatorService:
         payload["tmux_target_window"] = pane.window_name
         payload["tmux_target_codex_like"] = delivery_target.codex_like_target
         payload["tmux_target_codex_detection"] = delivery_target.codex_detection
+        payload["tmux_target_mode_cleared"] = delivery_target.pane_mode_cleared
         return self.store.create_command(
             CommandCreateRequest(
                 agent_id=source_operator_agent_id,
@@ -3557,6 +3563,9 @@ class OperatorService:
             )
             payload["tmux_target_codex_detection"] = (
                 delivery_target.codex_detection
+            )
+            payload["tmux_target_mode_cleared"] = (
+                delivery_target.pane_mode_cleared
             )
             command = self.store.create_command(
                 CommandCreateRequest(
@@ -4442,7 +4451,7 @@ class OperatorService:
     ) -> _TmuxDeliveryTarget:
         target = self._resolve_tmux_target(agent)
         try:
-            tmux_support.send_text(
+            mode_cleared = tmux_support.send_text(
                 target.pane.pane_id,
                 message,
                 tmux_bin=target.tmux_bin,
@@ -4453,7 +4462,15 @@ class OperatorService:
             raise ValueError(
                 f"{source} delivery to {target.pane.pane_id} failed: {exc}"
             ) from exc
-        return target
+        return _TmuxDeliveryTarget(
+            pane=target.pane,
+            tmux_bin=target.tmux_bin,
+            socket_path=target.socket_path,
+            runtime_mapped=target.runtime_mapped,
+            codex_like_target=target.codex_like_target,
+            codex_detection=target.codex_detection,
+            pane_mode_cleared=bool(mode_cleared),
+        )
 
     def _preflight_tmux_target(self, agent: dict[str, Any]) -> dict[str, Any]:
         agent_id = str(agent.get("agent_id") or "").strip()

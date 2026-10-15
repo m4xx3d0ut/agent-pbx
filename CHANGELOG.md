@@ -9,6 +9,8 @@
   to the exact recorded pane PID, process start evidence, session, window, and
   workspace, while command audit metadata records whether Codex was identified
   from tmux's foreground command or the pane process tree.
+- Exit an active tmux copy mode before audited prompt delivery so the submit
+  key reaches Codex instead of being consumed by the pane mode.
 - Restore the configured Joplin Data API server when Agent PBX starts in
   `managed_cli` profile ownership mode. Bootstrap uses the existing exclusive
   profile lock and validates PID, owner, executable, command, and profile before

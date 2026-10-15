@@ -785,6 +785,58 @@ def test_tmux_copy_mode_scroll_down_is_noop_outside_history(monkeypatch) -> None
     assert "display-message" in calls[0]
 
 
+def test_tmux_exit_pane_mode_cancels_exact_runtime_mode(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        stdout = "1\n" if "display-message" in args else ""
+        return subprocess.CompletedProcess(args, 0, stdout, "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.exit_pane_mode(
+        "%42",
+        socket_path="/tmp/pbx.sock",
+    ) is True
+    assert calls == [
+        [
+            "tmux",
+            "-S",
+            "/tmp/pbx.sock",
+            "display-message",
+            "-p",
+            "-t",
+            "%42",
+            "#{pane_in_mode}",
+        ],
+        [
+            "tmux",
+            "-S",
+            "/tmp/pbx.sock",
+            "send-keys",
+            "-X",
+            "-t",
+            "%42",
+            "cancel",
+        ],
+    ]
+
+
+def test_tmux_exit_pane_mode_is_noop_when_application_owns_input(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "0\n", "")
+
+    monkeypatch.setattr(tmux.subprocess, "run", fake_run)
+
+    assert tmux.exit_pane_mode("%42") is False
+    assert len(calls) == 1
+    assert "display-message" in calls[0]
+
+
 def test_tmux_copy_mode_scroll_rejects_relative_runtime_socket() -> None:
     with pytest.raises(ValueError, match="must be absolute"):
         tmux.scroll_pane_copy_mode("%42", -1, socket_path="relative.sock")
@@ -881,8 +933,9 @@ def test_tmux_send_text_pastes_exact_text_and_enters(monkeypatch) -> None:
 
     monkeypatch.setattr(tmux.subprocess, "run", fake_run)
     monkeypatch.setattr(tmux.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(tmux, "exit_pane_mode", lambda *_args, **_kwargs: False)
 
-    tmux.send_text("%1", "/status")
+    assert tmux.send_text("%1", "/status") is False
 
     assert loaded_text == ["/status"]
     assert calls[0][0:3] == ["tmux", "load-buffer", "-b"]
@@ -902,9 +955,10 @@ def test_tmux_send_text_can_disable_bracketed_paste(monkeypatch) -> None:
 
     monkeypatch.setattr(tmux.subprocess, "run", fake_run)
     monkeypatch.setattr(tmux.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(tmux, "exit_pane_mode", lambda *_args, **_kwargs: True)
     monkeypatch.setenv("AGENT_PBX_TUI_TMUX_BRACKETED_PASTE", "0")
 
-    tmux.send_text("%1", "hello")
+    assert tmux.send_text("%1", "hello") is True
 
     assert calls[1][0:4] == ["tmux", "paste-buffer", "-d", "-b"]
 

@@ -854,11 +854,20 @@ def test_operator_followup_accepts_codex_beneath_managed_shell_wrapper(
         "agent_pbx.operator.tmux_support.process_tree_has_codex",
         lambda _pid: True,
     )
+    def fake_send_text(
+        target: str,
+        text: str,
+        *,
+        tmux_bin: str,
+        socket_path: str | None,
+        **_kwargs: object,
+    ) -> bool:
+        sent.append((target, text, tmux_bin, socket_path))
+        return True
+
     monkeypatch.setattr(
         "agent_pbx.operator.tmux_support.send_text",
-        lambda target, text, *, tmux_bin, socket_path, **_kwargs: sent.append(
-            (target, text, tmux_bin, socket_path)
-        ),
+        fake_send_text,
     )
     campaign = service.start_campaign(
         operator_agent_id="operator-0",
@@ -892,6 +901,7 @@ def test_operator_followup_accepts_codex_beneath_managed_shell_wrapper(
     assert command["payload"]["tmux_target_command"] == "sh"
     assert command["payload"]["tmux_target_codex_like"] is True
     assert command["payload"]["tmux_target_codex_detection"] == "pane_process_tree"
+    assert command["payload"]["tmux_target_mode_cleared"] is True
 
 
 def test_operator_followup_rejects_reused_managed_wrapper_process(
