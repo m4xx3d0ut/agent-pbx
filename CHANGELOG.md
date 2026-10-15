@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Recognize a live Codex descendant beneath a managed tmux shell launcher when
+  routing Operator campaign assignments and follow-ups. Delivery remains bound
+  to the exact recorded pane PID, process start evidence, session, window, and
+  workspace, while command audit metadata records whether Codex was identified
+  from tmux's foreground command or the pane process tree.
 - Restore the configured Joplin Data API server when Agent PBX starts in
   `managed_cli` profile ownership mode. Bootstrap uses the existing exclusive
   profile lock and validates PID, owner, executable, command, and profile before

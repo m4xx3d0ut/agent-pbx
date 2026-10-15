@@ -17,7 +17,10 @@ from .schemas import (
     OperatorAssignmentCreate,
     ReportCreateRequest,
 )
-from .runtime_tmux import runtime_mapping_tmux_binary
+from .runtime_tmux import (
+    process_start_ticks as runtime_process_start_ticks,
+    runtime_mapping_tmux_binary,
+)
 from .security import now_ts
 from .store import Store
 from .tmux_binary import configured_tmux_binary
@@ -67,6 +70,8 @@ class _TmuxDeliveryTarget:
     tmux_bin: str
     socket_path: str | None = None
     runtime_mapped: bool = False
+    codex_like_target: bool = False
+    codex_detection: str | None = None
 
 
 REVIEW_FORK_PURPOSE = "review"
@@ -3346,16 +3351,16 @@ class OperatorService:
             )
         if resolved != "tmux":
             raise ValueError("delivery must be auto, queue, or tmux")
-        pane = self._send_tmux_text(target, message)
+        delivery_target = self._send_tmux_text(target, message)
+        pane = delivery_target.pane
         payload["tmux_pane_id"] = pane.pane_id
         payload["tmux_target"] = pane.target_label
         payload["tmux_target_command"] = pane.current_command
         payload["tmux_target_title"] = pane.title
         payload["tmux_target_cwd"] = pane.cwd
         payload["tmux_target_window"] = pane.window_name
-        payload["tmux_target_codex_like"] = self._codex_like_command(
-            pane.current_command
-        )
+        payload["tmux_target_codex_like"] = delivery_target.codex_like_target
+        payload["tmux_target_codex_detection"] = delivery_target.codex_detection
         return self.store.create_command(
             CommandCreateRequest(
                 agent_id=str(fork["fork_agent_id"]),
@@ -3399,15 +3404,19 @@ class OperatorService:
             )
         if resolved != "tmux":
             raise ValueError("delivery must be auto, queue, or tmux")
-        pane = self._send_tmux_text(target, message)
+        delivery_target = self._send_tmux_text(target, message)
+        pane = delivery_target.pane
         command_payload["tmux_pane_id"] = pane.pane_id
         command_payload["tmux_target"] = pane.target_label
         command_payload["tmux_target_command"] = pane.current_command
         command_payload["tmux_target_title"] = pane.title
         command_payload["tmux_target_cwd"] = pane.cwd
         command_payload["tmux_target_window"] = pane.window_name
-        command_payload["tmux_target_codex_like"] = self._codex_like_command(
-            pane.current_command
+        command_payload["tmux_target_codex_like"] = (
+            delivery_target.codex_like_target
+        )
+        command_payload["tmux_target_codex_detection"] = (
+            delivery_target.codex_detection
         )
         return self.store.create_command(
             CommandCreateRequest(
@@ -3460,16 +3469,16 @@ class OperatorService:
             )
         if resolved != "tmux":
             raise ValueError("delivery must be auto, queue, or tmux")
-        pane = self._send_tmux_text(target, seed_run["prompt"])
+        delivery_target = self._send_tmux_text(target, seed_run["prompt"])
+        pane = delivery_target.pane
         payload["tmux_pane_id"] = pane.pane_id
         payload["tmux_target"] = pane.target_label
         payload["tmux_target_command"] = pane.current_command
         payload["tmux_target_title"] = pane.title
         payload["tmux_target_cwd"] = pane.cwd
         payload["tmux_target_window"] = pane.window_name
-        payload["tmux_target_codex_like"] = self._codex_like_command(
-            pane.current_command
-        )
+        payload["tmux_target_codex_like"] = delivery_target.codex_like_target
+        payload["tmux_target_codex_detection"] = delivery_target.codex_detection
         return self.store.create_command(
             CommandCreateRequest(
                 agent_id=source_operator_agent_id,
@@ -3534,7 +3543,8 @@ class OperatorService:
             )
             delivery_status = "queued"
         elif resolved == "tmux":
-            pane = self._send_tmux_text(target, turn["message"])
+            delivery_target = self._send_tmux_text(target, turn["message"])
+            pane = delivery_target.pane
             tmux_pane_id = pane.pane_id
             payload["tmux_pane_id"] = pane.pane_id
             payload["tmux_target"] = pane.target_label
@@ -3542,8 +3552,11 @@ class OperatorService:
             payload["tmux_target_title"] = pane.title
             payload["tmux_target_cwd"] = pane.cwd
             payload["tmux_target_window"] = pane.window_name
-            payload["tmux_target_codex_like"] = self._codex_like_command(
-                pane.current_command
+            payload["tmux_target_codex_like"] = (
+                delivery_target.codex_like_target
+            )
+            payload["tmux_target_codex_detection"] = (
+                delivery_target.codex_detection
             )
             command = self.store.create_command(
                 CommandCreateRequest(
@@ -4273,16 +4286,25 @@ class OperatorService:
                     f"managed tmux runtime pane {pane_id} for {agent_id} changed "
                     "workspace"
                 )
-            if not self._codex_like_command(pane.current_command):
+            codex_detection = self._managed_runtime_codex_detection(
+                pane,
+                mapping=mapping,
+                tmux_bin=tmux_bin,
+                socket_path=socket_path,
+            )
+            if codex_detection is None:
                 raise ValueError(
                     f"managed tmux runtime pane {pane_id} for {agent_id} is not "
-                    "running Codex"
+                    "running Codex (no Codex foreground command or mapped-pane "
+                    "descendant was found)"
                 )
             return _TmuxDeliveryTarget(
                 pane=pane,
                 tmux_bin=tmux_bin,
                 socket_path=socket_path,
                 runtime_mapped=True,
+                codex_like_target=True,
+                codex_detection=codex_detection,
             )
 
         try:
@@ -4300,7 +4322,15 @@ class OperatorService:
             if len(matches) == 1:
                 pane = matches[0]
                 if self._explicit_tmux_pane_matches_agent(pane, agent):
-                    return _TmuxDeliveryTarget(pane=pane, tmux_bin=self.tmux_bin)
+                    codex_like = self._codex_like_command(pane.current_command)
+                    return _TmuxDeliveryTarget(
+                        pane=pane,
+                        tmux_bin=self.tmux_bin,
+                        codex_like_target=codex_like,
+                        codex_detection=(
+                            "pane_current_command" if codex_like else None
+                        ),
+                    )
         if self._is_operator_fork_agent(agent):
             fork_panes = [
                 pane
@@ -4308,9 +4338,16 @@ class OperatorService:
                 if self._pane_matches_operator_fork_agent(pane, agent)
             ]
             if len(fork_panes) == 1:
+                codex_like = self._codex_like_command(
+                    fork_panes[0].current_command
+                )
                 return _TmuxDeliveryTarget(
                     pane=fork_panes[0],
                     tmux_bin=self.tmux_bin,
+                    codex_like_target=codex_like,
+                    codex_detection=(
+                        "pane_current_command" if codex_like else None
+                    ),
                 )
             if not fork_panes:
                 raise ValueError(
@@ -4327,7 +4364,73 @@ class OperatorService:
                 f"no unique local tmux pane matched {agent['agent_id']}; "
                 "enable tmux direct mode or use delivery='queue' with nohup polling"
             )
-        return _TmuxDeliveryTarget(pane=pane, tmux_bin=self.tmux_bin)
+        codex_like = self._codex_like_command(pane.current_command)
+        return _TmuxDeliveryTarget(
+            pane=pane,
+            tmux_bin=self.tmux_bin,
+            codex_like_target=codex_like,
+            codex_detection="pane_current_command" if codex_like else None,
+        )
+
+    def _managed_runtime_codex_detection(
+        self,
+        pane: tmux_support.TmuxPane,
+        *,
+        mapping: dict[str, Any],
+        tmux_bin: str,
+        socket_path: str,
+    ) -> str | None:
+        expected_pid = self._positive_int(mapping.get("pane_pid"))
+        expected_ticks = self._positive_int(mapping.get("process_start_ticks"))
+        if (
+            expected_pid is None
+            and expected_ticks is None
+            and self._codex_like_command(pane.current_command)
+        ):
+            return "pane_current_command"
+        observed_pid = tmux_support.pane_root_pid(
+            pane.pane_id,
+            tmux_bin=tmux_bin,
+            socket_path=socket_path,
+        )
+        if expected_pid is not None:
+            if observed_pid is None:
+                raise ValueError(
+                    f"managed tmux runtime pane {pane.pane_id} process identity "
+                    "is unavailable"
+                )
+            if observed_pid != expected_pid:
+                raise ValueError(
+                    f"managed tmux runtime pane {pane.pane_id} process identity "
+                    "changed"
+                )
+        if expected_ticks is not None:
+            observed_ticks = runtime_process_start_ticks(observed_pid)
+            if observed_ticks is None:
+                raise ValueError(
+                    f"managed tmux runtime pane {pane.pane_id} process start "
+                    "evidence is unavailable"
+                )
+            if observed_ticks != expected_ticks:
+                raise ValueError(
+                    f"managed tmux runtime pane {pane.pane_id} process start "
+                    "evidence changed"
+                )
+        if self._codex_like_command(pane.current_command):
+            return "pane_current_command"
+        if observed_pid is not None and tmux_support.process_tree_has_codex(
+            observed_pid
+        ):
+            return "pane_process_tree"
+        return None
+
+    @staticmethod
+    def _positive_int(value: Any) -> int | None:
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError):
+            return None
+        return resolved if resolved > 0 else None
 
     def _resolve_tmux_pane(self, agent: dict[str, Any]) -> tmux_support.TmuxPane:
         return self._resolve_tmux_target(agent).pane
@@ -4336,7 +4439,7 @@ class OperatorService:
         self,
         agent: dict[str, Any],
         message: str,
-    ) -> tmux_support.TmuxPane:
+    ) -> _TmuxDeliveryTarget:
         target = self._resolve_tmux_target(agent)
         try:
             tmux_support.send_text(
@@ -4350,7 +4453,7 @@ class OperatorService:
             raise ValueError(
                 f"{source} delivery to {target.pane.pane_id} failed: {exc}"
             ) from exc
-        return target.pane
+        return target
 
     def _preflight_tmux_target(self, agent: dict[str, Any]) -> dict[str, Any]:
         agent_id = str(agent.get("agent_id") or "").strip()
@@ -4371,9 +4474,20 @@ class OperatorService:
                 "ok": True,
                 "reason": None,
                 "retryable": False,
-                "pane": self._tmux_pane_payload(pane),
-                "warnings": self._tmux_binding_warnings(pane, agent),
-                "metadata": {"runtime_mapped": True},
+                "pane": self._tmux_pane_payload(
+                    pane,
+                    codex_like_target=target.codex_like_target,
+                    codex_detection=target.codex_detection,
+                ),
+                "warnings": self._tmux_binding_warnings(
+                    pane,
+                    agent,
+                    codex_like_target=target.codex_like_target,
+                ),
+                "metadata": {
+                    "runtime_mapped": True,
+                    "codex_detection": target.codex_detection,
+                },
             }
         try:
             panes = tmux_support.list_panes(self.tmux_bin)
@@ -4469,7 +4583,18 @@ class OperatorService:
         text = str(command or "").strip().lower()
         return bool(text and ("codex" in text or text in {"node"}))
 
-    def _tmux_pane_payload(self, pane: tmux_support.TmuxPane) -> dict[str, Any]:
+    def _tmux_pane_payload(
+        self,
+        pane: tmux_support.TmuxPane,
+        *,
+        codex_like_target: bool | None = None,
+        codex_detection: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_codex_like = (
+            self._codex_like_command(pane.current_command)
+            if codex_like_target is None
+            else codex_like_target
+        )
         return {
             "session_name": pane.session_name,
             "window_index": pane.window_index,
@@ -4481,20 +4606,28 @@ class OperatorService:
             "title": pane.title,
             "cwd": pane.cwd,
             "window_name": pane.window_name,
-            "codex_like_target": self._codex_like_command(pane.current_command),
+            "codex_like_target": resolved_codex_like,
+            "codex_detection": codex_detection,
         }
 
     def _tmux_binding_warnings(
         self,
         pane: tmux_support.TmuxPane,
         agent: dict[str, Any],
+        *,
+        codex_like_target: bool | None = None,
     ) -> list[str]:
         warnings: list[str] = []
         metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
         agent_cwd = str(metadata.get("cwd") or "").strip()
         if agent_cwd and pane.cwd != agent_cwd:
             warnings.append("tmux pane cwd differs from agent metadata cwd")
-        if not self._codex_like_command(pane.current_command):
+        resolved_codex_like = (
+            self._codex_like_command(pane.current_command)
+            if codex_like_target is None
+            else codex_like_target
+        )
+        if not resolved_codex_like:
             warnings.append("tmux target command does not look like Codex")
         return warnings
 

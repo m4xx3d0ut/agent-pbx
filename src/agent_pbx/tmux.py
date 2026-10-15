@@ -334,6 +334,43 @@ def process_tree_ids(root_pid: int, *, proc_root: str | Path = "/proc") -> set[i
     return found
 
 
+def process_tree_has_codex(
+    root_pid: int,
+    *,
+    proc_root: str | Path = "/proc",
+) -> bool:
+    """Return whether a live Codex executable exists below ``root_pid``.
+
+    Managed panes may retain a shell as tmux's foreground command while that
+    shell owns the Node/Codex process tree.  Inspect only executable identity
+    from the pane's descendants; command-line arguments are deliberately not
+    searched because prompt text or unrelated arguments can contain ``codex``.
+    """
+
+    proc = Path(proc_root)
+    for process_id in process_tree_ids(root_pid, proc_root=proc):
+        names: list[str] = []
+        try:
+            names.append(
+                (proc / str(process_id) / "comm")
+                .read_text(encoding="utf-8", errors="replace")
+                .strip()
+            )
+        except OSError:
+            pass
+        try:
+            names.append(Path(os.readlink(proc / str(process_id) / "exe")).name)
+        except OSError:
+            pass
+        normalized_names = [Path(name).name.casefold() for name in names if name]
+        if any(
+            name == "codex" or name.startswith(("codex-", "codex_"))
+            for name in normalized_names
+        ):
+            return True
+    return False
+
+
 def pane_open_rollout_paths(
     target: str,
     *,

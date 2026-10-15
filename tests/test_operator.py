@@ -788,6 +788,188 @@ def test_operator_followup_uses_managed_runtime_tmux_binary_and_socket(
     assert command["payload"]["tmux_pane_id"] == "%22"
 
 
+def test_operator_followup_accepts_codex_beneath_managed_shell_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store, tmux_bin="/usr/bin/tmux")
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        tmux_pane_id="%22",
+        status="running",
+        metadata={"pbx_mode": "report", "tmux_pane_id": "%22"},
+    )
+    managed_tmux = "/home/test/.local/bin/tmux-3.7c"
+    managed_socket = "/run/user/1000/agent-pbx/runtime-tmux-3.7c-v2.sock"
+    managed_session = "agent-pbx-runtime-operator-0-fork-caller-1"
+    store.upsert_tmux_runtime_mapping(
+        entity_id="operator-0-fork-caller-1",
+        server_mode="dedicated",
+        server_id="runtime-37",
+        socket_path=managed_socket,
+        session_name=managed_session,
+        window_id="@22",
+        window_name="operator-0-fork-caller-1",
+        pane_id="%22",
+        pane_pid=4242,
+        process_start_ticks=99,
+        cwd=str(tmp_path / "caller-1"),
+        state="ready",
+        metadata={"tmux_bin": managed_tmux},
+    )
+    pane = tmux_support.TmuxPane(
+        session_name=managed_session,
+        window_index="0",
+        pane_index="0",
+        pane_id="%22",
+        active=True,
+        current_command="sh",
+        title="operator-0-fork-caller-1",
+        cwd=str(tmp_path / "caller-1"),
+        width=100,
+        height=30,
+        history_size=10,
+        window_name="operator-0-fork-caller-1",
+        window_id="@22",
+    )
+    sent: list[tuple[str, str, str, str | None]] = []
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.list_panes",
+        lambda _tmux_bin, *, socket_path=None: [pane],
+    )
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.pane_root_pid",
+        lambda *_args, **_kwargs: 4242,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.operator.runtime_process_start_ticks",
+        lambda _pid: 99,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.process_tree_has_codex",
+        lambda _pid: True,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.send_text",
+        lambda target, text, *, tmux_bin, socket_path, **_kwargs: sent.append(
+            (target, text, tmux_bin, socket_path)
+        ),
+    )
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Mapped wrapper follow-up",
+        objective="Dispatch through a managed shell-owned Codex process tree.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Start."}],
+        delivery="queue",
+    )
+    assignment = campaign["assignments"][0]
+
+    command = service.send_followup(
+        operator_agent_id="operator-0",
+        campaign_id=campaign["campaign_id"],
+        target_agent_id="caller-1",
+        assignment_id=assignment["assignment_id"],
+        operator_fork_id=fork["operator_fork_id"],
+        message="Continue from the checkpoint.",
+        delivery="tmux",
+    )
+
+    assert sent == [
+        (
+            "%22",
+            "Continue from the checkpoint.",
+            managed_tmux,
+            managed_socket,
+        )
+    ]
+    assert command["status"] == "sent"
+    assert command["payload"]["tmux_target_command"] == "sh"
+    assert command["payload"]["tmux_target_codex_like"] is True
+    assert command["payload"]["tmux_target_codex_detection"] == "pane_process_tree"
+
+
+def test_operator_followup_rejects_reused_managed_wrapper_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        tmux_pane_id="%22",
+        status="running",
+        metadata={"pbx_mode": "report", "tmux_pane_id": "%22"},
+    )
+    managed_session = "agent-pbx-runtime-operator-0-fork-caller-1"
+    store.upsert_tmux_runtime_mapping(
+        entity_id="operator-0-fork-caller-1",
+        server_mode="dedicated",
+        server_id="runtime-37",
+        socket_path="/tmp/runtime.sock",
+        session_name=managed_session,
+        window_id="@22",
+        window_name="operator-0-fork-caller-1",
+        pane_id="%22",
+        pane_pid=4242,
+        process_start_ticks=99,
+        cwd=str(tmp_path / "caller-1"),
+        state="ready",
+    )
+    pane = tmux_support.TmuxPane(
+        session_name=managed_session,
+        window_index="0",
+        pane_index="0",
+        pane_id="%22",
+        active=True,
+        current_command="sh",
+        title="operator-0-fork-caller-1",
+        cwd=str(tmp_path / "caller-1"),
+        width=100,
+        height=30,
+        history_size=10,
+        window_name="operator-0-fork-caller-1",
+        window_id="@22",
+    )
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.list_panes",
+        lambda _tmux_bin, *, socket_path=None: [pane],
+    )
+    monkeypatch.setattr(
+        "agent_pbx.operator.tmux_support.pane_root_pid",
+        lambda *_args, **_kwargs: 5000,
+    )
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Mapped wrapper follow-up",
+        objective="Reject a reused managed process.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Start."}],
+        delivery="queue",
+    )
+    assignment = campaign["assignments"][0]
+
+    with pytest.raises(ValueError, match="process identity changed"):
+        service.send_followup(
+            operator_agent_id="operator-0",
+            campaign_id=campaign["campaign_id"],
+            target_agent_id="caller-1",
+            assignment_id=assignment["assignment_id"],
+            operator_fork_id=fork["operator_fork_id"],
+            message="Continue from the checkpoint.",
+            delivery="tmux",
+        )
+
+
 @pytest.mark.asyncio
 async def test_mcp_operator_campaign_tools_queue_delivery(tmp_path: Path) -> None:
     store = Store(tmp_path / "pbx.sqlite")

@@ -391,6 +391,30 @@ def test_tmux_pane_open_rollout_paths_follows_process_tree(tmp_path, monkeypatch
     }
 
 
+def test_process_tree_has_codex_uses_descendant_executable_identity(tmp_path) -> None:
+    proc_root = tmp_path / "proc"
+
+    def add_process(pid: int, parent: int, name: str) -> None:
+        root = proc_root / str(pid)
+        root.mkdir(parents=True)
+        (root / "status").write_text(
+            f"Name:\t{name}\nPPid:\t{parent}\n",
+            encoding="utf-8",
+        )
+        (root / "comm").write_text(f"{name}\n", encoding="utf-8")
+        (root / "exe").symlink_to(f"/usr/bin/{name}")
+
+    add_process(100, 1, "sh")
+    add_process(101, 100, "node")
+    add_process(102, 101, "codex")
+    add_process(200, 1, "sh")
+    add_process(201, 1, "codex-code-mode")
+    add_process(202, 200, "my-codex-helper")
+
+    assert tmux.process_tree_has_codex(100, proc_root=proc_root) is True
+    assert tmux.process_tree_has_codex(200, proc_root=proc_root) is False
+
+
 def test_tmux_kill_pane_uses_target(monkeypatch) -> None:
     calls: list[list[str]] = []
 
