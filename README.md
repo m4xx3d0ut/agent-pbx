@@ -777,6 +777,42 @@ self-select that profile. Review forks always receive the read-only profile.
 Gateway bearer tokens are passed only in the child process environment and are
 not stored in Agent or Operator metadata.
 
+Workspace mobility is a separate daemon policy. The committed default is
+`pinned` with controller approval: an Agent may refresh the content of its
+current checkout but cannot silently bind WorkerBee to another repository.
+The WorkerBee tab's `Workspace` action and `/workerbee workspace` palette
+command show the effective policy, preview a canonical Git root and subpath,
+apply an approved binding, review pending requests, and revert the latest
+applicable transition.
+
+| Policy | Allowed target |
+|---|---|
+| `pinned` | Current Git checkout only |
+| `same-repository` | Worktrees and subdirectories sharing the same Git common directory |
+| `scoped-workbench` | Git checkouts and subdirectories beneath controller-approved roots |
+
+Request mode is independently `approval`, `automatic`, or `disabled`.
+Changing a workspace never changes the lease token, selected WorkerBee
+backend, generation, or tool profile. A `review-readonly` fork therefore
+remains read-only after a move, while `local-deploy` remains limited to its
+existing bounded tool allowlist. A supplied scenario label becomes a
+deterministic, namespaced WorkerBee project.
+
+Administrators can constrain or remove this UI without trusting client-side
+settings:
+
+```bash
+export AGENT_PBX_WORKERBEE_WORKSPACE_CONTROL_MODE="read_only" # editable|read_only|hidden
+export AGENT_PBX_WORKERBEE_WORKSPACE_POLICY_CEILING="same-repository"
+export AGENT_PBX_WORKERBEE_WORKSPACE_ROOT_CEILING_JSON='["/srv/engineering"]'
+export AGENT_PBX_WORKERBEE_WORKSPACE_REQUEST_MODE="approval"
+```
+
+The environment values are hard ceilings. A TUI or Agent cannot expand them.
+Allowed roots and transition paths are stored by the daemon and are omitted
+from ordinary status events. `agent-pbx doctor` reports the effective policy
+without printing its host paths.
+
 `/workerbee switch oss` and `/workerbee switch debug` always begin with the
 switcher's real non-mutating `--dry-run` result. Apply requires an unexpired
 private transaction, unchanged backend evidence, exact typed confirmation, and

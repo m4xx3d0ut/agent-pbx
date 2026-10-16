@@ -120,6 +120,15 @@ and `/workerbee switch rollback`. Every apply is bound to the displayed preview
 and typed confirmation. A switch affects future sessions; running Codex
 sessions retain their current MCP binding.
 
+`Workspace` in the WorkerBee tab, `/workerbee workspace`, and `/workerbee
+policy` open the selected entity's daemon-owned workspace manager. It displays
+the effective policy and administrator ceiling, lets a controller preview and
+bind a Git checkout/subdirectory, approves the newest pending request, and can
+revert the latest still-current transition. Bind remains disabled until the
+current path and scenario have a successful preview. Read-only policy keeps
+the controls visible but disables policy writes; hidden policy removes the tab
+button and palette actions after server posture is known.
+
 ## Focus and refresh behavior
 
 Async refreshes use generation checks. A completed background task may restore

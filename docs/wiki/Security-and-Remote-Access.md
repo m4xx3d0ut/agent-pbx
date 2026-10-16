@@ -53,6 +53,20 @@ approved roots, symlink/path traversal checks, sensitive-path policy, hash/mtime
 conflicts, and recoverable trash for untracked data. Tracked deletion remains
 visible to Git.
 
+WorkerBee workspace placement is enforced by the daemon, independently of its
+tool profile. The public posture pins each lease to its checkout and requires
+controller approval. Broader workstation profiles may allow same-repository or
+allowed-root mobility, but canonical Git discovery, current-user ownership,
+symlink resolution, policy ceilings, and root ceilings still apply. Review
+forks retain `review-readonly` tools across every transition. Ordinary status
+events report policy/project state without publishing allowed host paths.
+
+Administrators can set workspace controls to `read_only` or `hidden`, cap the
+maximum policy, force request mode, and provide a JSON root ceiling through the
+`AGENT_PBX_WORKERBEE_WORKSPACE_*` environment variables documented in the
+WorkerBee guide. These checks occur server-side and cannot be relaxed by a TUI
+configuration file or remote controller scoped to one Agent.
+
 ## Audit-sensitive operations
 
 Model elevation, runtime repair, prompt injection, file writes, Joplin writes,

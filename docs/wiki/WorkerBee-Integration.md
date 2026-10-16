@@ -121,9 +121,58 @@ from silently using an older appliance snapshot. Observe and review profiles
 remain fixed to their existing read-only snapshot, and OSS `direct_host`
 sessions continue to use the exact host checkout without snapshot staging.
 
-Source refresh does not authorize backend, generation, project, source-root,
-or access-profile changes. Those boundaries still require a reviewed Agent PBX
-restart or resume with a new lease.
+Source refresh does not authorize backend, generation, or access-profile
+changes. Source-root and WorkerBee project changes are governed separately by
+the daemon-owned workspace-mobility policy below.
+
+## Workspace mobility and workbench policy
+
+Agent PBX separates tool authority from workspace placement. Moving an Agent
+or Operator to another approved checkout does not grant new WorkerBee tools.
+The public default is `pinned` plus `approval`; it preserves the historical
+single-checkout behavior until a controller deliberately changes policy.
+
+| Policy | Meaning |
+|---|---|
+| `pinned` | The current canonical Git root; subdirectories are permitted. |
+| `same-repository` | Any worktree whose Git common directory matches the current checkout. |
+| `scoped-workbench` | Any canonical Git checkout beneath one of the daemon-owned allowed roots. |
+
+Each policy has an independent request mode: `approval`, `automatic`, or
+`disabled`. Under approval, the first `workerbee_v1_session_start(cwd=...)`
+records a pending request and returns an actionable transition ID. A controller
+can review and apply it from `Workspace` in the WorkerBee tab, after which the
+Agent retries normally. Under automatic, an allowed request stages and binds
+in the same tool call. Disabled mode refuses target changes.
+
+Agent-supplied host paths never become appliance paths directly. The gateway
+resolves the requested directory, discovers its canonical Git root and Git
+common directory, calculates a root-relative `working_subpath`, applies owner,
+symlink, policy, and administrator-ceiling checks, then sends only the selected
+binding's runtime path to WorkerBee. A supplied project value is treated as a
+scenario label and converted to a deterministic project namespace.
+
+Every move records prior/new bindings, source/subpath, project namespace,
+policy, request mode, actor, status, and timestamps. The previous receipt is
+retained. Revert is allowed only when that transition still owns the active
+binding and the old root remains permitted by current administrator policy.
+Agent PBX never prunes these records as a side effect of binding.
+
+The WorkerBee tab and `/workerbee workspace` or `/workerbee policy` expose
+policy, preview, bind, pending approval, and revert controls. Environment
+posture remains authoritative:
+
+```bash
+export AGENT_PBX_WORKERBEE_WORKSPACE_CONTROL_MODE="editable"
+export AGENT_PBX_WORKERBEE_WORKSPACE_POLICY_CEILING="scoped-workbench"
+export AGENT_PBX_WORKERBEE_WORKSPACE_ROOT_CEILING_JSON='["/srv/engineering"]'
+export AGENT_PBX_WORKERBEE_WORKSPACE_REQUEST_MODE="approval"
+```
+
+`CONTROL_MODE` may be `editable`, `read_only`, or `hidden`. A root ceiling is
+a JSON list of existing directories. `REQUEST_MODE`, when set, overrides every
+stored global and per-entity value. The daemon enforces these settings even if
+a client hides or modifies its own TUI state.
 
 ## Tool policy
 

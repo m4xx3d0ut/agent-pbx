@@ -14,6 +14,7 @@ from agent_pbx.events import EventClientRegistry
 from agent_pbx.mcp_daemon import MCPDaemonConfig, lan_auth_guard
 from agent_pbx.remote import ssh_attach_plan, validate_view_state
 from agent_pbx.schemas import AgentRegisterRequest
+from agent_pbx.store import SCHEMA_VERSION
 
 
 RUNTIME_HEADERS = {"Authorization": "Bearer runtime-secret"}
@@ -491,7 +492,7 @@ def test_remote_schema_records_safe_token_and_audit_metadata(tmp_path: Path) -> 
     token_record = issued["record"]
     listed = client.get("/v2/remote/tokens", headers=RUNTIME_HEADERS)
 
-    assert app.state.store.schema_version() == 30
+    assert app.state.store.schema_version() == SCHEMA_VERSION
     assert "token_hash" not in json.dumps(token_record)
     assert "token" not in listed.json()["tokens"][0]
     assert listed.json()["tokens"][0]["client_id"] == "audit-client"

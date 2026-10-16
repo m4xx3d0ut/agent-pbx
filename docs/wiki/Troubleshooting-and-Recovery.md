@@ -70,6 +70,15 @@ Compare the PBX host cwd, WorkerBee-visible path, repository root, backend
 provenance, and mount translation. Distinguish path mismatch from an omitted
 tool allowlist or an unavailable/older endpoint.
 
+If `workerbee_v1_session_start` reports
+`WORKERBEE_WORKSPACE_APPROVAL_REQUIRED`, open the selected entity's WorkerBee
+tab, choose `Workspace`, review the pending canonical root/subpath and apply it,
+then retry the original call. `WORKERBEE_WORKSPACE_SCOPE_DENIED` means the
+target exceeds the effective `pinned`, same-repository, allowed-root, or
+administrator ceiling. Do not bypass that decision by sending an appliance
+path: the gateway intentionally maps only verified host Git roots into the
+selected runtime.
+
 ## Migration rollback
 
 Rollback requires a reviewed backup and a stopped managed daemon:

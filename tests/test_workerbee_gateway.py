@@ -22,7 +22,9 @@ from agent_pbx.workerbee_gateway import (
     WorkerBeeGatewayService,
 )
 from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
+from agent_pbx.workerbee_policy import WorkerBeeWorkspacePolicyService
 from agent_pbx.workerbee_workspace import WorkerBeeWorkspaceService
+from agent_pbx.store import Store
 
 
 def git_repo(root: Path) -> None:
@@ -401,6 +403,201 @@ def test_gateway_injects_exact_session_binding_and_project_scope(tmp_path: Path)
     assert scope_error.value.code == "WORKERBEE_PROJECT_SCOPE_MISMATCH"
 
 
+def test_gateway_automatic_scoped_workbench_transition_keeps_lease(
+    tmp_path: Path,
+) -> None:
+    runtime, workspace, binding, _gateway = services(tmp_path)
+    target_repo = tmp_path / "git" / "other"
+    target_repo.parent.mkdir()
+    git_repo(target_repo)
+    nested = target_repo / "service"
+    nested.mkdir()
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    policy = WorkerBeeWorkspacePolicyService(store, environ={})
+    policy.set_policy(
+        agent_id=None,
+        policy="scoped-workbench",
+        request_mode="automatic",
+        allowed_roots=[str(tmp_path)],
+        managed_scratch_root=None,
+        profile_label="Workbench",
+        updated_by="test",
+    )
+    gateway = WorkerBeeGatewayService(
+        tmp_path / "gateway-policy",
+        runtime,
+        workspace,
+        workspace_policy=policy,
+    )
+    lease, token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+
+    moved, moved_binding, changed = gateway.transition_workspace(
+        lease,
+        {"cwd": str(nested)},
+    )
+
+    assert changed is True
+    assert moved.lease_id == lease.lease_id
+    assert moved.token_hash == lease.token_hash
+    assert moved.workspace_binding_id == moved_binding.binding_id
+    assert moved_binding.source_root == str(target_repo.resolve())
+    assert moved.project == "other"
+    assert moved.working_subpath == "service"
+    assert gateway.validate(lease.lease_id, token) == moved
+    prepared = gateway.prepare_arguments(
+        moved, "workerbee_v1_session_start", {"goal": "test other"}
+    )
+    assert prepared["cwd"] == str(target_repo.resolve() / "service")
+    assert prepared["project"] == "other"
+
+
+def test_gateway_approval_transition_is_pending_until_controller_applies(
+    tmp_path: Path,
+) -> None:
+    runtime, workspace, binding, _gateway = services(tmp_path)
+    target_repo = tmp_path / "other"
+    git_repo(target_repo)
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    policy = WorkerBeeWorkspacePolicyService(store, environ={})
+    policy.set_policy(
+        agent_id=None,
+        policy="scoped-workbench",
+        request_mode="approval",
+        allowed_roots=[str(tmp_path)],
+        managed_scratch_root=None,
+        profile_label="Safe",
+        updated_by="test",
+    )
+    gateway = WorkerBeeGatewayService(
+        tmp_path / "gateway-policy",
+        runtime,
+        workspace,
+        workspace_policy=policy,
+    )
+    lease, _token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_OBSERVE,
+        workspace_binding_id=binding.binding_id,
+    )
+
+    with pytest.raises(WorkerBeeGatewayError) as approval:
+        gateway.transition_workspace(lease, {"cwd": str(target_repo)})
+    assert approval.value.code == "WORKERBEE_WORKSPACE_APPROVAL_REQUIRED"
+    pending = policy.list_transitions("demo-agent")
+    assert len(pending) == 1
+    assert pending[0]["status"] == "pending"
+    assert gateway.load(lease.lease_id).workspace_binding_id == binding.binding_id
+    with pytest.raises(WorkerBeeGatewayError) as repeated:
+        gateway.transition_workspace(lease, {"cwd": str(target_repo)})
+    assert repeated.value.code == "WORKERBEE_WORKSPACE_APPROVAL_REQUIRED"
+    assert len(policy.list_transitions("demo-agent")) == 1
+
+    moved, moved_binding, changed = gateway.apply_transition(
+        pending[0]["transition_id"], approved_by="controller"
+    )
+    assert changed is True
+    assert moved.workspace_binding_id == moved_binding.binding_id
+    assert policy.get_transition(pending[0]["transition_id"])["status"] == "applied"
+    # Workspace mobility does not broaden the observe-only tool profile.
+    assert "workerbee_v1_manifest_deploy_local" not in moved.allowed_tools
+
+
+def test_gateway_disabled_agent_request_still_allows_explicit_controller_bind(
+    tmp_path: Path,
+) -> None:
+    runtime, workspace, binding, _gateway = services(tmp_path)
+    target_repo = tmp_path / "other"
+    git_repo(target_repo)
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    policy = WorkerBeeWorkspacePolicyService(store, environ={})
+    policy.set_policy(
+        agent_id=None,
+        policy="scoped-workbench",
+        request_mode="disabled",
+        allowed_roots=[str(tmp_path)],
+        managed_scratch_root=None,
+        profile_label="Controller only",
+        updated_by="test",
+    )
+    gateway = WorkerBeeGatewayService(
+        tmp_path / "gateway-policy",
+        runtime,
+        workspace,
+        workspace_policy=policy,
+    )
+    lease, _token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_OBSERVE,
+        workspace_binding_id=binding.binding_id,
+    )
+
+    with pytest.raises(WorkerBeeGatewayError) as disabled:
+        gateway.transition_workspace(lease, {"cwd": str(target_repo)})
+    assert disabled.value.code == "WORKERBEE_WORKSPACE_REQUEST_DISABLED"
+
+    moved, _binding, changed = gateway.transition_workspace(
+        lease,
+        {"cwd": str(target_repo)},
+        controller_approved=True,
+        requested_by="controller",
+    )
+    assert changed is True
+    assert moved.project == "other"
+
+
+def test_gateway_transition_revert_restores_prior_binding(tmp_path: Path) -> None:
+    runtime, workspace, binding, _gateway = services(tmp_path)
+    target_repo = tmp_path / "other"
+    git_repo(target_repo)
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    policy = WorkerBeeWorkspacePolicyService(store, environ={})
+    policy.set_policy(
+        agent_id=None,
+        policy="scoped-workbench",
+        request_mode="automatic",
+        allowed_roots=[str(tmp_path)],
+        managed_scratch_root=None,
+        profile_label="Workbench",
+        updated_by="test",
+    )
+    gateway = WorkerBeeGatewayService(
+        tmp_path / "gateway-policy",
+        runtime,
+        workspace,
+        workspace_policy=policy,
+    )
+    lease, _token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_REVIEW,
+        workspace_binding_id=binding.binding_id,
+    )
+    moved, _moved_binding, _changed = gateway.transition_workspace(
+        lease, {"cwd": str(target_repo)}
+    )
+    transition = policy.list_transitions("demo-agent")[0]
+
+    restored, restored_binding = gateway.revert_transition(
+        transition["transition_id"], reverted_by="controller"
+    )
+
+    assert restored.workspace_binding_id == binding.binding_id
+    assert restored_binding == binding
+    assert restored.profile == WORKERBEE_PROFILE_REVIEW
+    assert policy.get_transition(transition["transition_id"])["status"] == "reverted"
+
+
 def test_gateway_rejects_tools_outside_profile(tmp_path: Path) -> None:
     _runtime, _workspace, binding, gateway = services(tmp_path)
     lease, _token = gateway.issue(
@@ -576,6 +773,96 @@ def test_gateway_api_prepares_workspace_and_issues_one_time_token(
         )
         assert revoked.status_code == 200
         assert revoked.json()["status"] == "revoked"
+
+
+def test_gateway_api_manages_workspace_policy_and_controller_transition(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "git" / "first"
+    target = tmp_path / "git" / "second"
+    repo.parent.mkdir()
+    git_repo(repo)
+    git_repo(target)
+    nested = target / "service"
+    nested.mkdir()
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {
+                "active": {
+                    "ready": True,
+                    "backend": "oss",
+                    "endpoint": "http://127.0.0.1:8765/mcp",
+                    "server_name": "K1S WorkerBee",
+                    "server_version": "1.30.0",
+                }
+            }
+
+    app.state.workerbee_switcher = Selector()
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "demo-agent",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(repo),
+                    "workerbee_mcp_profile": "local-deploy",
+                },
+            },
+        ).status_code == 200
+        binding = client.post(
+            "/v2/agents/demo-agent/workerbee/workspaces", json={}
+        ).json()
+        issued = client.post(
+            "/v2/agents/demo-agent/workerbee/leases",
+            json={
+                "codex_session_id": "thread-1",
+                "profile": "local-deploy",
+                "workspace_binding_id": binding["binding_id"],
+            },
+        )
+        assert issued.status_code == 200
+
+        saved = client.put(
+            "/v2/agents/demo-agent/workerbee/workspace-policy",
+            json={
+                "policy": "scoped-workbench",
+                "request_mode": "automatic",
+                "allowed_roots": [str(tmp_path / "git")],
+                "managed_scratch_root": str(tmp_path / "git" / ".scratch"),
+                "profile_label": "Test Workbench",
+            },
+        )
+        assert saved.status_code == 200
+        assert saved.json()["effective"]["profile_label"] == "Test Workbench"
+
+        preview = client.post(
+            "/v2/agents/demo-agent/workerbee/workspace-transitions/preview",
+            json={"cwd": str(nested)},
+        )
+        assert preview.status_code == 200
+        assert preview.json()["target"]["working_subpath"] == "service"
+        applied = client.post(
+            "/v2/agents/demo-agent/workerbee/workspace-transitions",
+            json={"cwd": str(nested)},
+        )
+        assert applied.status_code == 200
+        assert applied.json()["changed"] is True
+        assert applied.json()["lease"]["project"] == "second"
+        transitions = client.get(
+            "/v2/agents/demo-agent/workerbee/workspace-transitions"
+        )
+        assert transitions.status_code == 200
+        assert transitions.json()[0]["status"] == "applied"
+
+        reverted = client.post(
+            "/v2/agents/demo-agent/workerbee/workspace-transitions/"
+            f"{transitions.json()[0]['transition_id']}/revert"
+        )
+        assert reverted.status_code == 200
+        assert reverted.json()["lease"]["workspace_binding_id"] == binding["binding_id"]
 
 
 @pytest.mark.parametrize(

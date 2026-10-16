@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Callable, Mapping
 
 from mcp import ClientSession, types
@@ -27,6 +27,12 @@ from .workerbee_runtime import (
     WORKERBEE_WORKSPACE_DIRECT_HOST,
     WorkerBeeRuntimeRegistry,
     WorkerBeeRuntimeSelection,
+)
+from .workerbee_policy import (
+    WORKERBEE_WORKSPACE_REQUEST_APPROVAL,
+    WorkerBeeWorkspacePolicyError,
+    WorkerBeeWorkspacePolicyService,
+    WorkerBeeWorkspaceTarget,
 )
 from .workerbee_workspace import (
     WorkerBeeWorkspaceBinding,
@@ -127,6 +133,9 @@ class WorkerBeeGatewayLease:
     created_at: float
     expires_at: float | None
     revoked_at: float | None = None
+    source_project: str = ""
+    working_subpath: str = "."
+    scenario_label: str | None = None
 
     def private_dict(self) -> dict[str, Any]:
         return {
@@ -173,12 +182,14 @@ class WorkerBeeGatewayService:
             None,
         ]
         | None = None,
+        workspace_policy: WorkerBeeWorkspacePolicyService | None = None,
     ) -> None:
         self.state_root = state_root.expanduser().resolve()
         self.runtime_registry = runtime_registry
         self.workspace_service = workspace_service
         self.clock = clock
         self.binding_refreshed = binding_refreshed
+        self.workspace_policy = workspace_policy
         self._mutation_lock = threading.Lock()
         self._active_mutations: dict[str, int] = {}
 
@@ -230,6 +241,8 @@ class WorkerBeeGatewayService:
             status="active",
             created_at=now,
             expires_at=(now + max(30.0, ttl_seconds) if ttl_seconds else None),
+            source_project=binding.project,
+            working_subpath=".",
         )
         _atomic_private_json(self._lease_path(lease_id), lease.private_dict())
         return lease, token
@@ -254,6 +267,9 @@ class WorkerBeeGatewayService:
                 "WorkerBee gateway lease has an unsupported version.",
             )
         payload["allowed_tools"] = tuple(payload.get("allowed_tools") or ())
+        payload.setdefault("source_project", str(payload.get("project") or ""))
+        payload.setdefault("working_subpath", ".")
+        payload.setdefault("scenario_label", None)
         try:
             return WorkerBeeGatewayLease(**payload)
         except (TypeError, ValueError) as exc:
@@ -358,17 +374,286 @@ class WorkerBeeGatewayService:
         binding = self.workspace_service.load(lease.workspace_binding_id)
         supplied = dict(arguments or {})
         supplied_project = str(supplied.get("project") or "").strip()
-        if supplied_project and supplied_project != binding.project:
+        if (
+            tool_name != "workerbee_v1_session_start"
+            and supplied_project
+            and supplied_project != lease.project
+        ):
             raise WorkerBeeGatewayError(
                 "WORKERBEE_PROJECT_SCOPE_MISMATCH",
                 "WorkerBee tool call targets a project outside this session binding.",
             )
         if tool_name == "workerbee_v1_session_start":
             goal = str(supplied.get("goal") or "Agent PBX managed session").strip()
-            return binding.session_start_args(goal=goal)
+            prepared = binding.session_start_args(goal=goal)
+            working_subpath = str(lease.working_subpath or ".").strip() or "."
+            if working_subpath != ".":
+                prepared["cwd"] = str(
+                    PurePosixPath(binding.runtime_workspace_path) / working_subpath
+                )
+            prepared["project"] = lease.project
+            return prepared
         if tool_name in WORKERBEE_PROJECT_SCOPED_TOOLS:
-            supplied.setdefault("project", binding.project)
+            supplied.setdefault("project", lease.project)
         return supplied
+
+    def transition_workspace(
+        self,
+        lease: WorkerBeeGatewayLease,
+        arguments: Mapping[str, Any] | None,
+        *,
+        controller_approved: bool = False,
+        requested_by: str | None = None,
+        transition_id: str | None = None,
+    ) -> tuple[WorkerBeeGatewayLease, WorkerBeeWorkspaceBinding, bool]:
+        """Move one lease to an allowed Git checkout without changing its identity."""
+
+        current = self.load(lease.lease_id)
+        runtime, binding = self._refresh_context(current)
+        if self.workspace_policy is None:
+            return self.refresh_workspace(current)
+        supplied = dict(arguments or {})
+        try:
+            target = self.workspace_policy.resolve_target(
+                agent_id=current.agent_id,
+                binding=binding,
+                candidate_cwd=str(supplied.get("cwd") or "").strip() or None,
+                requested_project=str(supplied.get("project") or "").strip() or None,
+                current_working_subpath=current.working_subpath,
+                allow_disabled=controller_approved,
+            )
+        except WorkerBeeWorkspacePolicyError as exc:
+            raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
+        if not target.requires_transition:
+            return self.refresh_workspace(current)
+
+        transition: dict[str, Any] | None = None
+        if transition_id:
+            transition = self.workspace_policy.get_transition(transition_id)
+            if (
+                transition is None
+                or transition.get("agent_id") != current.agent_id
+                or transition.get("lease_id") != current.lease_id
+            ):
+                raise WorkerBeeGatewayError(
+                    "WORKERBEE_WORKSPACE_TRANSITION_NOT_FOUND",
+                    "Workspace transition does not belong to this session lease.",
+                )
+        if target.request_mode == WORKERBEE_WORKSPACE_REQUEST_APPROVAL and not controller_approved:
+            transition = transition or self.workspace_policy.find_open_transition(
+                agent_id=current.agent_id,
+                lease_id=current.lease_id,
+                target=target,
+            )
+            if transition is None:
+                transition = self.workspace_policy.create_transition(
+                    agent_id=current.agent_id,
+                    lease_id=current.lease_id,
+                    from_binding_id=current.workspace_binding_id,
+                    target=target,
+                    status="pending",
+                    requested_by=requested_by or current.agent_id,
+                    reason=str(supplied.get("reason") or "").strip() or None,
+                    metadata=self._transition_metadata(current),
+                )
+                raise WorkerBeeGatewayError(
+                    "WORKERBEE_WORKSPACE_APPROVAL_REQUIRED",
+                    "WorkerBee workspace transition requires controller approval.",
+                    f"Approve transition {transition['transition_id']} in the WorkerBee tab, then retry.",
+                )
+            if transition.get("status") != "approved":
+                raise WorkerBeeGatewayError(
+                    "WORKERBEE_WORKSPACE_APPROVAL_REQUIRED",
+                    "WorkerBee workspace transition is awaiting controller approval.",
+                    f"Approve transition {transition['transition_id']} in the WorkerBee tab, then retry.",
+                )
+        elif transition is None:
+            transition = self.workspace_policy.create_transition(
+                agent_id=current.agent_id,
+                lease_id=current.lease_id,
+                from_binding_id=current.workspace_binding_id,
+                target=target,
+                status="approved",
+                requested_by=requested_by or current.agent_id,
+                approved_by=(requested_by or "policy:auto"),
+                reason=str(supplied.get("reason") or "").strip() or None,
+                metadata=self._transition_metadata(current),
+            )
+        elif transition.get("status") == "pending" and controller_approved:
+            transition = self.workspace_policy.approve_transition(
+                str(transition["transition_id"]), requested_by or "controller"
+            )
+
+        try:
+            include_paths = self._target_include_paths(current, target)
+            next_binding = self.workspace_service.prepare(
+                runtime=runtime,
+                project=target.runtime_project,
+                source_root=target.source_root,
+                include_paths=include_paths,
+            )
+            self.workspace_service.verify_runtime(next_binding, runtime)
+        except (WorkerBeeWorkspaceError, WorkerBeeGatewayError) as exc:
+            self.workspace_policy.update_transition(
+                str(transition["transition_id"]),
+                status="failed",
+                reason=str(getattr(exc, "message", exc)),
+            )
+            if isinstance(exc, WorkerBeeGatewayError):
+                raise
+            raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
+        updated = WorkerBeeGatewayLease(
+            **{
+                **asdict(current),
+                "workspace_binding_id": next_binding.binding_id,
+                "project": target.runtime_project,
+                "source_project": target.base_project,
+                "working_subpath": target.working_subpath,
+                "scenario_label": target.scenario_label,
+            }
+        )
+        lease_path = self._lease_path(current.lease_id)
+        _atomic_private_json(lease_path, updated.private_dict())
+        try:
+            if self.binding_refreshed is not None:
+                self.binding_refreshed(current, updated, next_binding)
+        except Exception as exc:  # noqa: BLE001
+            _atomic_private_json(lease_path, current.private_dict())
+            self.workspace_policy.update_transition(
+                str(transition["transition_id"]),
+                status="failed",
+                reason="Agent PBX mapping reconciliation failed",
+            )
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_TRANSITION_RECONCILE_FAILED",
+                "WorkerBee workspace changed but Agent PBX could not reconcile its session mapping.",
+                "The prior lease binding was restored; review daemon events before retrying.",
+            ) from exc
+        self.workspace_policy.update_transition(
+            str(transition["transition_id"]),
+            status="applied",
+            to_binding_id=next_binding.binding_id,
+        )
+        return updated, next_binding, True
+
+    def apply_transition(
+        self,
+        transition_id: str,
+        *,
+        approved_by: str,
+    ) -> tuple[WorkerBeeGatewayLease, WorkerBeeWorkspaceBinding, bool]:
+        if self.workspace_policy is None:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_POLICY_UNAVAILABLE",
+                "WorkerBee workspace policy service is unavailable.",
+            )
+        transition = self.workspace_policy.get_transition(transition_id)
+        if transition is None:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_TRANSITION_NOT_FOUND",
+                "Workspace transition was not found.",
+            )
+        if transition.get("status") not in {"pending", "approved"}:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_TRANSITION_NOT_PENDING",
+                "Only a pending or approved workspace transition can be applied.",
+            )
+        if transition["status"] == "pending":
+            transition = self.workspace_policy.approve_transition(
+                transition_id, approved_by
+            )
+        target_args = {
+            "cwd": str(
+                Path(str(transition["source_root"]))
+                / str(transition["working_subpath"])
+            ),
+            "project": transition.get("scenario_label")
+            or transition["runtime_project"],
+        }
+        return self.transition_workspace(
+            self.load(str(transition["lease_id"])),
+            target_args,
+            controller_approved=True,
+            requested_by=approved_by,
+            transition_id=transition_id,
+        )
+
+    def revert_transition(
+        self,
+        transition_id: str,
+        *,
+        reverted_by: str,
+    ) -> tuple[WorkerBeeGatewayLease, WorkerBeeWorkspaceBinding]:
+        if self.workspace_policy is None:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_POLICY_UNAVAILABLE",
+                "WorkerBee workspace policy service is unavailable.",
+            )
+        transition = self.workspace_policy.get_transition(transition_id)
+        if transition is None or transition.get("status") != "applied":
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_TRANSITION_NOT_APPLIED",
+                "Only the current applied workspace transition can be reverted.",
+            )
+        current = self.load(str(transition["lease_id"]))
+        if current.workspace_binding_id != transition.get("to_binding_id"):
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_REVERT_STALE",
+                "A newer workspace binding is active on this lease.",
+                "Revert the newest applicable transition instead.",
+            )
+        runtime, _binding = self._refresh_context(current)
+        previous = self.workspace_service.load(str(transition["from_binding_id"]))
+        try:
+            self.workspace_service.verify_runtime(previous, runtime)
+            # Re-apply current policy and administrator ceilings before restoring.
+            self.workspace_policy.resolve_target(
+                agent_id=current.agent_id,
+                binding=self.workspace_service.load(current.workspace_binding_id),
+                candidate_cwd=previous.source_root,
+                requested_project=None,
+                current_working_subpath=current.working_subpath,
+                allow_disabled=True,
+            )
+        except (WorkerBeeWorkspaceError, WorkerBeeWorkspacePolicyError) as exc:
+            raise WorkerBeeGatewayError(
+                str(getattr(exc, "code", "WORKERBEE_WORKSPACE_REVERT_DENIED")),
+                str(getattr(exc, "message", exc)),
+                str(getattr(exc, "remediation", "")),
+            ) from exc
+        metadata = transition.get("metadata") if isinstance(transition.get("metadata"), dict) else {}
+        updated = WorkerBeeGatewayLease(
+            **{
+                **asdict(current),
+                "workspace_binding_id": previous.binding_id,
+                "project": str(metadata.get("from_project") or previous.project),
+                "source_project": str(
+                    metadata.get("from_source_project") or previous.project
+                ),
+                "working_subpath": str(
+                    metadata.get("from_working_subpath") or "."
+                ),
+                "scenario_label": metadata.get("from_scenario_label"),
+            }
+        )
+        lease_path = self._lease_path(current.lease_id)
+        _atomic_private_json(lease_path, updated.private_dict())
+        try:
+            if self.binding_refreshed is not None:
+                self.binding_refreshed(current, updated, previous)
+        except Exception as exc:  # noqa: BLE001
+            _atomic_private_json(lease_path, current.private_dict())
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_REVERT_RECONCILE_FAILED",
+                "The prior binding was restored but Agent PBX mapping reconciliation failed.",
+                "The newer lease binding remains active.",
+            ) from exc
+        self.workspace_policy.update_transition(
+            transition_id,
+            status="reverted",
+            reason=f"Reverted by {reverted_by}",
+        )
+        return updated, previous
 
     def refresh_workspace(
         self,
@@ -519,6 +804,32 @@ class WorkerBeeGatewayService:
                 "Correct the host-owned include policy before refreshing this session.",
             ) from exc
 
+    def _target_include_paths(
+        self,
+        lease: WorkerBeeGatewayLease,
+        target: WorkerBeeWorkspaceTarget,
+    ) -> tuple[str, ...]:
+        try:
+            return configured_workerbee_workspace_include_paths(
+                agent_id=lease.agent_id,
+                source_root=target.source_root,
+            )
+        except WorkerBeeWorkspaceIncludePolicyError as exc:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_INCLUDE_INVALID",
+                f"WorkerBee workspace include policy {exc}.",
+                "Correct the host-owned include policy for the requested checkout.",
+            ) from exc
+
+    @staticmethod
+    def _transition_metadata(lease: WorkerBeeGatewayLease) -> dict[str, Any]:
+        return {
+            "from_project": lease.project,
+            "from_source_project": lease.source_project,
+            "from_working_subpath": lease.working_subpath,
+            "from_scenario_label": lease.scenario_label,
+        }
+
     @asynccontextmanager
     async def mutation(self, lease: WorkerBeeGatewayLease, tool_name: str) -> AsyncIterator[None]:
         mutating = tool_name in WORKERBEE_MUTATING_TOOLS
@@ -589,8 +900,9 @@ class WorkerBeeGatewayProxy:
             async with self.service.mutation(current, tool_name):
                 if tool_name == "workerbee_v1_session_start":
                     current, _binding, _changed = await asyncio.to_thread(
-                        self.service.refresh_workspace,
+                        self.service.transition_workspace,
                         current,
+                        arguments,
                     )
                 elif tool_name in WORKERBEE_MUTATING_TOOLS:
                     await asyncio.to_thread(

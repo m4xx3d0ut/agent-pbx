@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -509,6 +509,50 @@ class Store:
 
                 CREATE INDEX IF NOT EXISTS idx_runtime_migration_retention
                     ON runtime_migration_batches(retention_until, status);
+
+                CREATE TABLE IF NOT EXISTS workerbee_workspace_policies (
+                    scope TEXT PRIMARY KEY,
+                    policy TEXT NOT NULL,
+                    request_mode TEXT NOT NULL,
+                    allowed_roots_json TEXT NOT NULL DEFAULT '[]',
+                    managed_scratch_root TEXT,
+                    profile_label TEXT,
+                    updated_by TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS workerbee_workspace_transitions (
+                    transition_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    lease_id TEXT NOT NULL,
+                    from_binding_id TEXT NOT NULL,
+                    to_binding_id TEXT,
+                    source_root TEXT NOT NULL,
+                    working_subpath TEXT NOT NULL DEFAULT '.',
+                    base_project TEXT NOT NULL,
+                    runtime_project TEXT NOT NULL,
+                    scenario_label TEXT,
+                    policy TEXT NOT NULL,
+                    request_mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reason TEXT,
+                    requested_by TEXT,
+                    approved_by TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    approved_at REAL,
+                    applied_at REAL,
+                    reverted_at REAL,
+                    failed_at REAL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_workerbee_workspace_transition_agent
+                    ON workerbee_workspace_transitions(agent_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_workerbee_workspace_transition_lease
+                    ON workerbee_workspace_transitions(lease_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_workerbee_workspace_transition_status
+                    ON workerbee_workspace_transitions(status, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS joplin_logs (
                     log_id TEXT PRIMARY KEY,

@@ -19,7 +19,7 @@ from .codex_cli import inspect_codex_posture
 from .codex_theme import MANAGED_CODEX_THEME_NAME, managed_codex_theme_status
 from .compat import compatibility_posture
 from .mcp_daemon import MCPDaemonConfig, lan_auth_guard, mcp_daemon_status
-from .store import SCHEMA_VERSION
+from .store import SCHEMA_VERSION, Store
 from .tmux_binary import (
     configured_tmux_binary,
     managed_tmux_shim_status,
@@ -35,6 +35,7 @@ from .workerbee_runtime import (
     canonical_workerbee_backend,
 )
 from .workerbee_workspace import WORKERBEE_WORKSPACE_HELPER_ENV
+from .workerbee_policy import WorkerBeeWorkspacePolicyService
 from .workerbee_materializer import (
     DEBUG_STAGE_PYTHON_ENV,
     DEBUG_STAGE_SCRIPT_ENV,
@@ -147,6 +148,7 @@ def run_platform_doctor(
     checks.append(_workerbee_check(config, which, timeout))
     checks.append(_workerbee_switcher_check(which, timeout))
     checks.append(_workerbee_runtime_binding_check(config, which, timeout))
+    checks.append(_workerbee_workspace_policy_check(config))
     checks.append(_joplin_check(config, timeout, probe_services=probe_services))
     checks.append(_clipboard_check(which))
     return DoctorReport(
@@ -745,6 +747,48 @@ def _workerbee_runtime_binding_check(
         "pass",
         f"{selected.backend} generation {selected.generation} ready",
         detail=" · ".join(details),
+    )
+
+
+def _workerbee_workspace_policy_check(config: MCPDaemonConfig) -> DoctorCheck:
+    if not config.resolved_db_path.is_file():
+        return DoctorCheck(
+            "workerbee-workspace-policy",
+            "warn",
+            "workspace policy will use safe defaults after database initialization",
+        )
+    try:
+        service = WorkerBeeWorkspacePolicyService(Store(config.resolved_db_path))
+        view = service.get_policy()
+    except Exception as exc:  # noqa: BLE001 - doctor must report malformed state
+        return DoctorCheck(
+            "workerbee-workspace-policy",
+            "warn",
+            "WorkerBee workspace policy is unreadable",
+            detail=f"{type(exc).__name__}: {exc}",
+            remediation="Run the Agent PBX migration, then review the host workspace policy.",
+        )
+    effective = view["effective"]
+    admin = view["admin"]
+    policy = str(effective.get("policy") or "pinned")
+    roots = effective.get("allowed_roots") or []
+    valid = policy != "scoped-workbench" or bool(roots)
+    label = str(effective.get("profile_label") or "Safe default")
+    return DoctorCheck(
+        "workerbee-workspace-policy",
+        "pass" if valid else "warn",
+        f"{label}: {policy} with {effective.get('request_mode') or 'approval'} requests",
+        detail=(
+            f"control={admin.get('control_mode') or 'editable'} · "
+            f"ceiling={admin.get('policy_ceiling') or 'scoped-workbench'} · "
+            f"allowed_roots={len(roots)} · "
+            f"managed_scratch={bool(effective.get('managed_scratch_root'))}"
+        ),
+        remediation=(
+            "Configure at least one existing allowed root for scoped-workbench policy."
+            if not valid
+            else ""
+        ),
     )
 
 

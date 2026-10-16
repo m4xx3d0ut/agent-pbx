@@ -15,6 +15,7 @@ from agent_pbx.doctor import (
     _tmux_server_diagnostic,
     _compatibility_check,
     _workerbee_runtime_binding_check,
+    _workerbee_workspace_policy_check,
     doctor_json,
     doctor_markdown,
     run_platform_doctor,
@@ -23,6 +24,7 @@ from agent_pbx.mcp_daemon import MCPDaemonConfig
 from agent_pbx.store import SCHEMA_VERSION, Store
 from agent_pbx.workerbee_mcp import WorkerBeeBackendProvenance
 from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
+from agent_pbx.workerbee_policy import WorkerBeeWorkspacePolicyService
 
 
 def test_doctor_report_formats_machine_and_human_output() -> None:
@@ -56,6 +58,29 @@ def test_doctor_database_check_handles_new_current_and_legacy_state(tmp_path: Pa
     assert missing.status == "warn"
     assert current.status == "pass"
     assert f"schema {SCHEMA_VERSION}" in current.summary
+
+
+def test_doctor_reports_effective_workerbee_workspace_policy(tmp_path: Path) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path)
+    store = Store(config.resolved_db_path)
+    store.init()
+    root = tmp_path / "git"
+    root.mkdir()
+    WorkerBeeWorkspacePolicyService(store, environ={}).set_policy(
+        agent_id=None,
+        policy="scoped-workbench",
+        request_mode="automatic",
+        allowed_roots=[str(root)],
+        managed_scratch_root=str(root / ".scratch"),
+        profile_label="Rosie Workbench",
+        updated_by="test",
+    )
+
+    check = _workerbee_workspace_policy_check(config)
+
+    assert check.status == "pass"
+    assert "Rosie Workbench" in check.summary
+    assert "allowed_roots=1" in check.detail
 
 
 def test_doctor_security_rejects_unprotected_lan_and_warns_on_override(

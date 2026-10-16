@@ -71,6 +71,14 @@
 
 ### Added
 
+- Add daemon-owned WorkerBee workspace mobility with `pinned`,
+  `same-repository`, and `scoped-workbench` policies. Session-start requests
+  resolve to canonical Git roots and working subpaths, preserve the existing
+  gateway lease and access profile, journal approval/application/revert state,
+  and enforce administrator policy/root ceilings. The WorkerBee tab and
+  palette expose controller preview, policy, approval, bind, and rollback
+  actions; committed defaults remain pinned and approval-gated.
+
 - Add `/joplin retry write` and an Agent-scoped API action to requeue the
   selected Agent or Operator's latest failed targeted write without creating a
   duplicate note or invoking strict whole-profile E2EE validation.

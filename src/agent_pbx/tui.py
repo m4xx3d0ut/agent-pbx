@@ -712,6 +712,8 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/editor terminal forget",
     "/workerbee",
     "/workerbee preflight",
+    "/workerbee workspace",
+    "/workerbee policy",
     "/workerbee switch oss",
     "/workerbee switch debug",
     "/workerbee switch rollback",
@@ -2462,6 +2464,13 @@ def contains_codex_copy_selector(text: str) -> bool:
 
 def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME_NAME) -> set[str]:
     names = set(BUILT_IN_PALETTE_COMMAND_NAMES)
+    if (
+        str(os.getenv("AGENT_PBX_WORKERBEE_WORKSPACE_CONTROL_MODE") or "")
+        .strip()
+        .lower()
+        == "hidden"
+    ):
+        names.difference_update({"/workerbee workspace", "/workerbee policy"})
     names.add(f"/theme {custom_theme_name}")
     return names
 
@@ -4172,6 +4181,188 @@ class WorkerBeeSwitchConfirmScreen(ModalScreen[None]):
             self.submit()
 
 
+class WorkerBeeWorkspaceScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        policy_view: dict[str, Any],
+        transitions: list[dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.policy_view = policy_view
+        self.transitions = transitions
+        self.preview_payload: dict[str, Any] | None = None
+
+    def compose(self) -> ComposeResult:
+        effective = self.policy_view.get("effective") or {}
+        admin = self.policy_view.get("admin") or {}
+        read_only = str(admin.get("control_mode") or "editable") != "editable"
+        roots = ", ".join(str(item) for item in effective.get("allowed_roots") or ())
+        with Vertical(id="workerbee-workspace-panel"):
+            yield Static("WorkerBee Workspace", id="workerbee-workspace-title")
+            yield Static(
+                f"{effective.get('profile_label') or 'Workspace policy'} · "
+                f"control={admin.get('control_mode') or '-'} · "
+                f"ceiling={admin.get('policy_ceiling') or '-'}",
+                id="workerbee-workspace-posture",
+            )
+            yield Select(
+                [
+                    ("Pinned checkout", "pinned"),
+                    ("Same Git repository", "same-repository"),
+                    ("Scoped workbench", "scoped-workbench"),
+                ],
+                value=str(effective.get("policy") or "pinned"),
+                id="workerbee-workspace-policy",
+                disabled=read_only,
+            )
+            yield Select(
+                [
+                    ("Approval required", "approval"),
+                    ("Automatic", "automatic"),
+                    ("Disabled", "disabled"),
+                ],
+                value=str(effective.get("request_mode") or "approval"),
+                id="workerbee-workspace-request-mode",
+                disabled=read_only,
+            )
+            yield Input(
+                value=roots,
+                placeholder="Allowed roots, comma-separated",
+                id="workerbee-workspace-roots",
+                disabled=read_only,
+            )
+            yield Input(
+                value=str(effective.get("managed_scratch_root") or ""),
+                placeholder="Managed scratch root (optional)",
+                id="workerbee-workspace-scratch",
+                disabled=read_only,
+            )
+            yield Input(
+                value=str(effective.get("profile_label") or ""),
+                placeholder="Profile label",
+                id="workerbee-workspace-label",
+                disabled=read_only,
+            )
+            yield Input(
+                placeholder="Git checkout or subdirectory to bind",
+                id="workerbee-workspace-target",
+            )
+            yield Input(
+                placeholder="Scenario label (optional)",
+                id="workerbee-workspace-scenario",
+            )
+            yield Static(self.transition_summary(), id="workerbee-workspace-summary")
+            with Horizontal(id="workerbee-workspace-policy-actions"):
+                yield Button("Save Agent", id="workerbee-workspace-save", disabled=read_only)
+                yield Button("Save Global", id="workerbee-workspace-save-global", disabled=read_only)
+                yield Button("Inherit", id="workerbee-workspace-inherit", disabled=read_only)
+                yield Button("Preview", id="workerbee-workspace-preview")
+                yield Button("Bind", id="workerbee-workspace-bind", disabled=True, variant="primary")
+            with Horizontal(id="workerbee-workspace-transition-actions"):
+                yield Button("Approve Pending", id="workerbee-workspace-approve")
+                yield Button("Deny Pending", id="workerbee-workspace-deny")
+                yield Button("Revert Latest", id="workerbee-workspace-revert")
+                yield Button("Close", id="workerbee-workspace-close")
+
+    def transition_summary(self) -> str:
+        latest = self.transitions[0] if self.transitions else None
+        if not latest:
+            return "No workspace transitions recorded."
+        return (
+            f"Latest: {latest.get('status') or '-'} · "
+            f"{latest.get('runtime_project') or '-'} · "
+            f"{latest.get('working_subpath') or '.'}"
+        )
+
+    def policy_payload(self) -> dict[str, Any]:
+        policy = self.query_one("#workerbee-workspace-policy", Select).value
+        request_mode = self.query_one("#workerbee-workspace-request-mode", Select).value
+        roots_text = self.query_one("#workerbee-workspace-roots", Input).value
+        return {
+            "policy": str(policy),
+            "request_mode": str(request_mode),
+            "allowed_roots": [part.strip() for part in roots_text.split(",") if part.strip()],
+            "managed_scratch_root": self.query_one("#workerbee-workspace-scratch", Input).value.strip() or None,
+            "profile_label": self.query_one("#workerbee-workspace-label", Input).value.strip() or None,
+        }
+
+    def target_payload(self) -> dict[str, Any]:
+        return {
+            "cwd": self.query_one("#workerbee-workspace-target", Input).value.strip(),
+            "project": self.query_one("#workerbee-workspace-scenario", Input).value.strip() or None,
+        }
+
+    def show_preview(self, payload: dict[str, Any]) -> None:
+        self.preview_payload = {"request": self.target_payload(), "preview": payload}
+        target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+        self.query_one("#workerbee-workspace-summary", Static).update(
+            f"Preview: {target.get('source_root') or '-'} · "
+            f"{target.get('working_subpath') or '.'} · "
+            f"{target.get('runtime_project') or '-'} · "
+            f"{target.get('request_mode') or '-'}"
+        )
+        self.query_one("#workerbee-workspace-bind", Button).disabled = False
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        button_id = event.button.id
+        if button_id == "workerbee-workspace-close":
+            self.dismiss()
+        elif button_id == "workerbee-workspace-save":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.save_workerbee_workspace_policy(self),  # type: ignore[attr-defined]
+                name="workerbee-workspace-policy-save",
+                exclusive=True,
+            )
+        elif button_id == "workerbee-workspace-save-global":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.save_workerbee_workspace_policy(self, global_policy=True),  # type: ignore[attr-defined]
+                name="workerbee-workspace-global-policy-save",
+                exclusive=True,
+            )
+        elif button_id == "workerbee-workspace-inherit":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.inherit_workerbee_workspace_policy(self),  # type: ignore[attr-defined]
+                name="workerbee-workspace-policy-inherit",
+                exclusive=True,
+            )
+        elif button_id == "workerbee-workspace-preview":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.preview_workerbee_workspace_target(self),  # type: ignore[attr-defined]
+                name="workerbee-workspace-preview",
+                exclusive=True,
+            )
+        elif button_id == "workerbee-workspace-bind":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.apply_workerbee_workspace_target(self),  # type: ignore[attr-defined]
+                name="workerbee-workspace-bind",
+                exclusive=True,
+            )
+        elif button_id == "workerbee-workspace-approve":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.approve_workerbee_workspace_transition(self),  # type: ignore[attr-defined]
+                name="workerbee-workspace-approve",
+                exclusive=True,
+            )
+        elif button_id == "workerbee-workspace-deny":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.deny_workerbee_workspace_transition(self),  # type: ignore[attr-defined]
+                name="workerbee-workspace-deny",
+                exclusive=True,
+            )
+        elif button_id == "workerbee-workspace-revert":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.revert_workerbee_workspace_transition(self),  # type: ignore[attr-defined]
+                name="workerbee-workspace-revert",
+                exclusive=True,
+            )
+
+
 class PullRequestMergeConfirmScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Close")]
 
@@ -4948,6 +5139,7 @@ class AgentPBXTUI(App[None]):
     OperatorKillConfirmScreen,
     OperatorHistoryScreen,
     WorkerBeeSwitchConfirmScreen,
+    WorkerBeeWorkspaceScreen,
     PullRequestMergeConfirmScreen,
     IssueClearConfirmScreen {
         align: center middle;
@@ -4965,6 +5157,7 @@ class AgentPBXTUI(App[None]):
     #operator-kill-panel,
     #operator-history-panel,
     #workerbee-switch-panel,
+    #workerbee-workspace-panel,
     #pr-merge-panel,
     #issue-clear-panel {
         width: 64;
@@ -5671,6 +5864,34 @@ class AgentPBXTUI(App[None]):
         width: 1fr;
     }
 
+    #workerbee-workspace-panel {
+        width: 92;
+        max-width: 94%;
+        height: auto;
+        max-height: 94%;
+        border: tall $accent;
+        background: $panel;
+        padding: 1 2;
+    }
+
+    #workerbee-workspace-posture,
+    #workerbee-workspace-summary {
+        height: auto;
+        min-height: 2;
+        color: $secondary;
+    }
+
+    #workerbee-workspace-policy-actions,
+    #workerbee-workspace-transition-actions {
+        height: 3;
+        margin-top: 1;
+    }
+
+    #workerbee-workspace-policy-actions Button,
+    #workerbee-workspace-transition-actions Button {
+        width: 1fr;
+    }
+
     #pull-request-status,
     #issue-status,
     #operator-kb-status {
@@ -6309,6 +6530,14 @@ class AgentPBXTUI(App[None]):
             "latest_viewed_at_by_agent",
         )
         self.workerbee_status_by_agent: dict[str, dict[str, Any]] = {}
+        self.workerbee_workspace_policy_by_agent: dict[str, dict[str, Any]] = {}
+        self.workerbee_workspace_transitions_by_agent: dict[str, list[dict[str, Any]]] = {}
+        self.workerbee_workspace_controls_hidden = (
+            str(os.getenv("AGENT_PBX_WORKERBEE_WORKSPACE_CONTROL_MODE") or "")
+            .strip()
+            .lower()
+            == "hidden"
+        )
         self.pull_request_status_by_agent: dict[str, dict[str, Any]] = {}
         self.pull_requests_by_agent: dict[str, dict[int, dict[str, Any]]] = {}
         self.selected_pull_request_number: int | None = None
@@ -7946,6 +8175,7 @@ class AgentPBXTUI(App[None]):
                         yield NavigationTextArea(id="workerbee-detail", read_only=True)
                         with Horizontal(id="workerbee-actions"):
                             yield Button("Refresh WorkerBee", id="workerbee-refresh")
+                            yield Button("Workspace", id="workerbee-workspace")
                             yield Button("Switch OSS", id="workerbee-switch-oss")
                             yield Button("Switch Debug", id="workerbee-switch-debug")
                             yield Button("Rollback", id="workerbee-switch-rollback")
@@ -8073,6 +8303,9 @@ class AgentPBXTUI(App[None]):
         # demo does not need a synthetic browser resize to settle its panes.
         self.call_after_refresh(self.settle_initial_layout_geometry)
         self.apply_tmux_class()
+        workspace_button = self.query_one_or_none("#workerbee-workspace", Button)
+        if workspace_button is not None:
+            workspace_button.display = not self.workerbee_workspace_controls_hidden
         agents = self.query_one("#agents", DataTable)
         self.render_agent_columns(agents)
         operators = self.query_one("#operators", DataTable)
@@ -8360,6 +8593,9 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/editor reveal", "Reveal the current editor file in Files", self.palette_editor_reveal)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         yield SystemCommand("/workerbee preflight", "Check WorkerBee MCP bootstrap capability", self.palette_workerbee_preflight)
+        if not self.workerbee_workspace_controls_hidden:
+            yield SystemCommand("/workerbee workspace", "Manage the selected Agent WorkerBee workspace", self.palette_workerbee_workspace)
+            yield SystemCommand("/workerbee policy", "Manage the selected Agent WorkerBee workspace policy", self.palette_workerbee_workspace)
         yield SystemCommand("/workerbee switch oss", "Preview switching future sessions to OSS WorkerBee", self.palette_workerbee_switch_oss)
         yield SystemCommand("/workerbee switch debug", "Preview switching future sessions to platform-debug WorkerBee", self.palette_workerbee_switch_debug)
         yield SystemCommand("/workerbee switch rollback", "Preview rollback of the last verified WorkerBee switch", self.palette_workerbee_switch_rollback)
@@ -9557,6 +9793,17 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.refresh_workerbee_mcp_preflight(),
             name="workerbee-mcp-preflight",
+            exclusive=True,
+        )
+
+    def palette_workerbee_workspace(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.activate_agent_tab("workerbee-tab")
+        self.run_worker(
+            self.open_workerbee_workspace_manager(agent_id),
+            name="workerbee-workspace-manager",
             exclusive=True,
         )
 
@@ -16420,6 +16667,10 @@ class AgentPBXTUI(App[None]):
         if event.button.id == "workerbee-refresh":
             if self.selected_agent_id:
                 await self.load_workerbee_status(self.selected_agent_id)
+            return
+        if event.button.id == "workerbee-workspace":
+            if self.selected_agent_id:
+                await self.open_workerbee_workspace_manager(self.selected_agent_id)
             return
         if event.button.id == "workerbee-switch-oss":
             await self.preview_workerbee_switch("oss")
@@ -32523,6 +32774,16 @@ class AgentPBXTUI(App[None]):
                 detail.text = f"Unable to load WorkerBee status for {agent_id}: {exc}"
             return
         self.workerbee_status_by_agent[agent_id] = status
+        workspace_policy = (
+            status.get("workspace_policy")
+            if isinstance(status.get("workspace_policy"), dict)
+            else {}
+        )
+        if workspace_policy.get("control_mode") == "hidden":
+            self.workerbee_workspace_controls_hidden = True
+        workspace_button = self.query_one_or_none("#workerbee-workspace", Button)
+        if workspace_button is not None:
+            workspace_button.display = not self.workerbee_workspace_controls_hidden
         if render_detail and detail is not None:
             rendered = self.format_workerbee_status(status)
             if self.workerbee_backend_provenance is not None:
@@ -32540,6 +32801,242 @@ class AgentPBXTUI(App[None]):
             detail.text = rendered
         if self.selected_agent_id == agent_id:
             self.render_codex_runtime_surface()
+
+    async def load_workerbee_workspace_policy(
+        self,
+        agent_id: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        encoded = quote(agent_id, safe="")
+        policy_response, transitions_response = await asyncio.gather(
+            self.api_client().get(
+                f"/v2/agents/{encoded}/workerbee/workspace-policy",
+                headers=auth_headers(self.token),
+                timeout=15,
+            ),
+            self.api_client().get(
+                f"/v2/agents/{encoded}/workerbee/workspace-transitions",
+                headers=auth_headers(self.token),
+                timeout=15,
+            ),
+        )
+        policy_response.raise_for_status()
+        transitions_response.raise_for_status()
+        policy = dict(policy_response.json())
+        transitions = [
+            dict(item)
+            for item in transitions_response.json()
+            if isinstance(item, dict)
+        ]
+        self.workerbee_workspace_policy_by_agent[agent_id] = policy
+        self.workerbee_workspace_transitions_by_agent[agent_id] = transitions
+        admin = policy.get("admin") if isinstance(policy.get("admin"), dict) else {}
+        if admin.get("control_mode") == "hidden":
+            self.workerbee_workspace_controls_hidden = True
+        workspace_button = self.query_one_or_none("#workerbee-workspace", Button)
+        if workspace_button is not None:
+            workspace_button.display = not self.workerbee_workspace_controls_hidden
+        return policy, transitions
+
+    async def open_workerbee_workspace_manager(self, agent_id: str) -> None:
+        try:
+            policy, transitions = await self.load_workerbee_workspace_policy(agent_id)
+        except Exception as exc:
+            self.notify(f"WorkerBee workspace policy failed: {exc}", severity="error")
+            return
+        admin = policy.get("admin") if isinstance(policy.get("admin"), dict) else {}
+        if admin.get("control_mode") == "hidden":
+            self.notify(
+                "WorkerBee workspace controls are hidden by administrator policy.",
+                severity="warning",
+            )
+            return
+        self.push_screen(
+            WorkerBeeWorkspaceScreen(
+                agent_id=agent_id,
+                policy_view=policy,
+                transitions=transitions,
+            )
+        )
+
+    async def save_workerbee_workspace_policy(
+        self,
+        screen: WorkerBeeWorkspaceScreen,
+        *,
+        global_policy: bool = False,
+    ) -> None:
+        path = (
+            "/v2/workerbee/workspace-policy"
+            if global_policy
+            else f"/v2/agents/{quote(screen.agent_id, safe='')}/workerbee/workspace-policy"
+        )
+        try:
+            response = await self.api_client().put(
+                path,
+                json=screen.policy_payload(),
+                headers=auth_headers(self.token),
+                timeout=15,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"WorkerBee policy update failed: {exc}", severity="error")
+            return
+        self.notify(
+            "Global WorkerBee workspace policy saved."
+            if global_policy
+            else "Agent WorkerBee workspace policy saved."
+        )
+        screen.dismiss()
+        await self.open_workerbee_workspace_manager(screen.agent_id)
+
+    async def inherit_workerbee_workspace_policy(
+        self,
+        screen: WorkerBeeWorkspaceScreen,
+    ) -> None:
+        try:
+            response = await self.api_client().delete(
+                f"/v2/agents/{quote(screen.agent_id, safe='')}/workerbee/workspace-policy",
+                headers=auth_headers(self.token),
+                timeout=15,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"WorkerBee policy inheritance failed: {exc}", severity="error")
+            return
+        self.notify("WorkerBee workspace policy now inherits the global policy.")
+        screen.dismiss()
+        await self.open_workerbee_workspace_manager(screen.agent_id)
+
+    async def preview_workerbee_workspace_target(
+        self,
+        screen: WorkerBeeWorkspaceScreen,
+    ) -> None:
+        payload = screen.target_payload()
+        if not payload.get("cwd"):
+            self.notify("Enter a Git checkout or subdirectory to preview.", severity="warning")
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v2/agents/{quote(screen.agent_id, safe='')}/workerbee/workspace-transitions/preview",
+                json=payload,
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            preview = dict(response.json())
+        except Exception as exc:
+            self.notify(f"WorkerBee workspace preview failed: {exc}", severity="error")
+            return
+        screen.show_preview(preview)
+
+    async def apply_workerbee_workspace_target(
+        self,
+        screen: WorkerBeeWorkspaceScreen,
+    ) -> None:
+        current = screen.target_payload()
+        if not screen.preview_payload or screen.preview_payload.get("request") != current:
+            screen.preview_payload = None
+            screen.query_one("#workerbee-workspace-bind", Button).disabled = True
+            self.notify("Preview the current workspace target before binding.", severity="warning")
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v2/agents/{quote(screen.agent_id, safe='')}/workerbee/workspace-transitions",
+                json=current,
+                headers=auth_headers(self.token),
+                timeout=240,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            self.notify(f"WorkerBee workspace bind failed: {exc}", severity="error")
+            return
+        self.workerbee_status_by_agent.pop(screen.agent_id, None)
+        self.notify(
+            "WorkerBee workspace binding updated."
+            if result.get("changed")
+            else "WorkerBee workspace binding is already current."
+        )
+        screen.dismiss()
+        await self.load_workerbee_status(screen.agent_id)
+
+    async def approve_workerbee_workspace_transition(
+        self,
+        screen: WorkerBeeWorkspaceScreen,
+    ) -> None:
+        pending = next(
+            (item for item in screen.transitions if item.get("status") == "pending"),
+            None,
+        )
+        if pending is None:
+            self.notify("No pending WorkerBee workspace transition.", severity="warning")
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v2/agents/{quote(screen.agent_id, safe='')}/workerbee/workspace-transitions/"
+                f"{quote(str(pending.get('transition_id') or ''), safe='')}/decision",
+                json={"approve": True},
+                headers=auth_headers(self.token),
+                timeout=240,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"WorkerBee transition approval failed: {exc}", severity="error")
+            return
+        self.notify("WorkerBee workspace transition approved and applied.")
+        screen.dismiss()
+        await self.load_workerbee_status(screen.agent_id)
+
+    async def deny_workerbee_workspace_transition(
+        self,
+        screen: WorkerBeeWorkspaceScreen,
+    ) -> None:
+        pending = next(
+            (item for item in screen.transitions if item.get("status") == "pending"),
+            None,
+        )
+        if pending is None:
+            self.notify("No pending WorkerBee workspace transition.", severity="warning")
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v2/agents/{quote(screen.agent_id, safe='')}/workerbee/workspace-transitions/"
+                f"{quote(str(pending.get('transition_id') or ''), safe='')}/decision",
+                json={"approve": False},
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"WorkerBee transition denial failed: {exc}", severity="error")
+            return
+        self.notify("WorkerBee workspace transition denied.")
+        screen.dismiss()
+
+    async def revert_workerbee_workspace_transition(
+        self,
+        screen: WorkerBeeWorkspaceScreen,
+    ) -> None:
+        applied = next(
+            (item for item in screen.transitions if item.get("status") == "applied"),
+            None,
+        )
+        if applied is None:
+            self.notify("No current applied WorkerBee workspace transition.", severity="warning")
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v2/agents/{quote(screen.agent_id, safe='')}/workerbee/workspace-transitions/"
+                f"{quote(str(applied.get('transition_id') or ''), safe='')}/revert",
+                headers=auth_headers(self.token),
+                timeout=240,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"WorkerBee workspace revert failed: {exc}", severity="error")
+            return
+        self.notify("WorkerBee workspace binding reverted.")
+        screen.dismiss()
+        await self.load_workerbee_status(screen.agent_id)
 
     def workerbee_mcp_endpoint(self) -> str:
         config = dict(DEFAULT_REVIEW_OPERATOR_MCP_SERVER_CONFIGS.get("workerbee", {}))

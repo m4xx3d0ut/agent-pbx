@@ -67,6 +67,10 @@ from .workerbee_workspace import (
     WorkerBeeWorkspaceError,
     WorkerBeeWorkspaceService,
 )
+from .workerbee_policy import (
+    WorkerBeeWorkspacePolicyError,
+    WorkerBeeWorkspacePolicyService,
+)
 from .workerbee_mcp import call_workerbee_mcp_tool
 from .workerbee_switcher import WorkerBeeSwitchService
 from .events import EventClientRegistry, EventStreamService
@@ -148,6 +152,9 @@ from .schemas import (
     TerminalEditorStartRequest,
     WorkerBeeSwitchApplyRequest,
     WorkerBeeGatewayLeaseRequest,
+    WorkerBeeWorkspacePolicyRequest,
+    WorkerBeeWorkspaceTransitionDecisionRequest,
+    WorkerBeeWorkspaceTransitionRequest,
     WorkerBeeSwitchPreviewRequest,
     WorkerBeeSwitchRollbackRequest,
     WorkerBeeWorkspacePrepareRequest,
@@ -372,6 +379,7 @@ async def selected_workerbee_status_for_agent(
         result["status_source"] = "selected_oss_cli" if selected else "host_cli"
         result["selected_runtime"] = selected
         result["workspace_binding"] = None
+        result["workspace_policy"] = workerbee_policy_status(app, str(agent.get("agent_id") or ""))
         return result
 
     agent_id = str(agent.get("agent_id") or "")
@@ -417,6 +425,7 @@ async def selected_workerbee_status_for_agent(
         "status_source": "selected_mcp",
         "selected_runtime": selected,
         "workspace_binding": None,
+        "workspace_policy": workerbee_policy_status(app, agent_id),
     }
     if not binding_id:
         base["error"] = {
@@ -477,6 +486,23 @@ async def selected_workerbee_status_for_agent(
             "remediation": str(getattr(exc, "remediation", "Retry after verifying the selected backend and binding.")),
         }
     return base
+
+
+def workerbee_policy_status(app: FastAPI, agent_id: str) -> dict[str, Any]:
+    """Return a root-redacted policy summary for ordinary status consumers."""
+
+    view = app.state.workerbee_workspace_policy.get_policy(agent_id)
+    effective = view.get("effective") if isinstance(view.get("effective"), dict) else {}
+    admin = view.get("admin") if isinstance(view.get("admin"), dict) else {}
+    return {
+        "profile_label": effective.get("profile_label"),
+        "policy": effective.get("policy"),
+        "request_mode": effective.get("request_mode"),
+        "allowed_root_count": len(effective.get("allowed_roots") or ()),
+        "managed_scratch_configured": bool(effective.get("managed_scratch_root")),
+        "control_mode": admin.get("control_mode"),
+        "constrained": bool(view.get("constrained")),
+    }
 
 
 def create_app(config: ServerConfig | None = None) -> FastAPI:
@@ -548,6 +574,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     workerbee_workspaces = WorkerBeeWorkspaceService(
         workerbee_state_root / "workspaces"
     )
+    workerbee_workspace_policy = WorkerBeeWorkspacePolicyService(store)
 
     def record_workerbee_workspace_refresh(
         previous_lease: WorkerBeeGatewayLease,
@@ -563,6 +590,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             "backend": refreshed_lease.backend,
             "backend_generation": refreshed_lease.backend_generation,
             "project": binding.project,
+            "source_project": refreshed_lease.source_project,
+            "working_subpath": refreshed_lease.working_subpath,
+            "scenario_label": refreshed_lease.scenario_label,
             "source_commit": binding.source_commit,
             "source_dirty": binding.source_dirty,
             "refreshed_at": refreshed_at,
@@ -577,6 +607,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 "workerbee_workspace_refreshed_at": refreshed_at,
                 "workerbee_backend": refreshed_lease.backend,
                 "workerbee_backend_generation": refreshed_lease.backend_generation,
+                "workerbee_workspace_source_root": binding.source_root,
+                "workerbee_workspace_working_subpath": refreshed_lease.working_subpath,
+                "workerbee_workspace_project": refreshed_lease.project,
+                "workerbee_workspace_scenario": refreshed_lease.scenario_label,
             },
             event_type="workerbee_workspace_refreshed",
             event_payload=event_payload,
@@ -589,6 +623,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         workerbee_runtime,
         workerbee_workspaces,
         binding_refreshed=record_workerbee_workspace_refresh,
+        workspace_policy=workerbee_workspace_policy,
     )
     workerbee_gateway_app = create_workerbee_gateway_app(workerbee_gateway)
     workerbee_switcher = WorkerBeeSwitchService(
@@ -684,6 +719,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.workerbee = workerbee
     app.state.workerbee_runtime = workerbee_runtime
     app.state.workerbee_workspaces = workerbee_workspaces
+    app.state.workerbee_workspace_policy = workerbee_workspace_policy
     app.state.workerbee_gateway = workerbee_gateway
     app.state.workerbee_switcher = workerbee_switcher
     app.state.pull_requests = pull_requests
@@ -1956,6 +1992,285 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     async def workerbee_runtime_status(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
 
+    @app.get(
+        "/v2/workerbee/workspace-policy",
+        response_model=dict[str, Any],
+    )
+    async def get_workerbee_workspace_policy(
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            request.app.state.workerbee_workspace_policy.get_policy
+        )
+
+    @app.put(
+        "/v2/workerbee/workspace-policy",
+        response_model=dict[str, Any],
+    )
+    async def put_workerbee_workspace_policy(
+        payload: WorkerBeeWorkspacePolicyRequest,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_workspace_policy.set_policy,
+                agent_id=None,
+                policy=payload.policy,
+                request_mode=payload.request_mode,
+                allowed_roots=payload.allowed_roots,
+                managed_scratch_root=payload.managed_scratch_root,
+                profile_label=payload.profile_label,
+                updated_by=controller.token_id or "local",
+            )
+        except WorkerBeeWorkspacePolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.get(
+        "/v2/agents/{agent_id}/workerbee/workspace-policy",
+        response_model=dict[str, Any],
+    )
+    async def get_agent_workerbee_workspace_policy(
+        agent_id: str,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        return await asyncio.to_thread(
+            request.app.state.workerbee_workspace_policy.get_policy, agent_id
+        )
+
+    @app.put(
+        "/v2/agents/{agent_id}/workerbee/workspace-policy",
+        response_model=dict[str, Any],
+    )
+    async def put_agent_workerbee_workspace_policy(
+        agent_id: str,
+        payload: WorkerBeeWorkspacePolicyRequest,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_workspace_policy.set_policy,
+                agent_id=agent_id,
+                policy=payload.policy,
+                request_mode=payload.request_mode,
+                allowed_roots=payload.allowed_roots,
+                managed_scratch_root=payload.managed_scratch_root,
+                profile_label=payload.profile_label,
+                updated_by=controller.token_id or controller.client_id or "local",
+            )
+        except WorkerBeeWorkspacePolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.delete(
+        "/v2/agents/{agent_id}/workerbee/workspace-policy",
+        response_model=dict[str, Any],
+    )
+    async def delete_agent_workerbee_workspace_policy(
+        agent_id: str,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_workspace_policy.clear_policy,
+                agent_id,
+                updated_by=controller.token_id or controller.client_id or "local",
+            )
+        except WorkerBeeWorkspacePolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.get(
+        "/v2/agents/{agent_id}/workerbee/workspace-transitions",
+        response_model=list[dict[str, Any]],
+    )
+    async def list_workerbee_workspace_transitions(
+        agent_id: str,
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=200),
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> list[dict[str, Any]]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        return await asyncio.to_thread(
+            request.app.state.workerbee_workspace_policy.list_transitions,
+            agent_id,
+            limit=limit,
+        )
+
+    @app.post(
+        "/v2/agents/{agent_id}/workerbee/workspace-transitions/preview",
+        response_model=dict[str, Any],
+    )
+    async def preview_workerbee_workspace_transition(
+        agent_id: str,
+        payload: WorkerBeeWorkspaceTransitionRequest,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        agent = require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        lease_id = str(metadata.get("workerbee_gateway_lease_id") or "").strip()
+        if not lease_id:
+            raise HTTPException(status_code=409, detail="Agent has no active WorkerBee gateway lease")
+        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        try:
+            lease = await asyncio.to_thread(request.app.state.workerbee_gateway.load, lease_id)
+            binding = await asyncio.to_thread(
+                request.app.state.workerbee_workspaces.load,
+                lease.workspace_binding_id,
+            )
+            target = await asyncio.to_thread(
+                request.app.state.workerbee_workspace_policy.resolve_target,
+                agent_id=agent_id,
+                binding=binding,
+                candidate_cwd=payload.cwd,
+                requested_project=payload.project,
+                current_working_subpath=lease.working_subpath,
+                allow_disabled=True,
+            )
+        except (WorkerBeeGatewayError, WorkerBeeWorkspacePolicyError) as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+        return {
+            "agent_id": agent_id,
+            "lease_id": lease_id,
+            "current_binding_id": lease.workspace_binding_id,
+            "target": target.public_dict(),
+            "reason": payload.reason,
+        }
+
+    @app.post(
+        "/v2/agents/{agent_id}/workerbee/workspace-transitions",
+        response_model=dict[str, Any],
+    )
+    async def apply_workerbee_workspace_transition(
+        agent_id: str,
+        payload: WorkerBeeWorkspaceTransitionRequest,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        agent = require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        lease_id = str(metadata.get("workerbee_gateway_lease_id") or "").strip()
+        if not lease_id:
+            raise HTTPException(status_code=409, detail="Agent has no active WorkerBee gateway lease")
+        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        try:
+            lease, binding, changed = await asyncio.to_thread(
+                request.app.state.workerbee_gateway.transition_workspace,
+                await asyncio.to_thread(
+                    request.app.state.workerbee_gateway.load, lease_id
+                ),
+                {
+                    "cwd": payload.cwd,
+                    "project": payload.project,
+                    "reason": payload.reason,
+                },
+                controller_approved=True,
+                requested_by=controller.token_id or controller.client_id or "local",
+            )
+        except (WorkerBeeGatewayError, WorkerBeeWorkspacePolicyError) as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+        return {
+            "changed": changed,
+            "lease": lease.public_dict(),
+            "workspace_binding": binding.public_dict(),
+        }
+
+    @app.post(
+        "/v2/agents/{agent_id}/workerbee/workspace-transitions/{transition_id}/decision",
+        response_model=dict[str, Any],
+    )
+    async def decide_workerbee_workspace_transition(
+        agent_id: str,
+        transition_id: str,
+        payload: WorkerBeeWorkspaceTransitionDecisionRequest,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        try:
+            transition = request.app.state.workerbee_workspace_policy.get_transition(transition_id)
+            if transition is None or transition.get("agent_id") != agent_id:
+                raise HTTPException(status_code=404, detail="Workspace transition not found")
+            if not payload.approve:
+                if transition.get("status") != "pending":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Only a pending workspace transition can be denied",
+                    )
+                denied = await asyncio.to_thread(
+                    request.app.state.workerbee_workspace_policy.update_transition,
+                    transition_id,
+                    status="denied",
+                    reason="Denied by controller",
+                )
+                return {"changed": False, "transition": denied}
+            lease, binding, changed = await asyncio.to_thread(
+                request.app.state.workerbee_gateway.apply_transition,
+                transition_id,
+                approved_by=controller.token_id or controller.client_id or "local",
+            )
+        except (WorkerBeeGatewayError, WorkerBeeWorkspacePolicyError) as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+        return {
+            "changed": changed,
+            "lease": lease.public_dict(),
+            "workspace_binding": binding.public_dict(),
+        }
+
+    @app.post(
+        "/v2/agents/{agent_id}/workerbee/workspace-transitions/{transition_id}/revert",
+        response_model=dict[str, Any],
+    )
+    async def revert_workerbee_workspace_transition(
+        agent_id: str,
+        transition_id: str,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        try:
+            transition = request.app.state.workerbee_workspace_policy.get_transition(transition_id)
+            if transition is None or transition.get("agent_id") != agent_id:
+                raise HTTPException(status_code=404, detail="Workspace transition not found")
+            lease, binding = await asyncio.to_thread(
+                request.app.state.workerbee_gateway.revert_transition,
+                transition_id,
+                reverted_by=controller.token_id or controller.client_id or "local",
+            )
+        except (WorkerBeeGatewayError, WorkerBeeWorkspacePolicyError) as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+        return {"lease": lease.public_dict(), "workspace_binding": binding.public_dict()}
+
     @app.post(
         "/v2/agents/{agent_id}/workerbee/workspaces",
         response_model=dict[str, Any],
@@ -2045,6 +2360,26 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             )
         except WorkerBeeGatewayError as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+        if agent is not None:
+            await asyncio.to_thread(
+                store.merge_agent_metadata,
+                agent_id,
+                {
+                    "workerbee_gateway_lease_id": lease.lease_id,
+                    "workerbee_workspace_binding_id": lease.workspace_binding_id,
+                    "workerbee_workspace_project": lease.project,
+                    "workerbee_workspace_working_subpath": lease.working_subpath,
+                },
+                event_type="workerbee_gateway_lease_issued",
+                event_payload={
+                    "agent_id": agent_id,
+                    "lease_id": lease.lease_id,
+                    "workspace_binding_id": lease.workspace_binding_id,
+                    "backend": lease.backend,
+                    "backend_generation": lease.backend_generation,
+                    "profile": lease.profile,
+                },
+            )
         gateway_url = (
             str(request.base_url).rstrip("/")
             + f"/workerbee-mcp/{lease.lease_id}"

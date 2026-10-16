@@ -1393,6 +1393,7 @@ class WorkerBeeStatusResponse(BaseModel):
     status_source: str = "host_cli"
     selected_runtime: dict[str, Any] | None = None
     workspace_binding: dict[str, Any] | None = None
+    workspace_policy: dict[str, Any] | None = None
 
 
 class PullRequestStatusResponse(BaseModel):
@@ -1892,6 +1893,24 @@ class WorkerBeeGatewayLeaseRequest(BaseModel):
     profile: Literal["observe-local", "review-readonly", "local-deploy"]
     workspace_binding_id: str = Field(min_length=1, max_length=160)
     ttl_seconds: float | None = Field(default=None, ge=30, le=86_400)
+
+
+class WorkerBeeWorkspacePolicyRequest(BaseModel):
+    policy: Literal["pinned", "same-repository", "scoped-workbench"]
+    request_mode: Literal["approval", "automatic", "disabled"]
+    allowed_roots: list[str] = Field(default_factory=list, max_length=32)
+    managed_scratch_root: str | None = Field(default=None, max_length=4096)
+    profile_label: str | None = Field(default=None, max_length=120)
+
+
+class WorkerBeeWorkspaceTransitionRequest(BaseModel):
+    cwd: str = Field(min_length=1, max_length=4096)
+    project: str | None = Field(default=None, min_length=1, max_length=128)
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class WorkerBeeWorkspaceTransitionDecisionRequest(BaseModel):
+    approve: bool = True
 
 
 class FileDiagnostic(BaseModel):

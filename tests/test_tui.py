@@ -49,6 +49,7 @@ from agent_pbx.tui import (
     TMUX_LIVENESS_IDLE_SECONDS,
     WorkerBeeLaunchPreflightError,
     WorkerBeeSwitchConfirmScreen,
+    WorkerBeeWorkspaceScreen,
     DEFAULT_SPLIT_PERCENT,
     JOPLIN_COPY_MODE_COPY_FIRST,
     JOPLIN_COPY_MODE_TRANSCRIPT_FIRST,
@@ -1520,6 +1521,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         plan_hint = app.query_one("#plan-hint", Static)
         workerbee_detail = app.query_one("#workerbee-detail", TextArea)
         workerbee_refresh = app.query_one("#workerbee-refresh", Button)
+        workerbee_workspace = app.query_one("#workerbee-workspace", Button)
         joplin_status = app.query_one("#joplin-status", Static)
         joplin_notes = app.query_one("#joplin-notes", DataTable)
         joplin_body = app.query_one("#joplin-body", TextArea)
@@ -1606,6 +1608,7 @@ async def test_tui_mounts_latest_composer_and_settings_controls() -> None:
         assert plan_hint.renderable == "Reply with /plan:1 optional notes."
         assert workerbee_detail.read_only is True
         assert workerbee_refresh.label.plain == "Refresh WorkerBee"
+        assert workerbee_workspace.label.plain == "Workspace"
         assert str(joplin_status.renderable).startswith("Joplin:")
         assert joplin_notes.cursor_type == "row"
         assert joplin_body.read_only is False
@@ -11314,6 +11317,62 @@ def test_workerbee_switch_palette_and_confirmation_contract() -> None:
         ).expected_confirmation()
         == f"rollback {'a' * 24}"
     )
+
+
+async def test_workerbee_workspace_screen_exposes_policy_preview_and_audit() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    policy = {
+        "effective": {
+            "policy": "scoped-workbench",
+            "request_mode": "automatic",
+            "allowed_roots": ["/home/test/git"],
+            "managed_scratch_root": "/home/test/git/.agent-pbx-workbench",
+            "profile_label": "Rosie Workbench",
+        },
+        "admin": {
+            "control_mode": "editable",
+            "policy_ceiling": "scoped-workbench",
+        },
+    }
+    transitions = [
+        {
+            "transition_id": "transition-1",
+            "status": "applied",
+            "runtime_project": "demo",
+            "working_subpath": "service",
+        }
+    ]
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 40)
+        screen = WorkerBeeWorkspaceScreen(
+            agent_id="agent-1",
+            policy_view=policy,
+            transitions=transitions,
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+
+        assert screen.query_one("#workerbee-workspace-policy", Select).value == "scoped-workbench"
+        assert screen.query_one("#workerbee-workspace-request-mode", Select).value == "automatic"
+        assert screen.query_one("#workerbee-workspace-label", Input).value == "Rosie Workbench"
+        assert screen.query_one("#workerbee-workspace-bind", Button).disabled is True
+        assert "Latest: applied" in str(
+            screen.query_one("#workerbee-workspace-summary", Static).renderable
+        )
+
+
+def test_workerbee_workspace_palette_commands_are_available(monkeypatch) -> None:
+    monkeypatch.delenv("AGENT_PBX_WORKERBEE_WORKSPACE_CONTROL_MODE", raising=False)
+    names = built_in_palette_command_names()
+    assert {"/workerbee workspace", "/workerbee policy"} <= names
+
+
+def test_workerbee_workspace_palette_commands_can_be_hidden(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_WORKERBEE_WORKSPACE_CONTROL_MODE", "hidden")
+    names = built_in_palette_command_names()
+    assert "/workerbee workspace" not in names
+    assert "/workerbee policy" not in names
 
 
 def test_tui_load_custom_slash_commands_from_file(tmp_path: Path) -> None:
