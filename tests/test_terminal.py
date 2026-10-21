@@ -19,7 +19,11 @@ from agent_pbx.terminal.keys import FunctionKeyPassthroughMap, function_key_sequ
 from agent_pbx.terminal.pty import PtyProcess
 from agent_pbx.terminal.screen import VirtualTerminal
 from agent_pbx.terminal.widget import (
+    DEFAULT_CHILD_TERMINAL_HISTORY,
+    DEFAULT_TERMINAL_MAX_PAINT_FPS,
+    DEFAULT_TMUX_TERMINAL_HISTORY,
     EMBEDDED_SCROLL_MODE_CHILD,
+    EMBEDDED_SCROLL_MODE_TMUX,
     PbxTerminalSurface,
     TerminalScrollRequested,
     normalize_terminal_max_paint_fps,
@@ -323,8 +327,8 @@ def test_terminal_surface_reuses_dirty_row_when_final_cells_are_unchanged() -> N
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        (None, 15.0),
-        ("bad", 15.0),
+        (None, DEFAULT_TERMINAL_MAX_PAINT_FPS),
+        ("bad", DEFAULT_TERMINAL_MAX_PAINT_FPS),
         (1, 5.0),
         (15, 15.0),
         (120, 60.0),
@@ -332,6 +336,22 @@ def test_terminal_surface_reuses_dirty_row_when_final_cells_are_unchanged() -> N
 )
 def test_terminal_paint_rate_is_bounded(value: object, expected: float) -> None:
     assert normalize_terminal_max_paint_fps(value) == expected
+
+
+def test_terminal_history_follows_scrollback_owner() -> None:
+    tmux_surface = PbxTerminalSurface(scroll_mode=EMBEDDED_SCROLL_MODE_TMUX)
+    child_surface = PbxTerminalSurface(scroll_mode=EMBEDDED_SCROLL_MODE_CHILD)
+    explicit_surface = PbxTerminalSurface(
+        scroll_mode=EMBEDDED_SCROLL_MODE_TMUX,
+        history=777,
+    )
+
+    assert tmux_surface.history == DEFAULT_TMUX_TERMINAL_HISTORY
+    assert child_surface.history == DEFAULT_CHILD_TERMINAL_HISTORY
+    assert explicit_surface.history == 777
+
+    tmux_surface.set_scroll_mode(EMBEDDED_SCROLL_MODE_CHILD)
+    assert tmux_surface.history == DEFAULT_CHILD_TERMINAL_HISTORY
 
 
 def test_terminal_surface_coalesces_burst_paints_and_flushes_final_frame() -> None:
@@ -608,6 +628,7 @@ def test_mapped_tmux_client_attaches_to_exact_window_and_pane() -> None:
                     "session_name": "runtime",
                     "window_id": window_id,
                     "pane_id": pane_id,
+                    "tmux_bin": tmux,
                 }
             ),
             env=env,

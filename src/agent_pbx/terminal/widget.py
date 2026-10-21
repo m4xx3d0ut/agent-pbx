@@ -73,9 +73,11 @@ TerminalStyleKey = tuple[
 ]
 TerminalRowFingerprint = tuple[tuple[object | None, ...], int]
 
-DEFAULT_TERMINAL_MAX_PAINT_FPS = 15.0
+DEFAULT_TERMINAL_MAX_PAINT_FPS = 10.0
 MIN_TERMINAL_MAX_PAINT_FPS = 5.0
 MAX_TERMINAL_MAX_PAINT_FPS = 60.0
+DEFAULT_TMUX_TERMINAL_HISTORY = 200
+DEFAULT_CHILD_TERMINAL_HISTORY = 4_000
 
 
 def normalize_terminal_max_paint_fps(value: object) -> float:
@@ -184,15 +186,18 @@ class PbxTerminalSurface(Widget):
         self,
         *,
         id: str | None = None,
-        history: int = 4_000,
+        history: int | None = None,
         poll_interval: float = 0.03,
         scroll_mode: str = EMBEDDED_SCROLL_MODE_TMUX,
         max_paint_fps: float | None = None,
     ) -> None:
         super().__init__(id=id)
-        self.history = max(0, int(history))
         self.poll_interval = max(0.01, float(poll_interval))
         self.scroll_mode = normalize_embedded_scroll_mode(scroll_mode)
+        self._history_override = (
+            max(0, int(history)) if history is not None else None
+        )
+        self.history = self._resolved_history()
         configured_paint_fps: object = max_paint_fps
         if configured_paint_fps is None:
             configured_paint_fps = os.environ.get(
@@ -315,6 +320,16 @@ class PbxTerminalSurface(Widget):
 
     def set_scroll_mode(self, mode: str) -> None:
         self.scroll_mode = normalize_embedded_scroll_mode(mode)
+        self.history = self._resolved_history()
+
+    def _resolved_history(self) -> int:
+        """Keep only a small mirror when tmux owns authoritative scrollback."""
+
+        if self._history_override is not None:
+            return self._history_override
+        if self.scroll_mode == EMBEDDED_SCROLL_MODE_TMUX:
+            return DEFAULT_TMUX_TERMINAL_HISTORY
+        return DEFAULT_CHILD_TERMINAL_HISTORY
 
     def poll_pty(self) -> None:
         process = self.process

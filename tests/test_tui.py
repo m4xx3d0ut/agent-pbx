@@ -990,7 +990,8 @@ def test_tui_refresh_workers_use_non_default_groups() -> None:
         {
             "name": "agents-periodic-refresh",
             "group": "agents-refresh",
-            "exclusive": True,
+            "exclusive": False,
+            "exit_on_error": False,
         },
         {
             "name": "tmux-periodic-refresh",
@@ -998,6 +999,111 @@ def test_tui_refresh_workers_use_non_default_groups() -> None:
             "exclusive": True,
         },
     ]
+
+
+def test_tui_agent_refresh_requests_coalesce_without_worker_cancellation() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    worker_calls: list[dict[str, object]] = []
+
+    def fake_run_worker(work, *_args, **kwargs):  # type: ignore[no-untyped-def]
+        worker_calls.append({"work": work, **kwargs})
+        return None
+
+    app.run_worker = fake_run_worker  # type: ignore[method-assign]
+
+    app.schedule_refresh_agents(force=True)
+    app.schedule_refresh_agents(force=True)
+
+    assert len(worker_calls) == 1
+    assert worker_calls[0]["exclusive"] is False
+    assert app.agent_refresh_requested is True
+    assert app.agent_refresh_worker_active is True
+
+
+async def test_tui_agent_refresh_coordinator_drains_one_followup() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    refreshes = 0
+
+    async def fake_refresh_agents() -> None:
+        nonlocal refreshes
+        refreshes += 1
+        if refreshes == 1:
+            app.agent_refresh_requested = True
+
+    app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
+    app.agent_refresh_requested = True
+    app.agent_refresh_worker_active = True
+
+    await app.refresh_agents_coalesced()
+
+    assert refreshes == 2
+    assert app.agent_refresh_worker_active is False
+
+
+def test_tui_healthy_event_stream_throttles_periodic_reconciliation() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.event_stream_connected = True
+    app.last_agent_refresh_monotonic = time.monotonic()
+    worker_calls: list[object] = []
+    app.run_worker = lambda work, *_args, **_kwargs: worker_calls.append(work)  # type: ignore[method-assign]
+
+    app.schedule_refresh_agents()
+
+    assert worker_calls == []
+
+
+def test_tui_remote_view_state_writes_use_one_non_canceling_worker() -> None:
+    app = AgentPBXTUI(server="https://pbx.example.test")
+    worker_calls: list[dict[str, object]] = []
+
+    def fake_run_worker(work, *_args, **kwargs):  # type: ignore[no-untyped-def]
+        worker_calls.append({"work": work, **kwargs})
+        return None
+
+    app.run_worker = fake_run_worker  # type: ignore[method-assign]
+
+    app.schedule_remote_view_state_persist()
+    app.schedule_remote_view_state_persist()
+
+    assert len(worker_calls) == 1
+    assert worker_calls[0]["exclusive"] is False
+    assert app.remote_view_state_dirty is True
+    assert app.remote_view_state_worker_active is True
+
+
+async def test_tui_runtime_health_surface_reports_bounded_diagnostics(
+    tmp_path: Path,
+) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        settings_file=tmp_path / "settings.json",
+    )
+
+    async def quiet_refresh() -> None:
+        return None
+
+    async def idle_event_stream() -> None:
+        await asyncio.Event().wait()
+
+    app.refresh_joplin_status = quiet_refresh  # type: ignore[method-assign]
+    app.load_codex_config = quiet_refresh  # type: ignore[method-assign]
+    app.refresh_agents = quiet_refresh  # type: ignore[method-assign]
+    app.refresh_events = quiet_refresh  # type: ignore[method-assign]
+    app.stream_events = idle_event_stream  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.event_stream_connected = True
+        app.runtime_health_expected_at = time.monotonic() - 0.010
+        app.sample_tui_runtime_health()
+        rendered = str(
+            app.query_one("#tui-runtime-health", Static).renderable
+        )
+
+    assert "UI: event" in rendered
+    assert "lag p95" in rendered
+    assert "RSS" in rendered
+    assert "PTY 0 KiB/s" in rendered
+    assert "paint 0.0/s" in rendered
 
 
 async def test_tui_refresh_events_uses_tail_and_resets_stale_watermark(
@@ -7786,6 +7892,7 @@ async def test_tui_files_tab_loads_directory_and_preview() -> None:
 
 
 async def test_tui_files_search_copy_and_open_editor(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_EDITOR_DEFAULT_SURFACE", "textual")
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     calls: list[tuple[str, dict[str, str]]] = []
     copied: list[str] = []

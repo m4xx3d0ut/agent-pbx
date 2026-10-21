@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +13,10 @@ from agent_pbx.mcp_daemon import (
     mcp_daemon_status,
     restart_mcp_daemon,
     start_mcp_daemon,
+    start_mcp_daemon_log_monitor_from_env,
     stop_mcp_daemon,
     rotate_mcp_daemon_log,
+    rotate_mcp_daemon_log_live,
     _pid_matches_metadata,
 )
 from agent_pbx.paths import default_state_root
@@ -68,6 +71,49 @@ def test_mcp_daemon_log_rotation_is_bounded(tmp_path: Path) -> None:
     assert not log.exists()
     assert (tmp_path / "mcp-daemon.log.1").read_text(encoding="utf-8") == "current"
     assert (tmp_path / "mcp-daemon.log.2").read_text(encoding="utf-8") == "prior"
+
+
+def test_live_mcp_daemon_log_rotation_preserves_open_path(tmp_path: Path) -> None:
+    log = tmp_path / "mcp-daemon.log"
+    log.write_text("current", encoding="utf-8")
+    (tmp_path / "mcp-daemon.log.1").write_text("prior", encoding="utf-8")
+
+    rotated = rotate_mcp_daemon_log_live(log, max_bytes=1, backups=2)
+
+    assert rotated == [tmp_path / "mcp-daemon.log.1"]
+    assert log.exists()
+    assert log.read_text(encoding="utf-8") == ""
+    assert (tmp_path / "mcp-daemon.log.1").read_text(encoding="utf-8") == "current"
+    assert (tmp_path / "mcp-daemon.log.2").read_text(encoding="utf-8") == "prior"
+
+
+def test_live_log_monitor_consumes_launch_only_environment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    started: list[bool] = []
+
+    class FakeThread:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def start(self) -> None:
+            started.append(True)
+
+    monkeypatch.setenv("AGENT_PBX_DAEMON_LOG_FILE", str(tmp_path / "daemon.log"))
+    monkeypatch.setenv("AGENT_PBX_DAEMON_LOG_MAX_BYTES", "2097152")
+    monkeypatch.setenv("AGENT_PBX_DAEMON_LOG_BACKUPS", "2")
+    monkeypatch.setenv("AGENT_PBX_DAEMON_LOG_CHECK_SECONDS", "7")
+    monkeypatch.setattr("agent_pbx.mcp_daemon.threading.Thread", FakeThread)
+
+    thread = start_mcp_daemon_log_monitor_from_env()
+
+    assert isinstance(thread, FakeThread)
+    assert started == [True]
+    assert "AGENT_PBX_DAEMON_LOG_FILE" not in os.environ
+    assert "AGENT_PBX_DAEMON_LOG_MAX_BYTES" not in os.environ
+    assert "AGENT_PBX_DAEMON_LOG_BACKUPS" not in os.environ
+    assert "AGENT_PBX_DAEMON_LOG_CHECK_SECONDS" not in os.environ
 
 
 def test_mcp_status_accepts_token_for_command_symmetry() -> None:
@@ -154,6 +200,14 @@ def test_start_mcp_daemon_writes_detached_agent_pbx_argv(
     assert result["started"] is True
     assert calls["kwargs"]["start_new_session"] is True
     assert calls["kwargs"]["env"]["AGENT_PBX_TOKEN"] == "secret"
+    assert calls["kwargs"]["env"]["AGENT_PBX_DAEMON_LOG_FILE"] == str(
+        config.log_file
+    )
+    assert calls["kwargs"]["env"]["AGENT_PBX_DAEMON_LOG_MAX_BYTES"] == str(
+        64 * 1024 * 1024
+    )
+    assert calls["kwargs"]["env"]["AGENT_PBX_DAEMON_LOG_BACKUPS"] == "3"
+    assert calls["kwargs"]["env"]["AGENT_PBX_DAEMON_LOG_CHECK_SECONDS"] == "30"
     assert calls["kwargs"]["env"]["AGENT_PBX_PR_ENABLED"] == "1"
     assert calls["kwargs"]["env"]["AGENT_PBX_PR_MERGE_ENABLED"] == "1"
     assert calls["kwargs"]["env"]["AGENT_PBX_ISSUES_ENABLED"] == "1"

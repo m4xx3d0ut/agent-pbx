@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- Bound long-running native-terminal load by lowering the default embedded
+  paint ceiling to 10 FPS, retaining only a small renderer-side history when
+  tmux owns scrollback, skipping redundant capture polling for an attached
+  client, and exposing event-loop lag, RSS, PTY throughput, paint rate, and
+  frame-coalescing telemetry in `Latest`. Agent reconciliation and remote view
+  persistence now coalesce without canceling in-flight HTTP requests, use a
+  bounded keepalive pool, and reduce polling while the event stream is healthy.
+- Rotate managed daemon logs while the daemon is running instead of waiting for
+  its next restart. The live copy-and-truncate monitor honors
+  `AGENT_PBX_DAEMON_LOG_MAX_BYTES` and `AGENT_PBX_DAEMON_LOG_BACKUPS` while
+  preserving the daemon's open stdout/stderr descriptor.
 - Keep managed Joplin sync transitions responsive and visible. Status now reads
   durable queued/running state before probing the deliberately stopped Data API,
   the TUI preserves known configuration and cached notes through transient

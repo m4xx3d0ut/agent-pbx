@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -411,6 +412,12 @@ MIN_TMUX_REFRESH_SECONDS = 0.25
 DEFAULT_AGENT_REFRESH_SECONDS = 2.0
 LOW_POWER_AGENT_REFRESH_SECONDS = 15.0
 MIN_AGENT_REFRESH_SECONDS = 1.0
+EVENT_STREAM_RECONCILE_SECONDS = 30.0
+REMOTE_VIEW_STATE_DEBOUNCE_SECONDS = 2.0
+TUI_RUNTIME_HEALTH_SECONDS = 5.0
+HTTP_MAX_CONNECTIONS = 16
+HTTP_MAX_KEEPALIVE_CONNECTIONS = 4
+HTTP_KEEPALIVE_EXPIRY_SECONDS = 5.0
 DEFAULT_ATTENTION_BLINK_SECONDS = 0.8
 LOW_POWER_ATTENTION_BLINK_SECONDS = 3.0
 MIN_ATTENTION_BLINK_SECONDS = 0.5
@@ -2985,6 +2992,18 @@ def int_value(value: object) -> int | None:
 def int_setting(settings: dict[str, Any], key: str, default: int) -> int:
     value = int_value(settings.get(key))
     return value if value is not None else default
+
+
+def current_process_rss_bytes() -> int | None:
+    """Return current RSS on procfs hosts without adding a monitoring dependency."""
+
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except (FileNotFoundError, OSError, IndexError, ValueError):
+        return None
+    return None
 
 
 def float_map_setting(settings: dict[str, Any], key: str) -> dict[str, float]:
@@ -5637,6 +5656,12 @@ class AgentPBXTUI(App[None]):
         color: $secondary;
     }
 
+    #tui-runtime-health {
+        height: 1;
+        content-align: left middle;
+        color: $text-muted;
+    }
+
     #tmux-stream {
         height: 1fr;
         min-height: 8;
@@ -6736,6 +6761,7 @@ class AgentPBXTUI(App[None]):
         self.slash_completion_state: dict[str, SlashCompletionState] = {}
         self.file_completion_state: dict[str, FileCompletionState] = {}
         self.event_stream_disconnected = False
+        self.event_stream_connected = False
         self.event_stream_error_count = 0
         self.event_stream_last_error = ""
         self.last_seen_event_id = int_setting(self.settings, "last_seen_event_id", 0)
@@ -6743,10 +6769,24 @@ class AgentPBXTUI(App[None]):
         self.agent_jump_prefix_pending = False
         self.agent_jump_prefix_generation = 0
         self.http_client: httpx.AsyncClient | None = None
+        self.agent_refresh_requested = False
+        self.agent_refresh_worker_active = False
+        self.last_agent_refresh_monotonic = 0.0
+        self.remote_view_state_dirty = False
+        self.remote_view_state_worker_active = False
+        self.last_remote_view_state_payload = ""
+        self.last_settings_payload = ""
+        self.shutting_down = False
+        self.runtime_health_expected_at = 0.0
+        self.runtime_health_lag_samples: deque[float] = deque(maxlen=120)
+        self.runtime_health_terminal_target = ""
+        self.runtime_health_terminal_snapshot: Any | None = None
+        self.runtime_health_terminal_at = 0.0
         self.agent_refresh_timer: Timer | None = None
         self.tmux_refresh_timer: Timer | None = None
         self.attention_blink_timer: Timer | None = None
         self.tmux_writer_lease_timer: Timer | None = None
+        self.runtime_health_timer: Timer | None = None
 
     @staticmethod
     def is_plain_function_key(key: str) -> bool:
@@ -6857,7 +6897,15 @@ class AgentPBXTUI(App[None]):
 
     def api_client(self) -> httpx.AsyncClient:
         if self.http_client is None:
-            self.http_client = httpx.AsyncClient(base_url=self.server, timeout=10)
+            self.http_client = httpx.AsyncClient(
+                base_url=self.server,
+                timeout=10,
+                limits=httpx.Limits(
+                    max_connections=HTTP_MAX_CONNECTIONS,
+                    max_keepalive_connections=HTTP_MAX_KEEPALIVE_CONNECTIONS,
+                    keepalive_expiry=HTTP_KEEPALIVE_EXPIRY_SECONDS,
+                ),
+            )
         return self.http_client
 
     async def refresh_codex_posture(self) -> None:
@@ -7967,6 +8015,7 @@ class AgentPBXTUI(App[None]):
                             )
                         with Vertical(id="tmux-panel"):
                             yield Static("Tmux: -", id="tmux-status")
+                            yield Static("UI: sampling...", id="tui-runtime-health")
                             yield PbxTerminalSurface(
                                 id="pbx-terminal-surface",
                                 scroll_mode=self.embedded_terminal_scroll_mode,
@@ -8382,12 +8431,13 @@ class AgentPBXTUI(App[None]):
             self.apply_layout_dimensions()
 
     async def on_unmount(self) -> None:
+        self.shutting_down = True
         self.stop_refresh_timers()
         if self.tmux_writer_lease_timer is not None:
             self.tmux_writer_lease_timer.stop()
             self.tmux_writer_lease_timer = None
         if self.remote_client_state_ready:
-            await self.persist_remote_view_state()
+            await self.persist_remote_view_state(force=True)
         await self.detach_embedded_tmux_terminal(release_lease=True)
         if self.http_client is not None:
             await self.http_client.aclose()
@@ -8398,12 +8448,14 @@ class AgentPBXTUI(App[None]):
             self.agent_refresh_timer,
             self.tmux_refresh_timer,
             self.attention_blink_timer,
+            self.runtime_health_timer,
         ):
             if timer is not None:
                 timer.stop()
         self.agent_refresh_timer = None
         self.tmux_refresh_timer = None
         self.attention_blink_timer = None
+        self.runtime_health_timer = None
 
     def restart_refresh_timers(self) -> None:
         self.stop_refresh_timers()
@@ -8421,14 +8473,43 @@ class AgentPBXTUI(App[None]):
             self.attention_blink_seconds,
             self.toggle_unseen_attention,
         )
+        self.runtime_health_expected_at = time.monotonic() + TUI_RUNTIME_HEALTH_SECONDS
+        self.runtime_health_timer = self.set_interval(
+            TUI_RUNTIME_HEALTH_SECONDS,
+            self.sample_tui_runtime_health,
+        )
 
-    def schedule_refresh_agents(self) -> None:
+    def schedule_refresh_agents(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if (
+            not force
+            and self.event_stream_connected
+            and self.last_agent_refresh_monotonic > 0
+            and now - self.last_agent_refresh_monotonic
+            < EVENT_STREAM_RECONCILE_SECONDS
+        ):
+            return
+        self.agent_refresh_requested = True
+        if self.agent_refresh_worker_active:
+            return
+        self.agent_refresh_worker_active = True
         self.run_worker(
-            self.refresh_agents,
+            self.refresh_agents_coalesced,
             name="agents-periodic-refresh",
             group="agents-refresh",
-            exclusive=True,
+            exclusive=False,
+            exit_on_error=False,
         )
+
+    async def refresh_agents_coalesced(self) -> None:
+        """Serialize refreshes without canceling an in-flight HTTP response."""
+
+        try:
+            while self.agent_refresh_requested and not self.shutting_down:
+                self.agent_refresh_requested = False
+                await self.refresh_agents()
+        finally:
+            self.agent_refresh_worker_active = False
 
     def schedule_refresh_tmux_capture(self) -> None:
         self.run_worker(
@@ -8437,6 +8518,71 @@ class AgentPBXTUI(App[None]):
             group="tmux-refresh",
             exclusive=True,
         )
+
+    def sample_tui_runtime_health(self) -> None:
+        """Publish bounded event-loop and terminal throughput diagnostics."""
+
+        now = time.monotonic()
+        if self.runtime_health_expected_at > 0:
+            self.runtime_health_lag_samples.append(
+                max(0.0, now - self.runtime_health_expected_at)
+            )
+        self.runtime_health_expected_at = now + TUI_RUNTIME_HEALTH_SECONDS
+
+        terminal_rate = 0.0
+        paint_rate = 0.0
+        coalesced_percent = 0.0
+        surface = self.query_one_or_none(
+            "#pbx-terminal-surface", PbxTerminalSurface
+        )
+        if surface is not None and surface.attached:
+            snapshot = surface.performance_snapshot()
+            if (
+                surface.target == self.runtime_health_terminal_target
+                and self.runtime_health_terminal_snapshot is not None
+                and self.runtime_health_terminal_at > 0
+            ):
+                elapsed = max(0.001, now - self.runtime_health_terminal_at)
+                previous = self.runtime_health_terminal_snapshot
+                terminal_rate = max(0, snapshot.pty_bytes - previous.pty_bytes) / elapsed
+                paint_rate = max(0, snapshot.render_calls - previous.render_calls) / elapsed
+                paint_requests = max(
+                    0,
+                    snapshot.paint_requests - previous.paint_requests,
+                )
+                paint_suppressed = max(
+                    0,
+                    snapshot.paint_suppressed - previous.paint_suppressed,
+                )
+                if paint_requests:
+                    coalesced_percent = 100.0 * paint_suppressed / paint_requests
+            self.runtime_health_terminal_target = surface.target
+            self.runtime_health_terminal_snapshot = snapshot
+            self.runtime_health_terminal_at = now
+        else:
+            self.runtime_health_terminal_target = ""
+            self.runtime_health_terminal_snapshot = None
+            self.runtime_health_terminal_at = 0.0
+
+        lag_ms = 0.0
+        if self.runtime_health_lag_samples:
+            ordered = sorted(self.runtime_health_lag_samples)
+            lag_ms = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))] * 1000
+        rss_bytes = current_process_rss_bytes()
+        rss_text = (
+            f"{rss_bytes / (1024 * 1024):.0f} MiB"
+            if rss_bytes is not None
+            else "n/a"
+        )
+        stream_text = "event" if self.event_stream_connected else "poll"
+        widget = self.query_one_or_none("#tui-runtime-health", Static)
+        if widget is not None:
+            widget.update(
+                "UI: "
+                f"{stream_text} · lag p95 {lag_ms:.0f} ms · RSS {rss_text} · "
+                f"PTY {terminal_rate / 1024:.0f} KiB/s · "
+                f"paint {paint_rate:.1f}/s · coalesce {coalesced_percent:.0f}%"
+            )
 
     def action_command_palette(self) -> None:
         """Open the PBX palette while preserving Textual's native providers."""
@@ -11932,6 +12078,7 @@ class AgentPBXTUI(App[None]):
                 detail.text = f"Unable to refresh agents: {exc}"
             return
 
+        self.last_agent_refresh_monotonic = time.monotonic()
         previous_last_seen = self.agent_last_seen_at.copy()
         self.agents = {str(agent["agent_id"]): agent for agent in agents}
         tmux_state_changed = await self.reconcile_operator_tmux_targets()
@@ -15072,6 +15219,17 @@ class AgentPBXTUI(App[None]):
             or not self.selected_agent_id
             or self.tmux_refreshing
         ):
+            return
+        surface = self.embedded_terminal_surface()
+        if (
+            surface is not None
+            and self.embedded_terminal_agent_id == self.selected_agent_id
+        ):
+            # The attached tmux client is already streaming the authoritative
+            # pane. Geometry is local and the writer-lease renewal validates
+            # the mapping, so polling the API/capture path every 1.5 seconds
+            # only creates redundant sockets and render work.
+            surface.sync_geometry()
             return
         self.tmux_refreshing = True
         try:
@@ -33954,22 +34112,16 @@ class AgentPBXTUI(App[None]):
         }
         if self.palette_history_persist:
             self.settings["palette_history"] = list(self.palette_history.entries)
-        try:
-            self.settings_file.parent.mkdir(parents=True, exist_ok=True)
-            self.settings_file.write_text(
-                json.dumps(self.settings, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-        except OSError:
-            return
+        serialized = json.dumps(self.settings, indent=2, sort_keys=True) + "\n"
+        if serialized != self.last_settings_payload:
+            try:
+                self.settings_file.parent.mkdir(parents=True, exist_ok=True)
+                self.settings_file.write_text(serialized, encoding="utf-8")
+            except OSError:
+                return
+            self.last_settings_payload = serialized
         if self.remote_client_state_ready and self.is_running:
-            self.run_worker(
-                self.persist_remote_view_state_debounced,
-                name="remote-view-state",
-                group="remote-view-state",
-                exclusive=True,
-                exit_on_error=False,
-            )
+            self.schedule_remote_view_state_persist()
 
     def remote_view_state(self) -> dict[str, Any]:
         """Return non-sensitive per-client navigation state for remote persistence."""
@@ -34037,23 +34189,50 @@ class AgentPBXTUI(App[None]):
             self.activate_agent_tab(tab_id)
         self.save_settings()
 
-    async def persist_remote_view_state_debounced(self) -> None:
-        await asyncio.sleep(0.25)
-        await self.persist_remote_view_state()
+    def schedule_remote_view_state_persist(self) -> None:
+        """Coalesce state writes without canceling an active HTTP request."""
 
-    async def persist_remote_view_state(self) -> None:
+        self.remote_view_state_dirty = True
+        if self.remote_view_state_worker_active or self.shutting_down:
+            return
+        self.remote_view_state_worker_active = True
+        self.run_worker(
+            self.persist_remote_view_state_debounced,
+            name="remote-view-state",
+            group="remote-view-state",
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def persist_remote_view_state_debounced(self) -> None:
+        try:
+            while self.remote_view_state_dirty and not self.shutting_down:
+                self.remote_view_state_dirty = False
+                await asyncio.sleep(REMOTE_VIEW_STATE_DEBOUNCE_SECONDS)
+                if self.shutting_down:
+                    return
+                await self.persist_remote_view_state()
+        finally:
+            self.remote_view_state_worker_active = False
+
+    async def persist_remote_view_state(self, *, force: bool = False) -> None:
         if not self.remote_client_state_ready:
+            return
+        payload = {
+            "view_state": self.remote_view_state(),
+            "cursor": self.last_seen_event_id,
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        if not force and serialized == self.last_remote_view_state_payload:
             return
         try:
             response = await self.api_client().put(
                 f"/v2/remote/clients/{quote(self.remote_client_id, safe='')}/view-state",
                 headers=auth_headers(self.token),
-                json={
-                    "view_state": self.remote_view_state(),
-                    "cursor": self.last_seen_event_id,
-                },
+                json=payload,
             )
             response.raise_for_status()
+            self.last_remote_view_state_payload = serialized
         except Exception as exc:
             self.event_stream_last_error = f"remote view state save failed: {exc}"
 
@@ -34070,6 +34249,7 @@ class AgentPBXTUI(App[None]):
                         headers=headers,
                     ) as response:
                         response.raise_for_status()
+                        self.event_stream_connected = True
                         if self.event_stream_disconnected:
                             self.event_stream_disconnected = False
                             if not self.low_power_enabled:
@@ -34088,9 +34268,12 @@ class AgentPBXTUI(App[None]):
                             self.events.append(event)
                             self.events = self.events[-50:]
                             self.call_later(self.handle_event, event)
+                self.event_stream_connected = False
             except asyncio.CancelledError:
+                self.event_stream_connected = False
                 raise
             except Exception as exc:
+                self.event_stream_connected = False
                 self.event_stream_error_count += 1
                 self.event_stream_last_error = f"{type(exc).__name__}: {exc}"
                 if not self.event_stream_disconnected:
@@ -34119,6 +34302,7 @@ class AgentPBXTUI(App[None]):
                     ping_interval=20,
                     max_queue=32,
                 ) as websocket:
+                    self.event_stream_connected = True
                     if self.event_stream_disconnected:
                         self.event_stream_disconnected = False
                         if not self.low_power_enabled:
@@ -34138,9 +34322,12 @@ class AgentPBXTUI(App[None]):
                         if server_client_id:
                             self.remote_client_id = server_client_id
                         self.apply_event_stream_v2_envelope(envelope)
+                self.event_stream_connected = False
             except asyncio.CancelledError:
+                self.event_stream_connected = False
                 raise
             except Exception as exc:
+                self.event_stream_connected = False
                 self.event_stream_error_count += 1
                 self.event_stream_last_error = f"{type(exc).__name__}: {exc}"
                 if not self.event_stream_disconnected:
@@ -34242,12 +34429,7 @@ class AgentPBXTUI(App[None]):
             "agent_starred_changed",
             "operator_campaign_event",
         }:
-            self.run_worker(
-                self.refresh_agents,
-                name="agents-refresh",
-                group="agents-refresh",
-                exclusive=True,
-            )
+            self.schedule_refresh_agents(force=True)
         if event_type == "report_created" and agent_id:
             self.mark_latest_unseen(agent_id)
         if event_type == "latest_seen" and agent_id:

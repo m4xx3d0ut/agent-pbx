@@ -55,6 +55,7 @@ from .mcp_daemon import (
     lan_auth_guard,
     mcp_daemon_status,
     restart_mcp_daemon,
+    start_mcp_daemon_log_monitor_from_env,
     start_mcp_daemon,
     stop_mcp_daemon,
 )
@@ -1312,6 +1313,7 @@ def _serve_foreground(args: argparse.Namespace) -> int:
             }
         )
         return 1
+    start_mcp_daemon_log_monitor_from_env()
     config = ServerConfig(
         host=daemon_config.host,
         port=daemon_config.port,

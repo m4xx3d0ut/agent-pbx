@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import shlex
 import signal
 import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -58,8 +60,11 @@ MCP_DAEMON_FILE = "mcp-daemon.json"
 MCP_DAEMON_LOG = "mcp-daemon.log"
 MCP_DAEMON_LOG_MAX_BYTES_ENV = "AGENT_PBX_DAEMON_LOG_MAX_BYTES"
 MCP_DAEMON_LOG_BACKUPS_ENV = "AGENT_PBX_DAEMON_LOG_BACKUPS"
+MCP_DAEMON_LOG_FILE_ENV = "AGENT_PBX_DAEMON_LOG_FILE"
+MCP_DAEMON_LOG_CHECK_SECONDS_ENV = "AGENT_PBX_DAEMON_LOG_CHECK_SECONDS"
 DEFAULT_MCP_DAEMON_LOG_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_MCP_DAEMON_LOG_BACKUPS = 3
+DEFAULT_MCP_DAEMON_LOG_CHECK_SECONDS = 30
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 TOKEN_ENV = "AGENT_PBX_TOKEN"
 MANAGED_CHILD_ENV_VARS = {
@@ -93,6 +98,10 @@ MANAGED_CHILD_ENV_VARS = {
     CODEX_EVENT_BRIDGE_POLL_SECONDS_ENV,
     CODEX_EVENT_BRIDGE_TRANSPORT_ENV,
     CODEX_EVENT_BRIDGE_BIN_ENV,
+    MCP_DAEMON_LOG_FILE_ENV,
+    MCP_DAEMON_LOG_MAX_BYTES_ENV,
+    MCP_DAEMON_LOG_BACKUPS_ENV,
+    MCP_DAEMON_LOG_CHECK_SECONDS_ENV,
 }
 
 
@@ -246,6 +255,123 @@ def rotate_mcp_daemon_log(
     first = path.with_name(f"{path.name}.1")
     path.replace(first)
     return [first]
+
+
+def rotate_mcp_daemon_log_live(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+    backups: int | None = None,
+) -> list[Path]:
+    """Copy and truncate a daemon log whose process keeps the file open."""
+
+    limit = (
+        max(1, int(max_bytes))
+        if max_bytes is not None
+        else _bounded_env_int(
+            MCP_DAEMON_LOG_MAX_BYTES_ENV,
+            DEFAULT_MCP_DAEMON_LOG_MAX_BYTES,
+            minimum=1024 * 1024,
+            maximum=16 * 1024 * 1024 * 1024,
+        )
+    )
+    keep = (
+        max(0, min(20, int(backups)))
+        if backups is not None
+        else _bounded_env_int(
+            MCP_DAEMON_LOG_BACKUPS_ENV,
+            DEFAULT_MCP_DAEMON_LOG_BACKUPS,
+            minimum=0,
+            maximum=20,
+        )
+    )
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return []
+    if stat.st_size < limit:
+        return []
+    if keep == 0:
+        with path.open("r+b") as current:
+            current.truncate(0)
+        return []
+
+    oldest = path.with_name(f"{path.name}.{keep}")
+    with suppress(FileNotFoundError):
+        oldest.unlink()
+    for index in range(keep - 1, 0, -1):
+        source = path.with_name(f"{path.name}.{index}")
+        destination = path.with_name(f"{path.name}.{index + 1}")
+        if source.exists():
+            source.replace(destination)
+
+    first = path.with_name(f"{path.name}.1")
+    temporary = path.with_name(
+        f".{path.name}.rotate-{os.getpid()}-{threading.get_ident()}"
+    )
+    try:
+        with path.open("rb") as source, temporary.open("wb") as destination:
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
+        os.chmod(temporary, stat.st_mode & 0o777)
+        temporary.replace(first)
+        # stdout/stderr keep their original descriptor and continue writing to
+        # this inode after truncation, unlike rename-only startup rotation.
+        with path.open("r+b") as current:
+            current.truncate(0)
+    finally:
+        with suppress(FileNotFoundError):
+            temporary.unlink()
+    return [first]
+
+
+def start_mcp_daemon_log_monitor_from_env() -> threading.Thread | None:
+    """Start live log rotation inside a managed foreground daemon process."""
+
+    raw_path = str(os.environ.pop(MCP_DAEMON_LOG_FILE_ENV, "") or "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    max_bytes = _bounded_env_int(
+        MCP_DAEMON_LOG_MAX_BYTES_ENV,
+        DEFAULT_MCP_DAEMON_LOG_MAX_BYTES,
+        minimum=1024 * 1024,
+        maximum=16 * 1024 * 1024 * 1024,
+    )
+    backups = _bounded_env_int(
+        MCP_DAEMON_LOG_BACKUPS_ENV,
+        DEFAULT_MCP_DAEMON_LOG_BACKUPS,
+        minimum=0,
+        maximum=20,
+    )
+    interval = _bounded_env_int(
+        MCP_DAEMON_LOG_CHECK_SECONDS_ENV,
+        DEFAULT_MCP_DAEMON_LOG_CHECK_SECONDS,
+        minimum=1,
+        maximum=3600,
+    )
+    # These launch-only values must not leak into Codex, hooks, terminal
+    # editors, or any subprocess later created by the daemon.
+    os.environ.pop(MCP_DAEMON_LOG_MAX_BYTES_ENV, None)
+    os.environ.pop(MCP_DAEMON_LOG_BACKUPS_ENV, None)
+    os.environ.pop(MCP_DAEMON_LOG_CHECK_SECONDS_ENV, None)
+
+    def monitor() -> None:
+        while True:
+            time.sleep(interval)
+            with suppress(OSError):
+                rotate_mcp_daemon_log_live(
+                    path,
+                    max_bytes=max_bytes,
+                    backups=backups,
+                )
+
+    thread = threading.Thread(
+        target=monitor,
+        name="agent-pbx-log-rotation",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def config_from_args(
@@ -480,11 +606,33 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
 
 def _child_env(config: MCPDaemonConfig) -> dict[str, str]:
     child_env = os.environ.copy()
+    log_max_bytes = _bounded_env_int(
+        MCP_DAEMON_LOG_MAX_BYTES_ENV,
+        DEFAULT_MCP_DAEMON_LOG_MAX_BYTES,
+        minimum=1024 * 1024,
+        maximum=16 * 1024 * 1024 * 1024,
+    )
+    log_backups = _bounded_env_int(
+        MCP_DAEMON_LOG_BACKUPS_ENV,
+        DEFAULT_MCP_DAEMON_LOG_BACKUPS,
+        minimum=0,
+        maximum=20,
+    )
+    log_check_seconds = _bounded_env_int(
+        MCP_DAEMON_LOG_CHECK_SECONDS_ENV,
+        DEFAULT_MCP_DAEMON_LOG_CHECK_SECONDS,
+        minimum=1,
+        maximum=3600,
+    )
     for name in MANAGED_CHILD_ENV_VARS:
         child_env.pop(name, None)
 
     if config.token:
         child_env[TOKEN_ENV] = config.token
+    child_env[MCP_DAEMON_LOG_FILE_ENV] = str(config.log_file)
+    child_env[MCP_DAEMON_LOG_MAX_BYTES_ENV] = str(log_max_bytes)
+    child_env[MCP_DAEMON_LOG_BACKUPS_ENV] = str(log_backups)
+    child_env[MCP_DAEMON_LOG_CHECK_SECONDS_ENV] = str(log_check_seconds)
     child_env[CODEX_EVENT_BRIDGE_ENV] = (
         "1" if config.codex_event_bridge_enabled else "0"
     )

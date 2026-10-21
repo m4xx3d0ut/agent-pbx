@@ -1,7 +1,7 @@
 # Runtime and tmux Operations
 
 > **Applies to:** Agent PBX 2.2.x
-> **Last reviewed:** 2026-10-10
+> **Last reviewed:** 2026-10-21
 
 ## Runtime server modes
 
@@ -35,11 +35,18 @@ writer lease. Closing the TUI or disabling native mode detaches that client and
 releases the lease; it does not stop Codex.
 
 The terminal drains and parses every available PTY byte, but coalesces Textual
-paint requests during sustained output. The default maximum paint rate is 15
+paint requests during sustained output. The default maximum paint rate is 10
 frames per second. `AGENT_PBX_TERMINAL_MAX_PAINT_FPS` may set a qualified local
 value from 5 through 60; raising it trades more CPU for intermediate-frame
-smoothness. The performance snapshot records byte, poll, feed, paint, render,
-and row-reuse counters for diagnosis without storing prompt contents.
+smoothness. When tmux owns scrollback, the renderer keeps only a small 200-line
+mirror rather than duplicating the full history. `Latest` shows bounded runtime
+telemetry for event-loop lag, RSS, PTY throughput, paint rate, and frame
+coalescing without storing prompt contents.
+
+Managed daemon logs rotate while the daemon remains active. The default limit
+is 64 MiB with three backups; `AGENT_PBX_DAEMON_LOG_MAX_BYTES`,
+`AGENT_PBX_DAEMON_LOG_BACKUPS`, and
+`AGENT_PBX_DAEMON_LOG_CHECK_SECONDS` tune those bounds for a local deployment.
 
 The runtime server owns scrollback. Managed Codex profiles use inline terminal
 behavior so tmux can retain history. Page Up or `/tmux scrollback` enters copy
