@@ -882,6 +882,74 @@ def test_joplin_profile_coordinator_skips_decrypt_for_targeted_sync(
     assert events == ["stop:321", "sync", f"start:{profile}"]
 
 
+def test_joplin_profile_coordinator_waits_for_listener_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://127.0.0.1:41184",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=tmp_path / "profile",
+            profile_owner_mode="managed_cli",
+            timeout_seconds=5.0,
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    killed: list[tuple[int, int]] = []
+    endpoint_states = iter([True, True, False, False])
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "agent_pbx.joplin.os.kill",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+    monkeypatch.setattr(coordinator, "_process_exists", lambda _pid: False)
+    monkeypatch.setattr(
+        coordinator,
+        "_api_endpoint_accepting",
+        lambda: next(endpoint_states),
+    )
+    monkeypatch.setattr("agent_pbx.joplin.time.sleep", sleeps.append)
+
+    coordinator._stop_server(321)
+
+    assert killed == [(321, 15)]
+    assert sleeps == [0.1, 0.1, 0.1]
+
+
+def test_joplin_profile_coordinator_refuses_sync_while_listener_remains(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JoplinService(
+        JoplinConfig(
+            api_url="http://127.0.0.1:41184",
+            token="secret",
+            joplin_bin=tmp_path / "joplin",
+            profile=tmp_path / "profile",
+            profile_owner_mode="managed_cli",
+            timeout_seconds=5.0,
+        )
+    )
+    coordinator = JoplinProfileCoordinator(service)
+    monotonic_values = iter([0.0, 0.0, 6.0])
+    monkeypatch.setattr("agent_pbx.joplin.os.kill", lambda _pid, _sig: None)
+    monkeypatch.setattr(coordinator, "_process_exists", lambda _pid: False)
+    monkeypatch.setattr(coordinator, "_api_endpoint_accepting", lambda: True)
+    monkeypatch.setattr(
+        "agent_pbx.joplin.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr("agent_pbx.joplin.time.sleep", lambda _delay: None)
+
+    with pytest.raises(JoplinProfileInUseError) as caught:
+        coordinator._stop_server(321)
+
+    assert caught.value.code == "JOPLIN_PROFILE_RECOVERY_FAILED"
+    assert "listener did not release" in str(caught.value)
+
+
 def test_joplin_profile_coordinator_restores_server_after_unexpected_decrypt_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

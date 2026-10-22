@@ -10,10 +10,12 @@ from pathlib import Path
 import re
 import signal
 import shutil
+import socket
 import subprocess
 import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -1556,6 +1558,34 @@ class JoplinProfileCoordinator:
             return False
         return response.status_code == 200 and "JoplinClipperServer" in response.text
 
+    def _api_endpoint_accepting(self) -> bool:
+        """Return whether the configured API socket still accepts connections.
+
+        A managed Joplin server can release its recorded process before the
+        Clipper listener has finished shutting down.  An HTTP ping is
+        insufficient here because a draining listener may still own the port
+        while no longer serving requests.  Starting the replacement during
+        that window makes it exit with ``EADDRINUSE`` and leaves the profile
+        without a Data API server once the old listener finally disappears.
+        """
+
+        api_url = str(self.config.api_url or "").strip()
+        if not api_url:
+            return False
+        try:
+            parsed = urlsplit(api_url)
+            host = parsed.hostname
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        except ValueError:
+            return self._api_server_reachable()
+        if not host:
+            return self._api_server_reachable()
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                return True
+        except OSError:
+            return False
+
     @staticmethod
     def _process_exists(pid: int) -> bool:
         try:
@@ -1626,7 +1656,7 @@ class JoplinProfileCoordinator:
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
-            return
+            pass
         deadline = time.monotonic() + min(max(self.config.timeout_seconds, 5.0), 30.0)
         while self._process_exists(pid):
             if time.monotonic() >= deadline:
@@ -1634,6 +1664,26 @@ class JoplinProfileCoordinator:
                     "Joplin Data API server did not stop before the safe sync deadline"
                 )
             time.sleep(0.1)
+
+        # The Joplin CLI can tear down its recorded process before the Clipper
+        # listener releases the API port.  Wait for the endpoint itself to be
+        # free before running the profile CLI or starting its replacement.
+        # Two consecutive clear probes avoid treating a transient socket state
+        # as a completed shutdown.
+        clear_probes = 0
+        while clear_probes < 2:
+            if time.monotonic() >= deadline:
+                raise JoplinProfileInUseError(
+                    "Joplin Data API process stopped but its listener did not "
+                    "release the configured endpoint before the safe sync deadline",
+                    code="JOPLIN_PROFILE_RECOVERY_FAILED",
+                )
+            if self._api_endpoint_accepting():
+                clear_probes = 0
+            else:
+                clear_probes += 1
+            if clear_probes < 2:
+                time.sleep(0.1)
 
     def _start_server(self, profile: Path) -> None:
         executable = self.service.sync_command()[0]

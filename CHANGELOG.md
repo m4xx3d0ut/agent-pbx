@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Wait for the managed Joplin Clipper listener itself to release its socket
+  before running profile sync and starting the replacement Data API process.
+  This closes a shutdown race where the recorded PID exited first, the new
+  server failed with `EADDRINUSE`, and note copy remained locally and remotely
+  saved while subsequent Joplin requests received connection refusals.
 - Bound long-running native-terminal load by lowering the default embedded
   paint ceiling to 10 FPS, retaining only a small renderer-side history when
   tmux owns scrollback, skipping redundant capture polling for an attached
