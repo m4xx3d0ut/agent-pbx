@@ -1,7 +1,7 @@
 # Models, Profiles, and Codex
 
 > **Applies to:** Agent PBX 2.2.x
-> **Last reviewed:** 2026-10-10
+> **Last reviewed:** 2026-10-23
 
 Agent PBX validates model choices against the live `codex debug models`
 catalog. A configured slug that is missing from the current CLI produces a
@@ -23,8 +23,19 @@ restart/resume because model and reasoning fields are session-static. The UI
 must not present them as an in-turn hot reload.
 
 An elevated Sol max profile requires a human-approved justification and a
-bounded lease. The Operator requesting it cannot self-approve. Failure restores
-the prior profile and leaves an audit record.
+bounded lease. The Operator requesting it cannot self-approve. Palette and
+Codex-tab requests converge on one idempotent lease, so repeated input cannot
+open a second approval or restart an already elevated runtime. The Codex status
+surface shows the active or pending-return lease.
+
+One-task completion and lease expiry move an active lease to
+`revert_pending`; they do not interrupt a running turn. Agent PBX waits for a
+high-confidence app-server, hook, or transcript boundary, restarts/resumes the
+same Codex session under the prior profile, and closes the lease only after the
+effective model and reasoning effort are verified. Ambiguous runtime evidence
+fails closed and leaves an actionable pending-return state. Launch or
+verification failures retain an audit record instead of silently creating a
+second elevation.
 
 ## Managed global configuration
 

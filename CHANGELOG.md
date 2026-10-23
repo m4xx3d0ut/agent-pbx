@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Make bounded Sol-max elevation idempotent across the Codex tab, palette,
+  repeated submissions, and concurrent API clients. Agent PBX now reuses one
+  nonterminal lease per runtime, refuses lease/profile mismatches, associates
+  the approved lease with the resumed Codex runtime, and changes an expired or
+  completed one-task lease to `revert_pending` until a structured safe turn
+  boundary permits restart/resume on the verified prior profile.
 - Wait for the managed Joplin Clipper listener itself to release its socket
   before running profile sync and starting the replacement Data API process.
   This closes a shutdown race where the recorded PID exited first, the new

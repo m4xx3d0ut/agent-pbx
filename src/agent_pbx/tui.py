@@ -3496,6 +3496,7 @@ class ModelElevationScreen(ModalScreen[None]):
         super().__init__()
         self.agent_id = agent_id
         self.preset = preset
+        self._submitted = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="model-elevation-panel"):
@@ -3514,10 +3515,16 @@ class ModelElevationScreen(ModalScreen[None]):
                 yield Button("Cancel", id="model-elevation-cancel")
 
     def submit(self) -> None:
+        if self._submitted:
+            return
         justification = self.query_one("#model-elevation-justification", Input).value.strip()
         if len(justification) < 8:
             self.notify("A specific justification is required.", severity="warning")
             return
+        self._submitted = True
+        self.query_one("#model-elevation-justification", Input).disabled = True
+        self.query_one("#model-elevation-approve", Button).disabled = True
+        self.query_one("#model-elevation-cancel", Button).disabled = True
         self.app.run_worker(  # type: ignore[attr-defined]
             self.app.approve_and_restart_model_elevation(  # type: ignore[attr-defined]
                 self.agent_id,
@@ -3542,6 +3549,11 @@ class ModelElevationScreen(ModalScreen[None]):
         if event.input.id == "model-elevation-justification":
             event.stop()
             self.submit()
+
+    def on_unmount(self) -> None:
+        modal_agents = getattr(self.app, "model_elevation_modal_agent_ids", None)
+        if isinstance(modal_agents, set):
+            modal_agents.discard(self.agent_id)
 
 
 class JoplinNoteTitleScreen(ModalScreen[None]):
@@ -6667,6 +6679,9 @@ class AgentPBXTUI(App[None]):
         ] = {}
         self.codex_posture: CodexCliPosture | None = None
         self.codex_runtime_by_agent: dict[str, dict[str, Any]] = {}
+        self.model_elevation_by_agent: dict[str, dict[str, Any]] = {}
+        self.model_elevation_modal_agent_ids: set[str] = set()
+        self.model_elevation_reconcile_inflight: set[str] = set()
         self.codex_runtime_animation_frame = 0
         self.terminal_color_depth = terminal_color_depth()
         self.codex_config: dict[str, Any] | None = None
@@ -7016,13 +7031,217 @@ class AgentPBXTUI(App[None]):
                 if preset.reasoning_summary
                 else ""
             )
-            status.update(
+            lines = [
                 f"Target: {target}\n"
                 "Model preset: "
                 f"{preset.label} -> {preset.model}/{preset.reasoning_effort}"
                 f"{verbosity}{reasoning_summary}. "
                 f"{preset.description}"
+            ]
+            lease = self.model_elevation_by_agent.get(target)
+            if isinstance(lease, dict):
+                lease_status = str(lease.get("status") or "unknown")
+                expires_at = lease.get("expires_at")
+                expiry = ""
+                if isinstance(expires_at, (int, float)):
+                    expiry = time.strftime(
+                        "%Y-%m-%d %H:%M:%S UTC",
+                        time.gmtime(float(expires_at)),
+                    )
+                lines.append(
+                    "Elevation: "
+                    f"{lease_status} · {lease.get('requested_profile') or '-'}"
+                    + (f" · expires {expiry}" if expiry else "")
+                )
+                if lease_status == "revert_pending":
+                    lines.append(
+                        "Return to the prior profile is pending a verified safe turn boundary."
+                    )
+            status.update("\n".join(lines))
+
+    @staticmethod
+    def elevation_profile_id(preset: CodexModelPreset) -> str | None:
+        if preset.key == "sol-5.6-max":
+            return "sol-max"
+        return None
+
+    def runtime_profile_match(
+        self,
+        agent_id: str,
+        preset: CodexModelPreset,
+        snapshot: Mapping[str, Any] | None,
+    ) -> str:
+        """Return ``match``, ``mismatch``, or ``unknown`` for an effective profile."""
+
+        profile = snapshot.get("profile") if isinstance(snapshot, Mapping) else None
+        if isinstance(profile, Mapping):
+            model = str(profile.get("model") or "").strip()
+            effort = str(profile.get("reasoning_effort") or "").strip()
+            if model and effort:
+                return (
+                    "match"
+                    if model == preset.model and effort == preset.reasoning_effort
+                    else "mismatch"
+                )
+        agent = self.agents.get(agent_id) or {}
+        metadata = self.agent_metadata(agent)
+        model = str(metadata.get("codex_model") or "").strip()
+        effort = str(metadata.get("codex_model_reasoning_effort") or "").strip()
+        if model and effort:
+            return (
+                "match"
+                if model == preset.model and effort == preset.reasoning_effort
+                else "mismatch"
             )
+        return "unknown"
+
+    async def fetch_model_elevations(self, agent_id: str) -> list[dict[str, Any]]:
+        response = await self.api_client().get(
+            "/v2/codex/elevations",
+            params={"agent_id": agent_id, "limit": 20},
+            headers=auth_headers(self.token),
+            timeout=8,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        leases = [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+        open_lease = next(
+            (
+                item
+                for item in leases
+                if str(item.get("status") or "")
+                in {"pending", "approved", "active", "revert_pending"}
+            ),
+            None,
+        )
+        if open_lease is None:
+            self.model_elevation_by_agent.pop(agent_id, None)
+        else:
+            self.model_elevation_by_agent[agent_id] = open_lease
+        if self.selected_agent_id == agent_id:
+            self.update_codex_model_status()
+        return leases
+
+    async def fetch_codex_runtime_snapshot(self, agent_id: str) -> dict[str, Any]:
+        response = await self.api_client().get(
+            f"/v2/agents/{quote(agent_id, safe='')}/codex-runtime",
+            headers=auth_headers(self.token),
+            timeout=8,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Codex runtime endpoint returned a non-object response")
+        self.codex_runtime_by_agent[agent_id] = payload
+        return payload
+
+    async def request_codex_model_restart(
+        self,
+        agent_id: str,
+        preset: CodexModelPreset,
+    ) -> bool:
+        if not preset.elevated:
+            self.notify(f"Restarting {agent_id} with Codex model preset {preset.label}.")
+            return await self.restart_tmux_codex_session(
+                agent_id,
+                model_preset=preset,
+            )
+        return await self.prepare_model_elevation(agent_id, preset)
+
+    async def prepare_model_elevation(
+        self,
+        agent_id: str,
+        preset: CodexModelPreset,
+    ) -> bool:
+        """Preflight all elevation entry points before presenting approval UI."""
+
+        requested_profile = self.elevation_profile_id(preset)
+        if requested_profile is None:
+            self.notify("Unknown elevated model profile.", severity="error")
+            return False
+        if agent_id in self.model_elevation_modal_agent_ids:
+            self.notify(
+                f"An elevation approval is already open for {agent_id}.",
+                severity="warning",
+            )
+            return False
+        try:
+            snapshot, leases = await asyncio.gather(
+                self.fetch_codex_runtime_snapshot(agent_id),
+                self.fetch_model_elevations(agent_id),
+            )
+        except Exception as exc:
+            self.notify(
+                f"Unable to verify {agent_id}'s elevation state: {exc}",
+                severity="error",
+            )
+            return False
+        open_lease = next(
+            (
+                item
+                for item in leases
+                if str(item.get("status") or "")
+                in {"pending", "approved", "active", "revert_pending"}
+            ),
+            None,
+        )
+        runtime_match = self.runtime_profile_match(agent_id, preset, snapshot)
+        if open_lease is not None:
+            lease_profile = str(open_lease.get("requested_profile") or "")
+            lease_status = str(open_lease.get("status") or "")
+            if lease_profile != requested_profile:
+                self.notify(
+                    f"{agent_id} already has an open elevation for {lease_profile}; "
+                    "resolve it before requesting another profile.",
+                    severity="error",
+                )
+                return False
+            if lease_status == "active" and runtime_match == "match":
+                self.notify(
+                    f"{agent_id} is already running {preset.label} under lease "
+                    f"{open_lease.get('lease_id')}.",
+                    severity="information",
+                )
+                return True
+            if lease_status == "approved" and runtime_match != "match":
+                self.notify(
+                    f"Resuming the existing approved {preset.label} transition for {agent_id}."
+                )
+                return await self.restart_tmux_codex_session(
+                    agent_id,
+                    model_preset=preset,
+                    model_elevation_lease_id=str(open_lease.get("lease_id") or ""),
+                )
+            if lease_status == "pending":
+                self.notify(
+                    f"{agent_id} already has a pending {preset.label} approval; "
+                    "no second request was created.",
+                    severity="warning",
+                )
+                return False
+            if lease_status == "revert_pending":
+                self.notify(
+                    f"{agent_id}'s elevation is awaiting a safe-boundary return to "
+                    "its prior profile.",
+                    severity="warning",
+                )
+                return False
+            self.notify(
+                f"Elevation state mismatch for {agent_id}: lease={lease_status}, "
+                f"runtime={runtime_match}. No restart or approval was performed.",
+                severity="error",
+            )
+            return False
+        if runtime_match == "match":
+            self.notify(
+                f"{agent_id} reports {preset.label} without an open elevation lease. "
+                "Repair the runtime mapping before changing models.",
+                severity="error",
+            )
+            return False
+        self.model_elevation_modal_agent_ids.add(agent_id)
+        self.push_screen(ModelElevationScreen(agent_id=agent_id, preset=preset))
+        return True
 
     async def validate_codex_model_preset(
         self,
@@ -7170,11 +7389,7 @@ class AgentPBXTUI(App[None]):
         agent_id = self.codex_model_target_agent_id()
         if agent_id is None:
             return
-        if preset.elevated:
-            self.push_screen(ModelElevationScreen(agent_id=agent_id, preset=preset))
-            return
-        self.notify(f"Restarting {agent_id} with Codex model preset {preset.label}.")
-        await self.restart_tmux_codex_session(agent_id, model_preset=preset)
+        await self.request_codex_model_restart(agent_id, preset)
 
     async def approve_and_restart_model_elevation(
         self,
@@ -7205,18 +7420,44 @@ class AgentPBXTUI(App[None]):
             )
             requested.raise_for_status()
             lease = requested.json()
-            decided = await self.api_client().post(
-                f"/v2/codex/elevations/{lease['lease_id']}/decision",
-                json={
-                    "approved": True,
-                    "approved_by": "agent-pbx-tui-user",
-                    "duration_seconds": 3600,
-                },
-                headers=headers,
-            )
-            decided.raise_for_status()
+            lease_status = str(lease.get("status") or "")
+            if lease_status == "pending":
+                decided = await self.api_client().post(
+                    f"/v2/codex/elevations/{lease['lease_id']}/decision",
+                    json={
+                        "approved": True,
+                        "approved_by": "agent-pbx-tui-user",
+                        "duration_seconds": 3600,
+                    },
+                    headers=headers,
+                )
+                decided.raise_for_status()
+                lease = decided.json()
+                lease_status = str(lease.get("status") or "")
         except Exception as exc:
             self.notify(f"Sol max approval failed: {exc}", severity="error")
+            return
+        if lease_status == "active":
+            self.model_elevation_by_agent[agent_id] = lease
+            snapshot = self.codex_runtime_by_agent.get(agent_id)
+            if self.runtime_profile_match(agent_id, preset, snapshot) == "match":
+                self.notify(
+                    f"{agent_id} is already running {preset.label}; reused its active lease."
+                )
+                self.update_codex_model_status(preset)
+                return
+            self.notify(
+                f"{agent_id} has an active elevation lease, but its runtime profile "
+                "does not match. No second restart was attempted.",
+                severity="error",
+            )
+            return
+        if lease_status != "approved":
+            self.notify(
+                f"Elevation request for {agent_id} is {lease_status or 'unknown'}; "
+                "restart was not attempted.",
+                severity="warning",
+            )
             return
         self.notify(
             f"Approved bounded Sol max elevation for {agent_id}; restarting at the safe boundary."
@@ -7233,7 +7474,7 @@ class AgentPBXTUI(App[None]):
         *,
         agent_id: str,
         preset: CodexModelPreset,
-    ) -> bool:
+    ) -> dict[str, Any] | None:
         try:
             response = await self.api_client().post(
                 f"/v2/codex/elevations/{lease_id}/activate",
@@ -7250,7 +7491,7 @@ class AgentPBXTUI(App[None]):
             lease = response.json()
         except Exception as exc:
             self.notify(f"Model elevation activation failed: {exc}", severity="error")
-            return False
+            return None
         if (
             str(lease.get("agent_id") or "") != agent_id
             or str(lease.get("requested_profile") or "") != "sol-max"
@@ -7258,8 +7499,9 @@ class AgentPBXTUI(App[None]):
             or bool(lease.get("expired"))
         ):
             self.notify("Model elevation lease did not match the target session.", severity="error")
-            return False
-        return True
+            return None
+        self.model_elevation_by_agent[agent_id] = lease
+        return lease
 
     async def finish_model_elevation_lease(
         self,
@@ -7267,7 +7509,7 @@ class AgentPBXTUI(App[None]):
         *,
         status: str,
         transition: dict[str, object] | None = None,
-    ) -> None:
+    ) -> bool:
         try:
             response = await self.api_client().post(
                 f"/v2/codex/elevations/{lease_id}/finish",
@@ -7275,8 +7517,376 @@ class AgentPBXTUI(App[None]):
                 headers=auth_headers(self.token),
             )
             response.raise_for_status()
+            payload = response.json()
         except Exception as exc:
             self.notify(f"Unable to update model elevation lease: {exc}", severity="warning")
+            return False
+        if isinstance(payload, dict):
+            agent_id = str(payload.get("agent_id") or "")
+            if agent_id:
+                self.model_elevation_by_agent.pop(agent_id, None)
+                if self.selected_agent_id == agent_id:
+                    self.update_codex_model_status()
+        return True
+
+    async def update_model_elevation_lease_transition(
+        self,
+        lease_id: str,
+        transition: Mapping[str, object],
+    ) -> dict[str, Any] | None:
+        try:
+            response = await self.api_client().post(
+                f"/v2/codex/elevations/{lease_id}/transition",
+                json={"transition": dict(transition)},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return payload if isinstance(payload, dict) else None
+        except Exception as exc:
+            self.notify(
+                f"Unable to record model elevation transition: {exc}",
+                severity="warning",
+            )
+            return None
+
+    async def persist_model_elevation_metadata(
+        self,
+        agent_id: str,
+        lease: Mapping[str, Any] | None,
+    ) -> None:
+        agent = self.agents.get(agent_id)
+        if not isinstance(agent, dict):
+            return
+        metadata = dict(self.agent_metadata(agent))
+        keys = {
+            "codex_model_elevation_lease_id",
+            "codex_model_elevation_status",
+            "codex_model_elevation_prior_profile",
+            "codex_model_elevation_expires_at",
+        }
+        for key in keys:
+            metadata.pop(key, None)
+        if lease is not None:
+            metadata.update(
+                {
+                    "codex_model_elevation_lease_id": str(
+                        lease.get("lease_id") or ""
+                    ),
+                    "codex_model_elevation_status": str(
+                        lease.get("status") or ""
+                    ),
+                    "codex_model_elevation_prior_profile": str(
+                        lease.get("prior_profile") or ""
+                    ),
+                    "codex_model_elevation_expires_at": lease.get("expires_at"),
+                }
+            )
+        else:
+            # Agent registration merges metadata. Explicit nulls clear the
+            # association instead of allowing stale lease values to survive.
+            metadata.update({key: None for key in keys})
+        response = await self.api_client().post(
+            "/v1/agents/register",
+            json={
+                "agent_id": agent_id,
+                "project": str(agent.get("project") or "agent-pbx"),
+                "name": str(agent.get("name") or agent_id),
+                "agent_type": self.agent_type(agent),
+                "pbx_active": bool(agent.get("pbx_active", True)),
+                "metadata": metadata,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        updated = response.json()
+        if isinstance(updated, dict):
+            self.agents[agent_id] = updated
+
+    async def associate_model_elevation_runtime(
+        self,
+        agent_id: str,
+        lease: Mapping[str, Any],
+        preset: CodexModelPreset,
+    ) -> None:
+        agent = self.agents.get(agent_id) or {}
+        metadata = self.agent_metadata(agent)
+        mapping = self.tmux_runtime_mapping_by_agent.get(agent_id) or {}
+        session_id = str(
+            metadata.get("fork_codex_session_id")
+            or metadata.get("last_resume_codex_session_id")
+            or metadata.get("codex_session_id")
+            or metadata.get("codex_thread_id")
+            or mapping.get("codex_session_id")
+            or ""
+        ).strip()
+        updated = await self.update_model_elevation_lease_transition(
+            str(lease.get("lease_id") or ""),
+            {
+                "phase": "runtime_associated",
+                "runtime_associated_at": time.time(),
+                "codex_session_id": session_id,
+                "tmux_pane_id": str(
+                    mapping.get("pane_id")
+                    or self.tmux_agent_targets.get(agent_id)
+                    or ""
+                ),
+                "requested_preset": preset.key,
+                "requested_model": preset.model,
+                "requested_reasoning_effort": preset.reasoning_effort,
+            },
+        )
+        associated = updated or dict(lease)
+        self.model_elevation_by_agent[agent_id] = associated
+        try:
+            await self.persist_model_elevation_metadata(agent_id, associated)
+        except Exception as exc:
+            self.notify(
+                f"Model elevation is active, but its Agent metadata could not be "
+                f"associated: {exc}",
+                severity="warning",
+            )
+        if self.selected_agent_id == agent_id:
+            self.update_codex_model_status(preset)
+
+    @staticmethod
+    def verified_model_revert_boundary(
+        snapshot: Mapping[str, Any],
+        lease: Mapping[str, Any],
+        *,
+        completion_required: bool,
+    ) -> bool:
+        state = str(snapshot.get("state") or "")
+        if completion_required:
+            allowed_states = {"complete"}
+            transition = lease.get("transition")
+            try:
+                turn_started_at = float(
+                    transition.get("elevated_turn_started_at") or 0.0
+                ) if isinstance(transition, Mapping) else 0.0
+            except (TypeError, ValueError):
+                turn_started_at = 0.0
+            if state == "ready" and turn_started_at > 0:
+                allowed_states.add("ready")
+        else:
+            allowed_states = {"ready", "complete", "interrupted"}
+        if state not in allowed_states:
+            return False
+        evidence = snapshot.get("evidence")
+        if not isinstance(evidence, Mapping):
+            return False
+        if str(evidence.get("source") or "") not in {
+            "app_server",
+            "hook",
+            "transcript",
+        }:
+            return False
+        try:
+            observed_at = float(evidence.get("observed_at") or 0.0)
+            confidence = float(evidence.get("confidence") or 0.0)
+            activated_at = float(lease.get("activated_at") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if confidence < 0.8 or activated_at <= 0 or observed_at <= activated_at:
+            return False
+        if completion_required and state == "ready":
+            return turn_started_at > activated_at and observed_at > turn_started_at
+        return True
+
+    async def request_model_elevation_revert(
+        self,
+        lease: Mapping[str, Any],
+        *,
+        reason: str,
+        snapshot: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        lease_id = str(lease.get("lease_id") or "")
+        evidence = snapshot.get("evidence")
+        transition = {
+            "safe_boundary_state": str(snapshot.get("state") or ""),
+            "safe_boundary_observed_at": snapshot.get("updated_at"),
+            "safe_boundary_source": (
+                str(evidence.get("source") or "")
+                if isinstance(evidence, Mapping)
+                else ""
+            ),
+        }
+        try:
+            response = await self.api_client().post(
+                f"/v2/codex/elevations/{lease_id}/revert",
+                json={"reason": reason, "transition": transition},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self.notify(
+                f"Unable to request model elevation reversion: {exc}",
+                severity="warning",
+            )
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    async def reconcile_model_elevation(
+        self,
+        agent_id: str,
+        snapshot: Mapping[str, Any],
+        leases: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if agent_id in self.model_elevation_reconcile_inflight:
+            return
+        lease = self.model_elevation_by_agent.get(agent_id)
+        if lease is None and leases is not None:
+            lease = next(
+                (
+                    item
+                    for item in leases
+                    if str(item.get("status") or "")
+                    in {"active", "revert_pending"}
+                ),
+                None,
+            )
+        if not isinstance(lease, dict):
+            return
+        status = str(lease.get("status") or "")
+        if status not in {"active", "revert_pending"}:
+            return
+        requested = codex_model_preset_for(str(lease.get("requested_profile") or ""))
+        prior = codex_model_preset_for(str(lease.get("prior_profile") or ""))
+        if requested is None or prior is None or prior.elevated:
+            return
+        self.model_elevation_reconcile_inflight.add(agent_id)
+        try:
+            if status == "active":
+                if str(lease.get("scope") or "") != "one_task":
+                    return
+                evidence = snapshot.get("evidence")
+                detail = (
+                    evidence.get("detail")
+                    if isinstance(evidence, Mapping)
+                    and isinstance(evidence.get("detail"), Mapping)
+                    else {}
+                )
+                if (
+                    str(evidence.get("source") or "") == "app_server"
+                    and str(detail.get("method") or "") == "turn/started"
+                ):
+                    try:
+                        observed_at = float(evidence.get("observed_at") or 0.0)
+                        activated_at = float(lease.get("activated_at") or 0.0)
+                    except (TypeError, ValueError):
+                        observed_at = 0.0
+                        activated_at = 0.0
+                    transition = lease.get("transition")
+                    already_recorded = bool(
+                        isinstance(transition, Mapping)
+                        and transition.get("elevated_turn_started_at")
+                    )
+                    if observed_at > activated_at > 0 and not already_recorded:
+                        updated = await self.update_model_elevation_lease_transition(
+                            str(lease.get("lease_id") or ""),
+                            {
+                                "elevated_turn_started_at": observed_at,
+                                "elevated_turn_source": "app_server",
+                            },
+                        )
+                        if updated is not None:
+                            lease = updated
+                            self.model_elevation_by_agent[agent_id] = updated
+                    return
+                if not self.verified_model_revert_boundary(
+                    snapshot,
+                    lease,
+                    completion_required=True,
+                ):
+                    return
+                pending = await self.request_model_elevation_revert(
+                    lease,
+                    reason="one_task_completed",
+                    snapshot=snapshot,
+                )
+                if pending is None:
+                    return
+                lease = pending
+                status = "revert_pending"
+                self.model_elevation_by_agent[agent_id] = lease
+            if status != "revert_pending":
+                return
+            prior_match = self.runtime_profile_match(agent_id, prior, snapshot)
+            if prior_match == "match":
+                finished = await self.finish_model_elevation_lease(
+                    str(lease.get("lease_id") or ""),
+                    status="reverted",
+                    transition={
+                        "verified": True,
+                        "verified_at": time.time(),
+                        "verified_model": prior.model,
+                        "verified_reasoning_effort": prior.reasoning_effort,
+                    },
+                )
+                if not finished:
+                    return
+                self.model_elevation_by_agent.pop(agent_id, None)
+                try:
+                    await self.persist_model_elevation_metadata(agent_id, None)
+                except Exception as exc:
+                    self.notify(
+                        f"The prior model is verified, but elevation metadata cleanup "
+                        f"failed: {exc}",
+                        severity="warning",
+                    )
+                self.notify(f"{agent_id} returned to {prior.label}.")
+                return
+            if not self.verified_model_revert_boundary(
+                snapshot,
+                lease,
+                completion_required=False,
+            ):
+                return
+            transition = lease.get("transition")
+            if isinstance(transition, Mapping) and transition.get(
+                "revert_restart_completed_at"
+            ):
+                return
+            if self.runtime_profile_match(agent_id, requested, snapshot) != "match":
+                self.notify(
+                    f"{agent_id}'s elevation is pending reversion, but the effective "
+                    "runtime profile is ambiguous. Automatic restart was withheld.",
+                    severity="warning",
+                )
+                return
+            await self.update_model_elevation_lease_transition(
+                str(lease.get("lease_id") or ""),
+                {
+                    "phase": "revert_restarting",
+                    "revert_restart_started_at": time.time(),
+                    "prior_preset": prior.key,
+                },
+            )
+            self.notify(
+                f"{agent_id}'s bounded elevation reached a safe boundary; "
+                f"returning to {prior.label}."
+            )
+            restarted = await self.restart_tmux_codex_session(
+                agent_id,
+                model_preset=prior,
+            )
+            if restarted:
+                updated = await self.update_model_elevation_lease_transition(
+                    str(lease.get("lease_id") or ""),
+                    {
+                        "phase": "revert_verification_pending",
+                        "revert_restart_completed_at": time.time(),
+                    },
+                )
+                if updated is not None:
+                    self.model_elevation_by_agent[agent_id] = updated
+                self.notify(
+                    f"{agent_id} restarted on {prior.label}; waiting for runtime "
+                    "verification before closing the elevation lease."
+                )
+        finally:
+            self.model_elevation_reconcile_inflight.discard(agent_id)
 
     async def save_selected_codex_model_preset_as_default(self) -> None:
         await self.save_codex_model_preset_as_default(self.selected_codex_model_preset())
@@ -9644,12 +10254,8 @@ class AgentPBXTUI(App[None]):
         if agent_id is None:
             return
         self.set_codex_model_preset_selector(preset)
-        if preset.elevated:
-            self.push_screen(ModelElevationScreen(agent_id=agent_id, preset=preset))
-            return
-        self.notify(f"Restarting {agent_id} with Codex model preset {preset.label}.")
         self.run_worker(
-            self.restart_tmux_codex_session(agent_id, model_preset=preset),
+            self.request_codex_model_restart(agent_id, preset),
             name=f"codex-model-restart-{slugify(agent_id)}",
             exclusive=True,
         )
@@ -14920,20 +15526,21 @@ class AgentPBXTUI(App[None]):
         title.update(f"Agent: {agent_id} | View: {view} | Plan: {state}")
 
     async def load_codex_runtime_status(self, agent_id: str) -> None:
+        snapshot: dict[str, Any] | None = None
         try:
-            response = await self.api_client().get(
-                f"/v2/agents/{quote(agent_id, safe='')}/codex-runtime",
-                headers=auth_headers(self.token),
-                timeout=8,
-            )
-            response.raise_for_status()
-            snapshot = response.json()
-            if isinstance(snapshot, dict):
-                self.codex_runtime_by_agent[agent_id] = snapshot
+            snapshot = await self.fetch_codex_runtime_snapshot(agent_id)
         except Exception:
             agent = self.agents.get(agent_id)
             if agent is not None:
-                self.codex_runtime_by_agent[agent_id] = self.local_runtime_snapshot(agent)
+                snapshot = self.local_runtime_snapshot(agent)
+                self.codex_runtime_by_agent[agent_id] = snapshot
+        leases: list[dict[str, Any]] | None = None
+        try:
+            leases = await self.fetch_model_elevations(agent_id)
+        except Exception:
+            leases = None
+        if snapshot is not None and leases is not None:
+            await self.reconcile_model_elevation(agent_id, snapshot, leases)
         if self.selected_agent_id == agent_id:
             self.render_codex_runtime_surface()
 
@@ -19087,13 +19694,14 @@ class AgentPBXTUI(App[None]):
         if not isinstance(agent, dict):
             self.notify(f"{agent_id} is not loaded.", severity="warning")
             return False
+        activated_lease: dict[str, Any] | None = None
         if model_elevation_lease_id and model_preset is not None:
-            activated = await self.activate_model_elevation_lease(
+            activated_lease = await self.activate_model_elevation_lease(
                 model_elevation_lease_id,
                 agent_id=agent_id,
                 preset=model_preset,
             )
-            if not activated:
+            if activated_lease is None:
                 return False
         mapping = await self.fetch_tmux_runtime_mapping(agent_id)
         mapping_state = (
@@ -19131,6 +19739,12 @@ class AgentPBXTUI(App[None]):
                         transition={"reason": "managed_resume_failed"},
                     )
                 return False
+            if activated_lease is not None and model_preset is not None:
+                await self.associate_model_elevation_runtime(
+                    agent_id,
+                    activated_lease,
+                    model_preset,
+                )
             await self.refresh_agents()
             await self.refresh_events()
             await self.load_tmux_capture(agent_id)
@@ -19184,6 +19798,12 @@ class AgentPBXTUI(App[None]):
                     transition={"reason": "runtime_mapping_refresh_failed"},
                 )
             return False
+        if activated_lease is not None and model_preset is not None:
+            await self.associate_model_elevation_runtime(
+                agent_id,
+                activated_lease,
+                model_preset,
+            )
         await self.refresh_agents()
         await self.refresh_events()
         await self.load_tmux_capture(agent_id)
@@ -34470,6 +35090,29 @@ class AgentPBXTUI(App[None]):
                 self.codex_runtime_by_agent[agent_id] = snapshot
                 if agent_id == selected_agent_id:
                     self.render_codex_runtime_surface()
+                if agent_id in self.model_elevation_by_agent:
+                    self.run_async_worker(
+                        lambda: self.reconcile_model_elevation(agent_id, snapshot),
+                        name=f"model-elevation-reconcile-{slugify(agent_id)}",
+                        group="model-elevation",
+                        exclusive=False,
+                        exit_on_error=False,
+                    )
+        if event_type.startswith("model_elevation_") and agent_id:
+            payload = event.get("payload")
+            if isinstance(payload, dict):
+                lease_status = str(payload.get("status") or "")
+                if lease_status in {
+                    "pending",
+                    "approved",
+                    "active",
+                    "revert_pending",
+                }:
+                    self.model_elevation_by_agent[agent_id] = payload
+                else:
+                    self.model_elevation_by_agent.pop(agent_id, None)
+                if agent_id == selected_agent_id:
+                    self.update_codex_model_status()
         if selected_agent_id and selected_detail_visible:
             if event_type == "report_created":
                 self.run_worker(

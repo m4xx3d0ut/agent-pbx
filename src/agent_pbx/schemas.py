@@ -153,6 +153,15 @@ class ModelElevationActivateRequest(BaseModel):
     transition: dict[str, Any] = Field(default_factory=dict)
 
 
+class ModelElevationTransitionRequest(BaseModel):
+    transition: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelElevationRevertRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=240)
+    transition: dict[str, Any] = Field(default_factory=dict)
+
+
 class ModelElevationFinishRequest(BaseModel):
     status: Literal["expired", "failed", "reverted"]
     transition: dict[str, Any] = Field(default_factory=dict)
@@ -174,6 +183,7 @@ class ModelElevationResponse(BaseModel):
     approved_by: str | None = None
     transition: dict[str, Any] = Field(default_factory=dict)
     expired: bool = False
+    reused: bool = False
 
 
 class ManagedSkillApplyRequest(BaseModel):

@@ -11849,7 +11849,19 @@ async def test_tui_sol_max_requires_explicit_justification_modal() -> None:
         restarts.append("restarted")
         return True
 
+    async def runtime(_agent_id: str) -> dict[str, object]:
+        return {
+            "state": "ready",
+            "profile": {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"},
+            "evidence": {"source": "app_server", "confidence": 1.0},
+        }
+
+    async def elevations(_agent_id: str) -> list[dict[str, object]]:
+        return []
+
     app.restart_tmux_codex_session = fake_restart  # type: ignore[method-assign]
+    app.fetch_codex_runtime_snapshot = runtime  # type: ignore[method-assign]
+    app.fetch_model_elevations = elevations  # type: ignore[method-assign]
     async with app.run_test() as pilot:
         await pilot.pause()
         app.agents = {
@@ -11868,6 +11880,319 @@ async def test_tui_sol_max_requires_explicit_justification_modal() -> None:
 
         assert isinstance(app.screen, ModelElevationScreen)
         assert restarts == []
+
+
+async def test_tui_model_elevation_modal_is_singleton_across_entry_points() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async def runtime(_agent_id: str) -> dict[str, object]:
+        return {
+            "state": "ready",
+            "profile": {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"},
+        }
+
+    async def elevations(_agent_id: str) -> list[dict[str, object]]:
+        return []
+
+    app.fetch_codex_runtime_snapshot = runtime  # type: ignore[method-assign]
+    app.fetch_model_elevations = elevations  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        app.agents = {
+            "operator-5": {
+                "agent_id": "operator-5",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"codex_model_preset": "sol-5.6-xhigh"},
+            }
+        }
+        app.selected_agent_id = "operator-5"
+        app.palette_codex_model_restart("sol-max")
+        await pilot.pause()
+        first = app.screen
+        assert isinstance(first, ModelElevationScreen)
+
+        await app.restart_selected_with_codex_model_preset()
+        await pilot.pause()
+
+        assert app.screen is first
+        assert app.model_elevation_modal_agent_ids == {"operator-5"}
+
+
+@pytest.mark.parametrize("lease_status", ["pending", "active", "revert_pending"])
+async def test_tui_existing_model_elevation_never_opens_second_modal(
+    lease_status: str,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    preset = codex_model_preset_for("sol-max")
+    assert preset is not None
+
+    async def runtime(_agent_id: str) -> dict[str, object]:
+        effort = "max" if lease_status == "active" else "xhigh"
+        return {
+            "state": "thinking",
+            "profile": {"model": "gpt-5.6-sol", "reasoning_effort": effort},
+        }
+
+    async def elevations(_agent_id: str) -> list[dict[str, object]]:
+        return [
+            {
+                "lease_id": "lease-1",
+                "agent_id": "operator-5",
+                "requested_profile": "sol-max",
+                "prior_profile": "sol-5.6-xhigh",
+                "status": lease_status,
+            }
+        ]
+
+    app.fetch_codex_runtime_snapshot = runtime  # type: ignore[method-assign]
+    app.fetch_model_elevations = elevations  # type: ignore[method-assign]
+    async with app.run_test():
+        app.agents = {
+            "operator-5": {
+                "agent_id": "operator-5",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"codex_model_preset": "sol-5.6-xhigh"},
+            }
+        }
+        app.selected_agent_id = "operator-5"
+        assert await app.prepare_model_elevation("operator-5", preset) is (
+            lease_status == "active"
+        )
+        assert not isinstance(app.screen, ModelElevationScreen)
+
+
+async def test_tui_active_model_elevation_runtime_mismatch_fails_closed() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    preset = codex_model_preset_for("sol-max")
+    assert preset is not None
+
+    async def runtime(_agent_id: str) -> dict[str, object]:
+        return {
+            "state": "thinking",
+            "profile": {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"},
+        }
+
+    async def elevations(_agent_id: str) -> list[dict[str, object]]:
+        return [
+            {
+                "lease_id": "lease-1",
+                "agent_id": "operator-5",
+                "requested_profile": "sol-max",
+                "prior_profile": "sol-5.6-xhigh",
+                "status": "active",
+            }
+        ]
+
+    app.fetch_codex_runtime_snapshot = runtime  # type: ignore[method-assign]
+    app.fetch_model_elevations = elevations  # type: ignore[method-assign]
+    async with app.run_test():
+        app.agents = {
+            "operator-5": {
+                "agent_id": "operator-5",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {},
+            }
+        }
+        app.selected_agent_id = "operator-5"
+        assert await app.prepare_model_elevation("operator-5", preset) is False
+        assert not isinstance(app.screen, ModelElevationScreen)
+
+
+async def test_tui_approved_model_elevation_resumes_existing_transition() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    preset = codex_model_preset_for("sol-max")
+    assert preset is not None
+    restarts: list[tuple[str, str]] = []
+
+    async def runtime(_agent_id: str) -> dict[str, object]:
+        return {
+            "state": "ready",
+            "profile": {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"},
+        }
+
+    async def elevations(_agent_id: str) -> list[dict[str, object]]:
+        return [
+            {
+                "lease_id": "lease-approved",
+                "agent_id": "operator-5",
+                "requested_profile": "sol-max",
+                "prior_profile": "sol-5.6-xhigh",
+                "status": "approved",
+            }
+        ]
+
+    async def restart(
+        agent_id: str,
+        *,
+        model_preset: object,
+        model_elevation_lease_id: str,
+    ) -> bool:
+        restarts.append((agent_id, model_elevation_lease_id))
+        return True
+
+    app.fetch_codex_runtime_snapshot = runtime  # type: ignore[method-assign]
+    app.fetch_model_elevations = elevations  # type: ignore[method-assign]
+    app.restart_tmux_codex_session = restart  # type: ignore[method-assign]
+    async with app.run_test():
+        app.agents = {
+            "operator-5": {
+                "agent_id": "operator-5",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": {"codex_model_preset": "sol-5.6-xhigh"},
+            }
+        }
+        app.selected_agent_id = "operator-5"
+        assert await app.prepare_model_elevation("operator-5", preset) is True
+
+    assert restarts == [("operator-5", "lease-approved")]
+
+
+async def test_tui_reverts_one_task_elevation_only_at_verified_boundary() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    restarts: list[str] = []
+    revert_requests: list[str] = []
+    transitions: list[dict[str, object]] = []
+    lease: dict[str, object] = {
+        "lease_id": "lease-1",
+        "agent_id": "operator-5",
+        "requested_profile": "sol-max",
+        "prior_profile": "sol-5.6-xhigh",
+        "scope": "one_task",
+        "status": "active",
+        "activated_at": 100.0,
+        "transition": {},
+    }
+
+    async def request_revert(
+        current: object,
+        *,
+        reason: str,
+        snapshot: object,
+    ) -> dict[str, object]:
+        assert current is lease
+        assert reason == "one_task_completed"
+        revert_requests.append(reason)
+        return {**lease, "status": "revert_pending"}
+
+    async def update_transition(
+        _lease_id: str,
+        transition: dict[str, object],
+    ) -> dict[str, object]:
+        transitions.append(transition)
+        return {
+            **lease,
+            "status": "revert_pending",
+            "transition": {**transition},
+        }
+
+    async def restart(
+        agent_id: str,
+        *,
+        model_preset: object,
+    ) -> bool:
+        restarts.append(agent_id)
+        return True
+
+    app.request_model_elevation_revert = request_revert  # type: ignore[method-assign]
+    app.update_model_elevation_lease_transition = update_transition  # type: ignore[method-assign]
+    app.restart_tmux_codex_session = restart  # type: ignore[method-assign]
+    app.agents = {
+        "operator-5": {
+            "agent_id": "operator-5",
+            "agent_type": "operator",
+            "metadata": {
+                "codex_model": "gpt-5.6-sol",
+                "codex_model_reasoning_effort": "max",
+            },
+        }
+    }
+    app.model_elevation_by_agent["operator-5"] = lease  # type: ignore[assignment]
+    unverified = {
+        "state": "complete",
+        "profile": {"model": "gpt-5.6-sol", "reasoning_effort": "max"},
+        "evidence": {
+            "source": "pbx_report",
+            "observed_at": 200.0,
+            "confidence": 1.0,
+        },
+    }
+    verified = {
+        **unverified,
+        "evidence": {
+            "source": "app_server",
+            "observed_at": 200.0,
+            "confidence": 1.0,
+        },
+    }
+
+    await app.reconcile_model_elevation("operator-5", unverified)
+    assert restarts == []
+    await app.reconcile_model_elevation("operator-5", verified)
+
+    assert revert_requests == ["one_task_completed"]
+    assert restarts == ["operator-5"]
+    assert transitions[0]["phase"] == "revert_restarting"
+    assert transitions[1]["phase"] == "revert_verification_pending"
+
+
+def test_tui_model_elevation_idle_requires_elevated_turn_start_marker() -> None:
+    snapshot = {
+        "state": "ready",
+        "evidence": {
+            "source": "app_server",
+            "observed_at": 200.0,
+            "confidence": 1.0,
+        },
+    }
+    lease = {"activated_at": 100.0, "transition": {}}
+
+    assert AgentPBXTUI.verified_model_revert_boundary(
+        snapshot,
+        lease,
+        completion_required=True,
+    ) is False
+
+    lease["transition"] = {"elevated_turn_started_at": 150.0}
+    assert AgentPBXTUI.verified_model_revert_boundary(
+        snapshot,
+        lease,
+        completion_required=True,
+    ) is True
+
+
+async def test_model_elevation_modal_submits_only_once() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    preset = codex_model_preset_for("sol-max")
+    assert preset is not None
+    calls: list[str] = []
+
+    async def approve(
+        _agent_id: str,
+        _preset: object,
+        justification: str,
+    ) -> None:
+        calls.append(justification)
+
+    app.approve_and_restart_model_elevation = approve  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        screen = ModelElevationScreen(agent_id="operator-5", preset=preset)
+        app.model_elevation_modal_agent_ids.add("operator-5")
+        app.push_screen(screen)
+        await pilot.pause()
+        field = screen.query_one("#model-elevation-justification", Input)
+        approve_button = screen.query_one("#model-elevation-approve", Button)
+        field.value = "Bounded difficult architecture task"
+
+        screen.submit()
+        screen.submit()
+        await pilot.pause()
+
+        assert calls == ["Bounded difficult architecture task"]
+        assert field.disabled is True
+        assert approve_button.disabled is True
 
 
 async def test_tui_palette_escape_uses_selected_agent() -> None:

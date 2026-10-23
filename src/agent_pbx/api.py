@@ -193,8 +193,10 @@ from .schemas import (
     ModelElevationActivateRequest,
     ModelElevationDecisionRequest,
     ModelElevationFinishRequest,
+    ModelElevationRevertRequest,
     ModelElevationRequest,
     ModelElevationResponse,
+    ModelElevationTransitionRequest,
     RemoteClientStateRequest,
     RemoteControlRequest,
     RemoteTokenIssueRequest,
@@ -982,11 +984,18 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         if profile is None or not profile.elevated:
             raise HTTPException(status_code=400, detail="requested profile is not elevated")
         try:
-            lease = store.request_model_elevation(**payload.model_dump())
+            lease, created = store.request_or_reuse_model_elevation(
+                **payload.model_dump()
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        store.append_event("model_elevation_requested", lease, payload.agent_id)
-        return lease
+        result = {**lease, "reused": not created}
+        store.append_event(
+            "model_elevation_requested" if created else "model_elevation_reused",
+            result,
+            payload.agent_id,
+        )
+        return result
 
     @app.post(
         "/v2/codex/elevations/{lease_id}/decision",
@@ -1025,6 +1034,55 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         store.append_event("model_elevation_activated", lease, str(lease["agent_id"]))
+        return lease
+
+    @app.post(
+        "/v2/codex/elevations/{lease_id}/transition",
+        response_model=ModelElevationResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def update_model_elevation_transition(
+        lease_id: str,
+        payload: ModelElevationTransitionRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        try:
+            lease = store.update_model_elevation_transition(
+                lease_id,
+                transition=payload.transition,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        store.append_event(
+            "model_elevation_transition_updated",
+            lease,
+            str(lease["agent_id"]),
+        )
+        return lease
+
+    @app.post(
+        "/v2/codex/elevations/{lease_id}/revert",
+        response_model=ModelElevationResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def request_model_elevation_revert(
+        lease_id: str,
+        payload: ModelElevationRevertRequest,
+        store: Store = Depends(get_store),
+    ) -> dict[str, object]:
+        try:
+            lease = store.mark_model_elevation_revert_pending(
+                lease_id,
+                reason=payload.reason,
+                transition=payload.transition,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        store.append_event(
+            "model_elevation_revert_pending",
+            lease,
+            str(lease["agent_id"]),
+        )
         return lease
 
     @app.post(

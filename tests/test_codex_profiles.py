@@ -204,6 +204,17 @@ def test_elevated_model_requires_distinct_approval_and_tracks_lease(
     )
     assert approved.status_code == 200
     assert approved.json()["status"] == "approved"
+    repeated_approval = client.post(
+        f"/v2/codex/elevations/{lease_id}/decision",
+        headers=headers,
+        json={
+            "approved": True,
+            "approved_by": "agent-pbx-tui-user",
+            "duration_seconds": 600,
+        },
+    )
+    assert repeated_approval.status_code == 200
+    assert repeated_approval.json()["lease_id"] == lease_id
     activated = client.post(
         f"/v2/codex/elevations/{lease_id}/activate",
         headers=headers,
@@ -211,6 +222,25 @@ def test_elevated_model_requires_distinct_approval_and_tracks_lease(
     )
     assert activated.status_code == 200
     assert activated.json()["status"] == "active"
+    repeated_activation = client.post(
+        f"/v2/codex/elevations/{lease_id}/activate",
+        headers=headers,
+        json={"transition": {"repeated": True}},
+    )
+    assert repeated_activation.status_code == 200
+    assert repeated_activation.json()["status"] == "active"
+    assert repeated_activation.json()["transition"]["repeated"] is True
+    revert = client.post(
+        f"/v2/codex/elevations/{lease_id}/revert",
+        headers=headers,
+        json={
+            "reason": "one_task_completed",
+            "transition": {"safe_boundary_source": "app_server"},
+        },
+    )
+    assert revert.status_code == 200
+    assert revert.json()["status"] == "revert_pending"
+    assert revert.json()["transition"]["revert_reason"] == "one_task_completed"
     finished = client.post(
         f"/v2/codex/elevations/{lease_id}/finish",
         headers=headers,
@@ -218,3 +248,82 @@ def test_elevated_model_requires_distinct_approval_and_tracks_lease(
     )
     assert finished.status_code == 200
     assert finished.json()["transition"]["verified"] is True
+
+
+def test_elevated_model_request_reuses_open_lease(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
+    client = TestClient(app)
+    register(client, root)
+    headers = {"Authorization": "Bearer secret"}
+    request = {
+        "agent_id": "agent-a",
+        "requested_profile": "sol-max",
+        "prior_profile": "sol-xhigh",
+        "justification": "Difficult bounded architecture synthesis",
+        "scope": "one_task",
+    }
+
+    first = client.post("/v2/codex/elevations", headers=headers, json=request)
+    second = client.post("/v2/codex/elevations", headers=headers, json=request)
+    listed = client.get(
+        "/v2/codex/elevations",
+        headers=headers,
+        params={"agent_id": "agent-a"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["reused"] is False
+    assert second.json()["reused"] is True
+    assert second.json()["lease_id"] == first.json()["lease_id"]
+    assert len(listed.json()) == 1
+
+
+def test_active_elevation_expiry_requests_safe_revert(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
+    client = TestClient(app)
+    register(client, root)
+    headers = {"Authorization": "Bearer secret"}
+    requested = client.post(
+        "/v2/codex/elevations",
+        headers=headers,
+        json={
+            "agent_id": "agent-a",
+            "requested_profile": "sol-max",
+            "prior_profile": "sol-xhigh",
+            "justification": "Difficult bounded architecture synthesis",
+            "scope": "one_task",
+        },
+    ).json()
+    lease_id = requested["lease_id"]
+    client.post(
+        f"/v2/codex/elevations/{lease_id}/decision",
+        headers=headers,
+        json={
+            "approved": True,
+            "approved_by": "agent-pbx-tui-user",
+            "duration_seconds": 60,
+        },
+    )
+    activated = client.post(
+        f"/v2/codex/elevations/{lease_id}/activate",
+        headers=headers,
+        json={"transition": {"phase": "runtime_associated"}},
+    ).json()
+    store = app.state.store
+
+    changed = store.expire_model_elevations(
+        current_time=float(activated["expires_at"]) + 1.0
+    )
+    lease = store.get_model_elevation(lease_id)
+
+    assert changed == 1
+    assert lease is not None
+    assert lease["status"] == "revert_pending"
+    assert lease["finished_at"] is None
+    assert lease["transition"]["phase"] == "runtime_associated"
+    assert lease["transition"]["revert_reason"] == "lease_expired"

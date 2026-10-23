@@ -1,7 +1,42 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
 
 from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import SCHEMA_VERSION, Store
+
+
+def test_model_elevation_request_is_idempotent_under_concurrency(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="agent-1",
+            project="demo",
+            metadata={"cwd": str(tmp_path)},
+        )
+    )
+    barrier = threading.Barrier(2)
+
+    def request() -> tuple[str, bool]:
+        barrier.wait(timeout=5)
+        lease, created = store.request_or_reuse_model_elevation(
+            agent_id="agent-1",
+            requested_profile="sol-max",
+            prior_profile="sol-5.6-xhigh",
+            justification="Difficult bounded architecture synthesis",
+            scope="one_task",
+        )
+        return str(lease["lease_id"]), created
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result() for future in (pool.submit(request), pool.submit(request))]
+
+    assert len({lease_id for lease_id, _created in results}) == 1
+    assert sorted(created for _lease_id, created in results) == [False, True]
+    assert len(store.list_model_elevations(agent_id="agent-1")) == 1
 
 
 def test_store_installs_agent_summary_indexes(tmp_path: Path) -> None:
