@@ -77,6 +77,7 @@ from .setup_assistant import (
     resume_setup,
     rollback_setup,
 )
+from .workerbee_snapshot_policy import WORKERBEE_WORKFLOW_PRESETS
 from .store import Store
 from .tui import run_tui
 from .uat import (
@@ -336,6 +337,15 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
         )
         command.add_argument("--theme", default=None)
+        command.add_argument(
+            "--workerbee-preset",
+            choices=WORKERBEE_WORKFLOW_PRESETS,
+            default=None,
+            help=(
+                "Configure backend-neutral WorkerBee workspace defaults; this does "
+                "not switch a backend or grant deploy authority."
+            ),
+        )
         command.add_argument("--json", action="store_true")
 
     setup_plan = setup_subcommands.add_parser(
@@ -865,6 +875,7 @@ def main(argv: list[str] | None = None) -> int:
                     project_roots=args.project_root,
                     runtime_server_mode=args.runtime_server_mode,
                     theme=args.theme,
+                    workerbee_preset=args.workerbee_preset,
                 )
                 if args.setup_command == "plan":
                     result = plan.public_dict()

@@ -34,6 +34,10 @@ from .workerbee_policy import (
     WorkerBeeWorkspacePolicyService,
     WorkerBeeWorkspaceTarget,
 )
+from .workerbee_snapshot_policy import (
+    WorkerBeeSnapshotPolicyError,
+    WorkerBeeSnapshotPolicyService,
+)
 from .workerbee_workspace import (
     WorkerBeeWorkspaceBinding,
     WorkerBeeWorkspaceError,
@@ -183,6 +187,7 @@ class WorkerBeeGatewayService:
         ]
         | None = None,
         workspace_policy: WorkerBeeWorkspacePolicyService | None = None,
+        snapshot_policy: WorkerBeeSnapshotPolicyService | None = None,
     ) -> None:
         self.state_root = state_root.expanduser().resolve()
         self.runtime_registry = runtime_registry
@@ -190,6 +195,7 @@ class WorkerBeeGatewayService:
         self.clock = clock
         self.binding_refreshed = binding_refreshed
         self.workspace_policy = workspace_policy
+        self.snapshot_policy = snapshot_policy
         self._mutation_lock = threading.Lock()
         self._active_mutations: dict[str, int] = {}
 
@@ -787,11 +793,22 @@ class WorkerBeeGatewayService:
             )
         return runtime, binding
 
-    @staticmethod
     def _workspace_include_paths(
+        self,
         lease: WorkerBeeGatewayLease,
         binding: WorkerBeeWorkspaceBinding,
     ) -> tuple[str, ...]:
+        if self.snapshot_policy is not None:
+            try:
+                return self.snapshot_policy.resolve_include_paths(
+                    agent_id=lease.agent_id,
+                    source_root=binding.source_root,
+                    backend=lease.backend,
+                )
+            except WorkerBeeSnapshotPolicyError as exc:
+                raise WorkerBeeGatewayError(
+                    exc.code, exc.message, exc.remediation
+                ) from exc
         try:
             return configured_workerbee_workspace_include_paths(
                 agent_id=lease.agent_id,
@@ -809,6 +826,17 @@ class WorkerBeeGatewayService:
         lease: WorkerBeeGatewayLease,
         target: WorkerBeeWorkspaceTarget,
     ) -> tuple[str, ...]:
+        if self.snapshot_policy is not None:
+            try:
+                return self.snapshot_policy.resolve_include_paths(
+                    agent_id=lease.agent_id,
+                    source_root=target.source_root,
+                    backend=lease.backend,
+                )
+            except WorkerBeeSnapshotPolicyError as exc:
+                raise WorkerBeeGatewayError(
+                    exc.code, exc.message, exc.remediation
+                ) from exc
         try:
             return configured_workerbee_workspace_include_paths(
                 agent_id=lease.agent_id,

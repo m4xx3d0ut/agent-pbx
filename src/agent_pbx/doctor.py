@@ -36,6 +36,7 @@ from .workerbee_runtime import (
 )
 from .workerbee_workspace import WORKERBEE_WORKSPACE_HELPER_ENV
 from .workerbee_policy import WorkerBeeWorkspacePolicyService
+from .workerbee_snapshot_policy import WorkerBeeSnapshotPolicyService
 from .workerbee_materializer import (
     DEBUG_STAGE_PYTHON_ENV,
     DEBUG_STAGE_SCRIPT_ENV,
@@ -760,6 +761,9 @@ def _workerbee_workspace_policy_check(config: MCPDaemonConfig) -> DoctorCheck:
     try:
         service = WorkerBeeWorkspacePolicyService(Store(config.resolved_db_path))
         view = service.get_policy()
+        snapshot_view = WorkerBeeSnapshotPolicyService(
+            Store(config.resolved_db_path)
+        ).get_policy()
     except Exception as exc:  # noqa: BLE001 - doctor must report malformed state
         return DoctorCheck(
             "workerbee-workspace-policy",
@@ -774,6 +778,8 @@ def _workerbee_workspace_policy_check(config: MCPDaemonConfig) -> DoctorCheck:
     roots = effective.get("allowed_roots") or []
     valid = policy != "scoped-workbench" or bool(roots)
     label = str(effective.get("profile_label") or "Safe default")
+    snapshot = snapshot_view["effective"]
+    snapshot_admin = snapshot_view["admin"]
     return DoctorCheck(
         "workerbee-workspace-policy",
         "pass" if valid else "warn",
@@ -783,6 +789,8 @@ def _workerbee_workspace_policy_check(config: MCPDaemonConfig) -> DoctorCheck:
             f"ceiling={admin.get('policy_ceiling') or 'scoped-workbench'} · "
             f"allowed_roots={len(roots)} · "
             f"managed_scratch={bool(effective.get('managed_scratch_root'))}"
+            f" · snapshot={snapshot.get('policy') or 'tracked'}"
+            f" · snapshot_control={snapshot_admin.get('control_mode') or 'editable'}"
         ),
         remediation=(
             "Configure at least one existing allowed root for scoped-workbench policy."

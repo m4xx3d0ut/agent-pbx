@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable, Mapping
 import uuid
 
 from .envfile import default_user_env_path, parse_env_file, parse_env_line
+from .workerbee_snapshot_policy import workerbee_workflow_preset_values
 
 
 SETUP_API_VERSION = "agent-pbx.setup/v1"
@@ -40,6 +41,7 @@ def build_setup_plan(
     project_roots: Iterable[Path] | None = None,
     runtime_server_mode: str | None = None,
     theme: str | None = None,
+    workerbee_preset: str | None = None,
     environ: Mapping[str, str] | None = None,
     which: Callable[[str], str | None] = shutil.which,
     platform_name: str | None = None,
@@ -93,6 +95,12 @@ def build_setup_plan(
         ),
         "AGENT_PBX_TUI_THEME": theme or str(existing.get("AGENT_PBX_TUI_THEME") or "cyberpunk"),
     }
+    desired.update(
+        workerbee_workflow_preset_values(
+            workerbee_preset,
+            project_roots=roots,
+        )
+    )
     dependencies = {
         command: str(found) if (found := which(command)) else None
         for command in LOCAL_WORKSTATION_COMMANDS

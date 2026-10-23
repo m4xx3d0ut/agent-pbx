@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -527,6 +527,24 @@ class Store:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS workerbee_snapshot_policies (
+                    scope TEXT NOT NULL,
+                    source_root TEXT NOT NULL,
+                    policy TEXT NOT NULL,
+                    include_paths_json TEXT NOT NULL DEFAULT '[]',
+                    max_bytes INTEGER NOT NULL,
+                    max_files INTEGER NOT NULL,
+                    max_file_bytes INTEGER NOT NULL,
+                    profile_label TEXT,
+                    updated_by TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(scope, source_root)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_workerbee_snapshot_policy_root
+                    ON workerbee_snapshot_policies(source_root, scope);
 
                 CREATE TABLE IF NOT EXISTS workerbee_workspace_transitions (
                     transition_id TEXT PRIMARY KEY,

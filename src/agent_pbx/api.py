@@ -61,6 +61,10 @@ from .workerbee_gateway import (
     WorkerBeeGatewayService,
     create_workerbee_gateway_app,
 )
+from .workerbee_access import (
+    WorkerBeeAccessPolicyError,
+    WorkerBeeAccessPolicyService,
+)
 from .workerbee_runtime import WorkerBeeRuntimeRegistry
 from .workerbee_workspace import (
     WorkerBeeWorkspaceBinding,
@@ -70,6 +74,10 @@ from .workerbee_workspace import (
 from .workerbee_policy import (
     WorkerBeeWorkspacePolicyError,
     WorkerBeeWorkspacePolicyService,
+)
+from .workerbee_snapshot_policy import (
+    WorkerBeeSnapshotPolicyError,
+    WorkerBeeSnapshotPolicyService,
 )
 from .workerbee_mcp import call_workerbee_mcp_tool
 from .workerbee_switcher import WorkerBeeSwitchService
@@ -152,7 +160,9 @@ from .schemas import (
     TerminalEditorStartRequest,
     WorkerBeeSwitchApplyRequest,
     WorkerBeeGatewayLeaseRequest,
+    WorkerBeeAccessProfileRequest,
     WorkerBeeWorkspacePolicyRequest,
+    WorkerBeeSnapshotPolicyRequest,
     WorkerBeeWorkspaceTransitionDecisionRequest,
     WorkerBeeWorkspaceTransitionRequest,
     WorkerBeeSwitchPreviewRequest,
@@ -496,6 +506,27 @@ def workerbee_policy_status(app: FastAPI, agent_id: str) -> dict[str, Any]:
     view = app.state.workerbee_workspace_policy.get_policy(agent_id)
     effective = view.get("effective") if isinstance(view.get("effective"), dict) else {}
     admin = view.get("admin") if isinstance(view.get("admin"), dict) else {}
+    agent = app.state.store.get_agent(agent_id)
+    runtime = app.state.workerbee_runtime.selected()
+    snapshot_view = app.state.workerbee_snapshot_policy.get_policy(
+        agent_id,
+        source_root=(agent_cwd(agent) if agent is not None else None),
+        backend=(runtime.backend if runtime is not None else None),
+    )
+    snapshot = (
+        snapshot_view.get("effective")
+        if isinstance(snapshot_view.get("effective"), dict)
+        else {}
+    )
+    snapshot_admin = (
+        snapshot_view.get("admin")
+        if isinstance(snapshot_view.get("admin"), dict)
+        else {}
+    )
+    try:
+        access = app.state.workerbee_access_policy.get_profile(agent_id)
+    except WorkerBeeAccessPolicyError:
+        access = {}
     return {
         "profile_label": effective.get("profile_label"),
         "policy": effective.get("policy"),
@@ -504,6 +535,19 @@ def workerbee_policy_status(app: FastAPI, agent_id: str) -> dict[str, Any]:
         "managed_scratch_configured": bool(effective.get("managed_scratch_root")),
         "control_mode": admin.get("control_mode"),
         "constrained": bool(view.get("constrained")),
+        "snapshot": {
+            "applicable": bool(snapshot_view.get("applicable")),
+            "policy": snapshot.get("policy"),
+            "approved_path_count": len(snapshot.get("include_paths") or ()),
+            "control_mode": snapshot_admin.get("control_mode"),
+            "constrained": bool(snapshot_view.get("constrained")),
+            "workflow_label": snapshot_view.get("workflow_label"),
+        },
+        "access": {
+            "profile": access.get("effective_profile"),
+            "control_mode": access.get("control_mode"),
+            "constrained": bool(access.get("constrained")),
+        },
     }
 
 
@@ -577,6 +621,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         workerbee_state_root / "workspaces"
     )
     workerbee_workspace_policy = WorkerBeeWorkspacePolicyService(store)
+    workerbee_snapshot_policy = WorkerBeeSnapshotPolicyService(store)
+    workerbee_access_policy = WorkerBeeAccessPolicyService(store)
 
     def record_workerbee_workspace_refresh(
         previous_lease: WorkerBeeGatewayLease,
@@ -626,6 +672,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         workerbee_workspaces,
         binding_refreshed=record_workerbee_workspace_refresh,
         workspace_policy=workerbee_workspace_policy,
+        snapshot_policy=workerbee_snapshot_policy,
     )
     workerbee_gateway_app = create_workerbee_gateway_app(workerbee_gateway)
     workerbee_switcher = WorkerBeeSwitchService(
@@ -722,6 +769,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.workerbee_runtime = workerbee_runtime
     app.state.workerbee_workspaces = workerbee_workspaces
     app.state.workerbee_workspace_policy = workerbee_workspace_policy
+    app.state.workerbee_snapshot_policy = workerbee_snapshot_policy
+    app.state.workerbee_access_policy = workerbee_access_policy
     app.state.workerbee_gateway = workerbee_gateway
     app.state.workerbee_switcher = workerbee_switcher
     app.state.pull_requests = pull_requests
@@ -2062,6 +2111,51 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             request.app.state.workerbee_workspace_policy.get_policy
         )
 
+    @app.get(
+        "/v2/agents/{agent_id}/workerbee/access-profile",
+        response_model=dict[str, Any],
+    )
+    async def get_agent_workerbee_access_profile(
+        agent_id: str,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_access_policy.get_profile,
+                agent_id,
+            )
+        except WorkerBeeAccessPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.put(
+        "/v2/agents/{agent_id}/workerbee/access-profile",
+        response_model=dict[str, Any],
+    )
+    async def put_agent_workerbee_access_profile(
+        agent_id: str,
+        payload: WorkerBeeAccessProfileRequest,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_access_policy.set_profile,
+                agent_id,
+                profile=payload.profile,
+                updated_by=controller.token_id or controller.client_id or "local",
+            )
+        except WorkerBeeAccessPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
     @app.put(
         "/v2/workerbee/workspace-policy",
         response_model=dict[str, Any],
@@ -2150,6 +2244,147 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 updated_by=controller.token_id or controller.client_id or "local",
             )
         except WorkerBeeWorkspacePolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.get(
+        "/v2/workerbee/snapshot-policy",
+        response_model=dict[str, Any],
+    )
+    async def get_workerbee_snapshot_policy(
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        runtime = request.app.state.workerbee_runtime.selected()
+        return await asyncio.to_thread(
+            request.app.state.workerbee_snapshot_policy.get_policy,
+            backend=(runtime.backend if runtime is not None else None),
+        )
+
+    @app.put(
+        "/v2/workerbee/snapshot-policy",
+        response_model=dict[str, Any],
+    )
+    async def put_workerbee_snapshot_policy(
+        payload: WorkerBeeSnapshotPolicyRequest,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_snapshot_policy.set_policy,
+                agent_id=None,
+                source_root=payload.source_root,
+                policy=payload.policy,
+                include_paths=payload.include_paths,
+                max_bytes=payload.max_bytes,
+                max_files=payload.max_files,
+                max_file_bytes=payload.max_file_bytes,
+                profile_label=payload.profile_label,
+                updated_by=controller.token_id or "local",
+            )
+        except WorkerBeeSnapshotPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.get(
+        "/v2/agents/{agent_id}/workerbee/snapshot-policy",
+        response_model=dict[str, Any],
+    )
+    async def get_agent_workerbee_snapshot_policy(
+        agent_id: str,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        agent = require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        runtime = request.app.state.workerbee_runtime.selected()
+        return await asyncio.to_thread(
+            request.app.state.workerbee_snapshot_policy.get_policy,
+            agent_id,
+            source_root=agent_cwd(agent),
+            backend=(runtime.backend if runtime is not None else None),
+        )
+
+    @app.put(
+        "/v2/agents/{agent_id}/workerbee/snapshot-policy",
+        response_model=dict[str, Any],
+    )
+    async def put_agent_workerbee_snapshot_policy(
+        agent_id: str,
+        payload: WorkerBeeSnapshotPolicyRequest,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        agent = require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        source_root = str(payload.source_root or agent_cwd(agent) or "").strip()
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_snapshot_policy.set_policy,
+                agent_id=agent_id,
+                source_root=source_root,
+                policy=payload.policy,
+                include_paths=payload.include_paths,
+                max_bytes=payload.max_bytes,
+                max_files=payload.max_files,
+                max_file_bytes=payload.max_file_bytes,
+                profile_label=payload.profile_label,
+                updated_by=controller.token_id or controller.client_id or "local",
+            )
+        except WorkerBeeSnapshotPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.delete(
+        "/v2/agents/{agent_id}/workerbee/snapshot-policy",
+        response_model=dict[str, Any],
+    )
+    async def delete_agent_workerbee_snapshot_policy(
+        agent_id: str,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        agent = require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_snapshot_policy.clear_policy,
+                agent_id,
+                source_root=agent_cwd(agent) or "",
+            )
+        except WorkerBeeSnapshotPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.get(
+        "/v2/agents/{agent_id}/workerbee/snapshot-policy/preview",
+        response_model=dict[str, Any],
+    )
+    async def preview_agent_workerbee_snapshot_policy(
+        agent_id: str,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        agent = require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        runtime = request.app.state.workerbee_runtime.selected()
+        if runtime is None:
+            raise HTTPException(status_code=409, detail="no verified WorkerBee backend is selected")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_snapshot_policy.preview,
+                agent_id=agent_id,
+                source_root=agent_cwd(agent) or "",
+                backend=runtime.backend,
+            )
+        except WorkerBeeSnapshotPolicyError as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
 
     @app.get(
@@ -2358,14 +2593,28 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             payload.project or (agent.get("project") if agent is not None else "") or ""
         ).strip()
         try:
+            include_paths = await asyncio.to_thread(
+                request.app.state.workerbee_snapshot_policy.resolve_include_paths,
+                agent_id=agent_id,
+                source_root=cwd,
+                backend=runtime.backend,
+            )
+            if payload.include_paths and not set(payload.include_paths).issubset(
+                set(include_paths)
+            ):
+                raise WorkerBeeSnapshotPolicyError(
+                    "WORKERBEE_SNAPSHOT_POLICY_DENIED",
+                    "Requested appliance include paths exceed the effective host policy.",
+                    "Approve the paths through WorkerBee appliance-content policy first.",
+                )
             binding = await asyncio.to_thread(
                 request.app.state.workerbee_workspaces.prepare,
                 runtime=runtime,
                 project=project,
                 source_root=cwd,
-                include_paths=tuple(payload.include_paths),
+                include_paths=include_paths,
             )
-        except WorkerBeeWorkspaceError as exc:
+        except (WorkerBeeWorkspaceError, WorkerBeeSnapshotPolicyError) as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
         return binding.public_dict()
 

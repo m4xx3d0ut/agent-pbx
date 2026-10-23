@@ -57,6 +57,29 @@ def test_workspace_policy_defaults_to_pinned_approval(tmp_path: Path) -> None:
     assert view["admin"]["control_mode"] == "editable"
 
 
+def test_workspace_policy_uses_reviewed_workflow_defaults_when_no_db_override(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "git"
+    root.mkdir()
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    view = WorkerBeeWorkspacePolicyService(
+        store,
+        environ={
+            "AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_POLICY": "scoped-workbench",
+            "AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_ROOTS_JSON": f'["{root}"]',
+            "AGENT_PBX_WORKERBEE_WORKSPACE_REQUEST_MODE": "automatic",
+            "AGENT_PBX_WORKERBEE_WORKFLOW_LABEL": "Trusted Platform Workbench",
+        },
+    ).get_policy("agent-1")
+
+    assert view["effective"]["policy"] == "scoped-workbench"
+    assert view["effective"]["request_mode"] == "automatic"
+    assert view["effective"]["allowed_roots"] == [str(root)]
+    assert view["effective"]["profile_label"] == "Trusted Platform Workbench"
+
+
 def test_scoped_workbench_resolves_git_root_and_subpath(tmp_path: Path) -> None:
     first = tmp_path / "git" / "first"
     second = tmp_path / "git" / "second"

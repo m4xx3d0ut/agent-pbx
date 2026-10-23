@@ -865,6 +865,103 @@ def test_gateway_api_manages_workspace_policy_and_controller_transition(
         assert reverted.json()["lease"]["workspace_binding_id"] == binding["binding_id"]
 
 
+def test_gateway_api_manages_backend_aware_snapshot_policy(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    (repo / "site-output").mkdir()
+    (repo / "site-output" / "index.html").write_text("demo\n", encoding="utf-8")
+    (repo / "site-output" / "app.css").write_text("body{}\n", encoding="utf-8")
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {
+                "active": {
+                    "ready": True,
+                    "backend": "platform_debug",
+                    "endpoint": "http://127.0.0.1:8765/mcp",
+                    "server_name": "K1S WorkerBee Debug",
+                    "server_version": "1.30.0",
+                }
+            }
+
+    app.state.workerbee_switcher = Selector()
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "demo-agent",
+                "project": "demo",
+                "metadata": {"cwd": str(repo)},
+            },
+        ).status_code == 200
+
+        initial = client.get(
+            "/v2/agents/demo-agent/workerbee/snapshot-policy"
+        )
+        assert initial.status_code == 200
+        assert initial.json()["applicable"] is True
+        assert initial.json()["effective"]["policy"] == "tracked"
+
+        saved = client.put(
+            "/v2/agents/demo-agent/workerbee/snapshot-policy",
+            json={
+                "source_root": str(repo),
+                "policy": "safe-working-tree",
+                "include_paths": [],
+                "profile_label": "Trusted test",
+            },
+        )
+        assert saved.status_code == 200
+        assert saved.json()["effective"]["policy"] == "safe-working-tree"
+
+        preview = client.get(
+            "/v2/agents/demo-agent/workerbee/snapshot-policy/preview"
+        )
+        assert preview.status_code == 200
+        assert preview.json()["selection"]["include_paths"] == ["site-output"]
+
+        inherited = client.delete(
+            "/v2/agents/demo-agent/workerbee/snapshot-policy"
+        )
+        assert inherited.status_code == 200
+        assert inherited.json()["effective"]["policy"] == "tracked"
+
+
+def test_gateway_api_requires_explicit_access_profile_and_restart(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "demo-agent",
+                "project": "demo",
+                "metadata": {"cwd": str(repo)},
+            },
+        ).status_code == 200
+
+        initial = client.get(
+            "/v2/agents/demo-agent/workerbee/access-profile"
+        )
+        assert initial.status_code == 200
+        assert initial.json()["effective_profile"] == "observe-local"
+
+        saved = client.put(
+            "/v2/agents/demo-agent/workerbee/access-profile",
+            json={"profile": "local-deploy"},
+        )
+        assert saved.status_code == 200
+        assert saved.json()["effective_profile"] == "local-deploy"
+        assert saved.json()["requires_restart_on_change"] is True
+
+        agent = app.state.store.get_agent("demo-agent")
+        assert agent is not None
+        assert agent["metadata"]["workerbee_mcp_profile"] == "local-deploy"
+
+
 @pytest.mark.parametrize(
     "profile",
     [WORKERBEE_PROFILE_OBSERVE, WORKERBEE_PROFILE_REVIEW],

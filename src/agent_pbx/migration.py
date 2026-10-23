@@ -209,6 +209,7 @@ def verify_migration(config: MCPDaemonConfig) -> dict[str, Any]:
         "file_trash_entries",
         "remote_client_sessions",
         "remote_audit_events",
+        "workerbee_snapshot_policies",
     }
     with sqlite3.connect(path) as conn:
         tables = {

@@ -1913,6 +1913,20 @@ class WorkerBeeWorkspacePolicyRequest(BaseModel):
     profile_label: str | None = Field(default=None, max_length=120)
 
 
+class WorkerBeeSnapshotPolicyRequest(BaseModel):
+    source_root: str | None = Field(default=None, max_length=4096)
+    policy: Literal["tracked", "approved-paths", "safe-working-tree"]
+    include_paths: list[str] = Field(default_factory=list, max_length=64)
+    max_bytes: int | None = Field(default=None, ge=1)
+    max_files: int | None = Field(default=None, ge=1)
+    max_file_bytes: int | None = Field(default=None, ge=1)
+    profile_label: str | None = Field(default=None, max_length=120)
+
+
+class WorkerBeeAccessProfileRequest(BaseModel):
+    profile: Literal["observe-local", "local-deploy"]
+
+
 class WorkerBeeWorkspaceTransitionRequest(BaseModel):
     cwd: str = Field(min_length=1, max_length=4096)
     project: str | None = Field(default=None, min_length=1, max_length=128)

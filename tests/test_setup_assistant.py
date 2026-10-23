@@ -40,6 +40,27 @@ def test_setup_plan_uses_localhost_and_scoped_git_root(tmp_path: Path) -> None:
     assert plan.dependencies["codex"] == "/usr/bin/codex"
 
 
+def test_setup_plan_can_apply_backend_neutral_workerbee_workflow_preset(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "git"
+    root.mkdir()
+
+    plan = build_setup_plan(
+        config_path=tmp_path / "local.env",
+        project_roots=[root],
+        workerbee_preset="trusted-platform-workbench",
+        environ={"HOME": str(tmp_path)},
+        which=available_command,
+    )
+
+    assert plan.ready is True
+    assert plan.desired_values["AGENT_PBX_WORKERBEE_WORKFLOW_PRESET"] == "trusted-platform-workbench"
+    assert plan.desired_values["AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_POLICY"] == "scoped-workbench"
+    assert plan.desired_values["AGENT_PBX_WORKERBEE_SNAPSHOT_DEFAULT_POLICY"] == "safe-working-tree"
+    assert "AGENT_PBX_WORKERBEE_BACKEND" not in plan.desired_values
+
+
 def test_setup_plan_requires_existing_roots_and_tools(tmp_path: Path) -> None:
     plan = build_setup_plan(
         config_path=tmp_path / "local.env",
@@ -176,6 +197,8 @@ def test_setup_cli_parser_exposes_transaction_commands() -> None:
             "/srv/git",
             "--runtime-server-mode",
             "dedicated",
+            "--workerbee-preset",
+            "trusted-platform-workbench",
             "--json",
         ]
     )
@@ -184,4 +207,5 @@ def test_setup_cli_parser_exposes_transaction_commands() -> None:
     assert args.setup_command == "apply"
     assert args.project_root == [Path("/srv/git")]
     assert args.runtime_server_mode == "dedicated"
+    assert args.workerbee_preset == "trusted-platform-workbench"
     assert args.json is True

@@ -431,14 +431,15 @@ class WorkerBeeWorkspaceService:
         identity: Mapping[str, Any],
         include_paths: tuple[str, ...],
     ) -> WorkerBeeWorkspaceBinding:
-        if not self.helper_bin:
-            code = (
-                "WORKERBEE_USER_APPLIANCE_DEFERRED"
-                if runtime.backend == WORKERBEE_BACKEND_USER_APPLIANCE
-                else "WORKERBEE_WORKSPACE_HELPER_NOT_CONFIGURED"
-            )
+        if runtime.backend == WORKERBEE_BACKEND_USER_APPLIANCE:
             raise WorkerBeeWorkspaceError(
-                code,
+                "WORKERBEE_USER_APPLIANCE_DEFERRED",
+                "The managed user-appliance workspace has not completed qualification.",
+                "Use the OSS or platform-debug backend until the managed-volume contract is available.",
+            )
+        if not self.helper_bin:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_WORKSPACE_HELPER_NOT_CONFIGURED",
                 "WorkerBee appliance workspace materializer is not configured.",
                 f"Set {WORKERBEE_WORKSPACE_HELPER_ENV} to the versioned materializer helper.",
             )

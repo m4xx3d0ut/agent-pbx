@@ -45,6 +45,9 @@ WORKERBEE_WORKSPACE_CONTROL_MODE_ENV = "AGENT_PBX_WORKERBEE_WORKSPACE_CONTROL_MO
 WORKERBEE_WORKSPACE_POLICY_CEILING_ENV = "AGENT_PBX_WORKERBEE_WORKSPACE_POLICY_CEILING"
 WORKERBEE_WORKSPACE_ROOT_CEILING_ENV = "AGENT_PBX_WORKERBEE_WORKSPACE_ROOT_CEILING_JSON"
 WORKERBEE_WORKSPACE_REQUEST_MODE_ENV = "AGENT_PBX_WORKERBEE_WORKSPACE_REQUEST_MODE"
+WORKERBEE_WORKSPACE_DEFAULT_POLICY_ENV = "AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_POLICY"
+WORKERBEE_WORKSPACE_DEFAULT_ROOTS_ENV = "AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_ROOTS_JSON"
+WORKERBEE_WORKFLOW_LABEL_ENV = "AGENT_PBX_WORKERBEE_WORKFLOW_LABEL"
 
 _POLICY_RANK = {
     WORKERBEE_WORKSPACE_POLICY_PINNED: 0,
@@ -618,15 +621,26 @@ class WorkerBeeWorkspacePolicyService:
             updated_at=float(row["updated_at"]),
         )
 
-    @staticmethod
-    def _default_policy() -> WorkerBeeWorkspacePolicy:
+    def _default_policy(self) -> WorkerBeeWorkspacePolicy:
+        policy = self._normalize_choice(
+            self.environ.get(WORKERBEE_WORKSPACE_DEFAULT_POLICY_ENV),
+            WORKERBEE_WORKSPACE_POLICIES,
+            WORKERBEE_WORKSPACE_POLICY_PINNED,
+            "default workspace policy",
+        )
+        roots = self._environment_roots(WORKERBEE_WORKSPACE_DEFAULT_ROOTS_ENV)
+        if policy == WORKERBEE_WORKSPACE_POLICY_SCOPED_WORKBENCH and not roots:
+            policy = WORKERBEE_WORKSPACE_POLICY_PINNED
         return WorkerBeeWorkspacePolicy(
             scope="global",
-            policy=WORKERBEE_WORKSPACE_POLICY_PINNED,
+            policy=policy,
             request_mode=WORKERBEE_WORKSPACE_REQUEST_APPROVAL,
-            allowed_roots=(),
+            allowed_roots=roots,
             managed_scratch_root=None,
-            profile_label="Safe default",
+            profile_label=(
+                str(self.environ.get(WORKERBEE_WORKFLOW_LABEL_ENV) or "").strip()
+                or "Safe default"
+            ),
             updated_by=None,
             created_at=None,
             updated_at=None,

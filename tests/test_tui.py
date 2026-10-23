@@ -48,7 +48,9 @@ from agent_pbx.tui import (
     REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     TMUX_LIVENESS_IDLE_SECONDS,
     WorkerBeeLaunchPreflightError,
+    WorkerBeeAccessScreen,
     WorkerBeeSwitchConfirmScreen,
+    WorkerBeeSnapshotScreen,
     WorkerBeeWorkspaceScreen,
     DEFAULT_SPLIT_PERCENT,
     JOPLIN_COPY_MODE_COPY_FIRST,
@@ -11469,17 +11471,139 @@ async def test_workerbee_workspace_screen_exposes_policy_preview_and_audit() -> 
         )
 
 
+async def test_workerbee_snapshot_screen_separates_appliance_content_policy() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    policy = {
+        "applicable": True,
+        "backend": "platform_debug",
+        "workflow_label": "Trusted Platform Workbench",
+        "effective": {
+            "source_root": "/home/test/git/demo",
+            "policy": "safe-working-tree",
+            "include_paths": ["site-output"],
+            "max_bytes": 1024,
+            "max_files": 20,
+            "max_file_bytes": 512,
+            "profile_label": "Project output",
+        },
+        "admin": {
+            "control_mode": "editable",
+            "policy_ceiling": "safe-working-tree",
+        },
+    }
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 40)
+        screen = WorkerBeeSnapshotScreen(agent_id="agent-1", policy_view=policy)
+        app.push_screen(screen)
+        await pilot.pause()
+
+        assert screen.query_one("#workerbee-snapshot-policy", Select).value == "safe-working-tree"
+        assert screen.query_one("#workerbee-snapshot-includes", Input).value == "site-output"
+        assert screen.policy_payload()["source_root"] == "/home/test/git/demo"
+        screen.show_preview(
+            {
+                "selection": {
+                    "policy": "safe-working-tree",
+                    "file_count": 4,
+                    "total_bytes": 120,
+                    "include_paths": ["site-output"],
+                    "excluded_paths": [".env (sensitive-name)"],
+                }
+            }
+        )
+        assert "4 files" in str(
+            screen.query_one("#workerbee-snapshot-summary", Static).renderable
+        )
+
+
+async def test_workerbee_access_screen_explains_restart_boundary() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    view = {
+        "effective_profile": "observe-local",
+        "control_mode": "editable",
+        "profile_ceiling": "local-deploy",
+        "review_readonly": False,
+    }
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(100, 30)
+        screen = WorkerBeeAccessScreen(agent_id="agent-1", access_view=view)
+        app.push_screen(screen)
+        await pilot.pause()
+
+        assert screen.query_one("#workerbee-access-profile", Select).value == "observe-local"
+        assert "restart" in str(
+            screen.query_one("#workerbee-access-summary", Static).renderable
+        ).lower()
+
+
+async def test_workerbee_access_save_updates_cached_restart_profile(monkeypatch) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "agent-1": {
+            "agent_id": "agent-1",
+            "metadata": {"cwd": "/tmp/demo"},
+        }
+    }
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "requested_profile": "local-deploy",
+                "effective_profile": "local-deploy",
+                "changed": True,
+            }
+
+    class FakeClient:
+        async def put(self, *_args, **_kwargs) -> FakeResponse:  # type: ignore[no-untyped-def]
+            return FakeResponse()
+
+    class FakeScreen:
+        agent_id = "agent-1"
+
+        @staticmethod
+        def selected_profile() -> str:
+            return "local-deploy"
+
+        @staticmethod
+        def dismiss() -> None:
+            return None
+
+    monkeypatch.setattr(app, "api_client", lambda: FakeClient())
+    monkeypatch.setattr(app, "notify", lambda *_args, **_kwargs: None)
+
+    await app.save_workerbee_access_profile(FakeScreen())  # type: ignore[arg-type]
+
+    assert (
+        app.agents["agent-1"]["metadata"]["workerbee_mcp_profile"]
+        == "local-deploy"
+    )
+    assert app.workerbee_profile_for_agent(app.agents["agent-1"]) == "local-deploy"
+
+
 def test_workerbee_workspace_palette_commands_are_available(monkeypatch) -> None:
     monkeypatch.delenv("AGENT_PBX_WORKERBEE_WORKSPACE_CONTROL_MODE", raising=False)
+    monkeypatch.delenv("AGENT_PBX_WORKERBEE_SNAPSHOT_CONTROL_MODE", raising=False)
+    monkeypatch.delenv("AGENT_PBX_WORKERBEE_ACCESS_CONTROL_MODE", raising=False)
     names = built_in_palette_command_names()
     assert {"/workerbee workspace", "/workerbee policy"} <= names
+    assert "/workerbee content" in names
+    assert "/workerbee access" in names
 
 
 def test_workerbee_workspace_palette_commands_can_be_hidden(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_PBX_WORKERBEE_WORKSPACE_CONTROL_MODE", "hidden")
+    monkeypatch.setenv("AGENT_PBX_WORKERBEE_SNAPSHOT_CONTROL_MODE", "hidden")
+    monkeypatch.setenv("AGENT_PBX_WORKERBEE_ACCESS_CONTROL_MODE", "hidden")
     names = built_in_palette_command_names()
     assert "/workerbee workspace" not in names
     assert "/workerbee policy" not in names
+    assert "/workerbee content" not in names
+    assert "/workerbee access" not in names
 
 
 def test_tui_load_custom_slash_commands_from_file(tmp_path: Path) -> None:
@@ -22620,7 +22744,7 @@ async def test_tui_workerbee_gateway_launch_uses_selected_runtime_binding() -> N
 
 
 @pytest.mark.asyncio
-async def test_tui_workerbee_gateway_launch_forwards_host_approved_includes(
+async def test_tui_workerbee_gateway_launch_leaves_host_policy_to_daemon(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
@@ -22688,50 +22812,38 @@ async def test_tui_workerbee_gateway_launch_forwards_host_approved_includes(
         {
             "project": "demo",
             "source_root": source_root,
-            "include_paths": [
-                "business-site/product-pages/agent-pbx",
-                "business-site/docs/agent-pbx-product-site.md",
-            ],
         },
     )
 
 
 @pytest.mark.asyncio
-async def test_tui_workerbee_invalid_include_policy_stops_before_workspace_stage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_tui_workerbee_snapshot_policy_error_is_returned_by_daemon() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
-    monkeypatch.setenv(
-        "AGENT_PBX_WORKERBEE_WORKSPACE_INCLUDES_JSON",
-        json.dumps(
-            {
-                "agent-1": {
-                    "source_root": "/tmp/other",
-                    "include_paths": ["site"],
-                }
-            }
-        ),
-    )
     posts: list[str] = []
 
-    class Response:
-        status_code = 200
-
-        @staticmethod
-        def raise_for_status() -> None:
-            return None
-
-        @staticmethod
-        def json() -> dict[str, object]:
-            return {"selected": {"backend": "platform_debug"}}
-
     class Client:
-        async def get(self, _path: str, **_kwargs: object) -> Response:
-            return Response()
+        async def get(self, path: str, **_kwargs: object) -> httpx.Response:
+            request = httpx.Request("GET", f"http://127.0.0.1:8765{path}")
+            return httpx.Response(
+                200,
+                json={"selected": {"backend": "platform_debug"}},
+                request=request,
+            )
 
-        async def post(self, path: str, **_kwargs: object) -> Response:
+        async def post(self, path: str, **_kwargs: object) -> httpx.Response:
             posts.append(path)
-            return Response()
+            request = httpx.Request("POST", f"http://127.0.0.1:8765{path}")
+            return httpx.Response(
+                409,
+                json={
+                    "detail": {
+                        "code": "WORKERBEE_SNAPSHOT_COMPATIBILITY_POLICY_INVALID",
+                        "message": "Legacy include policy source root does not match.",
+                        "remediation": "Correct the private compatibility policy.",
+                    }
+                },
+                request=request,
+            )
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
 
@@ -22744,9 +22856,9 @@ async def test_tui_workerbee_invalid_include_policy_stops_before_workspace_stage
             source_root="/tmp/demo",
         )
 
-    assert failure.value.code == "WORKERBEE_WORKSPACE_INCLUDE_POLICY_INVALID"
-    assert failure.value.phase == "workspace include policy"
-    assert posts == []
+    assert failure.value.code == "WORKERBEE_SNAPSHOT_COMPATIBILITY_POLICY_INVALID"
+    assert failure.value.phase == "workspace staging"
+    assert posts == ["/v2/agents/agent-1/workerbee/workspaces"]
 
 
 @pytest.mark.asyncio
