@@ -729,8 +729,9 @@ export AGENT_PBX_WORKERBEE_SWITCHER_STATUS_BIN="$HOME/.local/bin/wb-mcp-status"
 export AGENT_PBX_WORKERBEE_SWITCHER_BIN="$HOME/.local/bin/wb-mcp-switch"
 ```
 
-Agent PBX treats backend selection, access policy, and workspace placement as
-separate controls. Exactly one backend is selected at a time:
+Agent PBX treats backend selection, access policy, workspace placement, and
+appliance snapshot content as separate controls. Exactly one backend is
+selected at a time:
 
 | Backend | Workspace domain | Current posture |
 |---|---|---|
@@ -777,6 +778,12 @@ self-select that profile. Review forks always receive the read-only profile.
 Gateway bearer tokens are passed only in the child process environment and are
 not stored in Agent or Operator metadata.
 
+Use `Access` in the WorkerBee tab or `/workerbee access` to select inspect-only
+or bounded local build/deploy authority for one Agent or Operator. The change
+is durable but takes effect only after a safe Agent PBX restart/resume. This
+keeps authority changes explicit and prevents a running process from broadening
+its own lease.
+
 Workspace mobility is a separate daemon policy. The committed default is
 `pinned` with controller approval: an Agent may refresh the content of its
 current checkout but cannot silently bind WorkerBee to another repository.
@@ -812,6 +819,28 @@ The environment values are hard ceilings. A TUI or Agent cannot expand them.
 Allowed roots and transition paths are stored by the daemon and are omitted
 from ordinary status events. `agent-pbx doctor` reports the effective policy
 without printing its host paths.
+
+For appliance-backed sessions, `Content` or `/workerbee content` independently
+selects `tracked`, explicit `approved-paths`, or a bounded
+`safe-working-tree` snapshot. Safe working tree excludes common secret paths,
+keys, links, special files, virtual environments, dependency caches, and
+oversized content. It is intended for trusted single-user workstations;
+high-assurance environments should use tracked or explicitly approved paths.
+OSS direct-host sessions do not use appliance snapshot policy.
+
+The setup assistant can install reviewed workflow defaults without selecting a
+backend or granting deployment tools:
+
+```bash
+agent-pbx setup plan \
+  --project-root "$HOME/git" \
+  --workerbee-preset trusted-platform-workbench
+```
+
+Committed new-user behavior remains observe-only, pinned plus approval, and
+tracked content. Administrators may independently constrain or hide Access,
+Workspace, and Content controls. The complete preset and environment reference
+is in the [WorkerBee wiki guide](https://github.com/m4xx3d0ut/agent-pbx/wiki/WorkerBee-Integration).
 
 `/workerbee switch oss` and `/workerbee switch debug` always begin with the
 switcher's real non-mutating `--dry-run` result. Apply requires an unexpired

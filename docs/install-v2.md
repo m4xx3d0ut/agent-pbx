@@ -62,6 +62,21 @@ agent-pbx mcp start
 agent-pbx tui
 ```
 
+WorkerBee users may add a reviewed, backend-neutral workflow preset. The safe
+new-user default is `standard-oss`; a trusted single-user workstation may use:
+
+```bash
+agent-pbx setup plan \
+  --project-root "$HOME/git" \
+  --workerbee-preset trusted-platform-workbench
+```
+
+The preset configures workspace and appliance-content defaults within the
+listed roots. It does not select a backend or grant an Agent/Operator deployment
+authority. Preview the plan before applying it. See the
+[WorkerBee integration guide](wiki/WorkerBee-Integration.md) for all presets,
+administrator ceilings, and restart/resume requirements.
+
 The assistant defaults to loopback service URLs, the dedicated v2 runtime tmux
 server, the embedded terminal, and the event stream. It updates only its known
 keys in `${XDG_CONFIG_HOME:-~/.config}/agent-pbx/local.env`, preserves unrelated

@@ -93,6 +93,23 @@
 
 ### Added
 
+- Add tiered WorkerBee workflow policy without changing the conservative public
+  default. Access authority, workspace mobility, appliance snapshot content,
+  and backend selection are now independent controls. The WorkerBee tab and
+  palette expose per-entity Access and Content screens; review forks remain
+  read-only, policy/admin ceilings are daemon-enforced, and authority changes
+  require a safe restart/resume before taking effect.
+- Add backend-neutral setup presets for standard OSS, personal appliance,
+  trusted platform workbench, and high-assurance platform workflows. The
+  trusted preset scopes automatic workspace binding to approved roots and uses
+  bounded safe-working-tree appliance snapshots, while no preset switches a
+  backend or grants `local-deploy`.
+- Add daemon-owned appliance snapshot policy with tracked, approved-paths, and
+  safe-working-tree modes, source/size/file ceilings, sensitive and bulk-cache
+  exclusions, previews, drift-safe persistence, and compatibility with the
+  existing private include allowlist. OSS remains direct-host, and the managed
+  PaaS/user appliance remains unavailable pending volume qualification.
+
 - Add daemon-owned WorkerBee workspace mobility with `pinned`,
   `same-repository`, and `scoped-workbench` policies. Session-start requests
   resolve to canonical Git roots and working subpaths, preserve the existing

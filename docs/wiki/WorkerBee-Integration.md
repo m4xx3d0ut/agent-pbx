@@ -1,7 +1,7 @@
 # WorkerBee Integration
 
 > **Applies to:** Agent PBX 2.2.x
-> **Last reviewed:** 2026-10-13
+> **Last reviewed:** 2026-10-23
 
 WorkerBee is an optional runtime-truth plane. Agent PBX remains the authority
 for Agent/Operator identity, routing, lifecycle, policy, and audit. WorkerBee
@@ -39,6 +39,47 @@ A project that exists for Agent PBX but appears absent to WorkerBee is a path
 visibility mismatch. Do not patch the WorkerBee server merely because a launch
 allowlist omitted `workerbee_v1_session_start`. Correct the policy or path
 mapping first.
+
+## Choose a workflow posture
+
+Agent PBX keeps four WorkerBee controls independent:
+
+1. **Access** selects observe-only or bounded local build/deploy tools for one
+   Agent or Operator. Review forks are always read-only.
+2. **Workspace** controls whether the runtime may stay in its current checkout,
+   move among worktrees, or bind another repository under approved roots.
+3. **Content** controls which dirty, untracked, or ignored files may enter an
+   appliance snapshot. It does not apply to the OSS direct-host backend.
+4. **Backend** selects OSS, platform-debug, or a future managed user appliance.
+
+The public default remains conservative: observe-only access, a pinned
+workspace with controller approval, and tracked content. This is the normal
+starting point for a new OSS or PaaS user. Appliance content policy does not
+make OSS stricter because OSS reads the exact host checkout directly.
+
+The setup assistant offers backend-neutral presets:
+
+| Preset | Intended use | Workspace | Appliance content |
+|---|---|---|---|
+| `standard-oss` | New local user or direct-host OSS | Pinned, approval | Tracked |
+| `personal-appliance` | Single-user appliance | Pinned, approval | Tracked |
+| `trusted-platform-workbench` | Trusted engineering workstation | Scoped roots, automatic | Safe working tree |
+| `high-assurance-platform` | Controlled or multiuser environment | Pinned, approval | Tracked; approved paths are the ceiling |
+
+```bash
+agent-pbx setup plan \
+  --project-root "$HOME/git" \
+  --workerbee-preset trusted-platform-workbench
+agent-pbx setup apply \
+  --project-root "$HOME/git" \
+  --workerbee-preset trusted-platform-workbench
+```
+
+The preview must be reviewed before apply. A preset never switches the active
+backend and never grants `local-deploy`. Use `Access` for explicit per-entity
+authority and restart/resume that Codex session at a safe turn boundary after a
+change. Administrators can make Access, Workspace, or Content read-only or hide
+them while the daemon continues to enforce the configured ceilings.
 
 ## Runtime domains and session binding
 
@@ -125,6 +166,43 @@ Source refresh does not authorize backend, generation, or access-profile
 changes. Source-root and WorkerBee project changes are governed separately by
 the daemon-owned workspace-mobility policy below.
 
+## Appliance content policy
+
+Appliance-backed sessions need a bounded rule for content that Git does not
+carry in the tracked tree. `Content` in the WorkerBee tab and
+`/workerbee content` expose that rule without exposing host secrets or changing
+the selected backend.
+
+| Policy | Snapshot behavior |
+|---|---|
+| `tracked` | Stage tracked repository and initialized submodule content only. |
+| `approved-paths` | Also stage explicit host-approved relative paths. |
+| `safe-working-tree` | Discover untracked and ignored files, exclude secret-sensitive names, links, special files, virtual environments, dependency caches, and oversized content, then stage the bounded remainder. |
+
+`safe-working-tree` is intended for a trusted single-user engineering
+workstation where generated site output, manifests, or other build inputs are
+part of routine work. It remains bounded by file-count, total-byte, per-file,
+source-root, and policy ceilings. High-assurance and multiuser installations
+should retain `tracked` or explicit `approved-paths`.
+
+The daemon owns the policy. Remote TUIs do not read local environment include
+lists, and Agent-provided paths cannot expand the daemon-approved selection.
+The legacy `AGENT_PBX_WORKERBEE_WORKSPACE_INCLUDES_JSON` allowlist remains a
+compatibility input and is merged under the same limits.
+
+```bash
+export AGENT_PBX_WORKERBEE_SNAPSHOT_CONTROL_MODE="read_only" # editable|read_only|hidden
+export AGENT_PBX_WORKERBEE_SNAPSHOT_POLICY_CEILING="approved-paths"
+export AGENT_PBX_WORKERBEE_SNAPSHOT_ROOT_CEILING_JSON='["/srv/engineering"]'
+export AGENT_PBX_WORKERBEE_SNAPSHOT_MAX_BYTES="$((256 * 1024 * 1024))"
+export AGENT_PBX_WORKERBEE_SNAPSHOT_MAX_FILES="20000"
+export AGENT_PBX_WORKERBEE_SNAPSHOT_MAX_FILE_BYTES="$((64 * 1024 * 1024))"
+```
+
+The `user_appliance` backend remains unavailable until its managed-volume
+contract is qualified. A configured platform-debug helper cannot accidentally
+turn that deferred backend into a generic staging attempt.
+
 ## Workspace mobility and workbench policy
 
 Agent PBX separates tool authority from workspace placement. Moving an Agent
@@ -197,6 +275,19 @@ caller through the TUI re-emits the same narrow WorkerBee policy together with
 the caller's Agent PBX report policy, identity, token environment, Codex thread,
 cwd, and model profile. Unknown profile names fail closed. Removing the
 metadata value returns future restarts to the normal global-config behavior.
+
+Controllers can inspect or change this durable profile through `Access` in the
+WorkerBee tab or `/workerbee access`. `Inspect` stores `observe-local`; `Build +
+Deploy` stores `local-deploy`. The daemon can constrain or hide the control:
+
+```bash
+export AGENT_PBX_WORKERBEE_ACCESS_CONTROL_MODE="read_only" # editable|read_only|hidden
+export AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING="observe-local" # or local-deploy
+```
+
+The new profile takes effect only after an Agent PBX restart/resume of that
+entity. Agent PBX does not rewrite a running Codex process or mint broader tools
+inside the current lease.
 
 With a selected runtime, ordinary Agents and root/edit Operators receive
 `observe-local`, review forks receive `review-readonly`, and only entities with

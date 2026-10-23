@@ -42,6 +42,21 @@ agent-pbx setup apply --project-root "$HOME/git"
 agent-pbx doctor
 ```
 
+If WorkerBee is installed, the optional `--workerbee-preset` configures
+backend-neutral workflow defaults. New users should begin with `standard-oss`.
+A trusted single-user engineering workstation can preview
+`trusted-platform-workbench`, which permits automatic movement only beneath the
+listed project roots and uses bounded safe-working-tree appliance snapshots:
+
+```bash
+agent-pbx setup plan \
+  --project-root "$HOME/git" \
+  --workerbee-preset trusted-platform-workbench
+```
+
+Presets do not switch a WorkerBee backend and do not grant build/deploy tools.
+Those remain separate, explicit controls in the WorkerBee tab.
+
 The clean-user default is a dedicated PBX runtime tmux server. It works whether
 or not the TUI itself is inside tmux. Use `outer_if_present` only when the
 workstation should deliberately share a validated outer server:

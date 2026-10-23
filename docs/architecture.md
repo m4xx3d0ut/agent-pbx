@@ -80,6 +80,15 @@ and lifecycle. With WorkerBee, the control loop can incorporate application and
 infrastructure truth, simulation, deployment evidence, and post-change
 validation.
 
+WorkerBee integration separates four authorities: backend selection, per-entity
+tool access, workspace mobility, and appliance snapshot content. A broader
+workspace does not grant deployment tools; a broader content snapshot does not
+select another backend; and review forks remain read-only under every
+combination. The committed posture is observe-only, pinned plus approval, and
+tracked content. Trusted-workstation and high-assurance behavior are explicit
+daemon-owned profiles with administrator ceilings rather than assumptions made
+by an Agent or remote TUI.
+
 ## Native terminal topology
 
 The v1 left/right TUI composition remains: Agents, Operators, and Events occupy
