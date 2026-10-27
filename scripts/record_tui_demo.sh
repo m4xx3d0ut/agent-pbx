@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOST_HOME="${HOME:-}"
+HOST_USER="$(id -un)"
 OUT_DIR="${AGENT_PBX_DEMO_OUT_DIR:-${ROOT_DIR}/artifacts/tui-demo}"
 STATE_ROOT="${AGENT_PBX_DEMO_STATE_ROOT:-${OUT_DIR}/state}"
 DB_PATH="${AGENT_PBX_DEMO_DB:-${STATE_ROOT}/agent-pbx-demo.sqlite}"
@@ -32,6 +34,12 @@ if [[ -z "${AGENT_PBX_BIN:-}" && -x "${ROOT_DIR}/.venv/bin/agent-pbx" ]]; then
 elif [[ -z "${AGENT_PBX_BIN:-}" ]]; then
   AGENT_PBX_BIN="agent-pbx"
 fi
+if [[ -z "${AGENT_PBX_DEMO_PYTHON:-}" && -x "${ROOT_DIR}/.venv/bin/python" ]]; then
+  DEMO_PYTHON="${ROOT_DIR}/.venv/bin/python"
+else
+  DEMO_PYTHON="${AGENT_PBX_DEMO_PYTHON:-python3}"
+fi
+RUNTIME_TMUX_BIN="${AGENT_PBX_TMUX_BIN:-tmux}"
 ASCIINEMA_BIN="${ASCIINEMA_BIN:-asciinema}"
 AGG_BIN="${AGG_BIN:-agg}"
 FFMPEG_BIN="${FFMPEG_BIN:-ffmpeg}"
@@ -42,9 +50,17 @@ RENDER_HEIGHT="${AGENT_PBX_DEMO_RENDER_HEIGHT:-1080}"
 RENDER_FPS="${AGENT_PBX_DEMO_RENDER_FPS:-30}"
 RENDER_SELECT="${AGENT_PBX_DEMO_RENDER_SELECT:-0..67}"
 RENDER_EXACT_SIZE="${AGENT_PBX_DEMO_RENDER_EXACT_SIZE:-0}"
+CAPTURE_STILLS="${AGENT_PBX_DEMO_CAPTURE_STILLS:-0}"
+STILLS_DIR="${AGENT_PBX_DEMO_STILLS_DIR:-${OUT_DIR}/stills}"
+STILLS_MANIFEST="${STILLS_DIR}/capture-manifest.json"
+DEMO_OPERATOR_ID="${AGENT_PBX_DEMO_OPERATOR_ID:-operator-0}"
+DEMO_HOME="${AGENT_PBX_DEMO_HOME:-${OUT_DIR}/home}"
+DEMO_CONFIG_HOME="${DEMO_HOME}/.config"
+DEMO_DATA_HOME="${DEMO_HOME}/.local/share"
+DEMO_CACHE_HOME="${DEMO_HOME}/.cache"
 WORKERBEE_BIN="${AGENT_PBX_WORKERBEE_BIN:-}"
 DEMO_FIXTURES="${AGENT_PBX_DEMO_FIXTURES:-1}"
-DEMO_BIN_DIR="${OUT_DIR}/bin"
+DEMO_BIN_DIR="${AGENT_PBX_DEMO_BIN_DIR:-${OUT_DIR}/bin}"
 DEMO_GH_BIN="${DEMO_BIN_DIR}/gh"
 DEMO_WORKERBEE_BIN="${DEMO_BIN_DIR}/workerbee"
 DEMO_CODEX_BIN="${DEMO_BIN_DIR}/codex"
@@ -81,6 +97,8 @@ Options:
   --render-size WxH    Exact GIF output size. Default: 1920x1080
   --render-select SEL  agg frame selector. Default: 0..67
   --exact-size         Resize/re-encode to --render-size with ffmpeg.
+  --capture-stills     Capture deterministic 1920x800 PNG article scenes.
+  --stills-dir PATH    Static scene output. Default: OUT_DIR/stills
   --live-codex         Use the installed Codex CLI in the isolated demo runtime.
   --manual             Record without scripted key presses; quit the TUI to stop.
   --skip-mcp           Use an already running MCP/API server.
@@ -126,12 +144,18 @@ while [[ $# -gt 0 ]]; do
       CAST_PATH="${OUT_DIR}/agent-pbx-tui-demo.cast"
       GIF_PATH="${OUT_DIR}/agent-pbx-tui-demo.gif"
       TMUX_SOCKET="${OUT_DIR}/tmux.sock"
-      DEMO_BIN_DIR="${OUT_DIR}/bin"
+      DEMO_BIN_DIR="${AGENT_PBX_DEMO_BIN_DIR:-${OUT_DIR}/bin}"
       DEMO_GH_BIN="${DEMO_BIN_DIR}/gh"
       DEMO_WORKERBEE_BIN="${DEMO_BIN_DIR}/workerbee"
       DEMO_CODEX_BIN="${DEMO_BIN_DIR}/codex"
       DEMO_RUNTIME_DIR="${OUT_DIR}/runtime"
       DEMO_RUNTIME_SOCKET="${DEMO_RUNTIME_DIR}/agent-pbx/runtime-tmux.sock"
+      STILLS_DIR="${OUT_DIR}/stills"
+      STILLS_MANIFEST="${STILLS_DIR}/capture-manifest.json"
+      DEMO_HOME="${OUT_DIR}/home"
+      DEMO_CONFIG_HOME="${DEMO_HOME}/.config"
+      DEMO_DATA_HOME="${DEMO_HOME}/.local/share"
+      DEMO_CACHE_HOME="${DEMO_HOME}/.cache"
       shift 2
       ;;
     --port)
@@ -180,6 +204,15 @@ while [[ $# -gt 0 ]]; do
       RENDER_EXACT_SIZE=1
       shift
       ;;
+    --capture-stills)
+      CAPTURE_STILLS=1
+      shift
+      ;;
+    --stills-dir)
+      STILLS_DIR="$2"
+      STILLS_MANIFEST="${STILLS_DIR}/capture-manifest.json"
+      shift 2
+      ;;
     --live-codex)
       LIVE_CODEX=1
       shift
@@ -216,6 +249,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$CAPTURE_STILLS" == "1" && -z "${AGENT_PBX_DEMO_OPERATOR_ID:-}" ]]; then
+  DEMO_OPERATOR_ID="release-operator"
+fi
+if [[ "$CAPTURE_STILLS" == "1" ]]; then
+  mkdir -p "$DEMO_HOME" "$DEMO_CONFIG_HOME" "$DEMO_DATA_HOME" "$DEMO_CACHE_HOME"
+  chmod 700 "$DEMO_HOME" "$DEMO_CONFIG_HOME" "$DEMO_DATA_HOME" "$DEMO_CACHE_HOME"
+  export HOME="$DEMO_HOME"
+  export XDG_CONFIG_HOME="$DEMO_CONFIG_HOME"
+  export XDG_DATA_HOME="$DEMO_DATA_HOME"
+  export XDG_CACHE_HOME="$DEMO_CACHE_HOME"
+  export AGENT_PBX_EDITOR_DEFAULT_SURFACE="terminal"
+  export AGENT_PBX_TERMINAL_EDITOR_DEFAULT="nvim"
+  export AGENT_PBX_TERMINAL_EDITOR_SHUTDOWN_POLICY="stop"
+  export AGENT_PBX_TERMINAL_EDITOR_PROFILES='{"nvim":{"label":"Neovim","argv":["nvim","--clean","+{line}","--","{path}"],"workspace_argv":["nvim","--clean"]}}'
+fi
+
 DRIVER_PID=""
 JOPLIN_PID=""
 RECORDER_PID=""
@@ -242,7 +291,7 @@ cleanup() {
   # demo Operator session. Stop the whole disposable server so no fixture
   # runtime survives a completed or interrupted capture.
   tmux_demo kill-server >/dev/null 2>&1 || true
-  tmux -S "$DEMO_RUNTIME_SOCKET" kill-server >/dev/null 2>&1 || true
+  "$RUNTIME_TMUX_BIN" -S "$DEMO_RUNTIME_SOCKET" kill-server >/dev/null 2>&1 || true
   if [[ "$START_MCP" == "1" && "$KEEP_MCP" != "1" ]]; then
     mkdir -p "$OUT_DIR" >/dev/null 2>&1 || true
     "$AGENT_PBX_BIN" mcp stop \
@@ -259,13 +308,20 @@ check_requirements() {
   need_cmd "$AGENT_PBX_BIN"
   need_cmd git
   need_cmd python3
+  need_cmd "$DEMO_PYTHON"
   need_cmd tmux
-  need_cmd "$ASCIINEMA_BIN"
-  if [[ "$RENDER" == "1" ]]; then
+  need_cmd "$RUNTIME_TMUX_BIN"
+  if [[ "$CAPTURE_STILLS" != "1" || "$RENDER" == "1" ]]; then
+    need_cmd "$ASCIINEMA_BIN"
+  fi
+  if [[ "$RENDER" == "1" || "$CAPTURE_STILLS" == "1" ]]; then
     need_cmd "$AGG_BIN"
-    if [[ "$RENDER_EXACT_SIZE" == "1" ]]; then
+    if [[ "$RENDER_EXACT_SIZE" == "1" || "$CAPTURE_STILLS" == "1" ]]; then
       need_cmd "$FFMPEG_BIN"
     fi
+  fi
+  if [[ "$CAPTURE_STILLS" == "1" ]]; then
+    need_cmd nvim
   fi
   if [[ -n "$WORKERBEE_BIN" && ! -x "$WORKERBEE_BIN" ]]; then
     fail "AGENT_PBX_WORKERBEE_BIN is set but not executable: $WORKERBEE_BIN"
@@ -273,6 +329,103 @@ check_requirements() {
   if [[ "$LIVE_CODEX" == "1" ]]; then
     need_cmd codex
   fi
+}
+
+capture_still() {
+  local scene="$1"
+  local title="$2"
+  shift 2
+  local expected=("$@")
+  local raw_dir="${STILLS_DIR}/raw"
+  local raw_path="${raw_dir}/${scene}.ansi"
+  local cast_path="${raw_dir}/${scene}.cast"
+  local plain_path="${raw_dir}/${scene}.txt"
+  local raw_gif="${raw_dir}/${scene}.gif"
+  local image_path="${STILLS_DIR}/${scene}.png"
+  local dimensions cols rows source_commit
+  mkdir -p "$raw_dir"
+  dimensions="$(tmux_demo display-message -p -t "$SESSION" '#{pane_width} #{pane_height}')"
+  read -r cols rows <<<"$dimensions"
+  if [[ -z "$cols" || -z "$rows" ]]; then
+    fail "unable to determine terminal geometry for ${scene}"
+  fi
+  tmux_demo capture-pane -p -e -N -t "$SESSION" >"$raw_path"
+  PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 \
+    -m agent_pbx.demo.capture prepare \
+    --raw "$raw_path" \
+    --cast "$cast_path" \
+    --plain "$plain_path" \
+    --cols "$cols" \
+    --rows "$rows" \
+    --title "$title" \
+    >/dev/null
+  "$AGG_BIN" \
+    --quiet \
+    --font-size "$RENDER_FONT_SIZE" \
+    --line-height "$RENDER_LINE_HEIGHT" \
+    --cols "$cols" \
+    --rows "$rows" \
+    --select 0 \
+    --last-frame-duration 1 \
+    "$cast_path" \
+    "$raw_gif"
+  "$FFMPEG_BIN" \
+    -y \
+    -v warning \
+    -i "$raw_gif" \
+    -vf "scale=${RENDER_WIDTH}:${RENDER_HEIGHT}:force_original_aspect_ratio=decrease:flags=lanczos,pad=${RENDER_WIDTH}:${RENDER_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=0x080a0f" \
+    -frames:v 1 \
+    "$image_path"
+  source_commit="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  local finalize=(
+    python3 -m agent_pbx.demo.capture finalize
+    --manifest "$STILLS_MANIFEST"
+    --scene "$scene"
+    --image "$image_path"
+    --plain "$plain_path"
+    --source-commit "$source_commit"
+    --cols "$cols"
+    --rows "$rows"
+    --width "$RENDER_WIDTH"
+    --height "$RENDER_HEIGHT"
+    --forbid "$HOST_HOME"
+    --forbid "$HOST_USER"
+    --forbid "codex-shared-admin-state"
+    --forbid ".home.arpa"
+    --forbid "operator-0"
+  )
+  local marker
+  for marker in "${expected[@]}"; do
+    finalize+=(--expect "$marker")
+  done
+  PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" "${finalize[@]}" >/dev/null
+  log "Captured still: ${scene} (${cols}x${rows} -> ${RENDER_WIDTH}x${RENDER_HEIGHT})"
+}
+
+render_stills_contact_sheet() {
+  if [[ "$CAPTURE_STILLS" != "1" ]]; then
+    return
+  fi
+  local campaign="${STILLS_DIR}/campaign-topology.png"
+  local latest="${STILLS_DIR}/native-latest.png"
+  local workerbee="${STILLS_DIR}/workerbee-provenance.png"
+  local neovim="${STILLS_DIR}/managed-neovim.png"
+  local contact="${STILLS_DIR}/contact-sheet.png"
+  for image in "$campaign" "$latest" "$workerbee" "$neovim"; do
+    [[ -s "$image" ]] || fail "missing still required for contact sheet: ${image}"
+  done
+  "$FFMPEG_BIN" \
+    -y \
+    -v warning \
+    -i "$campaign" \
+    -i "$latest" \
+    -i "$workerbee" \
+    -i "$neovim" \
+    -filter_complex \
+      "[0:v]scale=960:400[a];[1:v]scale=960:400[b];[2:v]scale=960:400[c];[3:v]scale=960:400[d];[a][b]hstack[top];[c][d]hstack[bottom];[top][bottom]vstack" \
+    -frames:v 1 \
+    "$contact"
+  log "Captured still contact sheet: ${contact}"
 }
 
 prepare_demo_project() {
@@ -323,7 +476,10 @@ PY
 write_demo_integrations() {
   mkdir -p "$DEMO_BIN_DIR"
   if [[ "$LIVE_CODEX" != "1" ]]; then
-    cp "$ROOT_DIR/scripts/demo/demo_codex.py" "$DEMO_CODEX_BIN"
+    printf '#!/bin/sh\nexec %q %q "$@"\n' \
+      "$DEMO_PYTHON" \
+      "$ROOT_DIR/scripts/demo/demo_codex.py" \
+      >"$DEMO_CODEX_BIN"
     chmod +x "$DEMO_CODEX_BIN"
   fi
   cat >"$DEMO_WORKERBEE_BIN" <<'PY'
@@ -653,6 +809,8 @@ start_demo_mcp() {
   env -u TMUX -u TMUX_PANE \
     PATH="$demo_path" \
     XDG_RUNTIME_DIR="$DEMO_RUNTIME_DIR" \
+    AGENT_PBX_TMUX_RUNTIME_SOCKET="$DEMO_RUNTIME_SOCKET" \
+    AGENT_PBX_TUI_TMUX_RUNTIME_SERVER_MODE="dedicated" \
     AGENT_PBX_PROJECT_ROOTS="$DEMO_PROJECT_ROOT" \
     AGENT_PBX_WORKERBEE_BIN="$workerbee_bin" \
     AGENT_PBX_GH_BIN="$gh_bin" \
@@ -661,6 +819,7 @@ start_demo_mcp() {
     AGENT_PBX_PR_ALLOWED_REPOS="m4xx3d0ut/agent-pbx" \
     AGENT_PBX_JOPLIN_API_URL="$joplin_api_url" \
     AGENT_PBX_JOPLIN_TOKEN="$joplin_token" \
+    AGENT_PBX_JOPLIN_PROFILE_OWNER_MODE="external" \
     "$AGENT_PBX_BIN" mcp restart \
     --host "$HOST" \
     --port "$PORT" \
@@ -689,6 +848,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 
 server = os.environ["AGENT_PBX_DEMO_SERVER"].rstrip("/")
@@ -713,9 +873,15 @@ def request(
         headers=headers,
         method=method,
     )
-    with urllib.request.urlopen(req, timeout=8) as response:
-        body = response.read().decode()
-        return json.loads(body) if body else {}
+    try:
+        with urllib.request.urlopen(req, timeout=8) as response:
+            body = response.read().decode()
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        raise RuntimeError(
+            f"Agent PBX API {method} {path} failed with HTTP {exc.code}: {detail}"
+        ) from exc
 
 
 request(
@@ -805,7 +971,7 @@ request(
             },
         ],
         "reporting_agent_id": "release-review",
-        "metadata": {"demo": True},
+        "metadata": {"demo": True, "suppress_tui_alerts": True},
     },
 )
 request(
@@ -882,11 +1048,57 @@ raise SystemExit(f"timed out waiting for demo Agent PBX entity {agent_id}")
 PY
 }
 
+wait_for_terminal_editor() {
+  local agent_id="$1"
+  local profile_id="${2:-nvim}"
+  AGENT_PBX_DEMO_SERVER="$SERVER" \
+  AGENT_PBX_DEMO_TOKEN="$TOKEN" \
+  AGENT_PBX_DEMO_AGENT_ID="$agent_id" \
+  AGENT_PBX_DEMO_EDITOR_PROFILE="$profile_id" \
+  python3 - <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import time
+import urllib.error
+import urllib.request
+
+server = os.environ["AGENT_PBX_DEMO_SERVER"].rstrip("/")
+token = os.environ["AGENT_PBX_DEMO_TOKEN"]
+agent_id = os.environ["AGENT_PBX_DEMO_AGENT_ID"]
+profile_id = os.environ["AGENT_PBX_DEMO_EDITOR_PROFILE"]
+deadline = time.monotonic() + 30
+last: object = None
+while time.monotonic() < deadline:
+    request = urllib.request.Request(
+        f"{server}/v1/agents/{agent_id}/terminal-editor",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            last = json.loads(response.read().decode())
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        time.sleep(0.25)
+        continue
+    if (
+        isinstance(last, dict)
+        and last.get("running")
+        and last.get("profile_id") == profile_id
+    ):
+        raise SystemExit(0)
+    time.sleep(0.25)
+raise SystemExit(f"managed terminal editor did not become ready: {last!r}")
+PY
+}
+
 seed_operator_workflow() {
   log "Seeding deterministic Operator campaign after UI launch"
   AGENT_PBX_DEMO_SERVER="$SERVER" \
   AGENT_PBX_DEMO_TOKEN="$TOKEN" \
   AGENT_PBX_DEMO_LAUNCHED_AGENT_ID="$DEMO_LAUNCHED_AGENT_ID" \
+  AGENT_PBX_DEMO_OPERATOR_ID="$DEMO_OPERATOR_ID" \
+  AGENT_PBX_DEMO_REGISTER_OPERATOR="$CAPTURE_STILLS" \
   python3 - <<'PY'
 from __future__ import annotations
 
@@ -897,6 +1109,9 @@ import urllib.request
 server = os.environ["AGENT_PBX_DEMO_SERVER"].rstrip("/")
 token = os.environ["AGENT_PBX_DEMO_TOKEN"]
 launched_agent_id = os.environ["AGENT_PBX_DEMO_LAUNCHED_AGENT_ID"]
+operator_id = os.environ["AGENT_PBX_DEMO_OPERATOR_ID"]
+register_operator = os.environ["AGENT_PBX_DEMO_REGISTER_OPERATOR"] == "1"
+source_agent_id = "platform-agent" if register_operator else launched_agent_id
 headers = {
     "Authorization": f"Bearer {token}",
     "Content-Type": "application/json",
@@ -915,6 +1130,28 @@ def request(method: str, path: str, payload: dict[str, object]) -> dict[str, obj
         return json.loads(body) if body else {}
 
 
+if register_operator:
+    request(
+        "POST",
+        "/v1/agents/register",
+        {
+            "agent_id": operator_id,
+            "project": "agent-pbx-operator",
+            "name": "Release Operator",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "root",
+                "reporting_agent_id": operator_id,
+                "pbx_mode": "report",
+                "demo": True,
+                "codex_session_id": "demo-session-release-operator",
+                "codex_host_id": "local",
+            },
+        },
+    )
+
+
 # The deterministic runtime does not register through MCP, so promote the
 # isolated fork records to the state that a real Codex launch reports. Campaign
 # delivery then exercises the normal queue path and renders healthy topology.
@@ -922,9 +1159,9 @@ request(
     "POST",
     "/v1/operator/forks/ensure",
     {
-        "operator_agent_id": "operator-0",
-        "source_caller_agent_id": launched_agent_id,
-        "fork_agent_id": "operator-0-fork-codex-agent-pbx-v2-demo-demo",
+        "operator_agent_id": operator_id,
+        "source_caller_agent_id": source_agent_id,
+        "fork_agent_id": f"{operator_id}-fork-platform-agent-demo",
         "fork_track_id": "default",
         "fork_purpose": "edit",
         "access_mode": "edit",
@@ -937,9 +1174,9 @@ request(
     "POST",
     "/v1/operator/forks/ensure",
     {
-        "operator_agent_id": "operator-0",
+        "operator_agent_id": operator_id,
         "source_caller_agent_id": "release-review",
-        "fork_agent_id": "operator-0-fork-release-review-demo",
+        "fork_agent_id": f"{operator_id}-fork-release-review-demo",
         "fork_track_id": "default",
         "fork_purpose": "edit",
         "access_mode": "edit",
@@ -952,21 +1189,21 @@ request(
 
 request(
     "POST",
-    "/v1/agents/operator-0/reports",
+    f"/v1/agents/{operator_id}/reports",
     {
         "project": "agent-pbx-operator",
         "status": "working",
         "summary": "Coordinating the native Agent and release review campaign.",
         "detail": (
-            "Operator 0 owns durable campaign state while its Codex root and "
+            "The release Operator owns durable campaign state while its root and "
             "bounded fork execute inside PBX-managed tmux runtimes."
         ),
         "needs_input": False,
         "plan_options": [],
-        "reporting_agent_id": "operator-0",
+        "reporting_agent_id": operator_id,
         "metadata": {
             "demo": True,
-            "reporting_agent_id": "operator-0",
+            "reporting_agent_id": operator_id,
             "suppress_tui_alerts": True,
         },
     },
@@ -975,7 +1212,7 @@ request(
     "POST",
     "/v1/operator/campaigns",
     {
-        "operator_agent_id": "operator-0",
+        "operator_agent_id": operator_id,
         "title": "Agent PBX v2 documentation release",
         "objective": (
             "Coordinate native-runtime validation, documentation review, and "
@@ -988,7 +1225,7 @@ request(
         ],
         "assignments": [
             {
-                "target_agent_id": launched_agent_id,
+                "target_agent_id": source_agent_id,
                 "title": "Validate native runtime",
                 "prompt": "Verify terminal attachment, resize, input, and persistence.",
                 "criteria": ["Native tmux runtime remains ready."],
@@ -1033,7 +1270,128 @@ start_tui_session() {
   tmux_demo set-option -t "$SESSION" status off >/dev/null 2>&1 || true
 }
 
+drive_still_capture() {
+  screen_has_text() {
+    local expected="$1"
+    local attempts="${2:-20}"
+    local output
+    for ((index = 0; index < attempts; index++)); do
+      output="$(tmux_demo capture-pane -p -J -t "$SESSION" 2>/dev/null || true)"
+      if grep -Fq -- "$expected" <<<"$output"; then
+        return 0
+      fi
+      sleep 0.25
+    done
+    return 1
+  }
+
+  wait_for_screen_text() {
+    local expected="$1"
+    local attempts="${2:-80}"
+    screen_has_text "$expected" "$attempts" && return 0
+    log "Timed out waiting for TUI text: $expected"
+    return 1
+  }
+
+  send_palette() {
+    local command="$1"
+    tmux_demo send-keys -t "$SESSION" F3
+    sleep 0.35
+    tmux_demo send-keys -t "$SESSION" C-p
+    sleep 0.4
+    tmux_demo send-keys -t "$SESSION" -l "$command"
+    sleep 1.25
+    tmux_demo send-keys -t "$SESSION" Down Enter
+  }
+
+  sleep 2
+  tmux_demo send-keys -t "$SESSION" F1 Home Enter
+  wait_for_screen_text "DEMO CODEX RUNTIME" 120
+  sleep 1
+  capture_still \
+    "native-latest" \
+    "Agent PBX native Latest terminal" \
+    "DEMO CODEX RUNTIME" \
+    "platform-agent"
+
+  seed_operator_workflow
+  wait_for_demo_agent "$DEMO_OPERATOR_ID" 0
+  tmux_demo send-keys -t "$SESSION" F5
+  wait_for_screen_text "$DEMO_OPERATOR_ID" 120
+  local campaign_ready=0
+  local attempt
+  for attempt in 1 2 3; do
+    tmux_demo send-keys -t "$SESSION" r
+    sleep 1
+    tmux_demo send-keys -t "$SESSION" Home Enter
+    sleep 0.5
+    send_palette "/campaigns"
+    if screen_has_text "Agent PBX v2 documentation release" 40; then
+      campaign_ready=1
+      break
+    fi
+    tmux_demo send-keys -t "$SESSION" Escape F5
+    sleep 0.5
+  done
+  if [[ "$campaign_ready" != "1" ]]; then
+    fail "unable to select the seeded Operator campaign after three attempts"
+  fi
+  sleep 1
+  capture_still \
+    "campaign-topology" \
+    "Agent PBX Operator campaign topology" \
+    "$DEMO_OPERATOR_ID" \
+    "Agent PBX v2 documentation release"
+
+  tmux_demo send-keys -t "$SESSION" F1 Home Enter
+  wait_for_screen_text "5.6-SOL/HIGH" 120
+  send_palette "/workerbee"
+  wait_for_screen_text "WorkerBee" 120
+  wait_for_screen_text "Name: agent-pbx" 120
+  sleep 1
+  capture_still \
+    "workerbee-provenance" \
+    "Agent PBX WorkerBee runtime provenance" \
+    "WorkerBee" \
+    "Name: agent-pbx"
+
+  local editor_ready=0
+  for attempt in 1 2 3; do
+    send_palette "/editor terminal nvim"
+    wait_for_terminal_editor "platform-agent" "nvim"
+    if screen_has_text "Editor: nvim" 60; then
+      editor_ready=1
+      break
+    fi
+    tmux_demo send-keys -t "$SESSION" Escape F3
+    sleep 0.5
+  done
+  if [[ "$editor_ready" != "1" ]]; then
+    fail "managed Neovim runtime was ready but its terminal surface did not attach"
+  fi
+  tmux_demo send-keys -t "$SESSION" Escape
+  tmux_demo send-keys -t "$SESSION" -l ":edit src/runtime.py"
+  tmux_demo send-keys -t "$SESSION" Enter
+  wait_for_screen_text "runtime_status" 120
+  sleep 1
+  capture_still \
+    "managed-neovim" \
+    "Agent PBX managed Neovim workspace" \
+    "runtime.py" \
+    "runtime_status"
+
+  tmux_demo detach-client -s "$SESSION" >/dev/null 2>&1 || true
+  if [[ -n "$RECORDER_PID" ]]; then
+    kill -INT "$RECORDER_PID" >/dev/null 2>&1 || true
+  fi
+  log "Static scene capture complete"
+}
+
 drive_demo() {
+  if [[ "$CAPTURE_STILLS" == "1" ]]; then
+    drive_still_capture
+    return
+  fi
   wait_for_screen_text() {
     local expected="$1"
     local attempts="${2:-80}"
@@ -1165,6 +1523,11 @@ drive_demo() {
 }
 
 record_cast() {
+  if [[ "$CAPTURE_STILLS" == "1" && "$RENDER" != "1" ]]; then
+    log "Capturing deterministic static scenes without an asciinema client"
+    drive_demo
+    return
+  fi
   local attach_cmd
   printf -v attach_cmd 'tmux -f /dev/null -S %q attach-session -t %q' "$TMUX_SOCKET" "$SESSION"
   log "Recording ${CAST_PATH}"
@@ -1268,7 +1631,7 @@ mkdir -p "$OUT_DIR" "$STATE_ROOT"
 
 if [[ "$CHECK_ONLY" == "1" ]]; then
   if [[ "$LIVE_CODEX" != "1" ]]; then
-    "$ROOT_DIR/scripts/demo/demo_codex.py" --version >/dev/null
+    "$DEMO_PYTHON" "$ROOT_DIR/scripts/demo/demo_codex.py" --version >/dev/null
   fi
   log "Recording prerequisites are available."
   exit 0
@@ -1293,10 +1656,17 @@ seed_demo_data
 start_tui_session
 record_cast
 render_gif
+render_stills_contact_sheet
 
 log ""
 log "TUI demo artifacts:"
-log "  cast: ${CAST_PATH}"
+if [[ "$CAPTURE_STILLS" != "1" || "$RENDER" == "1" ]]; then
+  log "  cast: ${CAST_PATH}"
+fi
 if [[ "$RENDER" == "1" ]]; then
   log "  gif:  ${GIF_PATH}"
+fi
+if [[ "$CAPTURE_STILLS" == "1" ]]; then
+  log "  stills: ${STILLS_DIR}"
+  log "  manifest: ${STILLS_MANIFEST}"
 fi

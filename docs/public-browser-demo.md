@@ -133,3 +133,28 @@ python -m pytest -q \
 The media recorder continues to use the same package-owned Codex fixture via
 `scripts/demo/demo_codex.py`, preventing drift between the README hero and the
 interactive demo.
+
+For static documentation or article images, run the same isolated harness in
+still-capture mode. This path does not attach to the workstation daemon, live
+database, outer tmux server, or managed Agent/Operator panes:
+
+```bash
+AGENT_PBX_DEMO_OUT_DIR="$PWD/artifacts/blog-captures/review" \
+AGENT_PBX_DEMO_STATE_ROOT="/tmp/agent-pbx-capture/state" \
+AGENT_PBX_DEMO_HOME="/tmp/agent-pbx-capture/home" \
+AGENT_PBX_DEMO_BIN_DIR="/tmp/agent-pbx-capture/bin" \
+AGENT_PBX_DEMO_RUNTIME_DIR="/tmp/agent-pbx-capture/runtime" \
+AGENT_PBX_DEMO_PROJECT_ROOT="/tmp/agent-pbx-capture/projects" \
+AGENT_PBX_DEMO_COLS=207 \
+AGENT_PBX_DEMO_ROWS=46 \
+AGENT_PBX_DEMO_RENDER_WIDTH=1920 \
+AGENT_PBX_DEMO_RENDER_HEIGHT=800 \
+scripts/record_tui_demo.sh --capture-stills --no-render
+```
+
+The output contains four PNGs, a contact sheet, reviewable ANSI-free terminal
+frames, and `capture-manifest.json`. The manifest records source commit,
+terminal geometry, output dimensions, required markers, and SHA-256 hashes.
+Capture finalization rejects workstation usernames, home paths, local DNS
+names, live Operator identifiers, and other configured forbidden text before a
+scene is accepted.

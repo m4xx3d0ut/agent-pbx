@@ -2,8 +2,21 @@
 
 ## Unreleased
 
+### Added
+
+- Add deterministic ultrawide TUI still capture for documentation and article
+  workflows. The isolated media harness records native Latest, Operator
+  campaign, WorkerBee, and managed Neovim scenes with per-frame marker checks,
+  forbidden-text checks, hashes, geometry, and source revision evidence.
+
 ### Fixed
 
+- Pin a managed Agent process to its launched Agent ID, project, cwd, PBX mode,
+  model, reasoning, summary, and verbosity environment instead of allowing
+  daemon-launcher environment values to leak into the new runtime. The media
+  harness also pins its private runtime socket and uses the matching managed
+  tmux binary during cleanup, so a capture cannot adopt or strand a host
+  runtime.
 - Make bounded Sol-max elevation idempotent across the Codex tab, palette,
   repeated submissions, and concurrent API clients. Agent PBX now reuses one
   nonterminal lease per runtime, refuses lease/profile mismatches, associates
