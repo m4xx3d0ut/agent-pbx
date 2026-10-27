@@ -146,6 +146,15 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     assert store.get_agent("codex-demo")["metadata"]["tmux_pane_id"] == "%17"  # type: ignore[index]
     assert store.get_tmux_runtime_mapping("codex-demo")["process_start_ticks"] == 99  # type: ignore[index]
     assert any("AGENT_PBX_AGENT_ID=codex-demo" in item for item in commands[0])
+    assert any("AGENT_PBX_REPORTING_AGENT_ID=codex-demo" in item for item in commands[0])
+    assert any("AGENT_PBX_AGENT_TYPE=caller" in item for item in commands[0])
+    assert any("AGENT_PBX_AGENT_PROJECT=demo" in item for item in commands[0])
+    assert any(f"AGENT_PBX_CWD={repo}" in item for item in commands[0])
+    assert any("AGENT_PBX_PBX_MODE=report" in item for item in commands[0])
+    assert any("AGENT_PBX_CODEX_MODEL=gpt-5.6-sol" in item for item in commands[0])
+    assert any("AGENT_PBX_CODEX_REASONING_EFFORT=high" in item for item in commands[0])
+    assert any("AGENT_PBX_CODEX_REASONING_SUMMARY=detailed" in item for item in commands[0])
+    assert any("AGENT_PBX_CODEX_VERBOSITY=high" in item for item in commands[0])
     assert any("PATH=/private/bin:/usr/bin" in item for item in commands[0])
     assert commands[0][-1].startswith("exec ")
 
@@ -196,6 +205,7 @@ def test_managed_launch_on_real_dedicated_tmux_server(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    monkeypatch.delenv("AGENT_PBX_TMUX_RUNTIME_SOCKET", raising=False)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("SHELL", "/bin/false")
     root = tmp_path / "git"

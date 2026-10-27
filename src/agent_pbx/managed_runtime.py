@@ -220,6 +220,15 @@ class ManagedRuntimeService:
             dedicated_server_started = ensure_dedicated_runtime_server(identity)
         env = {
             "AGENT_PBX_AGENT_ID": str(preview["agent_id"]),
+            "AGENT_PBX_REPORTING_AGENT_ID": str(preview["agent_id"]),
+            "AGENT_PBX_AGENT_TYPE": "caller",
+            "AGENT_PBX_AGENT_PROJECT": str(preview["project"]),
+            "AGENT_PBX_CWD": str(preview["project_path"]),
+            "AGENT_PBX_PBX_MODE": "report",
+            "AGENT_PBX_CODEX_MODEL": str(preview["model"]),
+            "AGENT_PBX_CODEX_REASONING_EFFORT": str(preview["reasoning_effort"]),
+            "AGENT_PBX_CODEX_REASONING_SUMMARY": str(preview["reasoning_summary"]),
+            "AGENT_PBX_CODEX_VERBOSITY": str(preview["verbosity"]),
             "AGENT_PBX_SERVER_URL": server_url.rstrip("/"),
             "AGENT_PBX_MODE": "report",
         }
