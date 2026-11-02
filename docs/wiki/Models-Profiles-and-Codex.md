@@ -1,6 +1,6 @@
 # Models, Profiles, and Codex
 
-> **Applies to:** Agent PBX 2.2.x
+> **Applies to:** Agent PBX 2.3.x
 > **Last reviewed:** 2026-10-23
 
 Agent PBX validates model choices against the live `codex debug models`

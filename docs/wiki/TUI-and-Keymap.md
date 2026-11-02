@@ -1,6 +1,6 @@
 # TUI and Keymap
 
-> **Applies to:** Agent PBX 2.2.x
+> **Applies to:** Agent PBX 2.3.x
 > **Last reviewed:** 2026-10-10
 
 The v2 TUI retains the v1 left/right composition. Agents, Operators, and Events

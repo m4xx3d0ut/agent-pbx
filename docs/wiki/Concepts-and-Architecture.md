@@ -1,6 +1,6 @@
 # Concepts and Architecture
 
-> **Applies to:** Agent PBX 2.2.x
+> **Applies to:** Agent PBX 2.3.x
 > **Last reviewed:** 2026-10-10
 
 ## Durable ownership

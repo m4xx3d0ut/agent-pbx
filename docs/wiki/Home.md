@@ -1,6 +1,6 @@
 # Agent PBX
 
-> **Applies to:** Agent PBX 2.2.x
+> **Applies to:** Agent PBX 2.3.x
 > **Last reviewed:** 2026-10-12
 
 Agent PBX is a **runtime-grounded Agentic Engineering Control Plane**. It gives

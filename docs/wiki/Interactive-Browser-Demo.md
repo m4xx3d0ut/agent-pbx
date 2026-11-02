@@ -1,6 +1,6 @@
 # Interactive Browser Demo
 
-> **Applies to:** Agent PBX 2.2.x
+> **Applies to:** Agent PBX 2.3.x
 > **Last reviewed:** 2026-10-12
 
 The optional browser demo runs the real packaged Textual TUI while keeping the

@@ -1,6 +1,6 @@
 # Security and Remote Access
 
-> **Applies to:** Agent PBX 2.2.x
+> **Applies to:** Agent PBX 2.3.x
 > **Last reviewed:** 2026-10-12
 
 ## Default boundary

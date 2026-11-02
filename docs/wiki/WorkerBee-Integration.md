@@ -1,6 +1,6 @@
 # WorkerBee Integration
 
-> **Applies to:** Agent PBX 2.2.x
+> **Applies to:** Agent PBX 2.3.x
 > **Last reviewed:** 2026-10-23
 
 WorkerBee is an optional runtime-truth plane. Agent PBX remains the authority

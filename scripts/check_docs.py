@@ -94,7 +94,7 @@ def validate_wiki() -> list[str]:
     for page in pages:
         body = page.read_text(encoding="utf-8")
         relative = page.relative_to(ROOT)
-        if "**Applies to:** Agent PBX 2.2.x" not in body:
+        if "**Applies to:** Agent PBX 2.3.x" not in body:
             errors.append(f"{relative}: missing version applicability marker")
         if WIKI_REVIEW_DATE_RE.search(body) is None:
             errors.append(f"{relative}: missing review-date marker")

@@ -1,6 +1,6 @@
 # Packaging, Releases, and Upgrades
 
-> **Applies to:** Agent PBX 2.2.x
+> **Applies to:** Agent PBX 2.3.x
 > **Last reviewed:** 2026-10-10
 
 Agent PBX publishes a Python wheel and source distribution through PyPI Trusted

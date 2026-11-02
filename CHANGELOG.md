@@ -2,12 +2,60 @@
 
 ## Unreleased
 
+## v2.3.0rc1 - 2026-11-02
+
 ### Added
 
 - Add deterministic ultrawide TUI still capture for documentation and article
   workflows. The isolated media harness records native Latest, Operator
   campaign, WorkerBee, and managed Neovim scenes with per-frame marker checks,
   forbidden-text checks, hashes, geometry, and source revision evidence.
+
+- Add tiered WorkerBee workflow policy without changing the conservative public
+  default. Access authority, workspace mobility, appliance snapshot content,
+  and backend selection are now independent controls. The WorkerBee tab and
+  palette expose per-entity Access and Content screens; review forks remain
+  read-only, policy/admin ceilings are daemon-enforced, and authority changes
+  require a safe restart/resume before taking effect.
+- Add backend-neutral setup presets for standard OSS, personal appliance,
+  trusted platform workbench, and high-assurance platform workflows. The
+  trusted preset scopes automatic workspace binding to approved roots and uses
+  bounded safe-working-tree appliance snapshots, while no preset switches a
+  backend or grants `local-deploy`.
+- Add daemon-owned appliance snapshot policy with tracked, approved-paths, and
+  safe-working-tree modes, source/size/file ceilings, sensitive and bulk-cache
+  exclusions, previews, drift-safe persistence, and compatibility with the
+  existing private include allowlist. OSS remains direct-host, and the managed
+  PaaS/user appliance remains unavailable pending volume qualification.
+
+- Add daemon-owned WorkerBee workspace mobility with `pinned`,
+  `same-repository`, and `scoped-workbench` policies. Session-start requests
+  resolve to canonical Git roots and working subpaths, preserve the existing
+  gateway lease and access profile, journal approval/application/revert state,
+  and enforce administrator policy/root ceilings. The WorkerBee tab and
+  palette expose controller preview, policy, approval, bind, and rollback
+  actions; committed defaults remain pinned and approval-gated.
+
+- Add `/joplin retry write` and an Agent-scoped API action to requeue the
+  selected Agent or Operator's latest failed targeted write without creating a
+  duplicate note or invoking strict whole-profile E2EE validation.
+- Add an Agent PBX styled first-frame loading surface to the public browser
+  demo. It reports staged private-session startup progress, yields when Textual
+  paints the first terminal frame, honors reduced-motion preferences, and
+  offers a safe retry when the disposable session closes before startup.
+- Expand each isolated public-demo visitor topology with distinct native tmux
+  runtimes for the root Operator and both Operator forks while retaining Release
+  Review as a report-mode Agent. Each fake-Codex identity has an independent
+  pane and runtime mapping on the visitor-private socket, preserving the public
+  demo's no-credentials, no-host-tmux security boundary.
+- Add host-owned, Agent-and-source-bound workspace include policies for
+  explicitly selected dirty or untracked Git-submodule content. Materialized
+  binding identities now incorporate dirty submodule diffs and approved include
+  bytes so changed snapshots cannot reuse a stale appliance import path.
+- Add generation-bound WorkerBee workspace and gateway lease APIs, scoped
+  `observe-local`, `review-readonly`, and `local-deploy` tool profiles, active
+  mutation guards for backend switching, and doctor diagnostics for runtime
+  generation and materializer readiness.
 
 ### Fixed
 
@@ -103,54 +151,6 @@
   inherit global WorkerBee configuration without a PBX override.
 - Restore caller Agent PBX identity and bearer-token environment when Codex is
   respawned in an existing managed tmux pane.
-
-### Added
-
-- Add tiered WorkerBee workflow policy without changing the conservative public
-  default. Access authority, workspace mobility, appliance snapshot content,
-  and backend selection are now independent controls. The WorkerBee tab and
-  palette expose per-entity Access and Content screens; review forks remain
-  read-only, policy/admin ceilings are daemon-enforced, and authority changes
-  require a safe restart/resume before taking effect.
-- Add backend-neutral setup presets for standard OSS, personal appliance,
-  trusted platform workbench, and high-assurance platform workflows. The
-  trusted preset scopes automatic workspace binding to approved roots and uses
-  bounded safe-working-tree appliance snapshots, while no preset switches a
-  backend or grants `local-deploy`.
-- Add daemon-owned appliance snapshot policy with tracked, approved-paths, and
-  safe-working-tree modes, source/size/file ceilings, sensitive and bulk-cache
-  exclusions, previews, drift-safe persistence, and compatibility with the
-  existing private include allowlist. OSS remains direct-host, and the managed
-  PaaS/user appliance remains unavailable pending volume qualification.
-
-- Add daemon-owned WorkerBee workspace mobility with `pinned`,
-  `same-repository`, and `scoped-workbench` policies. Session-start requests
-  resolve to canonical Git roots and working subpaths, preserve the existing
-  gateway lease and access profile, journal approval/application/revert state,
-  and enforce administrator policy/root ceilings. The WorkerBee tab and
-  palette expose controller preview, policy, approval, bind, and rollback
-  actions; committed defaults remain pinned and approval-gated.
-
-- Add `/joplin retry write` and an Agent-scoped API action to requeue the
-  selected Agent or Operator's latest failed targeted write without creating a
-  duplicate note or invoking strict whole-profile E2EE validation.
-- Add an Agent PBX styled first-frame loading surface to the public browser
-  demo. It reports staged private-session startup progress, yields when Textual
-  paints the first terminal frame, honors reduced-motion preferences, and
-  offers a safe retry when the disposable session closes before startup.
-- Expand each isolated public-demo visitor topology with distinct native tmux
-  runtimes for the root Operator and both Operator forks while retaining Release
-  Review as a report-mode Agent. Each fake-Codex identity has an independent
-  pane and runtime mapping on the visitor-private socket, preserving the public
-  demo's no-credentials, no-host-tmux security boundary.
-- Add host-owned, Agent-and-source-bound workspace include policies for
-  explicitly selected dirty or untracked Git-submodule content. Materialized
-  binding identities now incorporate dirty submodule diffs and approved include
-  bytes so changed snapshots cannot reuse a stale appliance import path.
-- Add generation-bound WorkerBee workspace and gateway lease APIs, scoped
-  `observe-local`, `review-readonly`, and `local-deploy` tool profiles, active
-  mutation guards for backend switching, and doctor diagnostics for runtime
-  generation and materializer readiness.
 
 ## v2.2.0 - 2026-10-13
 

@@ -1,6 +1,6 @@
 # Runtime and tmux Operations
 
-> **Applies to:** Agent PBX 2.2.x
+> **Applies to:** Agent PBX 2.3.x
 > **Last reviewed:** 2026-10-21
 
 ## Runtime server modes
