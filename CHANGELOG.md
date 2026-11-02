@@ -59,6 +59,8 @@
 
 ### Fixed
 
+- Make public-demo process liveness assertions portable across Linux and macOS
+  instead of assuming a Linux `/proc` filesystem during release qualification.
 - Pin a managed Agent process to its launched Agent ID, project, cwd, PBX mode,
   model, reasoning, summary, and verbosity environment instead of allowing
   daemon-launcher environment values to leak into the new runtime. The media

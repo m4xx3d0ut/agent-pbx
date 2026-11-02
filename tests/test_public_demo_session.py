@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -52,6 +53,20 @@ def _wait_for_pane_text(
             return capture
         time.sleep(0.05)
     raise AssertionError(f"pane {pane_id} did not render {expected!r}:\n{capture}")
+
+
+def _process_exists(pid: int) -> bool:
+    """Return process liveness without relying on Linux-only procfs."""
+
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def test_demo_session_prepare_uses_disposable_paths_and_fake_integrations() -> None:
@@ -216,7 +231,7 @@ def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
         assert implicit_sessions == {
             str(mapping["session_name"]) for mapping in mappings
         }
-        assert all((Path("/proc") / str(pid)).exists() for pid in pane_pids)
+        assert all(_process_exists(pid) for pid in pane_pids)
     finally:
         session.close()
         shutil.rmtree(root, ignore_errors=True)
@@ -225,9 +240,7 @@ def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
     assert session.joplin_server is None
     assert session.joplin_thread is None
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and any(
-        (Path("/proc") / str(pid)).exists() for pid in pane_pids
-    ):
+    while time.monotonic() < deadline and any(_process_exists(pid) for pid in pane_pids):
         time.sleep(0.05)
-    assert not any((Path("/proc") / str(pid)).exists() for pid in pane_pids)
+    assert not any(_process_exists(pid) for pid in pane_pids)
     assert not session.runtime_socket.exists()
