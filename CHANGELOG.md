@@ -59,6 +59,10 @@
 
 ### Fixed
 
+- Harden isolated public-demo daemon startup against transient loopback-port
+  races and slow CI cold starts. Each launch now chooses a fresh port at spawn
+  time, detects early child exit with a redacted bounded log tail, and retries
+  once without touching host Agent PBX state.
 - Make public-demo process liveness assertions portable across Linux and macOS
   instead of assuming a Linux `/proc` filesystem during release qualification.
 - Pin a managed Agent process to its launched Agent ID, project, cwd, PBX mode,

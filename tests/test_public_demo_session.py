@@ -9,6 +9,7 @@ import time
 
 import pytest
 
+from agent_pbx.demo import session as demo_session
 from agent_pbx.demo.session import (
     DEMO_NATIVE_TERMINAL_ENTITY_IDS,
     DEMO_REPORT_ENTITY_IDS,
@@ -16,6 +17,14 @@ from agent_pbx.demo.session import (
     DemoSessionConfig,
     DemoSessionError,
 )
+
+
+class _FakeProcess:
+    def __init__(self, returncode: int | None) -> None:
+        self.returncode = returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
 
 
 def _tmux(session: DemoSession, *args: str) -> subprocess.CompletedProcess[str]:
@@ -105,6 +114,73 @@ def test_demo_session_rejects_unknown_scenario_and_unbounded_ttl() -> None:
         DemoSession(DemoSessionConfig(ttl_seconds=10))
     with pytest.raises(DemoSessionError, match="TTL"):
         DemoSession(DemoSessionConfig(ttl_seconds=3601))
+
+
+def test_demo_daemon_start_retries_with_a_fresh_loopback_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = DemoSession(DemoSessionConfig(keep=True, ttl_seconds=60))
+    processes = [_FakeProcess(98), _FakeProcess(None)]
+    ports = iter((41001, 41002))
+    spawned: list[tuple[list[str], _FakeProcess]] = []
+
+    def fake_spawn(argv: list[str], *, log_name: str) -> _FakeProcess:
+        assert log_name == "agent-pbx.log"
+        process = processes[len(spawned)]
+        spawned.append((argv, process))
+        return process
+
+    def fake_wait_json(
+        _url: str,
+        *,
+        timeout: float,
+        process: _FakeProcess | None = None,
+        log_name: str | None = None,
+    ) -> object:
+        assert timeout == demo_session.DEMO_DAEMON_START_TIMEOUT_SECONDS
+        assert log_name == "agent-pbx.log"
+        if process is processes[0]:
+            raise DemoSessionError("transient daemon startup failure")
+        return {"ok": True}
+
+    monkeypatch.setattr(demo_session, "reserve_loopback_port", lambda: next(ports))
+    monkeypatch.setattr(session, "_spawn", fake_spawn)
+    monkeypatch.setattr(session, "_wait_json", fake_wait_json)
+    try:
+        session._start_daemon()
+        assert session.daemon_process is processes[1]
+        assert session.api_port == 41002
+        assert session.server_url == "http://127.0.0.1:41002"
+        assert [argv[argv.index("--port") + 1] for argv, _process in spawned] == [
+            "41001",
+            "41002",
+        ]
+    finally:
+        session.daemon_process = None
+        session.close()
+
+
+def test_demo_readiness_reports_early_process_exit_and_redacts_token() -> None:
+    session = DemoSession(DemoSessionConfig(keep=True, ttl_seconds=60))
+    try:
+        session.prepare()
+        (session.logs_dir / "agent-pbx.log").write_text(
+            f"bind failed token={session.token}\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(DemoSessionError, match="exited with code 71") as raised:
+            session._wait_json(
+                "http://127.0.0.1:1/healthz",
+                timeout=0.5,
+                process=_FakeProcess(71),
+                log_name="agent-pbx.log",
+            )
+        message = str(raised.value)
+        assert session.token not in message
+        assert "<redacted-demo-token>" in message
+        assert "bind failed" in message
+    finally:
+        session.close()
 
 
 @pytest.mark.serial

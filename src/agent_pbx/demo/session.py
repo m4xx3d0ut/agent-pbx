@@ -39,6 +39,8 @@ DEMO_NATIVE_TERMINAL_ENTITY_IDS = (
     "operator-0-fork-release-review-demo",
 )
 DEMO_REPORT_ENTITY_IDS = ("release-review",)
+DEMO_DAEMON_START_ATTEMPTS = 2
+DEMO_DAEMON_START_TIMEOUT_SECONDS = 30.0
 
 
 class DemoSessionError(RuntimeError):
@@ -214,6 +216,70 @@ class DemoSession:
             start_new_session=True,
         )
 
+    def _log_tail(self, log_name: str, *, limit: int = 4096) -> str:
+        path = self.logs_dir / log_name
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - limit), os.SEEK_SET)
+                text = handle.read().decode("utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+        if self.token:
+            text = text.replace(self.token, "<redacted-demo-token>")
+        return text
+
+    def _start_daemon(self) -> None:
+        failures: list[str] = []
+        attempted_ports: set[int] = set()
+        for attempt in range(1, DEMO_DAEMON_START_ATTEMPTS + 1):
+            api_port = reserve_loopback_port()
+            while api_port in attempted_ports:
+                api_port = reserve_loopback_port()
+            attempted_ports.add(api_port)
+            self.api_port = api_port
+            self.server_url = f"http://127.0.0.1:{self.api_port}"
+            process = self._spawn(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_pbx",
+                    "mcp",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(self.api_port),
+                    "--state-root",
+                    str(self.state_root),
+                    "--db",
+                    str(self.db_path),
+                    "--token",
+                    self.token,
+                    "--log-level",
+                    "warning",
+                ],
+                log_name="agent-pbx.log",
+            )
+            self.daemon_process = process
+            try:
+                self._wait_json(
+                    f"{self.server_url}/healthz",
+                    timeout=DEMO_DAEMON_START_TIMEOUT_SECONDS,
+                    process=process,
+                    log_name="agent-pbx.log",
+                )
+                return
+            except DemoSessionError as exc:
+                failures.append(f"attempt {attempt}: {exc}")
+                _terminate_process(process)
+                self.daemon_process = None
+        detail = "; ".join(failures)
+        raise DemoSessionError(
+            f"demo daemon failed after {DEMO_DAEMON_START_ATTEMPTS} attempts: {detail}"
+        )
+
     def start(self) -> None:
         if self._started:
             return
@@ -230,33 +296,18 @@ class DemoSession:
         )
         self.joplin_thread.start()
         self._wait_json(f"{self.joplin_url}/folders", timeout=10)
-        self.daemon_process = self._spawn(
-            [
-                sys.executable,
-                "-m",
-                "agent_pbx",
-                "mcp",
-                "serve",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(self.api_port),
-                "--state-root",
-                str(self.state_root),
-                "--db",
-                str(self.db_path),
-                "--token",
-                self.token,
-                "--log-level",
-                "warning",
-            ],
-            log_name="agent-pbx.log",
-        )
-        self._wait_json(f"{self.server_url}/healthz", timeout=20)
+        self._start_daemon()
         self.seed()
         self._started = True
 
-    def _wait_json(self, url: str, *, timeout: float) -> object:
+    def _wait_json(
+        self,
+        url: str,
+        *,
+        timeout: float,
+        process: subprocess.Popen[bytes] | None = None,
+        log_name: str | None = None,
+    ) -> object:
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
         while time.monotonic() < deadline:
@@ -265,8 +316,19 @@ class DemoSession:
                     return json.loads(response.read().decode("utf-8"))
             except (OSError, json.JSONDecodeError, urllib.error.URLError) as exc:
                 last_error = exc
+                if process is not None and (returncode := process.poll()) is not None:
+                    log_tail = self._log_tail(log_name) if log_name else ""
+                    detail = f"; log tail:\n{log_tail}" if log_tail else ""
+                    raise DemoSessionError(
+                        f"demo service process exited with code {returncode} "
+                        f"before {url} became ready: {last_error}{detail}"
+                    )
                 time.sleep(0.1)
-        raise DemoSessionError(f"demo service did not become ready at {url}: {last_error}")
+        log_tail = self._log_tail(log_name) if log_name else ""
+        detail = f"; log tail:\n{log_tail}" if log_tail else ""
+        raise DemoSessionError(
+            f"demo service did not become ready at {url}: {last_error}{detail}"
+        )
 
     def request(
         self,
