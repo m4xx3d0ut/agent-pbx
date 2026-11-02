@@ -241,4 +241,3 @@ class WorkerBeeRuntimeRegistry:
                 for item in self.catalog(available_backends=available_backends)
             ],
         }
-

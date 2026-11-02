@@ -34,3 +34,30 @@ def test_documented_agent_pbx_commands_accept_help() -> None:
 
     assert commands
     assert module.smoke_documented_commands(commands) == []
+
+
+def test_documented_command_parser_ignores_agent_pbx_text_in_env_values() -> None:
+    module = docs_check_module()
+    line = (
+        'AGENT_PBX_DEMO_STATE_ROOT="/tmp/agent-pbx-capture" '
+        './scripts/record_tui_demo.sh'
+    )
+
+    assert list(module.AGENT_PBX_COMMAND_RE.finditer(line)) == []
+
+
+def test_documented_command_parser_accepts_env_prefixed_executable_path() -> None:
+    module = docs_check_module()
+    line = (
+        'AGENT_PBX_STATE_ROOT="/tmp/agent-pbx-state" '
+        '.venv/bin/agent-pbx doctor --json'
+    )
+
+    matches = list(module.AGENT_PBX_COMMAND_RE.finditer(line))
+
+    assert len(matches) == 1
+    assert matches[0].group("executable") == ".venv/bin/agent-pbx"
+    assert tuple(module.shlex.split(matches[0].group("arguments"))) == (
+        "doctor",
+        "--json",
+    )

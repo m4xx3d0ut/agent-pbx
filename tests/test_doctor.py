@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from agent_pbx.cli import build_parser
 from agent_pbx.doctor import (
     DoctorCheck,
@@ -121,7 +123,11 @@ def test_doctor_reports_v2_compatibility_posture(tmp_path: Path) -> None:
     assert "polling" in disabled.remediation
 
 
-def test_platform_doctor_reports_missing_host_executables(tmp_path: Path) -> None:
+def test_platform_doctor_reports_missing_host_executables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AGENT_PBX_TMUX_BIN", raising=False)
     report = run_platform_doctor(
         MCPDaemonConfig(state_root=tmp_path),
         codex_command="missing-codex",

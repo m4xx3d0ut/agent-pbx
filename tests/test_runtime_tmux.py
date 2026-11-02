@@ -34,8 +34,17 @@ from agent_pbx.runtime_tmux import (
     tmux_select_runtime_pane_command,
     write_managed_runtime_tmux_config,
 )
+
+
 from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import Store
+
+
+@pytest.fixture(autouse=True)
+def isolate_tmux_binary_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep workstation tmux selection out of deterministic command tests."""
+
+    monkeypatch.delenv("AGENT_PBX_TMUX_BIN", raising=False)
 
 
 def bind_socket(path: Path) -> socket.socket:

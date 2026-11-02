@@ -733,4 +733,3 @@ def _git(root: Path, *args: str) -> str:
         check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else ""
-

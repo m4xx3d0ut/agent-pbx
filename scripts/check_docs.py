@@ -23,7 +23,10 @@ SHELL_BLOCK_RE = re.compile(
 AGENT_PBX_COMMAND_RE = re.compile(
     r"(?:^|&&|;|\|)\s*"
     r"(?:(?:[A-Z_][A-Z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S+))\s+)*"
-    r"(?P<executable>(?:\S*/)?agent-pbx(?:-tui)?)\b"
+    # Exclude assignment syntax and quotes from an executable path. Without
+    # this boundary the regex can backtrack out of the assignment group and
+    # misread an environment value such as /tmp/agent-pbx-capture as a command.
+    r"(?P<executable>(?:[^\s=\"']*/)?agent-pbx(?:-tui)?)\b"
     r"(?P<arguments>[^;&|]*)"
 )
 PRIVATE_WIKI_PATTERNS = {

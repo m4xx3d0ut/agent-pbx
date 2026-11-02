@@ -1055,4 +1055,3 @@ def create_workerbee_gateway_app(
         server=server,
         session_manager=manager,
     )
-

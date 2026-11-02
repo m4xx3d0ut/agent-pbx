@@ -56,4 +56,3 @@ def test_backend_catalog_defers_user_appliance_without_hiding_contract(tmp_path:
     assert catalog[WORKERBEE_BACKEND_USER_APPLIANCE].available is False
     assert "deferred" in catalog[WORKERBEE_BACKEND_USER_APPLIANCE].unavailable_reason.lower()
     assert canonical_workerbee_backend("user-facing") == WORKERBEE_BACKEND_USER_APPLIANCE
-

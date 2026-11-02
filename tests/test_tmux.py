@@ -12,6 +12,13 @@ import pytest
 from agent_pbx import tmux
 
 
+@pytest.fixture(autouse=True)
+def isolate_tmux_binary_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep host-managed tmux selection out of command-construction tests."""
+
+    monkeypatch.delenv("AGENT_PBX_TMUX_BIN", raising=False)
+
+
 def test_tmux_parse_pane_line() -> None:
     pane = tmux.parse_pane_line(
         "agent-pbx\t0\t2\t%76\t1\tnode\tagent-pbx\t/home/me/agent-pbx\t142\t45\t2640\toperator-0"
