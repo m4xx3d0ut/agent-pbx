@@ -17,6 +17,7 @@ from agent_pbx.migration import (
     rollback_migration,
     verify_migration,
 )
+from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import SCHEMA_VERSION, Store
 
 
@@ -87,6 +88,121 @@ def test_migration_dry_run_and_apply_reach_current_schema(tmp_path: Path) -> Non
     assert applied["ok"] is True
     assert applied["verification"]["schema"] == SCHEMA_VERSION
     assert Path(applied["backup"]["backup_path"]).is_dir()
+
+
+def test_schema_30_fixture_migrates_with_retained_entities_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Qualify the v2.2 schema boundary without touching workstation state."""
+
+    config = config_for(tmp_path)
+    store = Store(config.resolved_db_path)
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="retained-agent",
+            project="fixture-project",
+            name="Retained Agent",
+            metadata={"cwd": str(tmp_path / "project")},
+        )
+    )
+    store.set_agent_starred("retained-agent", starred=True)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="retained-operator",
+            project="fixture-operator",
+            name="Retained Operator",
+            agent_type="operator",
+            metadata={"agent_type": "operator", "operator_role": "root"},
+        )
+    )
+    store.append_event(
+        "fixture_retained",
+        {"agent_id": "retained-agent"},
+        "retained-agent",
+    )
+    v23_tables = (
+        "workerbee_workspace_policies",
+        "workerbee_snapshot_policies",
+        "workerbee_workspace_transitions",
+    )
+    with store.connect() as conn:
+        for table in v23_tables:
+            conn.execute(f"DROP TABLE {table}")
+        conn.execute(
+            "UPDATE metadata SET value = '30' WHERE key = 'schema_version'"
+        )
+
+    # Keep migration config discovery inside this test's private fixture tree.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+
+    dry_run = migration_dry_run(config)
+    source_schema_after_dry_run, source_integrity = database_posture(
+        config.resolved_db_path
+    )
+    with store.connect() as conn:
+        source_tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+
+    assert dry_run["source_schema"] == 30
+    assert dry_run["simulated_schema"] == SCHEMA_VERSION
+    assert dry_run["simulated_integrity"] == "ok"
+    assert source_schema_after_dry_run == 30
+    assert source_integrity == "ok"
+    assert not set(v23_tables) & source_tables
+
+    applied = apply_migration(config)
+    migrated = Store(config.resolved_db_path)
+    migrated_agents = {
+        item["agent_id"]: item for item in migrated.list_agents(include_hidden=True)
+    }
+    migrated_events = migrated.list_events(after_id=0, limit=100)
+    with migrated.connect() as conn:
+        migrated_tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+
+    assert applied["ok"] is True
+    assert applied["verification"]["schema"] == SCHEMA_VERSION
+    assert set(v23_tables) <= migrated_tables
+    assert set(migrated_agents) >= {"retained-agent", "retained-operator"}
+    assert migrated_agents["retained-agent"]["name"] == "Retained Agent"
+    assert migrated_agents["retained-agent"]["starred_at"] is not None
+    assert migrated_agents["retained-operator"]["agent_type"] == "operator"
+    assert [item["type"] for item in migrated_events] == ["fixture_retained"]
+
+    restored = rollback_migration(
+        config,
+        Path(applied["backup"]["backup_path"]),
+        restore_config=False,
+    )
+    rolled_back = Store(config.resolved_db_path)
+    rolled_back_agents = {
+        item["agent_id"]: item
+        for item in rolled_back.list_agents(include_hidden=True)
+    }
+    with rolled_back.connect() as conn:
+        rolled_back_tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+
+    assert restored["ok"] is True
+    assert rolled_back.schema_version() == 30
+    assert not set(v23_tables) & rolled_back_tables
+    assert set(rolled_back_agents) >= {"retained-agent", "retained-operator"}
+    assert rolled_back_agents["retained-agent"]["starred_at"] is not None
 
 
 def test_migration_rollback_restores_database_and_optionally_config(
