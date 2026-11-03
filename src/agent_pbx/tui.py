@@ -11086,35 +11086,47 @@ class AgentPBXTUI(App[None]):
         self.action_focus_operators()
 
     def palette_operator_history(self) -> None:
+        agent_id = self.palette_operator_lifecycle_target("view history for")
+        if agent_id is None:
+            return
         self.run_worker(
-            self.show_selected_operator_history(),
+            self.show_selected_operator_history(agent_id=agent_id),
             name="palette-operator-history",
             exclusive=True,
         )
 
     def palette_operator_resume(self) -> None:
+        agent_id = self.palette_operator_lifecycle_target("resume")
+        if agent_id is None:
+            return
         self.run_worker(
-            self.resume_selected_operator(),
+            self.resume_selected_operator(agent_id=agent_id),
             name="palette-operator-resume",
             exclusive=True,
         )
 
     def palette_operator_restart(self) -> None:
+        agent_id = self.palette_operator_lifecycle_target("restart")
+        if agent_id is None:
+            return
         self.run_worker(
-            self.restart_selected_operator(),
+            self.restart_selected_operator(agent_id=agent_id),
             name="palette-operator-restart",
             exclusive=True,
         )
 
     def palette_operator_stop(self) -> None:
+        agent_id = self.palette_operator_lifecycle_target("stop")
+        if agent_id is None:
+            return
         self.run_worker(
-            self.stop_selected_operator(),
+            self.stop_selected_operator(agent_id=agent_id),
             name="palette-operator-stop",
             exclusive=True,
         )
 
     def palette_operator_hide(self) -> None:
-        agent_id = self.selected_operator_agent_id()
+        agent_id = self.palette_operator_lifecycle_target("hide")
         if agent_id is None:
             return
         self.run_worker(
@@ -11124,7 +11136,7 @@ class AgentPBXTUI(App[None]):
         )
 
     def palette_operator_purge(self) -> None:
-        agent_id = self.selected_operator_agent_id()
+        agent_id = self.palette_operator_lifecycle_target("purge")
         if agent_id is None:
             return
         self.run_worker(
@@ -23654,8 +23666,12 @@ class AgentPBXTUI(App[None]):
                 lines.append(f"   file: {candidate.path}")
         return "\n".join(lines)
 
-    async def show_selected_operator_history(self) -> None:
-        agent_id = self.selected_operator_agent_id()
+    async def show_selected_operator_history(
+        self,
+        *,
+        agent_id: str | None = None,
+    ) -> None:
+        agent_id = agent_id or self.selected_operator_agent_id()
         if not agent_id:
             return
         candidates = await asyncio.to_thread(self.operator_session_candidates, agent_id)
@@ -27593,6 +27609,34 @@ class AgentPBXTUI(App[None]):
         self.notify("Select an operator first.", severity="warning")
         return None
 
+    def palette_operator_lifecycle_target(self, action: str) -> str | None:
+        """Return one explicitly aligned Operators-table target for a palette action."""
+
+        cursor_agent_id = self.operator_id_at_cursor()
+        selected_agent_id = str(self.selected_agent_id or "").strip()
+        if not cursor_agent_id or not self.is_operator_agent_id(cursor_agent_id):
+            self.notify(
+                f"Select the operator to {action} in the Operators table and press "
+                "Enter before using the command palette.",
+                severity="warning",
+            )
+            return None
+        if (
+            not selected_agent_id
+            or not self.is_operator_agent_id(selected_agent_id)
+            or selected_agent_id != cursor_agent_id
+        ):
+            active_label = selected_agent_id or "none"
+            self.notify(
+                "Operator selection mismatch; no action was taken. "
+                f"Operators cursor: {cursor_agent_id}; active selection: "
+                f"{active_label}. Press Enter on the intended Operators row, "
+                "then reopen the command palette.",
+                severity="warning",
+            )
+            return None
+        return cursor_agent_id
+
     def tui_owned_operator_pane_id(self, agent_id: str) -> str | None:
         if not self.is_operator_agent_id(agent_id):
             return None
@@ -27625,8 +27669,12 @@ class AgentPBXTUI(App[None]):
         self.save_settings()
         return True
 
-    async def restart_selected_operator(self) -> None:
-        agent_id = self.selected_operator_agent_id()
+    async def restart_selected_operator(
+        self,
+        *,
+        agent_id: str | None = None,
+    ) -> None:
+        agent_id = agent_id or self.selected_operator_agent_id()
         if not agent_id:
             return
         await self.restart_tmux_codex_session(agent_id)
@@ -27657,7 +27705,7 @@ class AgentPBXTUI(App[None]):
         target = resume_candidate or self.operator_resume_target(agent_id, candidates)
         if target is None:
             self.notify(f"No resumable Codex session found for {agent_id}.", severity="warning")
-            await self.show_selected_operator_history()
+            await self.show_selected_operator_history(agent_id=agent_id)
             return
         if not self.operator_session_can_resume(agent_id, target.session_id):
             self.notify(
@@ -27840,8 +27888,12 @@ class AgentPBXTUI(App[None]):
         await self.refresh_agents()
         await self.open_latest_for_agent(agent_id)
 
-    async def stop_selected_operator(self) -> None:
-        agent_id = self.selected_operator_agent_id()
+    async def stop_selected_operator(
+        self,
+        *,
+        agent_id: str | None = None,
+    ) -> None:
+        agent_id = agent_id or self.selected_operator_agent_id()
         if not agent_id:
             return
         pane_id = self.tmux_agent_targets.get(agent_id)

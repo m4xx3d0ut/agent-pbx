@@ -7051,6 +7051,182 @@ async def test_tui_operator_button_focus_resolves_operator_cursor() -> None:
     assert resolved == "operator-0"
 
 
+async def test_tui_palette_operator_restart_requires_aligned_explicit_fork_selection() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    root_agent_id = "operator-7"
+    fork_agent_id = "operator-7-fork-codex-workerbee-0c25d502"
+    restarted: list[str] = []
+    notifications: list[str] = []
+
+    async def fake_select_agent(agent_id: str) -> None:
+        app.selected_agent_id = agent_id
+
+    async def fake_restart_tmux_codex_session(agent_id: str, **_kwargs: object) -> bool:
+        restarted.append(agent_id)
+        return True
+
+    app.select_agent = fake_select_agent  # type: ignore[method-assign]
+    app.restart_tmux_codex_session = (  # type: ignore[method-assign]
+        fake_restart_tmux_codex_session
+    )
+    app.notify = (  # type: ignore[method-assign]
+        lambda message, **_kwargs: notifications.append(str(message))
+    )
+
+    async with app.run_test() as pilot:
+        app.agents = {
+            root_agent_id: {
+                "agent_id": root_agent_id,
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "waiting",
+                "last_seen_at": 20.0,
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+            },
+            fork_agent_id: {
+                "agent_id": fork_agent_id,
+                "agent_type": "operator",
+                "project": "workerbee",
+                "status": "blocked",
+                "last_seen_at": 10.0,
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "fork",
+                    "logical_operator_id": root_agent_id,
+                },
+            },
+        }
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(
+            row=operators.get_row_index(fork_agent_id),
+            animate=False,
+            scroll=True,
+        )
+        operators.focus()
+        app.selected_agent_id = root_agent_id
+
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert app.focused is not operators
+        assert app.operator_id_at_cursor() == fork_agent_id
+
+        app.palette_operator_restart()
+        await pilot.pause()
+
+        assert restarted == []
+        assert any(
+            "Operator selection mismatch; no action was taken" in message
+            and f"Operators cursor: {fork_agent_id}" in message
+            and f"active selection: {root_agent_id}" in message
+            for message in notifications
+        )
+
+        await pilot.press("escape")
+        await pilot.pause()
+        operators.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.selected_agent_id == fork_agent_id
+
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert app.focused is not operators
+        assert app.operator_id_at_cursor() == fork_agent_id
+
+        app.palette_operator_restart()
+        await pilot.pause()
+
+    assert restarted == [fork_agent_id]
+
+
+async def test_tui_palette_operator_mutations_fail_closed_on_selection_mismatch() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    root_agent_id = "operator-7"
+    fork_agent_id = "operator-7-fork-codex-workerbee-0c25d502"
+    mutations: list[tuple[str, str | None]] = []
+    notifications: list[str] = []
+
+    async def fake_resume_selected_operator(
+        *,
+        agent_id: str | None = None,
+        resume_candidate: OperatorSessionCandidate | None = None,
+    ) -> None:
+        del resume_candidate
+        mutations.append(("resume", agent_id))
+
+    async def fake_restart_selected_operator(*, agent_id: str | None = None) -> None:
+        mutations.append(("restart", agent_id))
+
+    async def fake_stop_selected_operator(*, agent_id: str | None = None) -> None:
+        mutations.append(("stop", agent_id))
+
+    async def fake_dismiss_selected_agent(
+        *,
+        delete_thread: bool,
+        agent_id: str | None = None,
+        confirmed_operator_kill: bool = False,
+    ) -> None:
+        del confirmed_operator_kill
+        mutations.append(("purge" if delete_thread else "hide", agent_id))
+
+    app.resume_selected_operator = fake_resume_selected_operator  # type: ignore[method-assign]
+    app.restart_selected_operator = fake_restart_selected_operator  # type: ignore[method-assign]
+    app.stop_selected_operator = fake_stop_selected_operator  # type: ignore[method-assign]
+    app.dismiss_selected_agent = fake_dismiss_selected_agent  # type: ignore[method-assign]
+    app.notify = (  # type: ignore[method-assign]
+        lambda message, **_kwargs: notifications.append(str(message))
+    )
+
+    async with app.run_test() as pilot:
+        app.agents = {
+            root_agent_id: {
+                "agent_id": root_agent_id,
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "waiting",
+                "last_seen_at": 20.0,
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+            },
+            fork_agent_id: {
+                "agent_id": fork_agent_id,
+                "agent_type": "operator",
+                "project": "workerbee",
+                "status": "blocked",
+                "last_seen_at": 10.0,
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "fork",
+                    "logical_operator_id": root_agent_id,
+                },
+            },
+        }
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(
+            row=operators.get_row_index(fork_agent_id),
+            animate=False,
+            scroll=True,
+        )
+        operators.focus()
+        app.selected_agent_id = root_agent_id
+
+        app.palette_operator_resume()
+        app.palette_operator_restart()
+        app.palette_operator_stop()
+        app.palette_operator_hide()
+        app.palette_operator_purge()
+        await pilot.pause()
+
+    assert mutations == []
+    mismatch_notifications = [
+        message
+        for message in notifications
+        if "Operator selection mismatch" in message
+    ]
+    assert len(mismatch_notifications) == 5
+
+
 async def test_tui_starred_agents_sort_above_unstarred_by_freshness(
     monkeypatch,
 ) -> None:
@@ -16244,6 +16420,51 @@ async def test_tui_operator_history_opens_selectable_modal() -> None:
     assert table.row_count == 2
     assert table.get_row("old-session")[3] == "old-session"
     assert "Default resume target: old-session" in str(summary.renderable)
+
+
+async def test_tui_operator_resume_no_target_preserves_explicit_agent_for_history() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    root_agent_id = "operator-7"
+    fork_agent_id = "operator-7-fork-codex-workerbee-0c25d502"
+    history_targets: list[str | None] = []
+
+    def fake_operator_session_candidates(agent_id: str) -> list[OperatorSessionCandidate]:
+        assert agent_id == fork_agent_id
+        return []
+
+    async def fake_show_selected_operator_history(
+        *,
+        agent_id: str | None = None,
+    ) -> None:
+        history_targets.append(agent_id)
+
+    app.agents = {
+        root_agent_id: {
+            "agent_id": root_agent_id,
+            "agent_type": "operator",
+            "metadata": {"agent_type": "operator", "operator_role": "root"},
+        },
+        fork_agent_id: {
+            "agent_id": fork_agent_id,
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "logical_operator_id": root_agent_id,
+            },
+        },
+    }
+    app.selected_agent_id = root_agent_id
+    app.tmux_features_available = True
+    app.operator_session_candidates = fake_operator_session_candidates  # type: ignore[method-assign]
+    app.show_selected_operator_history = (  # type: ignore[method-assign]
+        fake_show_selected_operator_history
+    )
+    app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    await app.resume_selected_operator(agent_id=fork_agent_id)
+
+    assert history_targets == [fork_agent_id]
 
 
 async def test_tui_operator_history_modal_resumes_highlighted_candidate() -> None:
