@@ -27,6 +27,13 @@ the shim. `agent-pbx doctor` reports the result as
 environment at their next safe restart/resume; they are never restarted solely
 to refresh the shim.
 
+Linked-worktree Git-admin permissions follow the same activation rule. A
+package update alone does not change a running Codex process. A qualified edit
+fork receives its launch-local permission profile only on a reviewed fresh
+launch, in-place restart/resume, or managed cross-server resume. The preflight
+runs before pane creation or replacement; failure leaves the existing pane and
+working tree untouched. Review forks retain their existing read-only sandbox.
+
 ## Embedded terminal
 
 `Latest` runs a normal tmux client on a child PTY and renders its virtual
@@ -93,3 +100,14 @@ agent-pbx remote ssh-attach \
   verifies it, and retains rollback evidence.
 - Extensive terminal replay is unnecessary; Codex resume history and current
   runtime readiness are the required recovery state.
+- A blocked linked edit fork should keep all working-tree changes in place.
+  Install the reviewed Agent PBX package, then restart or reopen only the TUI so
+  it loads the new validator; this source-only change does not require a daemon
+  restart. Record and verify the fork's current Codex session, cwd, branch, and
+  diff, then invoke guarded in-place restart/resume for only that edit fork at a
+  safe turn boundary. Qualification runs inside that action before pane
+  replacement; failure leaves the pane and working tree untouched. After a
+  successful resume, verify the same session, cwd, branch, and diff before
+  staging. Do not relaunch callers or restart any other pane. If the branch
+  namespace is shared or top-level, stop: branch migration is a separately
+  approved repository mutation and is never part of repair activation.

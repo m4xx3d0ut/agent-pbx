@@ -23,6 +23,11 @@ from agent_pbx.codex_cli import (
     CodexCliPosture,
 )
 from agent_pbx.codex_sessions import CodexTranscriptBoundary, CodexTranscriptResult
+from agent_pbx.git_worktree import (
+    LINKED_EDIT_PERMISSION_PROFILE,
+    LinkedWorktreeGitAdminPlan,
+    LinkedWorktreeQualificationError,
+)
 from agent_pbx.tui import (
     ActiveCodexSession,
     AgentPBXTUI,
@@ -4558,6 +4563,207 @@ async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
     assert remain_on_exit_calls == [("%8", True), ("%9", True), ("%9", False)]
     assert posts[0] == "/v2/tmux/runtimes/agent-a"
     assert app.tmux_runtime_mapping_by_agent["agent-a"]["pane_id"] == "%9"
+
+
+@pytest.mark.parametrize(
+    ("fork_purpose", "access_mode", "expects_profile"),
+    (("edit", "edit", True), ("review", "review_readonly", False)),
+)
+async def test_tui_managed_cross_server_resume_scopes_linked_git_profile_to_edit_forks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fork_purpose: str,
+    access_mode: str,
+    expects_profile: bool,
+) -> None:
+    codex_binary = configure_managed_resume_test_codex(monkeypatch, tmp_path)
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+    common = tmp_path / "main" / ".git"
+    plan = LinkedWorktreeGitAdminPlan(
+        worktree_root=work_root,
+        git_file=work_root / ".git",
+        git_dir=common / "worktrees" / "work",
+        common_dir=common,
+        object_dir=common / "objects",
+        branch_ref="refs/heads/pbx/work",
+        ref_namespace=common / "refs" / "heads" / "pbx",
+        reflog_namespace=common / "logs" / "refs" / "heads" / "pbx",
+        writable_paths=(
+            common / "worktrees" / "work",
+            common / "objects",
+            common / "refs" / "heads" / "pbx",
+            common / "logs" / "refs" / "heads" / "pbx",
+        ),
+    )
+    agent_id = f"operator-7-fork-caller-{fork_purpose}"
+    socket_path = tmp_path / "runtime.sock"
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret", tmux_direct=True)
+    app.tmux_runtime_server = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-new",
+        str(socket_path),
+        True,
+        False,
+        tmux_bin="/opt/tmux-3.7c",
+    )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
+    respawns: list[dict[str, object]] = []
+    posts: list[dict[str, object]] = []
+
+    class Response:
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posts.append({"path": path, **kwargs})
+            body = kwargs["json"]  # type: ignore[index]
+            if path.startswith("/v2/tmux/runtimes/"):
+                return Response(
+                    {
+                        "entity_id": agent_id,
+                        "state": "ready",
+                        "server_mode": "dedicated",
+                        "server_id": "server-new",
+                        "socket_path": str(socket_path),
+                        "session_name": f"agent-pbx-runtime-{agent_id}",
+                        "pane_id": "%31",
+                        "metadata": {"tmux_bin": "/opt/tmux-3.7c"},
+                    }
+                )
+            if path == "/v1/operator/forks/ensure":
+                return Response(
+                    {
+                        "operator_fork_id": "fork-1",
+                        "logical_operator_agent_id": "operator-7",
+                        "fork_agent_id": agent_id,
+                        "source_caller_agent_id": "caller-1",
+                        "source_codex_session_id": "source-session",
+                        "fork_track_id": "default",
+                        "fork_purpose": fork_purpose,
+                        "access_mode": access_mode,
+                        "work_root": str(work_root),
+                        "tmux_pane_id": "%31",
+                        "status": "running",
+                        "metadata": body["metadata"],  # type: ignore[index]
+                    }
+                )
+            return Response(body)  # type: ignore[arg-type]
+
+        async def aclose(self) -> None:
+            return None
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return {"state": "server_lost", "pane_id": "%old"}
+
+    async def available(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def auth_ready() -> bool:
+        return True
+
+    async def configure(**_kwargs: object) -> None:
+        return None
+
+    async def qualify(
+        _work_root: str,
+        *,
+        fork_purpose: str,
+        access_mode: str,
+    ) -> LinkedWorktreeGitAdminPlan | None:
+        if fork_purpose == "edit" and access_mode == "edit":
+            return plan
+        return None
+
+    def launch(**_kwargs: object) -> str:
+        return "%31"
+
+    def respawn(pane_id: str, **kwargs: object) -> None:
+        respawns.append({"pane_id": pane_id, **kwargs})
+
+    pane = tmux_support.TmuxPane(
+        f"agent-pbx-runtime-{agent_id}",
+        "0",
+        "0",
+        "%31",
+        True,
+        "node",
+        agent_id,
+        str(work_root),
+        120,
+        40,
+        0,
+        window_name=agent_id,
+        window_id="@31",
+    )
+    app.fetch_tmux_runtime_mapping = fetch  # type: ignore[method-assign]
+    app.ensure_codex_resume_session_available = available  # type: ignore[method-assign]
+    app.ensure_operator_auth_ready = auth_ready  # type: ignore[method-assign]
+    app.configure_operator_codex_mcp = configure  # type: ignore[method-assign]
+    app.linked_edit_fork_git_admin_plan = qualify  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 1)
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr("agent_pbx.tui.ensure_dedicated_runtime_server", lambda _identity: False)
+    monkeypatch.setattr(
+        "agent_pbx.tui.wait_for_codex_thread_writer_lock_release",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(tmux_support, "launch_pane", launch)
+    monkeypatch.setattr(tmux_support, "respawn_pane", respawn)
+    monkeypatch.setattr(tmux_support, "set_pane_remain_on_exit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(tmux_support, "capture_pane", lambda *_args, **_kwargs: "Codex ready")
+    monkeypatch.setattr(tmux_support, "list_panes", lambda *_args, **_kwargs: [pane])
+    monkeypatch.setattr(tmux_support, "pane_root_pid", lambda *_args, **_kwargs: 431)
+    monkeypatch.setattr("agent_pbx.tui.runtime_process_start_ticks", lambda _pid: 31)
+
+    async with app.run_test():
+        if app.http_client is not None:
+            await app.http_client.aclose()
+            app.http_client = None
+        app.api_client = lambda: Client()  # type: ignore[method-assign]
+        app.agents = {
+            agent_id: {
+                "agent_id": agent_id,
+                "agent_type": "operator",
+                "project": "demo",
+                "pbx_active": True,
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "fork",
+                    "logical_operator_id": "operator-7",
+                    "source_caller_agent_id": "caller-1",
+                    "source_codex_session_id": "source-session",
+                    "fork_codex_session_id": "fork-session",
+                    "fork_track_id": "default",
+                    "fork_purpose": fork_purpose,
+                    "access_mode": access_mode,
+                    "source_cwd": str(work_root),
+                    "work_root": str(work_root),
+                    "cwd": str(work_root),
+                    "codex_command": "codex",
+                    "launched_by": "agent-pbx-tui",
+                },
+            }
+        }
+        assert await app.resume_tmux_codex_in_managed_runtime(agent_id) is True
+
+    command = str(respawns[0]["command"])
+    assert shlex.split(command)[0] == str(codex_binary)
+    assert (f'default_permissions="{LINKED_EDIT_PERMISSION_PROFILE}"' in command) is expects_profile
+    assert (f"permissions.{LINKED_EDIT_PERMISSION_PROFILE}=" in command) is expects_profile
+    register_post = next(post for post in posts if post["path"] == "/v1/agents/register")
+    metadata = register_post["json"]["metadata"]  # type: ignore[index]
+    assert ("linked_git_admin" in metadata) is expects_profile
 
 
 async def test_tui_managed_resume_reports_exhausted_lease_retries(
@@ -17259,6 +17465,26 @@ async def test_tui_fork_restart_replaces_stale_source_resume_with_codex_fork(
     async def fake_configure(**_: object) -> None:
         return None
 
+    git_admin_plan = LinkedWorktreeGitAdminPlan(
+        worktree_root=work_root,
+        git_file=work_root / ".git",
+        git_dir=tmp_path / "main" / ".git" / "worktrees" / "fork",
+        common_dir=tmp_path / "main" / ".git",
+        object_dir=tmp_path / "main" / ".git" / "objects",
+        branch_ref="refs/heads/pbx/fork",
+        ref_namespace=tmp_path / "main" / ".git" / "refs" / "heads" / "pbx",
+        reflog_namespace=tmp_path / "main" / ".git" / "logs" / "refs" / "heads" / "pbx",
+        writable_paths=(
+            tmp_path / "main" / ".git" / "worktrees" / "fork",
+            tmp_path / "main" / ".git" / "objects",
+            tmp_path / "main" / ".git" / "refs" / "heads" / "pbx",
+            tmp_path / "main" / ".git" / "logs" / "refs" / "heads" / "pbx",
+        ),
+    )
+
+    async def fake_git_admin_plan(*_args: object, **_kwargs: object) -> LinkedWorktreeGitAdminPlan:
+        return git_admin_plan
+
     async def fake_record_operator_fork(**kwargs: object) -> dict[str, object]:
         records.append(dict(kwargs))
         return {
@@ -17281,6 +17507,7 @@ async def test_tui_fork_restart_replaces_stale_source_resume_with_codex_fork(
     app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     app.ensure_operator_auth_ready = fake_auth_ready  # type: ignore[method-assign]
     app.configure_operator_codex_mcp = fake_configure  # type: ignore[method-assign]
+    app.linked_edit_fork_git_admin_plan = fake_git_admin_plan  # type: ignore[method-assign]
     app.record_operator_fork = fake_record_operator_fork  # type: ignore[method-assign]
     app.operator_session_candidates = lambda _agent_id: [  # type: ignore[method-assign]
         OperatorSessionCandidate(
@@ -17332,6 +17559,8 @@ async def test_tui_fork_restart_replaces_stale_source_resume_with_codex_fork(
     assert "fork" in argv
     assert "resume" not in argv
     assert 'model="gpt-5.6-sol"' in argv
+    assert f'default_permissions="{LINKED_EDIT_PERMISSION_PROFILE}"' in argv
+    assert any(item.startswith(f"permissions.{LINKED_EDIT_PERMISSION_PROFILE}=") for item in argv)
     assert records[0]["fork_codex_session_id"] is None
     assert records[0]["clear_fork_codex_session_id"] is True
     record_metadata = records[0]["metadata"]
@@ -17345,6 +17574,187 @@ async def test_tui_fork_restart_replaces_stale_source_resume_with_codex_fork(
         assert key not in record_metadata
     assert record_metadata["source_codex_session_id"] == "source-session"
     assert record_metadata["fork_resume_disabled_reason"] == "source_session_collision"
+    assert record_metadata["linked_git_admin"] == git_admin_plan.public_dict()
+
+
+async def test_tui_fork_restart_fails_before_pane_mutation_when_git_admin_is_unqualified(
+    tmp_path: Path,
+) -> None:
+    work_root = tmp_path / "fork"
+    work_root.mkdir()
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    notifications: list[tuple[str, str]] = []
+    pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "1",
+        "0",
+        "%20",
+        True,
+        "node",
+        "operator-0-fork-caller-1",
+        str(work_root),
+        100,
+        30,
+        200,
+        window_name="operator-0-fork-caller-1",
+    )
+
+    async def auth_ready() -> bool:
+        return True
+
+    async def reject_plan(*_args: object, **_kwargs: object) -> None:
+        raise LinkedWorktreeQualificationError("branch namespace is shared")
+
+    app.notify = lambda message, severity="information", **_kwargs: notifications.append(  # type: ignore[method-assign]
+        (message, severity)
+    )
+    app.ensure_operator_auth_ready = auth_ready  # type: ignore[method-assign]
+    app.linked_edit_fork_git_admin_plan = reject_plan  # type: ignore[method-assign]
+    app.agents = {
+        "operator-0-fork-caller-1": {
+            "agent_id": "operator-0-fork-caller-1",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "launched_by": "agent-pbx-tui",
+                "logical_operator_id": "operator-0",
+                "source_caller_agent_id": "caller-1",
+                "source_codex_session_id": "source-session",
+                "fork_track_id": "default",
+                "fork_purpose": "edit",
+                "access_mode": "edit",
+                "source_cwd": str(work_root),
+                "work_root": str(work_root),
+                "cwd": str(work_root),
+            },
+        }
+    }
+
+    restarted = await app.relaunch_operator_fork_codex(
+        "operator-0-fork-caller-1",
+        pane,
+    )
+
+    assert restarted is False
+    assert notifications == [
+        (
+            "Refused to restart operator-0-fork-caller-1: linked-worktree Git "
+            "administration did not qualify. branch namespace is shared",
+            "error",
+        )
+    ]
+
+
+async def test_tui_fresh_edit_fork_launch_includes_linked_git_permission_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    work_root = tmp_path / "linked"
+    work_root.mkdir()
+    plan = LinkedWorktreeGitAdminPlan(
+        worktree_root=work_root,
+        git_file=work_root / ".git",
+        git_dir=tmp_path / "main" / ".git" / "worktrees" / "linked",
+        common_dir=tmp_path / "main" / ".git",
+        object_dir=tmp_path / "main" / ".git" / "objects",
+        branch_ref="refs/heads/pbx/linked",
+        ref_namespace=tmp_path / "main" / ".git" / "refs" / "heads" / "pbx",
+        reflog_namespace=tmp_path / "main" / ".git" / "logs" / "refs" / "heads" / "pbx",
+        writable_paths=(
+            tmp_path / "main" / ".git" / "worktrees" / "linked",
+            tmp_path / "main" / ".git" / "objects",
+            tmp_path / "main" / ".git" / "refs" / "heads" / "pbx",
+            tmp_path / "main" / ".git" / "logs" / "refs" / "heads" / "pbx",
+        ),
+    )
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+    launches: list[dict[str, object]] = []
+    records: list[dict[str, object]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"forks": []}
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            assert path == "/v1/operator/forks"
+            return Response()
+
+    async def qualify(*_args: object, **_kwargs: object) -> LinkedWorktreeGitAdminPlan:
+        return plan
+
+    async def configure(**_kwargs: object) -> None:
+        return None
+
+    async def launch(**kwargs: object) -> str:
+        launches.append(dict(kwargs))
+        return "%71"
+
+    async def record(**kwargs: object) -> dict[str, object]:
+        records.append(dict(kwargs))
+        return {
+            "operator_fork_id": "fork-1",
+            "logical_operator_agent_id": "operator-0",
+            "fork_agent_id": kwargs["fork_agent_id"],
+            "source_caller_agent_id": "caller-1",
+            "source_codex_session_id": "source-session",
+            "fork_track_id": "default",
+            "fork_purpose": "edit",
+            "access_mode": "edit",
+            "work_root": str(work_root),
+            "tmux_pane_id": "%71",
+            "status": "running",
+            "metadata": kwargs["metadata"],
+        }
+
+    async def register_runtime(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"state": "ready", "pane_id": "%71"}
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.linked_edit_fork_git_admin_plan = qualify  # type: ignore[method-assign]
+    app.configure_operator_codex_mcp = configure  # type: ignore[method-assign]
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
+    app.configured_runtime_launch_target = default_runtime_launch_target_fixture  # type: ignore[method-assign]
+    app.launch_restart_pane = launch  # type: ignore[method-assign]
+    app.record_operator_fork = record  # type: ignore[method-assign]
+    app.register_launched_tmux_runtime = register_runtime  # type: ignore[method-assign]
+    app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", lambda **_kwargs: [])
+
+    async with app.run_test():
+        app.agents = {
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(work_root),
+                    "codex_session_id": "source-session",
+                    "codex_host_id": "local",
+                },
+            }
+        }
+        fork = await app.ensure_operator_fork_from_tui(
+            logical_operator_id="operator-0",
+            source_caller_agent_id="caller-1",
+            fork_purpose="edit",
+            access_mode="edit",
+            work_root=str(work_root),
+        )
+
+    assert fork is not None
+    argv = shlex.split(str(launches[0]["command"]))
+    values = [argv[index + 1] for index, item in enumerate(argv[:-1]) if item == "-c"]
+    assert f'default_permissions="{LINKED_EDIT_PERMISSION_PROFILE}"' in values
+    assert any(
+        item.startswith(f"permissions.{LINKED_EDIT_PERMISSION_PROFILE}=")
+        for item in values
+    )
+    assert records[0]["metadata"]["linked_git_admin"] == plan.public_dict()  # type: ignore[index]
 
 
 async def test_tui_resume_leaves_external_lease_dialog_unregistered(
@@ -17581,6 +17991,11 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
         for index, item in enumerate(argv)
         if item == "-c"
     ]
+    assert f'default_permissions="{LINKED_EDIT_PERMISSION_PROFILE}"' not in config_overrides
+    assert not any(
+        item.startswith(f"permissions.{LINKED_EDIT_PERMISSION_PROFILE}=")
+        for item in config_overrides
+    )
     agent_pbx_override = next(
         item
         for item in config_overrides
@@ -23718,6 +24133,11 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
         for index, item in enumerate(argv)
         if item == "-c"
     ]
+    assert f'default_permissions="{LINKED_EDIT_PERMISSION_PROFILE}"' not in config_overrides
+    assert not any(
+        item.startswith(f"permissions.{LINKED_EDIT_PERMISSION_PROFILE}=")
+        for item in config_overrides
+    )
     agent_pbx_override = next(
         item
         for item in config_overrides

@@ -53,6 +53,18 @@ approved roots, symlink/path traversal checks, sensitive-path policy, hash/mtime
 conflicts, and recoverable trash for untracked data. Tracked deletion remains
 visible to Git.
 
+For trusted edit forks in linked worktrees, Agent PBX does not make the common
+Git directory writable. It emits a launch-local Codex permission profile only
+after proving the canonical worktree, the forward `.git` pointer, the reverse
+admin `gitdir` pointer, the common directory, critical admin files, ownership,
+and an isolated branch ref/reflog namespace. The minimal additional writable
+set is the active per-worktree admin directory, common object database, and the
+active branch's dedicated ref/reflog directories. Existing Codex permission
+profiles must ultimately inherit `:workspace` and must not already grant Git
+administration writes. Legacy `sandbox_mode`, administrator-profile conflicts,
+bare/detached repositories, malformed pointers, sibling-admin collisions, and
+symlink or root ambiguity all fail closed.
+
 WorkerBee workspace placement is enforced by the daemon, independently of its
 tool profile. The public posture pins each lease to its checkout and requires
 controller approval. Broader workstation profiles may allow same-repository or

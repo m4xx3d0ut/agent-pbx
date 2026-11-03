@@ -76,6 +76,12 @@ from .codex_sessions import (
     wait_for_codex_thread_writer_lock_release,
 )
 from .codex.profiles import portable_codex_keymap_overrides
+from .git_worktree import (
+    LinkedWorktreeGitAdminPlan,
+    LinkedWorktreeQualificationError,
+    qualify_linked_worktree_git_admin,
+)
+from .managed_runtime import default_managed_project_roots
 from . import tmux as tmux_support
 from .project_spawn import (
     normalize_project_slug,
@@ -19759,6 +19765,19 @@ class AgentPBXTUI(App[None]):
         )
         source_cwd = str(metadata.get("source_cwd") or "").strip()
         work_root = str(metadata.get("work_root") or metadata.get("cwd") or pane.cwd).strip()
+        try:
+            git_admin_plan = await self.linked_edit_fork_git_admin_plan(
+                work_root,
+                fork_purpose=fork_purpose,
+                access_mode=access_mode,
+            )
+        except LinkedWorktreeQualificationError as exc:
+            self.notify(
+                f"Refused to restart {agent_id}: linked-worktree Git administration "
+                f"did not qualify. {exc}",
+                severity="error",
+            )
+            return False
         unsafe_persisted_fork_session = (
             str(metadata.get("fork_codex_session_id") or "").strip()
             == source_session_id
@@ -19834,6 +19853,9 @@ class AgentPBXTUI(App[None]):
         )
         launch_config_overrides.extend(
             codex_model_preset_config_overrides(effective_model_preset)
+        )
+        launch_config_overrides.extend(
+            self.linked_edit_fork_config_overrides(git_admin_plan)
         )
         sandbox = (
             "workspace-write"
@@ -19992,6 +20014,10 @@ class AgentPBXTUI(App[None]):
             "last_tmux_restart_mode": "in_place",
             **self.workerbee_gateway_metadata(workerbee_gateway_binding),
         }
+        if git_admin_plan is not None:
+            fork_metadata["linked_git_admin"] = git_admin_plan.public_dict()
+        else:
+            fork_metadata.pop("linked_git_admin", None)
         if effective_model_preset is not None:
             fork_metadata.update(effective_model_preset.metadata())
         if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
@@ -20435,6 +20461,7 @@ class AgentPBXTUI(App[None]):
                 str(exc),
             )
         sandbox: str | None = None
+        git_admin_plan: LinkedWorktreeGitAdminPlan | None = None
         if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
             if not await self.ensure_operator_auth_ready():
                 return self.record_runtime_migration_failure(
@@ -20452,6 +20479,26 @@ class AgentPBXTUI(App[None]):
                     metadata.get("fork_purpose"),
                     default=DEFAULT_OPERATOR_FORK_PURPOSE,
                 )
+                access_mode = self.normalize_operator_fork_label(
+                    metadata.get("access_mode"),
+                    default=(
+                        REVIEW_OPERATOR_FORK_ACCESS_MODE
+                        if purpose == REVIEW_OPERATOR_FORK_PURPOSE
+                        else DEFAULT_OPERATOR_FORK_ACCESS_MODE
+                    ),
+                )
+                try:
+                    git_admin_plan = await self.linked_edit_fork_git_admin_plan(
+                        cwd,
+                        fork_purpose=purpose,
+                        access_mode=access_mode,
+                    )
+                except LinkedWorktreeQualificationError as exc:
+                    return self.record_runtime_migration_failure(
+                        agent_id,
+                        f"Refused to resume {agent_id}: linked-worktree Git "
+                        f"administration did not qualify. {exc}",
+                    )
                 overrides = (
                     review_operator_config_overrides(
                         mcp_url=mcp_url,
@@ -20482,7 +20529,7 @@ class AgentPBXTUI(App[None]):
                     source_codex_session_id=str(metadata.get("source_codex_session_id") or "") or None,
                     fork_track_id=str(metadata.get("fork_track_id") or "") or None,
                     fork_purpose=purpose,
-                    access_mode=str(metadata.get("access_mode") or "") or None,
+                    access_mode=access_mode,
                     source_cwd=str(metadata.get("source_cwd") or "") or None,
                     work_root=cwd,
                     review_launch_mode=str(metadata.get("review_launch_mode") or "") or None,
@@ -20522,6 +20569,7 @@ class AgentPBXTUI(App[None]):
                 workerbee_profile=workerbee_profile,
                 workerbee_gateway_binding=workerbee_gateway_binding,
             )
+        overrides.extend(self.linked_edit_fork_config_overrides(git_admin_plan))
         overrides.extend(codex_model_preset_config_overrides(preset))
         env["PATH"] = codex_launch_path
         env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = session_id
@@ -20716,6 +20764,10 @@ class AgentPBXTUI(App[None]):
             "last_tmux_restart_mode": "managed_cross_server_resume",
             **self.workerbee_gateway_metadata(workerbee_gateway_binding),
         }
+        if git_admin_plan is not None:
+            updated_metadata["linked_git_admin"] = git_admin_plan.public_dict()
+        else:
+            updated_metadata.pop("linked_git_admin", None)
         if preset is not None:
             updated_metadata.update(preset.metadata())
         try:
@@ -22403,6 +22455,34 @@ class AgentPBXTUI(App[None]):
         if configured:
             return Path(configured).expanduser()
         return Path.home() / ".codex"
+
+    async def linked_edit_fork_git_admin_plan(
+        self,
+        work_root: str,
+        *,
+        fork_purpose: str,
+        access_mode: str,
+    ) -> LinkedWorktreeGitAdminPlan | None:
+        roots = default_managed_project_roots(cwd=Path(work_root))
+        return await asyncio.to_thread(
+            qualify_linked_worktree_git_admin,
+            work_root,
+            approved_roots=roots,
+            fork_purpose=fork_purpose,
+            access_mode=access_mode,
+            codex_home=self.codex_home_dir(),
+        )
+
+    @staticmethod
+    def linked_edit_fork_config_overrides(
+        plan: LinkedWorktreeGitAdminPlan | None,
+    ) -> list[str]:
+        if plan is None:
+            return []
+        return [
+            codex_config_override(key, value)
+            for key, value in plan.config_overrides()
+        ]
 
     def operator_resume_command(
         self,
@@ -24176,6 +24256,21 @@ class AgentPBXTUI(App[None]):
                 "starting review fork with fresh context.",
                 severity="warning",
             )
+        try:
+            git_admin_plan = await self.linked_edit_fork_git_admin_plan(
+                launch_cwd,
+                fork_purpose=resolved_purpose,
+                access_mode=resolved_access_mode,
+            )
+        except LinkedWorktreeQualificationError as exc:
+            self.notify(
+                f"Refused to launch {fork_agent_id}: linked-worktree Git "
+                f"administration did not qualify. {exc}",
+                severity="error",
+            )
+            return None
+        if git_admin_plan is not None:
+            fork_metadata["linked_git_admin"] = git_admin_plan.public_dict()
         workerbee_profile = (
             WORKERBEE_PROFILE_REVIEW
             if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
@@ -24212,6 +24307,7 @@ class AgentPBXTUI(App[None]):
         launch_config_overrides = [
             *launch_config_overrides,
             *codex_model_preset_config_overrides(launch_preset),
+            *self.linked_edit_fork_config_overrides(git_admin_plan),
         ]
         sandbox = (
             "workspace-write"

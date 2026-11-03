@@ -486,6 +486,20 @@ should provide needed domain context through the first prompt, KB context, or a
 knowledge handoff. Set `AGENT_PBX_TUI_REVIEW_FORK_LAUNCH_MODE=fresh_context`
 to skip transcript continuation for new review forks.
 
+Linked Git worktrees receive one additional launch preflight for trusted
+default/edit forks. Agent PBX validates the canonical checkout, `.git`
+indirection and reverse backpointer, per-worktree admin directory, common object
+database, attached local branch, ownership, symlink posture, and approved-root
+boundary. A qualifying branch must use a dedicated namespace such as
+`pbx/<fork-id>` with no sibling refs in that namespace. The generated Codex
+permission profile adds write access only to the active worktree admin
+directory, shared object database, and that branch's dedicated ref/reflog
+directories. It never grants the common `.git` root, sibling worktree admin
+directories, configuration, or hooks. Standalone repositories and non-Git
+projects retain their existing behavior; review/read-only forks never receive
+this profile. Ambiguous, detached, bare, malformed, symlinked, unapproved, or
+legacy-`sandbox_mode` configurations fail before a pane is launched or replaced.
+
 Review forks should treat the source checkout as read-only and write only under
 their configured `work_root`. If a finding requires edits in the source repo,
 route it with `pbx_operator_route_review_escalation` so the root operator or an

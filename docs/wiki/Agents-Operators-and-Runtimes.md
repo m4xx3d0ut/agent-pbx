@@ -27,6 +27,26 @@ review forks remain children of the root:
 - reusable context moves through reviewed knowledge links or handoffs;
 - new sibling projects require an approved PBX project-spawn request.
 
+### Linked-worktree edit forks
+
+Trusted edit forks can stage and commit in an approved linked Git worktree only
+after a launch-time topology preflight. The preflight binds the checkout's
+`.git` marker to its exact per-worktree admin directory in both directions,
+validates the common directory and object database, requires current-user
+ownership, rejects symlink or approved-root escape, and requires an attached
+branch in a dedicated ref namespace. Agent PBX then creates a launch-local
+Codex permission profile with four bounded writable roots:
+
+1. the active worktree's per-worktree Git admin directory;
+2. the common object database;
+3. the active branch's dedicated ref namespace;
+4. the matching branch-reflog namespace.
+
+The common `.git` directory, sibling worktree administration, hooks,
+configuration, and unrelated refs remain protected. Review/read-only forks are
+excluded before repository inspection. Standalone Git repositories and non-Git
+projects do not receive or need this additional profile.
+
 Acknowledging a root alert also clears the related non-review fork alert when
 both describe the same update. F8 moves to and clears one alert at a time so a
 queue of alerts remains reviewable.
