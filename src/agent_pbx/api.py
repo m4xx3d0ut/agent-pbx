@@ -272,6 +272,7 @@ from .schemas import (
     OperatorProjectSpawnListResponse,
     OperatorProjectSpawnRequest,
     OperatorProjectSpawnResponse,
+    OperatorProjectSpawnCancelRequest,
     OperatorProjectSpawnUpdateRequest,
     OperatorReviewEscalationRequest,
     OperatorAlertAcknowledgementResponse,
@@ -1504,6 +1505,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         request: Request,
     ) -> dict[str, object]:
         service: ManagedRuntimeService = request.app.state.managed_runtime
+        local_server = f"http://127.0.0.1:{resolved_config.port}"
         try:
             return await asyncio.to_thread(
                 service.preview_launch,
@@ -1511,6 +1513,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 agent_id=payload.agent_id,
                 profile_id=payload.profile_id,
                 runtime_server_mode=payload.runtime_server_mode,
+                server_url=local_server,
+                source_codex_session_id=payload.source_codex_session_id,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1534,6 +1538,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 runtime_server_mode=payload.runtime_server_mode,
                 server_url=local_server,
                 token=resolved_config.token,
+                source_codex_session_id=payload.source_codex_session_id,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -5254,6 +5259,41 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             campaign_id=payload.campaign_id,
             assignment_id=payload.assignment_id,
             metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/project-spawns/{spawn_request_id}",
+        response_model=OperatorProjectSpawnResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def inspect_operator_project_spawn(
+        spawn_request_id: str,
+        request: Request,
+        operator_agent_id: str | None = None,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.get_project_spawn_request,
+            spawn_request_id=spawn_request_id,
+            operator_agent_id=operator_agent_id,
+        )
+
+    @app.post(
+        "/v1/operator/project-spawns/{spawn_request_id}/cancel",
+        response_model=OperatorProjectSpawnResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def cancel_operator_project_spawn(
+        spawn_request_id: str,
+        payload: OperatorProjectSpawnCancelRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.cancel_project_spawn_request,
+            spawn_request_id=spawn_request_id,
+            operator_agent_id=payload.operator_agent_id,
+            reason=payload.reason,
         )
 
     @app.post(

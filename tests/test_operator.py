@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import subprocess
 
 import pytest
 
@@ -2627,6 +2628,7 @@ def test_operator_review_fork_can_request_sibling_project_spawn(
     store.init()
     caller_cwd = tmp_path / "caller-1"
     caller_cwd.mkdir()
+    subprocess.run(["git", "init", "-q", str(caller_cwd)], check=True)
     register_operator_and_caller(store, tmp_path)
     store.register_agent(
         AgentRegisterRequest(
@@ -2683,6 +2685,10 @@ def test_operator_review_fork_can_request_sibling_project_spawn(
             metadata={"pbx_mode": "report", "cwd": str(tmp_path / "Next-Demo")},
         )
     )
+    service.update_project_spawn_request(
+        spawn_request_id=request["spawn_request_id"],
+        status="launching",
+    )
     updated = service.update_project_spawn_request(
         spawn_request_id=request["spawn_request_id"],
         status="launched",
@@ -2699,8 +2705,80 @@ def test_operator_review_fork_can_request_sibling_project_spawn(
     ]
     assert [event["type"] for event in events] == [
         "operator_project_spawn_requested",
+        "operator_project_spawn_launching",
         "operator_project_spawn_launched",
     ]
+
+
+def test_operator_project_spawn_rejects_nonempty_target_and_cancels_idempotently(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    caller_cwd = tmp_path / "caller-1"
+    caller_cwd.mkdir()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={"cwd": str(caller_cwd), "codex_session_id": "session-caller-1"},
+        )
+    )
+    service = OperatorService(store)
+    review = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1-review-1",
+        fork_track_id="review-1",
+        fork_purpose="review",
+        access_mode="review_readonly",
+        source_cwd=str(caller_cwd),
+        work_root=str(tmp_path / ".agent-pbx-review" / "review"),
+        status="running",
+        metadata={"pbx_mode": "report"},
+    )
+    occupied = tmp_path / "occupied"
+    occupied.mkdir()
+    (occupied / "existing.txt").write_text("keep", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="managed Agent launcher"):
+        service.request_project_spawn(
+            operator_agent_id="operator-0",
+            review_fork_id=review["operator_fork_id"],
+            project_name="occupied",
+            instructions="Do not overwrite this workspace.",
+        )
+
+    pending = service.request_project_spawn(
+        operator_agent_id="operator-0",
+        review_fork_id=review["operator_fork_id"],
+        project_name="cancel-me",
+        instructions="This request should remain cancellable.",
+    )
+    inspected = service.get_project_spawn_request(
+        spawn_request_id=pending["spawn_request_id"],
+        operator_agent_id="operator-0",
+    )
+    assert inspected["status"] == "pending"
+    canceled = service.cancel_project_spawn_request(
+        spawn_request_id=pending["spawn_request_id"],
+        operator_agent_id="operator-0",
+        reason="superseded",
+    )
+    repeated = service.cancel_project_spawn_request(
+        spawn_request_id=pending["spawn_request_id"],
+        operator_agent_id="operator-0",
+        reason="duplicate retry",
+    )
+    assert canceled["status"] == "canceled"
+    assert repeated["updated_at"] == canceled["updated_at"]
+
+    with pytest.raises(ValueError, match="invalid project spawn status transition"):
+        service.update_project_spawn_request(
+            spawn_request_id=pending["spawn_request_id"],
+            status="launching",
+        )
 
 
 def test_operator_project_spawn_requires_review_readonly_fork(

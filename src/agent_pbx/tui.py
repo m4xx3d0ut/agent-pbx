@@ -78,9 +78,8 @@ from .codex_sessions import (
 from .codex.profiles import portable_codex_keymap_overrides
 from . import tmux as tmux_support
 from .project_spawn import (
-    PROJECT_SPAWN_MODES,
     normalize_project_slug,
-    validate_sibling_project_target,
+    validate_stored_project_spawn_preflight,
 )
 from .workerbee_mcp import (
     WorkerBeeBackendProvenance,
@@ -794,6 +793,8 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/operator kb reject",
     "/operator kb retire",
     "/operator project spawn",
+    "/operator project spawn inspect",
+    "/operator project spawn cancel",
     "/gitstatus",
     "/gitdiff",
     "/gitpush",
@@ -4001,6 +4002,44 @@ class OperatorKillConfirmScreen(ModalScreen[None]):
             self.dismiss()
 
 
+class OperatorProjectSpawnCancelScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, request: Mapping[str, Any]) -> None:
+        super().__init__()
+        self.request = dict(request)
+
+    def compose(self) -> ComposeResult:
+        request_id = str(self.request.get("spawn_request_id") or "")
+        with Vertical(id="operator-kill-panel"):
+            yield Static("Cancel Project Spawn", id="operator-kill-title")
+            yield Static(
+                "Cancel this pending request without creating or changing its target?\n\n"
+                f"Request: {request_id}\n"
+                f"Project: {self.request.get('project_name') or '-'}\n"
+                f"Target: {self.request.get('target_path') or '-'}",
+                id="operator-kill-message",
+            )
+            with Horizontal(id="operator-kill-actions"):
+                yield Button("Cancel Request", id="project-spawn-cancel-confirm", variant="error")
+                yield Button("Keep Pending", id="project-spawn-cancel-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "project-spawn-cancel-close":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "project-spawn-cancel-confirm":
+            event.stop()
+            request_id = str(self.request.get("spawn_request_id") or "")
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.cancel_project_spawn_request(request_id),  # type: ignore[attr-defined]
+                name=f"project-spawn-cancel-{slugify(request_id)}",
+                exclusive=True,
+            )
+            self.dismiss()
+
+
 class OperatorHistoryScreen(ModalScreen[None]):
     BINDINGS = [
         ("escape", "dismiss", "Close"),
@@ -5394,6 +5433,7 @@ class AgentPBXTUI(App[None]):
     FileTrashScreen,
     EditorCloseConfirmScreen,
     OperatorKillConfirmScreen,
+    OperatorProjectSpawnCancelScreen,
     OperatorHistoryScreen,
     WorkerBeeSwitchConfirmScreen,
     WorkerBeeWorkspaceScreen,
@@ -9723,6 +9763,8 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator kb reject", "Reject the oldest proposed KB entry", self.palette_operator_kb_reject)
         yield SystemCommand("/operator kb retire", "Retire the selected active KB entry", self.palette_operator_kb_retire)
         yield SystemCommand("/operator project spawn", "Launch the oldest pending review project spawn", self.palette_operator_project_spawn)
+        yield SystemCommand("/operator project spawn inspect", "Inspect the oldest pending review project spawn", self.palette_operator_project_spawn_inspect)
+        yield SystemCommand("/operator project spawn cancel", "Cancel the oldest pending review project spawn", self.palette_operator_project_spawn_cancel)
         yield SystemCommand("/commands reload", "Reload custom slash commands", self.palette_reload_custom_slash_commands)
         yield SystemCommand(
             "/palette history",
@@ -9989,11 +10031,19 @@ class AgentPBXTUI(App[None]):
         profile_id: str,
         runtime_server_mode: str,
     ) -> bool:
+        source_session_ids = (
+            self.codex_session_ids_for_agent(self.selected_agent_id)
+            if self.selected_agent_id
+            else ()
+        )
         request = {
             "project_path": project_path,
             "agent_id": agent_id.strip(),
             "profile_id": profile_id,
             "runtime_server_mode": runtime_server_mode,
+            "source_codex_session_id": (
+                source_session_ids[0] if source_session_ids else None
+            ),
         }
         try:
             preview = await self.api_client().post(
@@ -10121,24 +10171,31 @@ class AgentPBXTUI(App[None]):
             return False
 
         if self.operator_fork_start_blocker(caller_id) is not None:
-            bootstrap = (
-                "Use Agent PBX in report mode. Register this Codex session under "
-                f"the existing Agent PBX id `{caller_id}`, send a waiting report, "
-                "then stop at the Codex prompt. This is startup registration only; "
-                "do not begin project work."
+            registered = await self.wait_for_managed_caller_registration(
+                caller_id,
+                timeout_seconds=8.0,
             )
-            if not await self.send_text_to_tmux(caller_id, bootstrap):
-                self.notify(
-                    f"Agent {caller_id} launched, but startup registration could not "
-                    "be sent. Select it and use /operator start after it registers.",
-                    severity="warning",
+            if not registered:
+                bootstrap = (
+                    "Retry the idempotent Agent PBX managed registration bootstrap. "
+                    "Register this Codex session under "
+                    f"the existing Agent PBX id `{caller_id}`, include the current "
+                    "Codex session id, send a waiting report, then stop at the Codex "
+                    "prompt. Do not begin project work."
                 )
-                return True
-            self.notify(
-                f"Waiting for {caller_id} to publish its Codex session before "
-                "starting the Operator."
-            )
-            if not await self.wait_for_managed_caller_registration(caller_id):
+                if not await self.send_text_to_tmux(caller_id, bootstrap):
+                    self.notify(
+                        f"Agent {caller_id} launched, but startup registration could not "
+                        "be retried. Select it and use /operator start after it registers.",
+                        severity="warning",
+                    )
+                    return True
+                self.notify(
+                    f"Retrying startup registration for {caller_id} before "
+                    "starting the Operator."
+                )
+                registered = await self.wait_for_managed_caller_registration(caller_id)
+            if not registered:
                 self.notify(
                     f"Agent {caller_id} is running, but its Codex session has not "
                     "registered yet. Use /operator start after registration completes.",
@@ -11228,6 +11285,20 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.launch_pending_project_spawn_request(),
             name="palette-operator-project-spawn",
+            exclusive=True,
+        )
+
+    def palette_operator_project_spawn_inspect(self) -> None:
+        self.run_worker(
+            self.inspect_pending_project_spawn_request(),
+            name="palette-operator-project-spawn-inspect",
+            exclusive=True,
+        )
+
+    def palette_operator_project_spawn_cancel(self) -> None:
+        self.run_worker(
+            self.confirm_cancel_pending_project_spawn_request(),
+            name="palette-operator-project-spawn-cancel",
             exclusive=True,
         )
 
@@ -18569,6 +18640,119 @@ class AgentPBXTUI(App[None]):
             "socket_path": socket_path,
         }
 
+    @staticmethod
+    def managed_runtime_session_name(entity_id: str) -> str:
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", entity_id).strip(".-") or "agent"
+        return f"agent-pbx-runtime-{safe_id}"[:240]
+
+    async def configured_runtime_launch_target(
+        self,
+        entity_id: str,
+        *,
+        fallback_session_name: str,
+    ) -> tuple[str, dict[str, str]]:
+        """Resolve the configured server for a new durable runtime.
+
+        New Operator roots and forks have no mapping yet, so mapping-based
+        lookup cannot select their server.  Use the configured runtime identity
+        directly and give dedicated-server entities isolated session names.
+        """
+
+        identity = self.tmux_runtime_server
+        if not self.tmux_local_direct_context:
+            return fallback_session_name, {}
+        if identity.effective_mode is RuntimeServerMode.DEDICATED:
+            await asyncio.to_thread(ensure_dedicated_runtime_server, identity)
+            await asyncio.to_thread(restore_dedicated_runtime_exit_policy, identity)
+            session_name = self.managed_runtime_session_name(entity_id)
+        elif identity.ready:
+            session_name = fallback_session_name
+        else:
+            return fallback_session_name, {}
+        return session_name, {
+            "tmux_bin": identity.command_prefix[0],
+            "socket_path": identity.socket_path,
+        }
+
+    async def register_launched_tmux_runtime(
+        self,
+        entity_id: str,
+        pane_id: str,
+        *,
+        runtime_kwargs: Mapping[str, str],
+        mapping_source: str,
+        codex_session_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Register a newly launched pane on its exact configured server."""
+
+        socket_path = str(runtime_kwargs.get("socket_path") or "").strip()
+        if not socket_path:
+            return None
+        tmux_bin = str(runtime_kwargs.get("tmux_bin") or "tmux")
+        panes = await asyncio.to_thread(
+            tmux_support.list_panes,
+            tmux_bin=tmux_bin,
+            socket_path=socket_path,
+        )
+        pane = next((item for item in panes if item.pane_id == pane_id), None)
+        if pane is None:
+            raise RuntimeError(
+                f"launched pane {pane_id} is absent from the configured runtime server"
+            )
+        pane_pid = await asyncio.to_thread(
+            tmux_support.pane_root_pid,
+            pane_id,
+            tmux_bin=tmux_bin,
+            socket_path=socket_path,
+        )
+        metadata = self.agent_metadata(self.agents.get(entity_id))
+        session_id = str(
+            codex_session_id
+            or metadata.get("fork_codex_session_id")
+            or metadata.get("last_resume_codex_session_id")
+            or metadata.get("codex_session_id")
+            or metadata.get("codex_thread_id")
+            or ""
+        ).strip()
+        identity = self.tmux_runtime_server
+        outer = None
+        if identity.effective_mode is not RuntimeServerMode.DEDICATED:
+            outer = await asyncio.to_thread(read_outer_tmux_context, identity)
+        response = await self.api_client().post(
+            f"/v2/tmux/runtimes/{quote(entity_id, safe='')}",
+            json={
+                "server_mode": identity.effective_mode.value,
+                "socket_path": socket_path,
+                "session_name": pane.session_name,
+                "window_id": pane.window_id or pane.window_index,
+                "window_name": pane.window_name,
+                "pane_id": pane.pane_id,
+                "pane_pid": pane_pid,
+                "process_start_ticks": await asyncio.to_thread(
+                    runtime_process_start_ticks,
+                    pane_pid,
+                ),
+                "codex_session_id": session_id or None,
+                "cwd": pane.cwd,
+                "origin_client_tty": outer.client_tty if outer else None,
+                "origin_session_name": outer.session_name if outer else None,
+                "metadata": {
+                    "managed_by": "agent-pbx-tui",
+                    "mapping_source": mapping_source,
+                    "tmux_bin": tmux_bin,
+                },
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        mapping = response.json()
+        if not isinstance(mapping, dict):
+            raise RuntimeError("runtime registration returned a non-object response")
+        self.tmux_runtime_mapping_by_agent[entity_id] = mapping
+        self.tmux_runtime_mapping_validated_at_by_agent[entity_id] = time.monotonic()
+        self.tmux_runtime_mapping_error_by_agent.pop(entity_id, None)
+        return mapping
+
     def runtime_tmux_command_kwargs_for_pane(self, pane_id: str) -> dict[str, str]:
         """Resolve a pane only through a ready authoritative runtime mapping."""
 
@@ -18958,12 +19142,25 @@ class AgentPBXTUI(App[None]):
                 return candidate
         return candidates[0] if candidates else None
 
-    async def quit_or_kill_tmux_pane(self, pane_id: str, *, label: str) -> bool:
+    async def quit_or_kill_tmux_pane(
+        self,
+        pane_id: str,
+        *,
+        label: str,
+        tmux_bin: str = "tmux",
+        socket_path: str | None = None,
+    ) -> bool:
+        runtime_kwargs: dict[str, str | None]
+        if socket_path is not None or tmux_bin != "tmux":
+            runtime_kwargs = {"tmux_bin": tmux_bin, "socket_path": socket_path}
+        else:
+            runtime_kwargs = self.runtime_tmux_command_kwargs_for_pane(pane_id)
         try:
             exited = await asyncio.to_thread(
                 tmux_support.quit_pane,
                 pane_id,
                 timeout_seconds=CODEX_RESTART_WAIT_SECONDS,
+                **runtime_kwargs,
             )
         except Exception as exc:
             self.notify(f"Unable to send /quit to {label}: {exc}", severity="warning")
@@ -18971,7 +19168,11 @@ class AgentPBXTUI(App[None]):
         if exited:
             return True
         try:
-            await asyncio.to_thread(tmux_support.kill_pane, pane_id)
+            await asyncio.to_thread(
+                tmux_support.kill_pane,
+                pane_id,
+                **runtime_kwargs,
+            )
         except Exception as exc:
             self.notify(f"Unable to kill {label} after /quit: {exc}", severity="error")
             return False
@@ -18986,7 +19187,12 @@ class AgentPBXTUI(App[None]):
         label: str,
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
+        tmux_bin: str = "tmux",
+        socket_path: str | None = None,
     ) -> str:
+        runtime_kwargs: dict[str, str | None] = {}
+        if socket_path is not None or tmux_bin != "tmux":
+            runtime_kwargs = {"tmux_bin": tmux_bin, "socket_path": socket_path}
         failures: list[str] = []
         attempts = max(1, CODEX_RESTART_LAUNCH_ATTEMPTS)
         for attempt in range(1, attempts + 1):
@@ -19000,6 +19206,7 @@ class AgentPBXTUI(App[None]):
                     env=env,
                     width=self.detached_tmux_width,
                     height=self.detached_tmux_height,
+                    **runtime_kwargs,
                 )
             except Exception as exc:
                 failures.append(str(exc))
@@ -19007,7 +19214,11 @@ class AgentPBXTUI(App[None]):
                 if CODEX_RESTART_STABILIZE_SECONDS > 0:
                     await asyncio.sleep(CODEX_RESTART_STABILIZE_SECONDS)
                 try:
-                    pane_alive = await asyncio.to_thread(tmux_support.pane_exists, pane_id)
+                    pane_alive = await asyncio.to_thread(
+                        tmux_support.pane_exists,
+                        pane_id,
+                        **runtime_kwargs,
+                    )
                 except Exception as exc:
                     failures.append(f"{pane_id} liveness check failed: {exc}")
                 else:
@@ -22287,20 +22498,10 @@ class AgentPBXTUI(App[None]):
         return ignored
 
     def create_project_spawn_repo(self, request: dict[str, Any]) -> Path:
-        source = Path(str(request.get("source_cwd") or "")).expanduser().resolve(strict=True)
-        target_parent = Path(str(request.get("target_parent") or "")).expanduser().resolve(
-            strict=False
-        )
-        target = Path(str(request.get("target_path") or "")).expanduser().resolve(strict=False)
-        validate_sibling_project_target(source, target, expected_parent=target_parent)
-        mode = str(request.get("mode") or "empty").strip().lower()
-        if mode not in PROJECT_SPAWN_MODES:
-            raise RuntimeError("project spawn mode must be empty or clone_source")
-        if target.exists():
-            if not target.is_dir():
-                raise RuntimeError(f"target path exists and is not a directory: {target}")
-            if any(target.iterdir()):
-                raise RuntimeError(f"target project directory is not empty: {target}")
+        preflight = validate_stored_project_spawn_preflight(request)
+        source = preflight.source_path
+        target = preflight.target_path
+        mode = preflight.mode
         if mode == "clone_source" and (source / ".git").exists():
             result = subprocess.run(
                 ["git", "clone", "--no-hardlinks", str(source), str(target)],
@@ -22609,6 +22810,7 @@ class AgentPBXTUI(App[None]):
         codex_command: str,
         mcp_url: str,
         request: dict[str, Any],
+        tmux_session_name: str | None = None,
         workerbee_gateway_binding: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         metadata = {
@@ -22620,7 +22822,7 @@ class AgentPBXTUI(App[None]):
             "server_url": self.server,
             "mcp_url": mcp_url,
             "token_env": AGENT_PBX_TOKEN_ENV,
-            "tmux_session": self.caller_tmux_session_name(),
+            "tmux_session": tmux_session_name or self.caller_tmux_session_name(),
             "tmux_pane_id": pane_id,
             "codex_command": codex_command,
             "project_spawn_request_id": request.get("spawn_request_id"),
@@ -22864,11 +23066,18 @@ class AgentPBXTUI(App[None]):
     async def review_fork_pane_has_invalid_encrypted_content(
         self,
         pane_id: str,
+        *,
+        tmux_bin: str = "tmux",
+        socket_path: str | None = None,
     ) -> bool:
         attempts = max(1, int(REVIEW_FORK_HEALTH_CHECK_ATTEMPTS))
         interval = max(0.0, float(REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS))
         for attempt in range(attempts):
-            if await self.tmux_pane_has_invalid_encrypted_content(pane_id):
+            if await self.tmux_pane_has_invalid_encrypted_content(
+                pane_id,
+                tmux_bin=tmux_bin,
+                socket_path=socket_path,
+            ):
                 return True
             if attempt < attempts - 1 and interval > 0:
                 await asyncio.sleep(interval)
@@ -22976,12 +23185,24 @@ class AgentPBXTUI(App[None]):
             )
         )
 
-    async def tmux_pane_has_invalid_encrypted_content(self, pane_id: str) -> bool:
+    async def tmux_pane_has_invalid_encrypted_content(
+        self,
+        pane_id: str,
+        *,
+        tmux_bin: str = "tmux",
+        socket_path: str | None = None,
+    ) -> bool:
+        runtime_kwargs: dict[str, str | None]
+        if socket_path is not None or tmux_bin != "tmux":
+            runtime_kwargs = {"tmux_bin": tmux_bin, "socket_path": socket_path}
+        else:
+            runtime_kwargs = self.runtime_tmux_command_kwargs_for_pane(pane_id)
         try:
             captured = await asyncio.to_thread(
                 tmux_support.capture_pane,
                 pane_id,
                 lines=REVIEW_FORK_HEALTH_CAPTURE_LINES,
+                **runtime_kwargs,
             )
         except Exception:
             return False
@@ -23414,6 +23635,20 @@ class AgentPBXTUI(App[None]):
         return history
 
     async def live_operator_root_pane_id(self, agent_id: str) -> str | None:
+        mapping = await self.fetch_tmux_runtime_mapping(agent_id)
+        if isinstance(mapping, dict) and str(mapping.get("state") or "") == "ready":
+            pane_id = str(mapping.get("pane_id") or "").strip()
+            if pane_id:
+                runtime_kwargs = self.runtime_tmux_command_kwargs(agent_id)
+                try:
+                    if await asyncio.to_thread(
+                        tmux_support.pane_exists,
+                        pane_id,
+                        **runtime_kwargs,
+                    ):
+                        return pane_id
+                except Exception:
+                    pass
         try:
             panes = await asyncio.to_thread(tmux_support.list_panes)
         except Exception:
@@ -23544,9 +23779,13 @@ class AgentPBXTUI(App[None]):
             profile=WORKERBEE_PROFILE_OBSERVE,
             source_root=cwd,
         )
+        runtime_session_name, runtime_kwargs = await self.configured_runtime_launch_target(
+            agent_id,
+            fallback_session_name=session_name,
+        )
         pane_id = await asyncio.to_thread(
             tmux_support.launch_pane,
-            session_name=session_name,
+            session_name=runtime_session_name,
             window_name=agent_id,
             command=self.codex_interactive_command(
                 codex_command,
@@ -23571,6 +23810,7 @@ class AgentPBXTUI(App[None]):
             ),
             width=self.detached_tmux_width,
             height=self.detached_tmux_height,
+            **runtime_kwargs,
         )
         self.tmux_agent_targets[agent_id] = pane_id
         self.tmux_manual_override_agent_ids.add(agent_id)
@@ -23581,7 +23821,7 @@ class AgentPBXTUI(App[None]):
             cwd=cwd,
             codex_command=codex_command,
             mcp_url=mcp_url,
-            session_name=session_name,
+            session_name=runtime_session_name,
             tmux_pane_id=pane_id,
             default_source_caller_agent_id=source_caller_agent_id,
             default_source_caller_project=(
@@ -23594,6 +23834,12 @@ class AgentPBXTUI(App[None]):
             ),
             model_preset=launch_preset,
             workerbee_gateway_binding=workerbee_gateway_binding,
+        )
+        await self.register_launched_tmux_runtime(
+            agent_id,
+            pane_id,
+            runtime_kwargs=runtime_kwargs,
+            mapping_source="operator_root_launch",
         )
         await asyncio.sleep(1.0)
         sent = await self.send_text_to_tmux_pane(
@@ -23761,11 +24007,35 @@ class AgentPBXTUI(App[None]):
                     continue
                 fork_agent = self.operator_fork_record_agent(fork)
                 self.agents[fork_agent_id] = fork_agent
-                pane = self.validated_operator_fork_pane(
-                    fork_agent_id,
-                    panes,
-                    tmux_pane_id=tmux_pane_id,
-                )
+                pane = None
+                runtime_mapping = await self.fetch_tmux_runtime_mapping(fork_agent_id)
+                if (
+                    isinstance(runtime_mapping, dict)
+                    and str(runtime_mapping.get("state") or "") == "ready"
+                ):
+                    runtime_pane_id = str(runtime_mapping.get("pane_id") or "").strip()
+                    runtime_kwargs = self.runtime_tmux_command_kwargs(fork_agent_id)
+                    try:
+                        runtime_panes = await asyncio.to_thread(
+                            tmux_support.list_panes,
+                            **runtime_kwargs,
+                        )
+                    except Exception:
+                        runtime_panes = []
+                    pane = next(
+                        (
+                            item
+                            for item in runtime_panes
+                            if item.pane_id == runtime_pane_id
+                        ),
+                        None,
+                    )
+                if pane is None:
+                    pane = self.validated_operator_fork_pane(
+                        fork_agent_id,
+                        panes,
+                        tmux_pane_id=tmux_pane_id,
+                    )
                 if pane is None:
                     pane = self.validated_operator_fork_pane(fork_agent_id, panes)
                 if pane is None:
@@ -24005,37 +24275,51 @@ class AgentPBXTUI(App[None]):
                 workerbee_gateway_binding=workerbee_gateway_binding,
             )
 
+        runtime_session_name, runtime_kwargs = await self.configured_runtime_launch_target(
+            fork_agent_id,
+            fallback_session_name=session_name,
+        )
+        fork_metadata["tmux_session"] = runtime_session_name
         pane_id = await self.launch_restart_pane(
-            session_name=session_name,
+            session_name=runtime_session_name,
             window_name=fork_agent_id,
             command=build_command(review_launch_mode),
             label=fork_agent_id,
             cwd=launch_cwd,
             env=build_env(review_launch_mode),
+            **runtime_kwargs,
         )
         if (
             resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
             and review_launch_mode == REVIEW_OPERATOR_FORK_LAUNCH_MODE_CODEX_FORK
-            and await self.review_fork_pane_has_invalid_encrypted_content(pane_id)
+            and await self.review_fork_pane_has_invalid_encrypted_content(
+                pane_id,
+                **runtime_kwargs,
+            )
         ):
             self.notify(
                 "Codex fork continuation failed encrypted-content verification; "
                 "restarting review fork with fresh context.",
                 severity="warning",
             )
-            await self.quit_or_kill_tmux_pane(pane_id, label=fork_agent_id)
+            await self.quit_or_kill_tmux_pane(
+                pane_id,
+                label=fork_agent_id,
+                **runtime_kwargs,
+            )
             review_launch_mode = REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
             fork_metadata["review_launch_mode"] = review_launch_mode
             fork_metadata["source_continuation_disabled_reason"] = (
                 "invalid_encrypted_content"
             )
             pane_id = await self.launch_restart_pane(
-                session_name=session_name,
+                session_name=runtime_session_name,
                 window_name=fork_agent_id,
                 command=build_command(review_launch_mode),
                 label=fork_agent_id,
                 cwd=launch_cwd,
                 env=build_env(review_launch_mode),
+                **runtime_kwargs,
             )
         self.tmux_agent_targets[fork_agent_id] = pane_id
         self.tmux_manual_override_agent_ids.add(fork_agent_id)
@@ -24056,6 +24340,12 @@ class AgentPBXTUI(App[None]):
         )
         if isinstance(fork, dict):
             self.agents[fork_agent_id] = self.operator_fork_record_agent(fork)
+        await self.register_launched_tmux_runtime(
+            fork_agent_id,
+            pane_id,
+            runtime_kwargs=runtime_kwargs,
+            mapping_source="operator_fork_launch",
+        )
         self.notify(
             f"Started {resolved_purpose} fork {fork_agent_id} for {source_caller_agent_id}."
         )
@@ -24194,6 +24484,92 @@ class AgentPBXTUI(App[None]):
         if not isinstance(requests, list):
             return []
         return [item for item in requests if isinstance(item, dict)]
+
+    async def inspect_pending_project_spawn_request(self) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            self.notify("Select an operator first.", severity="warning")
+            return
+        operator = self.agents.get(operator_agent_id)
+        if operator is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator)
+        try:
+            pending = await self.fetch_pending_project_spawn_requests(
+                logical_operator_id
+            )
+        except Exception as exc:
+            self.notify(f"Unable to inspect project spawn requests: {exc}", severity="error")
+            return
+        if not pending:
+            self.notify(f"No pending project spawn requests for {logical_operator_id}.")
+            return
+        request = pending[0]
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = (
+                "Pending project spawn\n\n"
+                f"Request: {request.get('spawn_request_id') or '-'}\n"
+                f"Project: {request.get('project_name') or '-'}\n"
+                f"Mode: {request.get('mode') or '-'}\n"
+                f"Source: {request.get('source_cwd') or '-'}\n"
+                f"Target: {request.get('target_path') or '-'}\n"
+                f"Review fork: {request.get('review_fork_agent_id') or '-'}\n\n"
+                f"{request.get('instructions') or ''}"
+            )
+        self.notify(
+            f"Inspected project spawn {request.get('spawn_request_id') or '-'}; "
+            "use /operator project spawn cancel to cancel it."
+        )
+
+    async def confirm_cancel_pending_project_spawn_request(self) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            self.notify("Select an operator first.", severity="warning")
+            return
+        operator = self.agents.get(operator_agent_id)
+        if operator is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator)
+        try:
+            pending = await self.fetch_pending_project_spawn_requests(
+                logical_operator_id
+            )
+        except Exception as exc:
+            self.notify(f"Unable to inspect project spawn requests: {exc}", severity="error")
+            return
+        if not pending:
+            self.notify(f"No pending project spawn requests for {logical_operator_id}.")
+            return
+        self.push_screen(OperatorProjectSpawnCancelScreen(pending[0]))
+
+    async def cancel_project_spawn_request(self, spawn_request_id: str) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            self.notify("Select an operator first.", severity="warning")
+            return
+        operator = self.agents.get(operator_agent_id)
+        if operator is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        logical_operator_id = self.logical_operator_id_for_agent(operator)
+        try:
+            response = await self.api_client().post(
+                f"/v1/operator/project-spawns/{quote(spawn_request_id, safe='')}/cancel",
+                json={
+                    "operator_agent_id": logical_operator_id,
+                    "reason": "Canceled by the Agent PBX TUI before launch.",
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"Unable to cancel project spawn: {exc}", severity="error")
+            return
+        self.notify(f"Canceled project spawn {spawn_request_id} without launching it.")
+        await self.refresh_events()
 
     async def fetch_operator_knowledge_links(
         self,
@@ -26409,6 +26785,21 @@ class AgentPBXTUI(App[None]):
             self.notify("Project spawn request is missing an id.", severity="error")
             return False
         try:
+            await asyncio.to_thread(validate_stored_project_spawn_preflight, request)
+        except Exception as exc:
+            error = str(exc)
+            detail = self.query_one_or_none("#detail", TextArea)
+            if detail is not None:
+                detail.text = (
+                    "Project spawn approval blocked before launch.\n\n"
+                    f"Request: {spawn_request_id}\n"
+                    f"Target: {request.get('target_path') or '-'}\n"
+                    f"Error: {error}\n\n"
+                    "The request remains pending so it can be inspected or canceled."
+                )
+            self.notify(f"Project spawn approval blocked: {error}", severity="warning")
+            return False
+        try:
             request = await self.update_project_spawn_request_status(
                 spawn_request_id,
                 status="launching",
@@ -26448,8 +26839,12 @@ class AgentPBXTUI(App[None]):
                     workerbee_gateway_binding=workerbee_gateway_binding,
                 ),
             )
+            runtime_session_name, runtime_kwargs = await self.configured_runtime_launch_target(
+                agent_id,
+                fallback_session_name=self.caller_tmux_session_name(),
+            )
             pane_id = await self.launch_restart_pane(
-                session_name=self.caller_tmux_session_name(),
+                session_name=runtime_session_name,
                 window_name=agent_id,
                 command=command,
                 label=agent_id,
@@ -26462,6 +26857,7 @@ class AgentPBXTUI(App[None]):
                     request=request,
                     workerbee_gateway_binding=workerbee_gateway_binding,
                 ),
+                **runtime_kwargs,
             )
             await self.register_spawned_project_caller(
                 agent_id=agent_id,
@@ -26471,7 +26867,14 @@ class AgentPBXTUI(App[None]):
                 codex_command=codex_command,
                 mcp_url=mcp_url,
                 request=request,
+                tmux_session_name=runtime_session_name,
                 workerbee_gateway_binding=workerbee_gateway_binding,
+            )
+            await self.register_launched_tmux_runtime(
+                agent_id,
+                pane_id,
+                runtime_kwargs=runtime_kwargs,
+                mapping_source="project_spawn",
             )
             await self.update_project_spawn_request_status(
                 spawn_request_id,

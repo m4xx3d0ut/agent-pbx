@@ -140,7 +140,11 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
         lambda env, *_args, **_kwargs: {**env, "PATH": "/private/bin:/usr/bin"},
     )
 
-    result = runtime.launch(project_path=str(repo), token="secret")
+    result = runtime.launch(
+        project_path=str(repo),
+        token="secret",
+        source_codex_session_id="source-session-1",
+    )
 
     assert result["launched"] is True
     assert store.get_agent("codex-demo")["metadata"]["tmux_pane_id"] == "%17"  # type: ignore[index]
@@ -151,12 +155,33 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     assert any("AGENT_PBX_AGENT_PROJECT=demo" in item for item in commands[0])
     assert any(f"AGENT_PBX_CWD={repo}" in item for item in commands[0])
     assert any("AGENT_PBX_PBX_MODE=report" in item for item in commands[0])
+    assert any("AGENT_PBX_SOURCE_CODEX_SESSION_ID=source-session-1" in item for item in commands[0])
+    assert any("AGENT_PBX_MANAGED_BOOTSTRAP_ID=" in item for item in commands[0])
+    assert any("CODEX_NON_INTERACTIVE=1" in item for item in commands[0])
     assert any("AGENT_PBX_CODEX_MODEL=gpt-5.6-sol" in item for item in commands[0])
     assert any("AGENT_PBX_CODEX_REASONING_EFFORT=high" in item for item in commands[0])
     assert any("AGENT_PBX_CODEX_REASONING_SUMMARY=detailed" in item for item in commands[0])
     assert any("AGENT_PBX_CODEX_VERBOSITY=high" in item for item in commands[0])
     assert any("PATH=/private/bin:/usr/bin" in item for item in commands[0])
     assert commands[0][-1].startswith("exec ")
+    assert "check_for_update_on_startup=false" in commands[0][-1]
+    assert "mcp_servers.agent-pbx=" in commands[0][-1]
+    assert "default_tools_approval_mode" in commands[0][-1]
+    assert "pbx_register_agent" in commands[0][-1]
+    assert "pbx_report_turn" in commands[0][-1]
+    assert "source_codex_session_id: source-session-1" in commands[0][-1]
+    metadata = store.get_agent("codex-demo")["metadata"]  # type: ignore[index]
+    assert metadata["managed_bootstrap_state"] == "delivered"
+    assert metadata["source_codex_session_id"] == "source-session-1"
+
+    repeated = runtime.launch(
+        project_path=str(repo),
+        token="secret",
+        source_codex_session_id="source-session-1",
+    )
+    assert repeated["launched"] is False
+    assert repeated["idempotent"] is True
+    assert len(commands) == 1
 
 
 def test_managed_launch_failure_kills_session_without_orphan_agent(
@@ -370,10 +395,15 @@ def test_managed_runtime_api_discovers_projects_and_persists_migration(
     preview = client.post(
         "/v2/agents/managed-launch/preview",
         headers=headers,
-        json={"project_path": str(repo)},
+        json={
+            "project_path": str(repo),
+            "source_codex_session_id": "source-session-api",
+        },
     )
     assert preview.status_code == 200
     assert preview.json()["agent_id"] == "codex-demo"
+    assert preview.json()["source_codex_session_id"] == "source-session-api"
+    assert "check_for_update_on_startup=false" in preview.json()["command"]
 
     register = client.post(
         "/v1/agents/register",

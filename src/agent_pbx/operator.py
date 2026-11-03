@@ -10,7 +10,10 @@ import uuid
 from typing import Any
 
 from . import tmux as tmux_support
-from .project_spawn import PROJECT_SPAWN_MODES, resolve_sibling_project_paths
+from .project_spawn import (
+    PROJECT_SPAWN_MODES,
+    validate_project_spawn_preflight,
+)
 from .schemas import (
     AgentRegisterRequest,
     CommandCreateRequest,
@@ -3018,10 +3021,12 @@ class OperatorService:
             raise ValueError("mode must be empty or clone_source")
         if campaign_id:
             self._require_campaign_for_operator(campaign_id, operator)
-        source_path, target_parent, target_path, resolved_slug = resolve_sibling_project_paths(
+        preflight = validate_project_spawn_preflight(
             source_cwd,
             project_name,
+            mode=resolved_mode,
             target_slug=target_slug,
+            metadata=metadata,
         )
         request = self.store.create_operator_project_spawn_request(
             logical_operator_agent_id=logical_operator_id,
@@ -3029,10 +3034,10 @@ class OperatorService:
             review_fork_id=str(review_fork["operator_fork_id"]),
             review_fork_agent_id=str(review_fork["fork_agent_id"]),
             source_caller_agent_id=source_caller_agent_id,
-            source_cwd=str(source_path),
-            target_parent=str(target_parent),
-            target_slug=resolved_slug,
-            target_path=str(target_path),
+            source_cwd=str(preflight.source_path),
+            target_parent=str(preflight.target_parent),
+            target_slug=preflight.target_slug,
+            target_path=str(preflight.target_path),
             project_name=project_name,
             mode=resolved_mode,
             instructions=instructions,
@@ -3040,6 +3045,7 @@ class OperatorService:
             assignment_id=assignment_id,
             metadata={
                 **(metadata or {}),
+                "preflight": preflight.public_dict(),
                 "requested_by": str(review_fork["fork_agent_id"]),
                 "review_fork_id": str(review_fork["operator_fork_id"]),
             },
@@ -3049,10 +3055,54 @@ class OperatorService:
             request,
             summary=(
                 f"Review fork requested {resolved_mode} project "
-                f"{resolved_slug}."
+                f"{preflight.target_slug}."
             ),
         )
         return request
+
+    def get_project_spawn_request(
+        self,
+        *,
+        spawn_request_id: str,
+        operator_agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        request = self.store.get_operator_project_spawn_request(spawn_request_id)
+        if request is None:
+            raise ValueError("project spawn request not found")
+        if operator_agent_id:
+            logical_operator_id = self._logical_operator_agent_id(
+                self._require_operator(operator_agent_id)
+            )
+            if str(request.get("logical_operator_agent_id") or "") != logical_operator_id:
+                raise ValueError("project spawn request belongs to a different operator")
+        return request
+
+    def cancel_project_spawn_request(
+        self,
+        *,
+        spawn_request_id: str,
+        operator_agent_id: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        request = self.get_project_spawn_request(
+            spawn_request_id=spawn_request_id,
+            operator_agent_id=operator_agent_id,
+        )
+        status = str(request.get("status") or "").strip().lower()
+        if status in {"canceled", "cancelled"}:
+            return request
+        if status not in {"pending", "failed"}:
+            raise ValueError(
+                "only pending or failed project spawn requests can be canceled"
+            )
+        return self.update_project_spawn_request(
+            spawn_request_id=spawn_request_id,
+            status="canceled",
+            metadata={
+                "canceled_by_operator_agent_id": operator_agent_id,
+                "cancel_reason": str(reason or "").strip() or None,
+            },
+        )
 
     def list_project_spawn_requests(
         self,
@@ -3085,6 +3135,8 @@ class OperatorService:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_status = str(status or "").strip().lower()
+        if normalized_status == "cancelled":
+            normalized_status = "canceled"
         if normalized_status not in {
             "pending",
             "launching",
@@ -3094,6 +3146,24 @@ class OperatorService:
             "cancelled",
         }:
             raise ValueError("status must be pending, launching, launched, failed, or canceled")
+        current = self.store.get_operator_project_spawn_request(spawn_request_id)
+        if current is None:
+            raise ValueError("project spawn request not found")
+        current_status = str(current.get("status") or "pending").strip().lower()
+        if current_status == "cancelled":
+            current_status = "canceled"
+        allowed_transitions = {
+            "pending": {"pending", "launching", "failed", "canceled"},
+            "launching": {"launching", "launched", "failed"},
+            "failed": {"failed", "pending", "canceled"},
+            "launched": {"launched"},
+            "canceled": {"canceled"},
+        }
+        if normalized_status not in allowed_transitions.get(current_status, set()):
+            raise ValueError(
+                "invalid project spawn status transition: "
+                f"{current_status} -> {normalized_status}"
+            )
         request = self.store.update_operator_project_spawn_request(
             spawn_request_id,
             status=normalized_status,
@@ -3103,7 +3173,7 @@ class OperatorService:
             metadata=metadata,
         )
         if request is None:
-            raise ValueError("project spawn request not found")
+            raise RuntimeError("project spawn request update failed")
         self._record_project_spawn_event(
             f"operator_project_spawn_{normalized_status}",
             request,

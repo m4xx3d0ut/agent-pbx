@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,12 @@ from .codex.profiles import (
     validate_managed_profile,
 )
 from .codex_cli import CodexModelOption, inspect_codex_model_catalog
+from .codex_launch import (
+    MANAGED_CALLER_BOOTSTRAP_VERSION,
+    managed_caller_bootstrap_id,
+    managed_caller_bootstrap_prompt,
+    managed_caller_codex_overrides,
+)
 from .runtime_tmux import (
     exact_tmux_session_target,
     ensure_dedicated_runtime_server,
@@ -145,6 +152,8 @@ class ManagedRuntimeService:
         agent_id: str = "",
         profile_id: str = DEFAULT_CALLER_PROFILE_ID,
         runtime_server_mode: str = "dedicated",
+        server_url: str = "http://127.0.0.1:8765",
+        source_codex_session_id: str | None = None,
     ) -> dict[str, Any]:
         path = self._validated_project_path(project_path)
         project_name = path.name
@@ -171,6 +180,19 @@ class ManagedRuntimeService:
         if not identity.ready:
             raise ValueError(identity.message or "runtime tmux server is unavailable")
         session_name = self._runtime_session_name(resolved_agent_id)
+        bootstrap_prompt = managed_caller_bootstrap_prompt(
+            agent_id=resolved_agent_id,
+            project=project_name,
+            cwd=path,
+            source_codex_session_id=source_codex_session_id,
+        )
+        bootstrap_id = managed_caller_bootstrap_id(
+            agent_id=resolved_agent_id,
+            project_path=path,
+            profile_id=profile_id,
+            runtime_server_mode=runtime_server_mode,
+            source_codex_session_id=source_codex_session_id,
+        )
         return {
             "agent_id": resolved_agent_id,
             "project": project_name,
@@ -182,7 +204,19 @@ class ManagedRuntimeService:
             "reasoning_summary": profile.reasoning_summary,
             "runtime_server": identity.public_dict(),
             "session_name": session_name,
-            "command": [self.codex_bin, *self._profile_argv(profile.overrides())],
+            "command": [
+                self.codex_bin,
+                *self._profile_argv(profile.overrides()),
+                *self._profile_argv(managed_caller_codex_overrides(server_url)),
+                bootstrap_prompt,
+            ],
+            "bootstrap_id": bootstrap_id,
+            "bootstrap_version": MANAGED_CALLER_BOOTSTRAP_VERSION,
+            "bootstrap_prompt_sha256": hashlib.sha256(
+                bootstrap_prompt.encode("utf-8")
+            ).hexdigest(),
+            "source_codex_session_id": str(source_codex_session_id or "").strip()
+            or None,
             "warnings": list(validation.warnings),
         }
 
@@ -195,12 +229,24 @@ class ManagedRuntimeService:
         runtime_server_mode: str = "dedicated",
         server_url: str = "http://127.0.0.1:8765",
         token: str | None = None,
+        source_codex_session_id: str | None = None,
     ) -> dict[str, Any]:
+        existing = self._idempotent_launch_result(
+            project_path=project_path,
+            agent_id=agent_id,
+            profile_id=profile_id,
+            runtime_server_mode=runtime_server_mode,
+            source_codex_session_id=source_codex_session_id,
+        )
+        if existing is not None:
+            return existing
         preview = self.preview_launch(
             project_path=project_path,
             agent_id=agent_id,
             profile_id=profile_id,
             runtime_server_mode=runtime_server_mode,
+            server_url=server_url,
+            source_codex_session_id=source_codex_session_id,
         )
         identity_data = preview["runtime_server"]
         identity = TmuxServerIdentity(
@@ -231,7 +277,13 @@ class ManagedRuntimeService:
             "AGENT_PBX_CODEX_VERBOSITY": str(preview["verbosity"]),
             "AGENT_PBX_SERVER_URL": server_url.rstrip("/"),
             "AGENT_PBX_MODE": "report",
+            "AGENT_PBX_MANAGED_BOOTSTRAP_ID": str(preview["bootstrap_id"]),
+            "CODEX_NON_INTERACTIVE": "1",
         }
+        if preview.get("source_codex_session_id"):
+            env["AGENT_PBX_SOURCE_CODEX_SESSION_ID"] = str(
+                preview["source_codex_session_id"]
+            )
         if token:
             env["AGENT_PBX_TOKEN"] = token
         env = managed_tmux_launch_environment(
@@ -240,9 +292,7 @@ class ManagedRuntimeService:
             state_root=self.state_root,
         )
         command = [
-            self.tmux_bin,
-            "-S",
-            identity.socket_path,
+            *identity.command_prefix,
             "new-session",
             "-d",
             "-P",
@@ -315,6 +365,13 @@ class ManagedRuntimeService:
                 "codex_model_reasoning_effort": preview["reasoning_effort"],
                 "codex_model_verbosity": preview["verbosity"],
                 "codex_model_reasoning_summary": preview["reasoning_summary"],
+                "managed_bootstrap_id": preview["bootstrap_id"],
+                "managed_bootstrap_version": preview["bootstrap_version"],
+                "managed_bootstrap_prompt_sha256": preview[
+                    "bootstrap_prompt_sha256"
+                ],
+                "managed_bootstrap_state": "delivered",
+                "source_codex_session_id": preview.get("source_codex_session_id"),
             }
             agent, mapping = self.store.create_managed_agent_runtime(
                 AgentRegisterRequest(
@@ -338,7 +395,12 @@ class ManagedRuntimeService:
                     "metadata": {
                         "managed_launch": True,
                         "profile_id": profile_id,
-                        "tmux_bin": self.tmux_bin,
+                        "tmux_bin": identity.tmux_bin or self.tmux_bin,
+                        "managed_bootstrap_id": preview["bootstrap_id"],
+                        "managed_bootstrap_version": preview["bootstrap_version"],
+                        "source_codex_session_id": preview.get(
+                            "source_codex_session_id"
+                        ),
                     },
                 },
             )
@@ -353,10 +415,74 @@ class ManagedRuntimeService:
                 "pane_id": pane_id,
                 "profile_id": profile_id,
                 "server_id": identity.server_id,
+                "bootstrap_id": preview["bootstrap_id"],
+                "source_codex_session_id": preview.get("source_codex_session_id"),
             },
             str(preview["agent_id"]),
         )
         return {**preview, "agent": agent, "runtime_mapping": mapping, "launched": True}
+
+    def _idempotent_launch_result(
+        self,
+        *,
+        project_path: str,
+        agent_id: str,
+        profile_id: str,
+        runtime_server_mode: str,
+        source_codex_session_id: str | None,
+    ) -> dict[str, Any] | None:
+        path = self._validated_project_path(project_path)
+        resolved_agent_id = normalize_managed_agent_id(agent_id, project_name=path.name)
+        existing = self.store.get_agent(resolved_agent_id)
+        if existing is None:
+            return None
+        bootstrap_id = managed_caller_bootstrap_id(
+            agent_id=resolved_agent_id,
+            project_path=path,
+            profile_id=profile_id,
+            runtime_server_mode=runtime_server_mode,
+            source_codex_session_id=source_codex_session_id,
+        )
+        metadata = (
+            dict(existing.get("metadata") or {})
+            if isinstance(existing.get("metadata"), dict)
+            else {}
+        )
+        mapping = self.store.get_tmux_runtime_mapping(resolved_agent_id)
+        if (
+            metadata.get("managed_bootstrap_id") != bootstrap_id
+            or not isinstance(mapping, dict)
+            or str(mapping.get("state") or "") != "ready"
+            or Path(str(metadata.get("cwd") or "")).resolve(strict=False) != path
+        ):
+            return None
+        return {
+            "agent_id": resolved_agent_id,
+            "project": path.name,
+            "project_path": str(path),
+            "profile_id": profile_id,
+            "model": metadata.get("model"),
+            "reasoning_effort": metadata.get("model_reasoning_effort"),
+            "verbosity": metadata.get("model_verbosity"),
+            "reasoning_summary": metadata.get("model_reasoning_summary"),
+            "runtime_server": {
+                "effective_mode": mapping.get("server_mode"),
+                "server_id": mapping.get("server_id"),
+                "socket_path": mapping.get("socket_path"),
+            },
+            "session_name": mapping.get("session_name"),
+            "bootstrap_id": bootstrap_id,
+            "bootstrap_version": metadata.get("managed_bootstrap_version"),
+            "bootstrap_prompt_sha256": metadata.get(
+                "managed_bootstrap_prompt_sha256"
+            ),
+            "source_codex_session_id": metadata.get("source_codex_session_id"),
+            "warnings": [],
+            "agent": existing,
+            "runtime_mapping": mapping,
+            "launched": False,
+            "idempotent": True,
+        }
 
     def preview_migration(
         self,
@@ -598,9 +724,7 @@ class ManagedRuntimeService:
     def _kill_session(self, identity: TmuxServerIdentity, session_name: str) -> None:
         subprocess.run(
             [
-                self.tmux_bin,
-                "-S",
-                identity.socket_path,
+                *identity.command_prefix,
                 "kill-session",
                 "-t",
                 exact_tmux_session_target(session_name),

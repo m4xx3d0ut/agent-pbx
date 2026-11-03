@@ -4183,6 +4183,14 @@ def configure_managed_resume_test_codex(
     return binary
 
 
+async def default_runtime_launch_target_fixture(
+    _entity_id: str,
+    *,
+    fallback_session_name: str,
+) -> tuple[str, dict[str, str]]:
+    return fallback_session_name, {}
+
+
 async def prepared_workerbee_gateway_fixture(**kwargs: object) -> dict[str, object]:
     profile = str(kwargs.get("profile") or "observe-local")
     return {
@@ -4253,6 +4261,132 @@ def test_tui_refuses_missing_managed_codex_executable(
 
     with pytest.raises(RuntimeError, match="AGENT_PBX_TUI_CODEX_BIN"):
         app.resolved_codex_launch_command("codex --search")
+
+
+async def test_tui_configured_runtime_launch_target_uses_dedicated_server(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    socket_path = tmp_path / "runtime.sock"
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_local_direct_context = True
+    app.tmux_runtime_server = TmuxServerIdentity(
+        RuntimeServerMode.DEDICATED,
+        RuntimeServerMode.DEDICATED,
+        "server-new",
+        str(socket_path),
+        True,
+        False,
+        tmux_bin="/opt/tmux-3.7c",
+    )
+    ensured: list[TmuxServerIdentity] = []
+    restored: list[TmuxServerIdentity] = []
+    monkeypatch.setattr(
+        "agent_pbx.tui.ensure_dedicated_runtime_server",
+        lambda identity: ensured.append(identity) or True,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.tui.restore_dedicated_runtime_exit_policy",
+        lambda identity: restored.append(identity) or True,
+    )
+
+    session_name, runtime_kwargs = await app.configured_runtime_launch_target(
+        "operator-8/fork caller",
+        fallback_session_name="agent-pbx-operators",
+    )
+
+    assert session_name == "agent-pbx-runtime-operator-8-fork-caller"
+    assert runtime_kwargs == {
+        "tmux_bin": "/opt/tmux-3.7c",
+        "socket_path": str(socket_path),
+    }
+    assert ensured == [app.tmux_runtime_server]
+    assert restored == [app.tmux_runtime_server]
+
+
+async def test_tui_registers_exact_outer_runtime_mapping_with_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+    app.tmux_runtime_server = TmuxServerIdentity(
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        RuntimeServerMode.OUTER_IF_PRESENT,
+        "outer-server",
+        "/run/user/1000/tmux/default",
+        True,
+        True,
+        tmux_bin="/opt/tmux-3.7c",
+    )
+    app.agents = {
+        "operator-9": {
+            "agent_id": "operator-9",
+            "agent_type": "operator",
+            "metadata": {"codex_session_id": "operator-session-9"},
+        }
+    }
+    pane = tmux_support.TmuxPane(
+        session_name="agent-pbx-operators",
+        window_index="3",
+        pane_index="0",
+        pane_id="%90",
+        active=True,
+        current_command="codex",
+        title="operator-9",
+        cwd="/srv/operator-9",
+        width=120,
+        height=40,
+        history_size=20,
+        window_id="@33",
+        window_name="operator-9",
+    )
+    monkeypatch.setattr(tmux_support, "list_panes", lambda **_kwargs: [pane])
+    monkeypatch.setattr(tmux_support, "pane_root_pid", lambda *_args, **_kwargs: 9090)
+    monkeypatch.setattr("agent_pbx.tui.runtime_process_start_ticks", lambda _pid: 77)
+    monkeypatch.setattr(
+        "agent_pbx.tui.read_outer_tmux_context",
+        lambda _identity: OuterTmuxContext(
+            "agent-pbx",
+            "@1",
+            "%1",
+            "/dev/pts/44",
+        ),
+    )
+    posted: list[dict[str, object]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"entity_id": "operator-9", "pane_id": "%90", "state": "ready"}
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            posted.append({"path": path, **kwargs})
+            return Response()
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    mapping = await app.register_launched_tmux_runtime(
+        "operator-9",
+        "%90",
+        runtime_kwargs={
+            "tmux_bin": "/opt/tmux-3.7c",
+            "socket_path": "/run/user/1000/tmux/default",
+        },
+        mapping_source="operator_root_launch",
+    )
+
+    assert mapping and mapping["state"] == "ready"
+    payload = posted[0]["json"]
+    assert isinstance(payload, dict)
+    assert payload["session_name"] == "agent-pbx-operators"
+    assert payload["window_id"] == "@33"
+    assert payload["pane_id"] == "%90"
+    assert payload["codex_session_id"] == "operator-session-9"
+    assert payload["origin_session_name"] == "agent-pbx"
+    assert payload["origin_client_tty"] == "/dev/pts/44"
+    assert payload["metadata"]["tmux_bin"] == "/opt/tmux-3.7c"  # type: ignore[index]
 
 
 async def test_tui_managed_resume_retries_lease_on_exact_dedicated_server(
@@ -11010,6 +11144,8 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/operator kb reject" in titles
     assert "/operator kb retire" in titles
     assert "/operator project spawn" in titles
+    assert "/operator project spawn inspect" in titles
+    assert "/operator project spawn cancel" in titles
     assert "/theme minimal" in titles
     assert "/layout compact" in titles
     assert "/gitstatus" not in titles
@@ -11066,6 +11202,69 @@ async def test_tui_managed_workspace_reuses_caller_and_starts_operator() -> None
     assert started == ["codex-demo"]
 
 
+async def test_tui_managed_launch_forwards_selected_source_session() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+    app.agents = {
+        "source-agent": {
+            "agent_id": "source-agent",
+            "agent_type": "caller",
+            "metadata": {"codex_session_id": "source-session-1"},
+        }
+    }
+    app.selected_agent_id = "source-agent"
+    requests: list[dict[str, object]] = []
+
+    class Response:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.payload
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            requests.append({"path": path, **kwargs})
+            if path.endswith("/preview"):
+                return Response({"agent_id": "codex-demo"})
+            return Response(
+                {
+                    "model": "gpt-5.6-sol",
+                    "agent": {"agent_id": "codex-demo", "metadata": {}},
+                    "runtime_mapping": {"pane_id": "%7", "state": "ready"},
+                }
+            )
+
+    async def no_refresh() -> None:
+        return None
+
+    async def fake_select(agent_id: str) -> None:
+        app.selected_agent_id = agent_id
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.refresh_agents = no_refresh  # type: ignore[method-assign]
+    app.select_agent = fake_select  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    launched = await app.launch_managed_agent_from_picker(
+        project_path="/tmp/demo",
+        agent_id="codex-demo",
+        profile_id="sol-high",
+        runtime_server_mode="dedicated",
+    )
+
+    assert launched is True
+    assert [item["path"] for item in requests] == [
+        "/v2/agents/managed-launch/preview",
+        "/v2/agents/managed-launch",
+    ]
+    for item in requests:
+        assert item["json"]["source_codex_session_id"] == "source-session-1"  # type: ignore[index]
+
+
 async def test_tui_managed_workspace_bootstraps_new_caller_before_operator() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     sent: list[tuple[str, str]] = []
@@ -11114,8 +11313,68 @@ async def test_tui_managed_workspace_bootstraps_new_caller_before_operator() -> 
     )
 
     assert launched is True
-    assert sent[0][0] == "codex-demo"
-    assert "startup registration only" in sent[0][1]
+    assert sent == []
+    assert started == ["codex-demo"]
+
+
+async def test_tui_managed_workspace_retries_bootstrap_only_after_wait() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    sent: list[tuple[str, str]] = []
+    waits: list[float] = []
+    started: list[str] = []
+
+    async def fake_launch(**_kwargs: object) -> bool:
+        app.selected_agent_id = "codex-demo"
+        app.agents["codex-demo"] = {
+            "agent_id": "codex-demo",
+            "agent_type": "caller",
+            "project": "demo",
+            "metadata": {"cwd": "/tmp/demo"},
+        }
+        return True
+
+    async def fake_wait(
+        agent_id: str,
+        *,
+        timeout_seconds: float = 30.0,
+    ) -> bool:
+        assert agent_id == "codex-demo"
+        waits.append(timeout_seconds)
+        if len(waits) == 2:
+            app.agents[agent_id]["metadata"]["codex_session_id"] = "session-demo"
+            return True
+        return False
+
+    async def fake_send(agent_id: str, prompt: str) -> bool:
+        sent.append((agent_id, prompt))
+        return True
+
+    async def fake_start_operator(
+        agent_id: str | None = None,
+        *,
+        source_caller_agent_id: str | None = None,
+    ) -> None:
+        assert agent_id is None
+        started.append(str(source_caller_agent_id))
+
+    app.launch_managed_agent_from_picker = fake_launch  # type: ignore[method-assign]
+    app.wait_for_managed_caller_registration = fake_wait  # type: ignore[method-assign]
+    app.send_text_to_tmux = fake_send  # type: ignore[method-assign]
+    app.start_operator_agent = fake_start_operator  # type: ignore[method-assign]
+    app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    launched = await app.launch_managed_workspace_from_picker(
+        project_path="/tmp/demo",
+        agent_id="codex-demo",
+        profile_id="sol-high",
+        runtime_server_mode="dedicated",
+        launch_mode="agent_operator",
+    )
+
+    assert launched is True
+    assert waits == [8.0, 30.0]
+    assert sent and sent[0][0] == "codex-demo"
+    assert "Retry the idempotent" in sent[0][1]
     assert started == ["codex-demo"]
 
 
@@ -11361,6 +11620,8 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/operator kb reject",
         "/operator kb retire",
         "/operator project spawn",
+        "/operator project spawn inspect",
+        "/operator project spawn cancel",
         "/joplin",
         "/joplin refresh",
         "/joplin new",
@@ -15410,6 +15671,8 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
     app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
     app.refresh_joplin_status = fake_refresh_joplin_status  # type: ignore[method-assign]
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+
+    app.configured_runtime_launch_target = default_runtime_launch_target_fixture  # type: ignore[method-assign]
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
 
     async with app.run_test():
@@ -15534,6 +15797,7 @@ async def test_tui_start_operator_does_not_bind_stale_caller_when_operator_selec
     app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    app.configured_runtime_launch_target = default_runtime_launch_target_fixture  # type: ignore[method-assign]
     app.selected_caller_agent_id_for_fork = lambda: "caller-1"  # type: ignore[method-assign]
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
 
@@ -17979,10 +18243,49 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    runtime_registrations: list[dict[str, object]] = []
+
+    async def use_managed_test_tmux(
+        entity_id: str,
+        *,
+        fallback_session_name: str,
+    ) -> tuple[str, dict[str, str]]:
+        assert fallback_session_name == "agent-pbx-operators"
+        return (
+            f"agent-pbx-runtime-{entity_id}",
+            {
+                "tmux_bin": "/opt/tmux-3.7c",
+                "socket_path": "/run/pbx.sock",
+            },
+        )
+
+    async def register_managed_test_tmux(
+        entity_id: str,
+        pane_id: str,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        record = {
+            "entity_id": entity_id,
+            "pane_id": pane_id,
+            **kwargs,
+        }
+        runtime_registrations.append(record)
+        return {
+            "entity_id": entity_id,
+            "pane_id": pane_id,
+            "state": "ready",
+        }
+
+    app.configured_runtime_launch_target = use_managed_test_tmux  # type: ignore[method-assign]
+    app.register_launched_tmux_runtime = register_managed_test_tmux  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%43")
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_exists",
+        lambda target, **_kwargs: target == "%43",
+    )
 
     async with app.run_test():
         app.agents = {
@@ -18016,6 +18319,9 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     assert posts[2]["path"] == "/v1/operator/forks/ensure"
     assert posts[2]["json"]["metadata"]["operator_role"] == "fork"  # type: ignore[index]
     assert launches[0]["window_name"] == "operator-0"
+    assert launches[0]["session_name"] == "agent-pbx-runtime-operator-0"
+    assert launches[0]["tmux_bin"] == "/opt/tmux-3.7c"
+    assert launches[0]["socket_path"] == "/run/pbx.sock"
     root_argv = shlex.split(str(launches[0]["command"]))
     assert root_argv[0] == "codex"
     assert "--cd" in root_argv
@@ -18023,6 +18329,11 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     assert any(item.startswith("mcp_servers.agent-pbx=") for item in root_argv)
     assert launches[0]["env"]["AGENT_PBX_OPERATOR_ROLE"] == "root"
     assert launches[1]["cwd"] == str(Path.cwd())
+    assert str(launches[1]["session_name"]).startswith(
+        "agent-pbx-runtime-operator-0-fork-caller-1"
+    )
+    assert launches[1]["tmux_bin"] == "/opt/tmux-3.7c"
+    assert launches[1]["socket_path"] == "/run/pbx.sock"
     fork_argv = shlex.split(str(launches[1]["command"]))
     assert fork_argv[:2] == ["codex", "fork"]
     assert "session-caller-1" in fork_argv
@@ -18034,6 +18345,11 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     assert launches[1]["env"]["AGENT_PBX_LOGICAL_OPERATOR_ID"] == "operator-0"
     assert launches[1]["env"]["AGENT_PBX_SOURCE_CALLER_AGENT_ID"] == "caller-1"
     assert launches[1]["env"]["AGENT_PBX_SOURCE_CODEX_SESSION_ID"] == "session-caller-1"
+    assert [item["pane_id"] for item in runtime_registrations] == ["%42", "%43"]
+    assert [item["mapping_source"] for item in runtime_registrations] == [
+        "operator_root_launch",
+        "operator_fork_launch",
+    ]
 
 
 def test_tui_operator_prompts_require_visible_pbx_forks() -> None:
@@ -23201,6 +23517,31 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
         tmux_direct=True,
     )
     app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
+    runtime_registrations: list[dict[str, object]] = []
+
+    async def use_managed_review_tmux(
+        entity_id: str,
+        *,
+        fallback_session_name: str,
+    ) -> tuple[str, dict[str, str]]:
+        assert fallback_session_name == "agent-pbx-operators"
+        return (
+            f"agent-pbx-runtime-{entity_id}",
+            {"tmux_bin": "/opt/tmux-3.7c", "socket_path": "/run/pbx.sock"},
+        )
+
+    async def register_managed_review_tmux(
+        entity_id: str,
+        pane_id: str,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        runtime_registrations.append(
+            {"entity_id": entity_id, "pane_id": pane_id, **kwargs}
+        )
+        return {"entity_id": entity_id, "pane_id": pane_id, "state": "ready"}
+
+    app.configured_runtime_launch_target = use_managed_review_tmux  # type: ignore[method-assign]
+    app.register_launched_tmux_runtime = register_managed_review_tmux  # type: ignore[method-assign]
     app.tmux_features_available = True
     launches: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -23308,7 +23649,11 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", lambda *args, **kwargs: [])
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%77")
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_exists",
+        lambda target, **_kwargs: target == "%77",
+    )
 
     async with app.run_test():
         app.agents = {
@@ -23348,6 +23693,9 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
 
     assert len(launches) == 2
     launch = launches[-1]
+    assert str(launch["session_name"]).startswith("agent-pbx-runtime-operator-0-")
+    assert launch["tmux_bin"] == "/opt/tmux-3.7c"
+    assert launch["socket_path"] == "/run/pbx.sock"
     work_root = Path(str(launch["cwd"]))
     assert work_root.name == "operator-0-caller-1-review-1"
     assert not work_root.is_relative_to(source_cwd)
@@ -23411,6 +23759,17 @@ async def test_tui_start_review_operator_fork_uses_scratch_work_root(
     assert opened and "review-1" in opened[0]
     assert app.tmux_agent_targets[str(ensure_body["fork_agent_id"])] == "%77"  # type: ignore[index]
     assert app.tmux_direct_agent_modes[str(ensure_body["fork_agent_id"])] is True  # type: ignore[index]
+    assert runtime_registrations == [
+        {
+            "entity_id": ensure_body["fork_agent_id"],  # type: ignore[index]
+            "pane_id": "%77",
+            "runtime_kwargs": {
+                "tmux_bin": "/opt/tmux-3.7c",
+                "socket_path": "/run/pbx.sock",
+            },
+            "mapping_source": "operator_fork_launch",
+        }
+    ]
 
 
 async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
@@ -23429,6 +23788,7 @@ async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
         tmux_direct=True,
     )
     app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
+    app.configured_runtime_launch_target = default_runtime_launch_target_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     launches: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -23596,6 +23956,7 @@ async def test_tui_start_review_operator_fork_uses_prior_failed_source_dispositi
         tmux_direct=True,
     )
     app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
+    app.configured_runtime_launch_target = default_runtime_launch_target_fixture  # type: ignore[method-assign]
     app.tmux_features_available = True
     launches: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -24048,6 +24409,12 @@ async def test_tui_launch_pending_project_spawn_starts_registered_caller(
         tmux_direct=True,
     )
     app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
+    app.configured_runtime_launch_target = default_runtime_launch_target_fixture  # type: ignore[method-assign]
+
+    async def ignore_runtime_registration(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    app.register_launched_tmux_runtime = ignore_runtime_registration  # type: ignore[method-assign]
     app.tmux_features_available = True
     launches: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -24165,6 +24532,42 @@ async def test_tui_launch_pending_project_spawn_starts_registered_caller(
     assert posts[0]["json"]["status"] == "launching"  # type: ignore[index]
     assert posts[-1]["json"]["status"] == "launched"  # type: ignore[index]
     assert posts[-1]["json"]["launched_agent_id"] == "codex-next-demo"  # type: ignore[index]
+
+
+async def test_tui_project_spawn_preflight_blocks_before_status_mutation(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    target = tmp_path / "occupied"
+    target.mkdir()
+    existing = target / "keep.txt"
+    existing.write_text("keep", encoding="utf-8")
+    request = {
+        "spawn_request_id": "spawn-blocked",
+        "source_cwd": str(source),
+        "target_parent": str(tmp_path),
+        "target_slug": "occupied",
+        "target_path": str(target),
+        "project_name": "occupied",
+        "mode": "empty",
+        "metadata": {},
+    }
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+    posts: list[str] = []
+
+    class Client:
+        async def post(self, path: str, **_: object) -> object:
+            posts.append(path)
+            raise AssertionError("preflight must run before API mutation")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    async with app.run_test():
+        launched = await app.launch_project_spawn_request(request)
+
+    assert launched is False
+    assert posts == []
+    assert existing.read_text(encoding="utf-8") == "keep"
 
 
 async def test_tui_launch_pending_operator_handoff_fork_retries_approval() -> None:

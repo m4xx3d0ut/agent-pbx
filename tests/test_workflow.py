@@ -2100,6 +2100,11 @@ def test_operator_project_spawn_api_request_list_and_status(tmp_path: Path) -> N
             "metadata": {"pbx_mode": "report", "cwd": str(tmp_path / "Next-Demo")},
         },
     )
+    launching = client.post(
+        f"/v1/operator/project-spawns/{spawn['spawn_request_id']}/status",
+        json={"status": "launching"},
+    )
+    assert launching.status_code == 200
     updated = client.post(
         f"/v1/operator/project-spawns/{spawn['spawn_request_id']}/status",
         json={
@@ -2111,6 +2116,37 @@ def test_operator_project_spawn_api_request_list_and_status(tmp_path: Path) -> N
     assert updated.status_code == 200
     assert updated.json()["status"] == "launched"
     assert updated.json()["launched_agent_id"] == "codex-Next-Demo"
+
+    second = client.post(
+        "/v1/operator/project-spawns",
+        json={
+            "operator_agent_id": "operator-0",
+            "review_fork_id": fork["operator_fork_id"],
+            "project_name": "Cancel Demo",
+            "instructions": "Keep this request pending for cancellation.",
+            "mode": "empty",
+        },
+    )
+    assert second.status_code == 200
+    second_id = second.json()["spawn_request_id"]
+    inspected = client.get(
+        f"/v1/operator/project-spawns/{second_id}",
+        params={"operator_agent_id": "operator-0"},
+    )
+    assert inspected.status_code == 200
+    assert inspected.json()["status"] == "pending"
+    canceled = client.post(
+        f"/v1/operator/project-spawns/{second_id}/cancel",
+        json={"operator_agent_id": "operator-0", "reason": "superseded"},
+    )
+    assert canceled.status_code == 200
+    assert canceled.json()["status"] == "canceled"
+    repeated = client.post(
+        f"/v1/operator/project-spawns/{second_id}/cancel",
+        json={"operator_agent_id": "operator-0", "reason": "retry"},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["updated_at"] == canceled.json()["updated_at"]
 
 
 def test_operator_knowledge_link_api_propose_approve_and_close(

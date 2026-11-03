@@ -492,10 +492,17 @@ route it with `pbx_operator_route_review_escalation` so the root operator or an
 idle default/edit fork can handle it. If review work needs a new sibling
 project, call `pbx_operator_request_project_spawn` with the project name,
 instructions, and `mode` of `empty` or `clone_source`. The TUI/root operator
-approves the oldest pending request with `Spawn P` or `/operator project spawn`;
-Agent PBX then creates the sibling project at the same parent depth as the
-source repo, starts a normal tmux caller Codex session there, and attaches it to
-the Agents pane when it registers.
+inspects the oldest pending request with `/operator project spawn inspect`, can
+cancel it without launching through `/operator project spawn cancel`, and
+approves it with `Spawn P` or `/operator project spawn`. Agent PBX validates the
+source and target before accepting the request and revalidates immediately
+before approval. A non-empty target is never copied over or initialized; select
+another empty sibling target or use the managed workspace launcher for an
+existing canonical Git repository. `clone_source` requires the review source to
+be the canonical Git root, and an explicit `metadata.repo_root` must match it.
+After validation, Agent PBX creates the sibling project, starts a normal tmux
+caller Codex session there, records its exact runtime mapping, and attaches it
+to the Agents pane when it registers.
 
 If review work needs to transfer domain context to another operator, the review
 fork can call `pbx_operator_propose_knowledge_handoff` with the source review
@@ -608,6 +615,11 @@ not receive a review task during creation. When the review fork requests a
 sibling project, select the operator and use
 `Spawn P` or `/operator project spawn`; the spawned project should then appear
 as a normal caller in the Agents pane after its Codex session registers. When a
+request is obsolete or points at pre-existing work, use
+`/operator project spawn inspect` followed by
+`/operator project spawn cancel`; cancellation is idempotent and does not touch
+the target. Existing-workspace adoption remains the `F10` managed-launch path
+rather than a project-spawn mode in this release candidate. When a
 review fork proposes a knowledge handoff, select the logical operator and run
 `/operator handoffs` to inspect workflow state, `/operator handoff preflight`
 to verify the target route, `/operator handoff approve` to approve delivery,
@@ -1375,7 +1387,9 @@ commands such as `/detail`, `/ping`, `/esc`, `/ctrlc`, `/restart`, `/tmux`,
 `/operator kb`, `/operator kb detail`, `/operator kb proposed`,
 `/operator kb proposed detail`, `/operator kb seed`, `/operator kb compile`,
 `/operator kb reindex`, `/operator kb promote`, `/operator kb reject`,
-`/operator kb retire`, `/operator project spawn`, `/codex update`, `/pr`, `/pr refresh`,
+`/operator kb retire`, `/operator project spawn`,
+`/operator project spawn inspect`, `/operator project spawn cancel`,
+`/codex update`, `/pr`, `/pr refresh`,
 `/pr review`, `/pr validate`, `/pr url`, `/pr merge`, `/issue`, `/issue refresh`, `/issue mitigate`,
 `/issue url`, `/issue clear`, configured `/joplin`, `/joplin new`,
 `/joplin rename`, `/joplin delete`, `/joplin copy`,
@@ -1558,6 +1572,22 @@ default edit fork. `/agent launch` remains an alias for the same picker, while
 `/operator start` and `Shift+O` start an Operator for the selected registered
 caller. Plain `F10` remains PBX-owned under embedded-terminal focus;
 `Shift+F10` sends F10 to Codex.
+
+Managed caller launch now includes a deterministic, audited registration
+bootstrap in the initial Codex command. It disables the startup update check so
+an upgrade interstitial cannot consume that prompt, exposes only the caller
+registration/report Agent PBX tools, auto-approves those explicitly enabled
+tools, and leaves unrelated approval escalation disallowed by the caller's
+normal launch policy. Retries with the same Agent, repository, profile, runtime
+mode, and source Codex session return the existing ready mapping rather than
+creating a second pane. The source session identifier and bootstrap digest are
+retained as launch provenance.
+
+TUI-created root Operators, edit forks, and review forks launch on the selected
+runtime tmux server and immediately register the exact server socket, session,
+window, pane, process, Codex-session evidence, and outer-client provenance.
+This avoids a manual reconciliation window before handoff preflight can address
+the new pane.
 
 Agent PBX v2 enables the native local tmux path by default when the TUI uses a
 loopback daemon and `tmux` is available. `Latest` embeds a PTY-backed normal

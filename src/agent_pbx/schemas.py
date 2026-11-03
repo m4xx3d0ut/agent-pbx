@@ -250,6 +250,7 @@ class ManagedAgentLaunchRequest(BaseModel):
     runtime_server_mode: Literal[
         "dedicated", "outer_if_present", "outer_required"
     ] = "dedicated"
+    source_codex_session_id: str | None = Field(default=None, max_length=200)
 
 
 class RuntimeMigrationPreviewRequest(BaseModel):
@@ -616,6 +617,11 @@ class OperatorProjectSpawnUpdateRequest(BaseModel):
     tmux_pane_id: str | None = Field(default=None, max_length=120)
     error: str | None = Field(default=None, max_length=4000)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorProjectSpawnCancelRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    reason: str | None = Field(default=None, max_length=1000)
 
 
 class OperatorForkEdgeCreateRequest(BaseModel):
