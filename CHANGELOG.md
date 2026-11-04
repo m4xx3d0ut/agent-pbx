@@ -4,6 +4,12 @@
 
 ### Added
 
+- Add server-enforced Operator execution authority independent from Operator
+  role. The public `scoped-edit` default, immutable `review-readonly`, explicit
+  Trusted Workbench, and ceiling-gated local `full-access` profiles use
+  versioned exact Git workspace sets, linked-worktree qualification, edit-fork
+  inheritance, bounded WorkerBee `local-deploy`, and safe restart/resume
+  activation through `/operator authority`.
 - Add a local-only, root-confirmed linked-worktree commit broker for stopped
   edit forks whose split secret/read/deny profile cannot safely receive direct
   Codex Git-administration grants. It commits only an explicit reviewed leaf

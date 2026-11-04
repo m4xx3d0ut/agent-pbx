@@ -29,6 +29,7 @@ and iteration while preserving the ownership of every managed runtime.
 - Native terminal and recovery access: [Runtime and tmux Operations](Runtime-and-Tmux-Operations.md)
 - Codex model and profile management: [Models, Profiles, and Codex](Models-Profiles-and-Codex.md)
 - Optional runtime truth: [WorkerBee Integration](WorkerBee-Integration.md)
+- Bounded multi-project execution: [Operator Authority and Workspace Sets](Operator-Authority-and-Workspace-Sets.md)
 - Scoped knowledge and response capture: [Joplin Notes](Joplin-Notes.md)
 - Isolated product tour: [Interactive Browser Demo](Interactive-Browser-Demo.md)
 - Network and client boundaries: [Security and Remote Access](Security-and-Remote-Access.md)

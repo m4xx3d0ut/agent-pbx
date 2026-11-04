@@ -129,6 +129,15 @@ maximum policy, force request mode, and provide a JSON root ceiling through the
 WorkerBee guide. These checks occur server-side and cannot be relaxed by a TUI
 configuration file or remote controller scoped to one Agent.
 
+Operator execution authority is enforced separately from role and WorkerBee
+placement. `scoped-edit` is the public default. `trusted-workbench` uses a
+versioned list of exact Git toplevels and qualified linked-worktree
+administration paths; a parent collection such as `~/git` or `~/git/k1s-wt`
+does not become a writable wildcard. `full-access` is unavailable unless the
+host explicitly raises `AGENT_PBX_OPERATOR_AUTHORITY_PROFILE_CEILING`.
+Review forks are fixed to `review-readonly` regardless of root Operator or
+workstation posture. See [Operator Authority and Workspace Sets](Operator-Authority-and-Workspace-Sets.md).
+
 ## Audit-sensitive operations
 
 Model elevation, runtime repair, prompt injection, file writes, Joplin writes,

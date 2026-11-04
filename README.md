@@ -840,6 +840,40 @@ is durable but takes effect only after a safe Agent PBX restart/resume. This
 keeps authority changes explicit and prevents a running process from broadening
 its own lease.
 
+Operator coordination role is separate from execution authority. The
+`/operator authority` palette command manages four server-enforced profiles:
+
+| Profile | Intended use |
+|---|---|
+| `scoped-edit` | Safe public default for one working checkout |
+| `trusted-workbench` | Exact, versioned multi-project workspace set with LAN network access and bounded WorkerBee local deployment |
+| `full-access` | Exceptional local-only profile, available only when the administrator ceiling permits it |
+| `review-readonly` | Immutable profile for review forks |
+
+Trusted Workbench sets contain canonical Git toplevels. A collection such as
+`~/git/k1s-wt` may discover candidate repositories, including linked
+worktrees, but the reviewed snapshot stores each selected checkout explicitly.
+The collection itself never becomes a wildcard writable root. Agent PBX
+qualifies linked-worktree Git metadata, rejects shared branch collisions,
+deduplicates exact administration paths, and resumes the Codex thread before
+recording the new profile as active. Edit forks inherit the root Operator's
+profile; review forks never do.
+
+The public default remains `scoped-edit`. Dedicated single-user workstations
+can select `trusted-workbench` as their local default while retaining an
+administrator root ceiling:
+
+```bash
+export AGENT_PBX_OPERATOR_AUTHORITY_CONTROL_MODE="editable"
+export AGENT_PBX_OPERATOR_AUTHORITY_PROFILE_CEILING="trusted-workbench"
+export AGENT_PBX_OPERATOR_AUTHORITY_DEFAULT_PROFILE="trusted-workbench"
+export AGENT_PBX_OPERATOR_AUTHORITY_ROOT_CEILING_JSON='["/home/user/git"]'
+export AGENT_PBX_OPERATOR_AUTHORITY_WORKFLOW_LABEL="Trusted Workbench"
+```
+
+The complete profile, workspace-set, inheritance, and rollback contract is in
+the [Operator authority wiki guide](https://github.com/m4xx3d0ut/agent-pbx/wiki/Operator-Authority-and-Workspace-Sets).
+
 Workspace mobility is a separate daemon policy. The committed default is
 `pinned` with controller approval: an Agent may refresh the content of its
 current checkout but cannot silently bind WorkerBee to another repository.
