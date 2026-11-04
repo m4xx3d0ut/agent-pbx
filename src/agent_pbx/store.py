@@ -3860,6 +3860,46 @@ class Store:
                 )
         return self.get_agent(agent_id)
 
+    def merge_operator_fork_metadata(
+        self,
+        fork_agent_id: str,
+        metadata: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Merge controller policy into the durable fork record, if present.
+
+        ``get_agent`` hydrates fork identity from ``operator_forks``. Policy
+        written only to ``agents`` can therefore be shadowed by an older fork
+        snapshot. Callers that change durable fork policy use this companion
+        update so the two records expose one effective value.
+        """
+
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT operator_fork_id, metadata_json
+                FROM operator_forks
+                WHERE fork_agent_id = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (fork_agent_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            merged = self._merged_agent_metadata(
+                row["metadata_json"],
+                dict(metadata),
+            )
+            conn.execute(
+                """
+                UPDATE operator_forks
+                SET metadata_json = ?, updated_at = ?
+                WHERE operator_fork_id = ?
+                """,
+                (json.dumps(merged), now_ts(), str(row["operator_fork_id"])),
+            )
+        return self.get_operator_fork(str(row["operator_fork_id"]))
+
     def list_agents(self, *, include_hidden: bool = False) -> list[dict[str, Any]]:
         where_clause = "" if include_hidden else "WHERE dismissed_at IS NULL"
         with self.connect() as conn:

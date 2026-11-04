@@ -60,6 +60,28 @@ def register_operator(
     )
 
 
+def register_edit_fork(store: Store, agent_id: str, root: Path) -> None:
+    register_operator(store, "operator-7")
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={"cwd": str(root), "codex_session_id": "source-session"},
+        )
+    )
+    register_operator(store, agent_id)
+    store.create_operator_fork(
+        logical_operator_agent_id="operator-7",
+        fork_agent_id=agent_id,
+        source_caller_agent_id="caller-1",
+        source_codex_session_id="source-session",
+        cwd=str(root),
+        fork_purpose="edit",
+        access_mode="edit",
+        metadata={"workerbee_mcp_profile": "observe-local"},
+    )
+
+
 def test_public_posture_is_scoped_and_collapses_nested_ceiling(tmp_path: Path) -> None:
     root = tmp_path / "git"
     nested = root / "k1s-wt"
@@ -194,7 +216,7 @@ def test_trusted_assignment_coordinates_workerbee_and_pins_set_version(
     git_repo(second)
     store = Store(tmp_path / "pbx.sqlite")
     store.init()
-    register_operator(store, "operator-7-fork-edit")
+    register_edit_fork(store, "operator-7-fork-edit", first)
     access = WorkerBeeAccessPolicyService(store, environ={})
     workspace = WorkerBeeWorkspacePolicyService(store, environ={})
     service = OperatorAuthorityService(
@@ -229,6 +251,7 @@ def test_trusted_assignment_coordinates_workerbee_and_pins_set_version(
     assert policy["request_mode"] == "automatic"
     assert policy["allowed_roots"] == [str(first), str(second)]
     metadata = store.get_agent("operator-7-fork-edit")["metadata"]
+    assert metadata["workerbee_mcp_profile"] == "local-deploy"
     assert metadata["operator_authority_workspace_roots"] == [str(first), str(second)]
     assert metadata["operator_authority_requires_restart"] is True
 

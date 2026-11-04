@@ -529,6 +529,7 @@ class OperatorAuthorityService:
                 "updated_by": str(updated_by or "local")[:255],
             },
         )
+        self.store.merge_operator_fork_metadata(agent_id, patch)
         self._coordinate_workerbee(agent_id, selected, roots, label, updated_by)
         return self.get_assignment(agent_id)
 
@@ -620,10 +621,20 @@ class OperatorAuthorityService:
             OPERATOR_AUTHORITY_TRUSTED_WORKBENCH,
             OPERATOR_AUTHORITY_FULL_ACCESS,
         }
+        selected_workerbee_profile = (
+            WORKERBEE_PROFILE_LOCAL_DEPLOY if deploy else WORKERBEE_PROFILE_OBSERVE
+        )
         self.workerbee_access.set_profile(
             agent_id,
-            profile=(WORKERBEE_PROFILE_LOCAL_DEPLOY if deploy else WORKERBEE_PROFILE_OBSERVE),
+            profile=selected_workerbee_profile,
             updated_by=updated_by,
+        )
+        self.store.merge_operator_fork_metadata(
+            agent_id,
+            {
+                "workerbee_mcp_profile": selected_workerbee_profile,
+                "workerbee_mcp_profile_updated_by": str(updated_by or "local"),
+            },
         )
         if profile == OPERATOR_AUTHORITY_TRUSTED_WORKBENCH:
             self.workerbee_workspace.set_policy(
