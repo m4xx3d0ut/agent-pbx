@@ -13,6 +13,11 @@
 
 ### Fixed
 
+- Keep long linked-Git broker receipts inside a bounded scroll region while
+  leaving the receipt-bound confirmation input and actions visible. The input
+  now owns initial focus, and app-level priority shortcuts yield only while
+  that exact modal input owns focus; empty or wrong confirmations still stop
+  before broker execution.
 - Reconcile a canceled, inactive edit fork's definitively missing tmux runtime
   without treating a same-number pane on another tmux server as the fork. The
   TUI now requires a fresh daemon probe, exact Agent/mapping server, socket,

@@ -26,7 +26,7 @@ from rich.color import Color, ColorParseError
 from rich.text import Text
 from textual.app import App, ComposeResult, ScreenStackError, SystemCommand
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import Click, DescendantFocus, Focus, Key, MouseDown, Resize
 from textual.screen import ModalScreen
@@ -4124,27 +4124,28 @@ class LinkedGitCommitConfirmScreen(ModalScreen[None]):
             ensure_ascii=False,
             indent=2,
         )
-        with Vertical(id="linked-git-broker-panel"):
+        with Vertical(id="linked-git-broker-confirm-panel"):
             yield Static(
                 "Approve exact linked-worktree commit",
                 id="linked-git-broker-title",
             )
-            yield Static(
-                f"Stopped edit fork: {self.context.agent_id}\n"
-                f"Worktree: {self.context.work_root}\n"
-                f"Transaction: {self.receipt.transaction_id}\n"
-                f"Authority: {self.context.authority_sha256}\n"
-                f"Branch: {self.receipt.branch}\n"
-                f"HEAD: {self.receipt.head}\n"
-                f"HEAD tree: {self.receipt.head_tree}\n"
-                f"Index tree: {self.receipt.index_tree}\n"
-                f"Upstream: {self.receipt.upstream} @ {self.receipt.upstream_oid}\n"
-                f"Index SHA-256: {self.receipt.index_sha256}\n"
-                f"Ref SHA-256: {self.receipt.branch_ref_sha256}\n"
-                f"Reflog SHA-256: {self.receipt.branch_reflog_sha256}\n"
-                f"Approved raw-byte identities:\n{approved}",
-                id="linked-git-broker-receipt",
-            )
+            with VerticalScroll(id="linked-git-broker-receipt-scroll"):
+                yield Static(
+                    f"Stopped edit fork: {self.context.agent_id}\n"
+                    f"Worktree: {self.context.work_root}\n"
+                    f"Transaction: {self.receipt.transaction_id}\n"
+                    f"Authority: {self.context.authority_sha256}\n"
+                    f"Branch: {self.receipt.branch}\n"
+                    f"HEAD: {self.receipt.head}\n"
+                    f"HEAD tree: {self.receipt.head_tree}\n"
+                    f"Index tree: {self.receipt.index_tree}\n"
+                    f"Upstream: {self.receipt.upstream} @ {self.receipt.upstream_oid}\n"
+                    f"Index SHA-256: {self.receipt.index_sha256}\n"
+                    f"Ref SHA-256: {self.receipt.branch_ref_sha256}\n"
+                    f"Reflog SHA-256: {self.receipt.branch_reflog_sha256}\n"
+                    f"Approved raw-byte identities:\n{approved}",
+                    id="linked-git-broker-receipt",
+                )
             yield Static(
                 "Protected/unapproved dirt remains outside broker authority and "
                 "is not inspected. The prepared index starts from exact original "
@@ -4166,6 +4167,10 @@ class LinkedGitCommitConfirmScreen(ModalScreen[None]):
                     variant="error",
                 )
                 yield Button("Cancel", id="linked-git-broker-cancel")
+
+    def on_mount(self) -> None:
+        confirmation = self.query_one("#linked-git-broker-confirmation", Input)
+        confirmation.focus()
 
     def submit(self) -> None:
         confirmation = self.query_one(
@@ -5773,6 +5778,48 @@ class AgentPBXTUI(App[None]):
     }
 
     #joplin-reference-prompt-actions Button {
+        width: 1fr;
+    }
+
+    LinkedGitCommitConfirmScreen {
+        align: center middle;
+    }
+
+    #linked-git-broker-confirm-panel {
+        width: 104;
+        max-width: 96%;
+        height: 92%;
+        max-height: 92%;
+        border: tall $accent;
+        background: $panel;
+        padding: 1 2;
+    }
+
+    #linked-git-broker-title {
+        height: 1;
+        content-align: center middle;
+        text-style: bold;
+    }
+
+    #linked-git-broker-receipt-scroll {
+        height: 1fr;
+        margin-top: 1;
+        margin-bottom: 1;
+        border: round $surface;
+    }
+
+    #linked-git-broker-receipt,
+    #linked-git-broker-protected,
+    #linked-git-broker-help {
+        height: auto;
+    }
+
+    #linked-git-broker-confirmation,
+    #linked-git-broker-actions {
+        height: 3;
+    }
+
+    #linked-git-broker-actions Button {
         width: 1fr;
     }
 
@@ -7533,15 +7580,29 @@ class AgentPBXTUI(App[None]):
         Textual evaluates priority bindings before forwarding a key to the
         focused widget. The gate must therefore run here; action-level guards
         alone would still consume printable characters and control bytes.
-        Plain function keys and the command-palette key remain PBX-owned.
+        Plain function keys and the command-palette key remain PBX-owned under
+        terminal focus. The exact broker confirmation input instead owns its
+        modal-local editing keys while it has focus.
         """
 
-        if (
-            priority
-            and self.writable_terminal_surface(require_focus=True) is not None
-            and not self.pbx_owns_key_under_terminal_focus(key)
-        ):
-            return False
+        if priority:
+            try:
+                screen = self.screen
+                focused = self.focused
+            except ScreenStackError:
+                screen = None
+                focused = None
+            if (
+                isinstance(screen, LinkedGitCommitConfirmScreen)
+                and isinstance(focused, Input)
+                and focused.id == "linked-git-broker-confirmation"
+            ):
+                return False
+            if (
+                self.writable_terminal_surface(require_focus=True) is not None
+                and not self.pbx_owns_key_under_terminal_focus(key)
+            ):
+                return False
         return await super()._check_bindings(key, priority)
 
     def resolve_agent_refresh_seconds(self) -> float:

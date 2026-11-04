@@ -7935,6 +7935,29 @@ def linked_git_broker_test_receipt(
     )
 
 
+def linked_git_broker_long_test_receipt(
+    context: LinkedGitBrokerTuiContext,
+    *,
+    count: int = 85,
+) -> SimpleNamespace:
+    receipt = linked_git_broker_test_receipt(context)
+    paths = tuple(f"approved-{index:03d}.txt" for index in range(count))
+    receipt.approved_stage_paths = paths
+    receipt.path_identities = tuple(
+        SimpleNamespace(
+            path=path,
+            state="file",
+            mode="100644",
+            raw_sha256=f"{index:064x}",
+            raw_blob_oid=f"{index:040x}",
+            index_mode="100644",
+            index_oid=f"{index + 1:040x}",
+        )
+        for index, path in enumerate(paths, start=1)
+    )
+    return receipt
+
+
 async def test_tui_linked_git_broker_fail_closed_before_any_prepare_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -8139,6 +8162,124 @@ async def test_tui_linked_git_broker_exact_confirmation_executes_once_from_fixed
     assert len(execute_calls) == 1
     assert execute_calls[0]["receipt"] is prepared[0]
     assert execute_calls[0]["journal_root"] == app.git_broker_state_root
+
+
+async def test_tui_linked_git_broker_long_receipt_keeps_confirmation_visible_and_focused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    context = LinkedGitBrokerTuiContext(
+        agent_id="phduxy",
+        work_root=str(tmp_path),
+        approved_roots=(tmp_path,),
+        codex_home=tmp_path / "codex-home",
+        authority_sha256="7" * 64,
+        plan_public=linked_git_broker_test_plan(tmp_path).public_dict(),
+    )
+    receipt = linked_git_broker_long_test_receipt(context)
+    execute_calls: list[tuple[object, object, str]] = []
+    intercepted_actions: list[str] = []
+
+    async def fake_execute(
+        received_context: object,
+        received_receipt: object,
+        confirmation: str,
+    ) -> None:
+        execute_calls.append((received_context, received_receipt, confirmation))
+
+    app.execute_linked_git_broker_commit = fake_execute  # type: ignore[method-assign]
+    for action_name in (
+        "copy_campaign_to_joplin",
+        "monitor_campaign",
+        "toggle_star_agent",
+        "toggle_hidden_agents",
+        "hide_agent",
+        "resume_operator",
+        "stop_operator",
+        "operator_history",
+    ):
+        monkeypatch.setattr(
+            app,
+            f"action_{action_name}",
+            lambda name=action_name: intercepted_actions.append(name),
+        )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.push_screen(LinkedGitCommitConfirmScreen(context=context, receipt=receipt))
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, LinkedGitCommitConfirmScreen)
+        confirmation = screen.query_one("#linked-git-broker-confirmation", Input)
+        actions = screen.query_one("#linked-git-broker-actions")
+        receipt_scroll = screen.query_one("#linked-git-broker-receipt-scroll")
+        commit_button = screen.query_one("#linked-git-broker-commit", Button)
+
+        assert confirmation.has_focus
+        assert not commit_button.has_focus
+        assert confirmation.region.height > 0
+        assert confirmation.region.bottom <= app.size.height
+        assert actions.region.height > 0
+        assert actions.region.bottom <= app.size.height
+        assert receipt_scroll.region.height > 0
+
+        phrase = screen.expected_confirmation
+        keys = tuple(
+            "space"
+            if character == " "
+            else character
+            for character in phrase
+        )
+        await pilot.press(*keys)
+        await pilot.pause()
+        assert confirmation.value == phrase
+        assert confirmation.has_focus
+        assert intercepted_actions == []
+        assert execute_calls == []
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert execute_calls == [(context, receipt, phrase)]
+
+
+async def test_tui_linked_git_broker_long_receipt_empty_and_wrong_are_zero_call(
+    tmp_path: Path,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    context = LinkedGitBrokerTuiContext(
+        agent_id="operator-7-fork-linked",
+        work_root=str(tmp_path),
+        approved_roots=(tmp_path,),
+        codex_home=tmp_path / "codex-home",
+        authority_sha256="7" * 64,
+        plan_public=linked_git_broker_test_plan(tmp_path).public_dict(),
+    )
+    receipt = linked_git_broker_long_test_receipt(context)
+    execute_calls: list[object] = []
+
+    async def forbidden_execute(*args: object, **kwargs: object) -> None:
+        execute_calls.append((args, kwargs))
+
+    app.execute_linked_git_broker_commit = forbidden_execute  # type: ignore[method-assign]
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.push_screen(LinkedGitCommitConfirmScreen(context=context, receipt=receipt))
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, LinkedGitCommitConfirmScreen)
+        confirmation = screen.query_one("#linked-git-broker-confirmation", Input)
+        assert confirmation.has_focus
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert execute_calls == []
+        assert app.screen is screen
+
+        confirmation.value = "wrong"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert execute_calls == []
+        assert app.screen is screen
 
 
 async def test_tui_linked_git_broker_requires_exact_stopped_terminal_posture(
