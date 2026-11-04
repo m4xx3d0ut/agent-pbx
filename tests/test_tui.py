@@ -8305,15 +8305,17 @@ async def test_tui_linked_git_broker_requires_exact_stopped_terminal_posture(
         assert app.linked_git_broker_tui_context(fork_id) is None
         app.agents[fork_id]["pbx_active"] = False
 
+        no_sample_context = app.linked_git_broker_tui_context(fork_id)
+        assert isinstance(no_sample_context, LinkedGitBrokerTuiContext)
+
         app.tmux_liveness_by_agent[fork_id] = TmuxLiveness(state="captured")
         assert app.linked_git_broker_tui_context(fork_id) is None
         app.tmux_liveness_by_agent[fork_id] = TmuxLiveness(state="unknown")
         assert app.linked_git_broker_tui_context(fork_id) is None
         app.tmux_liveness_by_agent[fork_id] = TmuxLiveness(state="stale")
-        assert isinstance(
-            app.linked_git_broker_tui_context(fork_id),
-            LinkedGitBrokerTuiContext,
-        )
+        stale_context = app.linked_git_broker_tui_context(fork_id)
+        assert isinstance(stale_context, LinkedGitBrokerTuiContext)
+        assert stale_context.authority_sha256 == no_sample_context.authority_sha256
 
         unrelated_mapping = {"entity_id": "operator-8", "state": "ready"}
         app.tmux_runtime_mapping_by_agent["operator-8"] = unrelated_mapping

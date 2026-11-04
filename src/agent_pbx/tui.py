@@ -28801,7 +28801,13 @@ class AgentPBXTUI(App[None]):
             "legacy_inert_launch_metadata": legacy_metadata,
             "approved_roots": [str(path) for path in roots],
             "codex_home": str(codex_home),
-            "tmux_liveness": liveness.state if isinstance(liveness, TmuxLiveness) else None,
+            # Both an absent sample and an explicit stale sample are accepted by
+            # the stopped-fork gate above.  Background liveness refreshes may
+            # legitimately move between those equivalent safe representations
+            # while a root operator reviews the receipt.  Bind the authority to
+            # the accepted stopped posture, while every review/execute pass still
+            # re-runs the gate and rejects captured, unknown, or other live state.
+            "tmux_liveness": "stale_or_absent",
         }
         authority_sha256 = hashlib.sha256(
             json.dumps(
