@@ -13,6 +13,14 @@
 
 ### Fixed
 
+- Reconcile a canceled, inactive edit fork's definitively missing tmux runtime
+  without treating a same-number pane on another tmux server as the fork. The
+  TUI now requires a fresh daemon probe, exact Agent/mapping server, socket,
+  session, pane, and Codex-session provenance, no writer lease, and conclusive
+  recorded-process absence plus a fresh local/outer pane listing with no
+  target-owned pane before discarding only that local cache entry.
+  Missing, stale, unreadable, active, leased, live, or ambiguous evidence still
+  fails closed.
 - Bind Operator stop, purge, restart, and resume operations to the complete
   managed tmux identity: executable, socket, server, session, window, and pane.
   Missing or mismatched provenance now fails before mutation, so a pane ID that

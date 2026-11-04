@@ -1454,7 +1454,19 @@ create a pane when the daemon cannot verify mapping state, preventing an
 unreachable runtime from being duplicated. Existing-pane stop, purge, restart,
 and resume actions require an exact executable/socket/server/session/window/pane
 match and never fall back to the process-default tmux server; colliding pane IDs
-therefore fail safely. Use `/codex update` to ask the Agent
+therefore fail safely. For a canceled, inactive edit fork, a durable mapping in
+`missing` state is treated as historical local evidence only after a fresh
+daemon probe agrees with the Agent's recorded server mode/ID, tmux session and
+pane, and Codex session; the writer lease is empty; and the recorded process is
+conclusively absent. A fresh local/outer tmux listing must also contain no pane
+owned by that Agent. A same-number pane on another tmux server does not revive
+that stale mapping. Unreadable process evidence, missing provenance, a live
+process with matching start identity, an active writer, embedded-terminal
+state, and every
+non-missing runtime state continue to block reconciliation. A readable PID with
+different start ticks proves that the registered process identity is gone;
+an existing but unreadable or malformed `/proc/<pid>` remains ambiguous. Use
+`/codex update` to ask the Agent
 PBX daemon to run the allowlisted npm update for
 `@openai/codex`, then use `/restart` or `/codex restart` to move long-lived
 caller, root-operator, and fork panes onto the updated executable. TUI-owned

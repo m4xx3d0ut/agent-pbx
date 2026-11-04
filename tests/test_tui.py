@@ -183,6 +183,61 @@ def cache_ready_runtime_mapping(
     app.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
 
 
+def inactive_missing_runtime_mapping(
+    agent_id: str,
+    *,
+    pane_id: str = "%12",
+    socket_path: str = "/run/user/1000/agent-pbx/runtime.sock",
+    session_name: str | None = None,
+) -> dict[str, object]:
+    return {
+        "entity_id": agent_id,
+        "state": "missing",
+        "server_mode": "dedicated",
+        "server_id": runtime_server_id(Path(socket_path)),
+        "socket_path": socket_path,
+        "session_name": session_name or f"agent-pbx-runtime-{agent_id}",
+        "window_id": "@12",
+        "window_name": agent_id,
+        "pane_id": pane_id,
+        "pane_pid": 12345,
+        "process_start_ticks": 67890,
+        "codex_session_id": "session-operator-fork",
+        "cwd": "/tmp/operator-worktree",
+        "writer_client_id": None,
+        "writer_lease_expires_at": None,
+        "writer_lease_active": False,
+        "metadata": {
+            "managed_by": "agent-pbx-tui",
+            "last_live_validation": {
+                "state": "missing",
+                "safe": False,
+                "message": "The recorded tmux pane is absent from its runtime server.",
+                "repair_pane_id": None,
+            },
+            "live_validated_at": time.time(),
+        },
+    }
+
+
+def bind_inactive_missing_runtime_metadata(
+    agent: dict[str, object],
+    mapping: dict[str, object],
+) -> dict[str, object]:
+    metadata = agent["metadata"]
+    assert isinstance(metadata, dict)
+    metadata.update(
+        {
+            "runtime_server_id": mapping["server_id"],
+            "runtime_server_mode": mapping["server_mode"],
+            "tmux_session": mapping["session_name"],
+            "tmux_pane_id": mapping["pane_id"],
+            "fork_codex_session_id": mapping["codex_session_id"],
+        }
+    )
+    return agent
+
+
 @pytest.fixture(autouse=True)
 def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
     for name in [
@@ -5710,6 +5765,270 @@ async def test_tui_runtime_mapping_404_clears_stale_lookup_error(
     assert "agent-1" not in app.tmux_runtime_mapping_error_by_agent
 
 
+async def test_tui_fetch_discards_only_definitively_inactive_missing_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_id = "operator-7-fork-linked"
+    mapping = inactive_missing_runtime_mapping(agent_id)
+    unrelated = {"entity_id": "operator-8", "state": "ready"}
+    app.agents = {agent_id: linked_git_broker_test_agent(tmp_path)}
+    app.tmux_runtime_mapping_by_agent[agent_id] = dict(mapping)
+    app.tmux_runtime_mapping_by_agent["operator-8"] = unrelated
+    app.tmux_runtime_mapping_validated_at_by_agent[agent_id] = 0.0
+    app.tmux_liveness_by_agent[agent_id] = TmuxLiveness(state="auto")
+    calls = 0
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return dict(mapping)
+
+    class Client:
+        async def get(self, *_args: object, **_kwargs: object) -> Response:
+            nonlocal calls
+            calls += 1
+            return Response()
+
+    monkeypatch.setattr(app, "api_client", lambda: Client())
+    monkeypatch.setattr(tmux_support, "list_panes", lambda: [])
+    monkeypatch.setattr(
+        app,
+        "tmux_runtime_process_identity_is_absent",
+        lambda _pid, _ticks: True,
+    )
+
+    assert await app.fetch_tmux_runtime_mapping(agent_id) is None
+    assert await app.fetch_tmux_runtime_mapping(agent_id) is None
+    assert calls == 2
+    assert agent_id not in app.tmux_runtime_mapping_by_agent
+    assert agent_id not in app.tmux_runtime_mapping_validated_at_by_agent
+    assert agent_id not in app.tmux_runtime_mapping_error_by_agent
+    assert agent_id not in app.tmux_liveness_by_agent
+    assert app.tmux_runtime_mapping_by_agent["operator-8"] is unrelated
+
+
+@pytest.mark.parametrize("pane_query", ["owned", "unavailable"])
+async def test_tui_fetch_preserves_missing_mapping_without_fresh_outer_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pane_query: str,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_id = "operator-7-fork-linked"
+    mapping = inactive_missing_runtime_mapping(agent_id)
+    app.agents = {agent_id: linked_git_broker_test_agent(tmp_path)}
+    owned_pane = tmux_support.TmuxPane(
+        app.operator_tmux_session_name(),
+        "7",
+        "0",
+        "%77",
+        True,
+        "zsh",
+        agent_id,
+        "/tmp/operator-worktree",
+        120,
+        40,
+        0,
+        window_name=agent_id,
+        window_id="@7",
+    )
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return dict(mapping)
+
+    class Client:
+        async def get(self, *_args: object, **_kwargs: object) -> Response:
+            return Response()
+
+    monkeypatch.setattr(app, "api_client", lambda: Client())
+    monkeypatch.setattr(
+        app,
+        "tmux_runtime_process_identity_is_absent",
+        lambda _pid, _ticks: True,
+    )
+    if pane_query == "owned":
+        monkeypatch.setattr(tmux_support, "list_panes", lambda: [owned_pane])
+    else:
+        def unavailable() -> list[tmux_support.TmuxPane]:
+            raise RuntimeError("outer tmux unavailable")
+
+        monkeypatch.setattr(tmux_support, "list_panes", unavailable)
+
+    observed = await app.fetch_tmux_runtime_mapping(agent_id)
+
+    assert isinstance(observed, dict)
+    assert observed["state"] == "missing"
+    assert app.tmux_runtime_mapping_by_agent[agent_id]["state"] == "missing"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "observed_ticks"),
+    [
+        ({"state": "ready"}, None),
+        ({"state": "starting"}, None),
+        ({"writer_lease_active": True}, None),
+        ({"writer_client_id": "other-client"}, None),
+        ({"writer_lease_expires_at": 200.0}, None),
+        ({"server_id": ""}, None),
+        ({"server_id": "wrong-server"}, None),
+        ({"socket_path": ""}, None),
+        ({"socket_path": "relative.sock"}, None),
+        ({"session_name": ""}, None),
+        ({"pane_pid": None}, None),
+        ({"process_start_ticks": None}, None),
+        ({"codex_session_id": None}, None),
+        ({"metadata": {}}, None),
+        ({}, 67890),
+    ],
+)
+def test_tui_inactive_missing_mapping_rejects_active_or_ambiguous_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: dict[str, object],
+    observed_ticks: int | None,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_id = "operator-7-fork-linked"
+    app.agents = {agent_id: linked_git_broker_test_agent(tmp_path)}
+    mapping = {**inactive_missing_runtime_mapping(agent_id), **mutation}
+    validated_at = time.monotonic()
+    monkeypatch.setattr(
+        app,
+        "tmux_runtime_process_identity_is_absent",
+        lambda _pid, expected: observed_ticks is None or observed_ticks != expected,
+    )
+
+    assert not app.tmux_runtime_mapping_is_definitively_inactive_missing(
+        agent_id,
+        mapping,
+        validated_at=validated_at,
+        local_panes=[],
+    )
+
+
+@pytest.mark.parametrize(
+    ("metadata_key", "replacement"),
+    [
+        ("runtime_server_id", None),
+        ("runtime_server_id", "wrong-server"),
+        ("runtime_server_mode", None),
+        ("runtime_server_mode", "outer_if_present"),
+        ("tmux_session", None),
+        ("tmux_session", "wrong-session"),
+        ("tmux_pane_id", None),
+        ("tmux_pane_id", "%99"),
+        ("fork_codex_session_id", None),
+        ("fork_codex_session_id", "wrong-codex-session"),
+    ],
+)
+def test_tui_inactive_missing_mapping_requires_exact_agent_runtime_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_key: str,
+    replacement: str | None,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_id = "operator-7-fork-linked"
+    agent = linked_git_broker_test_agent(tmp_path)
+    metadata = agent["metadata"]
+    assert isinstance(metadata, dict)
+    if replacement is None:
+        metadata.pop(metadata_key)
+    else:
+        metadata[metadata_key] = replacement
+    app.agents = {agent_id: agent}
+    mapping = inactive_missing_runtime_mapping(agent_id)
+    monkeypatch.setattr(
+        app,
+        "tmux_runtime_process_identity_is_absent",
+        lambda _pid, _ticks: True,
+    )
+
+    assert not app.tmux_runtime_mapping_is_definitively_inactive_missing(
+        agent_id,
+        mapping,
+        validated_at=time.monotonic(),
+        local_panes=[],
+    )
+
+
+@pytest.mark.parametrize("guard", ["embedded", "transition", "target", "live"])
+def test_tui_inactive_missing_mapping_preserves_local_active_guards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    guard: str,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_id = "operator-7-fork-linked"
+    app.agents = {agent_id: linked_git_broker_test_agent(tmp_path)}
+    mapping = inactive_missing_runtime_mapping(agent_id)
+    monkeypatch.setattr(
+        app,
+        "tmux_runtime_process_identity_is_absent",
+        lambda _pid, _ticks: True,
+    )
+    if guard == "embedded":
+        app.embedded_terminal_agent_id = agent_id
+    elif guard == "transition":
+        app.embedded_terminal_transition_agent_id = agent_id
+    elif guard == "target":
+        app.tmux_agent_targets[agent_id] = "%12"
+    else:
+        app.tmux_liveness_by_agent[agent_id] = TmuxLiveness(
+            state="captured",
+            pane_id="%12",
+        )
+
+    assert not app.tmux_runtime_mapping_is_definitively_inactive_missing(
+        agent_id,
+        mapping,
+        validated_at=time.monotonic(),
+        local_panes=[],
+    )
+
+
+def test_tui_runtime_process_absence_requires_conclusive_proc_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("agent_pbx.tui.runtime_process_start_ticks", lambda _pid: None)
+
+    monkeypatch.setattr("agent_pbx.tui.os.stat", lambda _path: object())
+    assert not AgentPBXTUI.tmux_runtime_process_identity_is_absent(12345, 67890)
+
+    def missing(_path: str) -> os.stat_result:
+        raise FileNotFoundError
+
+    monkeypatch.setattr("agent_pbx.tui.os.stat", missing)
+    assert AgentPBXTUI.tmux_runtime_process_identity_is_absent(12345, 67890)
+
+    def unreadable(_path: str) -> os.stat_result:
+        raise PermissionError
+
+    monkeypatch.setattr("agent_pbx.tui.os.stat", unreadable)
+    assert not AgentPBXTUI.tmux_runtime_process_identity_is_absent(12345, 67890)
+
+
+def test_tui_runtime_process_absence_accepts_only_different_readable_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("agent_pbx.tui.runtime_process_start_ticks", lambda _pid: 67890)
+    assert not AgentPBXTUI.tmux_runtime_process_identity_is_absent(12345, 67890)
+    monkeypatch.setattr("agent_pbx.tui.runtime_process_start_ticks", lambda _pid: 67891)
+    assert AgentPBXTUI.tmux_runtime_process_identity_is_absent(12345, 67890)
+
+
 async def test_tui_tmux_direct_is_tracked_per_agent() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=False)
     captures: list[str] = []
@@ -6730,7 +7049,7 @@ def test_tui_reconcile_clears_inactive_operator_fork_without_live_pane() -> None
     app.tmux_agent_targets[fork_agent_id] = "%226"
     app.tmux_direct_agent_modes[fork_agent_id] = True
     app.tmux_manual_override_agent_ids.add(fork_agent_id)
-    app.tmux_liveness_by_agent[fork_agent_id] = "live"
+    app.tmux_liveness_by_agent[fork_agent_id] = TmuxLiveness(state="stale")
     app.tmux_plan_selector_agent_ids.add(fork_agent_id)
     app.tmux_plan_selector_pane_by_agent[fork_agent_id] = "%226"
     app.tmux_plan_selector_indices_by_agent[fork_agent_id] = {1}
@@ -6745,6 +7064,188 @@ def test_tui_reconcile_clears_inactive_operator_fork_without_live_pane() -> None
     assert fork_agent_id not in app.tmux_plan_selector_agent_ids
     assert fork_agent_id not in app.tmux_plan_selector_pane_by_agent
     assert fork_agent_id not in app.tmux_plan_selector_indices_by_agent
+
+
+def test_tui_reconcile_inactive_missing_mapping_ignores_cross_server_pane_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_id = "operator-7-fork-linked"
+    unrelated_id = "operator-8"
+    outer_socket = tmp_path / "outer.sock"
+    runtime_socket = tmp_path / "runtime.sock"
+    monkeypatch.setenv("TMUX", f"{outer_socket},100,0")
+    app.agents = {agent_id: linked_git_broker_test_agent(tmp_path)}
+    mapping = inactive_missing_runtime_mapping(
+        agent_id,
+        socket_path=str(runtime_socket),
+    )
+    bind_inactive_missing_runtime_metadata(app.agents[agent_id], mapping)
+    unrelated = {"entity_id": unrelated_id, "state": "ready"}
+    app.tmux_runtime_mapping_by_agent[agent_id] = mapping
+    app.tmux_runtime_mapping_by_agent[unrelated_id] = unrelated
+    app.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
+    app.tmux_direct_agent_modes[agent_id] = True
+    app.tmux_liveness_by_agent[agent_id] = TmuxLiveness(state="stale")
+    monkeypatch.setattr(
+        app,
+        "tmux_runtime_process_identity_is_absent",
+        lambda _pid, _ticks: True,
+    )
+    unrelated_outer_pane = tmux_support.TmuxPane(
+        "agent-pbx",
+        "7",
+        "0",
+        "%12",
+        True,
+        "zsh",
+        "unrelated",
+        "/tmp/unrelated",
+        120,
+        40,
+        0,
+        window_name="zsh",
+        window_id="@7",
+    )
+
+    assert app.clear_inactive_operator_fork_tmux_state(
+        agent_id,
+        app.agents[agent_id],
+        [unrelated_outer_pane],
+    )
+    assert agent_id not in app.tmux_runtime_mapping_by_agent
+    assert agent_id not in app.tmux_direct_agent_modes
+    assert agent_id not in app.tmux_liveness_by_agent
+    assert app.tmux_runtime_mapping_by_agent[unrelated_id] is unrelated
+
+
+@pytest.mark.parametrize("mapping_kind", ["same_server", "missing_server", "ready"])
+def test_tui_reconcile_inactive_mapping_fails_closed_on_ambiguous_or_active_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mapping_kind: str,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_id = "operator-7-fork-linked"
+    outer_socket = tmp_path / "outer.sock"
+    runtime_socket = outer_socket if mapping_kind == "same_server" else tmp_path / "runtime.sock"
+    monkeypatch.setenv("TMUX", f"{outer_socket},100,0")
+    app.agents = {agent_id: linked_git_broker_test_agent(tmp_path)}
+    mapping = inactive_missing_runtime_mapping(
+        agent_id,
+        socket_path=str(runtime_socket),
+    )
+    bind_inactive_missing_runtime_metadata(app.agents[agent_id], mapping)
+    if mapping_kind == "missing_server":
+        mapping["server_id"] = ""
+    elif mapping_kind == "ready":
+        mapping["state"] = "ready"
+    app.tmux_runtime_mapping_by_agent[agent_id] = mapping
+    app.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
+    app.tmux_direct_agent_modes[agent_id] = True
+    monkeypatch.setattr(
+        app,
+        "tmux_runtime_process_identity_is_absent",
+        lambda _pid, _ticks: True,
+    )
+    colliding_pane = tmux_support.TmuxPane(
+        "agent-pbx",
+        "7",
+        "0",
+        "%12",
+        True,
+        "zsh",
+        "unrelated",
+        "/tmp/unrelated",
+        120,
+        40,
+        0,
+        window_name="zsh",
+        window_id="@7",
+    )
+
+    assert not app.clear_inactive_operator_fork_tmux_state(
+        agent_id,
+        app.agents[agent_id],
+        [colliding_pane],
+    )
+    assert app.tmux_runtime_mapping_by_agent[agent_id] is mapping
+
+
+def test_tui_reconcile_inactive_mapping_preserves_live_liveness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_id = "operator-7-fork-linked"
+    app.agents = {agent_id: linked_git_broker_test_agent(tmp_path)}
+    mapping = inactive_missing_runtime_mapping(agent_id)
+    app.tmux_runtime_mapping_by_agent[agent_id] = mapping
+    app.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
+    app.tmux_liveness_by_agent[agent_id] = TmuxLiveness(
+        state="captured",
+        pane_id="%12",
+    )
+    monkeypatch.setattr(
+        app,
+        "tmux_runtime_process_identity_is_absent",
+        lambda _pid, _ticks: True,
+    )
+
+    assert not app.clear_inactive_operator_fork_tmux_state(
+        agent_id,
+        app.agents[agent_id],
+        [],
+    )
+    assert app.tmux_runtime_mapping_by_agent[agent_id] is mapping
+
+
+def test_tui_reconcile_inactive_mapping_preserves_allowed_outer_pane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_id = "operator-7-fork-linked"
+    outer_socket = tmp_path / "outer.sock"
+    runtime_socket = tmp_path / "runtime.sock"
+    monkeypatch.setenv("TMUX", f"{outer_socket},100,0")
+    app.agents = {agent_id: linked_git_broker_test_agent(tmp_path)}
+    mapping = inactive_missing_runtime_mapping(
+        agent_id,
+        socket_path=str(runtime_socket),
+    )
+    bind_inactive_missing_runtime_metadata(app.agents[agent_id], mapping)
+    app.tmux_runtime_mapping_by_agent[agent_id] = mapping
+    app.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
+    app.tmux_liveness_by_agent[agent_id] = TmuxLiveness(state="stale")
+    monkeypatch.setattr(
+        app,
+        "tmux_runtime_process_identity_is_absent",
+        lambda _pid, _ticks: True,
+    )
+    owned_outer_pane = tmux_support.TmuxPane(
+        app.operator_tmux_session_name(),
+        "7",
+        "0",
+        "%12",
+        True,
+        "zsh",
+        agent_id,
+        "/tmp/operator-worktree",
+        120,
+        40,
+        0,
+        window_name=agent_id,
+        window_id="@7",
+    )
+
+    assert not app.clear_inactive_operator_fork_tmux_state(
+        agent_id,
+        app.agents[agent_id],
+        [owned_outer_pane],
+    )
+    assert app.tmux_runtime_mapping_by_agent[agent_id] is mapping
 
 
 async def test_tui_live_operator_root_pane_rejects_duplicate_without_saved_target(
@@ -7308,6 +7809,12 @@ def linked_git_broker_test_agent(
         "work_root": str(work_root),
         "cwd": str(work_root),
         "tmux_pane_id": "%12",
+        "tmux_session": "agent-pbx-runtime-operator-7-fork-linked",
+        "runtime_server_id": runtime_server_id(
+            Path("/run/user/1000/agent-pbx/runtime.sock")
+        ),
+        "runtime_server_mode": "dedicated",
+        "fork_codex_session_id": "session-operator-fork",
     }
     if linked is not None:
         metadata["linked_git_admin"] = linked
@@ -7667,9 +8174,34 @@ async def test_tui_linked_git_broker_requires_exact_stopped_terminal_posture(
             LinkedGitBrokerTuiContext,
         )
 
+        unrelated_mapping = {"entity_id": "operator-8", "state": "ready"}
+        app.tmux_runtime_mapping_by_agent["operator-8"] = unrelated_mapping
+        app.tmux_runtime_mapping_by_agent[fork_id] = (
+            inactive_missing_runtime_mapping(fork_id)
+        )
+        app.tmux_runtime_mapping_validated_at_by_agent[fork_id] = time.monotonic()
+        monkeypatch.setattr(
+            app,
+            "tmux_runtime_process_identity_is_absent",
+            lambda _pid, _ticks: True,
+        )
+        assert app.linked_git_broker_tui_context(fork_id) is None
+        assert fork_id in app.tmux_runtime_mapping_by_agent
+        assert app.clear_inactive_operator_fork_tmux_state(
+            fork_id,
+            app.agents[fork_id],
+            [],
+        )
+        assert fork_id not in app.tmux_runtime_mapping_by_agent
+        assert app.tmux_runtime_mapping_by_agent["operator-8"] is unrelated_mapping
+        assert isinstance(
+            app.linked_git_broker_tui_context(fork_id),
+            LinkedGitBrokerTuiContext,
+        )
+
         app.tmux_runtime_mapping_by_agent[fork_id] = {"pane_id": "%22"}
         assert app.linked_git_broker_tui_context(fork_id) is None
-        app.tmux_runtime_mapping_by_agent.clear()
+        app.tmux_runtime_mapping_by_agent.pop(fork_id)
         app.embedded_terminal_agent_id = fork_id
         assert app.linked_git_broker_tui_context(fork_id) is None
         app.embedded_terminal_agent_id = None

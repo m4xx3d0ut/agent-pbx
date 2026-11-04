@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -140,6 +141,7 @@ from .runtime_tmux import (
     runtime_pop_plan,
     restore_dedicated_runtime_exit_policy,
     tmux_client_attach_command,
+    tmux_socket_from_environment,
 )
 from .ui.actions import ActionRegistry
 from .ui.async_jobs import AsyncGenerationGate
@@ -16675,9 +16677,15 @@ class AgentPBXTUI(App[None]):
             self.end_embedded_terminal_transition(agent_id)
             self.tmux_visible_capture_key = None
             self.update_tmux_plan_selector_state(agent_id, "")
+            agent = self.agents.get(agent_id)
+            stopped_operator_fork = bool(
+                isinstance(agent, dict)
+                and self.operator_role(agent) == OPERATOR_ROLE_FORK
+                and not self.operator_fork_is_running(agent)
+            )
             self.record_tmux_liveness_state(
                 agent_id,
-                "stale" if mode == "stale" else mode,
+                "stale" if mode == "stale" or stopped_operator_fork else mode,
             )
             if mode == "stale":
                 self.update_tmux_status(
@@ -16880,17 +16888,36 @@ class AgentPBXTUI(App[None]):
                 headers=auth_headers(self.token),
             )
             if response.status_code == 404:
-                self.tmux_runtime_mapping_by_agent.pop(agent_id, None)
-                self.tmux_runtime_mapping_validated_at_by_agent.pop(agent_id, None)
-                self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+                self.clear_cached_tmux_runtime_mapping(agent_id)
                 return None
             response.raise_for_status()
             mapping = response.json()
         except Exception as exc:
             self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
             return None
+        validated_at = time.monotonic()
+        fresh_local_panes: list[tmux_support.TmuxPane] | None = None
+        if (
+            isinstance(mapping, dict)
+            and str(mapping.get("state") or "").strip().casefold() == "missing"
+        ):
+            try:
+                fresh_local_panes = await asyncio.to_thread(tmux_support.list_panes)
+            except Exception:
+                # Absence must be observed, never inferred from an unavailable
+                # local/outer tmux server query.
+                fresh_local_panes = None
+        if self.tmux_runtime_mapping_is_definitively_inactive_missing(
+            agent_id,
+            mapping,
+            validated_at=validated_at,
+            local_panes=fresh_local_panes,
+        ):
+            self.clear_cached_tmux_runtime_mapping(agent_id)
+            self.tmux_liveness_by_agent.pop(agent_id, None)
+            return None
         self.tmux_runtime_mapping_by_agent[agent_id] = mapping
-        self.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
+        self.tmux_runtime_mapping_validated_at_by_agent[agent_id] = validated_at
         if str(mapping.get("state") or "") == "ready":
             self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
         else:
@@ -16898,6 +16925,220 @@ class AgentPBXTUI(App[None]):
                 f"runtime mapping is {mapping.get('state') or 'unavailable'}"
             )
         return mapping
+
+    def clear_cached_tmux_runtime_mapping(self, agent_id: str) -> None:
+        """Discard only one TUI-local runtime mapping cache entry."""
+
+        self.tmux_runtime_mapping_by_agent.pop(agent_id, None)
+        self.tmux_runtime_mapping_validated_at_by_agent.pop(agent_id, None)
+        self.tmux_runtime_mapping_signature_by_agent.pop(agent_id, None)
+        self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+
+    def tmux_runtime_mapping_is_definitively_inactive_missing(
+        self,
+        agent_id: str,
+        mapping: Mapping[str, Any],
+        *,
+        validated_at: float | None = None,
+        allow_historical_target: bool = False,
+        local_panes: Iterable[tmux_support.TmuxPane] | None = None,
+    ) -> bool:
+        """Return whether one fresh missing mapping is safe to forget locally.
+
+        ``missing`` is accepted only when the daemon has freshly probed the exact
+        runtime server and found neither the registered pane nor a unique repair
+        candidate. Every active, leased, malformed, stale, or locally attached
+        condition remains evidence and therefore fails closed.
+        """
+
+        agent = self.agents.get(agent_id)
+        if not isinstance(agent, dict):
+            return False
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        if (
+            self.operator_role(agent) != OPERATOR_ROLE_FORK
+            or str(metadata.get("fork_purpose") or "").strip()
+            != DEFAULT_OPERATOR_FORK_PURPOSE
+            or str(metadata.get("access_mode") or "").strip()
+            != DEFAULT_OPERATOR_FORK_ACCESS_MODE
+            or str(agent.get("status") or "").strip().casefold() != "canceled"
+            or bool(agent.get("pbx_active", True))
+        ):
+            return False
+        if self.embedded_terminal_agent_id == agent_id:
+            return False
+        if self.embedded_terminal_transition_agent_id == agent_id:
+            return False
+        if not allow_historical_target and agent_id in self.tmux_agent_targets:
+            return False
+        if local_panes is None:
+            return False
+        if any(
+            self.tmux_pane_allowed_for_agent(agent, pane)
+            for pane in local_panes
+        ):
+            return False
+        liveness = self.tmux_liveness_by_agent.get(agent_id)
+        if liveness is not None and (
+            not isinstance(liveness, TmuxLiveness)
+            or liveness.state not in {"auto", "stale"}
+            or liveness.pane_id is not None
+        ):
+            return False
+
+        observed_at = (
+            float(validated_at)
+            if validated_at is not None
+            else float(self.tmux_runtime_mapping_validated_at_by_agent.get(agent_id, 0.0))
+        )
+        age = time.monotonic() - observed_at
+        if (
+            not math.isfinite(observed_at)
+            or not math.isfinite(age)
+            or observed_at <= 0
+            or age < 0
+            or age > TMUX_RUNTIME_MAPPING_CACHE_SECONDS
+        ):
+            return False
+
+        if str(mapping.get("entity_id") or "").strip() != agent_id:
+            return False
+        if str(mapping.get("state") or "").strip().casefold() != "missing":
+            return False
+        if mapping.get("writer_lease_active") is not False:
+            return False
+        if mapping.get("writer_client_id") not in {None, ""}:
+            return False
+        if mapping.get("writer_lease_expires_at") is not None:
+            return False
+
+        server_mode = str(mapping.get("server_mode") or "").strip().casefold()
+        if server_mode not in {mode.value for mode in RuntimeServerMode}:
+            return False
+        server_id = str(mapping.get("server_id") or "").strip()
+        socket_raw = str(mapping.get("socket_path") or "").strip()
+        session_name = str(mapping.get("session_name") or "").strip()
+        window_id = str(mapping.get("window_id") or "").strip()
+        pane_id = str(mapping.get("pane_id") or "").strip()
+        codex_session_id = str(mapping.get("codex_session_id") or "").strip()
+        metadata_server_id = str(metadata.get("runtime_server_id") or "").strip()
+        metadata_server_mode = (
+            str(metadata.get("runtime_server_mode") or "").strip().casefold()
+        )
+        metadata_session_name = str(metadata.get("tmux_session") or "").strip()
+        metadata_pane_id = str(metadata.get("tmux_pane_id") or "").strip()
+        metadata_codex_session_id = str(
+            metadata.get("fork_codex_session_id") or ""
+        ).strip()
+        if not all(
+            (
+                server_id,
+                socket_raw,
+                session_name,
+                window_id,
+                pane_id,
+                codex_session_id,
+                metadata_server_id,
+                metadata_server_mode,
+                metadata_session_name,
+                metadata_pane_id,
+                metadata_codex_session_id,
+            )
+        ):
+            return False
+        if (
+            metadata_server_id != server_id
+            or metadata_server_mode != server_mode
+            or metadata_session_name != session_name
+            or metadata_pane_id != pane_id
+            or metadata_codex_session_id != codex_session_id
+        ):
+            return False
+        socket_path = Path(socket_raw).expanduser()
+        if not socket_path.is_absolute():
+            return False
+        if runtime_server_id(socket_path) != server_id:
+            return False
+        try:
+            pane_pid = int(mapping.get("pane_pid") or 0)
+            expected_ticks = int(mapping.get("process_start_ticks") or 0)
+        except (TypeError, ValueError):
+            return False
+        if pane_pid <= 0 or expected_ticks <= 0:
+            return False
+        if not self.tmux_runtime_process_identity_is_absent(
+            pane_pid,
+            expected_ticks,
+        ):
+            return False
+
+        mapping_metadata = (
+            mapping.get("metadata") if isinstance(mapping.get("metadata"), dict) else {}
+        )
+        assessment = (
+            mapping_metadata.get("last_live_validation")
+            if isinstance(mapping_metadata.get("last_live_validation"), dict)
+            else None
+        )
+        try:
+            live_validated_at = float(mapping_metadata.get("live_validated_at") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        live_validation_age = time.time() - live_validated_at
+        if (
+            not isinstance(assessment, dict)
+            or str(assessment.get("state") or "").strip().casefold() != "missing"
+            or assessment.get("safe") is not False
+            or assessment.get("repair_pane_id") is not None
+            or not math.isfinite(live_validated_at)
+            or not math.isfinite(live_validation_age)
+            or live_validated_at <= 0
+            or live_validation_age < 0
+            or live_validation_age > TMUX_RUNTIME_MAPPING_CACHE_SECONDS
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def tmux_runtime_process_identity_is_absent(
+        pane_pid: int,
+        expected_start_ticks: int,
+    ) -> bool:
+        """Prove that the exact registered process identity no longer exists."""
+
+        observed_ticks = runtime_process_start_ticks(pane_pid)
+        if observed_ticks is not None:
+            return int(observed_ticks) != int(expected_start_ticks)
+        try:
+            os.stat(f"/proc/{pane_pid}")
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    @staticmethod
+    def tmux_runtime_mapping_is_on_distinct_server(
+        mapping: Mapping[str, Any],
+    ) -> bool:
+        """Compare one mapping with the server that owns unqualified pane rows."""
+
+        current_socket = tmux_socket_from_environment(os.getenv("TMUX"))
+        mapped_raw = str(mapping.get("socket_path") or "").strip()
+        mapped_server_id = str(mapping.get("server_id") or "").strip()
+        if current_socket is None or not mapped_raw or not mapped_server_id:
+            return False
+        mapped_socket = Path(mapped_raw).expanduser()
+        if not mapped_socket.is_absolute():
+            return False
+        if runtime_server_id(mapped_socket) != mapped_server_id:
+            return False
+        current_server_id = runtime_server_id(current_socket)
+        return (
+            current_server_id != mapped_server_id
+            and current_socket.resolve(strict=False)
+            != mapped_socket.resolve(strict=False)
+        )
 
     async def acquire_tmux_writer_lease(self, agent_id: str) -> dict[str, Any] | None:
         try:
@@ -17906,7 +18147,31 @@ class AgentPBXTUI(App[None]):
             return False
         if self.operator_fork_is_running(agent):
             return False
+        if (
+            self.embedded_terminal_agent_id == agent_id
+            or self.embedded_terminal_transition_agent_id == agent_id
+        ):
+            return False
         if any(self.tmux_pane_allowed_for_agent(agent, pane) for pane in panes):
+            return False
+        mapping = self.tmux_runtime_mapping_by_agent.get(agent_id)
+        missing_mapping = bool(
+            isinstance(mapping, dict)
+            and self.tmux_runtime_mapping_is_definitively_inactive_missing(
+                agent_id,
+                mapping,
+                allow_historical_target=True,
+                local_panes=panes,
+            )
+        )
+        if mapping is not None and not missing_mapping:
+            return False
+        liveness = self.tmux_liveness_by_agent.get(agent_id)
+        if liveness is not None and (
+            not isinstance(liveness, TmuxLiveness)
+            or liveness.state not in {"auto", "stale"}
+            or liveness.pane_id is not None
+        ):
             return False
         candidate_pane_ids = {
             str(self.tmux_agent_targets.get(agent_id) or "").strip(),
@@ -17920,13 +18185,21 @@ class AgentPBXTUI(App[None]):
             ).strip(),
         }
         candidate_pane_ids.discard("")
-        live_pane_ids = {pane.pane_id for pane in panes} | {
-            pane.target_label for pane in panes
-        }
-        if candidate_pane_ids and candidate_pane_ids & live_pane_ids:
+        colliding_panes = [
+            pane
+            for pane in panes
+            if pane.pane_id in candidate_pane_ids
+            or pane.target_label in candidate_pane_ids
+        ]
+        if colliding_panes and not (
+            missing_mapping
+            and isinstance(mapping, dict)
+            and self.tmux_runtime_mapping_is_on_distinct_server(mapping)
+        ):
             return False
         changed = (
             agent_id in self.tmux_agent_targets
+            or agent_id in self.tmux_runtime_mapping_by_agent
             or agent_id in self.tmux_direct_agent_modes
             or agent_id in self.tmux_manual_override_agent_ids
             or agent_id in self.tmux_liveness_by_agent
@@ -28733,10 +29006,7 @@ class AgentPBXTUI(App[None]):
 
     def clear_operator_tmux_state(self, agent_id: str) -> None:
         self.tmux_agent_targets.pop(agent_id, None)
-        self.tmux_runtime_mapping_by_agent.pop(agent_id, None)
-        self.tmux_runtime_mapping_validated_at_by_agent.pop(agent_id, None)
-        self.tmux_runtime_mapping_signature_by_agent.pop(agent_id, None)
-        self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
+        self.clear_cached_tmux_runtime_mapping(agent_id)
         self.tmux_direct_agent_modes.pop(agent_id, None)
         self.tmux_manual_override_agent_ids.discard(agent_id)
         self.tmux_detached_agent_ids.discard(agent_id)
