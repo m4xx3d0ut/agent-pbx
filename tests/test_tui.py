@@ -17915,6 +17915,158 @@ async def test_tui_operator_resume_no_target_preserves_explicit_agent_for_histor
     assert history_targets == [fork_agent_id]
 
 
+async def test_tui_resume_missing_fork_pane_preserves_fork_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    work_root = tmp_path / "operator-worktree"
+    source_cwd = tmp_path / "caller-source"
+    work_root.mkdir()
+    source_cwd.mkdir()
+    agent_id = "operator-7-fork-codex-workerbee-0c25d502"
+    retained_session_id = "fork-session"
+    source_session_id = "source-session"
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.tmux_features_available = True
+    launches: list[dict[str, object]] = []
+    registrations: list[dict[str, object]] = []
+    runtime_registrations: list[dict[str, object]] = []
+    sent: list[tuple[str, str, dict[str, object]]] = []
+
+    async def true_async(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    async def no_op_async(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def runtime_target(
+        _agent_id: str,
+        *,
+        fallback_session_name: str,
+    ) -> tuple[str, dict[str, str]]:
+        return fallback_session_name, {
+            "tmux_bin": "/opt/tmux-3.7c",
+            "socket_path": "/tmp/agent-pbx-test-runtime.sock",
+        }
+
+    async def record_fork(**kwargs: object) -> dict[str, object]:
+        registrations.append(kwargs)
+        metadata = kwargs["metadata"]
+        assert isinstance(metadata, dict)
+        return {
+            "fork_agent_id": agent_id,
+            "logical_operator_agent_id": kwargs["logical_operator_id"],
+            "source_caller_agent_id": kwargs["source_caller_agent_id"],
+            "source_codex_session_id": source_session_id,
+            "fork_track_id": kwargs["fork_track_id"],
+            "fork_purpose": kwargs["fork_purpose"],
+            "access_mode": kwargs["access_mode"],
+            "source_cwd": kwargs["source_cwd"],
+            "work_root": kwargs["work_root"],
+            "fork_codex_session_id": kwargs["fork_codex_session_id"],
+            "tmux_pane_id": kwargs["tmux_pane_id"],
+            "metadata": metadata,
+            "status": "running",
+        }
+
+    async def register_runtime(*_args: object, **kwargs: object) -> dict[str, object]:
+        runtime_registrations.append(kwargs)
+        return {"state": "ready", "pane_id": "%154"}
+
+    def launch_pane(**kwargs: object) -> str:
+        launches.append(kwargs)
+        return "%154"
+
+    def send_text(pane_id: str, message: str, **kwargs: object) -> None:
+        sent.append((pane_id, message, kwargs))
+
+    app.agents = {
+        agent_id: {
+            "agent_id": agent_id,
+            "agent_type": "operator",
+            "project": "workerbee",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "logical_operator_id": "operator-7",
+                "source_caller_agent_id": "codex-k1s-workerbee-oss-v1",
+                "source_codex_session_id": source_session_id,
+                "fork_codex_session_id": retained_session_id,
+                "fork_track_id": "default",
+                "fork_purpose": "edit",
+                "access_mode": "edit",
+                "source_cwd": str(source_cwd),
+                "work_root": str(work_root),
+                "cwd": str(work_root),
+                "launched_by": "agent-pbx-tui",
+            },
+        }
+    }
+    app.operator_session_candidates = lambda _agent_id: [  # type: ignore[method-assign]
+        OperatorSessionCandidate(
+            session_id=retained_session_id,
+            timestamp=1.0,
+            source="metadata.fork_codex_session_id",
+        )
+    ]
+    app.ensure_codex_resume_session_available = true_async  # type: ignore[method-assign]
+    app.ensure_operator_auth_ready = true_async  # type: ignore[method-assign]
+    app.configure_operator_codex_mcp = no_op_async  # type: ignore[method-assign]
+    app.linked_edit_fork_git_admin_plan = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=None)
+    )
+    app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
+    app.configured_runtime_launch_target = runtime_target  # type: ignore[method-assign]
+    app.kill_tui_owned_operator_pane = true_async  # type: ignore[method-assign]
+    app.tmux_pane_has_codex_session_lease_conflict = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    )
+    app.record_operator_fork = record_fork  # type: ignore[method-assign]
+    app.register_operator_root = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("fork resume must not register a root Operator")
+        )
+    )
+    app.register_launched_tmux_runtime = register_runtime  # type: ignore[method-assign]
+    app.refresh_agents = no_op_async  # type: ignore[method-assign]
+    app.open_latest_for_agent = true_async  # type: ignore[method-assign]
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "launch_pane", launch_pane)
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(tmux_support, "send_text", send_text)
+
+    await app.resume_selected_operator(agent_id=agent_id)
+
+    assert launches
+    launch = launches[0]
+    assert launch["cwd"] == str(work_root)
+    launch_env = launch["env"]
+    assert isinstance(launch_env, dict)
+    assert launch_env["AGENT_PBX_OPERATOR_ROLE"] == "fork"
+    assert launch_env["AGENT_PBX_LOGICAL_OPERATOR_ID"] == "operator-7"
+    assert launch_env["AGENT_PBX_SOURCE_CALLER_AGENT_ID"] == (
+        "codex-k1s-workerbee-oss-v1"
+    )
+    assert launch_env["AGENT_PBX_SOURCE_CODEX_SESSION_ID"] == source_session_id
+    assert launch_env["AGENT_PBX_OPERATOR_WORK_ROOT"] == str(work_root)
+    assert registrations
+    registration = registrations[0]
+    assert registration["fork_codex_session_id"] == retained_session_id
+    registered_metadata = registration["metadata"]
+    assert isinstance(registered_metadata, dict)
+    assert registered_metadata["operator_role"] == "fork"
+    assert registered_metadata["logical_operator_id"] == "operator-7"
+    assert registered_metadata["fork_codex_session_id"] == retained_session_id
+    assert runtime_registrations[0]["mapping_source"] == "operator_resume"
+    assert sent and sent[0][0] == "%154"
+    assert 'metadata.operator_role: "fork"' in sent[0][1]
+    assert "metadata.logical_operator_id: operator-7" in sent[0][1]
+    assert "This session is an Agent PBX fork" in sent[0][1]
+    assert "This root operator session" not in sent[0][1]
+
+
 async def test_tui_operator_history_modal_resumes_highlighted_candidate() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     resumed: list[tuple[str | None, str | None]] = []

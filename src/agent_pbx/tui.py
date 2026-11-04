@@ -23332,6 +23332,78 @@ class AgentPBXTUI(App[None]):
             ]
         )
 
+    def operator_fork_resume_identity(
+        self,
+        agent_id: str,
+        *,
+        cwd: str,
+    ) -> dict[str, str] | None:
+        """Return the durable fork identity required by a generic resume.
+
+        A missing-pane resume is shared by root Operators and forks.  Forks must
+        carry their source identity through the launch environment, PBX record,
+        and bootstrap prompt; silently falling back to root semantics would let
+        the resumed process coordinate outside its assigned fork boundary.
+        """
+
+        agent = self.agents.get(agent_id)
+        if not isinstance(agent, dict) or self.operator_role(agent) != OPERATOR_ROLE_FORK:
+            return None
+        metadata = self.operator_metadata_for(agent_id)
+        fork_track_id = self.normalize_operator_fork_track_id(
+            str(metadata.get("fork_track_id") or "")
+        )
+        fork_purpose = self.normalize_operator_fork_label(
+            str(metadata.get("fork_purpose") or ""),
+            default=(
+                DEFAULT_OPERATOR_FORK_PURPOSE
+                if fork_track_id == DEFAULT_OPERATOR_FORK_TRACK_ID
+                else REVIEW_OPERATOR_FORK_PURPOSE
+            ),
+        )
+        identity = {
+            "logical_operator_id": str(metadata.get("logical_operator_id") or "").strip(),
+            "source_caller_agent_id": str(
+                metadata.get("source_caller_agent_id") or ""
+            ).strip(),
+            "source_codex_session_id": str(
+                metadata.get("source_codex_session_id") or ""
+            ).strip(),
+            "fork_track_id": fork_track_id,
+            "fork_purpose": fork_purpose,
+            "access_mode": self.normalize_operator_fork_label(
+                str(metadata.get("access_mode") or ""),
+                default=(
+                    DEFAULT_OPERATOR_FORK_ACCESS_MODE
+                    if fork_purpose == DEFAULT_OPERATOR_FORK_PURPOSE
+                    else REVIEW_OPERATOR_FORK_ACCESS_MODE
+                ),
+            ),
+            "source_cwd": str(metadata.get("source_cwd") or cwd).strip() or cwd,
+            "work_root": str(
+                metadata.get("work_root") or metadata.get("cwd") or cwd
+            ).strip()
+            or cwd,
+            "review_launch_mode": self.normalize_review_operator_fork_launch_mode(
+                str(metadata.get("review_launch_mode") or "")
+            ),
+        }
+        missing = [
+            key
+            for key in (
+                "logical_operator_id",
+                "source_caller_agent_id",
+                "source_codex_session_id",
+            )
+            if not identity[key]
+        ]
+        if missing:
+            raise ValueError(
+                f"Refused to resume {agent_id}: fork identity is missing "
+                f"{', '.join(missing)}. Repair the fork mapping before resume."
+            )
+        return identity
+
     def operator_cwd(self) -> str:
         return os.getenv("AGENT_PBX_TUI_OPERATOR_CWD", os.getcwd()).strip() or os.getcwd()
 
@@ -29387,6 +29459,38 @@ class AgentPBXTUI(App[None]):
             or CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
         )
         cwd = str(metadata.get("cwd") or self.operator_cwd()).strip() or os.getcwd()
+        try:
+            fork_identity = self.operator_fork_resume_identity(agent_id, cwd=cwd)
+        except ValueError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        if fork_identity is not None:
+            cwd = fork_identity["work_root"]
+        fork_purpose = (
+            fork_identity["fork_purpose"]
+            if fork_identity is not None
+            else ""
+        )
+        access_mode = (
+            fork_identity["access_mode"]
+            if fork_identity is not None
+            else ""
+        )
+        git_admin_plan = None
+        if fork_identity is not None:
+            try:
+                git_admin_plan = await self.linked_edit_fork_git_admin_plan(
+                    cwd,
+                    fork_purpose=fork_purpose,
+                    access_mode=access_mode,
+                )
+            except LinkedWorktreeQualificationError as exc:
+                self.notify(
+                    f"Refused to resume {agent_id}: linked-worktree Git "
+                    f"administration did not qualify. {exc}",
+                    severity="error",
+                )
+                return
         codex_command = self.operator_codex_command()
         mcp_url = agent_pbx_mcp_url(self.server)
         try:
@@ -29417,11 +29521,26 @@ class AgentPBXTUI(App[None]):
             lifecycle_target=lifecycle_target,
         ):
             return
-        command = self.operator_resume_command(
-            codex_command,
-            target.session_id,
-            cd=cwd,
-            config_overrides=operator_agent_config_overrides(
+        if fork_identity is not None and fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
+            raw_review_servers = metadata.get("review_mcp_approval_servers", [])
+            review_servers = (
+                tuple(str(item) for item in raw_review_servers if str(item).strip())
+                if isinstance(raw_review_servers, (list, tuple))
+                else ()
+            )
+            if not review_servers:
+                review_servers = review_operator_mcp_approval_server_names()
+            launch_config_overrides = review_operator_config_overrides(
+                review_servers,
+                mcp_url=mcp_url,
+                codex_home=self.codex_home_dir(),
+                work_root=cwd,
+                terminal_mode=self.codex_terminal_mode,
+                workerbee_gateway_binding=workerbee_gateway_binding,
+            )
+            sandbox = "workspace-write"
+        else:
+            launch_config_overrides = operator_agent_config_overrides(
                 mcp_url=mcp_url,
                 codex_home=self.codex_home_dir(),
                 work_root=cwd,
@@ -29429,14 +29548,33 @@ class AgentPBXTUI(App[None]):
                 terminal_mode=self.codex_terminal_mode,
                 workerbee_gateway_binding=workerbee_gateway_binding,
             )
-            + codex_model_preset_config_overrides(launch_preset),
+            sandbox = None
+        launch_config_overrides.extend(
+            codex_model_preset_config_overrides(launch_preset)
         )
+        launch_config_overrides.extend(
+            self.linked_edit_fork_config_overrides(git_admin_plan)
+        )
+        command = self.operator_resume_command(
+            codex_command,
+            target.session_id,
+            cd=cwd,
+            sandbox=sandbox,
+            config_overrides=launch_config_overrides,
+        )
+        env_kwargs: dict[str, Any] = {}
+        if fork_identity is not None:
+            env_kwargs = {
+                "operator_role": OPERATOR_ROLE_FORK,
+                **fork_identity,
+            }
         env = self.operator_launch_env(
             agent_id=agent_id,
             cwd=cwd,
             mcp_url=mcp_url,
             model_preset=launch_preset,
             workerbee_gateway_binding=workerbee_gateway_binding,
+            **env_kwargs,
         )
         env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = target.session_id
         try:
@@ -29492,21 +29630,59 @@ class AgentPBXTUI(App[None]):
             self.save_settings()
             return
         try:
-            await self.register_operator_root(
-                agent_id,
-                cwd=cwd,
-                codex_command=codex_command,
-                mcp_url=mcp_url,
-                session_name=session_name,
-                tmux_pane_id=resumed_pane_id,
-                resumed_codex_session_id=target.session_id,
-                operator_session_history=history,
-                model_preset=launch_preset,
-                workerbee_gateway_binding=workerbee_gateway_binding,
-            )
+            if fork_identity is None:
+                await self.register_operator_root(
+                    agent_id,
+                    cwd=cwd,
+                    codex_command=codex_command,
+                    mcp_url=mcp_url,
+                    session_name=session_name,
+                    tmux_pane_id=resumed_pane_id,
+                    resumed_codex_session_id=target.session_id,
+                    operator_session_history=history,
+                    model_preset=launch_preset,
+                    workerbee_gateway_binding=workerbee_gateway_binding,
+                )
+            else:
+                fork_metadata = {
+                    **metadata,
+                    **fork_identity,
+                    "agent_type": OPERATOR_AGENT_TYPE,
+                    "operator_role": OPERATOR_ROLE_FORK,
+                    "reporting_agent_id": agent_id,
+                    "cwd": cwd,
+                    "tmux_session": session_name,
+                    "tmux_pane_id": resumed_pane_id,
+                    "fork_codex_session_id": target.session_id,
+                    "last_resume_codex_session_id": target.session_id,
+                    "operator_session_history": history,
+                    **launch_preset.metadata(),
+                    **self.workerbee_gateway_metadata(workerbee_gateway_binding),
+                }
+                if git_admin_plan is not None:
+                    fork_metadata["linked_git_admin"] = git_admin_plan.public_dict()
+                else:
+                    fork_metadata.pop("linked_git_admin", None)
+                fork = await self.record_operator_fork(
+                    logical_operator_id=fork_identity["logical_operator_id"],
+                    source_caller_agent_id=fork_identity["source_caller_agent_id"],
+                    fork_agent_id=agent_id,
+                    tmux_pane_id=resumed_pane_id,
+                    metadata=fork_metadata,
+                    fork_track_id=fork_identity["fork_track_id"],
+                    fork_purpose=fork_purpose,
+                    access_mode=access_mode,
+                    source_cwd=fork_identity["source_cwd"],
+                    work_root=cwd,
+                    fork_codex_session_id=target.session_id,
+                )
+                if isinstance(fork, dict):
+                    self.agents[agent_id] = self.operator_fork_record_agent(fork)
         except Exception as exc:
+            registration_kind = "fork" if fork_identity is not None else "root"
             self.notify(
-                f"Resumed pane launched, but PBX registration failed: {exc}",
+                f"Resumed pane launched, but PBX {registration_kind} registration "
+                f"failed: {exc}",
                 severity="warning",
             )
         try:
@@ -29523,11 +29699,16 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
         await asyncio.sleep(1.0)
+        bootstrap_kwargs: dict[str, Any] = fork_identity or {}
         try:
             await asyncio.to_thread(
                 tmux_support.send_text,
                 resumed_pane_id,
-                self.operator_bootstrap_prompt(agent_id, cwd),
+                self.operator_bootstrap_prompt(
+                    agent_id,
+                    cwd,
+                    **bootstrap_kwargs,
+                ),
                 **runtime_kwargs,
             )
             sent = True
