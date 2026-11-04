@@ -254,7 +254,17 @@ def test_trusted_assignment_coordinates_workerbee_and_pins_set_version(
     metadata = store.get_agent("operator-7-fork-edit")["metadata"]
     assert metadata["workerbee_mcp_profile"] == "local-deploy"
     assert metadata["operator_authority_workspace_roots"] == [str(first), str(second)]
+    assert metadata["operator_authority_git_common_dirs"] == [
+        str(first / ".git"),
+        str(second / ".git"),
+    ]
     assert metadata["operator_authority_requires_restart"] is True
+
+    activated = service.mark_activated("operator-7-fork-edit")
+    assert activated["pending_activation"] is False
+    activated_metadata = store.get_agent("operator-7-fork-edit")["metadata"]
+    assert activated_metadata["operator_authority_requires_restart"] is False
+    assert activated_metadata["operator_authority_activated_profile"] == "trusted-workbench"
 
 
 def test_activation_allows_new_commit_but_rejects_topology_drift(
@@ -371,6 +381,12 @@ def test_control_and_profile_ceilings_fail_closed(tmp_path: Path) -> None:
 
 def test_launch_overrides_are_exact_and_review_forks_ignore_them(tmp_path: Path) -> None:
     roots = [str(tmp_path / "first"), str(tmp_path / "second")]
+    Path(roots[0]).mkdir()
+    Path(roots[1]).mkdir()
+    (Path(roots[0]) / ".env").write_text("SECRET=redacted\n", encoding="utf-8")
+    (Path(roots[1]) / ".env.local").write_text(
+        "SECRET=redacted\n", encoding="utf-8"
+    )
     overrides = operator_authority_launch_overrides(
         {
             "operator_authority_profile": "trusted-workbench",
@@ -381,6 +397,13 @@ def test_launch_overrides_are_exact_and_review_forks_ignore_them(tmp_path: Path)
 
     assert overrides[0][0] == "permissions.agent-pbx-trusted-workbench"
     assert overrides[0][1]["workspace_roots"] == {root: True for root in roots}
+    filesystem = overrides[0][1]["filesystem"]
+    assert filesystem[":workspace_roots"] == {".": "write", ".git": "write"}
+    assert filesystem[str(Path(roots[0]) / ".env")] == "deny"
+    assert filesystem[str(Path(roots[1]) / ".env.local")] == "deny"
+    assert str(Path(roots[0]) / ".env.production") not in filesystem
+    assert "glob_scan_max_depth" not in filesystem
+    assert not any("*" in path for path in filesystem)
     assert overrides[1] == ("default_permissions", "agent-pbx-trusted-workbench")
     assert operator_authority_launch_overrides(
         {
@@ -398,6 +421,51 @@ def test_launch_overrides_are_exact_and_review_forks_ignore_them(tmp_path: Path)
             "access_mode": "review_readonly",
         }
     ) == "workspace-write"
+
+
+def test_launch_overrides_use_common_git_root_instead_of_narrow_admin_mounts(
+    tmp_path: Path,
+) -> None:
+    main = tmp_path / "main"
+    linked = tmp_path / "linked"
+    common = main / ".git"
+    narrow = common / "refs" / "heads" / "pbx-operator-7"
+
+    overrides = operator_authority_launch_overrides(
+        {
+            "operator_authority_profile": "trusted-workbench",
+            "operator_authority_workspace_roots": [str(linked)],
+            "operator_authority_git_common_dirs": [str(common)],
+            "operator_authority_git_admin_paths": [str(narrow)],
+            "access_mode": "edit",
+        }
+    )
+
+    permission = overrides[0][1]
+    assert permission["workspace_roots"] == {
+        str(linked): True,
+        str(common): True,
+    }
+    assert str(narrow) not in permission["filesystem"]
+
+
+def test_launch_overrides_do_not_duplicate_nested_common_git_root(tmp_path: Path) -> None:
+    main = tmp_path / "main"
+    linked = tmp_path / "linked"
+
+    overrides = operator_authority_launch_overrides(
+        {
+            "operator_authority_profile": "trusted-workbench",
+            "operator_authority_workspace_roots": [str(main), str(linked)],
+            "operator_authority_git_common_dirs": [str(main / ".git")],
+            "access_mode": "edit",
+        }
+    )
+
+    assert overrides[0][1]["workspace_roots"] == {
+        str(main): True,
+        str(linked): True,
+    }
 
 
 def test_operator_authority_api_saves_set_and_assigns_profile(

@@ -26380,6 +26380,7 @@ def test_tui_operator_config_includes_exact_trusted_workbench_permissions() -> N
             "operator_authority_profile": "trusted-workbench",
             "operator_authority_workspace_roots": [first, second],
             "operator_authority_git_admin_paths": [f"{first}/.git/objects"],
+            "operator_authority_git_common_dirs": [f"{first}/.git"],
             "access_mode": "edit",
         },
     )
@@ -26391,7 +26392,7 @@ def test_tui_operator_config_includes_exact_trusted_workbench_permissions() -> N
     )
     assert first in permission
     assert second in permission
-    assert f"{first}/.git/objects" in permission
+    assert f"{first}/.git/objects" not in permission
     assert 'default_permissions="agent-pbx-trusted-workbench"' in overrides
 
 
@@ -26410,6 +26411,85 @@ def test_tui_review_operator_ignores_trusted_workbench_permissions() -> None:
         item.startswith("permissions.agent-pbx-trusted-workbench=")
         for item in overrides
     )
+
+
+async def test_tui_marks_pending_fork_authority_after_stale_projection() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    agent_id = "operator-7-fork-caller-edit"
+    app.agents[agent_id] = {
+        "agent_id": agent_id,
+        "agent_type": "operator",
+        "metadata": {"operator_role": "fork", "access_mode": "edit"},
+    }
+    calls: list[tuple[str, str]] = []
+
+    class Response:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.payload
+
+    class Client:
+        async def get(self, path, **_kwargs):  # type: ignore[no-untyped-def]
+            calls.append(("GET", path))
+            return Response(
+                {
+                    "effective_profile": "trusted-workbench",
+                    "pending_activation": True,
+                }
+            )
+
+        async def post(self, path, **_kwargs):  # type: ignore[no-untyped-def]
+            calls.append(("POST", path))
+            return Response({"pending_activation": False})
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    await app.mark_operator_authority_activated(agent_id)
+
+    encoded_path = f"/v2/agents/{agent_id}/operator-authority"
+    assert calls == [
+        ("GET", encoded_path),
+        ("POST", f"{encoded_path}/activated"),
+    ]
+    assert app.agents[agent_id]["metadata"]["operator_authority_requires_restart"] is False
+
+
+async def test_tui_does_not_mark_authority_without_pending_assignment() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    agent_id = "operator-7-fork-caller-edit"
+    app.agents[agent_id] = {
+        "agent_id": agent_id,
+        "agent_type": "operator",
+        "metadata": {"operator_role": "fork", "access_mode": "edit"},
+    }
+    calls: list[tuple[str, str]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"effective_profile": "scoped-edit", "pending_activation": False}
+
+    class Client:
+        async def get(self, path, **_kwargs):  # type: ignore[no-untyped-def]
+            calls.append(("GET", path))
+            return Response()
+
+        async def post(self, path, **_kwargs):  # type: ignore[no-untyped-def]
+            calls.append(("POST", path))
+            return Response()
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    await app.mark_operator_authority_activated(agent_id)
+
+    assert calls == [("GET", f"/v2/agents/{agent_id}/operator-authority")]
 
 
 def test_tui_root_operator_config_includes_campaign_lifecycle_tools(

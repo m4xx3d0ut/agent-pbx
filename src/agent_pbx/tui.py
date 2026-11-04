@@ -25554,6 +25554,7 @@ class AgentPBXTUI(App[None]):
                 "operator_authority_profile_label",
                 "operator_authority_workspace_roots",
                 "operator_authority_git_admin_paths",
+                "operator_authority_git_common_dirs",
                 "operator_workspace_set_id",
                 "operator_workspace_set_version",
                 "operator_workspace_set_digest",
@@ -36725,6 +36726,13 @@ class AgentPBXTUI(App[None]):
                         for path in item.get("git_admin_paths", [])
                     }
                 ),
+                "operator_authority_git_common_dirs": sorted(
+                    {
+                        str(item.get("git_common_dir"))
+                        for item in members
+                        if str(item.get("git_common_dir") or "").strip()
+                    }
+                ),
                 "operator_workspace_set_id": workspace_set.get("set_id"),
                 "operator_workspace_set_version": workspace_set.get("version"),
                 "operator_workspace_set_digest": workspace_set.get("member_digest"),
@@ -36745,7 +36753,27 @@ class AgentPBXTUI(App[None]):
     async def mark_operator_authority_activated(self, agent_id: str) -> None:
         metadata = self.agent_metadata(self.agents.get(agent_id))
         if not metadata.get("operator_authority_profile"):
-            return
+            # Fork registration can briefly replace the hydrated Agent record
+            # with a fork projection that predates its durable authority
+            # assignment.  Read the authoritative view before deciding there
+            # is nothing to activate; otherwise a successful fork restart can
+            # remain marked pending indefinitely.
+            try:
+                authority_response = await self.api_client().get(
+                    f"/v2/agents/{quote(agent_id, safe='')}/operator-authority",
+                    headers=auth_headers(self.token),
+                    timeout=15,
+                )
+                authority_response.raise_for_status()
+                authority = dict(authority_response.json())
+            except Exception as exc:
+                self.notify(
+                    f"{agent_id} restarted, but authority state could not be verified: {exc}",
+                    severity="warning",
+                )
+                return
+            if not authority.get("pending_activation"):
+                return
         try:
             response = await self.api_client().post(
                 f"/v2/agents/{quote(agent_id, safe='')}/operator-authority/activated",

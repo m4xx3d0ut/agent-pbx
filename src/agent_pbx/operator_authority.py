@@ -57,6 +57,14 @@ _DEFAULT_COLLECTION_EXCLUDES = {
     "temp",
     "tmp",
 }
+_TRUSTED_WORKBENCH_SECRET_NAMES = (
+    ".env",
+    ".env.local",
+    ".env.development",
+    ".env.production",
+    ".env.test",
+    ".envrc",
+)
 
 
 class OperatorAuthorityError(RuntimeError):
@@ -484,6 +492,13 @@ class OperatorAuthorityService:
                 for path in item.get("git_admin_paths", [])
             }
         )
+        git_common_dirs = sorted(
+            {
+                str(item.get("git_common_dir"))
+                for item in (workspace_set or {}).get("members", [])
+                if str(item.get("git_common_dir") or "").strip()
+            }
+        )
         current = now_ts()
         with self.store.connect() as conn:
             conn.execute(
@@ -519,6 +534,7 @@ class OperatorAuthorityService:
             "operator_authority_profile_label": label,
             "operator_authority_workspace_roots": roots,
             "operator_authority_git_admin_paths": git_admin_paths,
+            "operator_authority_git_common_dirs": git_common_dirs,
             "operator_authority_requires_restart": True,
             "operator_authority_updated_by": str(updated_by or "local")[:255],
             "operator_workspace_set_id": workspace_set["set_id"] if workspace_set else None,
@@ -553,16 +569,17 @@ class OperatorAuthorityService:
                     "Trusted Workbench activation requires its pinned workspace set.",
                 )
             self.validate_workspace_set(workspace_set)
+        activation = {
+            "operator_authority_requires_restart": False,
+            "operator_authority_activated_at": now_ts(),
+            "operator_authority_activated_profile": view["effective_profile"],
+            "operator_authority_activated_workspace_set_digest": workspace_set.get(
+                "member_digest"
+            ),
+        }
         updated = self.store.merge_agent_metadata(
             agent_id,
-            {
-                "operator_authority_requires_restart": False,
-                "operator_authority_activated_at": now_ts(),
-                "operator_authority_activated_profile": view["effective_profile"],
-                "operator_authority_activated_workspace_set_digest": workspace_set.get(
-                    "member_digest"
-                ),
-            },
+            activation,
             event_type="operator_authority_activated",
             event_payload={
                 "agent_id": agent_id,
@@ -576,6 +593,11 @@ class OperatorAuthorityService:
             raise OperatorAuthorityError(
                 "OPERATOR_AUTHORITY_AGENT_NOT_FOUND", "Operator is not registered."
             )
+        # Operator fork identity and policy are hydrated from the durable fork
+        # record over the Agent row. Keep the activation marker aligned there
+        # as well, otherwise a successful edit-fork restart still appears
+        # pending as soon as the Agent is read back.
+        self.store.merge_operator_fork_metadata(agent_id, activation)
         return self.get_assignment(agent_id)
 
     def validate_workspace_set(self, workspace_set: Mapping[str, Any]) -> dict[str, Any]:
@@ -946,19 +968,31 @@ def operator_authority_launch_overrides(
     )
     if not roots:
         return ()
+    raw_git_common_dirs = metadata.get("operator_authority_git_common_dirs")
+    git_common_dirs = tuple(
+        str(Path(str(item)).expanduser().resolve(strict=False))
+        for item in raw_git_common_dirs or ()
+        if str(item or "").strip()
+    )
+    permission_roots = list(roots)
+    root_paths = tuple(Path(root) for root in roots)
+    for common_dir in git_common_dirs:
+        common_path = Path(common_dir)
+        if any(
+            common_path == root_path or common_path.is_relative_to(root_path)
+            for root_path in root_paths
+        ):
+            continue
+        permission_roots.append(common_dir)
     permission_name = "agent-pbx-trusted-workbench"
     definition = {
         "description": "Agent PBX explicit multi-project Trusted Workbench",
         "extends": ":workspace",
-        "workspace_roots": {root: True for root in roots},
+        "workspace_roots": {root: True for root in permission_roots},
         "filesystem": {
-            "glob_scan_max_depth": 4,
             ":workspace_roots": {
                 ".": "write",
                 ".git": "write",
-                "**/.env": "deny",
-                "**/.env.*": "deny",
-                "**/*.env": "deny",
             },
         },
         "network": {
@@ -967,13 +1001,26 @@ def operator_authority_launch_overrides(
             "domains": {"*": "allow"},
         },
     }
-    raw_git_admin_paths = metadata.get("operator_authority_git_admin_paths")
-    for item in raw_git_admin_paths or ():
-        text = str(item or "").strip()
-        if text:
-            definition["filesystem"][
-                str(Path(text).expanduser().resolve(strict=False))
-            ] = "write"
+    # Codex expands filesystem glob rules with ripgrep while building its
+    # bubblewrap command. A legitimate project may contain unreadable runtime
+    # artifacts (for example a root-owned crash-report directory); recursive
+    # ``**/.env*`` rules then make the entire session fail before the first
+    # turn. Deny existing common project-root secret files through literal
+    # paths. Do not add absent paths: bubblewrap creates read-only mount targets
+    # for them in the host checkout. The profile still extends Codex's managed
+    # ``:workspace`` baseline for its built-in protections.
+    for root in roots:
+        for name in _TRUSTED_WORKBENCH_SECRET_NAMES:
+            candidate = Path(root) / name
+            if candidate.exists() or candidate.is_symlink():
+                definition["filesystem"][str(candidate)] = "deny"
+    # Trusted Workbench grants the selected checkout roots and, when a linked
+    # worktree's common Git directory is not already beneath one of them, that
+    # exact common directory as another sandbox root. Do not mount the narrow
+    # writable ref/reflog namespaces used by the stricter edit-fork profile:
+    # Codex protects metadata-like children below each writable mount and can
+    # leave those mount targets inside refs/heads, invalidating Git namespace
+    # qualification on the next launch.
     return (
         (f"permissions.{permission_name}", definition),
         ("default_permissions", permission_name),
