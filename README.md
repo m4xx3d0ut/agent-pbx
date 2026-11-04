@@ -494,11 +494,15 @@ boundary. A qualifying branch must use a dedicated namespace such as
 `pbx/<fork-id>` with no sibling refs in that namespace. The generated Codex
 permission profile adds write access only to the active worktree admin
 directory, shared object database, and that branch's dedicated ref/reflog
-directories. It never grants the common `.git` root, sibling worktree admin
-directories, configuration, or hooks. Standalone repositories and non-Git
-projects retain their existing behavior; review/read-only forks never receive
-this profile. Ambiguous, detached, bare, malformed, symlinked, unapproved, or
-legacy-`sandbox_mode` configurations fail before a pane is launched or replaced.
+directories. These are sandbox filesystem grants, never Codex workspace roots
+or `--add-dir` inputs. The profile never grants the common `.git` root, sibling
+worktree admin directories, configuration, or hooks. Standalone repositories
+and non-Git projects retain their existing behavior; review/read-only forks
+never receive this profile. Ambiguous, detached, bare, malformed, symlinked,
+unapproved, or legacy-`sandbox_mode` configurations fail before a pane is
+launched or replaced. Codex 0.166 also fails closed when the selected base
+profile contains split secret/read/deny filesystem rules: the legacy writable-
+roots alternative cannot retain those rules and grant the linked index safely.
 
 Review forks should treat the source checkout as read-only and write only under
 their configured `work_root`. If a finding requires edits in the source repo,
@@ -1429,7 +1433,10 @@ explicit restart creates a fresh pane on the configured managed tmux server,
 resumes the preserved Codex session, registers and verifies the new mapping,
 and leaves the stale or absent pane reference behind. Agent PBX refuses to
 create a pane when the daemon cannot verify mapping state, preventing an
-unreachable runtime from being duplicated. Use `/codex update` to ask the Agent
+unreachable runtime from being duplicated. Existing-pane stop, purge, restart,
+and resume actions require an exact executable/socket/server/session/window/pane
+match and never fall back to the process-default tmux server; colliding pane IDs
+therefore fail safely. Use `/codex update` to ask the Agent
 PBX daemon to run the allowlisted npm update for
 `@openai/codex`, then use `/restart` or `/codex restart` to move long-lived
 caller, root-operator, and fork panes onto the updated executable. TUI-owned

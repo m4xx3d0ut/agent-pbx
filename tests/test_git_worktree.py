@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import shutil
 import subprocess
+from uuid import uuid4
 
 import pytest
 
@@ -12,6 +14,8 @@ from agent_pbx.git_worktree import (
     LinkedWorktreeQualificationError,
     qualify_linked_worktree_git_admin,
 )
+from agent_pbx.codex_launch import codex_config_override
+from agent_pbx.codex.event_bridge import AppServerJsonlClient
 
 
 @dataclass(frozen=True)
@@ -81,22 +85,297 @@ def test_linked_edit_plan_is_minimal_and_supports_stage_and_commit(tmp_path: Pat
     assert common / "worktrees" not in plan.writable_paths
     assert sibling_gitdir not in plan.writable_paths
     assert not any(sibling_gitdir.is_relative_to(path) for path in plan.writable_paths)
-    assert plan.config_overrides() == (
-        (
-            f"permissions.{LINKED_EDIT_PERMISSION_PROFILE}",
-            {
-                "extends": ":workspace",
-                "filesystem": {str(path): "write" for path in plan.writable_paths},
-            },
-        ),
-        ("default_permissions", LINKED_EDIT_PERMISSION_PROFILE),
+    profile_key, profile = plan.config_overrides()[0]
+    assert profile_key == f"permissions.{LINKED_EDIT_PERMISSION_PROFILE}"
+    assert profile["extends"] == ":workspace"
+    assert profile["filesystem"] == {
+        str(path): "write" for path in plan.writable_paths
+    }
+    assert "workspace_roots" not in profile
+    assert plan.config_overrides()[1] == (
+        "default_permissions",
+        LINKED_EDIT_PERMISSION_PROFILE,
     )
+    assert plan.public_dict()["grant_scope"] == "sandbox_filesystem_only"
+    assert plan.public_dict()["additional_workspace_roots"] == []
 
     (fixture.linked / "change.txt").write_text("qualified\n", encoding="utf-8")
     _git(fixture.linked, "add", "change.txt")
     _git(fixture.linked, "commit", "-m", "qualified linked edit")
     assert _git(fixture.linked, "status", "--short") == ""
     assert _git(fixture.linked, "log", "-1", "--format=%s") == "qualified linked edit"
+
+
+@pytest.mark.skipif(
+    os.getenv("AGENT_PBX_RUN_CODEX_SANDBOX_CANARY") != "1"
+    or shutil.which("codex") is None,
+    reason="requires an explicitly enabled local Codex sandbox canary",
+)
+def test_codex_sandbox_profile_writes_git_admin_without_bootstrap_pollution(
+    tmp_path: Path,
+) -> None:
+    """Exercise the generated profile without contacting a model provider."""
+
+    fixture = _linked_fixture(tmp_path)
+    plan = _qualify(fixture)
+    assert plan is not None
+    (fixture.linked / "canary.txt").write_text("sandbox canary\n", encoding="utf-8")
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    profile_key, profile_value = plan.config_overrides()[0]
+    command = [
+        shutil.which("codex") or "codex",
+        "sandbox",
+        "-C",
+        str(fixture.linked),
+        "-c",
+        codex_config_override(profile_key, profile_value),
+        "-P",
+        plan.permission_profile,
+        "--",
+        "sh",
+        "-c",
+        "git add canary.txt && git commit -m 'sandbox canary'",
+    ]
+    subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CODEX_HOME": str(codex_home),
+            "GIT_AUTHOR_NAME": "Agent PBX Canary",
+            "GIT_AUTHOR_EMAIL": "agent-pbx-canary@example.invalid",
+            "GIT_COMMITTER_NAME": "Agent PBX Canary",
+            "GIT_COMMITTER_EMAIL": "agent-pbx-canary@example.invalid",
+        },
+    )
+
+    assert _git(fixture.linked, "status", "--short") == ""
+    assert _git(fixture.linked, "log", "-1", "--format=%s") == "sandbox canary"
+    bootstrap_names = (".git", ".agents", ".codex", ".aws")
+    assert [
+        child
+        for root in plan.writable_paths
+        for name in bootstrap_names
+        if (child := root / name).exists()
+    ] == []
+
+
+@pytest.mark.skipif(
+    os.getenv("AGENT_PBX_RUN_CODEX_SANDBOX_CANARY") != "1"
+    or shutil.which("codex") is None,
+    reason="requires an explicitly enabled local Codex startup canary",
+)
+@pytest.mark.asyncio
+async def test_codex_legacy_writable_roots_comparison_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compare the rejected split profile with legacy writable roots on 0.166."""
+
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        "\n".join(
+            (
+                'default_permissions = "pbx-workstation-dev"',
+                "",
+                "[permissions.pbx-workstation-dev]",
+                'extends = ":workspace"',
+                "",
+                "[permissions.pbx-workstation-dev.filesystem]",
+                "glob_scan_max_depth = 4",
+                '":workspace_roots" = { "." = "write", ".git" = "write", "**/.env" = "deny", "**/.env.*" = "deny" }',
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    current_root = tmp_path / "current"
+    current_root.mkdir()
+    fixture = _linked_fixture(current_root)
+    plan = _qualify(fixture)
+    assert plan is not None
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    unsafe_profile = {
+        "extends": "pbx-workstation-dev",
+        "filesystem": {str(path): "write" for path in plan.writable_paths},
+    }
+    command = [shutil.which("codex") or "codex", "app-server", "--stdio"]
+    current_overrides = (
+        (
+            f"permissions.{LINKED_EDIT_PERMISSION_PROFILE}",
+            unsafe_profile,
+        ),
+        ("default_permissions", LINKED_EDIT_PERMISSION_PROFILE),
+    )
+    for key, value in current_overrides:
+        command.extend(("-c", codex_config_override(key, value)))
+    client = AppServerJsonlClient(command, request_timeout=15.0)
+    try:
+        await client.start()
+        current_result = await client.request(
+            "thread/start",
+            {
+                "cwd": str(fixture.linked),
+                "ephemeral": True,
+            },
+        )
+        assert current_result.get("thread") or current_result.get("id")
+    finally:
+        await client.close()
+
+    current_sandbox = [
+        shutil.which("codex") or "codex",
+        "sandbox",
+        "-C",
+        str(fixture.linked),
+    ]
+    for key, value in current_overrides:
+        current_sandbox.extend(("-c", codex_config_override(key, value)))
+    current_sandbox.extend(("-P", LINKED_EDIT_PERMISSION_PROFILE, "--", "true"))
+    current_sandbox_result = subprocess.run(
+        current_sandbox,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CODEX_HOME": str(codex_home)},
+    )
+    assert current_sandbox_result.returncode == 0, current_sandbox_result.stderr
+
+    bootstrap_names = (".git", ".agents", ".codex", ".aws")
+    current_polluted = [
+        child
+        for root in plan.writable_paths
+        for name in bootstrap_names
+        if (child := root / name).exists()
+    ]
+    assert len(current_polluted) == 16
+    assert current_result.get("activePermissionProfile") == {
+        "id": LINKED_EDIT_PERMISSION_PROFILE,
+        "extends": "pbx-workstation-dev",
+    }
+
+    legacy_root = tmp_path / "legacy"
+    legacy_root.mkdir()
+    legacy = _linked_fixture(legacy_root)
+    legacy_plan = _qualify(legacy)
+    assert legacy_plan is not None
+    (legacy.linked / ".env").write_text("CANARY_SECRET=not-for-tools\n", encoding="utf-8")
+    (legacy.linked / "legacy-change.txt").write_text("legacy\n", encoding="utf-8")
+    unrelated_target = Path.home() / f".agent-pbx-sandbox-canary-{uuid4().hex}"
+    assert not unrelated_target.exists()
+    legacy_overrides = (
+        ("sandbox_mode", "workspace-write"),
+        (
+            "sandbox_workspace_write.writable_roots",
+            [str(path) for path in legacy_plan.writable_paths],
+        ),
+        ("sandbox_workspace_write.exclude_slash_tmp", True),
+        ("sandbox_workspace_write.exclude_tmpdir_env_var", True),
+    )
+    legacy_command = [shutil.which("codex") or "codex", "app-server", "--stdio"]
+    for key, value in legacy_overrides:
+        legacy_command.extend(("-c", codex_config_override(key, value)))
+    legacy_client = AppServerJsonlClient(legacy_command, request_timeout=15.0)
+    try:
+        await legacy_client.start()
+        legacy_config = await legacy_client.request(
+            "config/read",
+            {"cwd": str(legacy.linked), "includeLayers": False},
+        )
+        legacy_result = await legacy_client.request(
+            "thread/start",
+            {"cwd": str(legacy.linked), "ephemeral": True},
+        )
+    finally:
+        await legacy_client.close()
+
+    environment = {
+        **os.environ,
+        "CODEX_HOME": str(codex_home),
+        "GIT_AUTHOR_NAME": "Agent PBX Canary",
+        "GIT_AUTHOR_EMAIL": "agent-pbx-canary@example.invalid",
+        "GIT_COMMITTER_NAME": "Agent PBX Canary",
+        "GIT_COMMITTER_EMAIL": "agent-pbx-canary@example.invalid",
+    }
+
+    def legacy_sandbox(*inner: str) -> subprocess.CompletedProcess[str]:
+        argv = [
+            shutil.which("codex") or "codex",
+            "sandbox",
+            "-C",
+            str(legacy.linked),
+            "-P",
+            "pbx-workstation-dev",
+        ]
+        for key, value in legacy_overrides:
+            argv.extend(("-c", codex_config_override(key, value)))
+        argv.extend(("--", *inner))
+        return subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+    git_result = legacy_sandbox(
+        "sh",
+        "-c",
+        "git add legacy-change.txt && git commit -m 'legacy canary'",
+    )
+    secret_result = legacy_sandbox("cat", ".env")
+    try:
+        unrelated_result = legacy_sandbox("touch", str(unrelated_target))
+        unrelated_created = unrelated_target.exists()
+    finally:
+        unrelated_target.unlink(missing_ok=True)
+    legacy_polluted = [
+        child
+        for root in legacy_plan.writable_paths
+        for name in (".git", ".agents", ".codex", ".aws")
+        if (child := root / name).exists()
+    ]
+    active = legacy_result.get("activePermissionProfile") or {}
+    effective_config = legacy_config.get("config") or {}
+    assert effective_config.get("sandbox_mode") == "workspace-write"
+    assert (effective_config.get("sandbox_workspace_write") or {}).get(
+        "writable_roots"
+    ) == [str(path) for path in legacy_plan.writable_paths]
+    assert (effective_config.get("sandbox_workspace_write") or {}).get(
+        "exclude_slash_tmp"
+    ) is True
+    assert (effective_config.get("sandbox_workspace_write") or {}).get(
+        "exclude_tmpdir_env_var"
+    ) is True
+    gates = {
+        "base_profile_precedence_preserved": active.get("id")
+        == "pbx-workstation-dev",
+        "git_admin_operations_work": git_result.returncode == 0,
+        "no_bootstrap_pollution": not legacy_polluted,
+        "secret_deny_preserved": secret_result.returncode != 0,
+        "unrelated_write_denied": (
+            unrelated_result.returncode != 0 and not unrelated_created
+        ),
+    }
+    assert gates == {
+        "base_profile_precedence_preserved": False,
+        "git_admin_operations_work": False,
+        "no_bootstrap_pollution": True,
+        "secret_deny_preserved": True,
+        "unrelated_write_denied": True,
+    }, {
+        "gates": gates,
+        "active_permission_profile": active,
+        "current_pollution": current_polluted,
+        "legacy_pollution": legacy_polluted,
+        "git_stderr": git_result.stderr,
+        "secret_stdout": secret_result.stdout,
+        "unrelated_stderr": unrelated_result.stderr,
+    }
 
 
 @pytest.mark.parametrize(
@@ -332,7 +611,7 @@ def test_legacy_sandbox_mode_blocks_permission_profile(tmp_path: Path) -> None:
         _qualify(fixture, codex_home=codex_home)
 
 
-def test_linked_profile_extends_validated_workspace_based_user_profile(
+def test_linked_profile_materializes_safe_workspace_based_user_profile(
     tmp_path: Path,
 ) -> None:
     fixture = _linked_fixture(tmp_path)
@@ -347,7 +626,7 @@ def test_linked_profile_extends_validated_workspace_based_user_profile(
                 'extends = ":workspace"',
                 "",
                 "[permissions.trusted-workstation.filesystem]",
-                '":workspace_roots" = "write"',
+                '":workspace_roots" = { "." = "write", ".git" = "write" }',
             )
         ),
         encoding="utf-8",
@@ -359,7 +638,39 @@ def test_linked_profile_extends_validated_workspace_based_user_profile(
     assert plan.base_permission_profile == "trusted-workstation"
     profile = plan.config_overrides()[0][1]
     assert isinstance(profile, dict)
-    assert profile["extends"] == "trusted-workstation"
+    assert profile["extends"] == ":workspace"
+    assert profile["filesystem"] == {
+        str(path): "write" for path in plan.writable_paths
+    }
+    assert "workspace_roots" not in profile
+
+
+def test_base_profile_with_secret_deny_rules_fails_closed(
+    tmp_path: Path,
+) -> None:
+    fixture = _linked_fixture(tmp_path)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        "\n".join(
+            (
+                'default_permissions = "trusted-workstation"',
+                "",
+                "[permissions.trusted-workstation]",
+                'extends = ":workspace"',
+                "",
+                "[permissions.trusted-workstation.filesystem]",
+                '":workspace_roots" = { "." = "write", ".git" = "write", "**/.env" = "deny" }',
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        LinkedWorktreeQualificationError,
+        match="split policy.*protected metadata mount targets",
+    ):
+        _qualify(fixture, codex_home=codex_home)
 
 
 def test_base_profile_with_existing_git_admin_write_is_rejected(

@@ -65,6 +65,17 @@ administration writes. Legacy `sandbox_mode`, administrator-profile conflicts,
 bare/detached repositories, malformed pointers, sibling-admin collisions, and
 symlink or root ambiguity all fail closed.
 
+Those four paths are permission-profile filesystem entries only. Agent PBX
+never passes them as workspace roots or `--add-dir` inputs. Codex 0.166 can
+create protected `.git`, `.agents`, `.codex`, and `.aws` mount targets below
+external writable roots when a profile also needs split secret/read/deny rules.
+Agent PBX rejects that combination before launch. A provider-free app-server
+and sandbox canary also rejects the legacy
+`sandbox_workspace_write.writable_roots` alternative: config readback sees the
+roots, but the active profile provenance disappears, and explicitly retaining
+the trusted profile leaves the linked-worktree index read-only. No policy is
+silently weakened to make a linked fork writable.
+
 WorkerBee workspace placement is enforced by the daemon, independently of its
 tool profile. The public posture pins each lease to its checkout and requires
 controller approval. Broader workstation profiles may allow same-repository or

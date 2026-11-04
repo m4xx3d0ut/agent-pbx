@@ -17,6 +17,12 @@ recorded tmux binary and socket instead of the daemon's inherited shell tmux.
 This is essential when the host shell and managed runtime use different tmux
 versions.
 
+Lifecycle actions additionally re-list the recorded server and require one
+exact session/window/pane match before stop, purge, restart, or resume. Missing
+socket/server provenance, a reused pane ID, or a live identity mismatch performs
+zero mutation. The implementation never retries a destructive action against
+the process-default tmux server.
+
 When `AGENT_PBX_TMUX_BIN` selects a qualified absolute binary, daemon startup
 creates a private `runtime-bin/tmux` shim under the Agent PBX state root and
 prepends that directory to managed-runtime `PATH`. This also makes an ordinary
@@ -32,7 +38,11 @@ package update alone does not change a running Codex process. A qualified edit
 fork receives its launch-local permission profile only on a reviewed fresh
 launch, in-place restart/resume, or managed cross-server resume. The preflight
 runs before pane creation or replacement; failure leaves the existing pane and
-working tree untouched. Review forks retain their existing read-only sandbox.
+working tree untouched. The four Git-admin paths are sandbox filesystem grants,
+not workspace or `--add-dir` roots. Review forks retain their existing read-only
+sandbox. On Codex 0.166, a base profile with split secret/read/deny rules is not
+flattened or weakened; linked qualification fails closed until a provider-free
+canary proves a compatible representation.
 
 ## Embedded terminal
 
@@ -110,4 +120,8 @@ agent-pbx remote ssh-attach \
   successful resume, verify the same session, cwd, branch, and diff before
   staging. Do not relaunch callers or restart any other pane. If the branch
   namespace is shared or top-level, stop: branch migration is a separately
-  approved repository mutation and is never part of repair activation.
+  approved repository mutation and is never part of repair activation. If
+  qualification reports incompatible split filesystem policy on Codex 0.166,
+  stop as well: do not switch to legacy writable roots or remove secret-deny
+  rules. Preserve the session and tree until a reviewed Codex/runtime adapter
+  update passes the provider-free canary.

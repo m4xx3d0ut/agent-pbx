@@ -125,6 +125,7 @@ from .runtime_tmux import (
     resolve_runtime_tmux_server,
     runtime_mapping_tmux_binary,
     runtime_mapping_server_identity,
+    runtime_server_id,
     runtime_pop_plan,
     restore_dedicated_runtime_exit_policy,
     tmux_client_attach_command,
@@ -1108,6 +1109,27 @@ class OperatorSessionCandidate:
     source: str
     path: str = ""
     summary: str = ""
+
+
+@dataclass(frozen=True)
+class ManagedTmuxLifecycleTarget:
+    """One live pane proven against its authoritative managed-runtime mapping."""
+
+    agent_id: str
+    server_id: str
+    tmux_bin: str
+    socket_path: str
+    session_name: str
+    window_id: str
+    pane_id: str
+    pane: tmux_support.TmuxPane
+
+    @property
+    def runtime_kwargs(self) -> dict[str, str]:
+        return {
+            "tmux_bin": self.tmux_bin,
+            "socket_path": self.socket_path,
+        }
 
 
 class CodexSessionLeaseConflictError(RuntimeError):
@@ -18658,6 +18680,160 @@ class AgentPBXTUI(App[None]):
             "socket_path": socket_path,
         }
 
+    async def managed_tmux_lifecycle_target(
+        self,
+        agent_id: str,
+        *,
+        expected_pane_id: str | None = None,
+        action: str,
+    ) -> ManagedTmuxLifecycleTarget | None:
+        """Fail closed unless one pane matches the complete managed identity.
+
+        Pane ids are scoped to a tmux server and routinely collide across the
+        host's outer server and Agent PBX's managed server. Destructive
+        lifecycle operations must therefore never use a bare pane id or the
+        process default tmux socket.
+        """
+
+        def reject(reason: str) -> None:
+            self.notify(
+                f"Refused to {action} {agent_id}: {reason}. No tmux pane was changed.",
+                severity="error",
+            )
+
+        mapping = await self.fetch_tmux_runtime_mapping(agent_id)
+        if not isinstance(mapping, dict):
+            lookup_error = str(
+                self.tmux_runtime_mapping_error_by_agent.get(agent_id) or ""
+            ).strip()
+            reject(lookup_error or "no managed runtime mapping is available")
+            return None
+        if str(mapping.get("state") or "") != "ready":
+            reject(
+                f"managed runtime mapping is {mapping.get('state') or 'unavailable'}"
+            )
+            return None
+
+        entity_id = str(mapping.get("entity_id") or "").strip()
+        server_id = str(mapping.get("server_id") or "").strip()
+        socket_path = str(mapping.get("socket_path") or "").strip()
+        session_name = str(mapping.get("session_name") or "").strip()
+        window_id = str(mapping.get("window_id") or "").strip()
+        pane_id = str(mapping.get("pane_id") or "").strip()
+        missing = [
+            name
+            for name, value in (
+                ("entity_id", entity_id),
+                ("server_id", server_id),
+                ("socket_path", socket_path),
+                ("session_name", session_name),
+                ("window_id", window_id),
+                ("pane_id", pane_id),
+            )
+            if not value
+        ]
+        if missing:
+            reject(
+                "managed runtime provenance is incomplete "
+                f"(missing {', '.join(missing)})"
+            )
+            return None
+        if entity_id != agent_id:
+            reject(
+                f"runtime mapping belongs to {entity_id!r}, not the requested entity"
+            )
+            return None
+        if expected_pane_id and pane_id != expected_pane_id:
+            reject(
+                f"saved pane {expected_pane_id} does not match mapped pane {pane_id}"
+            )
+            return None
+        socket = Path(socket_path).expanduser()
+        if not socket.is_absolute():
+            reject("managed runtime socket is not an absolute path")
+            return None
+        expected_server_id = runtime_server_id(socket)
+        if server_id != expected_server_id:
+            reject(
+                f"runtime server id {server_id!r} does not match socket provenance "
+                f"{expected_server_id!r}"
+            )
+            return None
+
+        tmux_bin = runtime_mapping_tmux_binary(mapping)
+        runtime_kwargs = {
+            "tmux_bin": tmux_bin,
+            "socket_path": socket_path,
+        }
+        try:
+            panes = await asyncio.to_thread(
+                tmux_support.list_panes,
+                **runtime_kwargs,
+            )
+        except Exception as exc:
+            reject(f"managed runtime server could not be inspected ({exc})")
+            return None
+        pane_id_matches = [pane for pane in panes if pane.pane_id == pane_id]
+        exact = [
+            pane
+            for pane in pane_id_matches
+            if pane.session_name == session_name
+            and str(pane.window_id or pane.window_index) == window_id
+        ]
+        if len(exact) != 1:
+            if pane_id_matches:
+                live = ", ".join(
+                    f"{pane.session_name}:{pane.window_id or pane.window_index}:{pane.pane_id}"
+                    for pane in pane_id_matches
+                )
+                reject(
+                    "mapped session/window/pane identity does not match the live "
+                    f"managed target ({live})"
+                )
+            else:
+                reject(
+                    f"mapped pane {pane_id} is absent from managed server {server_id}"
+                )
+            return None
+        return ManagedTmuxLifecycleTarget(
+            agent_id=agent_id,
+            server_id=server_id,
+            tmux_bin=tmux_bin,
+            socket_path=socket_path,
+            session_name=session_name,
+            window_id=window_id,
+            pane_id=pane_id,
+            pane=exact[0],
+        )
+
+    async def qualified_tmux_lifecycle_pane(
+        self,
+        agent_id: str,
+        pane: tmux_support.TmuxPane,
+        *,
+        action: str,
+        target: ManagedTmuxLifecycleTarget | None = None,
+    ) -> ManagedTmuxLifecycleTarget | None:
+        target = target or await self.managed_tmux_lifecycle_target(
+            agent_id,
+            expected_pane_id=pane.pane_id,
+            action=action,
+        )
+        if target is None:
+            return None
+        if (
+            target.pane_id != pane.pane_id
+            or target.session_name != pane.session_name
+            or target.window_id != str(pane.window_id or pane.window_index)
+        ):
+            self.notify(
+                f"Refused to {action} {agent_id}: the supplied pane does not match "
+                "the qualified managed runtime. No tmux pane was changed.",
+                severity="error",
+            )
+            return None
+        return target
+
     @staticmethod
     def managed_runtime_session_name(entity_id: str) -> str:
         safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", entity_id).strip(".-") or "agent"
@@ -18967,6 +19143,8 @@ class AgentPBXTUI(App[None]):
         session_id: str,
         *,
         excluding_pane_id: str | None = None,
+        tmux_bin: str = "tmux",
+        socket_path: str | None = None,
     ) -> list[CodexResumeSessionOwner]:
         """Find live tmux panes that are actively resuming ``session_id``.
 
@@ -18974,8 +19152,14 @@ class AgentPBXTUI(App[None]):
         command after Codex has exited back to a shell.  A shell with an old
         ``codex resume`` start command must not block a safe restart.
         """
+        runtime_kwargs: dict[str, str | None] = {}
+        if socket_path is not None or tmux_bin != "tmux":
+            runtime_kwargs = {"tmux_bin": tmux_bin, "socket_path": socket_path}
         try:
-            panes = await asyncio.to_thread(tmux_support.list_panes)
+            panes = await asyncio.to_thread(
+                tmux_support.list_panes,
+                **runtime_kwargs,
+            )
         except Exception as exc:
             raise RuntimeError(f"unable to inspect tmux panes: {exc}") from exc
         owners: list[CodexResumeSessionOwner] = []
@@ -18985,11 +19169,16 @@ class AgentPBXTUI(App[None]):
             if not self.tmux_pane_current_process_may_be_codex(pane):
                 continue
             try:
-                if not await asyncio.to_thread(tmux_support.pane_is_live, pane.pane_id):
+                if not await asyncio.to_thread(
+                    tmux_support.pane_is_live,
+                    pane.pane_id,
+                    **runtime_kwargs,
+                ):
                     continue
                 start_command = await asyncio.to_thread(
                     tmux_support.pane_start_command,
                     pane.pane_id,
+                    **runtime_kwargs,
                 )
             except Exception as exc:
                 raise RuntimeError(
@@ -19013,12 +19202,16 @@ class AgentPBXTUI(App[None]):
         session_id: str,
         *,
         replacing_pane_id: str | None = None,
+        tmux_bin: str = "tmux",
+        socket_path: str | None = None,
     ) -> bool:
         """Refuse an in-place replacement that would enter Codex's lease dialog."""
         try:
             owners = await self.codex_resume_session_owners(
                 session_id,
                 excluding_pane_id=replacing_pane_id,
+                tmux_bin=tmux_bin,
+                socket_path=socket_path,
             )
         except Exception as exc:
             return self.record_runtime_migration_failure(
@@ -19168,11 +19361,14 @@ class AgentPBXTUI(App[None]):
         tmux_bin: str = "tmux",
         socket_path: str | None = None,
     ) -> bool:
-        runtime_kwargs: dict[str, str | None]
-        if socket_path is not None or tmux_bin != "tmux":
-            runtime_kwargs = {"tmux_bin": tmux_bin, "socket_path": socket_path}
-        else:
-            runtime_kwargs = self.runtime_tmux_command_kwargs_for_pane(pane_id)
+        if not socket_path:
+            self.notify(
+                f"Refused to stop {label}: no fully qualified managed tmux socket "
+                "was supplied. No tmux pane was changed.",
+                severity="error",
+            )
+            return False
+        runtime_kwargs = {"tmux_bin": tmux_bin, "socket_path": socket_path}
         try:
             exited = await asyncio.to_thread(
                 tmux_support.quit_pane,
@@ -19263,12 +19459,18 @@ class AgentPBXTUI(App[None]):
         socket_path: str | None = None,
     ) -> str:
         """Restart Codex in place and restore the prior launch if it cannot live."""
+        if not socket_path:
+            raise RuntimeError(
+                f"refused to restart {label}: no fully qualified managed tmux "
+                "socket was supplied; no process was replaced"
+            )
         failures: list[str] = []
         lease_conflict = False
         attempts = max(1, CODEX_RESTART_LAUNCH_ATTEMPTS)
-        runtime_kwargs: dict[str, str | None] = {}
-        if socket_path is not None or tmux_bin != "tmux":
-            runtime_kwargs = {"tmux_bin": tmux_bin, "socket_path": socket_path}
+        runtime_kwargs: dict[str, str | None] = {
+            "tmux_bin": tmux_bin,
+            "socket_path": socket_path,
+        }
         pane_guarded = await asyncio.to_thread(
             tmux_support.pane_exists,
             pane_id,
@@ -19592,9 +19794,19 @@ class AgentPBXTUI(App[None]):
         *,
         model_preset: CodexModelPreset | None = None,
         resume_candidate: OperatorSessionCandidate | None = None,
+        lifecycle_target: ManagedTmuxLifecycleTarget | None = None,
     ) -> bool:
-        pane_id = pane.pane_id
-        runtime_kwargs = self.runtime_tmux_command_kwargs(agent_id)
+        lifecycle_target = await self.qualified_tmux_lifecycle_pane(
+            agent_id,
+            pane,
+            action="restart",
+            target=lifecycle_target,
+        )
+        if lifecycle_target is None:
+            return False
+        pane = lifecycle_target.pane
+        pane_id = lifecycle_target.pane_id
+        runtime_kwargs = lifecycle_target.runtime_kwargs
         agent = self.agents.get(agent_id)
         metadata = self.agent_metadata(agent)
         effective_model_preset = self.restart_model_preset(
@@ -19617,6 +19829,7 @@ class AgentPBXTUI(App[None]):
             agent_id,
             target.session_id,
             replacing_pane_id=pane_id,
+            **runtime_kwargs,
         ):
             return False
         if not await self.ensure_operator_auth_ready():
@@ -19732,9 +19945,19 @@ class AgentPBXTUI(App[None]):
         pane: tmux_support.TmuxPane,
         *,
         model_preset: CodexModelPreset | None = None,
+        lifecycle_target: ManagedTmuxLifecycleTarget | None = None,
     ) -> bool:
+        lifecycle_target = await self.qualified_tmux_lifecycle_pane(
+            agent_id,
+            pane,
+            action="restart",
+            target=lifecycle_target,
+        )
+        if lifecycle_target is None:
+            return False
+        pane = lifecycle_target.pane
         agent = self.agents.get(agent_id)
-        runtime_kwargs = self.runtime_tmux_command_kwargs(agent_id)
+        runtime_kwargs = lifecycle_target.runtime_kwargs
         metadata = self.agent_metadata(agent)
         effective_model_preset = self.restart_model_preset(
             metadata, model_preset, operator=True
@@ -19957,6 +20180,7 @@ class AgentPBXTUI(App[None]):
             agent_id,
             target.session_id,
             replacing_pane_id=pane.pane_id,
+            **runtime_kwargs,
         ):
             return False
         try:
@@ -19991,7 +20215,10 @@ class AgentPBXTUI(App[None]):
                 fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
                 and review_launch_mode
                 != REVIEW_OPERATOR_FORK_LAUNCH_MODE_FRESH_CONTEXT
-                and await self.review_fork_pane_has_invalid_encrypted_content(new_pane_id)
+                and await self.review_fork_pane_has_invalid_encrypted_content(
+                    new_pane_id,
+                    **runtime_kwargs,
+                )
             ):
                 self.notify(
                     "Codex continuation failed encrypted-content verification; "
@@ -20090,9 +20317,19 @@ class AgentPBXTUI(App[None]):
         pane: tmux_support.TmuxPane,
         *,
         model_preset: CodexModelPreset | None = None,
+        lifecycle_target: ManagedTmuxLifecycleTarget | None = None,
     ) -> bool:
+        lifecycle_target = await self.qualified_tmux_lifecycle_pane(
+            agent_id,
+            pane,
+            action="restart",
+            target=lifecycle_target,
+        )
+        if lifecycle_target is None:
+            return False
+        pane = lifecycle_target.pane
         agent = self.agents.get(agent_id)
-        runtime_kwargs = self.runtime_tmux_command_kwargs(agent_id)
+        runtime_kwargs = lifecycle_target.runtime_kwargs
         if not isinstance(agent, dict):
             self.notify(f"{agent_id} is not loaded.", severity="warning")
             return False
@@ -20123,6 +20360,7 @@ class AgentPBXTUI(App[None]):
             agent_id,
             session_id,
             replacing_pane_id=pane.pane_id,
+            **runtime_kwargs,
         ):
             return False
         mcp_url = agent_pbx_mcp_url(self.server)
@@ -20294,10 +20532,12 @@ class AgentPBXTUI(App[None]):
             await self.refresh_events()
             await self.load_tmux_capture(agent_id)
             return True
-        status = self.query_one_or_none("#tmux-status", Static)
-        pane = await self.resolve_tmux_send_pane(agent_id, status=status)
-        if pane is None:
-            self.notify(f"No tmux pane found for {agent_id}.", severity="warning")
+        lifecycle_target = await self.managed_tmux_lifecycle_target(
+            agent_id,
+            expected_pane_id=str(mapping.get("pane_id") or "").strip() or None,
+            action="restart",
+        )
+        if lifecycle_target is None:
             if model_elevation_lease_id:
                 await self.finish_model_elevation_lease(
                     model_elevation_lease_id,
@@ -20305,24 +20545,28 @@ class AgentPBXTUI(App[None]):
                     transition={"reason": "runtime_pane_unavailable"},
                 )
             return False
+        pane = lifecycle_target.pane
         if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
             if self.operator_role(agent) == OPERATOR_ROLE_FORK:
                 restarted = await self.relaunch_operator_fork_codex(
                     agent_id,
                     pane,
                     model_preset=model_preset,
+                    lifecycle_target=lifecycle_target,
                 )
             else:
                 restarted = await self.relaunch_operator_root_codex(
                     agent_id,
                     pane,
                     model_preset=model_preset,
+                    lifecycle_target=lifecycle_target,
                 )
         else:
             restarted = await self.relaunch_caller_codex(
                 agent_id,
                 pane,
                 model_preset=model_preset,
+                lifecycle_target=lifecycle_target,
             )
         if not restarted:
             if model_elevation_lease_id:
@@ -20418,7 +20662,12 @@ class AgentPBXTUI(App[None]):
                 agent_id,
                 f"{agent_id}'s working directory is unavailable: {cwd!r}",
             )
-        if not await self.ensure_codex_resume_session_available(agent_id, session_id):
+        if not await self.ensure_codex_resume_session_available(
+            agent_id,
+            session_id,
+            tmux_bin=identity.tmux_bin,
+            socket_path=identity.socket_path,
+        ):
             return False
         writer_lock_released = await asyncio.to_thread(
             wait_for_codex_thread_writer_lock_release,
@@ -27656,14 +27905,34 @@ class AgentPBXTUI(App[None]):
         self.tmux_plan_selector_pane_by_agent.pop(agent_id, None)
         self.tmux_plan_selector_indices_by_agent.pop(agent_id, None)
 
-    async def kill_tui_owned_operator_pane(self, agent_id: str) -> bool:
+    async def kill_tui_owned_operator_pane(
+        self,
+        agent_id: str,
+        *,
+        lifecycle_target: ManagedTmuxLifecycleTarget | None = None,
+    ) -> bool:
         pane_id = self.tui_owned_operator_pane_id(agent_id)
         if not pane_id:
             return True
+        lifecycle_target = lifecycle_target or await self.managed_tmux_lifecycle_target(
+            agent_id,
+            expected_pane_id=pane_id,
+            action="stop",
+        )
+        if lifecycle_target is None:
+            return False
         try:
-            await asyncio.to_thread(tmux_support.kill_pane, pane_id)
+            await asyncio.to_thread(
+                tmux_support.kill_pane,
+                lifecycle_target.pane_id,
+                **lifecycle_target.runtime_kwargs,
+            )
         except Exception as exc:
-            self.notify(f"Unable to kill operator pane {pane_id}: {exc}", severity="error")
+            self.notify(
+                f"Unable to kill qualified operator pane {lifecycle_target.pane_id}: "
+                f"{exc}",
+                severity="error",
+            )
             return False
         self.clear_operator_tmux_state(agent_id)
         self.save_settings()
@@ -27721,32 +27990,49 @@ class AgentPBXTUI(App[None]):
                 severity="warning",
             )
             return
+        lifecycle_target: ManagedTmuxLifecycleTarget | None = None
+        if pane_id:
+            lifecycle_target = await self.managed_tmux_lifecycle_target(
+                agent_id,
+                expected_pane_id=pane_id,
+                action="resume",
+            )
+            if lifecycle_target is None:
+                return
         agent = self.agents.get(agent_id) or {}
         if pane_id and self.operator_role(agent) == OPERATOR_ROLE_ROOT:
-            try:
-                panes = await asyncio.to_thread(tmux_support.list_panes)
-            except Exception as exc:
-                self.notify(
-                    f"Unable to verify {agent_id}'s existing tmux pane; no pane was "
-                    f"replaced. {exc}",
-                    severity="warning",
-                )
-                return
-            pane = self.saved_tmux_target_pane_for_agent(agent_id, agent, panes)
-            if pane is not None:
+            if lifecycle_target is not None:
                 restarted = await self.relaunch_operator_root_codex(
                     agent_id,
-                    pane,
+                    lifecycle_target.pane,
                     resume_candidate=target,
+                    lifecycle_target=lifecycle_target,
                 )
                 if restarted:
                     await self.refresh_agents()
                     await self.open_latest_for_agent(agent_id)
                 return
+        session_name = self.operator_tmux_session_name()
+        if lifecycle_target is not None:
+            session_name = lifecycle_target.session_name
+            runtime_kwargs = lifecycle_target.runtime_kwargs
+        else:
+            session_name, runtime_kwargs = await self.configured_runtime_launch_target(
+                agent_id,
+                fallback_session_name=session_name,
+            )
+            if not runtime_kwargs.get("socket_path"):
+                self.notify(
+                    f"Refused to resume {agent_id}: no fully qualified managed tmux "
+                    "launch target is available. No pane was created.",
+                    severity="error",
+                )
+                return
         if not await self.ensure_codex_resume_session_available(
             agent_id,
             target.session_id,
             replacing_pane_id=pane_id,
+            **runtime_kwargs,
         ):
             return
         if not await self.ensure_operator_auth_ready():
@@ -27758,7 +28044,6 @@ class AgentPBXTUI(App[None]):
         )
         cwd = str(metadata.get("cwd") or self.operator_cwd()).strip() or os.getcwd()
         codex_command = self.operator_codex_command()
-        session_name = self.operator_tmux_session_name()
         mcp_url = agent_pbx_mcp_url(self.server)
         try:
             await self.configure_operator_codex_mcp(
@@ -27783,7 +28068,10 @@ class AgentPBXTUI(App[None]):
         except RuntimeError as exc:
             self.notify(str(exc), severity="error")
             return
-        if not await self.kill_tui_owned_operator_pane(agent_id):
+        if not await self.kill_tui_owned_operator_pane(
+            agent_id,
+            lifecycle_target=lifecycle_target,
+        ):
             return
         command = self.operator_resume_command(
             codex_command,
@@ -27817,6 +28105,7 @@ class AgentPBXTUI(App[None]):
                 env=env,
                 width=self.detached_tmux_width,
                 height=self.detached_tmux_height,
+                **runtime_kwargs,
             )
         except Exception as exc:
             self.notify(f"Unable to launch resumed operator pane: {exc}", severity="error")
@@ -27827,6 +28116,7 @@ class AgentPBXTUI(App[None]):
             pane_alive = await asyncio.to_thread(
                 tmux_support.pane_is_live,
                 resumed_pane_id,
+                **runtime_kwargs,
             )
         except Exception as exc:
             self.notify(
@@ -27844,7 +28134,10 @@ class AgentPBXTUI(App[None]):
         self.tmux_manual_override_agent_ids.add(agent_id)
         self.tmux_detached_agent_ids.discard(agent_id)
         self.tmux_direct_agent_modes[agent_id] = True
-        if await self.tmux_pane_has_codex_session_lease_conflict(resumed_pane_id):
+        if await self.tmux_pane_has_codex_session_lease_conflict(
+            resumed_pane_id,
+            **runtime_kwargs,
+        ):
             self.notify(
                 f"Codex opened a conversation-lease dialog for {agent_id}. The pane "
                 "was left unregistered and without a bootstrap paste; close or wait "
@@ -27872,11 +28165,30 @@ class AgentPBXTUI(App[None]):
                 f"Resumed pane launched, but PBX registration failed: {exc}",
                 severity="warning",
             )
+        try:
+            await self.register_launched_tmux_runtime(
+                agent_id,
+                resumed_pane_id,
+                runtime_kwargs=runtime_kwargs,
+                mapping_source="operator_resume",
+                codex_session_id=target.session_id,
+            )
+        except Exception as exc:
+            self.notify(
+                f"Resumed {agent_id}, but exact runtime registration failed: {exc}",
+                severity="warning",
+            )
         await asyncio.sleep(1.0)
-        sent = await self.send_text_to_tmux_pane(
-            resumed_pane_id,
-            self.operator_bootstrap_prompt(agent_id, cwd),
-        )
+        try:
+            await asyncio.to_thread(
+                tmux_support.send_text,
+                resumed_pane_id,
+                self.operator_bootstrap_prompt(agent_id, cwd),
+                **runtime_kwargs,
+            )
+            sent = True
+        except Exception:
+            sent = False
         if not sent:
             self.notify(
                 f"Resumed {agent_id}, but bootstrap paste failed.",

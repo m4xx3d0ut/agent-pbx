@@ -112,6 +112,7 @@ from agent_pbx.runtime_tmux import (
     RuntimeServerMode,
     RuntimeTmuxClient,
     TmuxServerIdentity,
+    runtime_server_id,
 )
 from agent_pbx.workerbee_mcp import (
     WorkerBeeBackendProvenance,
@@ -155,12 +156,19 @@ def cache_ready_runtime_mapping(
     *,
     pane_id: str,
     session_name: str,
+    window_id: str = "0",
+    socket_path: str = "/tmp/agent-pbx-test-runtime.sock",
 ) -> None:
     app.tmux_runtime_mapping_by_agent[agent_id] = {
         "entity_id": agent_id,
         "state": "ready",
+        "server_mode": "dedicated",
+        "server_id": runtime_server_id(Path(socket_path)),
+        "socket_path": socket_path,
         "session_name": session_name,
+        "window_id": window_id,
         "pane_id": pane_id,
+        "metadata": {"tmux_bin": "/opt/tmux-3.7c"},
     }
     app.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
 
@@ -6391,7 +6399,7 @@ async def test_tui_cycles_operator_fork_panes(monkeypatch) -> None:
     ]
     refreshed: list[str] = []
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return panes
 
     async def fake_refresh_selected_agent(agent_id: str) -> None:
@@ -6913,7 +6921,7 @@ async def test_tui_escape_fans_out_to_operator_root_and_running_forks(
     sent: list[tuple[str, str]] = []
     captures: list[str] = []
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return panes
 
     async def fake_send_key_to_tmux_pane(
@@ -16228,6 +16236,7 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
     respawns: list[dict[str, object]] = []
     sent: list[tuple[str, str]] = []
     posts: list[dict[str, object]] = []
+    notifications: list[str] = []
 
     class Response:
         status_code = 200
@@ -16242,6 +16251,10 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
             return self.data
 
     class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            assert path == "/v2/tmux/runtimes/operator-0"
+            return Response(app.tmux_runtime_mapping_by_agent["operator-0"])
+
         async def post(self, path: str, **kwargs: object) -> Response:
             posts.append({"path": path, **kwargs})
             body = kwargs["json"]  # type: ignore[index]
@@ -16284,7 +16297,11 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
     def fake_respawn_pane(pane_id: str, **kwargs: object) -> None:
         respawns.append({"pane_id": pane_id, **kwargs})
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
+        assert _kwargs == {
+            "tmux_bin": "/opt/tmux-3.7c",
+            "socket_path": "/tmp/agent-pbx-test-runtime.sock",
+        }
         return [
             tmux_support.TmuxPane(
                 "agent-pbx-operators",
@@ -16318,6 +16335,7 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
         ]
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
     app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
     app.ensure_operator_auth_ready = fake_auth_ready  # type: ignore[method-assign]
     app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
@@ -16331,10 +16349,15 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
     monkeypatch.setattr(
         tmux_support,
-        "pane_start_command",
-        lambda _target: "codex resume current-session",
+        "pane_exists",
+        lambda _target, **_kwargs: False,
     )
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_start_command",
+        lambda _target, **_kwargs: "codex resume current-session",
+    )
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target, **_kwargs: True)
     monkeypatch.setattr(tmux_support, "capture_pane", lambda *_args, **_kwargs: "")
 
     async with app.run_test():
@@ -16355,9 +16378,18 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
         }
         app.tmux_agent_targets["operator-0"] = "%152"
         app.selected_agent_id = "operator-0"
+        cache_ready_runtime_mapping(
+            app,
+            "operator-0",
+            pane_id="%152",
+            session_name="agent-pbx-operators",
+        )
         await app.resume_selected_operator()
 
+    assert respawns, notifications
     assert respawns[0]["pane_id"] == "%152"
+    assert respawns[0]["tmux_bin"] == "/opt/tmux-3.7c"
+    assert respawns[0]["socket_path"] == "/tmp/agent-pbx-test-runtime.sock"
     launch_argv = shlex.split(str(respawns[0]["command"]))
     assert launch_argv[:4] == ["codex", "resume", "--cd", preserved_cwd]
     assert launch_argv[-1] == "old-session"
@@ -16523,6 +16555,7 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
     respawns: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
     captures: list[str] = []
+    notifications: list[str] = []
 
     class Response:
         def __init__(self, data: dict[str, object]) -> None:
@@ -16535,6 +16568,10 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
             return self.data
 
     class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            assert path == "/v2/tmux/runtimes/agent-1"
+            return Response(app.tmux_runtime_mapping_by_agent["agent-1"])
+
         async def post(self, path: str, **kwargs: object) -> Response:
             posts.append({"path": path, **kwargs})
             body = kwargs["json"]  # type: ignore[index]
@@ -16549,7 +16586,11 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
                 }
             )
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
+        assert _kwargs == {
+            "tmux_bin": "/opt/tmux-3.7c",
+            "socket_path": "/tmp/agent-pbx-test-runtime.sock",
+        }
         return [
             tmux_support.TmuxPane(
                 "agent-pbx",
@@ -16580,28 +16621,44 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
         captures.append(agent_id)
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.refresh_tmux_runtime_mapping_after_restart = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=True)
+    )
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_ATTEMPTS", 1)
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target == "%10")
-    monkeypatch.setattr(tmux_support, "pane_remain_on_exit", lambda _target: False)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_exists",
+        lambda target, **_kwargs: target == "%10",
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_remain_on_exit",
+        lambda _target, **_kwargs: False,
+    )
     monkeypatch.setattr(
         tmux_support,
         "set_pane_remain_on_exit",
-        lambda _target, _enabled: None,
+        lambda _target, _enabled, **_kwargs: None,
     )
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%10")
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda target, **_kwargs: target == "%10",
+    )
     monkeypatch.setattr(tmux_support, "capture_pane", lambda *_args, **_kwargs: "")
     monkeypatch.setattr(
         tmux_support,
         "pane_start_command",
-        lambda target: "codex --search resume session-1",
+        lambda target, **_kwargs: "codex --search resume session-1",
     )
 
     async with app.run_test():
@@ -16630,7 +16687,10 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
         )
         await app.restart_tmux_codex_session("agent-1")
 
+    assert respawns, notifications
     assert respawns[0]["target"] == "%10"
+    assert respawns[0]["tmux_bin"] == "/opt/tmux-3.7c"
+    assert respawns[0]["socket_path"] == "/tmp/agent-pbx-test-runtime.sock"
     launch_argv = shlex.split(str(respawns[0]["command"]))
     assert launch_argv[:5] == [
         "codex",
@@ -16839,16 +16899,28 @@ async def test_tui_respawn_restart_pane_rolls_back_in_same_pane_after_failure(
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda _target: True)
-    monkeypatch.setattr(tmux_support, "pane_remain_on_exit", lambda _target: False)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda _target, **_kwargs: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_remain_on_exit",
+        lambda _target, **_kwargs: False,
+    )
     remain_on_exit: list[bool] = []
     monkeypatch.setattr(
         tmux_support,
         "set_pane_remain_on_exit",
-        lambda _target, enabled: remain_on_exit.append(enabled),
+        lambda _target, enabled, **_kwargs: remain_on_exit.append(enabled),
     )
-    monkeypatch.setattr(tmux_support, "pane_dead_status", lambda _target: 1)
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: len(respawns) >= 3)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_dead_status",
+        lambda _target, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda _target, **_kwargs: len(respawns) >= 3,
+    )
 
     with pytest.raises(RuntimeError, match="restored the prior command"):
         await app.respawn_restart_pane(
@@ -16860,6 +16932,8 @@ async def test_tui_respawn_restart_pane_rolls_back_in_same_pane_after_failure(
             rollback_command="codex resume prior-session",
             rollback_cwd="/tmp/project",
             rollback_env={"AGENT_PBX_RESUME_CODEX_SESSION_ID": "prior-session"},
+            tmux_bin="/opt/tmux-3.7c",
+            socket_path="/tmp/agent-pbx-runtime.sock",
         )
 
     assert [record["target"] for record in respawns] == ["%10", "%10", "%10"]
@@ -16869,6 +16943,11 @@ async def test_tui_respawn_restart_pane_rolls_back_in_same_pane_after_failure(
         "codex resume prior-session",
     ]
     assert remain_on_exit == [True, False]
+    assert all(record["tmux_bin"] == "/opt/tmux-3.7c" for record in respawns)
+    assert all(
+        record["socket_path"] == "/tmp/agent-pbx-runtime.sock"
+        for record in respawns
+    )
 
 
 async def test_tui_respawn_restart_pane_retains_dead_pane_when_rollback_fails(
@@ -16884,16 +16963,28 @@ async def test_tui_respawn_restart_pane_retains_dead_pane_when_rollback_fails(
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda _target: True)
-    monkeypatch.setattr(tmux_support, "pane_remain_on_exit", lambda _target: False)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda _target, **_kwargs: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_remain_on_exit",
+        lambda _target, **_kwargs: False,
+    )
     remain_on_exit: list[bool] = []
     monkeypatch.setattr(
         tmux_support,
         "set_pane_remain_on_exit",
-        lambda _target, enabled: remain_on_exit.append(enabled),
+        lambda _target, enabled, **_kwargs: remain_on_exit.append(enabled),
     )
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: False)
-    monkeypatch.setattr(tmux_support, "pane_dead_status", lambda _target: 17)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda _target, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_dead_status",
+        lambda _target, **_kwargs: 17,
+    )
 
     with pytest.raises(RuntimeError, match="exited with status 17"):
         await app.respawn_restart_pane(
@@ -16901,6 +16992,8 @@ async def test_tui_respawn_restart_pane_retains_dead_pane_when_rollback_fails(
             command="codex resume new-session",
             label="agent-1",
             rollback_command="codex resume prior-session",
+            tmux_bin="/opt/tmux-3.7c",
+            socket_path="/tmp/agent-pbx-runtime.sock",
         )
 
     assert respawns == [
@@ -16948,15 +17041,23 @@ async def test_tui_respawn_restart_pane_rolls_back_on_codex_lease_dialog(
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda _target: True)
-    monkeypatch.setattr(tmux_support, "pane_remain_on_exit", lambda _target: False)
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda _target, **_kwargs: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_remain_on_exit",
+        lambda _target, **_kwargs: False,
+    )
     remain_on_exit: list[bool] = []
     monkeypatch.setattr(
         tmux_support,
         "set_pane_remain_on_exit",
-        lambda _target, enabled: remain_on_exit.append(enabled),
+        lambda _target, enabled, **_kwargs: remain_on_exit.append(enabled),
     )
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda _target, **_kwargs: True,
+    )
     monkeypatch.setattr(
         tmux_support,
         "capture_pane",
@@ -16972,6 +17073,8 @@ async def test_tui_respawn_restart_pane_rolls_back_on_codex_lease_dialog(
             command="codex resume new-session",
             label="agent-1",
             rollback_command="codex resume prior-session",
+            tmux_bin="/opt/tmux-3.7c",
+            socket_path="/tmp/agent-pbx-runtime.sock",
         )
 
     assert [record["command"] for record in respawns] == [
@@ -16979,6 +17082,11 @@ async def test_tui_respawn_restart_pane_rolls_back_on_codex_lease_dialog(
         "codex resume prior-session",
     ]
     assert remain_on_exit == [True, False]
+    assert all(record["tmux_bin"] == "/opt/tmux-3.7c" for record in respawns)
+    assert all(
+        record["socket_path"] == "/tmp/agent-pbx-runtime.sock"
+        for record in respawns
+    )
 
 
 async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_command(
@@ -16990,7 +17098,7 @@ async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_com
     respawns: list[dict[str, object]] = []
     captures: list[str] = []
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return [
             tmux_support.TmuxPane(
                 "agent-pbx",
@@ -17023,10 +17131,26 @@ async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_com
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.refresh_tmux_runtime_mapping_after_restart = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=True)
+    )
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%10")
-    monkeypatch.setattr(tmux_support, "pane_start_command", lambda target: "zsh")
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_exists",
+        lambda _target, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda target, **_kwargs: target == "%10",
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_start_command",
+        lambda target, **_kwargs: "zsh",
+    )
 
     async with app.run_test():
         app.agents = {
@@ -17074,7 +17198,7 @@ async def test_tui_restart_tmux_requires_tmux_direct(monkeypatch) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=False)
     app.tmux_features_available = True
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         raise AssertionError("restart should not inspect panes when tmux is disabled")
 
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
@@ -17336,7 +17460,7 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
                 }
             )
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return [
             tmux_support.TmuxPane(
                 "agent-pbx-operators",
@@ -17406,14 +17530,30 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     app.ensure_codex_model_preset_valid = (  # type: ignore[method-assign]
         fake_ensure_codex_model_preset_valid
     )
+    app.refresh_tmux_runtime_mapping_after_restart = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=True)
+    )
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_ATTEMPTS", 1)
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%30")
-    monkeypatch.setattr(tmux_support, "pane_start_command", lambda target: "codex resume old")
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_exists",
+        lambda _target, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda target, **_kwargs: target == "%30",
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_start_command",
+        lambda target, **_kwargs: "codex resume old",
+    )
 
     async with app.run_test():
         app.agents = {
@@ -17544,12 +17684,26 @@ async def test_tui_refuses_sol_restart_when_another_pane_owns_the_resume_session
         }
     }
     app.tmux_agent_targets["operator-0"] = "%30"
-    monkeypatch.setattr(tmux_support, "list_panes", lambda: [root_pane, stale_owner_pane])
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    cache_ready_runtime_mapping(
+        app,
+        "operator-0",
+        pane_id="%30",
+        session_name="agent-pbx-operators",
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "list_panes",
+        lambda **_kwargs: [root_pane, stale_owner_pane],
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda _target, **_kwargs: True,
+    )
     monkeypatch.setattr(
         tmux_support,
         "pane_start_command",
-        lambda _target: "codex resume current-session",
+        lambda _target, **_kwargs: "codex resume current-session",
     )
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
 
@@ -17623,15 +17777,40 @@ async def test_tui_sol_restart_rolls_back_when_codex_reports_external_lease(
         }
     }
     app.tmux_agent_targets["operator-0"] = "%30"
+    cache_ready_runtime_mapping(
+        app,
+        "operator-0",
+        pane_id="%30",
+        session_name="agent-pbx-operators",
+    )
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_LAUNCH_ATTEMPTS", 1)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
-    monkeypatch.setattr(tmux_support, "list_panes", lambda: [root_pane])
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    monkeypatch.setattr(tmux_support, "list_panes", lambda **_kwargs: [root_pane])
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_exists",
+        lambda _target, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_remain_on_exit",
+        lambda _target, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "set_pane_remain_on_exit",
+        lambda _target, _enabled, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda _target, **_kwargs: True,
+    )
     monkeypatch.setattr(
         tmux_support,
         "pane_start_command",
-        lambda _target: "codex resume current-session",
+        lambda _target, **_kwargs: "codex resume current-session",
     )
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
     monkeypatch.setattr(
@@ -17762,10 +17941,37 @@ async def test_tui_fork_restart_replaces_stale_source_resume_with_codex_fork(
             },
         }
     }
+    cache_ready_runtime_mapping(
+        app,
+        "operator-0-fork-caller-1",
+        pane_id="%20",
+        session_name="agent-pbx-operators",
+        window_id="1",
+    )
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr(tmux_support, "list_panes", lambda **_kwargs: [fork_pane])
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn)
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
-    monkeypatch.setattr(tmux_support, "pane_start_command", lambda _target: "codex resume old")
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_exists",
+        lambda _target, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_remain_on_exit",
+        lambda _target, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "set_pane_remain_on_exit",
+        lambda _target, _enabled, **_kwargs: None,
+    )
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target, **_kwargs: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_start_command",
+        lambda _target, **_kwargs: "codex resume old",
+    )
     monkeypatch.setattr(tmux_support, "capture_pane", lambda *_args, **_kwargs: "")
 
     restarted = await app.relaunch_operator_fork_codex(
@@ -17799,6 +18005,7 @@ async def test_tui_fork_restart_replaces_stale_source_resume_with_codex_fork(
 
 
 async def test_tui_fork_restart_fails_before_pane_mutation_when_git_admin_is_unqualified(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     work_root = tmp_path / "fork"
@@ -17851,6 +18058,14 @@ async def test_tui_fork_restart_fails_before_pane_mutation_when_git_admin_is_unq
             },
         }
     }
+    cache_ready_runtime_mapping(
+        app,
+        "operator-0-fork-caller-1",
+        pane_id="%20",
+        session_name="agent-pbx-operators",
+        window_id="1",
+    )
+    monkeypatch.setattr(tmux_support, "list_panes", lambda **_kwargs: [pane])
 
     restarted = await app.relaunch_operator_fork_codex(
         "operator-0-fork-caller-1",
@@ -18012,6 +18227,18 @@ async def test_tui_resume_leaves_external_lease_dialog_unregistered(
         )
     ]
     app.save_settings = lambda: None  # type: ignore[method-assign]
+    app.configured_runtime_launch_target = (  # type: ignore[method-assign]
+        lambda _agent_id, *, fallback_session_name: asyncio.sleep(
+            0,
+            result=(
+                fallback_session_name,
+                {
+                    "tmux_bin": "/opt/tmux-3.7c",
+                    "socket_path": "/tmp/agent-pbx-test-runtime.sock",
+                },
+            ),
+        )
+    )
     app.agents = {
         "operator-0": {
             "agent_id": "operator-0",
@@ -18026,9 +18253,13 @@ async def test_tui_resume_leaves_external_lease_dialog_unregistered(
         }
     }
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
-    monkeypatch.setattr(tmux_support, "list_panes", lambda: [])
+    monkeypatch.setattr(tmux_support, "list_panes", lambda **_kwargs: [])
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch)
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda _target: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda _target, **_kwargs: True,
+    )
     monkeypatch.setattr(
         tmux_support,
         "capture_pane",
@@ -18102,7 +18333,7 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
                 )
             raise AssertionError(path)
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return [
             tmux_support.TmuxPane(
                 "agent-pbx-operators",
@@ -18157,12 +18388,28 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.refresh_tmux_runtime_mapping_after_restart = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=True)
+    )
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%20")
-    monkeypatch.setattr(tmux_support, "pane_start_command", lambda target: "codex resume old")
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_exists",
+        lambda _target, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda target, **_kwargs: target == "%20",
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_start_command",
+        lambda target, **_kwargs: "codex resume old",
+    )
 
     async with app.run_test():
         app.agents = {
@@ -18197,9 +18444,11 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
             "operator-0-fork-caller-review-1",
             pane_id="%20",
             session_name="agent-pbx-operators",
+            window_id="1",
         )
         await app.restart_tmux_codex_session("operator-0-fork-caller-review-1")
 
+    assert respawns
     assert respawns[0]["target"] == "%20"
     argv = shlex.split(str(respawns[0]["command"]))
     assert argv[:2] == ["codex", "resume"]
@@ -18329,7 +18578,7 @@ async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_
                 )
             raise AssertionError(path)
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return [
             tmux_support.TmuxPane(
                 "agent-pbx-operators",
@@ -18385,12 +18634,38 @@ async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.refresh_events = fake_refresh_events  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.refresh_tmux_runtime_mapping_after_restart = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=True)
+    )
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
     monkeypatch.setattr(tmux_support, "respawn_pane", fake_respawn_pane)
-    monkeypatch.setattr(tmux_support, "pane_is_live", lambda target: target == "%20")
-    monkeypatch.setattr(tmux_support, "pane_start_command", lambda target: "codex resume old")
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_exists",
+        lambda target, **_kwargs: target == "%20",
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_remain_on_exit",
+        lambda target, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "set_pane_remain_on_exit",
+        lambda target, enabled, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_is_live",
+        lambda target, **_kwargs: target == "%20",
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_start_command",
+        lambda target, **_kwargs: "codex resume old",
+    )
     monkeypatch.setattr(tmux_support, "capture_pane", lambda *args, **kwargs: "")
 
     async with app.run_test():
@@ -18426,6 +18701,7 @@ async def test_tui_restart_review_fork_falls_back_when_resume_encrypted_content_
             "operator-0-fork-caller-review-1",
             pane_id="%20",
             session_name="agent-pbx-operators",
+            window_id="1",
         )
         await app.restart_tmux_codex_session("operator-0-fork-caller-review-1")
 
@@ -19119,7 +19395,8 @@ async def test_tui_start_operator_refuses_missing_required_token() -> None:
 async def test_tui_operator_purge_confirmed_kills_owned_pane(monkeypatch) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     deleted: list[tuple[str, bool]] = []
-    killed: list[str] = []
+    killed: list[tuple[str, dict[str, object]]] = []
+    socket_path = "/tmp/agent-pbx-managed-runtime.sock"
 
     async def fake_delete_agent(agent_id: str, *, delete_thread: bool = False) -> dict[str, str]:
         deleted.append((agent_id, delete_thread))
@@ -19128,12 +19405,35 @@ async def test_tui_operator_purge_confirmed_kills_owned_pane(monkeypatch) -> Non
     async def fake_refresh() -> None:
         return None
 
-    def fake_kill_pane(pane_id: str) -> None:
-        killed.append(pane_id)
+    def fake_list_panes(**kwargs: object) -> list[tmux_support.TmuxPane]:
+        assert kwargs == {
+            "tmux_bin": "/opt/tmux-3.7c",
+            "socket_path": socket_path,
+        }
+        return [
+            tmux_support.TmuxPane(
+                "agent-pbx-runtime-operator-0",
+                "0",
+                "0",
+                "%42",
+                True,
+                "node",
+                "operator-0",
+                "/tmp/demo",
+                120,
+                40,
+                0,
+                window_id="@42",
+            )
+        ]
+
+    def fake_kill_pane(pane_id: str, **kwargs: object) -> None:
+        killed.append((pane_id, kwargs))
 
     app.delete_agent = fake_delete_agent  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh  # type: ignore[method-assign]
     app.refresh_events = fake_refresh  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
     monkeypatch.setattr(tmux_support, "kill_pane", fake_kill_pane)
 
     async with app.run_test():
@@ -19152,15 +19452,215 @@ async def test_tui_operator_purge_confirmed_kills_owned_pane(monkeypatch) -> Non
         }
         app.tmux_agent_targets["operator-0"] = "%42"
         app.tmux_manual_override_agent_ids.add("operator-0")
+        cache_ready_runtime_mapping(
+            app,
+            "operator-0",
+            pane_id="%42",
+            session_name="agent-pbx-runtime-operator-0",
+            window_id="@42",
+            socket_path=socket_path,
+        )
         await app.dismiss_selected_agent(
             agent_id="operator-0",
             delete_thread=True,
             confirmed_operator_kill=True,
         )
 
-    assert killed == ["%42"]
+    assert killed == [
+        (
+            "%42",
+            {
+                "tmux_bin": "/opt/tmux-3.7c",
+                "socket_path": socket_path,
+            },
+        )
+    ]
     assert deleted == [("operator-0", True)]
     assert "operator-0" not in app.tmux_agent_targets
+
+
+async def test_tui_operator_stop_uses_qualified_managed_server_when_pane_ids_collide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    socket_path = "/tmp/agent-pbx-managed-runtime.sock"
+    inspections: list[dict[str, object]] = []
+    killed: list[tuple[str, dict[str, object]]] = []
+
+    def fake_list_panes(**kwargs: object) -> list[tmux_support.TmuxPane]:
+        inspections.append(kwargs)
+        if not kwargs:
+            pytest.fail("lifecycle target must never inspect the default tmux server")
+        return [
+            tmux_support.TmuxPane(
+                "agent-pbx-runtime-operator-7-fork",
+                "0",
+                "0",
+                "%12",
+                True,
+                "node",
+                "operator-7-fork",
+                "/tmp/worktree",
+                120,
+                40,
+                0,
+                window_id="@187",
+            )
+        ]
+
+    def fake_kill_pane(pane_id: str, **kwargs: object) -> None:
+        killed.append((pane_id, kwargs))
+
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(tmux_support, "kill_pane", fake_kill_pane)
+    app.agents = {
+        "operator-7-fork": {
+            "agent_id": "operator-7-fork",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "launched_by": "agent-pbx-tui",
+            },
+        }
+    }
+    app.tmux_agent_targets["operator-7-fork"] = "%12"
+    cache_ready_runtime_mapping(
+        app,
+        "operator-7-fork",
+        pane_id="%12",
+        session_name="agent-pbx-runtime-operator-7-fork",
+        window_id="@187",
+        socket_path=socket_path,
+    )
+
+    assert await app.kill_tui_owned_operator_pane("operator-7-fork") is True
+
+    expected_runtime = {
+        "tmux_bin": "/opt/tmux-3.7c",
+        "socket_path": socket_path,
+    }
+    assert inspections == [expected_runtime]
+    assert killed == [("%12", expected_runtime)]
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "replacement"),
+    (("server_id", ""), ("window_id", ""), ("socket_path", "")),
+)
+async def test_tui_operator_stop_fails_closed_on_incomplete_runtime_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_field: str,
+    replacement: str,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    mutations: list[str] = []
+    notifications: list[str] = []
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+    app.agents = {
+        "operator-7-fork": {
+            "agent_id": "operator-7-fork",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "launched_by": "agent-pbx-tui",
+            },
+        }
+    }
+    app.tmux_agent_targets["operator-7-fork"] = "%12"
+    cache_ready_runtime_mapping(
+        app,
+        "operator-7-fork",
+        pane_id="%12",
+        session_name="agent-pbx-runtime-operator-7-fork",
+        window_id="@187",
+    )
+    app.tmux_runtime_mapping_by_agent["operator-7-fork"][missing_field] = replacement
+    monkeypatch.setattr(
+        tmux_support,
+        "list_panes",
+        lambda **_kwargs: pytest.fail("incomplete provenance must not inspect tmux"),
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "kill_pane",
+        lambda *_args, **_kwargs: mutations.append("kill"),
+    )
+
+    assert await app.kill_tui_owned_operator_pane("operator-7-fork") is False
+    assert mutations == []
+    assert any("No tmux pane was changed" in message for message in notifications)
+
+
+async def test_tui_operator_stop_fails_closed_on_live_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    socket_path = "/tmp/agent-pbx-managed-runtime.sock"
+    mutations: list[str] = []
+    notifications: list[str] = []
+    app.save_settings = lambda: None  # type: ignore[method-assign]
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+    app.agents = {
+        "operator-7-fork": {
+            "agent_id": "operator-7-fork",
+            "agent_type": "operator",
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "launched_by": "agent-pbx-tui",
+            },
+        }
+    }
+    app.tmux_agent_targets["operator-7-fork"] = "%12"
+    cache_ready_runtime_mapping(
+        app,
+        "operator-7-fork",
+        pane_id="%12",
+        session_name="agent-pbx-runtime-operator-7-fork",
+        window_id="@187",
+        socket_path=socket_path,
+    )
+
+    def fake_list_panes(**kwargs: object) -> list[tmux_support.TmuxPane]:
+        assert kwargs == {
+            "tmux_bin": "/opt/tmux-3.7c",
+            "socket_path": socket_path,
+        }
+        return [
+            tmux_support.TmuxPane(
+                "foreign-runtime",
+                "0",
+                "0",
+                "%12",
+                True,
+                "node",
+                "foreign",
+                "/tmp/foreign",
+                120,
+                40,
+                0,
+                window_id="@999",
+            )
+        ]
+
+    monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(
+        tmux_support,
+        "kill_pane",
+        lambda *_args, **_kwargs: mutations.append("kill"),
+    )
+
+    assert await app.kill_tui_owned_operator_pane("operator-7-fork") is False
+    assert mutations == []
+    assert any(
+        "session/window/pane identity does not match" in message
+        and "No tmux pane was changed" in message
+        for message in notifications
+    )
 
 
 async def test_tui_agent_jump_sequence_opens_latest_by_visible_row() -> None:
@@ -22161,7 +22661,7 @@ async def test_tui_tmux_plan_selection_falls_back_to_selected_pane(
     sent_keys: list[tuple[str, str]] = []
     captures: list[str] = []
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return [pane]
 
     def fake_capture_pane(target: str, **_: object) -> str:
@@ -22229,7 +22729,7 @@ async def test_tui_plan_selection_uses_recorded_native_selector_pane() -> None:
         100,
     )
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return [pane]
 
     def fake_capture_pane(target: str, **_: object) -> str:
@@ -22373,7 +22873,7 @@ async def test_tui_plan_selection_uses_unique_global_native_selector_pane(
     sent_keys: list[tuple[str, str]] = []
     captures: list[str] = []
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return [agent_pane, selector_pane]
 
     def fake_capture_pane(target: str, **_: object) -> str:
@@ -22445,7 +22945,7 @@ async def test_tui_plan_selection_refuses_multiple_global_native_selectors(
     )
     sent_keys: list[tuple[str, str]] = []
 
-    def fake_list_panes() -> list[tmux_support.TmuxPane]:
+    def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return panes
 
     def fake_capture_pane(target: str, **_: object) -> str:
@@ -23870,7 +24370,9 @@ async def test_tui_workerbee_gateway_launch_preserves_structured_preflight_error
 
 
 @pytest.mark.asyncio
-async def test_tui_workerbee_preflight_failure_does_not_replace_running_caller() -> None:
+async def test_tui_workerbee_preflight_failure_does_not_replace_running_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     notifications: list[tuple[str, str]] = []
     replacements: list[str] = []
@@ -23900,6 +24402,18 @@ async def test_tui_workerbee_preflight_failure_does_not_replace_running_caller()
         }
     }
     app.tmux_agent_targets["agent-1"] = "%10"
+    cache_ready_runtime_mapping(
+        app,
+        "agent-1",
+        pane_id="%10",
+        session_name="agent-pbx-runtime-agent-1",
+        window_id="0",
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "list_panes",
+        lambda **_kwargs: [pane],
+    )
 
     async def codex_command(*_args: object, **_kwargs: object) -> str:
         return "codex"
@@ -24429,7 +24943,18 @@ async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
         tmux_direct=True,
     )
     app.prepare_workerbee_gateway_launch = prepared_workerbee_gateway_fixture  # type: ignore[method-assign]
-    app.configured_runtime_launch_target = default_runtime_launch_target_fixture  # type: ignore[method-assign]
+
+    async def managed_runtime_launch_target(
+        _entity_id: str,
+        *,
+        fallback_session_name: str,
+    ) -> tuple[str, dict[str, str]]:
+        return fallback_session_name, {
+            "tmux_bin": "/opt/tmux-3.7c",
+            "socket_path": "/tmp/agent-pbx-test-runtime.sock",
+        }
+
+    app.configured_runtime_launch_target = managed_runtime_launch_target  # type: ignore[method-assign]
     app.tmux_features_available = True
     launches: list[dict[str, object]] = []
     posts: list[dict[str, object]] = []
@@ -24499,6 +25024,9 @@ async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
         opened.append(agent_id)
         return True
 
+    async def ignore_runtime_registration(*_args: object, **_kwargs: object) -> None:
+        return None
+
     def fake_launch_pane(**kwargs: object) -> str:
         launches.append(kwargs)
         return "%bad" if len(launches) == 1 else "%fresh"
@@ -24524,6 +25052,7 @@ async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
     app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    app.register_launched_tmux_runtime = ignore_runtime_registration  # type: ignore[method-assign]
     app.save_settings = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
     monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_RETRY_SECONDS", 0.0)
@@ -24531,7 +25060,11 @@ async def test_tui_start_review_operator_fork_falls_back_to_fresh_context(
     monkeypatch.setattr("agent_pbx.tui.REVIEW_FORK_HEALTH_CHECK_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(tmux_support, "list_panes", lambda *args, **kwargs: [])
     monkeypatch.setattr(tmux_support, "launch_pane", fake_launch_pane)
-    monkeypatch.setattr(tmux_support, "pane_exists", lambda target: target in {"%bad", "%fresh"})
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_exists",
+        lambda target, **_kwargs: target in {"%bad", "%fresh"},
+    )
     monkeypatch.setattr(tmux_support, "quit_pane", fake_quit_pane)
     monkeypatch.setattr(tmux_support, "capture_pane", fake_capture_pane)
 

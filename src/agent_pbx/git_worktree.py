@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -34,6 +35,7 @@ class LinkedWorktreeGitAdminPlan:
     writable_paths: tuple[Path, ...]
     base_permission_profile: str = ":workspace"
     permission_profile: str = LINKED_EDIT_PERMISSION_PROFILE
+    permission_profile_definition: Mapping[str, Any] | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -44,15 +46,22 @@ class LinkedWorktreeGitAdminPlan:
             "branch_ref": self.branch_ref,
             "base_permission_profile": self.base_permission_profile,
             "permission_profile": self.permission_profile,
+            "grant_scope": "sandbox_filesystem_only",
+            "additional_workspace_roots": [],
             "writable_paths": [str(path) for path in self.writable_paths],
         }
 
     def config_overrides(self) -> tuple[tuple[str, object], ...]:
-        filesystem = {str(path): "write" for path in self.writable_paths}
+        profile = copy.deepcopy(self.permission_profile_definition)
+        if profile is None:
+            profile = {
+                "extends": ":workspace",
+                "filesystem": {str(path): "write" for path in self.writable_paths},
+            }
         return (
             (
                 f"permissions.{self.permission_profile}",
-                {"extends": self.base_permission_profile, "filesystem": filesystem},
+                profile,
             ),
             ("default_permissions", self.permission_profile),
         )
@@ -260,10 +269,13 @@ def qualify_linked_worktree_git_admin(
                 f"owner mismatch for linked-worktree path {path}: uid {owner}, expected {uid}"
             )
 
-    base_permission_profile = _validate_permission_profile_compatibility(
-        codex_home=codex_home,
-        profile_name=LINKED_EDIT_PERMISSION_PROFILE,
-        common_dir=common_dir,
+    base_permission_profile, permission_profile_definition = (
+        _validate_permission_profile_compatibility(
+            codex_home=codex_home,
+            profile_name=LINKED_EDIT_PERMISSION_PROFILE,
+            common_dir=common_dir,
+            writable_paths=writable_paths,
+        )
     )
     return LinkedWorktreeGitAdminPlan(
         worktree_root=root,
@@ -276,6 +288,7 @@ def qualify_linked_worktree_git_admin(
         reflog_namespace=reflog_namespace,
         writable_paths=writable_paths,
         base_permission_profile=base_permission_profile,
+        permission_profile_definition=permission_profile_definition,
     )
 
 
@@ -414,7 +427,8 @@ def _validate_permission_profile_compatibility(
     codex_home: Path | None,
     profile_name: str,
     common_dir: Path,
-) -> str:
+    writable_paths: tuple[Path, ...],
+) -> tuple[str, Mapping[str, Any]]:
     paths: list[tuple[str, Path]] = []
     if codex_home is not None:
         paths.append(("Codex user config", codex_home / "config.toml"))
@@ -449,7 +463,11 @@ def _validate_permission_profile_compatibility(
         if isinstance(definitions, Mapping):
             for name, definition in definitions.items():
                 if isinstance(definition, Mapping):
-                    profile_definitions[str(name)] = definition
+                    existing = profile_definitions.get(str(name), {})
+                    profile_definitions[str(name)] = _deep_merge_mapping(
+                        existing,
+                        definition,
+                    )
         configured_default = str(parsed.get("default_permissions") or "").strip()
         if configured_default:
             base_profile = configured_default
@@ -467,12 +485,16 @@ def _validate_permission_profile_compatibility(
                 raise LinkedWorktreeQualificationError(
                     f"Codex requirements do not allow permission profile {profile_name!r}"
                 )
-    _validate_base_permission_profile(
+    resolved_base = _validate_base_permission_profile(
         base_profile,
         definitions=profile_definitions,
         common_dir=common_dir,
     )
-    return base_profile
+    profile = _materialize_linked_edit_permission_profile(
+        resolved_base,
+        writable_paths=writable_paths,
+    )
+    return base_profile, profile
 
 
 def _validate_base_permission_profile(
@@ -480,9 +502,10 @@ def _validate_base_permission_profile(
     *,
     definitions: Mapping[str, Mapping[str, Any]],
     common_dir: Path,
-) -> None:
+) -> Mapping[str, Any]:
     current = profile_name
     visited: set[str] = set()
+    chain: list[Mapping[str, Any]] = []
     while not current.startswith(":"):
         if current in visited:
             raise LinkedWorktreeQualificationError(
@@ -493,6 +516,11 @@ def _validate_base_permission_profile(
         if not isinstance(definition, Mapping):
             raise LinkedWorktreeQualificationError(
                 f"permission profile {current!r} is not defined in validated Codex configuration"
+            )
+        if definition.get("workspace_roots"):
+            raise LinkedWorktreeQualificationError(
+                f"permission profile {current!r} defines configured workspace_roots; "
+                "linked Git administration grants require one runtime cwd only"
             )
         filesystem = definition.get("filesystem")
         if isinstance(filesystem, Mapping):
@@ -507,6 +535,7 @@ def _validate_base_permission_profile(
                     raise LinkedWorktreeQualificationError(
                         f"base permission profile {current!r} already grants Git administration write access at {candidate}"
                     )
+        chain.append(definition)
         current = str(definition.get("extends") or "").strip()
         if not current:
             raise LinkedWorktreeQualificationError(
@@ -515,4 +544,134 @@ def _validate_base_permission_profile(
     if current != ":workspace":
         raise LinkedWorktreeQualificationError(
             f"permission profile {profile_name!r} must ultimately extend :workspace, not {current!r}"
+        )
+    resolved: Mapping[str, Any] = {}
+    for definition in reversed(chain):
+        resolved = _deep_merge_mapping(resolved, definition)
+    return resolved
+
+
+def _deep_merge_mapping(
+    base: Mapping[str, Any],
+    overlay: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = copy.deepcopy(dict(base))
+    for key, value in overlay.items():
+        current = merged.get(str(key))
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            merged[str(key)] = _deep_merge_mapping(current, value)
+        else:
+            merged[str(key)] = copy.deepcopy(value)
+    return merged
+
+
+def _materialize_linked_edit_permission_profile(
+    base_profile: Mapping[str, Any],
+    *,
+    writable_paths: tuple[Path, ...],
+) -> Mapping[str, Any]:
+    """Flatten one base profile without promoting Git grants to workspaces.
+
+    Codex protects metadata-like children below every writable sandbox root.
+    In 0.166, combining split read/deny policy with external Git writes routes
+    through bubblewrap and creates protected mount targets below those Git
+    administration directories. Preserve only base semantics already supplied
+    by ``:workspace``; fail closed on split rules instead of weakening them.
+    """
+
+    allowed_keys = {"description", "extends", "filesystem", "network"}
+    unknown = sorted(str(key) for key in base_profile if str(key) not in allowed_keys)
+    if unknown:
+        raise LinkedWorktreeQualificationError(
+            "base permission profile has unsupported fields for safe materialization: "
+            + ", ".join(unknown)
+        )
+    filesystem: dict[str, Any] = {}
+    raw_filesystem = base_profile.get("filesystem")
+    if raw_filesystem is not None and not isinstance(raw_filesystem, Mapping):
+        raise LinkedWorktreeQualificationError(
+            "base permission profile filesystem policy is malformed"
+        )
+    for raw_path, raw_permission in (raw_filesystem or {}).items():
+        path_text = str(raw_path).strip()
+        if path_text == ":workspace_roots":
+            if not isinstance(raw_permission, Mapping):
+                raise LinkedWorktreeQualificationError(
+                    "base :workspace_roots policy must be a scoped table"
+                )
+            _validate_workspace_permissions_for_git_admin_grants(raw_permission)
+            continue
+        if path_text == "glob_scan_max_depth" or path_text.startswith(":"):
+            if path_text != "glob_scan_max_depth":
+                raise LinkedWorktreeQualificationError(
+                    "base permission profile requires split filesystem enforcement "
+                    f"through {path_text!r}; Codex 0.166 cannot combine that policy "
+                    "with external Git administration writes without creating "
+                    "protected metadata mount targets"
+                )
+            filesystem[path_text] = copy.deepcopy(raw_permission)
+            continue
+        if not Path(path_text).expanduser().is_absolute():
+            raise LinkedWorktreeQualificationError(
+                f"base filesystem permission is neither absolute nor scoped to "
+                f":workspace_roots: {path_text!r}"
+            )
+        raise LinkedWorktreeQualificationError(
+            "base permission profile contains an absolute filesystem rule; Codex "
+            "0.166 cannot preserve split secret/read policy while adding external "
+            "Git administration writes without creating protected metadata mount "
+            f"targets ({path_text})"
+        )
+
+    for path in writable_paths:
+        key = str(path)
+        existing = filesystem.get(key)
+        if existing is not None and str(existing).strip().casefold() != "write":
+            raise LinkedWorktreeQualificationError(
+                f"base permission profile conflicts with required Git administration "
+                f"write path {path}"
+            )
+        filesystem[key] = "write"
+
+    profile: dict[str, Any] = {
+        "description": "Agent PBX linked edit fork with sandbox-only Git administration grants",
+        "extends": ":workspace",
+        "filesystem": filesystem,
+    }
+    network = base_profile.get("network")
+    if network is not None:
+        if not isinstance(network, Mapping):
+            raise LinkedWorktreeQualificationError(
+                "base permission profile network policy is malformed"
+            )
+        profile["network"] = copy.deepcopy(dict(network))
+    return profile
+
+
+def _validate_workspace_permissions_for_git_admin_grants(
+    scoped: Mapping[str, Any],
+) -> None:
+    for raw_subpath, raw_permission in scoped.items():
+        subpath = str(raw_subpath).strip()
+        mode = str(raw_permission).strip().casefold()
+        if mode not in {"read", "write", "deny", "none"}:
+            raise LinkedWorktreeQualificationError(
+                f"unsupported :workspace_roots permission for {subpath!r}"
+            )
+        if subpath == ".":
+            if mode != "write":
+                raise LinkedWorktreeQualificationError(
+                    "linked edit forks require the workspace root to remain writable"
+                )
+            continue
+        if subpath == ".git" and mode in {"read", "write"}:
+            # The built-in workspace profile already keeps the linked .git
+            # marker readable. Exact qualified administration roots below are
+            # granted separately; the pointer file itself must not be writable.
+            continue
+        raise LinkedWorktreeQualificationError(
+            "base permission profile contains a scoped workspace filesystem rule; "
+            "Codex 0.166 cannot preserve that split policy while adding external Git "
+            "administration writes without creating protected metadata mount targets "
+            f"({subpath!r})"
         )
