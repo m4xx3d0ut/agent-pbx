@@ -57,6 +57,9 @@ def test_setup_plan_can_apply_backend_neutral_workerbee_workflow_preset(
     assert plan.ready is True
     assert plan.desired_values["AGENT_PBX_WORKERBEE_WORKFLOW_PRESET"] == "trusted-platform-workbench"
     assert plan.desired_values["AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_POLICY"] == "scoped-workbench"
+    assert plan.desired_values["AGENT_PBX_OPERATOR_AUTHORITY_DEFAULT_PROFILE"] == "scoped-edit"
+    assert plan.desired_values["AGENT_PBX_OPERATOR_AUTHORITY_PROFILE_CEILING"] == "trusted-workbench"
+    assert plan.desired_values["AGENT_PBX_OPERATOR_AUTHORITY_ROOT_CEILING_JSON"] == f'["{root}"]'
     assert plan.desired_values["AGENT_PBX_WORKERBEE_SNAPSHOT_DEFAULT_POLICY"] == "safe-working-tree"
     assert "AGENT_PBX_WORKERBEE_BACKEND" not in plan.desired_values
 

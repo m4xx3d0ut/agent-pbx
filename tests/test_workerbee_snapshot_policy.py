@@ -208,5 +208,8 @@ def test_trusted_platform_preset_is_backend_neutral_and_scoped(tmp_path: Path) -
     assert values["AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_POLICY"] == "scoped-workbench"
     assert values["AGENT_PBX_WORKERBEE_WORKSPACE_REQUEST_MODE"] == "automatic"
     assert values["AGENT_PBX_WORKERBEE_SNAPSHOT_DEFAULT_POLICY"] == "safe-working-tree"
+    assert values["AGENT_PBX_OPERATOR_AUTHORITY_DEFAULT_PROFILE"] == "scoped-edit"
+    assert values["AGENT_PBX_OPERATOR_AUTHORITY_PROFILE_CEILING"] == "trusted-workbench"
+    assert values["AGENT_PBX_OPERATOR_AUTHORITY_ROOT_CEILING_JSON"] == f'["{root}"]'
     assert "AGENT_PBX_WORKERBEE_BACKEND" not in values
     assert "local-deploy" not in values.values()

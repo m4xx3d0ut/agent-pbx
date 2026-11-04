@@ -104,6 +104,7 @@ from .mcp_tools import create_mcp_asgi_app
 from .managed_runtime import ManagedRuntimeService
 from .agent_adoption import AgentPaneAdoptionService
 from .operator import OperatorService, operator_runbook_payload
+from .operator_authority import OperatorAuthorityError, OperatorAuthorityService
 from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .polling import poll_commands as poll_commands_until
 from .pull_requests import (
@@ -161,6 +162,8 @@ from .schemas import (
     WorkerBeeSwitchApplyRequest,
     WorkerBeeGatewayLeaseRequest,
     WorkerBeeAccessProfileRequest,
+    OperatorAuthorityAssignmentRequest,
+    OperatorWorkspaceSetRequest,
     WorkerBeeWorkspacePolicyRequest,
     WorkerBeeSnapshotPolicyRequest,
     WorkerBeeWorkspaceTransitionDecisionRequest,
@@ -626,6 +629,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     workerbee_workspace_policy = WorkerBeeWorkspacePolicyService(store)
     workerbee_snapshot_policy = WorkerBeeSnapshotPolicyService(store)
     workerbee_access_policy = WorkerBeeAccessPolicyService(store)
+    operator_authority = OperatorAuthorityService(
+        store,
+        workerbee_access=workerbee_access_policy,
+        workerbee_workspace=workerbee_workspace_policy,
+    )
 
     def record_workerbee_workspace_refresh(
         previous_lease: WorkerBeeGatewayLease,
@@ -774,6 +782,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.workerbee_workspace_policy = workerbee_workspace_policy
     app.state.workerbee_snapshot_policy = workerbee_snapshot_policy
     app.state.workerbee_access_policy = workerbee_access_policy
+    app.state.operator_authority = operator_authority
     app.state.workerbee_gateway = workerbee_gateway
     app.state.workerbee_switcher = workerbee_switcher
     app.state.pull_requests = pull_requests
@@ -2164,6 +2173,145 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     )
     async def workerbee_runtime_status(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+
+    @app.get(
+        "/v2/operator/authority/posture",
+        response_model=dict[str, Any],
+    )
+    async def get_operator_authority_posture(
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        try:
+            posture = await asyncio.to_thread(
+                request.app.state.operator_authority.posture
+            )
+            return posture.public_dict()
+        except OperatorAuthorityError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.post(
+        "/v2/operator/workspace-sets/preview",
+        response_model=dict[str, Any],
+    )
+    async def preview_operator_workspace_set(
+        payload: OperatorWorkspaceSetRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.operator_authority.preview_workspace_set,
+                label=payload.label,
+                members=payload.members,
+                collections=payload.collections,
+                collection_depth=payload.collection_depth,
+            )
+        except OperatorAuthorityError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.get(
+        "/v2/operator/workspace-sets",
+        response_model=list[dict[str, Any]],
+    )
+    async def list_operator_workspace_sets(
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            request.app.state.operator_authority.list_workspace_sets
+        )
+
+    @app.put(
+        "/v2/operator/workspace-sets/{set_id}",
+        response_model=dict[str, Any],
+    )
+    async def put_operator_workspace_set(
+        set_id: str,
+        payload: OperatorWorkspaceSetRequest,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.operator_authority.save_workspace_set,
+                set_id=set_id,
+                label=payload.label,
+                members=payload.members,
+                collections=payload.collections,
+                collection_depth=payload.collection_depth,
+                updated_by=controller.token_id or controller.client_id or "local",
+            )
+        except OperatorAuthorityError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.get(
+        "/v2/agents/{agent_id}/operator-authority",
+        response_model=dict[str, Any],
+    )
+    async def get_agent_operator_authority(
+        agent_id: str,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.operator_authority.get_assignment,
+                agent_id,
+            )
+        except OperatorAuthorityError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.put(
+        "/v2/agents/{agent_id}/operator-authority",
+        response_model=dict[str, Any],
+    )
+    async def put_agent_operator_authority(
+        agent_id: str,
+        payload: OperatorAuthorityAssignmentRequest,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.operator_authority.set_assignment,
+                agent_id,
+                profile=payload.profile,
+                workspace_set_id=payload.workspace_set_id,
+                profile_label=payload.profile_label,
+                updated_by=controller.token_id or controller.client_id or "local",
+            )
+        except (OperatorAuthorityError, WorkerBeeAccessPolicyError, WorkerBeeWorkspacePolicyError) as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    @app.post(
+        "/v2/agents/{agent_id}/operator-authority/activated",
+        response_model=dict[str, Any],
+    )
+    async def activate_agent_operator_authority(
+        agent_id: str,
+        request: Request,
+        controller: ClientPrincipal = Depends(require_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        require_agent(store, agent_id)
+        if not principal_allows_agent(controller, agent_id):
+            raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
+        try:
+            return await asyncio.to_thread(
+                request.app.state.operator_authority.mark_activated,
+                agent_id,
+            )
+        except OperatorAuthorityError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
 
     @app.get(
         "/v2/workerbee/workspace-policy",

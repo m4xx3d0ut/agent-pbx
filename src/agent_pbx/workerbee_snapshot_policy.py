@@ -215,6 +215,14 @@ def workerbee_workflow_preset_values(
     if selected == WORKERBEE_WORKFLOW_TRUSTED_PLATFORM:
         values.update(
             {
+                "AGENT_PBX_OPERATOR_AUTHORITY_CONTROL_MODE": "editable",
+                "AGENT_PBX_OPERATOR_AUTHORITY_PROFILE_CEILING": "trusted-workbench",
+                # A workspace set is a durable database object, so setup can
+                # expose Trusted Workbench without pretending that a broad
+                # project-root list is already a reviewed set.
+                "AGENT_PBX_OPERATOR_AUTHORITY_DEFAULT_PROFILE": "scoped-edit",
+                "AGENT_PBX_OPERATOR_AUTHORITY_ROOT_CEILING_JSON": root_json,
+                "AGENT_PBX_OPERATOR_AUTHORITY_WORKFLOW_LABEL": "Trusted Workbench",
                 "AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_POLICY": "scoped-workbench",
                 "AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_ROOTS_JSON": root_json,
                 "AGENT_PBX_WORKERBEE_WORKSPACE_REQUEST_MODE": "automatic",

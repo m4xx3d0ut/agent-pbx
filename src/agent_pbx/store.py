@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -577,6 +577,39 @@ class Store:
                     ON workerbee_workspace_transitions(lease_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_workerbee_workspace_transition_status
                     ON workerbee_workspace_transitions(status, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS operator_workspace_set_versions (
+                    set_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    label TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    collections_json TEXT NOT NULL DEFAULT '[]',
+                    members_json TEXT NOT NULL DEFAULT '[]',
+                    member_digest TEXT NOT NULL,
+                    updated_by TEXT,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(set_id, version)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_operator_workspace_set_latest
+                    ON operator_workspace_set_versions(set_id, version DESC);
+
+                CREATE TABLE IF NOT EXISTS operator_authority_assignments (
+                    agent_id TEXT PRIMARY KEY,
+                    profile TEXT NOT NULL,
+                    profile_label TEXT NOT NULL,
+                    workspace_set_id TEXT,
+                    workspace_set_version INTEGER,
+                    workspace_set_digest TEXT,
+                    updated_by TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_operator_authority_profile
+                    ON operator_authority_assignments(profile, updated_at DESC);
 
                 CREATE TABLE IF NOT EXISTS joplin_logs (
                     log_id TEXT PRIMARY KEY,

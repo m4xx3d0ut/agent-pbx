@@ -1951,6 +1951,21 @@ class WorkerBeeAccessProfileRequest(BaseModel):
     profile: Literal["observe-local", "local-deploy"]
 
 
+class OperatorWorkspaceSetRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+    members: list[str] = Field(default_factory=list, max_length=128)
+    collections: list[str] = Field(default_factory=list, max_length=32)
+    collection_depth: int = Field(default=1, ge=1, le=4)
+
+
+class OperatorAuthorityAssignmentRequest(BaseModel):
+    profile: Literal[
+        "scoped-edit", "trusted-workbench", "full-access", "review-readonly"
+    ]
+    workspace_set_id: str | None = Field(default=None, max_length=120)
+    profile_label: str | None = Field(default=None, max_length=120)
+
+
 class WorkerBeeWorkspaceTransitionRequest(BaseModel):
     cwd: str = Field(min_length=1, max_length=4096)
     project: str | None = Field(default=None, min_length=1, max_length=128)
