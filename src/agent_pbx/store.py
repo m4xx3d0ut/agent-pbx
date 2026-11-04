@@ -2710,12 +2710,18 @@ class Store:
         current = now_ts()
         expires_at = current + max(5.0, min(300.0, float(ttl_seconds)))
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT writer_client_id, writer_lease_expires_at FROM tmux_runtime_mappings WHERE entity_id = ?",
+                """
+                SELECT state, writer_client_id, writer_lease_expires_at
+                FROM tmux_runtime_mappings WHERE entity_id = ?
+                """,
                 (entity_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("tmux runtime mapping not found")
+            if str(row["state"] or "") == "stopping":
+                raise ValueError("tmux runtime is stopping; writer acquisition is disabled")
             owner = str(row["writer_client_id"] or "")
             owner_expiry = row["writer_lease_expires_at"]
             if (
@@ -2767,6 +2773,317 @@ class Store:
                 (entity_id,),
             )
         return bool(cursor.rowcount)
+
+    @staticmethod
+    def _managed_runtime_stop_identity(mapping: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "server_id": str(mapping.get("server_id") or ""),
+            "socket_path": str(mapping.get("socket_path") or ""),
+            "session_name": str(mapping.get("session_name") or ""),
+            "window_id": str(mapping.get("window_id") or ""),
+            "pane_id": str(mapping.get("pane_id") or ""),
+            "pane_pid": mapping.get("pane_pid"),
+            "process_start_ticks": mapping.get("process_start_ticks"),
+            "codex_session_id": mapping.get("codex_session_id"),
+        }
+
+    def prepare_managed_runtime_stop(
+        self,
+        entity_id: str,
+        *,
+        expected_identity: Mapping[str, Any],
+        client_id: str,
+        phase: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """CAS one runtime into a durable, lease-free stopping state."""
+
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM tmux_runtime_mappings WHERE entity_id = ?",
+                (entity_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("tmux runtime mapping not found")
+            mapping = self._tmux_runtime_mapping_from_row(row)
+            observed_identity = self._managed_runtime_stop_identity(mapping)
+            normalized_expected = self._managed_runtime_stop_identity(expected_identity)
+            if observed_identity != normalized_expected:
+                raise ValueError("managed runtime identity changed before stop preparation")
+
+            owner = str(mapping.get("writer_client_id") or "")
+            expiry = mapping.get("writer_lease_expires_at")
+            if owner and expiry is not None and float(expiry) > current:
+                raise ValueError(f"release the active runtime writer lease owned by {owner!r}")
+
+            mapping_metadata = dict(mapping.get("metadata") or {})
+            existing = (
+                mapping_metadata.get("managed_stop")
+                if isinstance(mapping_metadata.get("managed_stop"), dict)
+                else None
+            )
+            if existing is not None:
+                existing_identity = existing.get("identity")
+                if existing_identity != observed_identity:
+                    raise ValueError("managed stop transaction identity no longer matches")
+                transaction_id = str(existing.get("transaction_id") or "").strip()
+                if not transaction_id:
+                    raise ValueError("managed stop transaction is incomplete")
+                stop_record = dict(existing)
+                stop_record["phase"] = phase
+                stop_record["last_prepared_at"] = current
+            else:
+                transaction_id = f"tmux-stop-{uuid.uuid4().hex}"
+                stop_record = {
+                    "transaction_id": transaction_id,
+                    "entity_id": entity_id,
+                    "client_id": client_id,
+                    "identity": observed_identity,
+                    "phase": phase,
+                    "prepared_at": current,
+                    "last_prepared_at": current,
+                }
+            if metadata:
+                stop_record["metadata"] = dict(metadata)
+            mapping_metadata["managed_stop"] = stop_record
+            conn.execute(
+                """
+                UPDATE tmux_runtime_mappings
+                SET state = 'stopping', metadata_json = ?,
+                    writer_client_id = NULL, writer_lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE entity_id = ?
+                """,
+                (json.dumps(mapping_metadata), current, entity_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO events(type, subject_id, payload_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    "tmux_runtime_stop_prepared",
+                    entity_id,
+                    json.dumps(
+                        {
+                            "entity_id": entity_id,
+                            "transaction_id": transaction_id,
+                            "phase": phase,
+                            "identity": observed_identity,
+                            "client_id": client_id,
+                        }
+                    ),
+                    current,
+                ),
+            )
+        prepared = self.get_tmux_runtime_mapping(entity_id)
+        assert prepared is not None
+        return prepared
+
+    def finalize_managed_runtime_stop(
+        self,
+        entity_id: str,
+        *,
+        transaction_id: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically retire one absent runtime and its Agent/fork records."""
+
+        current = now_ts()
+        report_id = str(uuid.uuid4())
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            mapping_row = conn.execute(
+                "SELECT * FROM tmux_runtime_mappings WHERE entity_id = ?",
+                (entity_id,),
+            ).fetchone()
+            if mapping_row is None:
+                raise ValueError("tmux runtime mapping not found")
+            mapping = self._tmux_runtime_mapping_from_row(mapping_row)
+            if mapping.get("writer_lease_active"):
+                raise ValueError("release the active runtime writer lease before finalization")
+            mapping_metadata = dict(mapping.get("metadata") or {})
+            stop_record = (
+                mapping_metadata.get("managed_stop")
+                if isinstance(mapping_metadata.get("managed_stop"), dict)
+                else None
+            )
+            if stop_record is None or str(stop_record.get("transaction_id") or "") != transaction_id:
+                raise ValueError("managed stop transaction does not match the runtime mapping")
+            identity = self._managed_runtime_stop_identity(mapping)
+            if stop_record.get("identity") != identity:
+                raise ValueError("managed stop runtime identity changed before finalization")
+
+            agent_row = conn.execute(
+                """
+                SELECT project, metadata_json FROM agents WHERE agent_id = ?
+                """,
+                (entity_id,),
+            ).fetchone()
+            if agent_row is None:
+                raise ValueError("agent not found")
+            agent_metadata = self._json_object(agent_row["metadata_json"])
+            for key in (
+                "tmux_pane_id",
+                "tmux_target",
+                "active_tmux_pane_id",
+                "tmux_window_id",
+                "tmux_window_name",
+                "tmux_pane_pid",
+                "pane_pid",
+                "process_start_ticks",
+                "runtime_server_id",
+                "runtime_socket_path",
+            ):
+                agent_metadata.pop(key, None)
+            stop_summary = {
+                "transaction_id": transaction_id,
+                "stopped_at": current,
+                "server_id": identity["server_id"],
+                "session_name": identity["session_name"],
+                "window_id": identity["window_id"],
+                "pane_id": identity["pane_id"],
+                "codex_session_id": identity.get("codex_session_id"),
+            }
+            agent_metadata["last_managed_runtime_stop"] = stop_summary
+            conn.execute(
+                """
+                UPDATE agents
+                SET status = 'canceled', pbx_active = 0, metadata_json = ?,
+                    last_seen_at = ?, dismissed_at = NULL
+                WHERE agent_id = ?
+                """,
+                (json.dumps(agent_metadata), current, entity_id),
+            )
+            report_metadata = {
+                "source": "managed_runtime_stop",
+                "transaction_id": transaction_id,
+                **dict(metadata or {}),
+            }
+            conn.execute(
+                """
+                INSERT INTO reports(
+                    report_id, agent_id, project, status, summary, detail,
+                    needs_input, plan_options_json, metadata_json, created_at
+                ) VALUES (?, ?, ?, 'canceled', ?, ?, 0, '[]', ?, ?)
+                """,
+                (
+                    report_id,
+                    entity_id,
+                    str(agent_row["project"] or ""),
+                    "Managed runtime stopped",
+                    "The exact managed tmux pane was verified absent and its "
+                    "Agent PBX runtime and fork records were finalized.",
+                    json.dumps(report_metadata),
+                    current,
+                ),
+            )
+
+            fork_row = conn.execute(
+                """
+                SELECT operator_fork_id, metadata_json
+                FROM operator_forks WHERE fork_agent_id = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (entity_id,),
+            ).fetchone()
+            operator_fork_id: str | None = None
+            if fork_row is not None:
+                operator_fork_id = str(fork_row["operator_fork_id"])
+                fork_metadata = self._json_object(fork_row["metadata_json"])
+                for key in (
+                    "tmux_pane_id",
+                    "tmux_target",
+                    "active_tmux_pane_id",
+                    "tmux_window_id",
+                    "tmux_window_name",
+                    "tmux_pane_pid",
+                    "pane_pid",
+                    "process_start_ticks",
+                ):
+                    fork_metadata.pop(key, None)
+                fork_metadata["last_managed_runtime_stop"] = stop_summary
+                conn.execute(
+                    """
+                    UPDATE operator_forks
+                    SET tmux_pane_id = NULL, status = 'canceled',
+                        summary = ?, metadata_json = ?, updated_at = ?,
+                        completed_at = ?
+                    WHERE operator_fork_id = ?
+                    """,
+                    (
+                        "Managed tmux runtime stopped; Codex session retained for resume.",
+                        json.dumps(fork_metadata),
+                        current,
+                        current,
+                        operator_fork_id,
+                    ),
+                )
+
+            conn.execute(
+                "DELETE FROM tmux_runtime_mappings WHERE entity_id = ?",
+                (entity_id,),
+            )
+            event_payload = {
+                "entity_id": entity_id,
+                "operator_fork_id": operator_fork_id,
+                "transaction_id": transaction_id,
+                "identity": identity,
+                "report_id": report_id,
+                "metadata": dict(metadata or {}),
+            }
+            conn.execute(
+                """
+                INSERT INTO events(type, subject_id, payload_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    "tmux_runtime_stop_finalized",
+                    entity_id,
+                    json.dumps(event_payload),
+                    current,
+                ),
+            )
+
+        return {
+            "entity_id": entity_id,
+            "transaction_id": transaction_id,
+            "report_id": report_id,
+            "agent": self.get_agent(entity_id),
+            "fork": self.get_operator_fork_for_agent(entity_id),
+            "runtime_mapping": self.get_tmux_runtime_mapping(entity_id),
+        }
+
+    def get_finalized_managed_runtime_stop(
+        self,
+        entity_id: str,
+        *,
+        transaction_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload_json FROM events
+                WHERE type = 'tmux_runtime_stop_finalized' AND subject_id = ?
+                ORDER BY event_id DESC LIMIT 50
+                """,
+                (entity_id,),
+            ).fetchall()
+        for row in rows:
+            payload = self._json_object(row["payload_json"])
+            if str(payload.get("transaction_id") or "") != transaction_id:
+                continue
+            return {
+                "entity_id": entity_id,
+                "transaction_id": transaction_id,
+                "report_id": payload.get("report_id"),
+                "agent": self.get_agent(entity_id),
+                "fork": self.get_operator_fork_for_agent(entity_id),
+                "runtime_mapping": self.get_tmux_runtime_mapping(entity_id),
+            }
+        return None
 
     def create_runtime_migration_batch(
         self,

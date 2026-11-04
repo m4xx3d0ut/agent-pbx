@@ -21113,6 +21113,205 @@ async def test_tui_operator_stop_fails_closed_on_live_identity_mismatch(
     )
 
 
+async def test_tui_managed_stop_detaches_matching_writer_and_blocks_renewal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    released: list[str] = []
+    acquired: list[str] = []
+    mapping = {
+        "entity_id": "operator-8-fork",
+        "state": "ready",
+        "server_id": "managed",
+        "socket_path": "/tmp/managed.sock",
+        "session_name": "runtime-operator-8-fork",
+        "window_id": "@8",
+        "pane_id": "%8",
+        "pane_pid": 800,
+        "process_start_ticks": 80,
+        "writer_client_id": app.tmux_terminal_client_id,
+        "writer_lease_active": True,
+    }
+    refreshed = {
+        **mapping,
+        "writer_client_id": None,
+        "writer_lease_active": False,
+        "writer_lease_expires_at": None,
+    }
+
+    class FakeProcess:
+        alive = True
+
+        def close(self) -> None:
+            self.alive = False
+
+    async def release(agent_id: str) -> bool:
+        released.append(agent_id)
+        return True
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return refreshed
+
+    async def acquire(agent_id: str) -> dict[str, object]:
+        acquired.append(agent_id)
+        return refreshed
+
+    async with app.run_test():
+        app.embedded_terminal_v2_enabled = True
+        app.selected_agent_id = "operator-8-fork"
+        app.active_agent_tab = "latest-tab"
+        app.tmux_direct_agent_modes["operator-8-fork"] = True
+        app.embedded_terminal_agent_id = "operator-8-fork"
+        app.embedded_terminal_target = "managed:%8"
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        process = FakeProcess()
+        surface.process = process  # type: ignore[assignment]
+        surface.target = "managed:%8"
+        monkeypatch.setattr(app, "release_tmux_writer_lease", release)
+        monkeypatch.setattr(app, "fetch_tmux_runtime_mapping_for_stop", fetch)
+        monkeypatch.setattr(app, "acquire_tmux_writer_lease", acquire)
+        app.tmux_stop_in_progress_agent_ids.add("operator-8-fork")
+
+        result = await app.release_embedded_terminal_for_managed_stop(
+            "operator-8-fork",
+            mapping,
+        )
+        await app.renew_embedded_tmux_writer_lease_if_active()
+
+    assert result == refreshed
+    assert released == ["operator-8-fork"]
+    assert acquired == []
+    assert process.alive is False
+    assert app.embedded_terminal_agent_id is None
+    assert app.embedded_terminal_target is None
+
+
+async def test_tui_managed_stop_refuses_foreign_writer_without_detach() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    notifications: list[str] = []
+    app.notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+    mapping = {
+        "entity_id": "operator-8-fork",
+        "state": "ready",
+        "server_id": "managed",
+        "pane_id": "%8",
+        "writer_client_id": "other-tui",
+        "writer_lease_active": True,
+    }
+
+    result = await app.release_embedded_terminal_for_managed_stop(
+        "operator-8-fork",
+        mapping,
+    )
+
+    assert result is None
+    assert any("other-tui" in message for message in notifications)
+
+
+async def test_tui_stop_uses_authoritative_mapping_without_local_pane_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    agent_id = "operator-8-fork"
+    mapping = {
+        "entity_id": agent_id,
+        "state": "ready",
+        "server_id": "managed",
+        "socket_path": "/tmp/managed.sock",
+        "session_name": "runtime-operator-8-fork",
+        "window_id": "@8",
+        "pane_id": "%8",
+        "pane_pid": 800,
+        "process_start_ticks": 80,
+        "codex_session_id": "fork-session-8",
+        "writer_client_id": None,
+        "writer_lease_active": False,
+    }
+    prepared_mapping = {**mapping, "state": "stopping"}
+    calls: list[str] = []
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        calls.append("fetch")
+        return mapping
+
+    async def release(_agent_id: str, _mapping: object) -> dict[str, object]:
+        calls.append("release")
+        return mapping
+
+    async def prepare(_agent_id: str, _mapping: object) -> dict[str, object]:
+        calls.append("prepare")
+        return {
+            "transaction_id": "tmux-stop-8",
+            "requires_pane_stop": True,
+            "mapping": prepared_mapping,
+        }
+
+    target = SimpleNamespace(pane_id="%8")
+
+    async def qualify(*_args: object, **_kwargs: object) -> object:
+        calls.append("qualify")
+        return target
+
+    async def kill(
+        _agent_id: str,
+        *,
+        lifecycle_target: object | None = None,
+    ) -> bool:
+        assert lifecycle_target is target
+        calls.append("kill")
+        return True
+
+    async def finalize(_agent_id: str, transaction_id: str) -> dict[str, object]:
+        assert transaction_id == "tmux-stop-8"
+        calls.append("finalize")
+        return {
+            "agent": {
+                "agent_id": agent_id,
+                "agent_type": "operator",
+                "status": "canceled",
+                "pbx_active": False,
+                "metadata": {"operator_role": "fork"},
+            }
+        }
+
+    async def refresh() -> None:
+        return None
+
+    async def load_thread(_agent_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(app, "fetch_tmux_runtime_mapping_for_stop", fetch)
+    monkeypatch.setattr(app, "release_embedded_terminal_for_managed_stop", release)
+    monkeypatch.setattr(app, "prepare_managed_operator_stop", prepare)
+    monkeypatch.setattr(app, "managed_tmux_lifecycle_target", qualify)
+    monkeypatch.setattr(app, "kill_tui_owned_operator_pane", kill)
+    monkeypatch.setattr(app, "finalize_managed_operator_stop", finalize)
+    monkeypatch.setattr(app, "refresh_agents", refresh)
+    monkeypatch.setattr(app, "refresh_events", refresh)
+    monkeypatch.setattr(app, "load_thread", load_thread)
+    monkeypatch.setattr(app, "save_settings", lambda: None)
+    app.agents = {
+        agent_id: {
+            "agent_id": agent_id,
+            "agent_type": "operator",
+            "status": "working",
+            "pbx_active": True,
+            "metadata": {
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "launched_by": "agent-pbx-tui",
+            },
+        }
+    }
+
+    assert agent_id not in app.tmux_agent_targets
+    await app.stop_selected_operator(agent_id=agent_id)
+
+    assert calls == ["fetch", "release", "prepare", "qualify", "kill", "finalize"]
+    assert agent_id not in app.tmux_stop_in_progress_agent_ids
+    assert app.agents[agent_id]["status"] == "canceled"
+
+
 async def test_tui_agent_jump_sequence_opens_latest_by_visible_row() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     loaded: list[str] = []

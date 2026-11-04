@@ -199,6 +199,8 @@ from .schemas import (
     JoplinSyncStatusResponse,
     LifecycleActionRequest,
     ManagedAgentLaunchRequest,
+    ManagedRuntimeStopFinalizeRequest,
+    ManagedRuntimeStopPrepareRequest,
     ManagedSkillApplyRequest,
     ModelElevationActivateRequest,
     ModelElevationDecisionRequest,
@@ -1280,10 +1282,12 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="tmux runtime mapping not found")
         assessment = await inspect_tmux_runtime_mapping_live(mapping)
         assessed_state = str(assessment["state"])
-        if assessed_state != str(mapping.get("state") or "") or not assessment["safe"]:
+        stopping = str(mapping.get("state") or "") == "stopping"
+        target_state = "stopping" if stopping else assessed_state
+        if target_state != str(mapping.get("state") or "") or not assessment["safe"]:
             mapping = store.set_tmux_runtime_state(
                 entity_id,
-                state=assessed_state,
+                state=target_state,
                 metadata={
                     "last_live_validation": assessment,
                     "live_validated_at": time.time(),
@@ -1308,9 +1312,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         results: list[dict[str, object]] = []
         for mapping in store.list_tmux_runtime_mappings():
             assessment = await inspect_tmux_runtime_mapping_live(mapping)
+            stopping = str(mapping.get("state") or "") == "stopping"
             updated = store.set_tmux_runtime_state(
                 str(mapping["entity_id"]),
-                state=str(assessment["state"]),
+                state="stopping" if stopping else str(assessment["state"]),
                 metadata={"last_reconciliation": assessment, "reconciled_at": time.time()},
                 clear_writer_lease=not bool(assessment["safe"]),
             )
@@ -1336,6 +1341,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         previous = store.get_tmux_runtime_mapping(entity_id)
         if previous is None:
             raise HTTPException(status_code=404, detail="tmux runtime mapping not found")
+        if str(previous.get("state") or "") == "stopping":
+            raise HTTPException(
+                status_code=409,
+                detail="tmux runtime is stopping; writer acquisition is disabled",
+            )
         assessment = await inspect_tmux_runtime_mapping_live(previous)
         if not assessment["safe"]:
             store.set_tmux_runtime_state(
@@ -1438,6 +1448,57 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             return await asyncio.to_thread(service.inspect, entity_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/lifecycle/{entity_id}/managed-stop/prepare",
+        dependencies=[Depends(require_token)],
+    )
+    async def prepare_managed_runtime_stop(
+        entity_id: str,
+        payload: ManagedRuntimeStopPrepareRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        service: LifecycleService = request.app.state.lifecycle
+        expected_identity = {
+            "server_id": payload.expected_server_id,
+            "socket_path": payload.expected_socket_path,
+            "session_name": payload.expected_session_name,
+            "window_id": payload.expected_window_id,
+            "pane_id": payload.expected_pane_id,
+            "pane_pid": payload.expected_pane_pid,
+            "process_start_ticks": payload.expected_process_start_ticks,
+            "codex_session_id": payload.expected_codex_session_id,
+        }
+        try:
+            return await asyncio.to_thread(
+                service.prepare_managed_runtime_stop,
+                entity_id,
+                expected_identity=expected_identity,
+                client_id=payload.client_id,
+                metadata=payload.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/lifecycle/{entity_id}/managed-stop/finalize",
+        dependencies=[Depends(require_token)],
+    )
+    async def finalize_managed_runtime_stop(
+        entity_id: str,
+        payload: ManagedRuntimeStopFinalizeRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        service: LifecycleService = request.app.state.lifecycle
+        try:
+            return await asyncio.to_thread(
+                service.finalize_managed_runtime_stop,
+                entity_id,
+                transaction_id=payload.transaction_id,
+                metadata=payload.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post(
         "/v2/lifecycle/{entity_id}/actions/{action}/preview",

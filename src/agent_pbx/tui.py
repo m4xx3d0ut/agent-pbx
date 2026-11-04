@@ -7445,6 +7445,7 @@ class AgentPBXTUI(App[None]):
         self.latest_runtime_migration_batch: dict[str, Any] | None = None
         self.latest_agent_pane_adoption_batch: dict[str, Any] | None = None
         self.tmux_terminal_client_id = f"tui-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        self.tmux_stop_in_progress_agent_ids: set[str] = set()
         self.embedded_terminal_agent_id: str | None = None
         self.embedded_terminal_target: str | None = None
         self.embedded_terminal_transition_agent_id: str | None = None
@@ -16987,6 +16988,33 @@ class AgentPBXTUI(App[None]):
             )
         return mapping
 
+    async def fetch_tmux_runtime_mapping_for_stop(
+        self,
+        agent_id: str,
+    ) -> dict[str, Any] | None:
+        """Fetch the authoritative mapping without hiding an absent stopped pane."""
+
+        try:
+            response = await self.api_client().get(
+                f"/v2/tmux/runtimes/{quote(agent_id, safe='')}",
+                headers=auth_headers(self.token),
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            mapping = response.json()
+        except Exception as exc:
+            self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
+            return None
+        if not isinstance(mapping, dict):
+            self.tmux_runtime_mapping_error_by_agent[agent_id] = (
+                "managed runtime mapping response is not an object"
+            )
+            return None
+        self.tmux_runtime_mapping_by_agent[agent_id] = mapping
+        self.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
+        return mapping
+
     def clear_cached_tmux_runtime_mapping(self, agent_id: str) -> None:
         """Discard only one TUI-local runtime mapping cache entry."""
 
@@ -17202,6 +17230,8 @@ class AgentPBXTUI(App[None]):
         )
 
     async def acquire_tmux_writer_lease(self, agent_id: str) -> dict[str, Any] | None:
+        if agent_id in self.tmux_stop_in_progress_agent_ids:
+            return None
         try:
             response = await self.api_client().post(
                 f"/v2/tmux/runtimes/{quote(agent_id, safe='')}/writer/acquire",
@@ -17216,12 +17246,15 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             self.tmux_runtime_mapping_error_by_agent[agent_id] = str(exc)
             return None
+        if agent_id in self.tmux_stop_in_progress_agent_ids:
+            await self.release_tmux_writer_lease(agent_id)
+            return None
         self.tmux_runtime_mapping_by_agent[agent_id] = mapping
         self.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
         self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
         return mapping
 
-    async def release_tmux_writer_lease(self, agent_id: str) -> None:
+    async def release_tmux_writer_lease(self, agent_id: str) -> bool:
         try:
             response = await self.api_client().post(
                 f"/v2/tmux/runtimes/{quote(agent_id, safe='')}/writer/release",
@@ -17231,10 +17264,14 @@ class AgentPBXTUI(App[None]):
                 },
                 headers=auth_headers(self.token),
             )
-            if response.status_code not in {404, 409}:
-                response.raise_for_status()
+            if response.status_code == 404:
+                return True
+            if response.status_code == 409:
+                return False
+            response.raise_for_status()
         except Exception:
-            return
+            return False
+        return True
 
     async def wait_for_embedded_terminal_layout(
         self,
@@ -17576,7 +17613,10 @@ class AgentPBXTUI(App[None]):
         return True
 
     def schedule_tmux_writer_lease_renewal(self) -> None:
-        if not self.embedded_terminal_agent_id:
+        if (
+            not self.embedded_terminal_agent_id
+            or self.embedded_terminal_agent_id in self.tmux_stop_in_progress_agent_ids
+        ):
             return
         self.run_async_worker(
             self.renew_embedded_tmux_writer_lease_if_active,
@@ -17587,7 +17627,7 @@ class AgentPBXTUI(App[None]):
 
     async def renew_embedded_tmux_writer_lease_if_active(self) -> None:
         agent_id = self.embedded_terminal_agent_id
-        if not agent_id:
+        if not agent_id or agent_id in self.tmux_stop_in_progress_agent_ids:
             return
         if self.embedded_terminal_surface() is None:
             await self.detach_embedded_tmux_terminal(release_lease=True)
@@ -19424,7 +19464,10 @@ class AgentPBXTUI(App[None]):
             ).strip()
             reject(lookup_error or "no managed runtime mapping is available")
             return None
-        if str(mapping.get("state") or "") != "ready":
+        mapping_state = str(mapping.get("state") or "")
+        if mapping_state != "ready" and not (
+            action == "stop" and mapping_state == "stopping"
+        ):
             reject(
                 f"managed runtime mapping is {mapping.get('state') or 'unavailable'}"
             )
@@ -29082,7 +29125,11 @@ class AgentPBXTUI(App[None]):
         *,
         lifecycle_target: ManagedTmuxLifecycleTarget | None = None,
     ) -> bool:
-        pane_id = self.tui_owned_operator_pane_id(agent_id)
+        pane_id = (
+            lifecycle_target.pane_id
+            if lifecycle_target is not None
+            else self.tui_owned_operator_pane_id(agent_id)
+        )
         if not pane_id:
             return True
         lifecycle_target = lifecycle_target or await self.managed_tmux_lifecycle_target(
@@ -29108,6 +29155,126 @@ class AgentPBXTUI(App[None]):
         self.clear_operator_tmux_state(agent_id)
         self.save_settings()
         return True
+
+    async def prepare_managed_operator_stop(
+        self,
+        agent_id: str,
+        mapping: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        payload = {
+            "client_id": self.tmux_terminal_client_id,
+            "expected_server_id": str(mapping.get("server_id") or ""),
+            "expected_socket_path": str(mapping.get("socket_path") or ""),
+            "expected_session_name": str(mapping.get("session_name") or ""),
+            "expected_window_id": str(mapping.get("window_id") or ""),
+            "expected_pane_id": str(mapping.get("pane_id") or ""),
+            "expected_pane_pid": mapping.get("pane_pid"),
+            "expected_process_start_ticks": mapping.get("process_start_ticks"),
+            "expected_codex_session_id": mapping.get("codex_session_id"),
+            "metadata": {"source": "agent-pbx-tui"},
+        }
+        try:
+            response = await self.api_client().post(
+                f"/v2/lifecycle/{quote(agent_id, safe='')}/managed-stop/prepare",
+                json=payload,
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            prepared = response.json()
+        except Exception as exc:
+            self.notify(
+                f"Unable to prepare an exact managed stop for {agent_id}: {exc}",
+                severity="error",
+            )
+            return None
+        return prepared if isinstance(prepared, dict) else None
+
+    async def finalize_managed_operator_stop(
+        self,
+        agent_id: str,
+        transaction_id: str,
+    ) -> dict[str, Any] | None:
+        last_error: Exception | None = None
+        for attempt in range(8):
+            try:
+                response = await self.api_client().post(
+                    f"/v2/lifecycle/{quote(agent_id, safe='')}/managed-stop/finalize",
+                    json={
+                        "transaction_id": transaction_id,
+                        "metadata": {"source": "agent-pbx-tui"},
+                    },
+                    headers=auth_headers(self.token),
+                )
+                response.raise_for_status()
+                finalized = response.json()
+                return finalized if isinstance(finalized, dict) else None
+            except Exception as exc:
+                last_error = exc
+                if attempt < 7:
+                    await asyncio.sleep(0.25)
+        self.notify(
+            f"The pane stop for {agent_id} could not be finalized: {last_error}. "
+            f"Retry the stop transaction {transaction_id}; do not restart the fork.",
+            severity="error",
+        )
+        return None
+
+    async def release_embedded_terminal_for_managed_stop(
+        self,
+        agent_id: str,
+        mapping: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        owner = str(mapping.get("writer_client_id") or "").strip()
+        lease_active = bool(mapping.get("writer_lease_active"))
+        mapped_target = f"{mapping.get('server_id')}:{mapping.get('pane_id')}"
+        if lease_active and owner != self.tmux_terminal_client_id:
+            self.notify(
+                f"Refused to stop {agent_id}: runtime writer lease belongs to "
+                f"{owner or 'an unknown client'}.",
+                severity="error",
+            )
+            return None
+
+        if self.embedded_terminal_agent_id == agent_id:
+            surface = self.query_one_or_none(
+                "#pbx-terminal-surface", PbxTerminalSurface
+            )
+            if (
+                surface is None
+                or not surface.attached
+                or self.embedded_terminal_target != mapped_target
+                or surface.target != mapped_target
+            ):
+                self.notify(
+                    f"Refused to stop {agent_id}: its embedded writer target no "
+                    "longer matches the authoritative runtime mapping.",
+                    severity="error",
+                )
+                return None
+            await self.detach_embedded_tmux_terminal(release_lease=True)
+        elif lease_active:
+            self.notify(
+                f"Refused to stop {agent_id}: this TUI owns a writer lease but "
+                "has no matching attached terminal to release.",
+                severity="error",
+            )
+            return None
+
+        refreshed = await self.fetch_tmux_runtime_mapping_for_stop(agent_id)
+        if refreshed is None:
+            self.notify(
+                f"Refused to stop {agent_id}: its authoritative runtime mapping "
+                "disappeared while releasing the writer.",
+                severity="error",
+            )
+            return None
+        if refreshed.get("writer_lease_active"):
+            self.notify(
+                f"Refused to stop {agent_id}: its runtime writer lease is still active.",
+                severity="error",
+            )
+            return None
+        return refreshed
 
     async def restart_selected_operator(
         self,
@@ -29379,46 +29546,90 @@ class AgentPBXTUI(App[None]):
         agent_id = agent_id or self.selected_operator_agent_id()
         if not agent_id:
             return
-        pane_id = self.tmux_agent_targets.get(agent_id)
-        if pane_id and self.tui_owned_operator_pane_id(agent_id) != pane_id:
-            self.notify(
-                f"{agent_id} has a non-TUI-owned tmux pane; detach it before stop.",
-                severity="warning",
-            )
-            return
-        if not await self.kill_tui_owned_operator_pane(agent_id):
-            return
         agent = self.agents.get(agent_id) or {}
-        project = str(agent.get("project") or "agent-pbx-operator")
-        detail = (
-            "The operator pane was stopped from the TUI. The pane was killed "
-            "and Agent PBX reporting was marked inactive."
-        )
-        try:
-            await self.create_agent_report(
-                agent_id,
-                {
-                    "project": project,
-                    "status": "canceled",
-                    "summary": "Operator stopped from TUI",
-                    "detail": detail,
-                    "needs_input": False,
-                    "plan_options": [],
-                },
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        if metadata.get("launched_by") != "agent-pbx-tui":
+            self.notify(
+                f"Refused to stop {agent_id}: it is not a TUI-managed Operator runtime.",
+                severity="error",
             )
-        except Exception as exc:
-            self.notify(f"Unable to record stop report for {agent_id}: {exc}", severity="warning")
-        try:
-            updated = await self.set_agent_pbx_active(agent_id, active=False)
-            if isinstance(updated, dict):
-                self.agents[agent_id] = updated
-        except Exception as exc:
-            self.notify(f"Unable to mark {agent_id} inactive: {exc}", severity="error")
             return
-        self.notify(f"Stopped operator {agent_id}.")
-        await self.refresh_agents()
-        await self.refresh_events()
-        await self.load_thread(agent_id)
+        if agent_id in self.tmux_stop_in_progress_agent_ids:
+            self.notify(f"A managed stop is already in progress for {agent_id}.")
+            return
+        self.tmux_stop_in_progress_agent_ids.add(agent_id)
+        transaction_id = ""
+        try:
+            mapping = await self.fetch_tmux_runtime_mapping_for_stop(agent_id)
+            if mapping is None:
+                self.notify(
+                    f"Refused to stop {agent_id}: no authoritative managed runtime "
+                    "mapping is available.",
+                    severity="error",
+                )
+                return
+            mapping = await self.release_embedded_terminal_for_managed_stop(
+                agent_id,
+                mapping,
+            )
+            if mapping is None:
+                return
+            prepared = await self.prepare_managed_operator_stop(agent_id, mapping)
+            if prepared is None:
+                return
+            transaction_id = str(prepared.get("transaction_id") or "").strip()
+            prepared_mapping = (
+                prepared.get("mapping")
+                if isinstance(prepared.get("mapping"), dict)
+                else None
+            )
+            if not transaction_id or prepared_mapping is None:
+                self.notify(
+                    f"Refused to stop {agent_id}: managed stop preparation was incomplete.",
+                    severity="error",
+                )
+                return
+            if bool(prepared.get("requires_pane_stop")):
+                pane_id = str(prepared_mapping.get("pane_id") or "").strip()
+                lifecycle_target = await self.managed_tmux_lifecycle_target(
+                    agent_id,
+                    expected_pane_id=pane_id,
+                    action="stop",
+                )
+                if lifecycle_target is None:
+                    self.notify(
+                        f"Managed stop {transaction_id} remains prepared; retry after "
+                        "the runtime identity can be verified.",
+                        severity="warning",
+                    )
+                    return
+                if not await self.kill_tui_owned_operator_pane(
+                    agent_id,
+                    lifecycle_target=lifecycle_target,
+                ):
+                    self.notify(
+                        f"Managed stop {transaction_id} remains prepared; no durable "
+                        "Agent or fork record was changed.",
+                        severity="warning",
+                    )
+                    return
+            finalized = await self.finalize_managed_operator_stop(
+                agent_id,
+                transaction_id,
+            )
+            if finalized is None:
+                return
+            self.clear_operator_tmux_state(agent_id)
+            self.save_settings()
+            finalized_agent = finalized.get("agent")
+            if isinstance(finalized_agent, dict):
+                self.agents[agent_id] = finalized_agent
+            self.notify(f"Stopped and finalized managed Operator {agent_id}.")
+            await self.refresh_agents()
+            await self.refresh_events()
+            await self.load_thread(agent_id)
+        finally:
+            self.tmux_stop_in_progress_agent_ids.discard(agent_id)
 
     async def load_operator_campaigns(self, agent_id: str) -> None:
         generation_resource = f"operator-campaigns:{agent_id}"

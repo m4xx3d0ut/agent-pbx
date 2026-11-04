@@ -7,7 +7,7 @@ from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
 from agent_pbx.lifecycle import LifecycleService
 from agent_pbx.runtime_tmux import RuntimeTmuxPane
-from agent_pbx.schemas import AgentRegisterRequest
+from agent_pbx.schemas import AgentRegisterRequest, ReportCreateRequest
 from agent_pbx.store import Store
 
 
@@ -19,6 +19,81 @@ def register_agent(store: Store, root: Path, *, agent_id: str = "agent-1") -> No
             metadata={"cwd": str(root), "codex_session_id": "session-1"},
         )
     )
+
+
+def register_operator_fork_runtime(
+    store: Store,
+    root: Path,
+) -> tuple[dict[str, object], RuntimeTmuxPane]:
+    register_agent(store, root, agent_id="caller-1")
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={
+                "agent_type": "operator",
+                "operator_role": "root",
+                "launched_by": "agent-pbx-tui",
+            },
+        )
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0-fork-caller-1",
+            project="demo",
+            agent_type="operator",
+            metadata={
+                "agent_type": "operator",
+                "operator_role": "fork",
+                "logical_operator_id": "operator-0",
+                "source_caller_agent_id": "caller-1",
+                "source_codex_session_id": "session-1",
+                "fork_codex_session_id": "fork-session-1",
+                "cwd": str(root),
+                "tmux_pane_id": "%8",
+                "launched_by": "agent-pbx-tui",
+            },
+        )
+    )
+    store.create_operator_fork(
+        logical_operator_agent_id="operator-0",
+        fork_agent_id="operator-0-fork-caller-1",
+        source_caller_agent_id="caller-1",
+        source_codex_session_id="session-1",
+        fork_codex_session_id="fork-session-1",
+        cwd=str(root),
+        tmux_pane_id="%8",
+        status="running",
+        metadata={"tmux_pane_id": "%8"},
+    )
+    mapping = store.upsert_tmux_runtime_mapping(
+        entity_id="operator-0-fork-caller-1",
+        server_mode="dedicated",
+        server_id="runtime-server",
+        socket_path=str(root / "runtime.sock"),
+        session_name="runtime-fork",
+        window_id="@8",
+        window_name="operator-0-fork-caller-1",
+        pane_id="%8",
+        pane_pid=800,
+        process_start_ticks=80,
+        codex_session_id="fork-session-1",
+        cwd=str(root),
+        state="ready",
+        metadata={"managed_by": "agent-pbx-tui"},
+    )
+    pane = RuntimeTmuxPane(
+        session_name="runtime-fork",
+        window_id="@8",
+        window_name="operator-0-fork-caller-1",
+        pane_id="%8",
+        pane_pid=800,
+        cwd=str(root),
+        current_command="codex",
+        title="operator-0-fork-caller-1",
+    )
+    return mapping, pane
 
 
 def test_lifecycle_actions_require_fresh_previews_and_preserve_guards(
@@ -180,6 +255,213 @@ def test_lifecycle_api_exposes_preview_before_mutation(tmp_path: Path) -> None:
     assert preview.json()["safe"] is True
     assert applied.json()["after"]["agent"]["starred"] is True
     assert stale.status_code == 409
+
+
+def test_managed_stop_finalizes_agent_runtime_and_fork_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    mapping, pane = register_operator_fork_runtime(store, workspace)
+    panes: tuple[RuntimeTmuxPane, ...] = (pane,)
+    ticks: int | None = 80
+    monkeypatch.setattr("agent_pbx.lifecycle.validate_tmux_socket", lambda _path: (True, ""))
+    monkeypatch.setattr(
+        "agent_pbx.lifecycle.probe_runtime_panes",
+        lambda _identity: (True, "", panes),
+    )
+    monkeypatch.setattr("agent_pbx.lifecycle.process_start_ticks", lambda _pid: ticks)
+    service = LifecycleService(store)
+
+    prepared = service.prepare_managed_runtime_stop(
+        "operator-0-fork-caller-1",
+        expected_identity=store._managed_runtime_stop_identity(mapping),
+        client_id="tui-1",
+        metadata={"test": True},
+    )
+
+    assert prepared["requires_pane_stop"] is True
+    assert prepared["phase"] == "qualified"
+    assert store.get_tmux_runtime_mapping("operator-0-fork-caller-1")["state"] == "stopping"  # type: ignore[index]
+    assert service.inspect("operator-0-fork-caller-1")["lifecycle_state"] == "stopping"
+
+    panes = ()
+    with pytest.raises(ValueError, match="process identity is still alive"):
+        service.finalize_managed_runtime_stop(
+            "operator-0-fork-caller-1",
+            transaction_id=str(prepared["transaction_id"]),
+        )
+    ticks = None
+    finalized = service.finalize_managed_runtime_stop(
+        "operator-0-fork-caller-1",
+        transaction_id=str(prepared["transaction_id"]),
+        metadata={"test": True},
+    )
+
+    assert finalized["idempotent"] is False
+    assert finalized["runtime_mapping"] is None
+    agent = store.get_agent("operator-0-fork-caller-1")
+    fork = store.get_operator_fork_for_agent("operator-0-fork-caller-1")
+    assert agent is not None
+    assert agent["status"] == "canceled"
+    assert agent["pbx_active"] is False
+    assert "tmux_pane_id" not in agent["metadata"]
+    assert agent["metadata"]["fork_codex_session_id"] == "fork-session-1"
+    assert fork is not None
+    assert fork["status"] == "canceled"
+    assert fork["tmux_pane_id"] is None
+    assert fork["completed_at"] is not None
+    assert fork["fork_codex_session_id"] == "fork-session-1"
+    assert finalized["after"]["lifecycle_state"] == "stopped"
+
+    repeated = service.finalize_managed_runtime_stop(
+        "operator-0-fork-caller-1",
+        transaction_id=str(prepared["transaction_id"]),
+    )
+    assert repeated["idempotent"] is True
+    assert repeated["report_id"] == finalized["report_id"]
+
+
+def test_managed_stop_fails_closed_on_foreign_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    mapping, pane = register_operator_fork_runtime(store, workspace)
+    store.acquire_tmux_writer_lease(
+        "operator-0-fork-caller-1",
+        client_id="other-tui",
+        ttl_seconds=30,
+    )
+    monkeypatch.setattr("agent_pbx.lifecycle.validate_tmux_socket", lambda _path: (True, ""))
+    monkeypatch.setattr(
+        "agent_pbx.lifecycle.probe_runtime_panes",
+        lambda _identity: (True, "", (pane,)),
+    )
+    monkeypatch.setattr("agent_pbx.lifecycle.process_start_ticks", lambda _pid: 80)
+    service = LifecycleService(store)
+
+    with pytest.raises(ValueError, match="other-tui"):
+        service.prepare_managed_runtime_stop(
+            "operator-0-fork-caller-1",
+            expected_identity=store._managed_runtime_stop_identity(mapping),
+            client_id="tui-1",
+        )
+
+    unchanged = store.get_tmux_runtime_mapping("operator-0-fork-caller-1")
+    assert unchanged is not None
+    assert unchanged["state"] == "ready"
+    assert unchanged["writer_client_id"] == "other-tui"
+
+
+def test_lifecycle_reports_agent_runtime_fork_split_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _mapping, pane = register_operator_fork_runtime(store, workspace)
+    monkeypatch.setattr("agent_pbx.lifecycle.validate_tmux_socket", lambda _path: (True, ""))
+    monkeypatch.setattr("agent_pbx.lifecycle.process_start_ticks", lambda _pid: 80)
+    service = LifecycleService(store)
+
+    store.create_report(
+        "operator-0-fork-caller-1",
+        ReportCreateRequest(
+            project="demo",
+            status="canceled",
+            summary="Canceled",
+            detail="Canceled while runtime remained live.",
+        ),
+    )
+    store.set_agent_pbx_active("operator-0-fork-caller-1", False)
+    monkeypatch.setattr(
+        "agent_pbx.lifecycle.probe_runtime_panes",
+        lambda _identity: (True, "", (pane,)),
+    )
+    live_split = service.inspect("operator-0-fork-caller-1")
+    assert live_split["lifecycle_state"] == "error"
+    assert "canceled_agent_live_runtime" in live_split["consistency_issues"]
+    assert live_split["actions"]["resume"]["available"] is False
+
+    store.create_report(
+        "operator-0-fork-caller-1",
+        ReportCreateRequest(
+            project="demo",
+            status="working",
+            summary="Working",
+            detail="Fork row remains active after pane loss.",
+        ),
+    )
+    store.set_agent_pbx_active("operator-0-fork-caller-1", True)
+    monkeypatch.setattr(
+        "agent_pbx.lifecycle.probe_runtime_panes",
+        lambda _identity: (True, "", ()),
+    )
+    missing_split = service.inspect("operator-0-fork-caller-1")
+    assert missing_split["lifecycle_state"] == "error"
+    assert "missing_runtime_active_fork" in missing_split["consistency_issues"]
+
+
+def test_managed_stop_api_blocks_new_writers_and_finalizes_after_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+    store: Store = app.state.store
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    mapping, pane = register_operator_fork_runtime(store, workspace)
+    panes: tuple[RuntimeTmuxPane, ...] = (pane,)
+    ticks: int | None = 80
+    monkeypatch.setattr("agent_pbx.lifecycle.validate_tmux_socket", lambda _path: (True, ""))
+    monkeypatch.setattr(
+        "agent_pbx.lifecycle.probe_runtime_panes",
+        lambda _identity: (True, "", panes),
+    )
+    monkeypatch.setattr("agent_pbx.lifecycle.process_start_ticks", lambda _pid: ticks)
+    client = TestClient(app)
+    identity = store._managed_runtime_stop_identity(mapping)
+
+    prepared = client.post(
+        "/v2/lifecycle/operator-0-fork-caller-1/managed-stop/prepare",
+        json={
+            "client_id": "tui-1",
+            "expected_server_id": identity["server_id"],
+            "expected_socket_path": identity["socket_path"],
+            "expected_session_name": identity["session_name"],
+            "expected_window_id": identity["window_id"],
+            "expected_pane_id": identity["pane_id"],
+            "expected_pane_pid": identity["pane_pid"],
+            "expected_process_start_ticks": identity["process_start_ticks"],
+            "expected_codex_session_id": identity["codex_session_id"],
+        },
+    )
+    assert prepared.status_code == 200
+    transaction_id = prepared.json()["transaction_id"]
+    blocked_writer = client.post(
+        "/v2/tmux/runtimes/operator-0-fork-caller-1/writer/acquire",
+        json={"client_id": "other-tui", "ttl_seconds": 30},
+    )
+    assert blocked_writer.status_code == 409
+    assert "stopping" in blocked_writer.json()["detail"]
+
+    panes = ()
+    ticks = None
+    finalized = client.post(
+        "/v2/lifecycle/operator-0-fork-caller-1/managed-stop/finalize",
+        json={"transaction_id": transaction_id},
+    )
+    assert finalized.status_code == 200
+    assert finalized.json()["runtime_mapping"] is None
 
 
 def test_campaign_api_pages_summaries_and_loads_events_on_detail(tmp_path: Path) -> None:

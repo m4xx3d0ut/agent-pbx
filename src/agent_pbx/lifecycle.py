@@ -20,6 +20,7 @@ from .store import Store
 
 
 CLIENT_LIFECYCLE_ACTIONS = {
+    "managed_stop",
     "resume",
     "restart_resume",
     "pop_in",
@@ -84,7 +85,12 @@ class LifecycleService:
             }
         )
         entity_kind = self._entity_kind(agent, fork)
-        state = self._lifecycle_state(agent, runtime)
+        consistency_issues = self._consistency_issues(agent, runtime, fork)
+        state = self._lifecycle_state(
+            agent,
+            runtime,
+            consistency_issues=consistency_issues,
+        )
         result = {
             "entity_id": entity_id,
             "entity_kind": entity_kind,
@@ -109,6 +115,7 @@ class LifecycleService:
             "workspace": workspace,
             "runtime": runtime,
             "fork": self._safe_fork(fork),
+            "consistency_issues": consistency_issues,
             "guard_reasons": guards,
             "actions": {},
             "observed_at": time.time(),
@@ -202,6 +209,120 @@ class LifecycleService:
             "applied": True,
             "requires_client": False,
             "entity": updated,
+            "after": self.inspect(entity_id),
+        }
+
+    def prepare_managed_runtime_stop(
+        self,
+        entity_id: str,
+        *,
+        expected_identity: dict[str, Any],
+        client_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        agent = self.store.get_agent(entity_id)
+        if agent is None:
+            raise ValueError("agent not found")
+        agent_metadata = (
+            agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        )
+        if agent_metadata.get("launched_by") != "agent-pbx-tui":
+            raise ValueError("managed stop requires a TUI-launched runtime")
+        mapping = self.store.get_tmux_runtime_mapping(entity_id)
+        if mapping is None:
+            raise ValueError("tmux runtime mapping not found")
+        observed_identity = self.store._managed_runtime_stop_identity(mapping)
+        normalized_expected = self.store._managed_runtime_stop_identity(expected_identity)
+        if observed_identity != normalized_expected:
+            raise ValueError("managed runtime identity changed before stop preparation")
+        if mapping.get("writer_lease_active"):
+            owner = str(mapping.get("writer_client_id") or "unknown")
+            raise ValueError(f"release the active runtime writer lease owned by {owner!r}")
+
+        runtime = self._assess_mapping(mapping)
+        runtime_state = str(runtime.get("state") or "")
+        if runtime_state == "ready":
+            phase = "qualified"
+            requires_pane_stop = True
+        elif runtime_state == "missing" and self._runtime_process_is_absent(mapping):
+            phase = "pane_stopped"
+            requires_pane_stop = False
+        else:
+            raise ValueError(
+                str(runtime.get("message") or "managed runtime cannot be stopped safely")
+            )
+        prepared = self.store.prepare_managed_runtime_stop(
+            entity_id,
+            expected_identity=observed_identity,
+            client_id=client_id,
+            phase=phase,
+            metadata=metadata,
+        )
+        stop_record = (
+            prepared.get("metadata", {}).get("managed_stop")
+            if isinstance(prepared.get("metadata"), dict)
+            else None
+        )
+        if not isinstance(stop_record, dict):
+            raise RuntimeError("managed stop preparation did not persist its journal")
+        return {
+            "entity_id": entity_id,
+            "transaction_id": stop_record["transaction_id"],
+            "phase": phase,
+            "requires_pane_stop": requires_pane_stop,
+            "mapping": prepared,
+            "runtime": runtime,
+            "fork": self._safe_fork(self.store.get_operator_fork_for_agent(entity_id)),
+        }
+
+    def finalize_managed_runtime_stop(
+        self,
+        entity_id: str,
+        *,
+        transaction_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        mapping = self.store.get_tmux_runtime_mapping(entity_id)
+        if mapping is None:
+            completed = self.store.get_finalized_managed_runtime_stop(
+                entity_id,
+                transaction_id=transaction_id,
+            )
+            if completed is None:
+                raise ValueError("tmux runtime mapping not found")
+            return {
+                **completed,
+                "idempotent": True,
+                "after": self.inspect(entity_id),
+            }
+        if str(mapping.get("state") or "") != "stopping":
+            raise ValueError("managed runtime is not in its prepared stopping state")
+        if mapping.get("writer_lease_active"):
+            raise ValueError("release the active runtime writer lease before finalization")
+        stop_record = (
+            mapping.get("metadata", {}).get("managed_stop")
+            if isinstance(mapping.get("metadata"), dict)
+            else None
+        )
+        if not isinstance(stop_record, dict) or str(
+            stop_record.get("transaction_id") or ""
+        ) != transaction_id:
+            raise ValueError("managed stop transaction does not match the runtime mapping")
+        runtime = self._assess_mapping(mapping)
+        if str(runtime.get("state") or "") != "missing":
+            raise ValueError(
+                str(runtime.get("message") or "managed tmux pane absence is not proven")
+            )
+        if not self._runtime_process_is_absent(mapping):
+            raise ValueError("managed pane process identity is still alive")
+        finalized = self.store.finalize_managed_runtime_stop(
+            entity_id,
+            transaction_id=transaction_id,
+            metadata=metadata,
+        )
+        return {
+            **finalized,
+            "idempotent": False,
             "after": self.inspect(entity_id),
         }
 
@@ -358,6 +479,9 @@ class LifecycleService:
         active_runtime = runtime.get("state") == "ready"
         session_known = bool(inspection["codex"]["session_known"])
         workspace_ready = bool(inspection["workspace"]["available"])
+        consistency_issues = list(inspection.get("consistency_issues") or [])
+        consistent = not consistency_issues
+        inconsistency_reason = ", ".join(consistency_issues)
 
         def option(available: bool, reason: str = "") -> dict[str, Any]:
             return {"available": available, "reason": "" if available else reason}
@@ -381,16 +505,26 @@ class LifecycleService:
             ),
             "unarchive": option(archived, "entity is not archived"),
             "mark_canceled": option(not archived, "entity is archived"),
+            "managed_stop": option(
+                bool(runtime.get("registered")) and not archived,
+                "managed runtime mapping is unavailable or entity is archived",
+            ),
             "resume": option(
-                session_known and workspace_ready,
-                "Codex session or workspace is unavailable",
+                session_known and workspace_ready and consistent,
+                inconsistency_reason or "Codex session or workspace is unavailable",
             ),
             "restart_resume": option(
-                session_known and workspace_ready,
-                "Codex session or workspace is unavailable",
+                session_known and workspace_ready and consistent,
+                inconsistency_reason or "Codex session or workspace is unavailable",
             ),
-            "pop_in": option(active_runtime, "runtime mapping is not ready"),
-            "pop_out": option(active_runtime, "runtime mapping is not ready"),
+            "pop_in": option(
+                active_runtime and consistent,
+                inconsistency_reason or "runtime mapping is not ready",
+            ),
+            "pop_out": option(
+                active_runtime and consistent,
+                inconsistency_reason or "runtime mapping is not ready",
+            ),
             "repair_mapping": option(repair_ready, runtime.get("message") or "no candidate"),
             "prune": option(
                 archived and not guards,
@@ -460,9 +594,16 @@ class LifecycleService:
     def _lifecycle_state(
         agent: dict[str, Any],
         runtime: dict[str, Any],
+        *,
+        consistency_issues: list[str] | None = None,
     ) -> LifecycleState:
         if agent.get("dismissed_at") is not None:
             return LifecycleState.ARCHIVED
+        mapping = runtime.get("mapping") if isinstance(runtime.get("mapping"), dict) else {}
+        if str(mapping.get("state") or "") == "stopping":
+            return LifecycleState.STOPPING
+        if consistency_issues:
+            return LifecycleState.ERROR
         runtime_state = runtime.get("state")
         if runtime_state in {"missing", "server_lost"}:
             return LifecycleState.MISSING
@@ -474,6 +615,52 @@ class LifecycleService:
         if status in {"complete", "completed", "done", "ready", "canceled", "cancelled"}:
             return LifecycleState.STOPPED
         return LifecycleState.REGISTERED
+
+    @staticmethod
+    def _consistency_issues(
+        agent: dict[str, Any],
+        runtime: dict[str, Any],
+        fork: dict[str, Any] | None,
+    ) -> list[str]:
+        issues: list[str] = []
+        status = str(agent.get("effective_status") or agent.get("status") or "").lower()
+        agent_stopped = status in {"canceled", "cancelled"} or not bool(
+            agent.get("pbx_active", True)
+        )
+        runtime_state = str(runtime.get("state") or "")
+        mapping = runtime.get("mapping") if isinstance(runtime.get("mapping"), dict) else {}
+        mapping_state = str(mapping.get("state") or "")
+        if mapping_state == "stopping":
+            return ["managed_stop_in_progress"]
+        if runtime_state == "ready" and agent_stopped:
+            issues.append("canceled_agent_live_runtime")
+
+        if fork is not None:
+            fork_status = str(fork.get("status") or "").lower().replace("-", "_")
+            fork_stopped = fork_status in {"canceled", "cancelled"}
+            fork_terminal = bool(fork.get("completed_at")) or fork_status in {
+                "complete",
+                "completed",
+                "done",
+                "canceled",
+                "cancelled",
+                "failed",
+                "blocked",
+            }
+            if runtime_state == "ready" and fork_stopped:
+                issues.append("stopped_fork_live_runtime")
+            if runtime_state in {"missing", "unregistered"} and not fork_terminal:
+                issues.append("missing_runtime_active_fork")
+        return sorted(set(issues))
+
+    @staticmethod
+    def _runtime_process_is_absent(mapping: dict[str, Any]) -> bool:
+        pane_pid = mapping.get("pane_pid")
+        expected_ticks = mapping.get("process_start_ticks")
+        if not pane_pid or not expected_ticks:
+            return False
+        observed_ticks = process_start_ticks(int(pane_pid))
+        return observed_ticks is None or int(observed_ticks) != int(expected_ticks)
 
     @staticmethod
     def _safe_fork(fork: dict[str, Any] | None) -> dict[str, Any] | None:
