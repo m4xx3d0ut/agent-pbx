@@ -491,18 +491,36 @@ default/edit forks. Agent PBX validates the canonical checkout, `.git`
 indirection and reverse backpointer, per-worktree admin directory, common object
 database, attached local branch, ownership, symlink posture, and approved-root
 boundary. A qualifying branch must use a dedicated namespace such as
-`pbx/<fork-id>` with no sibling refs in that namespace. The generated Codex
-permission profile adds write access only to the active worktree admin
-directory, shared object database, and that branch's dedicated ref/reflog
-directories. These are sandbox filesystem grants, never Codex workspace roots
-or `--add-dir` inputs. The profile never grants the common `.git` root, sibling
-worktree admin directories, configuration, or hooks. Standalone repositories
-and non-Git projects retain their existing behavior; review/read-only forks
-never receive this profile. Ambiguous, detached, bare, malformed, symlinked,
-unapproved, or legacy-`sandbox_mode` configurations fail before a pane is
-launched or replaced. Codex 0.166 also fails closed when the selected base
-profile contains split secret/read/deny filesystem rules: the legacy writable-
-roots alternative cannot retain those rules and grant the linked index safely.
+`pbx-operator-N/<fork-id>` with no sibling refs in that namespace. For a simple
+compatible base profile, the generated Codex permission profile adds write
+access only to the active worktree admin directory, shared object database, and
+that branch's dedicated ref/reflog directories. These are sandbox filesystem
+grants, never Codex workspace roots or `--add-dir` inputs. The profile never
+grants the common `.git` root, sibling worktree admin directories,
+configuration, or hooks. Standalone repositories and non-Git projects retain
+their existing behavior; review/read-only forks never receive this profile.
+
+Codex 0.166 cannot safely compose those direct writes with a base profile that
+contains split secret/read/deny filesystem rules. Agent PBX does not flatten or
+weaken that policy. Instead, a stopped, inactive edit fork can use the local
+TUI's root-confirmed `/operator git commit` action. The broker accepts an exact
+enumerated leaf subset—never add-all—shows each leaf's state, mode, raw SHA-256,
+raw Git blob OID, and prior index identity, then binds confirmation to the
+transaction, branch, HEAD/tree/index, upstream, ref, and reflog receipt. It
+commits the approved raw bytes without clean filters while leaving unapproved
+dirty paths unenumerated and unopened. The fork remains stopped after commit.
+
+The broker uses a private crash journal and object quarantine. Ref, index, and
+reflog changes are compare-and-swap guarded and exactly completed or restored
+when their recorded identities still match. A failed transaction can leave
+only the journaled immutable Git objects derived from the approved blobs, tree,
+and commit; they remain unreachable and are left for normal Git garbage
+collection because deleting shared objects during rollback is unsafe. Use
+`/operator git recover` after a TUI/process interruption. Ambiguous, detached,
+bare, malformed, symlinked, unapproved, partial-clone/promisor, object-alternate,
+external-config-include, staged, sparse/split-index, or unmerged topologies fail
+before mutation. Broker execution is unavailable through HTTP, API, or MCP and
+is never an alternate commit path for direct-compatible forks.
 
 Review forks should treat the source checkout as read-only and write only under
 their configured `work_root`. If a finding requires edits in the source repo,

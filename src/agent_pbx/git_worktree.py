@@ -4,6 +4,7 @@ import copy
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import shutil
 import subprocess
 from typing import Any, Iterable, Mapping
 
@@ -22,6 +23,10 @@ class LinkedWorktreeQualificationError(ValueError):
     """The linked-worktree topology is not safe for a managed write grant."""
 
 
+class _BrokerRequiredProfile(LinkedWorktreeQualificationError):
+    """Codex cannot safely compose this split policy with direct Git grants."""
+
+
 @dataclass(frozen=True)
 class LinkedWorktreeGitAdminPlan:
     worktree_root: Path
@@ -36,28 +41,37 @@ class LinkedWorktreeGitAdminPlan:
     base_permission_profile: str = ":workspace"
     permission_profile: str = LINKED_EDIT_PERMISSION_PROFILE
     permission_profile_definition: Mapping[str, Any] | None = None
+    write_strategy: str = "direct_permission_profile"
 
     def public_dict(self) -> dict[str, Any]:
+        direct = self.write_strategy == "direct_permission_profile"
         return {
             "kind": "linked_worktree_edit",
             "worktree_root": str(self.worktree_root),
             "git_dir": str(self.git_dir),
             "common_dir": str(self.common_dir),
+            "object_dir": str(self.object_dir),
             "branch_ref": self.branch_ref,
             "base_permission_profile": self.base_permission_profile,
             "permission_profile": self.permission_profile,
-            "grant_scope": "sandbox_filesystem_only",
+            "write_strategy": self.write_strategy,
+            "grant_scope": (
+                "sandbox_filesystem_only" if direct else "tui_root_commit_broker"
+            ),
             "additional_workspace_roots": [],
-            "writable_paths": [str(path) for path in self.writable_paths],
+            "active_write_grants": (
+                [str(path) for path in self.writable_paths] if direct else []
+            ),
+            "qualified_git_admin_paths": [str(path) for path in self.writable_paths],
+            "writable_paths": (
+                [str(path) for path in self.writable_paths] if direct else []
+            ),
         }
 
     def config_overrides(self) -> tuple[tuple[str, object], ...]:
         profile = copy.deepcopy(self.permission_profile_definition)
         if profile is None:
-            profile = {
-                "extends": ":workspace",
-                "filesystem": {str(path): "write" for path in self.writable_paths},
-            }
+            return ()
         return (
             (
                 f"permissions.{self.permission_profile}",
@@ -149,6 +163,34 @@ def qualify_linked_worktree_git_admin(
             "per-worktree gitdir backpointer does not resolve to this worktree's .git marker"
         )
 
+    # Resolve and inspect the administration topology without repository-aware
+    # Git first. Repository commands are allowed only after local/worktree
+    # configuration is proven not to include another file.
+    commondir_file = git_dir / "commondir"
+    raw_common_dir, common_dir = _parse_single_path_file(
+        commondir_file,
+        label="commondir",
+    )
+    _require_within(raw_common_dir, approved_root, label="raw common gitdir")
+    _require_no_symlink_components(raw_common_dir, approved_root)
+    _require_within(common_dir, approved_root, label="common gitdir")
+    _require_no_symlink_components(common_dir, approved_root)
+    if common_dir.name != ".git" or common_dir.parent / ".git" != common_dir:
+        raise LinkedWorktreeQualificationError(
+            "ambiguous common Git directory; expected a non-bare repository .git directory"
+        )
+    _reject_git_config_includes(common_dir / "config", label="local Git config")
+    _reject_git_config_includes(
+        git_dir / "config.worktree",
+        label="worktree Git config",
+        allow_absent=True,
+    )
+    alternates = common_dir / "objects" / "info" / "alternates"
+    if os.path.lexists(alternates):
+        raise LinkedWorktreeQualificationError(
+            "Git object alternates are unsupported for linked edit-fork qualification"
+        )
+
     top = Path(_git(root, "rev-parse", "--show-toplevel")).resolve(strict=True)
     if top != root:
         raise LinkedWorktreeQualificationError(
@@ -166,13 +208,6 @@ def qualify_linked_worktree_git_admin(
     if _git(root, "rev-parse", "--is-inside-work-tree") != "true":
         raise LinkedWorktreeQualificationError("repository is not an attached worktree")
 
-    commondir_file = git_dir / "commondir"
-    raw_common_dir, common_dir = _parse_single_path_file(
-        commondir_file,
-        label="commondir",
-    )
-    _require_within(raw_common_dir, approved_root, label="raw common gitdir")
-    _require_no_symlink_components(raw_common_dir, approved_root)
     reported_common = Path(
         _git(root, "rev-parse", "--git-common-dir")
     )
@@ -183,13 +218,6 @@ def qualify_linked_worktree_git_admin(
         raise LinkedWorktreeQualificationError(
             "per-worktree commondir does not match Git's common directory"
         )
-    _require_within(common_dir, approved_root, label="common gitdir")
-    _require_no_symlink_components(common_dir, approved_root)
-    if common_dir.name != ".git" or common_dir.parent / ".git" != common_dir:
-        raise LinkedWorktreeQualificationError(
-            "ambiguous common Git directory; expected a non-bare repository .git directory"
-        )
-
     worktrees_dir = common_dir / "worktrees"
     if git_dir.parent != worktrees_dir or git_dir.parent.parent != common_dir:
         raise LinkedWorktreeQualificationError(
@@ -269,7 +297,7 @@ def qualify_linked_worktree_git_admin(
                 f"owner mismatch for linked-worktree path {path}: uid {owner}, expected {uid}"
             )
 
-    base_permission_profile, permission_profile_definition = (
+    base_permission_profile, permission_profile_definition, write_strategy = (
         _validate_permission_profile_compatibility(
             codex_home=codex_home,
             profile_name=LINKED_EDIT_PERMISSION_PROFILE,
@@ -289,6 +317,7 @@ def qualify_linked_worktree_git_admin(
         writable_paths=writable_paths,
         base_permission_profile=base_permission_profile,
         permission_profile_definition=permission_profile_definition,
+        write_strategy=write_strategy,
     )
 
 
@@ -351,13 +380,16 @@ def _parse_single_path_file(path: Path, *, label: str) -> tuple[Path, Path]:
 
 
 def _git(root: Path, *args: str) -> str:
+    git_binary = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
+    if not git_binary:
+        raise LinkedWorktreeQualificationError("an absolute Git executable is required")
     result = subprocess.run(
-        ["git", "-C", str(root), *args],
+        [str(Path(git_binary).resolve(strict=True)), "-C", str(root), *args],
         check=False,
         capture_output=True,
         text=True,
         timeout=10.0,
-        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        env=_qualification_git_env(),
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip() or f"exit code {result.returncode}"
@@ -365,6 +397,96 @@ def _git(root: Path, *args: str) -> str:
             f"unable to qualify linked worktree ({' '.join(args)}): {detail}"
         )
     return result.stdout.strip()
+
+
+def _reject_git_config_includes(
+    path: Path,
+    *,
+    label: str,
+    allow_absent: bool = False,
+) -> None:
+    """Reject include/includeIf without following another config path."""
+
+    if not path.exists():
+        if allow_absent:
+            return
+        raise LinkedWorktreeQualificationError(f"{label} is unavailable: {path}")
+    if path.is_symlink() or not path.is_file():
+        raise LinkedWorktreeQualificationError(
+            f"{label} must be a regular non-symlink file: {path}"
+        )
+    git_binary = shutil.which("git", path="/usr/local/bin:/usr/bin:/bin")
+    if not git_binary:
+        raise LinkedWorktreeQualificationError("an absolute Git executable is required")
+    result = subprocess.run(
+        [
+            str(Path(git_binary).resolve(strict=True)),
+            "config",
+            "--file",
+            str(path),
+            "--no-includes",
+            "--get-regexp",
+            r"^include.*\.path$",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+        cwd=os.sep,
+        env=_qualification_git_env(),
+    )
+    if result.returncode == 0:
+        raise LinkedWorktreeQualificationError(
+            f"{label} contains include/includeIf directives; external config reads are unsupported"
+        )
+    if result.returncode != 1:
+        detail = (result.stderr or result.stdout).strip() or f"exit code {result.returncode}"
+        raise LinkedWorktreeQualificationError(
+            f"unable to inspect {label} without includes: {detail}"
+        )
+    promisor = subprocess.run(
+        [
+            str(Path(git_binary).resolve(strict=True)),
+            "config",
+            "--file",
+            str(path),
+            "--no-includes",
+            "--get-regexp",
+            r"^(extensions\.partialClone|remote\..*\.promisor)$",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+        cwd=os.sep,
+        env=_qualification_git_env(),
+    )
+    if promisor.returncode == 0:
+        raise LinkedWorktreeQualificationError(
+            f"{label} configures a partial-clone/promisor repository; lazy object fetch is unsupported"
+        )
+    if promisor.returncode != 1:
+        detail = (promisor.stderr or promisor.stdout).strip() or f"exit code {promisor.returncode}"
+        raise LinkedWorktreeQualificationError(
+            f"unable to inspect {label} promisor posture: {detail}"
+        )
+
+
+def _qualification_git_env() -> dict[str, str]:
+    """Return the fixed no-network/no-replacement Git qualification environment."""
+
+    return {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": "/nonexistent-agent-pbx-git-qualification-home",
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_LITERAL_PATHSPECS": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_NO_LAZY_FETCH": "1",
+    }
 
 
 def _git_optional(root: Path, *args: str) -> str | None:
@@ -428,7 +550,7 @@ def _validate_permission_profile_compatibility(
     profile_name: str,
     common_dir: Path,
     writable_paths: tuple[Path, ...],
-) -> tuple[str, Mapping[str, Any]]:
+) -> tuple[str, Mapping[str, Any] | None, str]:
     paths: list[tuple[str, Path]] = []
     if codex_home is not None:
         paths.append(("Codex user config", codex_home / "config.toml"))
@@ -490,11 +612,18 @@ def _validate_permission_profile_compatibility(
         definitions=profile_definitions,
         common_dir=common_dir,
     )
-    profile = _materialize_linked_edit_permission_profile(
-        resolved_base,
-        writable_paths=writable_paths,
-    )
-    return base_profile, profile
+    try:
+        profile = _materialize_linked_edit_permission_profile(
+            resolved_base,
+            writable_paths=writable_paths,
+        )
+    except _BrokerRequiredProfile:
+        # Codex 0.166 cannot compose split read/deny policy with these external
+        # writes without metadata bootstrap pollution or a broader grant. Keep
+        # the paths as qualification evidence for the local root-approved
+        # broker, but never emit them into the runtime profile.
+        return base_profile, None, "tui_root_commit_broker"
+    return base_profile, profile, "direct_permission_profile"
 
 
 def _validate_base_permission_profile(
@@ -603,7 +732,7 @@ def _materialize_linked_edit_permission_profile(
             continue
         if path_text == "glob_scan_max_depth" or path_text.startswith(":"):
             if path_text != "glob_scan_max_depth":
-                raise LinkedWorktreeQualificationError(
+                raise _BrokerRequiredProfile(
                     "base permission profile requires split filesystem enforcement "
                     f"through {path_text!r}; Codex 0.166 cannot combine that policy "
                     "with external Git administration writes without creating "
@@ -616,7 +745,7 @@ def _materialize_linked_edit_permission_profile(
                 f"base filesystem permission is neither absolute nor scoped to "
                 f":workspace_roots: {path_text!r}"
             )
-        raise LinkedWorktreeQualificationError(
+        raise _BrokerRequiredProfile(
             "base permission profile contains an absolute filesystem rule; Codex "
             "0.166 cannot preserve split secret/read policy while adding external "
             "Git administration writes without creating protected metadata mount "
@@ -669,7 +798,7 @@ def _validate_workspace_permissions_for_git_admin_grants(
             # marker readable. Exact qualified administration roots below are
             # granted separately; the pointer file itself must not be writable.
             continue
-        raise LinkedWorktreeQualificationError(
+        raise _BrokerRequiredProfile(
             "base permission profile contains a scoped workspace filesystem rule; "
             "Codex 0.166 cannot preserve that split policy while adding external Git "
             "administration writes without creating protected metadata mount targets "

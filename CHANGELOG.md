@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- Add a local-only, root-confirmed linked-worktree commit broker for stopped
+  edit forks whose split secret/read/deny profile cannot safely receive direct
+  Codex Git-administration grants. It commits only an explicit reviewed leaf
+  subset, uses raw-byte/no-filter identities, leaves unrelated dirt
+  unobserved, journals a closed crash-recovery state machine, and exposes no
+  API, MCP, shell, implicit-stage, or arbitrary-message surface.
+
 ### Fixed
 
 - Bind Operator stop, purge, restart, and resume operations to the complete
@@ -9,12 +18,12 @@
   Missing or mismatched provenance now fails before mutation, so a pane ID that
   collides on the outer/default tmux server can never be used as a fallback.
 - Keep linked-worktree Git-administration grants out of Codex workspace and
-  `--add-dir` roots. Agent PBX now emits only four qualified sandbox filesystem
-  writes and fails closed when Codex 0.166 cannot preserve a base profile's
-  split secret-deny rules without creating protected bootstrap mount targets.
-  The legacy `sandbox_workspace_write.writable_roots` representation is also
-  rejected because it cannot simultaneously retain profile provenance and make
-  the linked-worktree index writable.
+  `--add-dir` roots. Direct-compatible profiles emit only four qualified
+  sandbox filesystem writes. Split secret-deny profiles preserve all denials
+  and use the stopped-fork TUI broker instead; the legacy
+  `sandbox_workspace_write.writable_roots` representation remains rejected
+  because it cannot simultaneously retain profile provenance and make the
+  linked-worktree index writable.
 
 ## v2.3.0rc1 - 2026-11-02
 

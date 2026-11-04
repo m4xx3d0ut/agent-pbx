@@ -81,7 +81,18 @@ from .git_worktree import (
     LinkedWorktreeQualificationError,
     qualify_linked_worktree_git_admin,
 )
+from .git_broker import (
+    LinkedGitBrokerError,
+    LinkedGitBrokerRestored,
+    LinkedGitCommitReceipt,
+    PendingLinkedGitCommit,
+    execute_linked_git_commit,
+    load_pending_linked_git_commits,
+    prepare_linked_git_commit,
+    recover_linked_git_commit,
+)
 from .managed_runtime import default_managed_project_roots
+from .paths import default_state_root
 from . import tmux as tmux_support
 from .project_spawn import (
     normalize_project_slug,
@@ -1307,6 +1318,16 @@ class CallerAgentReference:
 class PlanSelection:
     index: int
     notes: str = ""
+
+
+@dataclass(frozen=True)
+class LinkedGitBrokerTuiContext:
+    agent_id: str
+    work_root: str
+    approved_roots: tuple[Path, ...]
+    codex_home: Path
+    authority_sha256: str
+    plan_public: dict[str, Any]
 
 
 CYBERPUNK_PALETTE = textual_palette()
@@ -3991,6 +4012,308 @@ class EditorCloseConfirmScreen(ModalScreen[None]):
             self.dismiss()
 
 
+class LinkedGitCommitPathsScreen(ModalScreen[None]):
+    """Collect an explicit broker subset without offering implicit add-all."""
+
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(self, *, context: LinkedGitBrokerTuiContext) -> None:
+        super().__init__()
+        self.context = context
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="linked-git-broker-panel"):
+            yield Static(
+                f"Review linked-worktree commit: {self.context.agent_id}",
+                id="linked-git-broker-title",
+            )
+            yield Static(
+                "Enter a JSON array of exact repository-relative leaf paths. "
+                "There is no add-all, glob, directory, or implicit staging mode.",
+                id="linked-git-broker-help",
+            )
+            yield TextArea("[]", id="linked-git-broker-paths", soft_wrap=True)
+            yield Static(
+                "Protected/unapproved dirt: excluded and unobserved. Agent PBX "
+                "will not enumerate, open, stat, hash, or pass those paths to Git.",
+                id="linked-git-broker-protected",
+            )
+            with Horizontal(id="linked-git-broker-actions"):
+                yield Button(
+                    "Review Exact Subset",
+                    id="linked-git-broker-review",
+                    variant="warning",
+                )
+                yield Button("Cancel", id="linked-git-broker-cancel")
+
+    def submit(self) -> None:
+        raw = self.query_one("#linked-git-broker-paths", TextArea).text.strip()
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            self.notify(f"Stage paths must be a JSON array: {exc}", severity="warning")
+            return
+        if (
+            not isinstance(value, list)
+            or not value
+            or any(not isinstance(path, str) or not path for path in value)
+        ):
+            self.notify(
+                "Enumerate at least one exact leaf path; implicit/all-path staging is disabled.",
+                severity="warning",
+            )
+            return
+        if len(value) != len(set(value)):
+            self.notify("Duplicate stage paths are not allowed.", severity="warning")
+            return
+        self.dismiss()
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.review_linked_git_broker_commit(  # type: ignore[attr-defined]
+                self.context,
+                tuple(value),
+            ),
+            name=f"linked-git-broker-review-{slugify(self.context.agent_id)}",
+            exclusive=True,
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "linked-git-broker-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "linked-git-broker-review":
+            event.stop()
+            self.submit()
+
+
+class LinkedGitCommitConfirmScreen(ModalScreen[None]):
+    """Root/TUI-local confirmation for one immutable broker receipt."""
+
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(
+        self,
+        *,
+        context: LinkedGitBrokerTuiContext,
+        receipt: LinkedGitCommitReceipt,
+    ) -> None:
+        super().__init__()
+        self.context = context
+        self.receipt = receipt
+
+    @property
+    def expected_confirmation(self) -> str:
+        return f"COMMIT {self.context.agent_id} {self.receipt.transaction_id[:12]}"
+
+    def compose(self) -> ComposeResult:
+        approved = json.dumps(
+            [
+                {
+                    "path": identity.path,
+                    "state": identity.state,
+                    "mode": identity.mode,
+                    "raw_sha256": identity.raw_sha256,
+                    "raw_blob_oid": identity.raw_blob_oid,
+                    "prior_index_mode": identity.index_mode,
+                    "prior_index_oid": identity.index_oid,
+                }
+                for identity in self.receipt.path_identities
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        with Vertical(id="linked-git-broker-panel"):
+            yield Static(
+                "Approve exact linked-worktree commit",
+                id="linked-git-broker-title",
+            )
+            yield Static(
+                f"Stopped edit fork: {self.context.agent_id}\n"
+                f"Worktree: {self.context.work_root}\n"
+                f"Transaction: {self.receipt.transaction_id}\n"
+                f"Authority: {self.context.authority_sha256}\n"
+                f"Branch: {self.receipt.branch}\n"
+                f"HEAD: {self.receipt.head}\n"
+                f"HEAD tree: {self.receipt.head_tree}\n"
+                f"Index tree: {self.receipt.index_tree}\n"
+                f"Upstream: {self.receipt.upstream} @ {self.receipt.upstream_oid}\n"
+                f"Index SHA-256: {self.receipt.index_sha256}\n"
+                f"Ref SHA-256: {self.receipt.branch_ref_sha256}\n"
+                f"Reflog SHA-256: {self.receipt.branch_reflog_sha256}\n"
+                f"Approved raw-byte identities:\n{approved}",
+                id="linked-git-broker-receipt",
+            )
+            yield Static(
+                "Protected/unapproved dirt remains outside broker authority and "
+                "is not inspected. The prepared index starts from exact original "
+                "bytes and may differ only at the approved entries.",
+                id="linked-git-broker-protected",
+            )
+            yield Static(
+                f'Type "{self.expected_confirmation}" to authorize this one local transaction.',
+                id="linked-git-broker-help",
+            )
+            yield Input(
+                placeholder=self.expected_confirmation,
+                id="linked-git-broker-confirmation",
+            )
+            with Horizontal(id="linked-git-broker-actions"):
+                yield Button(
+                    "Commit Exact Subset",
+                    id="linked-git-broker-commit",
+                    variant="error",
+                )
+                yield Button("Cancel", id="linked-git-broker-cancel")
+
+    def submit(self) -> None:
+        confirmation = self.query_one(
+            "#linked-git-broker-confirmation",
+            Input,
+        ).value
+        if confirmation != self.expected_confirmation:
+            self.notify("Exact root confirmation did not match.", severity="warning")
+            return
+        self.dismiss()
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.execute_linked_git_broker_commit(  # type: ignore[attr-defined]
+                self.context,
+                self.receipt,
+                confirmation,
+            ),
+            name=f"linked-git-broker-execute-{slugify(self.context.agent_id)}",
+            exclusive=True,
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "linked-git-broker-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "linked-git-broker-commit":
+            event.stop()
+            self.submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "linked-git-broker-confirmation":
+            event.stop()
+            self.submit()
+
+
+class LinkedGitRecoveryConfirmScreen(ModalScreen[None]):
+    """Confirm recovery of one exact transaction loaded from the private journal."""
+
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(
+        self,
+        *,
+        context: LinkedGitBrokerTuiContext,
+        pending: PendingLinkedGitCommit,
+    ) -> None:
+        super().__init__()
+        self.context = context
+        self.pending = pending
+
+    @property
+    def expected_confirmation(self) -> str:
+        receipt = self.pending.receipt
+        return f"RECOVER {self.context.agent_id} {receipt.transaction_id[:12]}"
+
+    def compose(self) -> ComposeResult:
+        receipt = self.pending.receipt
+        approved = json.dumps(
+            [
+                {
+                    "path": identity.path,
+                    "state": identity.state,
+                    "mode": identity.mode,
+                    "raw_sha256": identity.raw_sha256,
+                    "raw_blob_oid": identity.raw_blob_oid,
+                    "prior_index_mode": identity.index_mode,
+                    "prior_index_oid": identity.index_oid,
+                }
+                for identity in receipt.path_identities
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        with Vertical(id="linked-git-broker-panel"):
+            yield Static(
+                "Recover exact linked-worktree transaction",
+                id="linked-git-broker-title",
+            )
+            yield Static(
+                f"Stopped edit fork: {self.context.agent_id}\n"
+                f"Journal phase: {self.pending.phase}\n"
+                f"Transaction: {receipt.transaction_id}\n"
+                f"Authority: {self.context.authority_sha256}\n"
+                f"Worktree: {self.context.work_root}\n"
+                f"Branch: {receipt.branch}\n"
+                f"HEAD: {receipt.head}\n"
+                f"HEAD tree: {receipt.head_tree}\n"
+                f"Index tree: {receipt.index_tree}\n"
+                f"Upstream: {receipt.upstream} @ {receipt.upstream_oid}\n"
+                f"Index SHA-256: {receipt.index_sha256}\n"
+                f"Ref SHA-256: {receipt.branch_ref_sha256}\n"
+                f"Reflog SHA-256: {receipt.branch_reflog_sha256}\n"
+                f"Approved raw-byte identities:\n{approved}",
+                id="linked-git-broker-receipt",
+            )
+            yield Static(
+                "Recovery can only complete or restore the exact journaled ref/index "
+                "transition. Drift fails closed for manual review; the fork remains stopped.",
+                id="linked-git-broker-protected",
+            )
+            yield Static(
+                f'Type "{self.expected_confirmation}" to authorize this one recovery.',
+                id="linked-git-broker-help",
+            )
+            yield Input(
+                placeholder=self.expected_confirmation,
+                id="linked-git-broker-confirmation",
+            )
+            with Horizontal(id="linked-git-broker-actions"):
+                yield Button(
+                    "Recover Exact Transaction",
+                    id="linked-git-broker-recover",
+                    variant="error",
+                )
+                yield Button("Cancel", id="linked-git-broker-cancel")
+
+    def submit(self) -> None:
+        confirmation = self.query_one(
+            "#linked-git-broker-confirmation",
+            Input,
+        ).value
+        if confirmation != self.expected_confirmation:
+            self.notify("Exact recovery confirmation did not match.", severity="warning")
+            return
+        self.dismiss()
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.recover_linked_git_broker_commit(  # type: ignore[attr-defined]
+                self.context,
+                self.pending,
+                confirmation,
+            ),
+            name=f"linked-git-broker-recover-{slugify(self.context.agent_id)}",
+            exclusive=True,
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "linked-git-broker-cancel":
+            event.stop()
+            self.dismiss()
+            return
+        if event.button.id == "linked-git-broker-recover":
+            event.stop()
+            self.submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "linked-git-broker-confirmation":
+            event.stop()
+            self.submit()
+
+
 class OperatorKillConfirmScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Close")]
 
@@ -6644,6 +6967,9 @@ class AgentPBXTUI(App[None]):
             if settings_file is not None
             else env_settings_file()
         )
+        # Local-only private transaction state. This path is never accepted
+        # from a palette field, API request, MCP call, or agent metadata.
+        self.git_broker_state_root = default_state_root() / "git-broker"
         self.settings = load_tui_settings(self.settings_file)
         self.palette_history_persist = bool_setting(
             self.settings,
@@ -9768,6 +10094,16 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator stop", "Stop the selected operator", self.palette_operator_stop)
         yield SystemCommand("/operator hide", "Hide the selected operator", self.palette_operator_hide)
         yield SystemCommand("/operator purge", "Purge the selected operator", self.palette_operator_purge)
+        yield SystemCommand(
+            "/operator git commit",
+            "Commit an exact approved subset for a stopped broker-required edit fork",
+            self.palette_operator_git_commit,
+        )
+        yield SystemCommand(
+            "/operator git recover",
+            "Recover one exact pending broker transaction for the stopped edit fork",
+            self.palette_operator_git_recover,
+        )
         yield SystemCommand("/operator fork next", "View the next fork pane for the selected operator", self.palette_operator_fork_next)
         yield SystemCommand("/operator fork prev", "View the previous fork pane for the selected operator", self.palette_operator_fork_prev)
         yield SystemCommand("/operator fork review", "Start a read-only review fork for the selected operator", self.palette_operator_fork_review)
@@ -11165,6 +11501,52 @@ class AgentPBXTUI(App[None]):
             self.dismiss_selected_agent(agent_id=agent_id, delete_thread=True),
             name="palette-operator-purge",
             exclusive=True,
+        )
+
+    def palette_operator_git_commit(self) -> None:
+        agent_id = self.palette_operator_lifecycle_target(
+            "commit approved linked-worktree paths for"
+        )
+        if agent_id is None:
+            return
+        context = self.linked_git_broker_tui_context(agent_id)
+        if context is None:
+            return
+        pending, safe = self.pending_linked_git_broker_transaction(
+            context,
+            require_pending=False,
+        )
+        if not safe:
+            return
+        if pending is not None:
+            self.notify(
+                "A pending exact broker transaction must be recovered before a new "
+                "approval can be prepared.",
+                severity="warning",
+            )
+            self.push_screen(
+                LinkedGitRecoveryConfirmScreen(context=context, pending=pending)
+            )
+            return
+        self.push_screen(LinkedGitCommitPathsScreen(context=context))
+
+    def palette_operator_git_recover(self) -> None:
+        agent_id = self.palette_operator_lifecycle_target(
+            "recover a linked-worktree transaction for"
+        )
+        if agent_id is None:
+            return
+        context = self.linked_git_broker_tui_context(agent_id)
+        if context is None:
+            return
+        pending, safe = self.pending_linked_git_broker_transaction(
+            context,
+            require_pending=True,
+        )
+        if not safe or pending is None:
+            return
+        self.push_screen(
+            LinkedGitRecoveryConfirmScreen(context=context, pending=pending)
         )
 
     def palette_operator_fork_next(self) -> None:
@@ -27886,6 +28268,460 @@ class AgentPBXTUI(App[None]):
             return None
         return cursor_agent_id
 
+    def linked_git_broker_tui_context(
+        self,
+        agent_id: str,
+        *,
+        expected_authority_sha256: str | None = None,
+    ) -> LinkedGitBrokerTuiContext | None:
+        """Resolve one stopped edit fork for the local-only commit broker."""
+
+        cursor_agent_id = self.operator_id_at_cursor()
+        selected_agent_id = str(self.selected_agent_id or "").strip()
+        if cursor_agent_id != agent_id or selected_agent_id != agent_id:
+            self.notify(
+                "Linked Git commit selection drifted; no broker action was taken. "
+                "Press Enter on the exact stopped edit-fork row and retry.",
+                severity="warning",
+            )
+            return None
+        agent = self.agents.get(agent_id)
+        if not isinstance(agent, dict) or self.agent_type(agent) != OPERATOR_AGENT_TYPE:
+            self.notify("The broker target is no longer an operator.", severity="warning")
+            return None
+        metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        if (
+            self.operator_role(agent) != OPERATOR_ROLE_FORK
+            or str(metadata.get("fork_purpose") or "").strip() != DEFAULT_OPERATOR_FORK_PURPOSE
+            or str(metadata.get("access_mode") or "").strip() != DEFAULT_OPERATOR_FORK_ACCESS_MODE
+        ):
+            self.notify(
+                "The local commit broker is limited to edit-capable operator forks.",
+                severity="warning",
+            )
+            return None
+        if str(agent.get("status") or "").strip().casefold() != "canceled":
+            self.notify(
+                "The local commit broker requires the canonical canceled status "
+                "recorded by the guarded TUI stop action.",
+                severity="warning",
+            )
+            return None
+        if bool(agent.get("pbx_active", True)):
+            self.notify(
+                "Stop the exact edit fork before opening the local commit broker.",
+                severity="warning",
+            )
+            return None
+        if (
+            agent_id in self.tmux_agent_targets
+            or agent_id in self.tmux_runtime_mapping_by_agent
+            or self.embedded_terminal_agent_id == agent_id
+            or self.embedded_terminal_transition_agent_id == agent_id
+        ):
+            self.notify(
+                "The stopped edit fork still has terminal/runtime state. Reconcile "
+                "the stopped lifecycle record before opening the broker.",
+                severity="warning",
+            )
+            return None
+        liveness = self.tmux_liveness_by_agent.get(agent_id)
+        if liveness is not None and (
+            not isinstance(liveness, TmuxLiveness) or liveness.state != "stale"
+        ):
+            self.notify(
+                "The edit fork has non-stale tmux liveness evidence; no broker "
+                "action was taken.",
+                severity="warning",
+            )
+            return None
+        work_root = str(metadata.get("work_root") or metadata.get("cwd") or "").strip()
+        if not work_root:
+            self.notify("The edit fork has no canonical work root.", severity="error")
+            return None
+        roots = default_managed_project_roots(cwd=Path(work_root))
+        try:
+            codex_home = self.codex_home_dir().expanduser().resolve(strict=True)
+            plan = qualify_linked_worktree_git_admin(
+                work_root,
+                approved_roots=roots,
+                fork_purpose=DEFAULT_OPERATOR_FORK_PURPOSE,
+                access_mode=DEFAULT_OPERATOR_FORK_ACCESS_MODE,
+                codex_home=codex_home,
+            )
+        except (LinkedWorktreeQualificationError, OSError) as exc:
+            self.notify(
+                f"Linked Git broker qualification failed closed: {exc}",
+                severity="error",
+            )
+            return None
+        if plan is None:
+            self.notify(
+                "This edit fork is not a qualified linked Git worktree.",
+                severity="warning",
+            )
+            return None
+        plan_public = plan.public_dict()
+        if (
+            plan.write_strategy != "tui_root_commit_broker"
+            or plan.config_overrides()
+            or len(plan.writable_paths) != 4
+            or plan_public.get("active_write_grants")
+            or plan_public.get("writable_paths")
+        ):
+            self.notify(
+                "This fork does not require the split-profile TUI broker, or its "
+                "recomputed plan exposes runtime grants; use its qualified direct "
+                "Git path instead.",
+                severity="warning",
+            )
+            return None
+        linked = metadata.get("linked_git_admin")
+        if linked is not None and not isinstance(linked, dict):
+            self.notify(
+                "Stored linked-Git metadata is malformed. Refresh/reconcile the "
+                "stopped fork metadata before retrying; no restart is required.",
+                severity="error",
+            )
+            return None
+        legacy_metadata = False
+        if isinstance(linked, dict):
+            legacy_keys = {
+                "kind",
+                "worktree_root",
+                "git_dir",
+                "common_dir",
+                "branch_ref",
+                "base_permission_profile",
+                "permission_profile",
+                "writable_paths",
+            }
+            legacy_metadata = set(linked) == legacy_keys and all(
+                linked.get(key) == plan_public.get(key)
+                for key in legacy_keys - {"writable_paths"}
+            ) and linked.get("writable_paths") == plan_public.get(
+                "qualified_git_admin_paths"
+            )
+            current_metadata = linked == plan_public
+            if not legacy_metadata and not current_metadata:
+                self.notify(
+                    "Stored linked-Git metadata is partial, malformed, or conflicts "
+                    "with the current topology. Only the exact current plan or the "
+                    "exact pre-broker four-path legacy record is accepted. Refresh/"
+                    "reconcile the stopped fork metadata, then retry without restarting it.",
+                    severity="error",
+                )
+                return None
+        authority_payload = {
+            "agent_id": agent_id,
+            "pbx_active": bool(agent.get("pbx_active", True)),
+            "status": str(agent.get("status") or ""),
+            "operator_role": self.operator_role(agent),
+            "fork_purpose": str(metadata.get("fork_purpose") or ""),
+            "access_mode": str(metadata.get("access_mode") or ""),
+            "work_root": work_root,
+            "recomputed_linked_git_admin": plan_public,
+            "legacy_inert_launch_metadata": legacy_metadata,
+            "approved_roots": [str(path) for path in roots],
+            "codex_home": str(codex_home),
+            "tmux_liveness": liveness.state if isinstance(liveness, TmuxLiveness) else None,
+        }
+        authority_sha256 = hashlib.sha256(
+            json.dumps(
+                authority_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if (
+            expected_authority_sha256 is not None
+            and authority_sha256 != expected_authority_sha256
+        ):
+            self.notify(
+                "Linked Git commit approval context drifted; no broker action was taken.",
+                severity="warning",
+            )
+            return None
+        return LinkedGitBrokerTuiContext(
+            agent_id=agent_id,
+            work_root=work_root,
+            approved_roots=roots,
+            codex_home=codex_home,
+            authority_sha256=authority_sha256,
+            plan_public=plan_public,
+        )
+
+    @staticmethod
+    def linked_git_broker_receipt_matches_context(
+        receipt: LinkedGitCommitReceipt,
+        context: LinkedGitBrokerTuiContext,
+    ) -> bool:
+        plan = context.plan_public
+        return (
+            receipt.agent_id == context.agent_id
+            and receipt.worktree_root == context.work_root
+            and receipt.approved_roots
+            == tuple(str(path) for path in context.approved_roots)
+            and receipt.codex_home == str(context.codex_home)
+            and receipt.git_dir == str(plan.get("git_dir") or "")
+            and receipt.common_dir == str(plan.get("common_dir") or "")
+            and receipt.object_dir == str(plan.get("object_dir") or "")
+            and receipt.branch_ref == str(plan.get("branch_ref") or "")
+            and receipt.write_strategy == str(plan.get("write_strategy") or "")
+            and receipt.grant_scope == str(plan.get("grant_scope") or "")
+            and receipt.base_permission_profile
+            == str(plan.get("base_permission_profile") or "")
+            and receipt.permission_profile
+            == str(plan.get("permission_profile") or "")
+            and receipt.qualified_git_admin_paths
+            == tuple(plan.get("qualified_git_admin_paths") or ())
+        )
+
+    def pending_linked_git_broker_transaction(
+        self,
+        context: LinkedGitBrokerTuiContext,
+        *,
+        require_pending: bool,
+    ) -> tuple[PendingLinkedGitCommit | None, bool]:
+        """Return one exact local pending transaction or fail closed."""
+
+        try:
+            pending = load_pending_linked_git_commits(self.git_broker_state_root)
+        except (LinkedGitBrokerError, OSError) as exc:
+            self.notify(f"Unable to inspect broker recovery state: {exc}", severity="error")
+            return None, False
+        if not pending:
+            if require_pending:
+                self.notify(
+                    "No pending linked-Git broker transaction exists for recovery.",
+                    severity="warning",
+                )
+            return None, True
+        if len(pending) != 1:
+            self.notify(
+                "Broker recovery is ambiguous: the private journal contains "
+                f"{len(pending)} pending transactions. No recovery was attempted.",
+                severity="error",
+            )
+            return None, False
+        candidate = pending[0]
+        if not self.linked_git_broker_receipt_matches_context(
+            candidate.receipt,
+            context,
+        ):
+            self.notify(
+                "The pending broker transaction is foreign to the exact selected "
+                "stopped fork or its recomputed authority. No recovery was attempted.",
+                severity="error",
+            )
+            return None, False
+        return candidate, True
+
+    async def review_linked_git_broker_commit(
+        self,
+        context: LinkedGitBrokerTuiContext,
+        approved_stage_paths: tuple[str, ...],
+    ) -> None:
+        if not approved_stage_paths:
+            self.notify(
+                "Explicit stage paths are required; add-all is disabled.",
+                severity="warning",
+            )
+            return
+        current = self.linked_git_broker_tui_context(
+            context.agent_id,
+            expected_authority_sha256=context.authority_sha256,
+        )
+        if current is None:
+            return
+        try:
+            receipt = await asyncio.to_thread(
+                prepare_linked_git_commit,
+                agent_id=context.agent_id,
+                work_root=context.work_root,
+                approved_roots=context.approved_roots,
+                approved_stage_paths=approved_stage_paths,
+                codex_home=context.codex_home,
+            )
+        except (LinkedGitBrokerError, OSError) as exc:
+            self.notify(f"Linked Git commit review failed: {exc}", severity="error")
+            return
+        current = self.linked_git_broker_tui_context(
+            context.agent_id,
+            expected_authority_sha256=context.authority_sha256,
+        )
+        if current is None:
+            return
+        if not self.linked_git_broker_receipt_matches_context(receipt, current):
+            self.notify(
+                "Prepared broker receipt does not match the recomputed stopped-fork "
+                "authority; no confirmation was opened.",
+                severity="error",
+            )
+            return
+        self.push_screen(
+            LinkedGitCommitConfirmScreen(context=context, receipt=receipt)
+        )
+
+    async def execute_linked_git_broker_commit(
+        self,
+        context: LinkedGitBrokerTuiContext,
+        receipt: LinkedGitCommitReceipt,
+        confirmation: str,
+    ) -> None:
+        expected_confirmation = (
+            f"COMMIT {context.agent_id} {receipt.transaction_id[:12]}"
+        )
+        if confirmation != expected_confirmation:
+            self.notify("Exact root confirmation did not match.", severity="warning")
+            return
+        if not receipt.approved_stage_paths:
+            self.notify("The broker receipt has no explicit stage subset.", severity="error")
+            return
+        current = self.linked_git_broker_tui_context(
+            context.agent_id,
+            expected_authority_sha256=context.authority_sha256,
+        )
+        if current is None:
+            return
+        if not self.linked_git_broker_receipt_matches_context(receipt, current):
+            self.notify(
+                "Broker receipt no longer matches the recomputed stopped-fork "
+                "authority; no commit was attempted.",
+                severity="error",
+            )
+            return
+        try:
+            result = await asyncio.to_thread(
+                execute_linked_git_commit,
+                receipt,
+                approved_roots=current.approved_roots,
+                journal_root=self.git_broker_state_root,
+                codex_home=current.codex_home,
+            )
+        except (LinkedGitBrokerError, OSError) as exc:
+            self.notify(f"Linked Git commit failed closed: {exc}", severity="error")
+            return
+        self.notify(
+            f"Committed {len(result.committed_paths)} approved path(s) for "
+            f"{context.agent_id}: {result.new_head[:12]}."
+        )
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = (
+                "Linked Git broker commit complete\n\n"
+                f"Agent: {context.agent_id}\n"
+                f"Transaction: {result.transaction_id}\n"
+                f"Old HEAD: {result.old_head}\n"
+                f"New HEAD: {result.new_head}\n"
+                "Committed paths:\n- "
+                + "\n- ".join(result.committed_paths)
+                + "\n\nThe edit fork remains stopped."
+            )
+
+    async def recover_linked_git_broker_commit(
+        self,
+        context: LinkedGitBrokerTuiContext,
+        pending: PendingLinkedGitCommit,
+        confirmation: str,
+    ) -> None:
+        receipt = pending.receipt
+        expected_confirmation = (
+            f"RECOVER {context.agent_id} {receipt.transaction_id[:12]}"
+        )
+        if confirmation != expected_confirmation:
+            self.notify("Exact recovery confirmation did not match.", severity="warning")
+            return
+        current = self.linked_git_broker_tui_context(
+            context.agent_id,
+            expected_authority_sha256=context.authority_sha256,
+        )
+        if current is None:
+            return
+        current_pending, safe = self.pending_linked_git_broker_transaction(
+            current,
+            require_pending=True,
+        )
+        if (
+            not safe
+            or current_pending is None
+            or current_pending.receipt != receipt
+            or current_pending.phase != pending.phase
+        ):
+            self.notify(
+                "Broker recovery receipt or phase drifted; no recovery was attempted.",
+                severity="error",
+            )
+            return
+        try:
+            result = await asyncio.to_thread(
+                recover_linked_git_commit,
+                receipt,
+                approved_roots=current.approved_roots,
+                journal_root=self.git_broker_state_root,
+                codex_home=current.codex_home,
+            )
+        except LinkedGitBrokerRestored as exc:
+            try:
+                remaining = load_pending_linked_git_commits(
+                    self.git_broker_state_root
+                )
+            except (LinkedGitBrokerError, OSError) as state_exc:
+                self.notify(
+                    "Broker restored the original state, but journal verification "
+                    f"failed closed: {state_exc}",
+                    severity="error",
+                )
+                return
+            if remaining:
+                self.notify(
+                    "Broker reported an original-state restore, but pending journal "
+                    "state remains; manual review is required.",
+                    severity="error",
+                )
+                return
+            self.notify(
+                f"Restored the exact original linked-Git state for {context.agent_id}."
+            )
+            detail = self.query_one_or_none("#detail", TextArea)
+            if detail is not None:
+                detail.text = (
+                    "Linked Git broker recovery restored the original state\n\n"
+                    f"Agent: {context.agent_id}\n"
+                    f"Transaction: {receipt.transaction_id}\n"
+                    f"Original HEAD: {receipt.head}\n"
+                    f"Approved paths were not committed: "
+                    f"{', '.join(receipt.approved_stage_paths)}\n\n"
+                    f"Recovery result: {exc}\n"
+                    "No pending transaction remains. The edit fork remains stopped."
+                )
+            return
+        except (LinkedGitBrokerError, OSError) as exc:
+            self.notify(f"Linked Git recovery failed closed: {exc}", severity="error")
+            return
+        if result is None:
+            self.notify(
+                "The selected broker transaction no longer has recoverable state.",
+                severity="warning",
+            )
+            return
+        self.notify(
+            f"Recovered broker transaction for {context.agent_id}: "
+            f"{result.old_head[:12]} -> {result.new_head[:12]}."
+        )
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = (
+                "Linked Git broker recovery complete\n\n"
+                f"Agent: {context.agent_id}\n"
+                f"Transaction: {result.transaction_id}\n"
+                f"Old HEAD: {result.old_head}\n"
+                f"New HEAD: {result.new_head}\n"
+                "Committed paths:\n- "
+                + "\n- ".join(result.committed_paths)
+                + "\n\nThe edit fork remains stopped."
+            )
+
     def tui_owned_operator_pane_id(self, agent_id: str) -> str | None:
         if not self.is_operator_agent_id(agent_id):
             return None
@@ -27897,6 +28733,10 @@ class AgentPBXTUI(App[None]):
 
     def clear_operator_tmux_state(self, agent_id: str) -> None:
         self.tmux_agent_targets.pop(agent_id, None)
+        self.tmux_runtime_mapping_by_agent.pop(agent_id, None)
+        self.tmux_runtime_mapping_validated_at_by_agent.pop(agent_id, None)
+        self.tmux_runtime_mapping_signature_by_agent.pop(agent_id, None)
+        self.tmux_runtime_mapping_error_by_agent.pop(agent_id, None)
         self.tmux_direct_agent_modes.pop(agent_id, None)
         self.tmux_manual_override_agent_ids.discard(agent_id)
         self.tmux_detached_agent_ids.discard(agent_id)

@@ -41,8 +41,11 @@ runs before pane creation or replacement; failure leaves the existing pane and
 working tree untouched. The four Git-admin paths are sandbox filesystem grants,
 not workspace or `--add-dir` roots. Review forks retain their existing read-only
 sandbox. On Codex 0.166, a base profile with split secret/read/deny rules is not
-flattened or weakened; linked qualification fails closed until a provider-free
-canary proves a compatible representation.
+flattened or weakened. Instead of placing Git-admin paths in that runtime, a
+stopped and inactive edit fork uses the local-only `/operator git commit`
+broker for an exact root-approved leaf subset. `/operator git recover` resolves
+one exact pending transaction after a TUI/process interruption. Neither action
+restarts Codex, and the fork remains stopped.
 
 ## Embedded terminal
 
@@ -121,7 +124,19 @@ agent-pbx remote ssh-attach \
   staging. Do not relaunch callers or restart any other pane. If the branch
   namespace is shared or top-level, stop: branch migration is a separately
   approved repository mutation and is never part of repair activation. If
-  qualification reports incompatible split filesystem policy on Codex 0.166,
-  stop as well: do not switch to legacy writable roots or remove secret-deny
-  rules. Preserve the session and tree until a reviewed Codex/runtime adapter
-  update passes the provider-free canary.
+  qualification reports a split filesystem policy on Codex 0.166, do not switch
+  to legacy writable roots or remove secret-deny rules. Stop the exact edit fork
+  through the guarded TUI lifecycle action, align its Operators row with Enter,
+  and use `/operator git commit` only after reviewing the exact leaf identities
+  and receipt-bound confirmation. A direct-compatible fork continues to use its
+  qualified runtime profile and is deliberately ineligible for the broker.
+- The broker requires an initially empty staged set and a dedicated
+  `pbx-operator-N/...` branch. It never discovers or stages all changes. An
+  interrupted transaction is recovered only through `/operator git recover`
+  when one exact journal receipt still matches the stopped fork and recomputed
+  topology. Multiple, corrupt, foreign, or drifted journals require manual
+  review and cause zero recovery mutation.
+- Rollback never resets, cleans, stashes, edits, or opens unapproved worktree
+  paths. Exact ref/index/reflog state is restored when its recorded identities
+  still match. Journaled approved-content Git objects may remain unreachable
+  after a failed compare-and-swap and are intentionally left for normal Git GC.

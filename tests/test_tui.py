@@ -28,6 +28,11 @@ from agent_pbx.git_worktree import (
     LinkedWorktreeGitAdminPlan,
     LinkedWorktreeQualificationError,
 )
+from agent_pbx.git_broker import (
+    LinkedGitBrokerError,
+    LinkedGitBrokerRestored,
+    PendingLinkedGitCommit,
+)
 from agent_pbx.tui import (
     ActiveCodexSession,
     AgentPBXTUI,
@@ -42,6 +47,10 @@ from agent_pbx.tui import (
     EditorCloseConfirmScreen,
     JoplinReferencePromptScreen,
     JoplinPasteConfirmScreen,
+    LinkedGitBrokerTuiContext,
+    LinkedGitCommitConfirmScreen,
+    LinkedGitCommitPathsScreen,
+    LinkedGitRecoveryConfirmScreen,
     ModelElevationScreen,
     ManagedProjectPickerScreen,
     OperatorHistoryScreen,
@@ -52,6 +61,7 @@ from agent_pbx.tui import (
     OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     REVIEW_OPERATOR_MCP_APPROVAL_SERVERS_ENV,
     TMUX_LIVENESS_IDLE_SECONDS,
+    TmuxLiveness,
     WorkerBeeLaunchPreflightError,
     WorkerBeeAccessScreen,
     WorkerBeeSwitchConfirmScreen,
@@ -4603,6 +4613,18 @@ async def test_tui_managed_cross_server_resume_scopes_linked_git_profile_to_edit
             common / "refs" / "heads" / "pbx",
             common / "logs" / "refs" / "heads" / "pbx",
         ),
+        permission_profile_definition={
+            "extends": ":workspace",
+            "filesystem": {
+                str(path): "write"
+                for path in (
+                    common / "worktrees" / "work",
+                    common / "objects",
+                    common / "refs" / "heads" / "pbx",
+                    common / "logs" / "refs" / "heads" / "pbx",
+                )
+            },
+        },
     )
     agent_id = f"operator-7-fork-caller-{fork_purpose}"
     socket_path = tmp_path / "runtime.sock"
@@ -7233,6 +7255,725 @@ async def test_tui_palette_operator_mutations_fail_closed_on_selection_mismatch(
         if "Operator selection mismatch" in message
     ]
     assert len(mismatch_notifications) == 5
+
+
+def linked_git_broker_test_agent(
+    tmp_path: Path,
+    *,
+    active: bool = False,
+    status: str | None = None,
+    metadata_shape: str = "legacy",
+) -> dict[str, object]:
+    work_root = tmp_path / "linked"
+    work_root.mkdir(exist_ok=True)
+    qualified = [str(tmp_path / f"git-admin-{index}") for index in range(4)]
+    linked: dict[str, object] | None
+    if metadata_shape == "none":
+        linked = None
+    elif metadata_shape == "legacy":
+        linked = {
+            "kind": "linked_worktree_edit",
+            "worktree_root": str(work_root),
+            "git_dir": str(tmp_path / "git-admin-0"),
+            "common_dir": str(tmp_path / "common"),
+            "branch_ref": "refs/heads/pbx-operator-7/test",
+            "base_permission_profile": "trusted-split",
+            "permission_profile": LINKED_EDIT_PERMISSION_PROFILE,
+            "writable_paths": qualified,
+        }
+    else:
+        linked = {
+            "kind": "linked_worktree_edit",
+            "worktree_root": str(work_root),
+            "git_dir": str(tmp_path / "git-admin-0"),
+            "common_dir": str(tmp_path / "common"),
+            "object_dir": str(tmp_path / "git-admin-1"),
+            "branch_ref": "refs/heads/pbx-operator-7/test",
+            "base_permission_profile": "trusted-split",
+            "permission_profile": LINKED_EDIT_PERMISSION_PROFILE,
+            "write_strategy": "tui_root_commit_broker",
+            "grant_scope": "tui_root_commit_broker",
+            "active_write_grants": [],
+            "writable_paths": [],
+            "qualified_git_admin_paths": qualified,
+        }
+    metadata: dict[str, object] = {
+        "agent_type": "operator",
+        "operator_role": "fork",
+        "logical_operator_id": "operator-7",
+        "source_caller_agent_id": "caller-7",
+        "source_codex_session_id": "session-source",
+        "fork_purpose": "edit",
+        "access_mode": "edit",
+        "work_root": str(work_root),
+        "cwd": str(work_root),
+        "tmux_pane_id": "%12",
+    }
+    if linked is not None:
+        metadata["linked_git_admin"] = linked
+    return {
+        "agent_id": "operator-7-fork-linked",
+        "agent_type": "operator",
+        "project": "workerbee",
+        "status": status or ("working" if active else "canceled"),
+        "pbx_active": active,
+        "last_seen_at": 10.0,
+        "metadata": metadata,
+    }
+
+
+def linked_git_broker_test_plan(
+    tmp_path: Path,
+    *,
+    strategy: str = "tui_root_commit_broker",
+    branch_ref: str = "refs/heads/pbx-operator-7/test",
+) -> LinkedWorktreeGitAdminPlan:
+    work_root = tmp_path / "linked"
+    work_root.mkdir(exist_ok=True)
+    git_paths = tuple(tmp_path / f"git-admin-{index}" for index in range(4))
+    return LinkedWorktreeGitAdminPlan(
+        worktree_root=work_root,
+        git_file=work_root / ".git",
+        git_dir=git_paths[0],
+        common_dir=tmp_path / "common",
+        object_dir=git_paths[1],
+        branch_ref=branch_ref,
+        ref_namespace=git_paths[2],
+        reflog_namespace=git_paths[3],
+        writable_paths=git_paths,
+        base_permission_profile="trusted-split",
+        permission_profile=LINKED_EDIT_PERMISSION_PROFILE,
+        permission_profile_definition=(
+            None
+            if strategy == "tui_root_commit_broker"
+            else {"extends": ":workspace", "filesystem": {}}
+        ),
+        write_strategy=strategy,
+    )
+
+
+def install_linked_git_broker_tui_qualification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    strategy_state: dict[str, str] | None = None,
+    branch_state: dict[str, str] | None = None,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    def qualify(*_args: object, **_kwargs: object) -> LinkedWorktreeGitAdminPlan:
+        return linked_git_broker_test_plan(
+            tmp_path,
+            strategy=(strategy_state or {}).get(
+                "value", "tui_root_commit_broker"
+            ),
+            branch_ref=(branch_state or {}).get(
+                "value", "refs/heads/pbx-operator-7/test"
+            ),
+        )
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.qualify_linked_worktree_git_admin",
+        qualify,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.tui.load_pending_linked_git_commits",
+        lambda _root: (),
+    )
+
+
+def linked_git_broker_test_receipt(
+    context: LinkedGitBrokerTuiContext,
+    *,
+    transaction_id: str = "e" * 64,
+) -> SimpleNamespace:
+    plan = context.plan_public
+    path_identity = SimpleNamespace(
+        path="approved.txt",
+        state="file",
+        mode="100644",
+        raw_sha256="1" * 64,
+        raw_blob_oid="2" * 40,
+        index_mode="100644",
+        index_oid="3" * 40,
+    )
+    return SimpleNamespace(
+        transaction_id=transaction_id,
+        agent_id=context.agent_id,
+        approved_roots=tuple(str(path) for path in context.approved_roots),
+        codex_home=str(context.codex_home),
+        worktree_root=context.work_root,
+        git_dir=plan["git_dir"],
+        common_dir=plan["common_dir"],
+        object_dir=plan["object_dir"],
+        branch_ref=plan["branch_ref"],
+        branch=str(plan["branch_ref"]).removeprefix("refs/heads/"),
+        write_strategy=plan["write_strategy"],
+        grant_scope=plan["grant_scope"],
+        base_permission_profile=plan["base_permission_profile"],
+        permission_profile=plan["permission_profile"],
+        qualified_git_admin_paths=tuple(plan["qualified_git_admin_paths"]),
+        approved_stage_paths=("approved.txt",),
+        path_identities=(path_identity,),
+        head="a" * 40,
+        head_tree="4" * 40,
+        index_tree="4" * 40,
+        upstream="origin/dev",
+        upstream_oid="c" * 40,
+        index_sha256="d" * 64,
+        branch_ref_sha256="5" * 64,
+        branch_reflog_sha256="6" * 64,
+    )
+
+
+async def test_tui_linked_git_broker_fail_closed_before_any_prepare_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fork_id = "operator-7-fork-linked"
+    root_id = "operator-7"
+    prepare_calls: list[object] = []
+    strategy_state = {"value": "tui_root_commit_broker"}
+    install_linked_git_broker_tui_qualification(
+        tmp_path,
+        monkeypatch,
+        strategy_state=strategy_state,
+    )
+
+    def forbidden_prepare(**kwargs: object):
+        prepare_calls.append(kwargs)
+        raise AssertionError("broker prepare must not be called")
+
+    monkeypatch.setattr("agent_pbx.tui.prepare_linked_git_commit", forbidden_prepare)
+    async with app.run_test() as pilot:
+        app.agents = {
+            root_id: {
+                "agent_id": root_id,
+                "agent_type": "operator",
+                "project": "workerbee",
+                "status": "waiting",
+                "pbx_active": True,
+                "last_seen_at": 10.0,
+                "metadata": {"agent_type": "operator", "operator_role": "root"},
+            },
+            fork_id: linked_git_broker_test_agent(tmp_path),
+        }
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = root_id
+        app.palette_operator_git_commit()
+        await pilot.pause()
+        assert not isinstance(app.screen, LinkedGitCommitPathsScreen)
+
+        app.selected_agent_id = fork_id
+        app.agents[fork_id] = linked_git_broker_test_agent(tmp_path, active=True)
+        app.palette_operator_git_commit()
+        await pilot.pause()
+        assert not isinstance(app.screen, LinkedGitCommitPathsScreen)
+
+        app.agents[fork_id] = linked_git_broker_test_agent(tmp_path)
+        strategy_state["value"] = "direct_permission_profile"
+        app.palette_operator_git_commit()
+        await pilot.pause()
+        assert not isinstance(app.screen, LinkedGitCommitPathsScreen)
+
+    assert prepare_calls == []
+
+
+async def test_tui_linked_git_broker_empty_paths_and_modal_cancel_are_zero_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fork_id = "operator-7-fork-linked"
+    prepare_calls: list[object] = []
+    install_linked_git_broker_tui_qualification(tmp_path, monkeypatch)
+
+    def forbidden_prepare(**kwargs: object):
+        prepare_calls.append(kwargs)
+        raise AssertionError("empty/cancel path must not prepare")
+
+    monkeypatch.setattr("agent_pbx.tui.prepare_linked_git_commit", forbidden_prepare)
+    async with app.run_test() as pilot:
+        app.agents = {fork_id: linked_git_broker_test_agent(tmp_path)}
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = fork_id
+        app.palette_operator_git_commit()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, LinkedGitCommitPathsScreen)
+        screen.submit()
+        await pilot.pause()
+        assert isinstance(app.screen, LinkedGitCommitPathsScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+
+    assert prepare_calls == []
+
+
+async def test_tui_linked_git_broker_approval_drift_and_cancel_never_execute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fork_id = "operator-7-fork-linked"
+    execute_calls: list[object] = []
+    install_linked_git_broker_tui_qualification(tmp_path, monkeypatch)
+
+    def fake_prepare(**_kwargs: object):
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert context is not None
+        return linked_git_broker_test_receipt(context)
+
+    def forbidden_execute(*args: object, **kwargs: object):
+        execute_calls.append((args, kwargs))
+        raise AssertionError("drift/cancel must not execute")
+
+    monkeypatch.setattr("agent_pbx.tui.prepare_linked_git_commit", fake_prepare)
+    monkeypatch.setattr("agent_pbx.tui.execute_linked_git_commit", forbidden_execute)
+    async with app.run_test() as pilot:
+        app.agents = {fork_id: linked_git_broker_test_agent(tmp_path)}
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = fork_id
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert isinstance(context, LinkedGitBrokerTuiContext)
+        await app.review_linked_git_broker_commit(context, ("approved.txt",))
+        await pilot.pause()
+        assert isinstance(app.screen, LinkedGitCommitConfirmScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert execute_calls == []
+
+        await app.review_linked_git_broker_commit(context, ("approved.txt",))
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, LinkedGitCommitConfirmScreen)
+        app.selected_agent_id = "operator-7"
+        screen.query_one("#linked-git-broker-confirmation", Input).value = (
+            screen.expected_confirmation
+        )
+        screen.submit()
+        await pilot.pause()
+
+    assert execute_calls == []
+
+
+async def test_tui_linked_git_broker_exact_confirmation_executes_once_from_fixed_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.git_broker_state_root = tmp_path / "fixed-private-broker-state"
+    fork_id = "operator-7-fork-linked"
+    execute_calls: list[dict[str, object]] = []
+    install_linked_git_broker_tui_qualification(tmp_path, monkeypatch)
+    prepared: list[SimpleNamespace] = []
+
+    def fake_prepare(**_kwargs: object):
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert context is not None
+        receipt = linked_git_broker_test_receipt(context)
+        prepared.append(receipt)
+        return receipt
+
+    def fake_execute(received: object, **kwargs: object):
+        execute_calls.append({"receipt": received, **kwargs})
+        return SimpleNamespace(
+            transaction_id="e" * 64,
+            committed_paths=("approved.txt",),
+            old_head="a" * 40,
+            new_head="b" * 40,
+        )
+
+    monkeypatch.setattr("agent_pbx.tui.prepare_linked_git_commit", fake_prepare)
+    monkeypatch.setattr("agent_pbx.tui.execute_linked_git_commit", fake_execute)
+    async with app.run_test() as pilot:
+        app.agents = {fork_id: linked_git_broker_test_agent(tmp_path)}
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = fork_id
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert isinstance(context, LinkedGitBrokerTuiContext)
+        await app.review_linked_git_broker_commit(context, ("approved.txt",))
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, LinkedGitCommitConfirmScreen)
+        receipt_text = str(
+            screen.query_one("#linked-git-broker-receipt", Static).renderable
+        )
+        for expected in (
+            '"state": "file"',
+            '"mode": "100644"',
+            '"raw_sha256":',
+            '"raw_blob_oid":',
+            '"prior_index_mode":',
+            '"prior_index_oid":',
+            "HEAD tree:",
+            "Index tree:",
+            "Ref SHA-256:",
+            "Reflog SHA-256:",
+        ):
+            assert expected in receipt_text
+        screen.query_one("#linked-git-broker-confirmation", Input).value = (
+            screen.expected_confirmation
+        )
+        screen.submit()
+        await pilot.pause()
+
+    assert len(execute_calls) == 1
+    assert execute_calls[0]["receipt"] is prepared[0]
+    assert execute_calls[0]["journal_root"] == app.git_broker_state_root
+
+
+async def test_tui_linked_git_broker_requires_exact_stopped_terminal_posture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_linked_git_broker_tui_qualification(tmp_path, monkeypatch)
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fork_id = "operator-7-fork-linked"
+
+    async with app.run_test() as pilot:
+        app.agents = {fork_id: linked_git_broker_test_agent(tmp_path)}
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = fork_id
+
+        for status in ("working", "paused", "complete", "unknown", "blocked"):
+            app.agents[fork_id]["status"] = status
+            assert app.linked_git_broker_tui_context(fork_id) is None
+        app.agents[fork_id]["status"] = "canceled"
+        app.agents[fork_id]["pbx_active"] = True
+        assert app.linked_git_broker_tui_context(fork_id) is None
+        app.agents[fork_id]["pbx_active"] = False
+
+        app.tmux_liveness_by_agent[fork_id] = TmuxLiveness(state="captured")
+        assert app.linked_git_broker_tui_context(fork_id) is None
+        app.tmux_liveness_by_agent[fork_id] = TmuxLiveness(state="unknown")
+        assert app.linked_git_broker_tui_context(fork_id) is None
+        app.tmux_liveness_by_agent[fork_id] = TmuxLiveness(state="stale")
+        assert isinstance(
+            app.linked_git_broker_tui_context(fork_id),
+            LinkedGitBrokerTuiContext,
+        )
+
+        app.tmux_runtime_mapping_by_agent[fork_id] = {"pane_id": "%22"}
+        assert app.linked_git_broker_tui_context(fork_id) is None
+        app.tmux_runtime_mapping_by_agent.clear()
+        app.embedded_terminal_agent_id = fork_id
+        assert app.linked_git_broker_tui_context(fork_id) is None
+        app.embedded_terminal_agent_id = None
+        app.embedded_terminal_transition_agent_id = fork_id
+        assert app.linked_git_broker_tui_context(fork_id) is None
+        app.embedded_terminal_transition_agent_id = None
+        assert isinstance(
+            app.linked_git_broker_tui_context(fork_id),
+            LinkedGitBrokerTuiContext,
+        )
+        await pilot.pause()
+
+
+async def test_tui_linked_git_broker_recomputes_legacy_metadata_and_rejects_conflicts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy_state = {"value": "tui_root_commit_broker"}
+    install_linked_git_broker_tui_qualification(
+        tmp_path,
+        monkeypatch,
+        strategy_state=strategy_state,
+    )
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fork_id = "operator-7-fork-linked"
+
+    async with app.run_test() as pilot:
+        app.agents = {fork_id: linked_git_broker_test_agent(tmp_path)}
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = fork_id
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert isinstance(context, LinkedGitBrokerTuiContext)
+        assert context.plan_public["write_strategy"] == "tui_root_commit_broker"
+        assert app.agents[fork_id]["metadata"]["tmux_pane_id"] == "%12"  # type: ignore[index]
+
+        linked = app.agents[fork_id]["metadata"]["linked_git_admin"]  # type: ignore[index]
+        linked["branch_ref"] = "refs/heads/pbx-operator-7/wrong"
+        assert app.linked_git_broker_tui_context(fork_id) is None
+        linked["branch_ref"] = "refs/heads/pbx-operator-7/test"
+        linked["writable_paths"] = [str(tmp_path / "wrong")] * 4
+        assert app.linked_git_broker_tui_context(fork_id) is None
+
+        app.agents[fork_id] = linked_git_broker_test_agent(
+            tmp_path,
+            metadata_shape="none",
+        )
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert isinstance(context, LinkedGitBrokerTuiContext)
+        strategy_state["value"] = "direct_permission_profile"
+        assert app.linked_git_broker_tui_context(fork_id) is None
+
+        strategy_state["value"] = "tui_root_commit_broker"
+        review = linked_git_broker_test_agent(tmp_path, metadata_shape="none")
+        review["metadata"]["fork_purpose"] = "review"  # type: ignore[index]
+        review["metadata"]["access_mode"] = "review_readonly"  # type: ignore[index]
+        app.agents[fork_id] = review
+        assert app.linked_git_broker_tui_context(fork_id) is None
+        await pilot.pause()
+
+
+async def test_tui_linked_git_broker_context_drift_and_execute_failure_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    branch_state = {"value": "refs/heads/pbx-operator-7/test"}
+    install_linked_git_broker_tui_qualification(
+        tmp_path,
+        monkeypatch,
+        branch_state=branch_state,
+    )
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.git_broker_state_root = tmp_path / "fixed-private-broker-state"
+    fork_id = "operator-7-fork-linked"
+    execute_calls: list[object] = []
+
+    def fake_prepare(**_kwargs: object) -> SimpleNamespace:
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert context is not None
+        return linked_git_broker_test_receipt(context)
+
+    def failed_execute(*args: object, **kwargs: object) -> None:
+        execute_calls.append((args, kwargs))
+        raise LinkedGitBrokerError("injected exact execute failure")
+
+    monkeypatch.setattr("agent_pbx.tui.prepare_linked_git_commit", fake_prepare)
+    monkeypatch.setattr("agent_pbx.tui.execute_linked_git_commit", failed_execute)
+    async with app.run_test() as pilot:
+        app.agents = {fork_id: linked_git_broker_test_agent(tmp_path)}
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = fork_id
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert context is not None
+        await app.review_linked_git_broker_commit(context, ("approved.txt",))
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, LinkedGitCommitConfirmScreen)
+        screen.query_one("#linked-git-broker-confirmation", Input).value = "wrong"
+        screen.submit()
+        await pilot.pause()
+        assert execute_calls == []
+
+        branch_state["value"] = "refs/heads/pbx-operator-7/drift"
+        screen.query_one("#linked-git-broker-confirmation", Input).value = (
+            screen.expected_confirmation
+        )
+        screen.submit()
+        await pilot.pause()
+        assert execute_calls == []
+
+        branch_state["value"] = "refs/heads/pbx-operator-7/test"
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert context is not None
+        await app.review_linked_git_broker_commit(context, ("approved.txt",))
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, LinkedGitCommitConfirmScreen)
+        screen.query_one("#linked-git-broker-confirmation", Input).value = (
+            screen.expected_confirmation
+        )
+        screen.submit()
+        await pilot.pause()
+
+    assert len(execute_calls) == 1
+    assert execute_calls[0][1]["journal_root"] == app.git_broker_state_root  # type: ignore[index]
+
+
+async def test_tui_linked_git_broker_recovery_rejects_ambiguity_foreign_and_plan_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    branch_state = {"value": "refs/heads/pbx-operator-7/test"}
+    install_linked_git_broker_tui_qualification(
+        tmp_path,
+        monkeypatch,
+        branch_state=branch_state,
+    )
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fork_id = "operator-7-fork-linked"
+    recover_calls: list[object] = []
+    pending_state: list[PendingLinkedGitCommit] = []
+    monkeypatch.setattr(
+        "agent_pbx.tui.load_pending_linked_git_commits",
+        lambda _root: tuple(pending_state),
+    )
+    monkeypatch.setattr(
+        "agent_pbx.tui.recover_linked_git_commit",
+        lambda *args, **kwargs: recover_calls.append((args, kwargs)),
+    )
+
+    async with app.run_test() as pilot:
+        app.agents = {fork_id: linked_git_broker_test_agent(tmp_path)}
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = fork_id
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert context is not None
+        receipt = linked_git_broker_test_receipt(context)
+
+        app.palette_operator_git_recover()
+        await pilot.pause()
+        assert not isinstance(app.screen, LinkedGitRecoveryConfirmScreen)
+
+        foreign = linked_git_broker_test_receipt(context, transaction_id="f" * 64)
+        foreign.agent_id = "operator-8-fork-linked"
+        pending_state[:] = [PendingLinkedGitCommit(foreign, "ready")]
+        app.palette_operator_git_recover()
+        await pilot.pause()
+        assert not isinstance(app.screen, LinkedGitRecoveryConfirmScreen)
+
+        pending_state[:] = [
+            PendingLinkedGitCommit(receipt, "ready"),
+            PendingLinkedGitCommit(foreign, "ready"),
+        ]
+        app.palette_operator_git_recover()
+        await pilot.pause()
+        assert not isinstance(app.screen, LinkedGitRecoveryConfirmScreen)
+
+        pending_state[:] = [PendingLinkedGitCommit(receipt, "ready")]
+        branch_state["value"] = "refs/heads/pbx-operator-7/other"
+        app.palette_operator_git_recover()
+        await pilot.pause()
+        assert not isinstance(app.screen, LinkedGitRecoveryConfirmScreen)
+
+    assert recover_calls == []
+
+
+async def test_tui_linked_git_broker_recovery_is_receipt_bound_and_local_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_linked_git_broker_tui_qualification(tmp_path, monkeypatch)
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.git_broker_state_root = tmp_path / "fixed-private-broker-state"
+    fork_id = "operator-7-fork-linked"
+    pending_state: list[PendingLinkedGitCommit] = []
+    recover_calls: list[dict[str, object]] = []
+    api_calls: list[object] = []
+
+    def load_pending(_root: Path) -> tuple[PendingLinkedGitCommit, ...]:
+        return tuple(pending_state)
+
+    def fake_recover(receipt: object, **kwargs: object) -> SimpleNamespace:
+        recover_calls.append({"receipt": receipt, **kwargs})
+        pending_state.clear()
+        return SimpleNamespace(
+            transaction_id=receipt.transaction_id,
+            old_head=receipt.head,
+            new_head="b" * 40,
+            committed_paths=receipt.approved_stage_paths,
+        )
+
+    def forbidden_api() -> object:
+        api_calls.append(True)
+        raise AssertionError("broker TUI action must not use an API route")
+
+    monkeypatch.setattr("agent_pbx.tui.load_pending_linked_git_commits", load_pending)
+    monkeypatch.setattr("agent_pbx.tui.recover_linked_git_commit", fake_recover)
+
+    async with app.run_test() as pilot:
+        monkeypatch.setattr(app, "api_client", forbidden_api)
+        app.agents = {fork_id: linked_git_broker_test_agent(tmp_path)}
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = fork_id
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert context is not None
+        receipt = linked_git_broker_test_receipt(context)
+        pending_state[:] = [PendingLinkedGitCommit(receipt, "ready")]
+
+        app.palette_operator_git_recover()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, LinkedGitRecoveryConfirmScreen)
+        screen.query_one("#linked-git-broker-confirmation", Input).value = "wrong"
+        screen.submit()
+        await pilot.pause()
+        assert recover_calls == []
+        await pilot.press("escape")
+        await pilot.pause()
+        assert recover_calls == []
+
+        app.palette_operator_git_recover()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, LinkedGitRecoveryConfirmScreen)
+        screen.query_one("#linked-git-broker-confirmation", Input).value = (
+            screen.expected_confirmation
+        )
+        screen.submit()
+        await pilot.pause()
+
+    assert len(recover_calls) == 1
+    assert recover_calls[0]["receipt"] is receipt
+    assert recover_calls[0]["journal_root"] == app.git_broker_state_root
+    assert api_calls == []
+
+
+async def test_tui_linked_git_broker_recovery_reports_exact_original_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_linked_git_broker_tui_qualification(tmp_path, monkeypatch)
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.git_broker_state_root = tmp_path / "fixed-private-broker-state"
+    fork_id = "operator-7-fork-linked"
+    pending_state: list[PendingLinkedGitCommit] = []
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.load_pending_linked_git_commits",
+        lambda _root: tuple(pending_state),
+    )
+
+    def restored(*_args: object, **_kwargs: object) -> None:
+        pending_state.clear()
+        raise LinkedGitBrokerRestored("restored exact original state")
+
+    monkeypatch.setattr("agent_pbx.tui.recover_linked_git_commit", restored)
+    async with app.run_test() as pilot:
+        app.agents = {fork_id: linked_git_broker_test_agent(tmp_path)}
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = fork_id
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert context is not None
+        receipt = linked_git_broker_test_receipt(context)
+        pending_state[:] = [PendingLinkedGitCommit(receipt, "ready")]
+        app.palette_operator_git_recover()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, LinkedGitRecoveryConfirmScreen)
+        screen.query_one("#linked-git-broker-confirmation", Input).value = (
+            screen.expected_confirmation
+        )
+        screen.submit()
+        await pilot.pause()
+        assert "restored the original state" in app.query_one("#detail", TextArea).text
+        assert pending_state == []
 
 
 async def test_tui_starred_agents_sort_above_unstarred_by_freshness(
@@ -17880,6 +18621,24 @@ async def test_tui_fork_restart_replaces_stale_source_resume_with_codex_fork(
             tmp_path / "main" / ".git" / "refs" / "heads" / "pbx",
             tmp_path / "main" / ".git" / "logs" / "refs" / "heads" / "pbx",
         ),
+        permission_profile_definition={
+            "extends": ":workspace",
+            "filesystem": {
+                str(path): "write"
+                for path in (
+                    tmp_path / "main" / ".git" / "worktrees" / "fork",
+                    tmp_path / "main" / ".git" / "objects",
+                    tmp_path / "main" / ".git" / "refs" / "heads" / "pbx",
+                    tmp_path
+                    / "main"
+                    / ".git"
+                    / "logs"
+                    / "refs"
+                    / "heads"
+                    / "pbx",
+                )
+            },
+        },
     )
 
     async def fake_git_admin_plan(*_args: object, **_kwargs: object) -> LinkedWorktreeGitAdminPlan:
@@ -18103,6 +18862,24 @@ async def test_tui_fresh_edit_fork_launch_includes_linked_git_permission_profile
             tmp_path / "main" / ".git" / "refs" / "heads" / "pbx",
             tmp_path / "main" / ".git" / "logs" / "refs" / "heads" / "pbx",
         ),
+        permission_profile_definition={
+            "extends": ":workspace",
+            "filesystem": {
+                str(path): "write"
+                for path in (
+                    tmp_path / "main" / ".git" / "worktrees" / "linked",
+                    tmp_path / "main" / ".git" / "objects",
+                    tmp_path / "main" / ".git" / "refs" / "heads" / "pbx",
+                    tmp_path
+                    / "main"
+                    / ".git"
+                    / "logs"
+                    / "refs"
+                    / "heads"
+                    / "pbx",
+                )
+            },
+        },
     )
     app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
     launches: list[dict[str, object]] = []
