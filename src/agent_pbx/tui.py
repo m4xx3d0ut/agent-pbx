@@ -93,6 +93,10 @@ from .git_broker import (
     recover_linked_git_commit,
 )
 from .managed_runtime import default_managed_project_roots
+from .operator_authority import (
+    operator_authority_launch_overrides,
+    operator_authority_sandbox,
+)
 from .paths import default_state_root
 from . import tmux as tmux_support
 from .project_spawn import (
@@ -1990,6 +1994,7 @@ def operator_agent_config_overrides(
     include_campaign_lifecycle: bool = False,
     terminal_mode: str = CODEX_TERMINAL_MODE_DEFAULT,
     workerbee_gateway_binding: Mapping[str, object] | None = None,
+    authority_metadata: Mapping[str, object] | None = None,
 ) -> list[str]:
     """Build a least-privilege operator MCP allowlist for a launch.
 
@@ -2018,6 +2023,12 @@ def operator_agent_config_overrides(
     )
     overrides.extend(codex_model_launch_config_overrides())
     overrides.extend(codex_terminal_config_overrides(terminal_mode))
+    overrides.extend(
+        codex_config_override(key, value)
+        for key, value in operator_authority_launch_overrides(
+            authority_metadata or {}
+        )
+    )
     return overrides
 
 
@@ -4621,6 +4632,172 @@ class WorkerBeeSwitchConfirmScreen(ModalScreen[None]):
             self.submit()
 
 
+class OperatorAuthorityScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        authority_view: dict[str, Any],
+        workspace_sets: list[dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.agent_id = agent_id
+        self.authority_view = authority_view
+        self.workspace_sets = workspace_sets
+
+    def compose(self) -> ComposeResult:
+        admin = self.authority_view.get("admin") or {}
+        workspace_set = self.authority_view.get("workspace_set") or {}
+        read_only = str(admin.get("control_mode") or "editable") != "editable"
+        set_options = [("No workspace set", "")]
+        set_options.extend(
+            (
+                f"{item.get('label') or item.get('set_id')} · v{item.get('version')}",
+                str(item.get("set_id") or ""),
+            )
+            for item in self.workspace_sets
+        )
+        selected_set = str(workspace_set.get("set_id") or "")
+        members = ", ".join(
+            str(item.get("path") or "")
+            for item in workspace_set.get("members") or ()
+            if str(item.get("path") or "").strip()
+        )
+        collections = ", ".join(
+            str(item) for item in workspace_set.get("collections") or ()
+        )
+        with Vertical(id="operator-authority-panel"):
+            yield Static("Operator execution authority", id="operator-authority-title")
+            yield Static(
+                f"{self.agent_id} · control={admin.get('control_mode') or '-'} · "
+                f"ceiling={admin.get('profile_ceiling') or '-'}",
+                id="operator-authority-posture",
+            )
+            yield Select(
+                [
+                    ("Scoped edit", "scoped-edit"),
+                    ("Trusted Workbench", "trusted-workbench"),
+                    ("Full access (exceptional)", "full-access"),
+                    ("Review read-only", "review-readonly"),
+                ],
+                value=str(self.authority_view.get("requested_profile") or "scoped-edit"),
+                id="operator-authority-profile",
+                disabled=read_only or bool(self.authority_view.get("review_readonly")),
+            )
+            yield Select(
+                set_options,
+                value=selected_set,
+                id="operator-authority-set",
+                disabled=read_only,
+            )
+            yield Input(
+                value=str(
+                    self.authority_view.get("profile_label") or "Rosie Workbench"
+                ),
+                placeholder="Profile label",
+                id="operator-authority-label",
+                disabled=read_only,
+            )
+            yield Input(
+                value=str(workspace_set.get("set_id") or "rosie-stackops"),
+                placeholder="Workspace set id",
+                id="operator-workspace-set-id",
+                disabled=read_only,
+            )
+            yield Input(
+                value=str(workspace_set.get("label") or "Rosie StackOps"),
+                placeholder="Workspace set label",
+                id="operator-workspace-set-label",
+                disabled=read_only,
+            )
+            yield Input(
+                value=members,
+                placeholder="Explicit Git toplevels, comma-separated",
+                id="operator-workspace-set-members",
+                disabled=read_only,
+            )
+            yield Input(
+                value=collections,
+                placeholder="Collection roots, comma-separated (reviewed snapshot)",
+                id="operator-workspace-set-collections",
+                disabled=read_only,
+            )
+            yield Static(
+                self.summary(),
+                id="operator-authority-summary",
+            )
+            with Horizontal(id="operator-authority-actions"):
+                yield Button("Preview Set", id="operator-authority-preview", disabled=read_only)
+                yield Button("Save Set", id="operator-authority-save-set", disabled=read_only)
+                yield Button("Apply", id="operator-authority-apply", variant="primary", disabled=read_only)
+                yield Button("Close", id="operator-authority-close")
+
+    def summary(self) -> str:
+        workspace_set = self.authority_view.get("workspace_set") or {}
+        return (
+            f"Effective: {self.authority_view.get('effective_profile') or '-'} · "
+            f"set={workspace_set.get('set_id') or '-'} · "
+            f"members={workspace_set.get('member_count') or 0} · "
+            "changes apply after safe restart/resume"
+        )
+
+    def assignment_payload(self) -> dict[str, Any]:
+        profile = str(self.query_one("#operator-authority-profile", Select).value)
+        selected = self.query_one("#operator-authority-set", Select).value
+        return {
+            "profile": profile,
+            "workspace_set_id": (
+                (str(selected).strip() or None)
+                if profile == "trusted-workbench" else None
+            ),
+            "profile_label": self.query_one("#operator-authority-label", Input).value.strip() or None,
+        }
+
+    def workspace_set_payload(self) -> tuple[str, dict[str, Any]]:
+        set_id = self.query_one("#operator-workspace-set-id", Input).value.strip()
+        members = self.query_one("#operator-workspace-set-members", Input).value
+        collections = self.query_one("#operator-workspace-set-collections", Input).value
+        return set_id, {
+            "label": self.query_one("#operator-workspace-set-label", Input).value.strip(),
+            "members": [part.strip() for part in members.split(",") if part.strip()],
+            "collections": [part.strip() for part in collections.split(",") if part.strip()],
+            "collection_depth": 1,
+        }
+
+    def show_preview(self, payload: dict[str, Any]) -> None:
+        self.query_one("#operator-authority-summary", Static).update(
+            f"Preview: {payload.get('label') or '-'} · "
+            f"members={payload.get('member_count') or 0} · "
+            f"digest={str(payload.get('member_digest') or '')[:12]}"
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        button_id = event.button.id
+        if button_id == "operator-authority-close":
+            self.dismiss()
+        elif button_id == "operator-authority-preview":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.preview_operator_workspace_set(self),  # type: ignore[attr-defined]
+                name="operator-authority-preview",
+                exclusive=True,
+            )
+        elif button_id == "operator-authority-save-set":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.save_operator_workspace_set(self),  # type: ignore[attr-defined]
+                name="operator-authority-save-set",
+                exclusive=True,
+            )
+        elif button_id == "operator-authority-apply":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.apply_operator_authority(self),  # type: ignore[attr-defined]
+                name="operator-authority-apply",
+                exclusive=True,
+            )
+
+
 class WorkerBeeWorkspaceScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Close")]
 
@@ -5835,6 +6012,7 @@ class AgentPBXTUI(App[None]):
     OperatorKillConfirmScreen,
     OperatorProjectSpawnCancelScreen,
     OperatorHistoryScreen,
+    OperatorAuthorityScreen,
     WorkerBeeSwitchConfirmScreen,
     WorkerBeeWorkspaceScreen,
     WorkerBeeSnapshotScreen,
@@ -5855,6 +6033,7 @@ class AgentPBXTUI(App[None]):
     #editor-close-panel,
     #operator-kill-panel,
     #operator-history-panel,
+    #operator-authority-panel,
     #workerbee-switch-panel,
     #workerbee-workspace-panel,
     #workerbee-snapshot-panel,
@@ -5867,6 +6046,20 @@ class AgentPBXTUI(App[None]):
         border: tall $accent;
         background: $panel;
         padding: 1 2;
+    }
+
+    #operator-authority-panel {
+        width: 84;
+        max-width: 94%;
+    }
+
+    #operator-authority-actions {
+        height: 3;
+        margin-top: 1;
+    }
+
+    #operator-authority-actions Button {
+        width: 1fr;
     }
 
     #file-trash-panel {
@@ -10145,6 +10338,11 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator start", "Start a new operator agent", self.palette_operator_start)
         yield SystemCommand("/operator focus", "Focus the Operators table", self.palette_operator_focus)
         yield SystemCommand(
+            "/operator authority",
+            "Manage the selected Operator execution authority and workspace set",
+            self.palette_operator_authority,
+        )
+        yield SystemCommand(
             "/operator history",
             "Show selected operator session history",
             self.palette_operator_history,
@@ -11506,6 +11704,16 @@ class AgentPBXTUI(App[None]):
 
     def palette_operator_focus(self) -> None:
         self.action_focus_operators()
+
+    def palette_operator_authority(self) -> None:
+        agent_id = self.palette_operator_lifecycle_target("manage authority for")
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_operator_authority_manager(agent_id),
+            name="palette-operator-authority",
+            exclusive=True,
+        )
 
     def palette_operator_history(self) -> None:
         agent_id = self.palette_operator_lifecycle_target("view history for")
@@ -20630,6 +20838,7 @@ class AgentPBXTUI(App[None]):
             include_campaign_lifecycle=True,
             terminal_mode=self.codex_terminal_mode,
             workerbee_gateway_binding=workerbee_gateway_binding,
+            authority_metadata=metadata,
         )
         launch_config_overrides.extend(
             codex_model_preset_config_overrides(effective_model_preset)
@@ -20692,6 +20901,7 @@ class AgentPBXTUI(App[None]):
             new_pane_id,
             self.operator_bootstrap_prompt(agent_id, cwd),
         )
+        await self.mark_operator_authority_activated(agent_id)
         self.save_settings()
         self.notify(
             f"Restarted {agent_id} in place on Codex session {target.session_id}."
@@ -20843,19 +21053,16 @@ class AgentPBXTUI(App[None]):
                 work_root=work_root,
                 terminal_mode=self.codex_terminal_mode,
                 workerbee_gateway_binding=workerbee_gateway_binding,
+                authority_metadata=metadata,
             )
         )
         launch_config_overrides.extend(
             codex_model_preset_config_overrides(effective_model_preset)
         )
         launch_config_overrides.extend(
-            self.linked_edit_fork_config_overrides(git_admin_plan)
+            self.linked_edit_fork_config_overrides(git_admin_plan, metadata)
         )
-        sandbox = (
-            "workspace-write"
-            if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
-            else None
-        )
+        sandbox = operator_authority_sandbox(metadata)
 
         def build_bootstrap(mode: str) -> str:
             return self.operator_bootstrap_prompt(
@@ -21065,6 +21272,7 @@ class AgentPBXTUI(App[None]):
                 new_pane_id,
                 build_bootstrap(review_launch_mode),
             )
+        await self.mark_operator_authority_activated(agent_id)
         self.save_settings()
         suffix = f" on Codex session {target.session_id}" if target else ""
         self.notify(f"Restarted {agent_id} in place{suffix}.")
@@ -21534,10 +21742,10 @@ class AgentPBXTUI(App[None]):
                         work_root=cwd,
                         terminal_mode=self.codex_terminal_mode,
                         workerbee_gateway_binding=workerbee_gateway_binding,
+                        authority_metadata=metadata,
                     )
                 )
-                if purpose == REVIEW_OPERATOR_FORK_PURPOSE:
-                    sandbox = "workspace-write"
+                sandbox = operator_authority_sandbox(metadata)
                 env = self.operator_launch_env(
                     agent_id=agent_id,
                     cwd=cwd,
@@ -21563,7 +21771,9 @@ class AgentPBXTUI(App[None]):
                     include_campaign_lifecycle=True,
                     terminal_mode=self.codex_terminal_mode,
                     workerbee_gateway_binding=workerbee_gateway_binding,
+                    authority_metadata=metadata,
                 )
+                sandbox = operator_authority_sandbox(metadata)
                 env = self.operator_launch_env(
                     agent_id=agent_id,
                     cwd=cwd,
@@ -21589,7 +21799,7 @@ class AgentPBXTUI(App[None]):
                 workerbee_profile=workerbee_profile,
                 workerbee_gateway_binding=workerbee_gateway_binding,
             )
-        overrides.extend(self.linked_edit_fork_config_overrides(git_admin_plan))
+        overrides.extend(self.linked_edit_fork_config_overrides(git_admin_plan, metadata))
         overrides.extend(codex_model_preset_config_overrides(preset))
         env["PATH"] = codex_launch_path
         env["AGENT_PBX_RESUME_CODEX_SESSION_ID"] = session_id
@@ -21839,6 +22049,8 @@ class AgentPBXTUI(App[None]):
         self.tmux_direct_agent_modes[agent_id] = True
         self.tmux_manual_override_agent_ids.add(agent_id)
         self.tmux_detached_agent_ids.discard(agent_id)
+        if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
+            await self.mark_operator_authority_activated(agent_id)
         self.save_settings()
         self.notify(f"Resumed {agent_id} on managed tmux pane {pane_id}.")
         return True
@@ -23568,8 +23780,11 @@ class AgentPBXTUI(App[None]):
     @staticmethod
     def linked_edit_fork_config_overrides(
         plan: LinkedWorktreeGitAdminPlan | None,
+        metadata: Mapping[str, object] | None = None,
     ) -> list[str]:
         if plan is None:
+            return []
+        if str((metadata or {}).get("operator_authority_profile") or "").strip() == "trusted-workbench":
             return []
         return [
             codex_config_override(key, value)
@@ -24952,7 +25167,7 @@ class AgentPBXTUI(App[None]):
             agent_id=agent_id,
             project="agent-pbx-operator",
             codex_session_id="",
-            profile=WORKERBEE_PROFILE_OBSERVE,
+            profile=self.workerbee_profile_for_agent(agent),
             source_root=cwd,
         )
         runtime_session_name, runtime_kwargs = await self.configured_runtime_launch_target(
@@ -24966,6 +25181,7 @@ class AgentPBXTUI(App[None]):
             command=self.codex_interactive_command(
                 codex_command,
                 cd=cwd,
+                sandbox=operator_authority_sandbox(existing_metadata),
                 config_overrides=operator_agent_config_overrides(
                     mcp_url=mcp_url,
                     codex_home=self.codex_home_dir(),
@@ -24973,6 +25189,7 @@ class AgentPBXTUI(App[None]):
                     include_campaign_lifecycle=True,
                     terminal_mode=self.codex_terminal_mode,
                     workerbee_gateway_binding=workerbee_gateway_binding,
+                    authority_metadata=existing_metadata,
                 )
                 + codex_model_preset_config_overrides(launch_preset),
             ),
@@ -25017,6 +25234,7 @@ class AgentPBXTUI(App[None]):
             runtime_kwargs=runtime_kwargs,
             mapping_source="operator_root_launch",
         )
+        await self.mark_operator_authority_activated(agent_id)
         await asyncio.sleep(1.0)
         sent = await self.send_text_to_tmux_pane(
             pane_id,
@@ -25324,6 +25542,25 @@ class AgentPBXTUI(App[None]):
             "codex_command": codex_command,
             **launch_preset.metadata(),
         }
+        logical_agent = self.agents.get(logical_operator_id)
+        logical_metadata = self.agent_metadata(logical_agent)
+        if resolved_purpose == DEFAULT_OPERATOR_FORK_PURPOSE:
+            for key in (
+                "operator_authority_profile",
+                "operator_authority_profile_label",
+                "operator_authority_workspace_roots",
+                "operator_authority_git_admin_paths",
+                "operator_workspace_set_id",
+                "operator_workspace_set_version",
+                "operator_workspace_set_digest",
+            ):
+                if key in logical_metadata:
+                    fork_metadata[key] = logical_metadata[key]
+            if (
+                fork_metadata.get("operator_authority_profile")
+                == "trusted-workbench"
+            ):
+                fork_metadata["workerbee_mcp_profile"] = WORKERBEE_PROFILE_LOCAL_DEPLOY
         review_mcp_approval_servers: tuple[str, ...] = ()
         if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
             review_mcp_approval_servers = review_operator_mcp_approval_server_names()
@@ -25370,7 +25607,10 @@ class AgentPBXTUI(App[None]):
         workerbee_profile = (
             WORKERBEE_PROFILE_REVIEW
             if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
-            else WORKERBEE_PROFILE_OBSERVE
+            else str(
+                fork_metadata.get("workerbee_mcp_profile")
+                or WORKERBEE_PROFILE_OBSERVE
+            )
         )
         workerbee_gateway_binding = await self.prepare_workerbee_gateway_launch(
             agent_id=fork_agent_id,
@@ -25398,18 +25638,15 @@ class AgentPBXTUI(App[None]):
                 work_root=launch_cwd,
                 terminal_mode=self.codex_terminal_mode,
                 workerbee_gateway_binding=workerbee_gateway_binding,
+                authority_metadata=fork_metadata,
             )
         )
         launch_config_overrides = [
             *launch_config_overrides,
             *codex_model_preset_config_overrides(launch_preset),
-            *self.linked_edit_fork_config_overrides(git_admin_plan),
+            *self.linked_edit_fork_config_overrides(git_admin_plan, fork_metadata),
         ]
-        sandbox = (
-            "workspace-write"
-            if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
-            else None
-        )
+        sandbox = operator_authority_sandbox(fork_metadata)
 
         def build_bootstrap(mode: str) -> str:
             return self.operator_bootstrap_prompt(
@@ -25532,6 +25769,25 @@ class AgentPBXTUI(App[None]):
         )
         if isinstance(fork, dict):
             self.agents[fork_agent_id] = self.operator_fork_record_agent(fork)
+        inherited_profile = str(
+            fork_metadata.get("operator_authority_profile") or ""
+        ).strip()
+        if inherited_profile:
+            authority_response = await self.api_client().put(
+                f"/v2/agents/{fork_agent_id}/operator-authority",
+                json={
+                    "profile": inherited_profile,
+                    "workspace_set_id": fork_metadata.get(
+                        "operator_workspace_set_id"
+                    ),
+                    "profile_label": fork_metadata.get(
+                        "operator_authority_profile_label"
+                    ),
+                },
+                headers=auth_headers(self.token),
+            )
+            authority_response.raise_for_status()
+            await self.mark_operator_authority_activated(fork_agent_id)
         await self.register_launched_tmux_runtime(
             fork_agent_id,
             pane_id,
@@ -29547,13 +29803,14 @@ class AgentPBXTUI(App[None]):
                 include_campaign_lifecycle=True,
                 terminal_mode=self.codex_terminal_mode,
                 workerbee_gateway_binding=workerbee_gateway_binding,
+                authority_metadata=metadata,
             )
-            sandbox = None
+            sandbox = operator_authority_sandbox(metadata)
         launch_config_overrides.extend(
             codex_model_preset_config_overrides(launch_preset)
         )
         launch_config_overrides.extend(
-            self.linked_edit_fork_config_overrides(git_admin_plan)
+            self.linked_edit_fork_config_overrides(git_admin_plan, metadata)
         )
         command = self.operator_resume_command(
             codex_command,
@@ -29698,6 +29955,7 @@ class AgentPBXTUI(App[None]):
                 f"Resumed {agent_id}, but exact runtime registration failed: {exc}",
                 severity="warning",
             )
+        await self.mark_operator_authority_activated(agent_id)
         await asyncio.sleep(1.0)
         bootstrap_kwargs: dict[str, Any] = fork_identity or {}
         try:
@@ -36345,6 +36603,165 @@ class AgentPBXTUI(App[None]):
         if workspace_button is not None:
             workspace_button.display = not self.workerbee_workspace_controls_hidden
         return policy, transitions
+
+    async def open_operator_authority_manager(self, agent_id: str) -> None:
+        try:
+            authority_response, sets_response = await asyncio.gather(
+                self.api_client().get(
+                    f"/v2/agents/{quote(agent_id, safe='')}/operator-authority",
+                    headers=auth_headers(self.token),
+                    timeout=15,
+                ),
+                self.api_client().get(
+                    "/v2/operator/workspace-sets",
+                    headers=auth_headers(self.token),
+                    timeout=15,
+                ),
+            )
+            authority_response.raise_for_status()
+            sets_response.raise_for_status()
+            authority = dict(authority_response.json())
+            workspace_sets = [
+                dict(item) for item in sets_response.json() if isinstance(item, dict)
+            ]
+        except Exception as exc:
+            self.notify(f"Operator authority load failed: {exc}", severity="error")
+            return
+        admin = authority.get("admin") if isinstance(authority.get("admin"), dict) else {}
+        if admin.get("control_mode") == "hidden":
+            self.notify(
+                "Operator authority controls are hidden by administrator policy.",
+                severity="warning",
+            )
+            return
+        self.push_screen(
+            OperatorAuthorityScreen(
+                agent_id=agent_id,
+                authority_view=authority,
+                workspace_sets=workspace_sets,
+            )
+        )
+
+    async def preview_operator_workspace_set(
+        self,
+        screen: OperatorAuthorityScreen,
+    ) -> None:
+        _, payload = screen.workspace_set_payload()
+        try:
+            response = await self.api_client().post(
+                "/v2/operator/workspace-sets/preview",
+                json=payload,
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            screen.show_preview(dict(response.json()))
+        except Exception as exc:
+            self.notify(f"Workspace set preview failed: {exc}", severity="error")
+
+    async def save_operator_workspace_set(
+        self,
+        screen: OperatorAuthorityScreen,
+    ) -> None:
+        set_id, payload = screen.workspace_set_payload()
+        if not set_id:
+            self.notify("Workspace set id is required.", severity="warning")
+            return
+        try:
+            response = await self.api_client().put(
+                f"/v2/operator/workspace-sets/{quote(set_id, safe='')}",
+                json=payload,
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            saved = dict(response.json())
+        except Exception as exc:
+            self.notify(f"Workspace set save failed: {exc}", severity="error")
+            return
+        screen.dismiss()
+        self.notify(
+            f"Saved {saved.get('label') or set_id} v{saved.get('version')} with "
+            f"{saved.get('member_count') or 0} exact Git checkout(s)."
+        )
+        await self.open_operator_authority_manager(screen.agent_id)
+
+    async def apply_operator_authority(
+        self,
+        screen: OperatorAuthorityScreen,
+    ) -> None:
+        try:
+            response = await self.api_client().put(
+                f"/v2/agents/{quote(screen.agent_id, safe='')}/operator-authority",
+                json=screen.assignment_payload(),
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = dict(response.json())
+        except Exception as exc:
+            self.notify(f"Operator authority update failed: {exc}", severity="error")
+            return
+        cached = self.agents.get(screen.agent_id)
+        if isinstance(cached, dict):
+            metadata = self.agent_metadata(cached)
+            workspace_set = result.get("workspace_set") or {}
+            members = workspace_set.get("members") or []
+            cached["metadata"] = {
+                **metadata,
+                "operator_authority_profile": result.get("requested_profile"),
+                "operator_authority_profile_label": result.get("profile_label"),
+                "operator_authority_workspace_roots": [
+                    item.get("path") for item in members if item.get("path")
+                ],
+                "operator_authority_git_admin_paths": sorted(
+                    {
+                        path
+                        for item in members
+                        for path in item.get("git_admin_paths", [])
+                    }
+                ),
+                "operator_workspace_set_id": workspace_set.get("set_id"),
+                "operator_workspace_set_version": workspace_set.get("version"),
+                "operator_workspace_set_digest": workspace_set.get("member_digest"),
+                "operator_authority_requires_restart": True,
+                "workerbee_mcp_profile": (
+                    WORKERBEE_PROFILE_LOCAL_DEPLOY
+                    if result.get("effective_profile") in {"trusted-workbench", "full-access"}
+                    else WORKERBEE_PROFILE_OBSERVE
+                ),
+            }
+        screen.dismiss()
+        self.notify(
+            f"Saved {result.get('profile_label') or result.get('effective_profile')} for "
+            f"{screen.agent_id}. Restart/resume at a safe turn boundary to activate it.",
+            severity="warning",
+        )
+
+    async def mark_operator_authority_activated(self, agent_id: str) -> None:
+        metadata = self.agent_metadata(self.agents.get(agent_id))
+        if not metadata.get("operator_authority_profile"):
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v2/agents/{quote(agent_id, safe='')}/operator-authority/activated",
+                headers=auth_headers(self.token),
+                timeout=15,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(
+                f"{agent_id} restarted, but authority activation could not be recorded: {exc}",
+                severity="warning",
+            )
+            return
+        cached = self.agents.get(agent_id)
+        if isinstance(cached, dict):
+            cached_metadata = self.agent_metadata(cached)
+            cached["metadata"] = {
+                **cached_metadata,
+                "operator_authority_requires_restart": False,
+            }
 
     async def load_workerbee_access_profile(self, agent_id: str) -> dict[str, Any]:
         response = await self.api_client().get(

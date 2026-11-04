@@ -26370,6 +26370,48 @@ def test_tui_operator_agent_config_overrides_follow_operator_server_env(
     assert f'projects={{"{trusted}" = {{trust_level = "trusted"}}}}' in overrides
 
 
+def test_tui_operator_config_includes_exact_trusted_workbench_permissions() -> None:
+    first = str(Path("/tmp/operator first").resolve())
+    second = str(Path("/tmp/operator second").resolve())
+
+    overrides = operator_agent_config_overrides(
+        mcp_url="http://127.0.0.1:8767/mcp",
+        authority_metadata={
+            "operator_authority_profile": "trusted-workbench",
+            "operator_authority_workspace_roots": [first, second],
+            "operator_authority_git_admin_paths": [f"{first}/.git/objects"],
+            "access_mode": "edit",
+        },
+    )
+
+    permission = next(
+        item
+        for item in overrides
+        if item.startswith("permissions.agent-pbx-trusted-workbench=")
+    )
+    assert first in permission
+    assert second in permission
+    assert f"{first}/.git/objects" in permission
+    assert 'default_permissions="agent-pbx-trusted-workbench"' in overrides
+
+
+def test_tui_review_operator_ignores_trusted_workbench_permissions() -> None:
+    overrides = operator_agent_config_overrides(
+        mcp_url="http://127.0.0.1:8767/mcp",
+        authority_metadata={
+            "operator_authority_profile": "trusted-workbench",
+            "operator_authority_workspace_roots": ["/tmp/operator"],
+            "access_mode": "review_readonly",
+            "fork_purpose": "review",
+        },
+    )
+
+    assert not any(
+        item.startswith("permissions.agent-pbx-trusted-workbench=")
+        for item in overrides
+    )
+
+
 def test_tui_root_operator_config_includes_campaign_lifecycle_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
