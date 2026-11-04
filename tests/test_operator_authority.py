@@ -244,6 +244,7 @@ def test_trusted_assignment_coordinates_workerbee_and_pins_set_version(
     )
 
     assert assignment["effective_profile"] == "trusted-workbench"
+    assert assignment["pending_activation"] is True
     assert assignment["workspace_set"]["version"] == 1
     assert access.get_profile("operator-7-fork-edit")["effective_profile"] == "local-deploy"
     policy = workspace.get_policy("operator-7-fork-edit")["effective"]
@@ -287,6 +288,8 @@ def test_activation_allows_new_commit_but_rejects_topology_drift(
         "operator_authority_requires_restart"
     ] is False
     assert activated["effective_profile"] == "trusted-workbench"
+    assert activated["pending_activation"] is False
+    assert activated["activated_profile"] == "trusted-workbench"
 
     service.set_assignment(
         "operator-7",

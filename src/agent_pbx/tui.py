@@ -4740,7 +4740,11 @@ class OperatorAuthorityScreen(ModalScreen[None]):
             f"Effective: {self.authority_view.get('effective_profile') or '-'} · "
             f"set={workspace_set.get('set_id') or '-'} · "
             f"members={workspace_set.get('member_count') or 0} · "
-            "changes apply after safe restart/resume"
+            + (
+                "pending safe restart/resume"
+                if self.authority_view.get("pending_activation")
+                else "active or default policy"
+            )
         )
 
     def assignment_payload(self) -> dict[str, Any]:

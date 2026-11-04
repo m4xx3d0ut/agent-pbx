@@ -397,6 +397,16 @@ class OperatorAuthorityService:
             "constrained": constrained,
             "admin": posture.public_dict(),
             "requires_restart_on_change": True,
+            "pending_activation": bool(
+                metadata.get("operator_authority_requires_restart")
+            ),
+            "activated_profile": metadata.get(
+                "operator_authority_activated_profile"
+            ),
+            "activated_workspace_set_digest": metadata.get(
+                "operator_authority_activated_workspace_set_digest"
+            ),
+            "activated_at": metadata.get("operator_authority_activated_at"),
             "updated_at": float(row["updated_at"]) if row is not None else None,
         }
 
