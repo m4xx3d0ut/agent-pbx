@@ -29,6 +29,13 @@ DEDICATED_BRANCH_RE = re.compile(
     r"^refs/heads/pbx-operator-[0-9]+/[A-Za-z0-9._/-]+$"
 )
 UNSAFE_INDEX_EXTENSIONS = {b"link", b"sdir"}
+GIT_INDEX_OBJECT_FORMATS = {
+    "sha1": ("sha1", 20),
+    "sha256": ("sha256", 32),
+}
+SUPPORTED_GIT_INDEX_VERSIONS = frozenset({2, 3, 4})
+GIT_INDEX_EXTENDED_FLAG = 0x4000
+GIT_INDEX_NAME_LENGTH_MASK = 0x0FFF
 BROKER_GIT_ENV_KEYS = {
     "GIT_INDEX_FILE",
     "GIT_AUTHOR_NAME",
@@ -1401,11 +1408,25 @@ def _require_plain_clean_index(plan: LinkedWorktreeGitAdminPlan) -> None:
         if _git_optional_text(root, "config", "--bool", key) == "true":
             raise LinkedGitBrokerError(f"linked Git broker rejects {key}=true")
     index = _read_regular_bytes(plan.git_dir / "index", "Git index")
-    if len(index) < 12 or index[:4] != b"DIRC":
-        raise LinkedGitBrokerError("linked Git broker requires a regular Git index")
-    if any(marker in index for marker in UNSAFE_INDEX_EXTENSIONS):
+    object_format = _git_text(root, "rev-parse", "--show-object-format")
+    extensions = _git_index_extension_signatures(
+        index,
+        object_format=object_format,
+    )
+    if any(marker in extensions for marker in UNSAFE_INDEX_EXTENSIONS):
         raise LinkedGitBrokerError(
             "linked Git broker rejects split or sparse index extensions"
+        )
+    mandatory = tuple(
+        signature
+        for signature in extensions
+        if signature[:1].islower()
+    )
+    if mandatory:
+        rendered = ", ".join(signature.decode("ascii") for signature in mandatory)
+        raise LinkedGitBrokerError(
+            "linked Git broker rejects unsupported mandatory index extension(s): "
+            + rendered
         )
     if _git_bytes(root, "ls-files", "-u", "-z"):
         raise LinkedGitBrokerError("linked Git broker rejects unmerged index entries")
@@ -1425,6 +1446,200 @@ def _require_plain_clean_index(plan: LinkedWorktreeGitAdminPlan) -> None:
             )
         detail = result.stderr.decode(errors="replace").strip()
         raise LinkedGitBrokerError(detail or "unable to validate the Git index")
+
+
+def _git_index_extension_signatures(
+    index: bytes,
+    *,
+    object_format: str,
+) -> tuple[bytes, ...]:
+    """Return structurally parsed Git-index extension signatures.
+
+    Git extension names are meaningful only after the declared entry table.
+    Searching the complete byte stream is unsafe because object IDs and ordinary
+    pathnames may contain the same bytes. This parser deliberately validates the
+    full entry and extension boundaries before returning any signature.
+    """
+
+    format_spec = GIT_INDEX_OBJECT_FORMATS.get(str(object_format or "").strip())
+    if format_spec is None:
+        raise LinkedGitBrokerError(
+            f"linked Git broker does not support object format {object_format!r}"
+        )
+    digest_name, object_id_width = format_spec
+    header_size = 12
+    if len(index) < header_size + object_id_width:
+        raise LinkedGitBrokerError("Git index is truncated before its checksum")
+    if index[:4] != b"DIRC":
+        raise LinkedGitBrokerError("linked Git broker requires a regular Git index")
+
+    version = int.from_bytes(index[4:8], "big")
+    if version not in SUPPORTED_GIT_INDEX_VERSIONS:
+        raise LinkedGitBrokerError(
+            f"linked Git broker does not support Git index version {version}"
+        )
+    entry_count = int.from_bytes(index[8:12], "big")
+    content_end = len(index) - object_id_width
+    expected_checksum = index[content_end:]
+    actual_checksum = hashlib.new(digest_name, index[:content_end]).digest()
+    if actual_checksum != expected_checksum:
+        raise LinkedGitBrokerError(
+            f"Git index {object_format} checksum does not match its contents"
+        )
+
+    fixed_entry_size = 40 + object_id_width + 2
+    minimum_entry_size = fixed_entry_size + (2 if version == 4 else 1)
+    available_entry_bytes = content_end - header_size
+    if entry_count > available_entry_bytes // minimum_entry_size:
+        raise LinkedGitBrokerError(
+            "Git index entry count cannot fit before the checksum region"
+        )
+
+    offset = header_size
+    previous_path = b""
+    empty_path_ordinals: list[int] = []
+    for ordinal in range(entry_count):
+        entry_start = offset
+        fixed_end = entry_start + fixed_entry_size
+        if fixed_end > content_end:
+            raise LinkedGitBrokerError(
+                f"Git index entry {ordinal} is truncated before its pathname"
+            )
+        flags = int.from_bytes(index[fixed_end - 2 : fixed_end], "big")
+        cursor = fixed_end
+        if flags & GIT_INDEX_EXTENDED_FLAG:
+            if version == 2:
+                raise LinkedGitBrokerError(
+                    f"Git index v2 entry {ordinal} has unsupported extended flags"
+                )
+            if cursor + 2 > content_end:
+                raise LinkedGitBrokerError(
+                    f"Git index entry {ordinal} has truncated extended flags"
+                )
+            cursor += 2
+
+        if version == 4:
+            remove_count, cursor = _git_index_v4_remove_count(
+                index,
+                cursor=cursor,
+                content_end=content_end,
+                ordinal=ordinal,
+            )
+            if remove_count > len(previous_path):
+                raise LinkedGitBrokerError(
+                    f"Git index v4 entry {ordinal} removes beyond the previous pathname"
+                )
+            terminator = index.find(b"\0", cursor, content_end)
+            if terminator < 0:
+                raise LinkedGitBrokerError(
+                    f"Git index v4 entry {ordinal} pathname is not terminated"
+                )
+            suffix = index[cursor:terminator]
+            pathname = previous_path[: len(previous_path) - remove_count] + suffix
+            if not pathname:
+                empty_path_ordinals.append(ordinal)
+            offset = terminator + 1
+            previous_path = pathname
+        else:
+            terminator = index.find(b"\0", cursor, content_end)
+            if terminator < 0:
+                raise LinkedGitBrokerError(
+                    f"Git index entry {ordinal} pathname is not terminated"
+                )
+            pathname = index[cursor:terminator]
+            if not pathname:
+                empty_path_ordinals.append(ordinal)
+            unpadded_size = terminator + 1 - entry_start
+            padded_size = (unpadded_size + 7) & ~7
+            offset = entry_start + padded_size
+            if offset > content_end:
+                raise LinkedGitBrokerError(
+                    f"Git index entry {ordinal} padding crosses the checksum region"
+                )
+            if any(index[terminator + 1 : offset]):
+                raise LinkedGitBrokerError(
+                    f"Git index entry {ordinal} has non-NUL padding"
+                )
+            previous_path = pathname
+
+        declared_length = flags & GIT_INDEX_NAME_LENGTH_MASK
+        if declared_length == GIT_INDEX_NAME_LENGTH_MASK:
+            if len(previous_path) < GIT_INDEX_NAME_LENGTH_MASK:
+                raise LinkedGitBrokerError(
+                    f"Git index entry {ordinal} has an impossible pathname length flag"
+                )
+        elif declared_length != len(previous_path):
+            raise LinkedGitBrokerError(
+                f"Git index entry {ordinal} pathname length does not match its flags"
+            )
+
+    extensions: list[bytes] = []
+    seen: set[bytes] = set()
+    while offset < content_end:
+        if content_end - offset < 8:
+            raise LinkedGitBrokerError("Git index extension header is truncated")
+        signature = index[offset : offset + 4]
+        if len(signature) != 4 or not all(
+            65 <= byte <= 90 or 97 <= byte <= 122 for byte in signature
+        ):
+            raise LinkedGitBrokerError(
+                "Git index extension signature is not four ASCII letters"
+            )
+        if signature in seen:
+            raise LinkedGitBrokerError(
+                "Git index contains duplicate extension signature "
+                + signature.decode("ascii")
+            )
+        payload_size = int.from_bytes(index[offset + 4 : offset + 8], "big")
+        payload_start = offset + 8
+        payload_end = payload_start + payload_size
+        if payload_end > content_end:
+            raise LinkedGitBrokerError(
+                "Git index extension payload crosses the checksum region"
+            )
+        extensions.append(signature)
+        seen.add(signature)
+        offset = payload_end
+    if offset != content_end:  # pragma: no cover - loop invariants are explicit
+        raise LinkedGitBrokerError("Git index has an impossible extension boundary")
+    if empty_path_ordinals and b"link" not in seen:
+        raise LinkedGitBrokerError(
+            "Git index has empty pathname entries without a split-index extension"
+        )
+    return tuple(extensions)
+
+
+def _git_index_v4_remove_count(
+    index: bytes,
+    *,
+    cursor: int,
+    content_end: int,
+    ordinal: int,
+) -> tuple[int, int]:
+    """Decode Git's OFS_DELTA-style pathname remove count."""
+
+    if cursor >= content_end:
+        raise LinkedGitBrokerError(
+            f"Git index v4 entry {ordinal} has no pathname prefix length"
+        )
+    byte = index[cursor]
+    cursor += 1
+    value = byte & 0x7F
+    encoded_bytes = 1
+    while byte & 0x80:
+        if cursor >= content_end:
+            raise LinkedGitBrokerError(
+                f"Git index v4 entry {ordinal} has a truncated pathname prefix length"
+            )
+        if encoded_bytes >= 10:
+            raise LinkedGitBrokerError(
+                f"Git index v4 entry {ordinal} pathname prefix length overflows"
+            )
+        byte = index[cursor]
+        cursor += 1
+        value = ((value + 1) << 7) | (byte & 0x7F)
+        encoded_bytes += 1
+    return value, cursor
 
 
 def _normalize_stage_paths(paths: Iterable[str]) -> tuple[str, ...]:

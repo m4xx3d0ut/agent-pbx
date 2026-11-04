@@ -522,6 +522,14 @@ external-config-include, staged, sparse/split-index, or unmerged topologies fail
 before mutation. Broker execution is unavailable through HTTP, API, or MCP and
 is never an alternate commit path for direct-compatible forks.
 
+The broker validates Git indexes structurally rather than scanning arbitrary
+index bytes for extension names. It parses supported `DIRC` v2-v4 entries using
+the repository's SHA-1 or SHA-256 object-ID width, verifies pathname and padding
+boundaries plus the trailing checksum, and then parses the actual extension
+table. Ordinary path or object data containing `link` or `sdir` is safe; real
+split/sparse extensions, unknown mandatory extensions, malformed layouts, and
+ambiguous boundaries still fail closed.
+
 Review forks should treat the source checkout as read-only and write only under
 their configured `work_root`. If a finding requires edits in the source repo,
 route it with `pbx_operator_route_review_escalation` so the root operator or an

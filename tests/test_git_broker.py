@@ -202,6 +202,338 @@ def _prepare(
     return main, linked, codex_home, receipt
 
 
+def _git_index_fixture(
+    paths: tuple[bytes, ...],
+    *,
+    version: int = 2,
+    object_format: str = "sha1",
+    extensions: tuple[tuple[bytes, bytes], ...] = (),
+) -> bytes:
+    width = {"sha1": 20, "sha256": 32}[object_format]
+    body = bytearray(b"DIRC")
+    body.extend(version.to_bytes(4, "big"))
+    body.extend(len(paths).to_bytes(4, "big"))
+    previous = b""
+    for ordinal, path in enumerate(paths):
+        start = len(body)
+        body.extend(b"\0" * 40)
+        body.extend(bytes([ordinal + 1]) * width)
+        body.extend(min(len(path), 0x0FFF).to_bytes(2, "big"))
+        if version == 4:
+            common = 0
+            while (
+                common < len(previous)
+                and common < len(path)
+                and previous[common] == path[common]
+            ):
+                common += 1
+            remove_count = len(previous) - common
+            assert remove_count < 0x80
+            body.append(remove_count)
+            body.extend(path[common:])
+            body.append(0)
+        else:
+            body.extend(path)
+            body.append(0)
+            body.extend(b"\0" * ((-(len(body) - start)) % 8))
+        previous = path
+    for signature, payload in extensions:
+        assert len(signature) == 4
+        body.extend(signature)
+        body.extend(len(payload).to_bytes(4, "big"))
+        body.extend(payload)
+    body.extend(hashlib.new(object_format, body).digest())
+    return bytes(body)
+
+
+def _rehash_git_index(index: bytes, *, object_format: str = "sha1") -> bytes:
+    width = {"sha1": 20, "sha256": 32}[object_format]
+    body = index[:-width]
+    return body + hashlib.new(object_format, body).digest()
+
+
+def test_git_index_parser_accepts_marker_pathnames_and_safe_extensions() -> None:
+    index = _git_index_fixture(
+        (b"docs/link-guide.md", b"src/sdir-helper.py"),
+        extensions=((b"TREE", b"safe-cache"),),
+    )
+
+    assert broker._git_index_extension_signatures(  # noqa: SLF001
+        index,
+        object_format="sha1",
+    ) == (b"TREE",)
+
+
+def test_git_index_parser_accepts_v4_and_sha256_layouts() -> None:
+    v4 = _git_index_fixture(
+        (b"docs/link-one.md", b"docs/link-two.md"),
+        version=4,
+    )
+    sha256 = _git_index_fixture(
+        (b"src/sdir-name.py",),
+        object_format="sha256",
+        extensions=((b"TREE", b"sha256-cache"),),
+    )
+
+    assert broker._git_index_extension_signatures(  # noqa: SLF001
+        v4,
+        object_format="sha1",
+    ) == ()
+    assert broker._git_index_extension_signatures(  # noqa: SLF001
+        sha256,
+        object_format="sha256",
+    ) == (b"TREE",)
+
+
+@pytest.mark.parametrize("signature", (b"link", b"sdir"))
+def test_git_index_parser_exposes_actual_unsafe_extensions(signature: bytes) -> None:
+    index = _git_index_fixture(
+        (b"tracked.txt",),
+        extensions=((signature, b"unsafe"),),
+    )
+
+    assert broker._git_index_extension_signatures(  # noqa: SLF001
+        index,
+        object_format="sha1",
+    ) == (signature,)
+
+
+@pytest.mark.parametrize("signature", (b"link", b"sdir"))
+def test_plain_clean_index_rejects_structural_unsafe_extension(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    signature: bytes,
+) -> None:
+    index = _git_index_fixture(
+        (b"tracked.txt",),
+        extensions=((signature, b"unsafe"),),
+    )
+    plan = type(
+        "Plan",
+        (),
+        {"worktree_root": tmp_path, "git_dir": tmp_path},
+    )()
+    monkeypatch.setattr(broker, "_git_optional_text", lambda *_args: "")
+    monkeypatch.setattr(broker, "_git_text", lambda *_args: "sha1")
+    monkeypatch.setattr(broker, "_read_regular_bytes", lambda *_args: index)
+
+    with pytest.raises(LinkedGitBrokerError, match="split or sparse index extensions"):
+        broker._require_plain_clean_index(plan)  # noqa: SLF001
+
+
+def test_plain_clean_index_rejects_unknown_mandatory_extension(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    index = _git_index_fixture(
+        (b"tracked.txt",),
+        extensions=((b"abcd", b"mandatory"),),
+    )
+    plan = type(
+        "Plan",
+        (),
+        {"worktree_root": tmp_path, "git_dir": tmp_path},
+    )()
+    monkeypatch.setattr(broker, "_git_optional_text", lambda *_args: "")
+    monkeypatch.setattr(broker, "_git_text", lambda *_args: "sha1")
+    monkeypatch.setattr(broker, "_read_regular_bytes", lambda *_args: index)
+
+    with pytest.raises(LinkedGitBrokerError, match="mandatory index extension.*abcd"):
+        broker._require_plain_clean_index(plan)  # noqa: SLF001
+
+
+def test_git_index_parser_rejects_malformed_boundaries_and_checksum() -> None:
+    valid = _git_index_fixture((b"ab",), extensions=((b"TREE", b"cache"),))
+
+    unsupported = bytearray(valid)
+    unsupported[4:8] = (5).to_bytes(4, "big")
+    unsupported = bytearray(_rehash_git_index(bytes(unsupported)))
+    with pytest.raises(LinkedGitBrokerError, match="index version 5"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            bytes(unsupported), object_format="sha1"
+        )
+
+    impossible_count = bytearray(valid)
+    impossible_count[8:12] = (1000).to_bytes(4, "big")
+    impossible_count = bytearray(_rehash_git_index(bytes(impossible_count)))
+    with pytest.raises(LinkedGitBrokerError, match="entry count cannot fit"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            bytes(impossible_count), object_format="sha1"
+        )
+
+    non_nul_padding = bytearray(valid)
+    non_nul_padding[77] = 1
+    non_nul_padding = bytearray(_rehash_git_index(bytes(non_nul_padding)))
+    with pytest.raises(LinkedGitBrokerError, match="non-NUL padding"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            bytes(non_nul_padding), object_format="sha1"
+        )
+
+    oversized_extension = bytearray(valid)
+    tree_offset = oversized_extension.find(b"TREE", 12)
+    assert tree_offset > 0
+    oversized_extension[tree_offset + 4 : tree_offset + 8] = (2**32 - 1).to_bytes(
+        4, "big"
+    )
+    oversized_extension = bytearray(_rehash_git_index(bytes(oversized_extension)))
+    with pytest.raises(LinkedGitBrokerError, match="payload crosses"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            bytes(oversized_extension), object_format="sha1"
+        )
+
+    checksum_mismatch = bytearray(valid)
+    checksum_mismatch[-1] ^= 1
+    with pytest.raises(LinkedGitBrokerError, match="checksum"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            bytes(checksum_mismatch), object_format="sha1"
+        )
+
+
+def test_git_index_parser_rejects_truncated_duplicate_and_invalid_extensions() -> None:
+    valid = _git_index_fixture((b"tracked.txt",))
+    checksum_width = 20
+
+    truncated_header_body = valid[:-checksum_width] + b"ABC"
+    truncated_header = truncated_header_body + hashlib.sha1(
+        truncated_header_body
+    ).digest()
+    with pytest.raises(LinkedGitBrokerError, match="extension header is truncated"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            truncated_header, object_format="sha1"
+        )
+
+    invalid_signature_body = valid[:-checksum_width]
+    invalid_signature_body += b"1BAD" + (0).to_bytes(4, "big")
+    invalid_signature = invalid_signature_body + hashlib.sha1(
+        invalid_signature_body
+    ).digest()
+    with pytest.raises(LinkedGitBrokerError, match="four ASCII letters"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            invalid_signature, object_format="sha1"
+        )
+
+    duplicate = _git_index_fixture(
+        (b"tracked.txt",),
+        extensions=((b"TREE", b"one"), (b"TREE", b"two")),
+    )
+    with pytest.raises(LinkedGitBrokerError, match="duplicate extension"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            duplicate, object_format="sha1"
+        )
+
+    with pytest.raises(LinkedGitBrokerError, match="truncated before its checksum"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            b"DIRC", object_format="sha1"
+        )
+
+
+def test_git_index_parser_rejects_entry_flag_and_extended_layout_ambiguity() -> None:
+    valid = _git_index_fixture((b"tracked.txt",))
+
+    wrong_length = bytearray(valid)
+    flags_offset = 12 + 40 + 20
+    wrong_length[flags_offset : flags_offset + 2] = (1).to_bytes(2, "big")
+    wrong_length = bytearray(_rehash_git_index(bytes(wrong_length)))
+    with pytest.raises(LinkedGitBrokerError, match="pathname length"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            bytes(wrong_length), object_format="sha1"
+        )
+
+    extended_v2 = bytearray(valid)
+    original_flags = int.from_bytes(
+        extended_v2[flags_offset : flags_offset + 2], "big"
+    )
+    extended_v2[flags_offset : flags_offset + 2] = (
+        original_flags | broker.GIT_INDEX_EXTENDED_FLAG
+    ).to_bytes(2, "big")
+    extended_v2 = bytearray(_rehash_git_index(bytes(extended_v2)))
+    with pytest.raises(LinkedGitBrokerError, match="v2 entry.*extended flags"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            bytes(extended_v2), object_format="sha1"
+        )
+
+
+def test_git_index_parser_rejects_unterminated_and_v4_invalid_paths() -> None:
+    fixed = b"\0" * 40 + b"\1" * 20 + (1).to_bytes(2, "big")
+    unterminated_body = b"DIRC" + (2).to_bytes(4, "big") + (1).to_bytes(4, "big")
+    unterminated_body += fixed + b"x"
+    unterminated = unterminated_body + hashlib.sha1(unterminated_body).digest()
+    with pytest.raises(LinkedGitBrokerError, match="pathname is not terminated"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            unterminated, object_format="sha1"
+        )
+
+    invalid_v4 = bytearray(_git_index_fixture((b"first.txt",), version=4))
+    invalid_v4[12 + 62] = 1
+    invalid_v4 = bytearray(_rehash_git_index(bytes(invalid_v4)))
+    with pytest.raises(LinkedGitBrokerError, match="removes beyond"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            bytes(invalid_v4), object_format="sha1"
+        )
+
+    with pytest.raises(LinkedGitBrokerError, match="object format"):
+        broker._git_index_extension_signatures(  # noqa: SLF001
+            _git_index_fixture((b"tracked.txt",)), object_format="sha512"
+        )
+
+
+def test_prepare_accepts_link_marker_in_tracked_pathname(tmp_path: Path) -> None:
+    _, linked = _fixture(tmp_path)
+    codex_home = _split_codex_home(tmp_path)
+    marker_path = linked / "docs" / "release-links.md"
+    marker_path.parent.mkdir()
+    marker_path.write_text("baseline\n", encoding="utf-8")
+    _git(linked, "add", "docs/release-links.md")
+    _git(linked, "commit", "-m", "add link marker fixture")
+    marker_path.write_text("changed\n", encoding="utf-8")
+
+    receipt = prepare_linked_git_commit(
+        agent_id="operator-7-fork-test",
+        work_root=linked,
+        approved_roots=(tmp_path,),
+        approved_stage_paths=("docs/release-links.md",),
+        codex_home=codex_home,
+        authored_at=1_700_000_000,
+    )
+
+    assert receipt.approved_stage_paths == ("docs/release-links.md",)
+    assert receipt.path_identities[0].path == "docs/release-links.md"
+
+
+def test_prepare_rejects_actual_split_index_extension(tmp_path: Path) -> None:
+    _, linked = _fixture(tmp_path)
+    codex_home = _split_codex_home(tmp_path)
+    (linked / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    _git(linked, "update-index", "--split-index")
+
+    with pytest.raises(LinkedGitBrokerError, match="split or sparse index extensions"):
+        prepare_linked_git_commit(
+            agent_id="operator-7-fork-test",
+            work_root=linked,
+            approved_roots=(tmp_path,),
+            approved_stage_paths=("tracked.txt",),
+            codex_home=codex_home,
+        )
+
+
+def test_prepare_accepts_real_git_index_v4(tmp_path: Path) -> None:
+    _, linked = _fixture(tmp_path)
+    codex_home = _split_codex_home(tmp_path)
+    (linked / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    _git(linked, "update-index", "--index-version", "4")
+
+    receipt = prepare_linked_git_commit(
+        agent_id="operator-7-fork-test",
+        work_root=linked,
+        approved_roots=(tmp_path,),
+        approved_stage_paths=("tracked.txt",),
+        codex_home=codex_home,
+        authored_at=1_700_000_000,
+    )
+
+    assert receipt.approved_stage_paths == ("tracked.txt",)
+
+
 def test_broker_commits_exact_paths_and_is_idempotent(tmp_path: Path) -> None:
     main, linked, codex_home, receipt = _prepare(
         tmp_path,
