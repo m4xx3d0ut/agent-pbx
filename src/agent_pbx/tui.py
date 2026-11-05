@@ -468,6 +468,14 @@ JOPLIN_COPY_MODE_CHOICES = (
     ("Clean: transcript first", JOPLIN_COPY_MODE_TRANSCRIPT_FIRST),
     ("Visible tmux capture only", JOPLIN_COPY_MODE_TMUX_CAPTURE),
 )
+OPERATOR_HANDOFF_CANCEL_REASON_CHOICES = (
+    ("Superseded by structured handoff", "superseded"),
+    ("No longer needed", "no_longer_needed"),
+    ("Duplicate request", "duplicate"),
+    ("Test or UAT artifact", "test_or_uat_artifact"),
+    ("Created in error", "created_in_error"),
+    ("Other", "other"),
+)
 CODEX_TERMINAL_MODE_SCROLLBACK = "scrollback"
 CODEX_TERMINAL_MODE_RAW = "raw"
 CODEX_TERMINAL_MODE_DEFAULT = "default"
@@ -5803,6 +5811,120 @@ class OperatorHandoffApprovalConfirmScreen(ModalScreen[None]):
             )
 
 
+class OperatorHandoffCancelConfirmScreen(ModalScreen[None]):
+    """Confirm audited withdrawal of pre-delivery Operator handoffs."""
+
+    BINDINGS = [("escape", "dismiss", "Back")]
+
+    def __init__(
+        self,
+        *,
+        operator_agent_id: str,
+        handoffs: tuple[dict[str, Any], ...],
+        approval_screen: "OperatorHandoffApprovalScreen",
+    ) -> None:
+        super().__init__()
+        self.operator_agent_id = operator_agent_id
+        self.handoffs = handoffs
+        self.handoff_ids = tuple(
+            str(handoff.get("handoff_id") or "") for handoff in handoffs
+        )
+        self.approval_screen = approval_screen
+
+    def compose(self) -> ComposeResult:
+        lines = []
+        for handoff in self.handoffs:
+            handoff_id = str(handoff.get("handoff_id") or "-")
+            target = str(handoff.get("target_operator_agent_id") or "-")
+            objective = OperatorHandoffApprovalScreen.truncate(
+                str(handoff.get("objective") or "-"),
+                72,
+            )
+            lines.append(f"{handoff_id} · {target}\n  {objective}")
+        with Vertical(id="operator-handoff-confirm-panel"):
+            yield Static("Cancel Operator handoffs", id="operator-handoff-confirm-title")
+            yield Static(
+                "Withdraw these exact requests before delivery. Their records and "
+                "audit evidence will be retained.\n\n" + "\n".join(lines),
+                id="operator-handoff-confirm-summary",
+            )
+            yield Select(
+                OPERATOR_HANDOFF_CANCEL_REASON_CHOICES,
+                value="superseded",
+                allow_blank=False,
+                id="operator-handoff-cancel-reason",
+            )
+            yield Input(
+                placeholder="Required detail for Other; optional otherwise",
+                id="operator-handoff-cancel-detail",
+            )
+            yield Input(
+                placeholder="Replacement handoff IDs, separated by spaces or commas",
+                id="operator-handoff-cancel-replacements",
+            )
+            with Horizontal(id="operator-handoff-confirm-actions"):
+                yield Button(
+                    "Cancel exact IDs",
+                    id="operator-handoff-cancel-confirm",
+                    variant="error",
+                )
+                yield Button("Back", id="operator-handoff-cancel-back")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "operator-handoff-cancel-back":
+            self.dismiss()
+            return
+        if event.button.id != "operator-handoff-cancel-confirm":
+            return
+        reason = str(
+            self.query_one("#operator-handoff-cancel-reason", Select).value or ""
+        ).strip()
+        detail = self.query_one("#operator-handoff-cancel-detail", Input).value.strip()
+        replacements_text = self.query_one(
+            "#operator-handoff-cancel-replacements", Input
+        ).value
+        replacement_ids = tuple(
+            dict.fromkeys(
+                value
+                for value in re.split(r"[\s,]+", replacements_text.strip())
+                if value
+            )
+        )
+        if reason == "other" and not detail:
+            self.app.notify(  # type: ignore[attr-defined]
+                "Cancellation detail is required when the reason is Other.",
+                severity="warning",
+            )
+            return
+        if reason == "superseded" and not replacement_ids:
+            self.app.notify(  # type: ignore[attr-defined]
+                "Superseded cancellations require at least one replacement handoff ID.",
+                severity="warning",
+            )
+            return
+        if set(self.handoff_ids).intersection(replacement_ids):
+            self.app.notify(  # type: ignore[attr-defined]
+                "A canceled handoff cannot be its own replacement.",
+                severity="warning",
+            )
+            return
+        work = self.app.cancel_operator_handoff_ids(  # type: ignore[attr-defined]
+            self.operator_agent_id,
+            self.handoff_ids,
+            reason=reason,
+            detail=detail,
+            superseded_by_handoff_ids=replacement_ids,
+            approval_screen=self.approval_screen,
+        )
+        self.dismiss()
+        self.app.run_worker(  # type: ignore[attr-defined]
+            work,
+            name="operator-handoff-cancel-exact",
+            exclusive=True,
+        )
+
+
 class OperatorDelegationLeaseConfirmScreen(ModalScreen[None]):
     """Approve one bounded Trusted Workbench campaign delegation lease."""
 
@@ -5894,6 +6016,7 @@ class OperatorHandoffApprovalScreen(ModalScreen[None]):
                 yield Button("Preflight", id="operator-handoff-preflight")
                 yield Button("Approve selected", id="operator-handoff-approve", variant="warning")
                 yield Button("Trust campaign", id="operator-handoff-trust-campaign", variant="warning")
+                yield Button("Cancel selected", id="operator-handoff-cancel", variant="error")
                 yield Button("Refresh", id="operator-handoff-refresh")
                 yield Button("Close", id="operator-handoff-close")
 
@@ -5965,6 +6088,14 @@ class OperatorHandoffApprovalScreen(ModalScreen[None]):
         current = self.current_handoff_id()
         return (current,) if current else ()
 
+    def selected_handoffs(self) -> tuple[dict[str, Any], ...]:
+        selected_ids = set(self.selected_handoff_ids())
+        return tuple(
+            handoff
+            for handoff in self.handoffs
+            if str(handoff.get("handoff_id") or "") in selected_ids
+        )
+
     def handoff_order(self) -> tuple[str, ...]:
         return tuple(
             str(item.get("handoff_id") or "")
@@ -6028,6 +6159,21 @@ class OperatorHandoffApprovalScreen(ModalScreen[None]):
                     approval_screen=self,
                 )
             )
+        elif button_id == "operator-handoff-cancel":
+            selected = self.selected_handoffs()
+            if len(selected) != len(handoff_ids):
+                self.app.notify(  # type: ignore[attr-defined]
+                    "One or more selected handoffs changed; refresh and retry.",
+                    severity="error",
+                )
+                return
+            self.app.push_screen(  # type: ignore[attr-defined]
+                OperatorHandoffCancelConfirmScreen(
+                    operator_agent_id=self.operator_agent_id,
+                    handoffs=selected,
+                    approval_screen=self,
+                )
+            )
 
 
 class AgentPBXTUI(App[None]):
@@ -6066,7 +6212,8 @@ class AgentPBXTUI(App[None]):
     #operator-handoff-confirm-panel {
         width: 76%;
         height: auto;
-        max-height: 72%;
+        max-height: 92%;
+        overflow-y: auto;
     }
 
     #operator-handoff-approval-table {
@@ -7743,6 +7890,10 @@ class AgentPBXTUI(App[None]):
         self.active_agent_tab = "latest-tab"
         self.unseen_latest_agent_ids: set[str] = set()
         self.pending_handoff_approval_operator_ids: set[str] = set()
+        self.reviewed_handoff_approval_signatures: dict[
+            str, tuple[int, float | None]
+        ] = {}
+        self.handoff_approval_opening_operator_id: str | None = None
         self.local_starred_agent_ids = str_set_setting(
             self.settings,
             "starred_agent_ids",
@@ -15287,27 +15438,92 @@ class AgentPBXTUI(App[None]):
             )
         )
         self.pending_handoff_approval_operator_ids = set(operator_ids)
+        self.reviewed_handoff_approval_signatures = {
+            agent_id: signature
+            for agent_id, signature in self.reviewed_handoff_approval_signatures.items()
+            if agent_id in self.pending_handoff_approval_operator_ids
+        }
         return operator_ids
 
+    def handoff_approval_signature(
+        self,
+        operator_agent_id: str,
+    ) -> tuple[int, float | None]:
+        agent = self.agents.get(operator_agent_id) or {}
+        return (
+            int(agent.get("pending_handoff_approval_count") or 0),
+            float_value(agent.get("oldest_pending_handoff_created_at")),
+        )
+
+    def unreviewed_handoff_operators(self) -> list[str]:
+        return [
+            operator_agent_id
+            for operator_agent_id in self.pending_handoff_operators()
+            if self.reviewed_handoff_approval_signatures.get(operator_agent_id)
+            != self.handoff_approval_signature(operator_agent_id)
+        ]
+
+    def active_handoff_approval_screen(self) -> OperatorHandoffApprovalScreen | None:
+        try:
+            screens = list(self.screen_stack)
+        except ScreenStackError:
+            return None
+        return next(
+            (
+                screen
+                for screen in reversed(screens)
+                if isinstance(screen, OperatorHandoffApprovalScreen)
+            ),
+            None,
+        )
+
     async def action_focus_next_alert(self) -> None:
-        approval_ids = self.pending_handoff_operators()
+        if self.handoff_approval_opening_operator_id is not None:
+            self.notify(
+                "Operator handoff approvals are already opening.",
+                severity="information",
+            )
+            return
+        active_approval = self.active_handoff_approval_screen()
+        closed_approval = False
+        if active_approval is not None:
+            if self.screen is not active_approval:
+                self.notify(
+                    "Finish or cancel the current handoff action before cycling alerts.",
+                    severity="warning",
+                )
+                return
+            await active_approval.dismiss()
+            closed_approval = True
+        approval_ids = self.unreviewed_handoff_operators()
         if approval_ids:
             await self.open_operator_handoff_approval_center(approval_ids[0])
             return
         agent_id = self.next_alert_agent_id()
-        if agent_id is None:
-            self.notify("No Agent or Operator alerts are pending.")
+        if agent_id is not None:
+            if not await self.open_agent_latest(agent_id):
+                self.notify(
+                    f"Alert target {agent_id} is no longer available.",
+                    severity="warning",
+                )
+                return
+            # End any temporary event flash immediately. open_agent_latest() has
+            # already acknowledged this entity's latest report and rerendering now
+            # advances the banner to the next pending alert, if one exists.
+            self.clear_flash(self.flash_generation)
             return
-        if not await self.open_agent_latest(agent_id):
-            self.notify(
-                f"Alert target {agent_id} is no longer available.",
-                severity="warning",
-            )
+        remaining_approvals = self.pending_handoff_operators()
+        if remaining_approvals:
+            if closed_approval:
+                self.notify(
+                    "No other Agent or Operator alerts are pending; approval review remains openable with F8.",
+                )
+                return
+            for operator_agent_id in remaining_approvals:
+                self.reviewed_handoff_approval_signatures.pop(operator_agent_id, None)
+            await self.open_operator_handoff_approval_center(remaining_approvals[0])
             return
-        # End any temporary event flash immediately. open_agent_latest() has
-        # already acknowledged this entity's latest report and rerendering now
-        # advances the banner to the next pending alert, if one exists.
-        self.clear_flash(self.flash_generation)
+        self.notify("No Agent or Operator alerts are pending.")
 
     async def open_agent_latest(self, agent_id: str) -> bool:
         if agent_id not in self.agents:
@@ -26506,6 +26722,32 @@ class AgentPBXTUI(App[None]):
             return payload
         raise RuntimeError("handoff approval response was not an object")
 
+    async def cancel_operator_handoff(
+        self,
+        logical_operator_id: str,
+        handoff_id: str,
+        *,
+        reason: str,
+        detail: str = "",
+        superseded_by_handoff_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/handoffs/{handoff_id}/cancel",
+            json={
+                "operator_agent_id": logical_operator_id,
+                "reason": reason,
+                "detail": detail or None,
+                "superseded_by_handoff_ids": list(superseded_by_handoff_ids),
+                "metadata": {"requested_by": "agent-pbx-tui"},
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("handoff cancellation response was not an object")
+
     async def preflight_operator_handoff(
         self,
         logical_operator_id: str,
@@ -26589,26 +26831,43 @@ class AgentPBXTUI(App[None]):
     async def open_operator_handoff_approval_center(
         self,
         logical_operator_id: str,
-    ) -> None:
+    ) -> bool:
+        active = self.active_handoff_approval_screen()
+        if active is not None:
+            self.notify(
+                f"Operator handoff approvals for {active.operator_agent_id} are already open.",
+            )
+            return False
+        if self.handoff_approval_opening_operator_id is not None:
+            self.notify("Operator handoff approvals are already opening.")
+            return False
+        self.handoff_approval_opening_operator_id = logical_operator_id
         try:
-            handoffs = await self.fetch_operator_handoffs(
-                logical_operator_id,
-                limit=100,
+            try:
+                handoffs = await self.fetch_operator_handoffs(
+                    logical_operator_id,
+                    limit=100,
+                )
+            except Exception as exc:
+                self.notify(f"Unable to fetch operator handoffs: {exc}", severity="error")
+                return False
+            pending = self.pending_source_handoffs(logical_operator_id, handoffs)
+            if not pending:
+                self.notify(f"No pending operator handoffs for {logical_operator_id}.")
+                await self.refresh_agents()
+                return False
+            self.reviewed_handoff_approval_signatures[logical_operator_id] = (
+                self.handoff_approval_signature(logical_operator_id)
             )
-        except Exception as exc:
-            self.notify(f"Unable to fetch operator handoffs: {exc}", severity="error")
-            return
-        pending = self.pending_source_handoffs(logical_operator_id, handoffs)
-        if not pending:
-            self.notify(f"No pending operator handoffs for {logical_operator_id}.")
-            await self.refresh_agents()
-            return
-        self.push_screen(
-            OperatorHandoffApprovalScreen(
-                operator_agent_id=logical_operator_id,
-                handoffs=pending,
+            await self.push_screen(
+                OperatorHandoffApprovalScreen(
+                    operator_agent_id=logical_operator_id,
+                    handoffs=pending,
+                )
             )
-        )
+            return True
+        finally:
+            self.handoff_approval_opening_operator_id = None
 
     async def refresh_operator_handoff_approval_screen(
         self,
@@ -26622,10 +26881,11 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             self.notify(f"Unable to refresh operator handoffs: {exc}", severity="error")
             return
-        screen.replace_handoffs(
-            self.pending_source_handoffs(screen.operator_agent_id, handoffs)
-        )
+        pending = self.pending_source_handoffs(screen.operator_agent_id, handoffs)
+        screen.replace_handoffs(pending)
         await self.refresh_agents()
+        if not pending:
+            screen.dismiss()
 
     async def preflight_operator_handoff_ids(
         self,
@@ -26689,11 +26949,46 @@ class AgentPBXTUI(App[None]):
                 break
             approved.append(handoff_id)
         await self.refresh_events()
+        if approval_screen is not None:
+            await self.refresh_operator_handoff_approval_screen(approval_screen)
+        else:
+            await self.refresh_agents()
+        if approved:
+            self.notify(f"Approved {len(approved)} exact Operator handoff ID(s).")
+
+    async def cancel_operator_handoff_ids(
+        self,
+        logical_operator_id: str,
+        handoff_ids: tuple[str, ...],
+        *,
+        reason: str,
+        detail: str,
+        superseded_by_handoff_ids: tuple[str, ...],
+        approval_screen: OperatorHandoffApprovalScreen | None = None,
+    ) -> None:
+        canceled: list[str] = []
+        for handoff_id in handoff_ids:
+            try:
+                await self.cancel_operator_handoff(
+                    logical_operator_id,
+                    handoff_id,
+                    reason=reason,
+                    detail=detail,
+                    superseded_by_handoff_ids=superseded_by_handoff_ids,
+                )
+            except Exception as exc:
+                self.notify(
+                    f"Canceled {len(canceled)} handoff(s); stopped at {handoff_id}: {exc}",
+                    severity="error",
+                )
+                break
+            canceled.append(handoff_id)
+        await self.refresh_events()
         await self.refresh_agents()
         if approval_screen is not None:
             await self.refresh_operator_handoff_approval_screen(approval_screen)
-        if approved:
-            self.notify(f"Approved {len(approved)} exact Operator handoff ID(s).")
+        if canceled:
+            self.notify(f"Canceled {len(canceled)} exact Operator handoff ID(s).")
 
     async def create_operator_delegation_lease_from_handoffs(
         self,

@@ -53,6 +53,8 @@ from agent_pbx.tui import (
     LinkedGitRecoveryConfirmScreen,
     ModelElevationScreen,
     ManagedProjectPickerScreen,
+    OperatorHandoffApprovalScreen,
+    OperatorHandoffCancelConfirmScreen,
     OperatorHistoryScreen,
     OperatorSessionCandidate,
     ReadingMarkdown,
@@ -21710,6 +21712,96 @@ async def test_tui_f8_focuses_and_clears_one_alert_at_a_time() -> None:
     assert app.unseen_latest_agent_ids == set()
 
 
+@pytest.mark.asyncio
+async def test_tui_f8_single_flight_approval_then_advances_report_alert() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+    fetch_count = 0
+    focused: list[str] = []
+
+    async def fake_fetch(
+        logical_operator_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        nonlocal fetch_count
+        assert logical_operator_id == "operator-0"
+        fetch_count += 1
+        fetch_started.set()
+        await release_fetch.wait()
+        return [
+            {
+                "handoff_id": "handoff-1",
+                "logical_operator_agent_id": "operator-0",
+                "target_operator_agent_id": "operator-7",
+                "status": "proposed",
+                "objective": "Review checkpoint",
+                "created_at": 10.0,
+                "execution_scope": {},
+            }
+        ]
+
+    async def fake_open_agent_latest(agent_id: str) -> bool:
+        focused.append(agent_id)
+        app.unseen_latest_agent_ids.discard(agent_id)
+        return True
+
+    app.fetch_operator_handoffs = fake_fetch  # type: ignore[method-assign]
+    app.open_agent_latest = fake_open_agent_latest  # type: ignore[method-assign]
+
+    async with app.run_test():
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "pending_handoff_approval_count": 1,
+                "oldest_pending_handoff_created_at": 10.0,
+            },
+            "caller-1": {
+                "agent_id": "caller-1",
+                "agent_type": "caller",
+                "status": "done",
+                "last_seen_at": 20.0,
+            },
+        }
+        app.unseen_latest_agent_ids = {"caller-1"}
+        first = asyncio.create_task(app.action_focus_next_alert())
+        await fetch_started.wait()
+        await app.action_focus_next_alert()
+        release_fetch.set()
+        await first
+        await asyncio.sleep(0)
+
+        assert fetch_count == 1
+        assert sum(
+            isinstance(screen, OperatorHandoffApprovalScreen)
+            for screen in app.screen_stack
+        ) == 1
+
+        await app.action_focus_next_alert()
+        await asyncio.sleep(0)
+
+        assert focused == ["caller-1"]
+        assert not any(
+            isinstance(screen, OperatorHandoffApprovalScreen)
+            for screen in app.screen_stack
+        )
+        assert app.unseen_latest_agent_ids == set()
+
+        # The durable request remains available after the report-alert queue is
+        # exhausted, without ever stacking more than one approval screen.
+        await app.action_focus_next_alert()
+        await asyncio.sleep(0)
+
+        assert fetch_count == 2
+        assert sum(
+            isinstance(screen, OperatorHandoffApprovalScreen)
+            for screen in app.screen_stack
+        ) == 1
+
+
 async def test_tui_navigation_history_composes_with_alert_jump() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
@@ -28000,6 +28092,116 @@ async def test_tui_f8_routes_durable_handoff_approval_before_report_alert() -> N
 
     assert opened == ["operator-0"]
     assert app.unseen_latest_agent_ids == {"caller-1"}
+
+
+@pytest.mark.asyncio
+async def test_tui_handoff_cancel_modal_submits_exact_ids_and_replacements() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    submitted: list[dict[str, object]] = []
+
+    async def fake_cancel(
+        logical_operator_id: str,
+        handoff_ids: tuple[str, ...],
+        *,
+        reason: str,
+        detail: str,
+        superseded_by_handoff_ids: tuple[str, ...],
+        approval_screen: OperatorHandoffApprovalScreen | None = None,
+    ) -> None:
+        submitted.append(
+            {
+                "logical_operator_id": logical_operator_id,
+                "handoff_ids": handoff_ids,
+                "reason": reason,
+                "detail": detail,
+                "superseded_by_handoff_ids": superseded_by_handoff_ids,
+                "approval_screen": approval_screen,
+            }
+        )
+
+    app.cancel_operator_handoff_ids = fake_cancel  # type: ignore[method-assign]
+    approval = OperatorHandoffApprovalScreen(
+        operator_agent_id="operator-0",
+        handoffs=[
+            {
+                "handoff_id": "legacy-1",
+                "logical_operator_agent_id": "operator-0",
+                "target_operator_agent_id": "operator-7",
+                "objective": "Replace legacy request",
+                "status": "proposed",
+                "created_at": 10.0,
+                "execution_scope": {},
+            }
+        ],
+    )
+
+    async with app.run_test() as pilot:
+        app.push_screen(approval)
+        await pilot.pause()
+        assert await pilot.click("#operator-handoff-cancel")
+        await pilot.pause()
+        assert isinstance(app.screen, OperatorHandoffCancelConfirmScreen)
+        app.query_one("#operator-handoff-cancel-detail", Input).value = (
+            "Replaced by the structured campaign request."
+        )
+        app.query_one("#operator-handoff-cancel-replacements", Input).value = (
+            "replacement-1"
+        )
+        assert await pilot.click("#operator-handoff-cancel-confirm")
+        await pilot.pause()
+
+    assert len(submitted) == 1
+    assert submitted[0]["logical_operator_id"] == "operator-0"
+    assert submitted[0]["handoff_ids"] == ("legacy-1",)
+    assert submitted[0]["reason"] == "superseded"
+    assert submitted[0]["superseded_by_handoff_ids"] == ("replacement-1",)
+    assert submitted[0]["approval_screen"] is approval
+
+
+@pytest.mark.asyncio
+async def test_tui_cancel_handoff_ids_stops_on_first_failure() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    attempted: list[str] = []
+    notices: list[tuple[str, str]] = []
+
+    async def fake_cancel(
+        logical_operator_id: str,
+        handoff_id: str,
+        *,
+        reason: str,
+        detail: str = "",
+        superseded_by_handoff_ids: tuple[str, ...] = (),
+    ) -> dict[str, object]:
+        attempted.append(handoff_id)
+        if handoff_id == "handoff-2":
+            raise RuntimeError("delivery state changed")
+        return {"handoff": {"handoff_id": handoff_id, "status": "canceled"}}
+
+    async def no_refresh() -> None:
+        return None
+
+    def fake_notify(message: str, *, severity: str = "information", **_kwargs: object) -> None:
+        notices.append((message, severity))
+
+    app.cancel_operator_handoff = fake_cancel  # type: ignore[method-assign]
+    app.refresh_events = no_refresh  # type: ignore[method-assign]
+    app.refresh_agents = no_refresh  # type: ignore[method-assign]
+    app.notify = fake_notify  # type: ignore[method-assign]
+
+    await app.cancel_operator_handoff_ids(
+        "operator-0",
+        ("handoff-1", "handoff-2", "handoff-3"),
+        reason="no_longer_needed",
+        detail="Obsolete.",
+        superseded_by_handoff_ids=(),
+    )
+
+    assert attempted == ["handoff-1", "handoff-2"]
+    assert any(
+        "Canceled 1 handoff(s); stopped at handoff-2" in message
+        and severity == "error"
+        for message, severity in notices
+    )
 
 
 def test_tui_operator_handoff_monitor_renders_pending_ack(monkeypatch) -> None:

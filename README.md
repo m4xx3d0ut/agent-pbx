@@ -564,7 +564,12 @@ The root operator/TUI uses
 required target-fork state, and attached KB context without sending anything.
 Use `/operator handoff approve` to open the durable handoff approval center.
 It lists pending requests by immutable handoff ID, preflights the selected IDs,
-and requires an explicit confirmation before delivery. The top banner reports
+and requires an explicit confirmation before delivery. `Cancel selected`
+withdraws source-owned `proposed`, `approved`, or `pending_launch` requests
+without deleting their records. Cancellation requires a reason, records the
+prior state and actor in handoff metadata and the event journal, and requires
+replacement handoff IDs when the reason is `superseded`. It fails closed once
+delivery, acknowledgement, or execution has started. The top banner reports
 `APPROVALS N` until the underlying records leave a pending state; reading the
 Operator's latest report does not clear this approval alert. If the
 target operator needs a caller fork that has not been launched, the handoff
@@ -1742,7 +1747,12 @@ Plain configured function keys remain global PBX navigation even under terminal
 focus: `F1` Agents, `F2` Events, `F3` view, `F4` input, `F5` Operators,
 `F6/F7` fork navigation, `F8` next alert, `F9` editor, `F10` workspace launch,
 and `F11/F12` navigation back/forward. Repeated F8 presses
-focus and acknowledge one displayed Agent/Operator alert at a time.
+focus and acknowledge one displayed Agent/Operator alert at a time. Approval
+centers are single-flight: F8 never stacks duplicate modals. Pressing F8 while
+the approval center is frontmost closes that reviewed center and advances to
+the next unreviewed approval or report alert. An unresolved approval remains
+durable and can be reopened after the alert cycle; a nested confirmation must
+be completed or dismissed before cycling.
 Shift+F1–F12 is translated to unmodified child F1–F12. Thus F2
 always focuses Events while Shift+F2 opens Codex warnings. The input layer also
 recognizes xterm F13–F24 aliases, and the key probe documents terminal-specific

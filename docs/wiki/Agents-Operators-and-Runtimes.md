@@ -51,6 +51,15 @@ Acknowledging a root alert also clears the related non-review fork alert when
 both describe the same update. F8 moves to and clears one alert at a time so a
 queue of alerts remains reviewable.
 
+Executable Operator handoffs remain durable until they leave their pending
+state. The F8 approval center preflights and approves immutable IDs. A source
+Operator may instead use `Cancel selected` for handoffs that are still
+`proposed`, `approved`, or `pending_launch`. Agent PBX retains the record,
+stores the actor, reason, prior state, optional detail, and replacement IDs,
+and appends a cancellation event. `superseded` requires at least one valid
+replacement handoff owned by the same logical Operator. Cancellation fails
+closed after delivery, acknowledgement, or execution begins.
+
 ## Report and nohup modes
 
 Report mode is the normal local workflow. Agents send milestone and completion

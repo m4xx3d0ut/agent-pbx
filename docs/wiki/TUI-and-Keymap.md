@@ -26,6 +26,16 @@ Plain function keys remain PBX-owned even while the terminal has focus:
 | F10 | Launch a workspace from approved project roots |
 | F11 / F12 | Navigate backward / forward through Agent, Operator, and right-tab destinations |
 
+F8 treats durable handoff approvals and report alerts as one review queue. An
+approval center is single-flight, so repeated presses cannot stack duplicate
+modals. When the approval center itself is frontmost, F8 closes that reviewed
+view and advances to the next unreviewed approval or report alert. If a
+confirmation dialog is open inside it, finish or dismiss that action first.
+Reviewing does not approve or erase the handoff: unresolved records remain
+durable and F8 can reopen them after the rest of the alert queue is exhausted.
+The approval center also provides audited `Cancel selected` withdrawal for
+source-owned handoffs that have not entered delivery.
+
 Shift+F1 through Shift+F12 sends the corresponding unmodified function key to
 Codex. Terminals that encode those combinations as F13 through F24 are also
 recognized. Therefore F2 always means PBX Events and Shift+F2 opens Codex
