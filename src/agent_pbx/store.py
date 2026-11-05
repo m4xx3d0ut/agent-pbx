@@ -3925,6 +3925,7 @@ class Store:
                 self._add_latest_report_summary(conn, agent)
                 self._add_queue_summary(conn, agent)
                 self._add_campaign_summary(conn, agent)
+                self._add_handoff_approval_summary(conn, agent)
                 self._add_usage_summary(conn, agent)
         return agents
 
@@ -10056,6 +10057,33 @@ class Store:
                 (agent_id,),
             ).fetchone()
         agent["active_campaign_count"] = int(row["active_count"] or 0) if row else 0
+
+    @staticmethod
+    def _add_handoff_approval_summary(
+        conn: sqlite3.Connection, agent: dict[str, Any]
+    ) -> None:
+        """Expose durable source-operator approvals independently of reports."""
+
+        if agent.get("agent_type") != "operator":
+            agent["pending_handoff_approval_count"] = 0
+            agent["oldest_pending_handoff_created_at"] = None
+            return
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS pending_count, MIN(created_at) AS oldest_created_at
+            FROM operator_handoffs
+            WHERE logical_operator_agent_id = ?
+              AND status IN ('proposed', 'approved', 'pending_launch')
+              AND (expires_at IS NULL OR expires_at > ? OR started_at IS NOT NULL)
+            """,
+            (agent["agent_id"], now_ts()),
+        ).fetchone()
+        agent["pending_handoff_approval_count"] = (
+            int(row["pending_count"] or 0) if row else 0
+        )
+        agent["oldest_pending_handoff_created_at"] = (
+            row["oldest_created_at"] if row else None
+        )
 
     @staticmethod
     def _add_usage_summary(

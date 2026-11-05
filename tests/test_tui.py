@@ -27941,6 +27941,66 @@ async def test_tui_approve_pending_operator_handoff_preflights_first() -> None:
     assert "Preflight warnings: 0" in detail.text
 
 
+def test_tui_pending_source_handoffs_are_exact_and_oldest_first() -> None:
+    handoffs = [
+        {
+            "handoff_id": "newest",
+            "logical_operator_agent_id": "operator-0",
+            "status": "proposed",
+            "created_at": 30.0,
+        },
+        {
+            "handoff_id": "incoming",
+            "logical_operator_agent_id": "operator-7",
+            "target_operator_agent_id": "operator-0",
+            "status": "proposed",
+            "created_at": 5.0,
+        },
+        {
+            "handoff_id": "oldest",
+            "logical_operator_agent_id": "operator-0",
+            "status": "approved",
+            "created_at": 10.0,
+        },
+        {
+            "handoff_id": "done",
+            "logical_operator_agent_id": "operator-0",
+            "status": "sent",
+            "created_at": 1.0,
+        },
+    ]
+
+    pending = AgentPBXTUI.pending_source_handoffs("operator-0", handoffs)
+
+    assert [item["handoff_id"] for item in pending] == ["oldest", "newest"]
+
+
+@pytest.mark.asyncio
+async def test_tui_f8_routes_durable_handoff_approval_before_report_alert() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "pending_handoff_approval_count": 2,
+            "oldest_pending_handoff_created_at": 10.0,
+        },
+        "caller-1": {"agent_id": "caller-1", "agent_type": "caller"},
+    }
+    app.unseen_latest_agent_ids = {"caller-1"}
+    opened: list[str] = []
+
+    async def fake_open(operator_agent_id: str) -> None:
+        opened.append(operator_agent_id)
+
+    app.open_operator_handoff_approval_center = fake_open  # type: ignore[method-assign]
+
+    await app.action_focus_next_alert()
+
+    assert opened == ["operator-0"]
+    assert app.unseen_latest_agent_ids == {"caller-1"}
+
+
 def test_tui_operator_handoff_monitor_renders_pending_ack(monkeypatch) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 170.0)

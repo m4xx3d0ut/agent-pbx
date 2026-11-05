@@ -562,7 +562,11 @@ The root operator/TUI uses
 `/operator handoffs` to inspect pending handoffs and
 `/operator handoff preflight` to dry-run pane readiness, queue/nohup routing,
 required target-fork state, and attached KB context without sending anything.
-Use `/operator handoff approve` to approve the oldest pending handoff. If the
+Use `/operator handoff approve` to open the durable handoff approval center.
+It lists pending requests by immutable handoff ID, preflights the selected IDs,
+and requires an explicit confirmation before delivery. The top banner reports
+`APPROVALS N` until the underlying records leave a pending state; reading the
+Operator's latest report does not clear this approval alert. If the
 target operator needs a caller fork that has not been launched, the handoff
 moves to `pending_launch`; use `/operator handoff launch` to launch the
 required fork and retry delivery. Agent PBX then sends a normal `send_input`

@@ -5745,6 +5745,219 @@ class RuntimeMigrationScreen(ModalScreen[None]):
             self.dismiss()
 
 
+class OperatorHandoffApprovalConfirmScreen(ModalScreen[None]):
+    """Confirm delivery of an explicit, immutable set of handoff ids."""
+
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_ids: tuple[str, ...],
+        approval_screen: "OperatorHandoffApprovalScreen",
+    ) -> None:
+        super().__init__()
+        self.operator_agent_id = operator_agent_id
+        self.handoff_ids = handoff_ids
+        self.approval_screen = approval_screen
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="operator-handoff-confirm-panel"):
+            yield Static("Approve Operator handoffs", id="operator-handoff-confirm-title")
+            yield Static(
+                "The following exact handoff IDs will be preflighted again and approved:\n\n"
+                + "\n".join(self.handoff_ids),
+                id="operator-handoff-confirm-summary",
+            )
+            with Horizontal(id="operator-handoff-confirm-actions"):
+                yield Button("Approve exact IDs", id="operator-handoff-confirm", variant="warning")
+                yield Button("Cancel", id="operator-handoff-confirm-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "operator-handoff-confirm-cancel":
+            self.dismiss()
+            return
+        if event.button.id == "operator-handoff-confirm":
+            work = self.app.approve_operator_handoff_ids(  # type: ignore[attr-defined]
+                self.operator_agent_id,
+                self.handoff_ids,
+                approval_screen=self.approval_screen,
+            )
+            self.dismiss()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                work,
+                name="operator-handoff-approve-exact",
+                exclusive=True,
+            )
+
+
+class OperatorHandoffApprovalScreen(ModalScreen[None]):
+    """Durable action center for exact-ID Operator handoff approvals."""
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("space", "toggle_selected", "Mark"),
+    ]
+
+    def __init__(
+        self,
+        *,
+        operator_agent_id: str,
+        handoffs: list[dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.operator_agent_id = operator_agent_id
+        self.handoffs = handoffs
+        self.marked_ids: set[str] = set()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="operator-handoff-approval-panel"):
+            yield Static(
+                f"Operator handoff approvals · {self.operator_agent_id}",
+                id="operator-handoff-approval-title",
+            )
+            yield Static(
+                "Select a row, or press Space to mark several exact IDs.",
+                id="operator-handoff-approval-summary",
+            )
+            yield DataTable(
+                id="operator-handoff-approval-table",
+                cursor_type="row",
+                show_row_labels=False,
+            )
+            with Horizontal(id="operator-handoff-approval-actions"):
+                yield Button("Preflight", id="operator-handoff-preflight")
+                yield Button("Approve selected", id="operator-handoff-approve", variant="warning")
+                yield Button("Refresh", id="operator-handoff-refresh")
+                yield Button("Close", id="operator-handoff-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#operator-handoff-approval-table", DataTable)
+        table.add_columns("Mark", "Created", "Target", "Class", "Status", "Objective", "ID")
+        self.render_rows()
+
+    def render_rows(self) -> None:
+        table = self.query_one("#operator-handoff-approval-table", DataTable)
+        table.clear(columns=False)
+        valid_ids: set[str] = set()
+        for handoff in self.handoffs:
+            handoff_id = str(handoff.get("handoff_id") or "").strip()
+            if not handoff_id:
+                continue
+            valid_ids.add(handoff_id)
+            scope = handoff.get("execution_scope")
+            action_class = (
+                str(scope.get("action_class") or "legacy")
+                if isinstance(scope, dict)
+                else "legacy"
+            )
+            table.add_row(
+                "●" if handoff_id in self.marked_ids else "○",
+                self.format_timestamp(handoff.get("created_at")),
+                str(handoff.get("target_operator_agent_id") or "-"),
+                action_class,
+                str(handoff.get("status") or "-"),
+                self.truncate(str(handoff.get("objective") or "-"), 48),
+                handoff_id,
+                key=handoff_id,
+            )
+        self.marked_ids.intersection_update(valid_ids)
+        self.query_one("#operator-handoff-approval-summary", Static).update(
+            f"Pending {len(valid_ids)} · marked {len(self.marked_ids)} · "
+            "approval always targets the displayed immutable IDs."
+        )
+
+    @staticmethod
+    def format_timestamp(value: Any) -> str:
+        try:
+            return datetime.fromtimestamp(float(value), timezone.utc).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        except (TypeError, ValueError, OSError):
+            return "-"
+
+    @staticmethod
+    def truncate(value: str, limit: int) -> str:
+        return value if len(value) <= limit else value[: max(1, limit - 1)] + "…"
+
+    def current_handoff_id(self) -> str | None:
+        table = self.query_one("#operator-handoff-approval-table", DataTable)
+        if table.row_count == 0:
+            return None
+        try:
+            return str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
+        except Exception:
+            return None
+
+    def selected_handoff_ids(self) -> tuple[str, ...]:
+        if self.marked_ids:
+            return tuple(
+                handoff_id
+                for handoff_id in self.handoff_order()
+                if handoff_id in self.marked_ids
+            )
+        current = self.current_handoff_id()
+        return (current,) if current else ()
+
+    def handoff_order(self) -> tuple[str, ...]:
+        return tuple(
+            str(item.get("handoff_id") or "")
+            for item in self.handoffs
+            if str(item.get("handoff_id") or "").strip()
+        )
+
+    def action_toggle_selected(self) -> None:
+        handoff_id = self.current_handoff_id()
+        if handoff_id is None:
+            return
+        if handoff_id in self.marked_ids:
+            self.marked_ids.remove(handoff_id)
+        else:
+            self.marked_ids.add(handoff_id)
+        self.render_rows()
+
+    def replace_handoffs(self, handoffs: list[dict[str, Any]]) -> None:
+        self.handoffs = handoffs
+        self.render_rows()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        button_id = event.button.id
+        if button_id == "operator-handoff-close":
+            self.dismiss()
+            return
+        if button_id == "operator-handoff-refresh":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.refresh_operator_handoff_approval_screen(self),  # type: ignore[attr-defined]
+                name="operator-handoff-approval-refresh",
+                exclusive=True,
+            )
+            return
+        handoff_ids = self.selected_handoff_ids()
+        if not handoff_ids:
+            self.app.notify("Select at least one handoff.", severity="warning")  # type: ignore[attr-defined]
+            return
+        if button_id == "operator-handoff-preflight":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.preflight_operator_handoff_ids(  # type: ignore[attr-defined]
+                    self.operator_agent_id,
+                    handoff_ids,
+                ),
+                name="operator-handoff-preflight-exact",
+                exclusive=True,
+            )
+        elif button_id == "operator-handoff-approve":
+            self.app.push_screen(  # type: ignore[attr-defined]
+                OperatorHandoffApprovalConfirmScreen(
+                    operator_agent_id=self.operator_agent_id,
+                    handoff_ids=handoff_ids,
+                    approval_screen=self,
+                )
+            )
+
+
 class AgentPBXTUI(App[None]):
     TITLE = "Agent PBX"
     CSS = """
@@ -5767,6 +5980,25 @@ class AgentPBXTUI(App[None]):
         background: $warning;
         color: $background;
         text-style: bold;
+    }
+
+    #operator-handoff-approval-panel,
+    #operator-handoff-confirm-panel {
+        width: 92%;
+        height: 82%;
+        border: solid $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #operator-handoff-confirm-panel {
+        width: 76%;
+        height: auto;
+        max-height: 72%;
+    }
+
+    #operator-handoff-approval-table {
+        height: 1fr;
     }
 
     Screen.attention-flash #left,
@@ -7438,6 +7670,7 @@ class AgentPBXTUI(App[None]):
         self.marked_thread_item_ids: set[str] = set()
         self.active_agent_tab = "latest-tab"
         self.unseen_latest_agent_ids: set[str] = set()
+        self.pending_handoff_approval_operator_ids: set[str] = set()
         self.local_starred_agent_ids = str_set_setting(
             self.settings,
             "starred_agent_ids",
@@ -11857,8 +12090,8 @@ class AgentPBXTUI(App[None]):
 
     def palette_operator_handoff_approve(self) -> None:
         self.run_worker(
-            self.approve_pending_operator_handoff(),
-            name="palette-operator-handoff-approve",
+            self.open_selected_operator_handoff_approval_center(),
+            name="palette-operator-handoff-approval-center",
             exclusive=True,
         )
 
@@ -14829,7 +15062,9 @@ class AgentPBXTUI(App[None]):
         self.codex_runtime_animation_frame += 1
         self.render_codex_runtime_surface()
         has_attention_target = bool(
-            self.unseen_latest_agent_ids or self.tmux_plan_selector_agent_ids
+            self.unseen_latest_agent_ids
+            or self.tmux_plan_selector_agent_ids
+            or self.pending_handoff_approval_operator_ids
         )
         if not self.agent_blink_enabled or not has_attention_target:
             if self.attention_blink_phase:
@@ -14862,6 +15097,22 @@ class AgentPBXTUI(App[None]):
             # The changing PLAN/PLAN! marker is sufficient recurring notice.
             # Toggling a class on the entire Screen here forces both large
             # panels to be restyled every blink and can starve terminal input.
+            self.set_attention_flash_class(False)
+            return
+        approval_ids = self.pending_handoff_operators()
+        if approval_ids:
+            self.attention_agent_id = approval_ids[0]
+            total = sum(
+                int(self.agents[agent_id].get("pending_handoff_approval_count") or 0)
+                for agent_id in approval_ids
+                if agent_id in self.agents
+            )
+            displayed = ", ".join(approval_ids[:3])
+            if len(approval_ids) > 3:
+                displayed += f", +{len(approval_ids) - 3}"
+            marker = "APPROVALS!" if blink_active else "APPROVALS"
+            attention.update(f"{marker} {total}: {displayed} · F8 review")
+            attention.add_class("unseen-active")
             self.set_attention_flash_class(False)
             return
         if not self.unseen_latest_agent_ids:
@@ -14912,6 +15163,9 @@ class AgentPBXTUI(App[None]):
         for agent_id in sorted(self.tmux_plan_selector_agent_ids):
             if agent_id in self.agents:
                 return agent_id
+        for agent_id in self.pending_handoff_operators():
+            if agent_id in self.agents:
+                return agent_id
         if self.attention_agent_id in self.agents:
             return self.attention_agent_id
         for agent_id in sorted(self.unseen_latest_agent_ids):
@@ -14943,7 +15197,31 @@ class AgentPBXTUI(App[None]):
                     return agent_id
         return None
 
+    def pending_handoff_operators(self) -> list[str]:
+        """Return source Operators with durable approvals, oldest request first."""
+
+        operator_ids = [
+            agent_id
+            for agent_id, agent in self.agents.items()
+            if int(agent.get("pending_handoff_approval_count") or 0) > 0
+        ]
+        operator_ids.sort(
+            key=lambda agent_id: (
+                float_value(
+                    self.agents[agent_id].get("oldest_pending_handoff_created_at")
+                )
+                or math.inf,
+                agent_id,
+            )
+        )
+        self.pending_handoff_approval_operator_ids = set(operator_ids)
+        return operator_ids
+
     async def action_focus_next_alert(self) -> None:
+        approval_ids = self.pending_handoff_operators()
+        if approval_ids:
+            await self.open_operator_handoff_approval_center(approval_ids[0])
+            return
         agent_id = self.next_alert_agent_id()
         if agent_id is None:
             self.notify("No Agent or Operator alerts are pending.")
@@ -26202,6 +26480,149 @@ class AgentPBXTUI(App[None]):
             )
         self.activate_latest_tab()
 
+    @staticmethod
+    def pending_source_handoffs(
+        logical_operator_id: str,
+        handoffs: Iterable[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        pending = [
+            handoff
+            for handoff in handoffs
+            if str(handoff.get("logical_operator_agent_id") or "")
+            == logical_operator_id
+            and str(handoff.get("status") or "")
+            in {"proposed", "approved", "pending_launch"}
+            and not bool(handoff.get("expired"))
+        ]
+        return sorted(
+            pending,
+            key=lambda item: (
+                float_value(item.get("created_at")) or 0.0,
+                str(item.get("handoff_id") or ""),
+            ),
+        )
+
+    async def open_selected_operator_handoff_approval_center(self) -> None:
+        operator_agent_id = self.selected_operator_agent_id()
+        if not operator_agent_id:
+            return
+        operator_agent = self.agents.get(operator_agent_id)
+        if operator_agent is None:
+            self.notify("Select a known operator first.", severity="warning")
+            return
+        await self.open_operator_handoff_approval_center(
+            self.logical_operator_id_for_agent(operator_agent)
+        )
+
+    async def open_operator_handoff_approval_center(
+        self,
+        logical_operator_id: str,
+    ) -> None:
+        try:
+            handoffs = await self.fetch_operator_handoffs(
+                logical_operator_id,
+                limit=100,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to fetch operator handoffs: {exc}", severity="error")
+            return
+        pending = self.pending_source_handoffs(logical_operator_id, handoffs)
+        if not pending:
+            self.notify(f"No pending operator handoffs for {logical_operator_id}.")
+            await self.refresh_agents()
+            return
+        self.push_screen(
+            OperatorHandoffApprovalScreen(
+                operator_agent_id=logical_operator_id,
+                handoffs=pending,
+            )
+        )
+
+    async def refresh_operator_handoff_approval_screen(
+        self,
+        screen: OperatorHandoffApprovalScreen,
+    ) -> None:
+        try:
+            handoffs = await self.fetch_operator_handoffs(
+                screen.operator_agent_id,
+                limit=100,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to refresh operator handoffs: {exc}", severity="error")
+            return
+        screen.replace_handoffs(
+            self.pending_source_handoffs(screen.operator_agent_id, handoffs)
+        )
+        await self.refresh_agents()
+
+    async def preflight_operator_handoff_ids(
+        self,
+        logical_operator_id: str,
+        handoff_ids: tuple[str, ...],
+    ) -> None:
+        results: list[dict[str, Any]] = []
+        for handoff_id in handoff_ids:
+            try:
+                results.append(
+                    await self.preflight_operator_handoff(
+                        logical_operator_id,
+                        handoff_id,
+                    )
+                )
+            except Exception as exc:
+                self.notify(
+                    f"Unable to preflight handoff {handoff_id}: {exc}",
+                    severity="error",
+                )
+                return
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            detail.text = "\n\n".join(
+                self.format_operator_handoff_preflight(result) for result in results
+            )
+        failures = [result for result in results if not bool(result.get("ok"))]
+        self.notify(
+            f"Preflighted {len(results)} exact handoff ID(s); {len(failures)} need attention.",
+            severity="warning" if failures else "information",
+        )
+
+    async def approve_operator_handoff_ids(
+        self,
+        logical_operator_id: str,
+        handoff_ids: tuple[str, ...],
+        *,
+        approval_screen: OperatorHandoffApprovalScreen | None = None,
+    ) -> None:
+        approved: list[str] = []
+        for handoff_id in handoff_ids:
+            try:
+                preflight = await self.preflight_operator_handoff(
+                    logical_operator_id,
+                    handoff_id,
+                )
+                if not bool(preflight.get("ok")) and str(
+                    preflight.get("status") or ""
+                ) != "pending_launch":
+                    reason = str(preflight.get("reason") or "preflight failed")
+                    raise RuntimeError(reason)
+                await self.approve_operator_handoff(
+                    logical_operator_id,
+                    handoff_id,
+                )
+            except Exception as exc:
+                self.notify(
+                    f"Stopped after {len(approved)} approval(s); {handoff_id}: {exc}",
+                    severity="error",
+                )
+                break
+            approved.append(handoff_id)
+        await self.refresh_events()
+        await self.refresh_agents()
+        if approval_screen is not None:
+            await self.refresh_operator_handoff_approval_screen(approval_screen)
+        if approved:
+            self.notify(f"Approved {len(approved)} exact Operator handoff ID(s).")
+
     async def preflight_pending_operator_handoff(self) -> None:
         operator_agent_id = self.selected_operator_agent_id()
         if not operator_agent_id:
@@ -26219,11 +26640,7 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             self.notify(f"Unable to fetch operator handoffs: {exc}", severity="error")
             return
-        candidates = [
-            handoff
-            for handoff in handoffs
-            if str(handoff.get("status") or "") in {"proposed", "approved", "pending_launch"}
-        ]
+        candidates = self.pending_source_handoffs(logical_operator_id, handoffs)
         if not candidates:
             self.notify(f"No pending operator handoffs for {logical_operator_id}.")
             return
@@ -26270,11 +26687,7 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             self.notify(f"Unable to fetch operator handoffs: {exc}", severity="error")
             return
-        candidates = [
-            handoff
-            for handoff in handoffs
-            if str(handoff.get("status") or "") in {"proposed", "approved", "pending_launch"}
-        ]
+        candidates = self.pending_source_handoffs(logical_operator_id, handoffs)
         if not candidates:
             self.notify(f"No pending operator handoffs for {logical_operator_id}.")
             return

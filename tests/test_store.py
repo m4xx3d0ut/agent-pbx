@@ -6,6 +6,42 @@ from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import SCHEMA_VERSION, Store
 
 
+def test_agent_summary_keeps_pending_handoff_approval_durable(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    for agent_id, agent_type in (
+        ("operator-0", "operator"),
+        ("operator-7", "operator"),
+    ):
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=agent_id,
+                project="demo",
+                agent_type=agent_type,
+                metadata={"cwd": str(tmp_path / agent_id)},
+            )
+        )
+    handoff = store.create_operator_handoff(
+        logical_operator_agent_id="operator-0",
+        source_operator_agent_id="operator-0",
+        target_operator_agent_id="operator-7",
+        source_agent_id="operator-0",
+        objective="Review the exact checkpoint",
+        message="Review the exact checkpoint",
+    )
+
+    by_id = {agent["agent_id"]: agent for agent in store.list_agents()}
+    assert by_id["operator-0"]["pending_handoff_approval_count"] == 1
+    assert by_id["operator-0"]["oldest_pending_handoff_created_at"] is not None
+    assert by_id["operator-7"]["pending_handoff_approval_count"] == 0
+
+    store.update_operator_handoff(handoff["handoff_id"], status="sent")
+    by_id = {agent["agent_id"]: agent for agent in store.list_agents()}
+    assert by_id["operator-0"]["pending_handoff_approval_count"] == 0
+
+
 def test_model_elevation_request_is_idempotent_under_concurrency(
     tmp_path: Path,
 ) -> None:
