@@ -30,17 +30,6 @@ def project_handoff_action(
 ) -> dict[str, Any] | None:
     """Derive the next guarded local action for one acknowledged handoff."""
 
-    try:
-        scope = resolve_handoff_execution_scope(handoff)
-    except ValueError as exc:
-        return _blocked_projection(
-            handoff,
-            str(exc),
-            transaction=transaction,
-            target_agent=target_agent,
-        )
-    if not scope or scope.get("action_class") != "exact_git_commit_broker":
-        return None
     handoff_status = str(handoff.get("status") or "").lower()
     if handoff_status not in {
         "sent",
@@ -51,9 +40,22 @@ def project_handoff_action(
     }:
         return None
     # A terminal handoff with no action transaction has no local work left to
-    # execute. Keep terminal handoffs visible only when a previously started
-    # transaction still needs recovery or validation.
+    # execute. Filter it before resolving legacy execution scopes so canceled,
+    # failed, expired, or completed historical records cannot reappear as
+    # blocked actions merely because their old scope format is unsupported.
     if handoff_status in {"complete", "completed"} and not transaction:
+        return None
+
+    try:
+        scope = resolve_handoff_execution_scope(handoff)
+    except ValueError as exc:
+        return _blocked_projection(
+            handoff,
+            str(exc),
+            transaction=transaction,
+            target_agent=target_agent,
+        )
+    if not scope or scope.get("action_class") != "exact_git_commit_broker":
         return None
 
     digest = execution_scope_digest(scope)

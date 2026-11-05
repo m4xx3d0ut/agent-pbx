@@ -358,6 +358,48 @@ def test_completed_handoff_requires_an_existing_action_transaction(
 
 
 @pytest.mark.parametrize(
+    "status",
+    ["canceled", "cancelled", "failed", "expired"],
+)
+def test_terminal_legacy_handoff_is_not_projected_as_blocked_action(
+    status: str,
+) -> None:
+    handoff = {
+        "handoff_id": "legacy-handoff",
+        "logical_operator_agent_id": "operator-0",
+        "target_operator_agent_id": "operator-7",
+        "status": status,
+        "updated_at": 100.0,
+        "execution_scope": {"action_class": "unsupported-legacy-action"},
+        "metadata": {},
+    }
+
+    assert project_handoff_action(
+        handoff,
+        target_agent=None,
+        transaction=None,
+    ) is None
+
+
+def test_completed_legacy_handoff_without_transaction_is_not_projected() -> None:
+    handoff = {
+        "handoff_id": "legacy-handoff",
+        "logical_operator_agent_id": "operator-0",
+        "target_operator_agent_id": "operator-7",
+        "status": "completed",
+        "updated_at": 100.0,
+        "execution_scope": {"action_class": "unsupported-legacy-action"},
+        "metadata": {},
+    }
+
+    assert project_handoff_action(
+        handoff,
+        target_agent=None,
+        transaction=None,
+    ) is None
+
+
+@pytest.mark.parametrize(
     "scope, message",
     [
         (
