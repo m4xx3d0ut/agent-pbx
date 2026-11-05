@@ -5817,6 +5817,21 @@ class OperatorHandoffApprovalConfirmScreen(ModalScreen[None]):
             )
 
 
+def operator_ready_action_control(action: Mapping[str, Any]) -> str:
+    """Describe the explicit TUI control that advances one durable action."""
+
+    return {
+        "stop": "/operator stop",
+        "broker_review": "/operator git commit",
+        "broker_commit": (
+            "finish the open broker confirmation "
+            "(/operator git recover after an interrupted transaction)"
+        ),
+        "resume": "/operator resume",
+        "validate": "/operator action validate",
+    }.get(str(action.get("next_action") or ""), "manual review")
+
+
 class OperatorReadyActionScreen(ModalScreen[None]):
     """Review one approved target-side action without executing it automatically."""
 
@@ -5833,6 +5848,7 @@ class OperatorReadyActionScreen(ModalScreen[None]):
             else {}
         )
         paths = scope.get("exact_paths") if isinstance(scope.get("exact_paths"), list) else []
+        guarded_control = operator_ready_action_control(self.action)
         with Vertical(id="operator-handoff-confirm-panel"):
             yield Static("Operator ready action", id="operator-handoff-confirm-title")
             yield Static(
@@ -5840,6 +5856,7 @@ class OperatorReadyActionScreen(ModalScreen[None]):
                     [
                         f"State: {self.action.get('state') or '-'}",
                         f"Next: {self.action.get('next_action') or 'manual review'}",
+                        f"Guarded control: {guarded_control}",
                         f"Handoff: {self.action.get('handoff_id') or '-'}",
                         f"Campaign: {self.action.get('campaign_id') or '-'}",
                         f"Target: {self.action.get('target_agent_id') or '-'}",
@@ -5849,6 +5866,7 @@ class OperatorReadyActionScreen(ModalScreen[None]):
                         *(f"- {path}" for path in paths),
                         "",
                         str(self.action.get("reason") or "Use the guarded palette action shown by Next. Steps are never chained automatically."),
+                        "This alert remains active until the guarded control records its receipt.",
                     ]
                 ),
                 id="operator-handoff-confirm-summary",
@@ -27179,8 +27197,9 @@ class AgentPBXTUI(App[None]):
         if detail is not None and not self.is_tmux_direct_enabled(target_agent_id):
             detail.text = self.format_operator_ready_action(action)
         self.notify(
-            f"Focused {target_agent_id}; next guarded action: "
-            f"{action.get('next_action') or 'manual review'}."
+            f"Focused {target_agent_id}; run the guarded control: "
+            f"{operator_ready_action_control(action)}. The action alert remains "
+            "until that control succeeds."
         )
 
     @staticmethod
@@ -27194,6 +27213,7 @@ class AgentPBXTUI(App[None]):
                 "",
                 f"State: {action.get('state') or '-'}",
                 f"Next: {action.get('next_action') or '-'}",
+                f"Guarded control: {operator_ready_action_control(action)}",
                 f"Handoff: {action.get('handoff_id') or '-'}",
                 f"Campaign: {action.get('campaign_id') or '-'}",
                 f"Target: {action.get('target_agent_id') or '-'}",
@@ -27203,7 +27223,8 @@ class AgentPBXTUI(App[None]):
                 "Exact paths:",
                 *(f"- {path}" for path in paths),
                 "",
-                "Use the guarded palette action shown by Next. Agent PBX will not chain lifecycle or Git actions automatically.",
+                "Use the guarded control shown above. Agent PBX will not chain lifecycle or Git actions automatically.",
+                "The action alert remains active until that control records its receipt.",
             ]
         )
 

@@ -28212,10 +28212,40 @@ async def test_ready_action_screen_focuses_without_executing_chain() -> None:
     async with app.run_test() as pilot:
         app.push_screen(OperatorReadyActionScreen(action))
         await pilot.pause()
+        summary = app.query_one("#operator-handoff-confirm-summary", Static)
+        assert "Guarded control: /operator git commit" in str(summary.render())
+        assert "alert remains active" in str(summary.render())
         assert await pilot.click("#operator-ready-action-focus")
         await pilot.pause()
 
     assert focused == ["handoff-1"]
+
+
+@pytest.mark.parametrize(
+    ("next_action", "expected"),
+    [
+        ("stop", "/operator stop"),
+        ("broker_review", "/operator git commit"),
+        ("broker_commit", "/operator git recover"),
+        ("resume", "/operator resume"),
+        ("validate", "/operator action validate"),
+        (None, "manual review"),
+    ],
+)
+def test_operator_ready_action_detail_names_guarded_control(
+    next_action: str | None,
+    expected: str,
+) -> None:
+    detail = AgentPBXTUI.format_operator_ready_action(
+        {
+            "state": "ready",
+            "next_action": next_action,
+            "execution_scope": {"exact_paths": []},
+        }
+    )
+
+    assert expected in detail
+    assert "alert remains active" in detail
 
 
 @pytest.mark.asyncio
