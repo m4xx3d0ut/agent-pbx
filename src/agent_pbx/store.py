@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -36,6 +36,31 @@ MODEL_ELEVATION_OPEN_STATUSES = {
 }
 OPERATOR_AGENT_TYPE = "operator"
 OPERATOR_DELEGATION_LEASE_STATUSES = {
+    "pending",
+    "approved",
+    "rejected",
+    "revoked",
+    "expired",
+    "exhausted",
+}
+WORKERBEE_CONTROLLED_RUN_OPEN_STATUSES = {
+    "pending",
+    "approved",
+    "claimed",
+    "provisioning",
+    "canary",
+    "running",
+    "collecting",
+    "cleaning",
+}
+WORKERBEE_CONTROLLED_RUN_TERMINAL_STATUSES = {
+    "succeeded",
+    "failed",
+    "rejected",
+    "canceled",
+    "expired",
+}
+WORKERBEE_CONTROLLED_RUN_LEASE_STATUSES = {
     "pending",
     "approved",
     "rejected",
@@ -1129,6 +1154,120 @@ class Store:
                     ON operator_broker_requests(
                         target_fork_agent_id, status, created_at DESC
                     );
+
+                CREATE TABLE IF NOT EXISTS workerbee_controlled_run_leases (
+                    lease_id TEXT PRIMARY KEY,
+                    root_operator_agent_id TEXT NOT NULL,
+                    target_fork_agent_id TEXT NOT NULL,
+                    campaign_id TEXT NOT NULL,
+                    workspace_set_digest TEXT NOT NULL,
+                    backend TEXT NOT NULL,
+                    backend_instance_id TEXT NOT NULL,
+                    backend_generation INTEGER NOT NULL,
+                    workspace_binding_id TEXT NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    profile_sha256 TEXT NOT NULL,
+                    baseline_commit TEXT NOT NULL,
+                    candidate_commit TEXT NOT NULL,
+                    recipe_id TEXT NOT NULL,
+                    tool_manifest_sha256 TEXT NOT NULL,
+                    request_sha256 TEXT NOT NULL,
+                    max_uses INTEGER NOT NULL,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    requested_by TEXT NOT NULL,
+                    approved_by TEXT,
+                    created_at REAL NOT NULL,
+                    approved_at REAL,
+                    expires_at REAL NOT NULL,
+                    revoked_at REAL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY(root_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(target_fork_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(campaign_id) REFERENCES operator_campaigns(campaign_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_workerbee_controlled_run_leases_root
+                    ON workerbee_controlled_run_leases(
+                        root_operator_agent_id, status, expires_at
+                    );
+
+                CREATE TABLE IF NOT EXISTS workerbee_controlled_run_requests (
+                    request_id TEXT PRIMARY KEY,
+                    root_operator_agent_id TEXT NOT NULL,
+                    target_fork_agent_id TEXT NOT NULL,
+                    campaign_id TEXT NOT NULL,
+                    workspace_set_digest TEXT NOT NULL,
+                    backend TEXT NOT NULL,
+                    backend_instance_id TEXT NOT NULL,
+                    backend_generation INTEGER NOT NULL,
+                    workspace_binding_id TEXT NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    profile_version INTEGER NOT NULL,
+                    profile_sha256 TEXT NOT NULL,
+                    profile_json TEXT NOT NULL,
+                    baseline_commit TEXT NOT NULL,
+                    candidate_commit TEXT NOT NULL,
+                    recipe_id TEXT NOT NULL,
+                    tool_manifest_sha256 TEXT NOT NULL,
+                    request_sha256 TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    requested_by TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    decided_by TEXT,
+                    approved_at REAL,
+                    rejected_at REAL,
+                    lease_id TEXT,
+                    executor_id TEXT,
+                    claim_expires_at REAL,
+                    workerbee_run_id TEXT,
+                    workerbee_workspace_id TEXT,
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    error_code TEXT,
+                    error TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    started_at REAL,
+                    completed_at REAL,
+                    canceled_at REAL,
+                    canceled_by TEXT,
+                    FOREIGN KEY(root_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(target_fork_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(campaign_id) REFERENCES operator_campaigns(campaign_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(lease_id) REFERENCES workerbee_controlled_run_leases(lease_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_workerbee_controlled_runs_status
+                    ON workerbee_controlled_run_requests(status, expires_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_workerbee_controlled_runs_root
+                    ON workerbee_controlled_run_requests(
+                        root_operator_agent_id, status, created_at DESC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_workerbee_controlled_runs_fork
+                    ON workerbee_controlled_run_requests(
+                        target_fork_agent_id, status, created_at DESC
+                    );
+
+                CREATE TABLE IF NOT EXISTS workerbee_controlled_run_receipts (
+                    receipt_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL UNIQUE,
+                    outcome TEXT NOT NULL,
+                    backend_run_id TEXT,
+                    workspace_id TEXT,
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
+                    cleanup_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(request_id)
+                        REFERENCES workerbee_controlled_run_requests(request_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_workerbee_controlled_run_receipts_request
+                    ON workerbee_controlled_run_receipts(request_id, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS agent_prune_batches (
                     batch_id TEXT PRIMARY KEY,
@@ -9789,6 +9928,690 @@ class Store:
             "completed_at": row["completed_at"],
             "canceled_at": row["canceled_at"],
         }
+
+    def create_workerbee_controlled_run_request(
+        self,
+        *,
+        identity: Mapping[str, Any],
+        requested_by: str,
+        reason: str,
+        ttl_seconds: int,
+        max_in_flight_per_root: int,
+    ) -> tuple[dict[str, Any], bool]:
+        current = now_ts()
+        expires_at = current + max(60, int(ttl_seconds))
+        root_id = str(identity["root_operator_agent_id"])
+        request_sha256 = str(identity["request_sha256"])
+        open_statuses = tuple(sorted(WORKERBEE_CONTROLLED_RUN_OPEN_STATUSES))
+        placeholders = ",".join("?" for _ in open_statuses)
+        profile = identity.get("profile")
+        profile_json = json.dumps(
+            profile if isinstance(profile, Mapping) else {},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_workerbee_controlled_runs(conn, current=current)
+            existing = conn.execute(
+                f"""
+                SELECT * FROM workerbee_controlled_run_requests
+                WHERE request_sha256 = ? AND status IN ({placeholders})
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (request_sha256, *open_statuses),
+            ).fetchone()
+            if existing is not None:
+                return self._workerbee_controlled_run_request_from_row(existing), False
+            count = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM workerbee_controlled_run_requests
+                WHERE root_operator_agent_id = ? AND status IN ({placeholders})
+                """,
+                (root_id, *open_statuses),
+            ).fetchone()
+            if int(count["count"] or 0) >= max(1, int(max_in_flight_per_root)):
+                raise ValueError(
+                    "root Operator already has the configured maximum number "
+                    "of in-flight WorkerBee controlled runs"
+                )
+            request_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO workerbee_controlled_run_requests(
+                    request_id, root_operator_agent_id, target_fork_agent_id,
+                    campaign_id, workspace_set_digest, backend,
+                    backend_instance_id, backend_generation,
+                    workspace_binding_id, profile_id, profile_version,
+                    profile_sha256, profile_json, baseline_commit,
+                    candidate_commit, recipe_id, tool_manifest_sha256,
+                    request_sha256, status, requested_by, reason,
+                    result_json, created_at, updated_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          'pending', ?, ?, '{}', ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    root_id,
+                    str(identity["target_fork_agent_id"]),
+                    str(identity["campaign_id"]),
+                    str(identity["workspace_set_digest"]),
+                    str(identity["backend"]),
+                    str(identity["backend_instance_id"]),
+                    int(identity["backend_generation"]),
+                    str(identity["workspace_binding_id"]),
+                    str(identity["profile_id"]),
+                    int(identity["profile_version"]),
+                    str(identity["profile_sha256"]),
+                    profile_json,
+                    str(identity["baseline_commit"]),
+                    str(identity["candidate_commit"]),
+                    str(identity["recipe_id"]),
+                    str(identity["tool_manifest_sha256"]),
+                    request_sha256,
+                    str(requested_by),
+                    str(reason or "")[:4000],
+                    current,
+                    current,
+                    expires_at,
+                ),
+            )
+        result = self.get_workerbee_controlled_run_request(request_id)
+        if result is None:
+            raise RuntimeError("WorkerBee controlled-run request insert failed")
+        self.append_event(
+            "workerbee_controlled_run_requested",
+            {
+                "request_id": request_id,
+                "root_operator_agent_id": root_id,
+                "target_fork_agent_id": result["target_fork_agent_id"],
+                "campaign_id": result["campaign_id"],
+                "profile_id": result["profile_id"],
+                "request_sha256": request_sha256,
+            },
+            request_id,
+        )
+        return result, True
+
+    def get_workerbee_controlled_run_request(
+        self,
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        current = now_ts()
+        with self.connect() as conn:
+            self._expire_workerbee_controlled_runs(conn, current=current)
+            row = conn.execute(
+                "SELECT * FROM workerbee_controlled_run_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            receipt = conn.execute(
+                "SELECT * FROM workerbee_controlled_run_receipts WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = self._workerbee_controlled_run_request_from_row(row)
+        result["receipt"] = (
+            self._workerbee_controlled_run_receipt_from_row(receipt)
+            if receipt is not None
+            else None
+        )
+        return result
+
+    def list_workerbee_controlled_run_requests(
+        self,
+        *,
+        root_operator_agent_id: str | None = None,
+        target_fork_agent_id: str | None = None,
+        statuses: tuple[str, ...] | list[str] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if root_operator_agent_id:
+            clauses.append("root_operator_agent_id = ?")
+            values.append(root_operator_agent_id)
+        if target_fork_agent_id:
+            clauses.append("target_fork_agent_id = ?")
+            values.append(target_fork_agent_id)
+        normalized_statuses = tuple(
+            sorted({str(value).strip().lower() for value in statuses or () if str(value).strip()})
+        )
+        if normalized_statuses:
+            clauses.append("status IN (" + ",".join("?" for _ in normalized_statuses) + ")")
+            values.extend(normalized_statuses)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        current = now_ts()
+        with self.connect() as conn:
+            self._expire_workerbee_controlled_runs(conn, current=current)
+            rows = conn.execute(
+                f"""
+                SELECT * FROM workerbee_controlled_run_requests
+                {where}
+                ORDER BY created_at DESC, request_id DESC
+                LIMIT ?
+                """,
+                (*values, min(max(int(limit), 1), 500)),
+            ).fetchall()
+        return [self._workerbee_controlled_run_request_from_row(row) for row in rows]
+
+    def decide_workerbee_controlled_run_request(
+        self,
+        request_id: str,
+        *,
+        approve: bool,
+        decided_by: str,
+        lease_id: str | None = None,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_workerbee_controlled_runs(conn, current=current)
+            row = conn.execute(
+                "SELECT * FROM workerbee_controlled_run_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("WorkerBee controlled-run request not found")
+            if str(row["status"]) != "pending":
+                raise ValueError("WorkerBee controlled-run request is no longer pending")
+            approved_by = str(decided_by)
+            bound_lease_id: str | None = None
+            if approve and lease_id:
+                lease = conn.execute(
+                    "SELECT * FROM workerbee_controlled_run_leases WHERE lease_id = ?",
+                    (lease_id,),
+                ).fetchone()
+                if lease is None or not self._controlled_run_lease_matches_request(lease, row, current):
+                    raise ValueError("WorkerBee controlled-run lease does not match this exact request")
+                next_uses = int(lease["use_count"]) + 1
+                next_status = "exhausted" if next_uses >= int(lease["max_uses"]) else "approved"
+                conn.execute(
+                    """
+                    UPDATE workerbee_controlled_run_leases
+                    SET use_count = ?, status = ? WHERE lease_id = ?
+                    """,
+                    (next_uses, next_status, lease_id),
+                )
+                approved_by = f"lease:{lease_id}"
+                bound_lease_id = lease_id
+            status = "approved" if approve else "rejected"
+            cursor = conn.execute(
+                """
+                UPDATE workerbee_controlled_run_requests
+                SET status = ?, decided_by = ?, approved_at = ?, rejected_at = ?,
+                    lease_id = ?, updated_at = ?
+                WHERE request_id = ? AND status = 'pending'
+                """,
+                (
+                    status,
+                    approved_by,
+                    current if approve else None,
+                    None if approve else current,
+                    bound_lease_id,
+                    current,
+                    request_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("WorkerBee controlled-run request changed during decision")
+        result = self.get_workerbee_controlled_run_request(request_id)
+        assert result is not None
+        self.append_event(
+            f"workerbee_controlled_run_{status}",
+            {
+                "request_id": request_id,
+                "root_operator_agent_id": result["root_operator_agent_id"],
+                "target_fork_agent_id": result["target_fork_agent_id"],
+                "decided_by": approved_by,
+                "lease_id": bound_lease_id,
+            },
+            request_id,
+        )
+        return result
+
+    def claim_workerbee_controlled_run_request(
+        self,
+        request_id: str,
+        *,
+        executor_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        claim_expires_at = current + min(max(int(lease_seconds), 10), 300)
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_workerbee_controlled_runs(conn, current=current)
+            row = conn.execute(
+                "SELECT * FROM workerbee_controlled_run_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("WorkerBee controlled-run request not found")
+            status = str(row["status"])
+            claimable = status == "approved" or (
+                status == "claimed"
+                and (
+                    str(row["executor_id"] or "") == executor_id
+                    or float(row["claim_expires_at"] or 0.0) <= current
+                )
+            )
+            if not claimable:
+                raise ValueError(f"WorkerBee controlled run is not claimable from {status}")
+            conn.execute(
+                """
+                UPDATE workerbee_controlled_run_requests
+                SET status = 'claimed', executor_id = ?, claim_expires_at = ?,
+                    updated_at = ?, error_code = NULL, error = NULL
+                WHERE request_id = ?
+                """,
+                (executor_id, claim_expires_at, current, request_id),
+            )
+        result = self.get_workerbee_controlled_run_request(request_id)
+        assert result is not None
+        self.append_event(
+            "workerbee_controlled_run_claimed",
+            {"request_id": request_id, "executor_id": executor_id},
+            request_id,
+        )
+        return result
+
+    def transition_workerbee_controlled_run_request(
+        self,
+        request_id: str,
+        *,
+        executor_id: str,
+        status: str,
+        expected_statuses: tuple[str, ...] | list[str],
+        workerbee_run_id: str | None = None,
+        workerbee_workspace_id: str | None = None,
+        result: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
+        error: str | None = None,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        normalized = str(status or "").strip().lower()
+        allowed = WORKERBEE_CONTROLLED_RUN_OPEN_STATUSES | WORKERBEE_CONTROLLED_RUN_TERMINAL_STATUSES
+        if normalized not in allowed or normalized in {"pending", "approved", "rejected", "expired"}:
+            raise ValueError(f"unsupported WorkerBee controlled-run transition: {normalized}")
+        expected = tuple(sorted({str(item).strip().lower() for item in expected_statuses if str(item).strip()}))
+        if not expected:
+            raise ValueError("WorkerBee controlled-run transition requires expected statuses")
+        current = now_ts()
+        terminal = normalized in {"succeeded", "failed"}
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_workerbee_controlled_runs(conn, current=current)
+            row = conn.execute(
+                "SELECT * FROM workerbee_controlled_run_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("WorkerBee controlled-run request not found")
+            if str(row["executor_id"] or "") != executor_id:
+                raise ValueError("WorkerBee controlled run is claimed by another executor")
+            if str(row["status"]) not in expected:
+                raise ValueError(
+                    f"WorkerBee controlled run changed from expected state {expected}"
+                )
+            conn.execute(
+                """
+                UPDATE workerbee_controlled_run_requests
+                SET status = ?, workerbee_run_id = COALESCE(?, workerbee_run_id),
+                    workerbee_workspace_id = COALESCE(?, workerbee_workspace_id),
+                    result_json = ?, error_code = ?, error = ?, updated_at = ?,
+                    started_at = COALESCE(started_at, ?), completed_at = ?,
+                    claim_expires_at = ?
+                WHERE request_id = ?
+                """,
+                (
+                    normalized,
+                    workerbee_run_id,
+                    workerbee_workspace_id,
+                    json.dumps(dict(result or {}), sort_keys=True, separators=(",", ":"), default=str),
+                    error_code,
+                    error,
+                    current,
+                    current if normalized == "provisioning" else None,
+                    current if terminal else None,
+                    None if terminal else current + min(max(int(lease_seconds), 10), 300),
+                    request_id,
+                ),
+            )
+        updated = self.get_workerbee_controlled_run_request(request_id)
+        assert updated is not None
+        self.append_event(
+            "workerbee_controlled_run_transitioned",
+            {"request_id": request_id, "status": normalized, "executor_id": executor_id},
+            request_id,
+        )
+        return updated
+
+    def cancel_workerbee_controlled_run_request(
+        self,
+        request_id: str,
+        *,
+        canceled_by: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        open_statuses = tuple(sorted(WORKERBEE_CONTROLLED_RUN_OPEN_STATUSES))
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE workerbee_controlled_run_requests
+                SET status = 'canceled', canceled_at = ?, canceled_by = ?,
+                    error_code = 'CANCELED', error = ?, updated_at = ?
+                WHERE request_id = ? AND status IN ("""
+                + ",".join("?" for _ in open_statuses)
+                + ")",
+                (current, canceled_by, str(reason or "")[:4000], current, request_id, *open_statuses),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("WorkerBee controlled run is not cancelable")
+        result = self.get_workerbee_controlled_run_request(request_id)
+        assert result is not None
+        self.append_event(
+            "workerbee_controlled_run_canceled",
+            {"request_id": request_id, "canceled_by": canceled_by, "reason": reason[:1000]},
+            request_id,
+        )
+        return result
+
+    def record_workerbee_controlled_run_receipt(
+        self,
+        request_id: str,
+        *,
+        outcome: str,
+        backend_run_id: str | None,
+        workspace_id: str | None,
+        evidence: Mapping[str, Any],
+        cleanup: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        normalized = str(outcome or "").strip().lower()
+        if normalized not in {"succeeded", "failed", "canceled"}:
+            raise ValueError("unsupported WorkerBee controlled-run receipt outcome")
+        current = now_ts()
+        receipt_id = str(uuid.uuid4())
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM workerbee_controlled_run_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("WorkerBee controlled-run request not found")
+            if str(row["status"]) not in {"succeeded", "failed", "canceled"}:
+                raise ValueError("WorkerBee controlled run is not terminal")
+            conn.execute(
+                """
+                INSERT INTO workerbee_controlled_run_receipts(
+                    receipt_id, request_id, outcome, backend_run_id,
+                    workspace_id, evidence_json, cleanup_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(request_id) DO UPDATE SET
+                    outcome = excluded.outcome,
+                    backend_run_id = excluded.backend_run_id,
+                    workspace_id = excluded.workspace_id,
+                    evidence_json = excluded.evidence_json,
+                    cleanup_json = excluded.cleanup_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    receipt_id,
+                    request_id,
+                    normalized,
+                    backend_run_id,
+                    workspace_id,
+                    json.dumps(dict(evidence), sort_keys=True, separators=(",", ":"), default=str),
+                    json.dumps(dict(cleanup), sort_keys=True, separators=(",", ":"), default=str),
+                    current,
+                ),
+            )
+        result = self.get_workerbee_controlled_run_request(request_id)
+        assert result is not None and result.get("receipt") is not None
+        self.append_event(
+            "workerbee_controlled_run_receipt_recorded",
+            {"request_id": request_id, "outcome": normalized},
+            request_id,
+        )
+        return result
+
+    def create_workerbee_controlled_run_lease(
+        self,
+        *,
+        request: Mapping[str, Any],
+        requested_by: str,
+        max_uses: int,
+        ttl_seconds: int,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        lease_id = str(uuid.uuid4())
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO workerbee_controlled_run_leases(
+                    lease_id, root_operator_agent_id, target_fork_agent_id,
+                    campaign_id, workspace_set_digest, backend,
+                    backend_instance_id, backend_generation,
+                    workspace_binding_id, profile_id, profile_sha256,
+                    baseline_commit, candidate_commit, recipe_id,
+                    tool_manifest_sha256, request_sha256, max_uses, use_count,
+                    status, requested_by, created_at, expires_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                          'pending', ?, ?, ?, '{}')
+                """,
+                (
+                    lease_id,
+                    request["root_operator_agent_id"],
+                    request["target_fork_agent_id"],
+                    request["campaign_id"],
+                    request["workspace_set_digest"],
+                    request["backend"],
+                    request["backend_instance_id"],
+                    request["backend_generation"],
+                    request["workspace_binding_id"],
+                    request["profile_id"],
+                    request["profile_sha256"],
+                    request["baseline_commit"],
+                    request["candidate_commit"],
+                    request["recipe_id"],
+                    request["tool_manifest_sha256"],
+                    request["request_sha256"],
+                    min(max(int(max_uses), 1), 100),
+                    str(requested_by),
+                    current,
+                    current + min(max(int(ttl_seconds), 60), 86400),
+                ),
+            )
+        result = self.get_workerbee_controlled_run_lease(lease_id)
+        assert result is not None
+        self.append_event(
+            "workerbee_controlled_run_lease_requested",
+            {"lease_id": lease_id, "request_sha256": request["request_sha256"]},
+            lease_id,
+        )
+        return result
+
+    def get_workerbee_controlled_run_lease(self, lease_id: str) -> dict[str, Any] | None:
+        current = now_ts()
+        with self.connect() as conn:
+            self._expire_workerbee_controlled_runs(conn, current=current)
+            row = conn.execute(
+                "SELECT * FROM workerbee_controlled_run_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+        return self._workerbee_controlled_run_lease_from_row(row) if row is not None else None
+
+    def list_workerbee_controlled_run_leases(
+        self,
+        *,
+        root_operator_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        values: list[Any] = []
+        if root_operator_agent_id:
+            clauses.append("root_operator_agent_id = ?")
+            values.append(root_operator_agent_id)
+        if status:
+            clauses.append("status = ?")
+            values.append(str(status).lower())
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.connect() as conn:
+            self._expire_workerbee_controlled_runs(conn, current=now_ts())
+            rows = conn.execute(
+                f"SELECT * FROM workerbee_controlled_run_leases {where} ORDER BY created_at DESC LIMIT ?",
+                (*values, min(max(int(limit), 1), 500)),
+            ).fetchall()
+        return [self._workerbee_controlled_run_lease_from_row(row) for row in rows]
+
+    def decide_workerbee_controlled_run_lease(
+        self,
+        lease_id: str,
+        *,
+        approve: bool,
+        decided_by: str,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        status = "approved" if approve else "rejected"
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE workerbee_controlled_run_leases
+                SET status = ?, approved_by = ?, approved_at = ?
+                WHERE lease_id = ? AND status = 'pending' AND expires_at > ?
+                """,
+                (status, decided_by, current if approve else None, lease_id, current),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("WorkerBee controlled-run lease is no longer pending")
+        result = self.get_workerbee_controlled_run_lease(lease_id)
+        assert result is not None
+        self.append_event(
+            f"workerbee_controlled_run_lease_{status}",
+            {"lease_id": lease_id, "decided_by": decided_by},
+            lease_id,
+        )
+        return result
+
+    def revoke_workerbee_controlled_run_lease(
+        self,
+        lease_id: str,
+        *,
+        revoked_by: str,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE workerbee_controlled_run_leases
+                SET status = 'revoked', revoked_at = ?
+                WHERE lease_id = ? AND status = 'approved'
+                """,
+                (current, lease_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("WorkerBee controlled-run lease is not active")
+        result = self.get_workerbee_controlled_run_lease(lease_id)
+        assert result is not None
+        self.append_event(
+            "workerbee_controlled_run_lease_revoked",
+            {"lease_id": lease_id, "revoked_by": revoked_by},
+            lease_id,
+        )
+        return result
+
+    @staticmethod
+    def _controlled_run_lease_matches_request(
+        lease: sqlite3.Row,
+        request: sqlite3.Row,
+        current: float,
+    ) -> bool:
+        if (
+            str(lease["status"]) != "approved"
+            or float(lease["expires_at"]) <= current
+            or int(lease["use_count"]) >= int(lease["max_uses"])
+        ):
+            return False
+        fields = (
+            "root_operator_agent_id",
+            "target_fork_agent_id",
+            "campaign_id",
+            "workspace_set_digest",
+            "backend",
+            "backend_instance_id",
+            "backend_generation",
+            "workspace_binding_id",
+            "profile_id",
+            "profile_sha256",
+            "baseline_commit",
+            "candidate_commit",
+            "recipe_id",
+            "tool_manifest_sha256",
+            "request_sha256",
+        )
+        return all(lease[field] == request[field] for field in fields)
+
+    @staticmethod
+    def _expire_workerbee_controlled_runs(
+        conn: sqlite3.Connection,
+        *,
+        current: float,
+    ) -> None:
+        conn.execute(
+            """
+            UPDATE workerbee_controlled_run_requests
+            SET status = 'expired', updated_at = ?, completed_at = ?
+            WHERE status IN ('pending', 'approved') AND expires_at <= ?
+            """,
+            (current, current, current),
+        )
+        conn.execute(
+            """
+            UPDATE workerbee_controlled_run_leases
+            SET status = 'expired'
+            WHERE status IN ('pending', 'approved') AND expires_at <= ?
+            """,
+            (current,),
+        )
+
+    @staticmethod
+    def _workerbee_controlled_run_request_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        for key in ("profile_json", "result_json"):
+            raw = data.pop(key)
+            try:
+                decoded = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                decoded = {}
+            data[key.removesuffix("_json")] = decoded if isinstance(decoded, dict) else {}
+        return data
+
+    @staticmethod
+    def _workerbee_controlled_run_lease_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        try:
+            metadata = json.loads(data.pop("metadata_json") or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        data["uses_remaining"] = max(0, int(data["max_uses"]) - int(data["use_count"]))
+        data["expired"] = float(data["expires_at"]) <= now_ts()
+        return data
+
+    @staticmethod
+    def _workerbee_controlled_run_receipt_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        for key in ("evidence_json", "cleanup_json"):
+            raw = data.pop(key)
+            try:
+                decoded = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                decoded = {}
+            data[key.removesuffix("_json")] = decoded if isinstance(decoded, dict) else {}
+        return data
 
     def get_operator_action_transaction(
         self,

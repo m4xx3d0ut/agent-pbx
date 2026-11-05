@@ -2179,6 +2179,77 @@ class WorkerBeeAccessProfileRequest(BaseModel):
     profile: Literal["observe-local", "local-deploy"]
 
 
+class WorkerBeeControlledRunPreflightRequest(BaseModel):
+    root_operator_agent_id: str = Field(min_length=1, max_length=120)
+    target_fork_agent_id: str = Field(min_length=1, max_length=240)
+    campaign_id: str = Field(min_length=1, max_length=120)
+    profile_id: str = Field(min_length=1, max_length=120)
+    baseline_commit: str = Field(pattern=r"^[0-9a-fA-F]{40,64}$")
+    candidate_commit: str = Field(pattern=r"^[0-9a-fA-F]{40,64}$")
+
+
+class WorkerBeeControlledRunCreateRequest(WorkerBeeControlledRunPreflightRequest):
+    reason: str = Field(default="", max_length=4000)
+    requested_by: str = Field(default="agent-pbx-tui", min_length=1, max_length=255)
+
+
+class WorkerBeeControlledRunDecisionRequest(BaseModel):
+    approve: bool
+    decided_by: str = Field(min_length=1, max_length=255)
+    lease_id: str | None = Field(default=None, max_length=120)
+
+
+class WorkerBeeControlledRunCancelRequest(BaseModel):
+    canceled_by: str = Field(min_length=1, max_length=255)
+    reason: str = Field(min_length=1, max_length=4000)
+
+
+class WorkerBeeControlledRunLeaseCreateRequest(BaseModel):
+    requested_by: str = Field(default="agent-pbx-tui", min_length=1, max_length=255)
+
+
+class WorkerBeeControlledRunLeaseDecisionRequest(BaseModel):
+    approve: bool
+    decided_by: str = Field(min_length=1, max_length=255)
+
+
+class WorkerBeeControlledRunLeaseRevokeRequest(BaseModel):
+    revoked_by: str = Field(min_length=1, max_length=255)
+
+
+class WorkerBeeControlledRunClaimRequest(BaseModel):
+    executor_id: str = Field(min_length=1, max_length=240)
+    lease_seconds: int = Field(default=60, ge=10, le=300)
+
+
+class WorkerBeeControlledRunTransitionRequest(BaseModel):
+    executor_id: str = Field(min_length=1, max_length=240)
+    status: Literal[
+        "provisioning",
+        "canary",
+        "running",
+        "collecting",
+        "cleaning",
+        "succeeded",
+        "failed",
+    ]
+    expected_statuses: list[str] = Field(min_length=1, max_length=3)
+    workerbee_run_id: str | None = Field(default=None, max_length=240)
+    workerbee_workspace_id: str | None = Field(default=None, max_length=240)
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_code: str | None = Field(default=None, max_length=120)
+    error: str | None = Field(default=None, max_length=4000)
+    lease_seconds: int = Field(default=60, ge=10, le=300)
+
+
+class WorkerBeeControlledRunReceiptRequest(BaseModel):
+    outcome: Literal["succeeded", "failed", "canceled"]
+    backend_run_id: str | None = Field(default=None, max_length=240)
+    workspace_id: str | None = Field(default=None, max_length=240)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    cleanup: dict[str, Any] = Field(default_factory=dict)
+
+
 class OperatorWorkspaceSetRequest(BaseModel):
     label: str = Field(min_length=1, max_length=120)
     members: list[str] = Field(default_factory=list, max_length=128)

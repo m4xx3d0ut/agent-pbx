@@ -54,6 +54,7 @@ WORKERBEE_PROFILE_LOCAL_DEPLOY = "local-deploy"
 
 WORKERBEE_OBSERVE_TOOLS = (
     "workerbee_v1_capabilities",
+    "workerbee_v1_runtime_policy_status",
     "workerbee_v1_session_start",
     "workerbee_v1_project_runbook_status",
     "workerbee_v1_project_status",

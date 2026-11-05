@@ -81,6 +81,10 @@ from .workerbee_snapshot_policy import (
     WorkerBeeSnapshotPolicyService,
 )
 from .workerbee_mcp import call_workerbee_mcp_tool
+from .workerbee_controlled_run import (
+    WorkerBeeControlledRunError,
+    WorkerBeeControlledRunService,
+)
 from .workerbee_switcher import WorkerBeeSwitchService
 from .events import EventClientRegistry, EventStreamService
 from .codex.runtime import CodexRuntimeService
@@ -164,6 +168,16 @@ from .schemas import (
     WorkerBeeSwitchApplyRequest,
     WorkerBeeGatewayLeaseRequest,
     WorkerBeeAccessProfileRequest,
+    WorkerBeeControlledRunCancelRequest,
+    WorkerBeeControlledRunClaimRequest,
+    WorkerBeeControlledRunCreateRequest,
+    WorkerBeeControlledRunDecisionRequest,
+    WorkerBeeControlledRunLeaseCreateRequest,
+    WorkerBeeControlledRunLeaseDecisionRequest,
+    WorkerBeeControlledRunLeaseRevokeRequest,
+    WorkerBeeControlledRunPreflightRequest,
+    WorkerBeeControlledRunReceiptRequest,
+    WorkerBeeControlledRunTransitionRequest,
     OperatorAuthorityAssignmentRequest,
     OperatorWorkspaceSetRequest,
     WorkerBeeWorkspacePolicyRequest,
@@ -651,6 +665,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     workerbee_workspace_policy = WorkerBeeWorkspacePolicyService(store)
     workerbee_snapshot_policy = WorkerBeeSnapshotPolicyService(store)
     workerbee_access_policy = WorkerBeeAccessPolicyService(store)
+    workerbee_controlled_runs = WorkerBeeControlledRunService(
+        store,
+        workerbee_runtime,
+    )
     operator_authority = OperatorAuthorityService(
         store,
         workerbee_access=workerbee_access_policy,
@@ -804,6 +822,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.workerbee_workspace_policy = workerbee_workspace_policy
     app.state.workerbee_snapshot_policy = workerbee_snapshot_policy
     app.state.workerbee_access_policy = workerbee_access_policy
+    app.state.workerbee_controlled_runs = workerbee_controlled_runs
     app.state.operator_authority = operator_authority
     app.state.workerbee_gateway = workerbee_gateway
     app.state.workerbee_switcher = workerbee_switcher
@@ -2392,6 +2411,378 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             )
         except WorkerBeeAccessPolicyError as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+
+    async def workerbee_controlled_run_preflight(
+        payload: WorkerBeeControlledRunPreflightRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        try:
+            result = await asyncio.to_thread(
+                request.app.state.workerbee_controlled_runs.preflight,
+                root_operator_agent_id=payload.root_operator_agent_id,
+                target_fork_agent_id=payload.target_fork_agent_id,
+                campaign_id=payload.campaign_id,
+                profile_id=payload.profile_id,
+                baseline_commit=payload.baseline_commit,
+                candidate_commit=payload.candidate_commit,
+            )
+        except (WorkerBeeControlledRunError, ValueError) as exc:
+            detail = exc.public_dict() if isinstance(exc, WorkerBeeControlledRunError) else str(exc)
+            raise HTTPException(status_code=409, detail=detail) from exc
+        runtime = request.app.state.workerbee_runtime.selected()
+        if runtime is None:
+            raise HTTPException(status_code=409, detail="no verified WorkerBee backend is selected")
+        try:
+            capabilities = await call_workerbee_mcp_tool(
+                runtime.endpoint,
+                "workerbee_v1_capabilities",
+                {},
+                timeout_seconds=10.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - normalize backend diagnostics
+            result.update(
+                {
+                    "ok": False,
+                    "capability_ready": False,
+                    "capability_error": (
+                        f"WorkerBee capability probe failed ({type(exc).__name__})."
+                    ),
+                    "missing_capabilities": list(result["required_capabilities"]),
+                    "runtime_policy": None,
+                }
+            )
+            return result
+        data = capabilities.get("data") if isinstance(capabilities.get("data"), dict) else {}
+        advertised = {
+            str(item)
+            for item in data.get("mcp_tools", [])
+            if isinstance(item, str)
+        }
+        missing = [
+            item for item in result["required_capabilities"] if item not in advertised
+        ]
+        runtime_policy: dict[str, Any] | None = None
+        if str(result["runtime_policy_tool"]) in advertised:
+            try:
+                runtime_policy = await call_workerbee_mcp_tool(
+                    runtime.endpoint,
+                    str(result["runtime_policy_tool"]),
+                    {},
+                    timeout_seconds=10.0,
+                )
+            except Exception as exc:  # noqa: BLE001
+                runtime_policy = {
+                    "ok": False,
+                    "error": f"runtime policy probe failed ({type(exc).__name__})",
+                }
+        result.update(
+            {
+                "ok": not missing,
+                "capability_ready": not missing,
+                "workerbee_version": str(data.get("workerbee_version") or ""),
+                "advertised_capabilities": sorted(advertised),
+                "missing_capabilities": missing,
+                "runtime_policy": runtime_policy,
+            }
+        )
+        return result
+
+    @app.get(
+        "/v2/workerbee/controlled-runs/posture",
+        response_model=dict[str, Any],
+    )
+    async def get_workerbee_controlled_run_posture(
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        try:
+            posture = await asyncio.to_thread(
+                request.app.state.workerbee_controlled_runs.posture
+            )
+        except WorkerBeeControlledRunError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+        posture["runtime"] = await asyncio.to_thread(
+            refresh_workerbee_runtime_selection,
+            request.app,
+        )
+        return posture
+
+    @app.post(
+        "/v2/workerbee/controlled-runs/preflight",
+        response_model=dict[str, Any],
+    )
+    async def preflight_workerbee_controlled_run(
+        payload: WorkerBeeControlledRunPreflightRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        return await workerbee_controlled_run_preflight(payload, request)
+
+    @app.post(
+        "/v2/workerbee/controlled-runs",
+        response_model=dict[str, Any],
+    )
+    async def create_workerbee_controlled_run(
+        payload: WorkerBeeControlledRunCreateRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        preflight = await workerbee_controlled_run_preflight(payload, request)
+        if not preflight.get("capability_ready"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "WORKERBEE_CONTROLLED_RUN_CAPABILITY_MISSING",
+                    "message": "The selected WorkerBee appliance does not advertise the controlled-run contract.",
+                    "missing_capabilities": preflight.get("missing_capabilities", []),
+                },
+            )
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_controlled_runs.request,
+                root_operator_agent_id=payload.root_operator_agent_id,
+                target_fork_agent_id=payload.target_fork_agent_id,
+                campaign_id=payload.campaign_id,
+                profile_id=payload.profile_id,
+                baseline_commit=payload.baseline_commit,
+                candidate_commit=payload.candidate_commit,
+                requested_by=payload.requested_by,
+                reason=payload.reason,
+            )
+        except (WorkerBeeControlledRunError, ValueError) as exc:
+            detail = exc.public_dict() if isinstance(exc, WorkerBeeControlledRunError) else str(exc)
+            raise HTTPException(status_code=409, detail=detail) from exc
+
+    @app.get(
+        "/v2/workerbee/controlled-runs",
+        response_model=dict[str, Any],
+    )
+    async def list_workerbee_controlled_runs(
+        request: Request,
+        root_operator_agent_id: str | None = Query(default=None, max_length=120),
+        target_fork_agent_id: str | None = Query(default=None, max_length=240),
+        status_filter: list[str] | None = Query(default=None, alias="status"),
+        limit: int = Query(default=100, ge=1, le=500),
+        _controller: ClientPrincipal = Depends(require_global_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        return {
+            "requests": await asyncio.to_thread(
+                store.list_workerbee_controlled_run_requests,
+                root_operator_agent_id=root_operator_agent_id,
+                target_fork_agent_id=target_fork_agent_id,
+                statuses=status_filter,
+                limit=limit,
+            )
+        }
+
+    @app.get(
+        "/v2/workerbee/controlled-runs/{request_id}",
+        response_model=dict[str, Any],
+    )
+    async def get_workerbee_controlled_run(
+        request_id: str,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        result = await asyncio.to_thread(
+            store.get_workerbee_controlled_run_request,
+            request_id,
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="controlled run not found")
+        return result
+
+    @app.post(
+        "/v2/workerbee/controlled-runs/{request_id}/decision",
+        response_model=dict[str, Any],
+    )
+    async def decide_workerbee_controlled_run(
+        request_id: str,
+        payload: WorkerBeeControlledRunDecisionRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_controlled_runs.decide,
+                request_id,
+                approve=payload.approve,
+                decided_by=payload.decided_by,
+                lease_id=payload.lease_id,
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/workerbee/controlled-runs/{request_id}/cancel",
+        response_model=dict[str, Any],
+    )
+    async def cancel_workerbee_controlled_run(
+        request_id: str,
+        payload: WorkerBeeControlledRunCancelRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_controlled_runs.cancel,
+                request_id,
+                canceled_by=payload.canceled_by,
+                reason=payload.reason,
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/workerbee/controlled-runs/{request_id}/leases",
+        response_model=dict[str, Any],
+    )
+    async def create_workerbee_controlled_run_lease(
+        request_id: str,
+        payload: WorkerBeeControlledRunLeaseCreateRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                request.app.state.workerbee_controlled_runs.request_lease,
+                request_id,
+                requested_by=payload.requested_by,
+            )
+        except (WorkerBeeControlledRunError, KeyError, ValueError) as exc:
+            detail = exc.public_dict() if isinstance(exc, WorkerBeeControlledRunError) else str(exc)
+            raise HTTPException(status_code=409, detail=detail) from exc
+
+    @app.get(
+        "/v2/workerbee/controlled-run-leases",
+        response_model=dict[str, Any],
+    )
+    async def list_workerbee_controlled_run_leases(
+        root_operator_agent_id: str | None = Query(default=None, max_length=120),
+        status_filter: str | None = Query(default=None, alias="status", max_length=40),
+        limit: int = Query(default=100, ge=1, le=500),
+        _controller: ClientPrincipal = Depends(require_global_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        return {
+            "leases": await asyncio.to_thread(
+                store.list_workerbee_controlled_run_leases,
+                root_operator_agent_id=root_operator_agent_id,
+                status=status_filter,
+                limit=limit,
+            )
+        }
+
+    @app.post(
+        "/v2/workerbee/controlled-run-leases/{lease_id}/decision",
+        response_model=dict[str, Any],
+    )
+    async def decide_workerbee_controlled_run_lease(
+        lease_id: str,
+        payload: WorkerBeeControlledRunLeaseDecisionRequest,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                store.decide_workerbee_controlled_run_lease,
+                lease_id,
+                approve=payload.approve,
+                decided_by=payload.decided_by,
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/workerbee/controlled-run-leases/{lease_id}/revoke",
+        response_model=dict[str, Any],
+    )
+    async def revoke_workerbee_controlled_run_lease(
+        lease_id: str,
+        payload: WorkerBeeControlledRunLeaseRevokeRequest,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                store.revoke_workerbee_controlled_run_lease,
+                lease_id,
+                revoked_by=payload.revoked_by,
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/workerbee/controlled-runs/{request_id}/claim",
+        response_model=dict[str, Any],
+    )
+    async def claim_workerbee_controlled_run(
+        request_id: str,
+        payload: WorkerBeeControlledRunClaimRequest,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                store.claim_workerbee_controlled_run_request,
+                request_id,
+                executor_id=payload.executor_id,
+                lease_seconds=payload.lease_seconds,
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/workerbee/controlled-runs/{request_id}/transition",
+        response_model=dict[str, Any],
+    )
+    async def transition_workerbee_controlled_run(
+        request_id: str,
+        payload: WorkerBeeControlledRunTransitionRequest,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                store.transition_workerbee_controlled_run_request,
+                request_id,
+                executor_id=payload.executor_id,
+                status=payload.status,
+                expected_statuses=payload.expected_statuses,
+                workerbee_run_id=payload.workerbee_run_id,
+                workerbee_workspace_id=payload.workerbee_workspace_id,
+                result=payload.result,
+                error_code=payload.error_code,
+                error=payload.error,
+                lease_seconds=payload.lease_seconds,
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/workerbee/controlled-runs/{request_id}/receipt",
+        response_model=dict[str, Any],
+    )
+    async def record_workerbee_controlled_run_receipt(
+        request_id: str,
+        payload: WorkerBeeControlledRunReceiptRequest,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+        store: Store = Depends(get_store),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                store.record_workerbee_controlled_run_receipt,
+                request_id,
+                outcome=payload.outcome,
+                backend_run_id=payload.backend_run_id,
+                workspace_id=payload.workspace_id,
+                evidence=payload.evidence,
+                cleanup=payload.cleanup,
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.put(
         "/v2/workerbee/workspace-policy",
