@@ -53,6 +53,7 @@ from agent_pbx.tui import (
     LinkedGitRecoveryConfirmScreen,
     ModelElevationScreen,
     ManagedProjectPickerScreen,
+    OperatorDelegationLeaseConfirmScreen,
     OperatorHandoffApprovalScreen,
     OperatorHandoffCancelConfirmScreen,
     OperatorHistoryScreen,
@@ -440,6 +441,11 @@ def test_tui_constructs() -> None:
     assert any(
         getattr(binding, "key", None) == "f4"
         and getattr(binding, "action", None) == "focus_latest_input"
+        for binding in app.BINDINGS
+    )
+    assert any(
+        getattr(binding, "key", None) == "f9"
+        and getattr(binding, "action", None) == "toggle_right_pane_fullscreen"
         for binding in app.BINDINGS
     )
     assert any(
@@ -10161,7 +10167,7 @@ async def test_tui_file_crud_reconciles_editor_and_trash_prune_state() -> None:
     assert any(path.endswith("/files/trash/prune-undo") for path, _payload in posts)
 
 
-async def test_tui_editor_persists_saves_and_toggles_fullscreen() -> None:
+async def test_tui_editor_persists_saves_and_toggles_right_pane_fullscreen() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     saves: list[dict[str, object]] = []
     diagnostics_posts: list[dict[str, object]] = []
@@ -10340,14 +10346,15 @@ async def test_tui_editor_persists_saves_and_toggles_fullscreen() -> None:
         assert diagnostics_posts == [{"path": "src/app.py", "tool": "auto"}]
 
         app.activate_agent_tab("editor-tab")
-        app.toggle_editor_fullscreen()
+        app.toggle_right_pane_fullscreen()
         await pilot.pause()
-        assert app.editor_fullscreen is True
+        assert app.right_pane_fullscreen is True
         assert app.query_one("#left").styles.display == "none"
         assert app.query_one("#right").styles.display == "block"
+        assert app.active_agent_tab == "editor-tab"
 
-        app.toggle_editor_fullscreen()
-        assert app.editor_fullscreen is False
+        app.toggle_right_pane_fullscreen()
+        assert app.right_pane_fullscreen is False
 
 
 async def test_tui_editor_close_clears_clean_buffer_and_fullscreen() -> None:
@@ -10365,7 +10372,7 @@ async def test_tui_editor_close_clears_clean_buffer_and_fullscreen() -> None:
         }
         app.activate_agent_tab("editor-tab")
         app.render_editor_for_agent("agent-1")
-        app.toggle_editor_fullscreen()
+        app.toggle_right_pane_fullscreen()
         await pilot.pause()
 
         assert app.close_editor_document("agent-1") is True
@@ -10376,7 +10383,32 @@ async def test_tui_editor_close_clears_clean_buffer_and_fullscreen() -> None:
         assert str(app.query_one("#editor-status", Static).renderable) == "Editor: no file"
         assert app.query_one("#editor-diagnostics", TextArea).text == "Diagnostics: not run"
         assert app.active_agent_tab == "files-tab"
-        assert app.editor_fullscreen is False
+        assert app.right_pane_fullscreen is True
+
+
+async def test_tui_f9_preserves_active_right_tab_and_toggles_full_width() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 32)
+        await pilot.pause()
+        app.activate_agent_tab("workerbee-tab")
+
+        await pilot.press("f9")
+        await pilot.pause()
+
+        assert app.active_agent_tab == "workerbee-tab"
+        assert app.right_pane_fullscreen is True
+        assert app.query_one("#left").styles.display == "none"
+        assert app.query_one("#right").styles.display == "block"
+
+        await pilot.press("f9")
+        await pilot.pause()
+
+        assert app.active_agent_tab == "workerbee-tab"
+        assert app.right_pane_fullscreen is False
+        assert app.query_one("#left").styles.display == "block"
+        assert app.query_one("#right").styles.display == "block"
 
 
 async def test_tui_editor_dirty_close_prompts_before_discarding() -> None:
@@ -12917,6 +12949,7 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/editor copy path" in titles
     assert "/editor copy text" in titles
     assert "/editor fullscreen" in titles
+    assert "/view fullscreen" in titles
     assert "/editor close" in titles
     assert "/editor focus" in titles
     assert "/editor reveal" in titles
@@ -28156,6 +28189,251 @@ async def test_tui_handoff_cancel_modal_submits_exact_ids_and_replacements() -> 
     assert submitted[0]["reason"] == "superseded"
     assert submitted[0]["superseded_by_handoff_ids"] == ("replacement-1",)
     assert submitted[0]["approval_screen"] is approval
+
+
+@pytest.mark.asyncio
+async def test_tui_trust_rejects_legacy_handoff_before_confirmation() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    notices: list[tuple[str, str]] = []
+
+    def fake_notify(
+        message: str,
+        *,
+        severity: str = "information",
+        **_kwargs: object,
+    ) -> None:
+        notices.append((message, severity))
+
+    app.notify = fake_notify  # type: ignore[method-assign]
+    approval = OperatorHandoffApprovalScreen(
+        operator_agent_id="operator-0",
+        handoffs=[
+            {
+                "handoff_id": "legacy-1",
+                "logical_operator_agent_id": "operator-0",
+                "target_operator_agent_id": "operator-7",
+                "objective": "Legacy manual handoff",
+                "status": "proposed",
+                "created_at": 10.0,
+                "execution_scope": {},
+            }
+        ],
+    )
+
+    async with app.run_test() as pilot:
+        await app.push_screen(approval)
+        await pilot.pause()
+        assert await pilot.click("#operator-handoff-trust-campaign")
+        await pilot.pause()
+
+        assert app.screen is approval
+        assert not any(
+            isinstance(screen, OperatorDelegationLeaseConfirmScreen)
+            for screen in app.screen_stack
+        )
+
+    assert any(
+        "structured execution_scope" in message and severity == "warning"
+        for message, severity in notices
+    )
+
+
+@pytest.mark.asyncio
+async def test_tui_trust_preflights_creates_and_applies_bounded_lease() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    digest = "a" * 64
+    calls: list[tuple[str, dict[str, object] | None]] = []
+    notices: list[tuple[str, str]] = []
+
+    class Response:
+        def __init__(self, payload: object) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def post(
+            self,
+            path: str,
+            *,
+            json: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            calls.append((path, json))
+            if path == "/v1/operator/delegation-leases":
+                return Response({"lease_id": "lease-1"})
+            return Response({"ok": True})
+
+    async def fake_preflight(
+        logical_operator_id: str,
+        handoff_id: str,
+        *,
+        delivery: str = "auto",
+    ) -> dict[str, object]:
+        assert (logical_operator_id, handoff_id, delivery) == (
+            "operator-0",
+            "handoff-1",
+            "auto",
+        )
+        return {"ok": True, "status": "ready"}
+
+    async def no_refresh(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def fake_notify(
+        message: str,
+        *,
+        severity: str = "information",
+        **_kwargs: object,
+    ) -> None:
+        notices.append((message, severity))
+
+    approval = OperatorHandoffApprovalScreen(
+        operator_agent_id="operator-0",
+        handoffs=[
+            {
+                "handoff_id": "handoff-1",
+                "logical_operator_agent_id": "operator-0",
+                "target_operator_agent_id": "operator-7",
+                "status": "proposed",
+                "execution_scope": {
+                    "action_class": "test_validation",
+                    "mutation_mode": "exact_paths",
+                    "campaign_id": "campaign-1",
+                    "workspace_set_digest": digest,
+                    "allowed_roots": ["/repo"],
+                    "exact_paths": ["tests/test_release.py"],
+                },
+            }
+        ],
+    )
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.preflight_operator_handoff = fake_preflight  # type: ignore[method-assign]
+    app.refresh_events = no_refresh  # type: ignore[method-assign]
+    app.refresh_agents = no_refresh  # type: ignore[method-assign]
+    app.refresh_operator_handoff_approval_screen = no_refresh  # type: ignore[method-assign]
+    app.notify = fake_notify  # type: ignore[method-assign]
+
+    await app.create_operator_delegation_lease_from_handoffs(
+        "operator-0",
+        ("handoff-1",),
+        approval_screen=approval,
+    )
+
+    assert [path for path, _payload in calls] == [
+        "/v1/operator/delegation-leases",
+        "/v1/operator/delegation-leases/lease-1/decision",
+        "/v1/operator/delegation-leases/lease-1/apply/handoff-1",
+    ]
+    assert calls[0][1] == {
+        "source_operator_agent_id": "operator-0",
+        "target_operator_agent_ids": ["operator-7"],
+        "campaign_ids": ["campaign-1"],
+        "workspace_set_digest": digest,
+        "allowed_action_classes": ["test_validation"],
+        "allowed_roots": ["/repo"],
+        "exact_paths": ["tests/test_release.py"],
+        "denied_actions": [],
+        "max_uses": 8,
+        "ttl_seconds": 3600,
+        "requested_by": "agent-pbx-tui",
+        "metadata": {
+            "profile_label": "Rosie Workbench",
+            "approved_handoff_ids": ["handoff-1"],
+        },
+    }
+    assert any("applied 1 handoff(s)" in message for message, _severity in notices)
+
+
+@pytest.mark.asyncio
+async def test_tui_trust_revokes_incomplete_lease_without_raising() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    digest = "b" * 64
+    calls: list[str] = []
+    notices: list[tuple[str, str]] = []
+
+    class Response:
+        def __init__(self, payload: object, *, error: str | None = None) -> None:
+            self.payload = payload
+            self.error = error
+
+        def raise_for_status(self) -> None:
+            if self.error:
+                raise RuntimeError(self.error)
+
+        def json(self) -> object:
+            return self.payload
+
+    class Client:
+        async def post(
+            self,
+            path: str,
+            *,
+            json: dict[str, object] | None = None,
+            **_kwargs: object,
+        ) -> Response:
+            calls.append(path)
+            if path == "/v1/operator/delegation-leases":
+                return Response({"lease_id": "lease-2"})
+            if path.endswith("/apply/handoff-2"):
+                return Response({}, error="delivery route changed")
+            return Response({"ok": True})
+
+    async def fake_preflight(
+        _logical_operator_id: str,
+        _handoff_id: str,
+        *,
+        delivery: str = "auto",
+    ) -> dict[str, object]:
+        assert delivery == "auto"
+        return {"ok": True, "status": "ready"}
+
+    def fake_notify(
+        message: str,
+        *,
+        severity: str = "information",
+        **_kwargs: object,
+    ) -> None:
+        notices.append((message, severity))
+
+    approval = OperatorHandoffApprovalScreen(
+        operator_agent_id="operator-0",
+        handoffs=[
+            {
+                "handoff_id": "handoff-2",
+                "target_operator_agent_id": "operator-8",
+                "execution_scope": {
+                    "action_class": "read_only_verification",
+                    "mutation_mode": "read_only",
+                    "campaign_id": "campaign-2",
+                    "workspace_set_digest": digest,
+                    "allowed_roots": ["/repo"],
+                    "exact_paths": [],
+                },
+            }
+        ],
+    )
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.preflight_operator_handoff = fake_preflight  # type: ignore[method-assign]
+    app.notify = fake_notify  # type: ignore[method-assign]
+
+    await app.create_operator_delegation_lease_from_handoffs(
+        "operator-0",
+        ("handoff-2",),
+        approval_screen=approval,
+    )
+
+    assert calls[-1] == "/v1/operator/delegation-leases/lease-2/revoke"
+    assert any(
+        "delivery route changed" in message
+        and "incomplete lease was revoked" in message
+        and severity == "error"
+        for message, severity in notices
+    )
 
 
 @pytest.mark.asyncio

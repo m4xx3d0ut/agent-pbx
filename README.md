@@ -597,11 +597,17 @@ rejected. The legacy free-form `allowed_mutation_scope` remains readable but is
 never sufficient for delegated approval.
 
 The committed default remains manual approval. On a trusted local workstation,
-the approval center can grant a one-hour, use-limited campaign lease from the
-selected structured handoffs. Source and target Operators must share the same
-activated `trusted-workbench` workspace-set digest. The lease is pinned to the
-selected campaigns, targets, action classes, roots, and exact paths. Matching
-future handoffs may then pass preflight and deliver without another modal.
+the approval center's `Trust & approve` action can grant a one-hour,
+use-limited campaign lease and approve the selected structured handoffs. Source
+and target Operators must share the same activated `trusted-workbench`
+workspace-set digest. The lease is pinned to the selected source-owned
+campaigns, targets, action classes, roots, and exact paths. Matching future
+handoffs may then pass preflight and deliver without another modal. Legacy or
+unstructured handoffs are rejected before the lease confirmation and remain
+eligible for one-time `Approve selected`; create a structured successor when
+future automatic approval is required. Agent PBX preflights every selected
+handoff before creating the lease and revokes or rejects an incomplete lease
+when activation fails.
 Credentials, provider/cloud operations, deployment, publication, push, tag,
 release, repository/worktree/fork creation, workspace expansion, authority
 elevation, destructive mutation, and unstructured legacy requests always stay
@@ -1281,8 +1287,10 @@ an optimistic lock using the loaded file hash or mtime and reports a conflict if
 the file changed on disk. Returning from Neovim to a clean Textual buffer
 refetches the file, so native-editor writes do not leave a stale editable copy.
 A dirty Textual buffer must be saved or reverted before its project can open in
-the native editor. `F9` or `Full F9` toggles an editor-fullscreen layout that
-keeps the TUI title and footer visible.
+the native editor. `F9`, `Full F9`, or `/view fullscreen` toggles the complete
+active right-side workspace full width while keeping the TUI title and footer
+visible. The selected right tab and its terminal/editor state are preserved;
+the compatibility command `/editor fullscreen` invokes the same layout action.
 
 `Native` or `/editor terminal` starts or attaches a project-rooted managed
 editor without requiring a file to be staged in Textual. `/editor workspace`
@@ -1745,7 +1753,7 @@ terminal access; the WSS client is the observer/control path.
 
 Plain configured function keys remain global PBX navigation even under terminal
 focus: `F1` Agents, `F2` Events, `F3` view, `F4` input, `F5` Operators,
-`F6/F7` fork navigation, `F8` next alert, `F9` editor, `F10` workspace launch,
+`F6/F7` fork navigation, `F8` next alert, `F9` right-pane fullscreen, `F10` workspace launch,
 and `F11/F12` navigation back/forward. Repeated F8 presses
 focus and acknowledge one displayed Agent/Operator alert at a time. Approval
 centers are single-flight: F8 never stacks duplicate modals. Pressing F8 while

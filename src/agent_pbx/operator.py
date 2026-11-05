@@ -2313,6 +2313,13 @@ class OperatorService:
         if not normalized_message:
             raise ValueError("handoff message is required")
         normalized_objective = str(objective or summary or normalized_message).strip()
+        metadata_execution_scope = (metadata or {}).get("execution_scope")
+        if isinstance(metadata_execution_scope, Mapping) and metadata_execution_scope:
+            raise ValueError(
+                "handoff execution_scope must use the top-level execution_scope "
+                "argument; metadata.execution_scope is descriptive only and "
+                "cannot grant delegated authority"
+            )
         normalized_execution_scope = normalize_execution_scope(execution_scope)
         metadata_payload = self._metadata_with_requested_kb_context(
             metadata or {},

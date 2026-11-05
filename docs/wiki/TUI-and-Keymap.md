@@ -22,7 +22,7 @@ Plain function keys remain PBX-owned even while the terminal has focus:
 | F5 | Focus Operators |
 | F6 / F7 | Previous / next Operator fork |
 | F8 | Focus and acknowledge the next alert |
-| F9 | Toggle Editor full-screen |
+| F9 | Toggle the active right-side tab workspace full width |
 | F10 | Launch a workspace from approved project roots |
 | F11 / F12 | Navigate backward / forward through Agent, Operator, and right-tab destinations |
 
@@ -35,6 +35,20 @@ Reviewing does not approve or erase the handoff: unresolved records remain
 durable and F8 can reopen them after the rest of the alert queue is exhausted.
 The approval center also provides audited `Cancel selected` withdrawal for
 source-owned handoffs that have not entered delivery.
+
+`Trust & approve` is available only for structured, lease-eligible handoffs.
+It creates the bounded Trusted Workbench campaign lease and applies it to the
+selected handoff in one guarded TUI flow. Legacy handoffs without an
+`execution_scope` remain manual-only and are rejected before confirmation.
+Approval and delivery are separate: a healthy idle tmux-direct target receives
+the approved handoff automatically, while a missing or ambiguous delivery path
+fails closed even when a matching lease exists.
+
+F9 collapses or restores the left navigation without changing the selected
+right-side tab. Latest/Codex, Files, Editor/Neovim, WorkerBee, Joplin, and the
+other right-side tabs therefore share the same full-width layout. The palette
+equivalent is `/view fullscreen`; `/editor fullscreen` remains a compatibility
+alias.
 
 Shift+F1 through Shift+F12 sends the corresponding unmodified function key to
 Codex. Terminals that encode those combinations as F13 through F24 are also

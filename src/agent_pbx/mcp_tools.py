@@ -909,7 +909,17 @@ def build_mcp_server(
         summary: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Create an executable operator-to-operator handoff workflow."""
+        """Create an executable operator-to-operator handoff workflow.
+
+        Handoffs intended for Trusted Workbench lease approval must include a
+        machine-readable ``execution_scope``. At minimum, provide an eligible
+        ``action_class``, ``mutation_mode``, the source Operator's
+        ``campaign_id``, the activated 64-character ``workspace_set_digest``,
+        and bounded ``allowed_roots``/``exact_paths`` where applicable.
+        Prose-only ``allowed_mutation_scope`` remains manual-only. Deployment,
+        publication, provider, credential, authority, workspace-expansion, and
+        destructive classes always require a one-time user approval.
+        """
         return operator_service.create_handoff(
             operator_agent_id=operator_agent_id,
             source_agent_id=source_agent_id,

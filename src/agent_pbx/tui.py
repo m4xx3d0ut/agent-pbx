@@ -97,6 +97,10 @@ from .operator_authority import (
     operator_authority_launch_overrides,
     operator_authority_sandbox,
 )
+from .operator_delegation import (
+    LEASE_ELIGIBLE_ACTION_CLASSES,
+    execution_scope_requires_manual_approval,
+)
 from .paths import default_state_root
 from . import tmux as tmux_support
 from .project_spawn import (
@@ -746,6 +750,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/editor copy path",
     "/editor copy text",
     "/editor fullscreen",
+    "/view fullscreen",
     "/editor close",
     "/editor focus",
     "/editor reveal",
@@ -5925,6 +5930,51 @@ class OperatorHandoffCancelConfirmScreen(ModalScreen[None]):
         )
 
 
+def delegation_lease_ineligibility_reason(
+    handoffs: Iterable[Mapping[str, Any]],
+) -> str | None:
+    """Return a concise reason when handoffs cannot seed a trusted lease."""
+
+    selected = tuple(handoffs)
+    if not selected:
+        return "Select at least one handoff."
+    scopes: list[Mapping[str, Any]] = []
+    for handoff in selected:
+        scope = handoff.get("execution_scope")
+        if not isinstance(scope, Mapping) or not scope:
+            return (
+                "Trusted leases require a structured execution_scope on every "
+                "handoff; approve this legacy handoff once or create a structured "
+                "successor."
+            )
+        scopes.append(scope)
+    action_classes = {
+        str(scope.get("action_class") or "").strip().lower() for scope in scopes
+    }
+    if "" in action_classes or not action_classes.issubset(
+        LEASE_ELIGIBLE_ACTION_CLASSES
+    ):
+        return "One or more selected action classes always require manual approval."
+    if any(execution_scope_requires_manual_approval(scope) for scope in scopes):
+        return "One or more selected handoffs contain a manual-only authority flag."
+    campaigns = {str(scope.get("campaign_id") or "").strip() for scope in scopes}
+    if "" in campaigns:
+        return "Trusted leases require a campaign ID on every selected handoff."
+    digests = {
+        str(scope.get("workspace_set_digest") or "").strip().lower()
+        for scope in scopes
+    }
+    if "" in digests or len(digests) != 1:
+        return "Selected handoffs must share one activated workspace-set digest."
+    targets = {
+        str(handoff.get("target_operator_agent_id") or "").strip()
+        for handoff in selected
+    }
+    if "" in targets:
+        return "Trusted leases require an exact target Operator on every handoff."
+    return None
+
+
 class OperatorDelegationLeaseConfirmScreen(ModalScreen[None]):
     """Approve one bounded Trusted Workbench campaign delegation lease."""
 
@@ -5941,6 +5991,7 @@ class OperatorDelegationLeaseConfirmScreen(ModalScreen[None]):
         self.operator_agent_id = operator_agent_id
         self.handoff_ids = handoff_ids
         self.approval_screen = approval_screen
+        self.submitted = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="operator-handoff-confirm-panel"):
@@ -5965,16 +6016,23 @@ class OperatorDelegationLeaseConfirmScreen(ModalScreen[None]):
             self.dismiss()
             return
         if event.button.id == "operator-delegation-confirm":
-            work = self.app.create_operator_delegation_lease_from_handoffs(  # type: ignore[attr-defined]
+            if self.submitted:
+                return
+            self.submitted = True
+            app = self.app
+            self.query_one("#operator-delegation-confirm", Button).disabled = True
+            self.query_one("#operator-delegation-cancel", Button).disabled = True
+            work = app.create_operator_delegation_lease_from_handoffs(  # type: ignore[attr-defined]
                 self.operator_agent_id,
                 self.handoff_ids,
                 approval_screen=self.approval_screen,
             )
             self.dismiss()
-            self.app.run_worker(  # type: ignore[attr-defined]
+            app.run_worker(  # type: ignore[attr-defined]
                 work,
                 name="operator-delegation-lease-create",
                 exclusive=True,
+                exit_on_error=False,
             )
 
 
@@ -6015,7 +6073,11 @@ class OperatorHandoffApprovalScreen(ModalScreen[None]):
             with Horizontal(id="operator-handoff-approval-actions"):
                 yield Button("Preflight", id="operator-handoff-preflight")
                 yield Button("Approve selected", id="operator-handoff-approve", variant="warning")
-                yield Button("Trust campaign", id="operator-handoff-trust-campaign", variant="warning")
+                yield Button(
+                    "Trust & approve",
+                    id="operator-handoff-trust-campaign",
+                    variant="warning",
+                )
                 yield Button("Cancel selected", id="operator-handoff-cancel", variant="error")
                 yield Button("Refresh", id="operator-handoff-refresh")
                 yield Button("Close", id="operator-handoff-close")
@@ -6152,6 +6214,11 @@ class OperatorHandoffApprovalScreen(ModalScreen[None]):
                 )
             )
         elif button_id == "operator-handoff-trust-campaign":
+            selected = self.selected_handoffs()
+            reason = delegation_lease_ineligibility_reason(selected)
+            if reason is not None:
+                self.app.notify(reason, severity="warning")  # type: ignore[attr-defined]
+                return
             self.app.push_screen(  # type: ignore[attr-defined]
                 OperatorDelegationLeaseConfirmScreen(
                     operator_agent_id=self.operator_agent_id,
@@ -7536,7 +7603,7 @@ class AgentPBXTUI(App[None]):
         Binding("f5", "focus_operators", "Operators", key_display="F5", priority=True),
         Binding("f6", "prev_operator_fork", "Prev Fork", key_display="F6", priority=True),
         Binding("f7", "next_operator_fork", "Next Fork", key_display="F7", priority=True),
-        Binding("f9", "toggle_editor_fullscreen", "Editor Full", key_display="F9"),
+        Binding("f9", "toggle_right_pane_fullscreen", "Right Full", key_display="F9"),
         Binding(
             "f10",
             "launch_workspace",
@@ -8054,7 +8121,7 @@ class AgentPBXTUI(App[None]):
         self.latest_file_trash_prune_batch_by_agent: dict[str, str] = {}
         self.editor_rendering = False
         self.editor_rendered_agent_id: str | None = None
-        self.editor_fullscreen = False
+        self.right_pane_fullscreen = False
         self.editor_default_surface = normalize_editor_surface(
             os.getenv(EDITOR_DEFAULT_SURFACE_ENV)
             or self.settings.get("editor_default_surface")
@@ -9548,7 +9615,7 @@ class AgentPBXTUI(App[None]):
                 "",
                 "PBX-owned under every focus:",
                 "- F1 Agents · F2 Events · F3 right tabs · F4 input",
-                "- F5 Operators · F6/F7 forks · F8 alert · F9 editor · F10 launch",
+                "- F5 Operators · F6/F7 forks · F8 alert · F9 right pane · F10 launch",
                 "- F11 navigation back · F12 navigation forward",
                 "- Ctrl+T toggles the selected Latest tmux surface",
                 "- Ctrl+P command palette",
@@ -9910,7 +9977,7 @@ class AgentPBXTUI(App[None]):
                     focus_scope="terminal",
                     capability="terminal_input",
                 ),
-                ActionDefinition("editor.fullscreen", "Editor Full", "f9"),
+                ActionDefinition("view.fullscreen", "Right Pane Full", "f9"),
                 ActionDefinition("workspace.launch", "Launch Workspace", "f10"),
                 ActionDefinition("navigation.back", "Navigation Back", "f11"),
                 ActionDefinition("navigation.forward", "Navigation Forward", "f12"),
@@ -10707,7 +10774,16 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/editor check", "Run diagnostics for the current editor file", self.palette_editor_check)
         yield SystemCommand("/editor copy path", "Copy the current editor file path", self.palette_editor_copy_path)
         yield SystemCommand("/editor copy text", "Copy the current editor text", self.palette_editor_copy_text)
-        yield SystemCommand("/editor fullscreen", "Toggle editor fullscreen", self.palette_editor_fullscreen)
+        yield SystemCommand(
+            "/view fullscreen",
+            "Toggle the active right-side workspace full width",
+            self.palette_right_pane_fullscreen,
+        )
+        yield SystemCommand(
+            "/editor fullscreen",
+            "Toggle the active right-side workspace full width (compatibility alias)",
+            self.palette_right_pane_fullscreen,
+        )
         yield SystemCommand("/editor terminal", "Open or attach the managed native workspace", self.palette_editor_terminal)
         yield SystemCommand("/editor terminal open", "Open the selected file in the managed native editor", self.palette_editor_terminal_open)
         yield SystemCommand("/editor terminal nvim", "Open or attach the Neovim workspace", self.palette_editor_terminal_nvim)
@@ -11862,8 +11938,13 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_right_pane_fullscreen(self) -> None:
+        self.action_toggle_right_pane_fullscreen()
+
     def palette_editor_fullscreen(self) -> None:
-        self.action_toggle_editor_fullscreen()
+        """Compatibility alias for older palette integrations."""
+
+        self.palette_right_pane_fullscreen()
 
     def palette_editor_terminal(self) -> None:
         self._palette_editor_terminal_profile(None)
@@ -13821,10 +13902,13 @@ class AgentPBXTUI(App[None]):
             await self.detach_embedded_tmux_terminal(release_lease=True)
             await self.load_latest_report(self.selected_agent_id)
 
+    def action_toggle_right_pane_fullscreen(self) -> None:
+        self.toggle_right_pane_fullscreen()
+
     def action_toggle_editor_fullscreen(self) -> None:
-        if self.active_agent_tab != "editor-tab":
-            self.activate_agent_tab("editor-tab")
-        self.toggle_editor_fullscreen()
+        """Compatibility action retained for older keymaps and commands."""
+
+        self.action_toggle_right_pane_fullscreen()
 
     def is_tmux_direct_enabled(self, agent_id: str | None = None) -> bool:
         if not self.tmux_features_available:
@@ -19347,7 +19431,7 @@ class AgentPBXTUI(App[None]):
             await self.copy_editor_text()
             return
         if event.button.id == "editor-fullscreen":
-            self.toggle_editor_fullscreen()
+            self.toggle_right_pane_fullscreen()
             return
         if event.button.id == "editor-check":
             await self.check_editor_document(self.selected_agent_id)
@@ -27005,6 +27089,10 @@ class AgentPBXTUI(App[None]):
         if len(selected) != len(handoff_ids):
             self.notify("One or more selected handoffs changed; refresh and retry.", severity="error")
             return
+        ineligibility = delegation_lease_ineligibility_reason(selected)
+        if ineligibility is not None:
+            self.notify(ineligibility, severity="warning")
+            return
         if len(selected) > 8:
             self.notify(
                 "A local campaign lease can cover at most eight selected handoffs.",
@@ -27063,7 +27151,20 @@ class AgentPBXTUI(App[None]):
                 "approved_handoff_ids": list(handoff_ids),
             },
         }
+        lease_id = ""
+        lease_status = ""
+        applied = 0
         try:
+            for handoff_id in handoff_ids:
+                preflight = await self.preflight_operator_handoff(
+                    logical_operator_id,
+                    handoff_id,
+                )
+                if not bool(preflight.get("ok")):
+                    raise RuntimeError(
+                        f"{handoff_id}: "
+                        f"{preflight.get('reason') or 'preflight failed'}"
+                    )
             response = await self.api_client().post(
                 "/v1/operator/delegation-leases",
                 json=payload,
@@ -27071,14 +27172,19 @@ class AgentPBXTUI(App[None]):
             )
             response.raise_for_status()
             lease = response.json()
+            if not isinstance(lease, dict):
+                raise RuntimeError("delegation lease response was not an object")
             lease_id = str(lease.get("lease_id") or "")
+            if not lease_id:
+                raise RuntimeError("delegation lease response omitted the lease ID")
+            lease_status = "requested"
             decision = await self.api_client().post(
                 f"/v1/operator/delegation-leases/{lease_id}/decision",
                 json={"approve": True, "decided_by": "local-tui-user"},
                 headers=auth_headers(self.token),
             )
             decision.raise_for_status()
-            applied = 0
+            lease_status = "approved"
             for handoff_id in handoff_ids:
                 result = await self.api_client().post(
                     f"/v1/operator/delegation-leases/{lease_id}/apply/{handoff_id}",
@@ -27087,11 +27193,46 @@ class AgentPBXTUI(App[None]):
                 result.raise_for_status()
                 applied += 1
         except Exception as exc:
-            self.notify(f"Unable to activate campaign delegation: {exc}", severity="error")
+            cleanup = ""
+            if lease_id and lease_status:
+                try:
+                    if lease_status == "approved":
+                        response = await self.api_client().post(
+                            f"/v1/operator/delegation-leases/{lease_id}/revoke",
+                            json={"revoked_by": "agent-pbx-tui-failed-activation"},
+                            headers=auth_headers(self.token),
+                        )
+                        response.raise_for_status()
+                        cleanup = "; the incomplete lease was revoked"
+                    elif lease_status == "requested":
+                        response = await self.api_client().post(
+                            f"/v1/operator/delegation-leases/{lease_id}/decision",
+                            json={
+                                "approve": False,
+                                "decided_by": "agent-pbx-tui-failed-activation",
+                            },
+                            headers=auth_headers(self.token),
+                        )
+                        response.raise_for_status()
+                        cleanup = "; the incomplete lease was rejected"
+                except Exception as cleanup_exc:
+                    cleanup = f"; lease cleanup also failed: {cleanup_exc}"
+            self.notify(
+                f"Unable to activate campaign delegation after {applied} "
+                f"handoff(s): {exc}{cleanup}",
+                severity="error",
+            )
             return
-        await self.refresh_events()
-        await self.refresh_agents()
-        await self.refresh_operator_handoff_approval_screen(approval_screen)
+        try:
+            await self.refresh_events()
+            await self.refresh_agents()
+            await self.refresh_operator_handoff_approval_screen(approval_screen)
+        except Exception as exc:
+            self.notify(
+                "Campaign lease was activated, but the approval view could not "
+                f"refresh: {exc}",
+                severity="warning",
+            )
         self.notify(
             f"Approved one-hour campaign lease {lease_id[:8]} and applied {applied} handoff(s)."
         )
@@ -32916,9 +33057,6 @@ class AgentPBXTUI(App[None]):
                     self.editor_rendering = False
             self.set_editor_status("Editor: no file")
             self.set_editor_diagnostics("Diagnostics: not run")
-        if self.editor_fullscreen:
-            self.editor_fullscreen = False
-            self.apply_layout_class()
         if self.active_agent_tab == "editor-tab":
             self.activate_agent_tab("files-tab")
         self.focus_right_pane_content()
@@ -32994,14 +33132,19 @@ class AgentPBXTUI(App[None]):
             lines.append(f"... {len(diagnostics) - 100} more")
         return "\n".join(lines)
 
-    def toggle_editor_fullscreen(self) -> None:
-        self.editor_fullscreen = not self.editor_fullscreen
-        if self.editor_fullscreen:
-            self.activate_agent_tab("editor-tab")
+    def toggle_right_pane_fullscreen(self) -> None:
+        """Toggle the complete active right-side tab workspace full width."""
+
+        self.right_pane_fullscreen = not self.right_pane_fullscreen
         self.apply_layout_class()
         self.focus_right_pane_content()
-        state = "enabled" if self.editor_fullscreen else "disabled"
-        self.notify(f"Editor fullscreen {state}.")
+        state = "enabled" if self.right_pane_fullscreen else "disabled"
+        self.notify(f"Right pane fullscreen {state}.")
+
+    def toggle_editor_fullscreen(self) -> None:
+        """Compatibility alias for the former editor-only fullscreen action."""
+
+        self.toggle_right_pane_fullscreen()
 
     def render_file_error(self, agent_id: str, message: str) -> None:
         table = self.query_one("#files", DataTable)
@@ -38724,7 +38867,7 @@ class AgentPBXTUI(App[None]):
                 tiny_home and self.tiny_home_panel == TINY_HOME_EVENTS,
                 "tiny-events",
             )
-            screen.set_class(self.editor_fullscreen, "editor-fullscreen")
+            screen.set_class(self.right_pane_fullscreen, "right-pane-fullscreen")
         self.apply_layout_dimensions()
         self.render_agent_columns()
         self.render_operator_columns()
@@ -38737,7 +38880,7 @@ class AgentPBXTUI(App[None]):
         right = self.query_one_or_none("#right", Vertical)
         if left is None or right is None:
             return
-        if self.editor_fullscreen:
+        if self.right_pane_fullscreen:
             left.styles.display = "none"
             right.styles.display = "block"
             left.styles.width = "100%"

@@ -63,6 +63,29 @@ def test_exact_git_scope_is_normalized_and_persisted(tmp_path: Path) -> None:
     assert execution_scope_requires_manual_approval(handoff["execution_scope"]) is False
 
 
+def test_handoff_rejects_execution_scope_misplaced_in_metadata(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operators(store, tmp_path)
+    service = OperatorService(store)
+
+    with pytest.raises(ValueError, match="top-level execution_scope"):
+        service.create_handoff(
+            operator_agent_id="operator-0",
+            source_agent_id="operator-0",
+            target_operator_agent_id="operator-7",
+            message="Verify the reviewed checkpoint.",
+            metadata={
+                "execution_scope": {
+                    "action_class": "custom_read_only_check",
+                    "mutation_mode": "custom_read_only_mode",
+                }
+            },
+        )
+
+    assert store.list_operator_handoffs(logical_operator_agent_id="operator-0") == []
+
+
 @pytest.mark.parametrize(
     "scope, message",
     [
