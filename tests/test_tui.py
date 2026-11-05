@@ -26363,6 +26363,8 @@ def test_tui_operator_agent_config_overrides_follow_operator_server_env(
     assert "pbx_operator_start_campaign" not in agent_pbx_config
     assert "pbx_operator_send_followup" not in agent_pbx_config
     assert "pbx_operator_finish_campaign" not in agent_pbx_config
+    assert "pbx_operator_ack_handoff" not in agent_pbx_config
+    assert "pbx_operator_update_handoff" not in agent_pbx_config
     assert 'default_tools_approval_mode = "approve"' in workerbee_config
     assert "workerbee_v1_project_status" in workerbee_config
     assert "workerbee_v1_exec" not in workerbee_config
@@ -26510,6 +26512,8 @@ def test_tui_root_operator_config_includes_campaign_lifecycle_tools(
     assert "pbx_operator_start_campaign" in agent_pbx_config
     assert "pbx_operator_send_followup" in agent_pbx_config
     assert "pbx_operator_finish_campaign" in agent_pbx_config
+    assert "pbx_operator_ack_handoff" in agent_pbx_config
+    assert "pbx_operator_update_handoff" in agent_pbx_config
 
 
 def test_tui_operator_agent_config_overrides_fallback_to_review_env(

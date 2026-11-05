@@ -339,6 +339,8 @@ OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_operator_start_campaign",
     "pbx_operator_send_followup",
     "pbx_operator_finish_campaign",
+    "pbx_operator_ack_handoff",
+    "pbx_operator_update_handoff",
 )
 CALLER_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_agent_runbook",
