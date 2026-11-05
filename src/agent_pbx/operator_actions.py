@@ -41,13 +41,19 @@ def project_handoff_action(
         )
     if not scope or scope.get("action_class") != "exact_git_commit_broker":
         return None
-    if str(handoff.get("status") or "") not in {
+    handoff_status = str(handoff.get("status") or "").lower()
+    if handoff_status not in {
         "sent",
         "acknowledged",
         "running",
         "complete",
         "completed",
     }:
+        return None
+    # A terminal handoff with no action transaction has no local work left to
+    # execute. Keep terminal handoffs visible only when a previously started
+    # transaction still needs recovery or validation.
+    if handoff_status in {"complete", "completed"} and not transaction:
         return None
 
     digest = execution_scope_digest(scope)

@@ -10706,6 +10706,12 @@ class Store:
                 """,
                 (handoff["handoff_id"],),
             ).fetchone()
+            if (
+                str(handoff.get("status") or "").lower()
+                in {"complete", "completed"}
+                and transaction is None
+            ):
+                continue
             if transaction is not None and str(transaction["state"]) == "complete":
                 continue
             actionable.append(float(handoff.get("updated_at") or 0.0))

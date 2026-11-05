@@ -302,6 +302,55 @@ def test_ready_action_scope_drift_requires_reapproval(tmp_path: Path) -> None:
     assert "scope changed" in action["reason"]
 
 
+def test_completed_handoff_requires_an_existing_action_transaction(
+    tmp_path: Path,
+) -> None:
+    handoff = {
+        "handoff_id": "handoff-1",
+        "logical_operator_agent_id": "operator-0",
+        "target_operator_agent_id": "operator-8",
+        "target_operator_fork_id": "fork-1",
+        "status": "complete",
+        "updated_at": 100.0,
+        "execution_scope": {
+            "action_class": "exact_git_commit_broker",
+            "campaign_id": "campaign-1",
+            "workspace_set_digest": "a" * 64,
+            "mutation_mode": "exact_paths",
+            "allowed_roots": [str(tmp_path)],
+            "exact_paths": ["src/app.py"],
+            "expected_git_parent": "b" * 40,
+            "commit_subject": "Agent PBX approved commit",
+        },
+        "metadata": {},
+    }
+    target = {
+        "agent_id": "operator-8-fork",
+        "status": "canceled",
+        "pbx_active": False,
+    }
+
+    assert project_handoff_action(
+        handoff,
+        target_agent=target,
+        transaction=None,
+    ) is None
+
+    action = project_handoff_action(
+        handoff,
+        target_agent=target,
+        transaction={
+            "transaction_id": "tx-1",
+            "scope_sha256": execution_scope_digest(handoff["execution_scope"]),
+            "state": "receipt_review",
+            "updated_at": 101.0,
+        },
+    )
+    assert action is not None
+    assert action["state"] == "receipt_review"
+    assert action["next_action"] == "broker_commit"
+
+
 @pytest.mark.parametrize(
     "scope, message",
     [
