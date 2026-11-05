@@ -116,11 +116,50 @@ class OperatorBrokerService:
                 "OPERATOR_BROKER_HANDOFF_NOT_FOUND",
                 "The exact broker handoff no longer exists.",
             )
-        if str(handoff.get("logical_operator_agent_id") or "") != root_operator_agent_id:
-            raise OperatorBrokerPolicyError(
-                "OPERATOR_BROKER_HANDOFF_ROOT_MISMATCH",
-                "The handoff belongs to another logical root Operator.",
+        handoff_root_operator_id = str(
+            handoff.get("logical_operator_agent_id") or ""
+        ).strip()
+        handoff_target_operator_id = str(
+            handoff.get("target_operator_agent_id") or ""
+        ).strip()
+        authority_mode = "root_owned"
+        source_root: dict[str, Any] | None = None
+        if handoff_root_operator_id != root_operator_agent_id:
+            if handoff_target_operator_id != root_operator_agent_id:
+                raise OperatorBrokerPolicyError(
+                    "OPERATOR_BROKER_HANDOFF_ROOT_MISMATCH",
+                    "The handoff belongs to another logical root Operator and "
+                    "does not target the requesting root.",
+                )
+            handoff_status = str(handoff.get("status") or "").strip().lower()
+            handoff_metadata = self._metadata(handoff)
+            approved_by = str(
+                handoff_metadata.get("approved_by_operator_agent_id") or ""
+            ).strip()
+            acknowledged_by = str(
+                handoff_metadata.get("acknowledged_by_operator_agent_id") or ""
+            ).strip()
+            approved_through_tui = (
+                str(handoff_metadata.get("approved_by") or "").strip()
+                == "agent-pbx-tui"
             )
+            delegated_approval = bool(
+                handoff_metadata.get("delegated_approval")
+                and handoff_metadata.get("delegation_lease_id")
+            )
+            if (
+                handoff_status not in {"acknowledged", "running"}
+                or approved_by != handoff_root_operator_id
+                or acknowledged_by != root_operator_agent_id
+                or not (approved_through_tui or delegated_approval)
+            ):
+                raise OperatorBrokerPolicyError(
+                    "OPERATOR_BROKER_DELEGATED_HANDOFF_UNAPPROVED",
+                    "A cross-root broker handoff requires source-root approval "
+                    "and target-root acknowledgment before execution.",
+                )
+            source_root = self._require_root(handoff_root_operator_id)
+            authority_mode = "delegated_cross_root"
         target_fork_id = str(handoff.get("target_operator_fork_id") or "").strip()
         target_fork = self.store.get_operator_fork(target_fork_id) if target_fork_id else None
         if target_fork is None:
@@ -181,7 +220,23 @@ class OperatorBrokerService:
                 "OPERATOR_BROKER_WORKSPACE_MISMATCH",
                 "Root, fork, and handoff do not share one activated workspace-set digest.",
             )
-        for metadata, label in ((root_metadata, "root"), (fork_metadata, "fork")):
+        authority_subjects = [(root_metadata, "root"), (fork_metadata, "fork")]
+        if source_root is not None:
+            source_root_metadata = self._metadata(source_root)
+            source_digest = str(
+                source_root_metadata.get(
+                    "operator_authority_activated_workspace_set_digest"
+                )
+                or ""
+            )
+            if source_digest != digest:
+                raise OperatorBrokerPolicyError(
+                    "OPERATOR_BROKER_SOURCE_WORKSPACE_MISMATCH",
+                    "The approving source root does not share the activated "
+                    "workspace-set digest.",
+                )
+            authority_subjects.append((source_root_metadata, "source root"))
+        for metadata, label in authority_subjects:
             if str(metadata.get("operator_authority_activated_profile") or "") != "trusted-workbench":
                 raise OperatorBrokerPolicyError(
                     "OPERATOR_BROKER_AUTHORITY_REQUIRED",
@@ -202,6 +257,8 @@ class OperatorBrokerService:
             json.dumps(
                 {
                     "root_operator_agent_id": root_operator_agent_id,
+                    "handoff_root_operator_agent_id": handoff_root_operator_id,
+                    "handoff_authority_mode": authority_mode,
                     "target_fork_agent_id": target_fork_agent_id,
                     "handoff_id": handoff_id,
                     "campaign_id": campaign_id,
@@ -220,6 +277,8 @@ class OperatorBrokerService:
             "checked_at": now_ts(),
             "posture": posture.public_dict(),
             "root_operator_agent_id": root_operator_agent_id,
+            "handoff_root_operator_agent_id": handoff_root_operator_id,
+            "handoff_authority_mode": authority_mode,
             "target_fork_agent_id": target_fork_agent_id,
             "handoff_id": handoff_id,
             "campaign_id": campaign_id,

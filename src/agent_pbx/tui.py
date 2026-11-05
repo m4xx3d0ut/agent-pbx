@@ -4066,9 +4066,17 @@ class LinkedGitCommitPathsScreen(ModalScreen[None]):
 
     BINDINGS = [("escape", "dismiss", "Cancel")]
 
-    def __init__(self, *, context: LinkedGitBrokerTuiContext) -> None:
+    def __init__(
+        self,
+        *,
+        context: LinkedGitBrokerTuiContext,
+        suggested_paths: tuple[str, ...] = (),
+        scoped_change_summary: str = "",
+    ) -> None:
         super().__init__()
         self.context = context
+        self.suggested_paths = suggested_paths
+        self.scoped_change_summary = scoped_change_summary
 
     def compose(self) -> ComposeResult:
         with Vertical(id="linked-git-broker-panel"):
@@ -4081,7 +4089,22 @@ class LinkedGitCommitPathsScreen(ModalScreen[None]):
                 "There is no add-all, glob, directory, or implicit staging mode.",
                 id="linked-git-broker-help",
             )
-            yield TextArea("[]", id="linked-git-broker-paths", soft_wrap=True)
+            if self.suggested_paths:
+                yield Static(
+                    "The reviewed handoff supplied the exact suggested subset below. "
+                    "Confirm or narrow it before continuing.",
+                    id="linked-git-broker-suggested-help",
+                )
+            yield TextArea(
+                json.dumps(list(self.suggested_paths), indent=2),
+                id="linked-git-broker-paths",
+                soft_wrap=True,
+            )
+            if self.scoped_change_summary:
+                yield Static(
+                    self.scoped_change_summary,
+                    id="linked-git-broker-change-summary",
+                )
             yield Static(
                 "Protected/unapproved dirt: excluded and unobserved. Agent PBX "
                 "will not enumerate, open, stat, hash, or pass those paths to Git.",
@@ -27297,7 +27320,65 @@ class AgentPBXTUI(App[None]):
         if next_action == "stop":
             await self.stop_selected_operator(agent_id=target_agent_id)
         elif next_action == "broker_review":
-            self.palette_operator_git_commit()
+            if self.operator_broker_posture.root_operator_enabled:
+                root_operator_id = str(
+                    current.get("target_operator_agent_id")
+                    or current.get("logical_operator_agent_id")
+                    or ""
+                ).strip()
+                if not root_operator_id:
+                    self.notify(
+                        "Broker action has no supervising root Operator.",
+                        severity="error",
+                    )
+                    return
+                await self.request_operator_broker_checkpoint(
+                    root_operator_agent_id=root_operator_id,
+                    target_fork_agent_id=target_agent_id,
+                    handoff_id=handoff_id,
+                )
+            else:
+                context = self.linked_git_broker_tui_context(target_agent_id)
+                if context is None:
+                    return
+                pending, safe = self.pending_linked_git_broker_transaction(
+                    context,
+                    require_pending=False,
+                )
+                if not safe:
+                    return
+                if pending is not None:
+                    self.notify(
+                        "A pending exact broker transaction must be recovered "
+                        "before a new approval can be prepared.",
+                        severity="warning",
+                    )
+                    self.push_screen(
+                        LinkedGitRecoveryConfirmScreen(
+                            context=context,
+                            pending=pending,
+                        )
+                    )
+                    return
+                scope = current.get("execution_scope")
+                scope = scope if isinstance(scope, Mapping) else {}
+                suggested_paths = tuple(
+                    str(path)
+                    for path in scope.get("exact_paths") or ()
+                    if isinstance(path, str) and path.strip()
+                )
+                scoped_summary = await asyncio.to_thread(
+                    self.linked_git_scoped_change_summary,
+                    context.work_root,
+                    suggested_paths,
+                )
+                self.push_screen(
+                    LinkedGitCommitPathsScreen(
+                        context=context,
+                        suggested_paths=suggested_paths,
+                        scoped_change_summary=scoped_summary,
+                    )
+                )
         elif next_action == "resume":
             await self.resume_selected_operator(agent_id=target_agent_id)
         elif next_action == "validate":
@@ -27310,6 +27391,106 @@ class AgentPBXTUI(App[None]):
             )
         else:
             self.notify("The ready action requires manual review.", severity="warning")
+
+    async def request_operator_broker_checkpoint(
+        self,
+        *,
+        root_operator_agent_id: str,
+        target_fork_agent_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any] | None:
+        """Queue one root-supervised checkpoint from an already reviewed action."""
+
+        response = await self.api_client().post(
+            "/v1/operator/broker-checkpoints",
+            json={
+                "root_operator_agent_id": root_operator_agent_id,
+                "target_fork_agent_id": target_fork_agent_id,
+                "handoff_id": handoff_id,
+            },
+            headers=auth_headers(self.token),
+        )
+        if response.status_code in {400, 409}:
+            try:
+                error_payload = response.json()
+            except ValueError:
+                error_payload = {}
+            detail_value = (
+                error_payload.get("detail")
+                if isinstance(error_payload, dict)
+                else None
+            )
+            if isinstance(detail_value, dict):
+                detail = str(
+                    detail_value.get("message")
+                    or detail_value.get("code")
+                    or detail_value
+                )
+            else:
+                detail = str(detail_value or response.text or response.status_code)
+            self.notify(
+                f"Root-supervised broker request was refused: {detail}",
+                severity="error",
+            )
+            return None
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("broker request response was not an object")
+        request = payload.get("request")
+        request = request if isinstance(request, dict) else {}
+        request_id = str(request.get("request_id") or "").strip()
+        if not request_id:
+            raise RuntimeError("broker request response omitted the request id")
+        self.notify(
+            f"Queued root-supervised checkpoint {request_id[:12]} for "
+            f"{target_fork_agent_id}."
+        )
+        self.schedule_operator_broker_requests()
+        return payload
+
+    @staticmethod
+    def linked_git_scoped_change_summary(
+        work_root: str,
+        exact_paths: tuple[str, ...],
+    ) -> str:
+        """Describe only the reviewed exact paths for the guided broker screen."""
+
+        if not work_root or not exact_paths:
+            return "No reviewed exact paths were supplied by this handoff."
+
+        def run(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "-C", work_root, *args, "--", *exact_paths],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+        status = run("status", "--short", "--untracked-files=all")
+        unstaged = run("diff", "--stat")
+        staged = run("diff", "--cached", "--stat")
+        if any(result.returncode != 0 for result in (status, unstaged, staged)):
+            return (
+                "Scoped Git summary unavailable. No paths were staged; review the "
+                "exact handoff subset before continuing."
+            )
+        status_text = status.stdout.strip() or "(no scoped changes)"
+        unstaged_text = unstaged.stdout.strip() or "(none)"
+        staged_text = staged.stdout.strip() or "(none)"
+        return "\n".join(
+            (
+                "Reviewed-scope Git status:",
+                status_text,
+                "",
+                "Unstaged diff summary:",
+                unstaged_text,
+                "",
+                "Staged diff summary:",
+                staged_text,
+            )
+        )
 
     @staticmethod
     def format_operator_ready_action(action: Mapping[str, Any]) -> str:

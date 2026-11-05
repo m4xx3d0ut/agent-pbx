@@ -33,6 +33,7 @@ from agent_pbx.git_broker import (
     LinkedGitBrokerRestored,
     PendingLinkedGitCommit,
 )
+from agent_pbx.operator_broker import OperatorBrokerPosture
 from agent_pbx.tui import (
     ActiveCodexSession,
     AgentPBXTUI,
@@ -8610,6 +8611,99 @@ async def test_tui_guided_ready_action_runs_only_the_reviewed_next_step() -> Non
         ("cursor", "operator-7-fork:True"),
         ("stop", "operator-7-fork"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_tui_root_operator_ready_action_queues_checkpoint() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str, str]] = []
+    action = {
+        "handoff_id": "handoff-1",
+        "logical_operator_agent_id": "operator-0",
+        "target_operator_agent_id": "operator-8",
+        "target_agent_id": "operator-8-fork",
+        "scope_sha256": "a" * 64,
+        "state": "stopped_ready_broker",
+        "next_action": "broker_review",
+        "execution_scope": {"exact_paths": ["src/app.py"]},
+    }
+    app.operator_broker_posture = OperatorBrokerPosture(
+        mode="root_operator",
+        control_mode="editable",
+        request_ttl_seconds=900,
+        max_in_flight_per_root=1,
+    )
+    app.operator_broker_action = (  # type: ignore[method-assign]
+        lambda **_kwargs: asyncio.sleep(0, result=dict(action))
+    )
+    app.open_agent_latest = lambda _agent_id: asyncio.sleep(0)  # type: ignore[method-assign]
+    app.move_operator_cursor = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    async def request_checkpoint(**kwargs):
+        calls.append(
+            (
+                kwargs["root_operator_agent_id"],
+                kwargs["target_fork_agent_id"],
+                kwargs["handoff_id"],
+            )
+        )
+        return {"request": {"request_id": "request-1"}}
+
+    app.request_operator_broker_checkpoint = request_checkpoint  # type: ignore[method-assign]
+
+    await app.advance_operator_ready_action(action)
+
+    assert calls == [("operator-8", "operator-8-fork", "handoff-1")]
+
+
+@pytest.mark.asyncio
+async def test_tui_guided_broker_review_prefills_reviewed_paths() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.operator_broker_posture = OperatorBrokerPosture(
+        mode="guided",
+        control_mode="editable",
+        request_ttl_seconds=900,
+        max_in_flight_per_root=1,
+    )
+    action = {
+        "handoff_id": "handoff-1",
+        "target_operator_agent_id": "operator-8",
+        "target_agent_id": "operator-8-fork",
+        "scope_sha256": "a" * 64,
+        "state": "stopped_ready_broker",
+        "next_action": "broker_review",
+        "execution_scope": {
+            "exact_paths": ["src/app.py", "tests/test_app.py"],
+        },
+    }
+    context = LinkedGitBrokerTuiContext(
+        agent_id="operator-8-fork",
+        work_root="/tmp/work",
+        approved_roots=(Path("/tmp"),),
+        codex_home=Path("/tmp/codex"),
+        authority_sha256="b" * 64,
+        plan_public={},
+    )
+    screens: list[object] = []
+    app.operator_broker_action = (  # type: ignore[method-assign]
+        lambda **_kwargs: asyncio.sleep(0, result=dict(action))
+    )
+    app.open_agent_latest = lambda _agent_id: asyncio.sleep(0)  # type: ignore[method-assign]
+    app.move_operator_cursor = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    app.linked_git_broker_tui_context = lambda *_args, **_kwargs: context  # type: ignore[method-assign]
+    app.pending_linked_git_broker_transaction = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (None, True)
+    )
+    app.linked_git_scoped_change_summary = lambda *_args: "M src/app.py"  # type: ignore[method-assign]
+    app.push_screen = lambda screen: screens.append(screen)  # type: ignore[method-assign]
+
+    await app.advance_operator_ready_action(action)
+
+    assert len(screens) == 1
+    screen = screens[0]
+    assert isinstance(screen, LinkedGitCommitPathsScreen)
+    assert screen.suggested_paths == ("src/app.py", "tests/test_app.py")
+    assert screen.scoped_change_summary == "M src/app.py"
 
 
 @pytest.mark.asyncio

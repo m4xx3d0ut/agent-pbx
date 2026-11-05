@@ -396,6 +396,143 @@ def test_broker_service_preflight_binds_root_fork_campaign_and_scope(tmp_path) -
     assert len(result["authority_sha256"]) == 64
 
 
+def test_broker_service_accepts_tui_approved_cross_root_handoff(tmp_path) -> None:
+    digest = "a" * 64
+    store = Store(tmp_path / "cross-root.sqlite")
+    store.init()
+    for agent_id in ("operator-0", "operator-8"):
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=agent_id,
+                project="agent-pbx-operator",
+                agent_type="operator",
+                metadata={
+                    "cwd": str(tmp_path),
+                    "operator_role": "root",
+                    "logical_operator_id": agent_id,
+                    "operator_authority_activated_profile": "trusted-workbench",
+                    "operator_authority_activated_workspace_set_digest": digest,
+                },
+            )
+        )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-8",
+            project="demo",
+            metadata={
+                "cwd": str(tmp_path),
+                "codex_session_id": "session-caller-8",
+            },
+        )
+    )
+    operator = OperatorService(store)
+    fork = operator.ensure_fork(
+        operator_agent_id="operator-8",
+        source_caller_agent_id="caller-8",
+        fork_agent_id="operator-8-fork",
+        fork_track_id="edit",
+        fork_purpose="edit",
+        access_mode="edit",
+        source_cwd=str(tmp_path),
+        work_root=str(tmp_path),
+        fork_codex_session_id="session-fork-8",
+        status="running",
+        metadata={
+            "operator_authority_activated_profile": "trusted-workbench",
+            "operator_authority_activated_workspace_set_digest": digest,
+        },
+    )
+    campaign = store.create_operator_campaign(
+        operator_agent_id="operator-8",
+        title="Delegated exact checkpoint",
+        objective="Commit the target root's reviewed checkpoint",
+        criteria=["exact paths only"],
+        assignments=[
+            {
+                "target_agent_id": "caller-8",
+                "title": "Prepare exact change",
+                "prompt": "Prepare the reviewed change.",
+                "criteria": [],
+            }
+        ],
+    )
+    handoff = operator.create_handoff(
+        operator_agent_id="operator-0",
+        source_agent_id="operator-0",
+        target_operator_agent_id="operator-8",
+        target_operator_fork_id=str(fork["operator_fork_id"]),
+        message="Execute the reviewed delegated checkpoint.",
+        execution_scope={
+            "action_class": "exact_git_commit_broker",
+            "campaign_id": campaign["campaign_id"],
+            "workspace_set_digest": digest,
+            "mutation_mode": "exact_paths",
+            "allowed_roots": [str(tmp_path)],
+            "exact_paths": ["src/app.py"],
+            "expected_git_parent": "b" * 40,
+            "commit_subject": "fix: delegated exact checkpoint",
+        },
+    )
+    handoff = store.update_operator_handoff(
+        str(handoff["handoff_id"]),
+        status="acknowledged",
+        metadata={
+            "approved_by": "agent-pbx-tui",
+            "approved_by_operator_agent_id": "operator-0",
+            "acknowledged_by_operator_agent_id": "operator-8",
+        },
+    )
+    assert handoff is not None
+    service = OperatorBrokerService(
+        store,
+        environ={"AGENT_PBX_OPERATOR_BROKER_MODE": "root_operator"},
+    )
+
+    result = service.preflight(
+        root_operator_agent_id="operator-8",
+        target_fork_agent_id="operator-8-fork",
+        handoff_id=str(handoff["handoff_id"]),
+    )
+
+    assert result["ok"] is True
+    assert result["handoff_root_operator_agent_id"] == "operator-0"
+    assert result["handoff_authority_mode"] == "delegated_cross_root"
+    assert result["campaign_id"] == campaign["campaign_id"]
+    assert result["exact_paths"] == ["src/app.py"]
+
+
+def test_broker_service_rejects_unacknowledged_cross_root_handoff(tmp_path) -> None:
+    _store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+    service.store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-other",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={
+                "cwd": str(tmp_path),
+                "operator_role": "root",
+                "logical_operator_id": "operator-other",
+            },
+        )
+    )
+
+    with service.store.connect() as conn:
+        conn.execute(
+            "UPDATE operator_handoffs SET logical_operator_agent_id = ? WHERE handoff_id = ?",
+            ("operator-other", str(handoff["handoff_id"])),
+        )
+
+    with pytest.raises(
+        OperatorBrokerPolicyError,
+        match="requires source-root approval",
+    ):
+        service.preflight(
+            root_operator_agent_id="operator-0",
+            target_fork_agent_id="operator-7-fork",
+            handoff_id=str(handoff["handoff_id"]),
+        )
+
+
 def test_broker_service_root_mode_creates_durable_request(tmp_path) -> None:
     store, service, handoff, _digest = _qualified_broker_service(tmp_path)
 
