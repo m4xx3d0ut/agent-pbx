@@ -40199,7 +40199,9 @@ class AgentPBXTUI(App[None]):
         self.selected_thread_item_id = item_id
         if self.selected_agent_id:
             self.selected_thread_item_id_by_agent[self.selected_agent_id] = item_id
-        self.query_one("#thread-detail", TextArea).text = self.format_thread_item(item)
+        detail = self.query_one_or_none("#thread-detail", TextArea)
+        if detail is not None:
+            detail.text = self.format_thread_item(item)
         self.render_plan_choice_panel(item)
 
     def format_thread_plan_state(self, item: dict[str, Any]) -> str:

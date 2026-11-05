@@ -16907,6 +16907,27 @@ async def test_tui_load_thread_ignores_report_before_thread_surface_mount() -> N
     await app.load_thread("agent-1")
 
 
+def test_tui_thread_selection_before_surface_mount_is_nonfatal() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    item = {
+        "item_id": "report:r1",
+        "kind": "report",
+        "agent_id": "agent-1",
+        "created_at": 123.0,
+        "status": "done",
+        "title": "Report summary",
+        "body": "Full report detail",
+        "metadata": {},
+    }
+    app.thread_items = {"report:r1": item}
+    app.selected_agent_id = "agent-1"
+
+    app.select_thread_item("report:r1")
+
+    assert app.selected_thread_item_id == "report:r1"
+    assert app.selected_thread_item_id_by_agent["agent-1"] == "report:r1"
+
+
 async def test_tui_structured_plan_options_render_and_queue_metadata() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     queued: list[tuple[str, str, dict[str, object]]] = []
