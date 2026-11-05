@@ -1216,6 +1216,48 @@ class OperatorHandoffDeliveryResponse(BaseModel):
     command: CommandResponse | None = None
 
 
+class OperatorHandoffActionResponse(BaseModel):
+    handoff_id: str
+    logical_operator_agent_id: str
+    target_operator_agent_id: str
+    target_agent_id: str
+    target_operator_fork_id: str
+    campaign_id: str
+    action_class: str
+    state: str
+    next_action: str | None = None
+    scope_sha256: str
+    execution_scope: dict[str, Any] = Field(default_factory=dict)
+    transaction_id: str | None = None
+    reason: str | None = None
+    updated_at: float | None = None
+
+
+class OperatorHandoffActionListResponse(BaseModel):
+    actions: list[OperatorHandoffActionResponse] = Field(default_factory=list)
+
+
+class OperatorHandoffExecutionPreflightResponse(BaseModel):
+    ok: bool
+    handoff: OperatorHandoffResponse
+    action: OperatorHandoffActionResponse | None = None
+    transaction: dict[str, Any] | None = None
+    participant_operator_agent_id: str
+
+
+class OperatorHandoffActionReceiptRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    step: Literal["stop", "broker_review", "broker_commit", "resume", "validate"]
+    outcome: Literal["started", "succeeded", "failed", "restored"]
+    actor: str = Field(min_length=1, max_length=240)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorHandoffActionTransactionResponse(BaseModel):
+    action: OperatorHandoffActionResponse | None = None
+    transaction: dict[str, Any]
+
+
 class OperatorHandoffPreflightResponse(BaseModel):
     handoff_id: str
     operator_agent_id: str

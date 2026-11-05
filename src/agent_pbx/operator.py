@@ -39,6 +39,7 @@ from .operator_delegation import (
     normalize_delegation_lease_scope,
     normalize_execution_scope,
 )
+from .operator_actions import project_handoff_action
 from .tmux_binary import configured_tmux_binary
 
 
@@ -2634,6 +2635,209 @@ class OperatorService:
             }:
                 raise ValueError("handoff belongs to a different operator")
         return self._expire_handoff_if_due(handoff)
+
+    def preflight_handoff_execution(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        """Return participant-visible local execution readiness without mutation."""
+
+        handoff = self._require_handoff_for_participant(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+        )
+        handoff = self._expire_handoff_if_due(handoff)
+        transaction = self.store.get_operator_action_transaction(
+            handoff_id=handoff_id
+        )
+        target_agent = self._handoff_action_target_agent(handoff)
+        action = project_handoff_action(
+            handoff,
+            target_agent=target_agent,
+            transaction=transaction,
+        )
+        return {
+            "ok": bool(
+                action
+                and action.get("state") != "blocked_reapproval_required"
+                and bool(action.get("next_action"))
+            ),
+            "handoff": handoff,
+            "action": action,
+            "transaction": transaction,
+            "participant_operator_agent_id": operator_agent_id,
+        }
+
+    def list_handoff_actions(
+        self,
+        *,
+        target_agent_id: str | None = None,
+        limit: int = 100,
+        include_complete: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Project target-visible local actions separately from approvals."""
+
+        handoffs = self.store.list_operator_handoffs(limit=min(max(limit, 1), 500))
+        actions: list[dict[str, Any]] = []
+        for handoff in handoffs:
+            transaction = self.store.get_operator_action_transaction(
+                handoff_id=str(handoff.get("handoff_id") or "")
+            )
+            target_agent = self._handoff_action_target_agent(handoff)
+            action = project_handoff_action(
+                handoff,
+                target_agent=target_agent,
+                transaction=transaction,
+            )
+            if action is None:
+                continue
+            if target_agent_id and action.get("target_agent_id") != target_agent_id:
+                continue
+            if not include_complete and action.get("state") == "complete":
+                continue
+            actions.append(action)
+        return sorted(
+            actions,
+            key=lambda item: (
+                float(item.get("updated_at") or 0.0),
+                str(item.get("handoff_id") or ""),
+            ),
+        )[: min(max(limit, 1), 500)]
+
+    def record_handoff_action_receipt(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_id: str,
+        step: str,
+        outcome: str,
+        actor: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        handoff = self._require_handoff_for_participant(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+        )
+        target_agent = self._handoff_action_target_agent(handoff)
+        transaction = self.store.get_operator_action_transaction(
+            handoff_id=handoff_id
+        )
+        projection = project_handoff_action(
+            handoff,
+            target_agent=target_agent,
+            transaction=transaction,
+        )
+        if projection is None:
+            raise ValueError("handoff does not expose a managed local action")
+        if projection.get("state") == "blocked_reapproval_required":
+            raise ValueError(str(projection.get("reason") or "handoff requires reapproval"))
+        if target_agent is None:
+            raise ValueError("handoff target edit fork is unavailable")
+        self._validate_handoff_action_receipt(
+            projection=projection,
+            target_agent=target_agent,
+            step=step,
+            outcome=outcome,
+            evidence=evidence or {},
+        )
+        updated = self.store.append_operator_action_receipt(
+            handoff_id=handoff_id,
+            action_class=str(projection["action_class"]),
+            target_agent_id=str(projection["target_agent_id"]),
+            scope_sha256=str(projection["scope_sha256"]),
+            initial_state=str(projection["state"]),
+            step=step,
+            outcome=outcome,
+            actor=actor,
+            evidence=evidence,
+            metadata={"operator_agent_id": operator_agent_id},
+        )
+        refreshed = project_handoff_action(
+            handoff,
+            target_agent=self._handoff_action_target_agent(handoff),
+            transaction=updated,
+        )
+        self.store.append_event(
+            "operator_handoff_action_receipt",
+            {
+                "handoff_id": handoff_id,
+                "transaction_id": updated["transaction_id"],
+                "target_agent_id": updated["target_agent_id"],
+                "step": step,
+                "outcome": outcome,
+                "state": updated["state"],
+            },
+            handoff_id,
+        )
+        return {"action": refreshed, "transaction": updated}
+
+    def _handoff_action_target_agent(
+        self,
+        handoff: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        fork_id = str(handoff.get("target_operator_fork_id") or "").strip()
+        metadata = handoff.get("metadata")
+        if not fork_id and isinstance(metadata, Mapping):
+            fork_id = str(metadata.get("target_operator_fork_id") or "").strip()
+        if not fork_id:
+            return None
+        fork = self.store.get_operator_fork(fork_id)
+        if fork is None:
+            fork = self.store.get_operator_fork_for_agent(fork_id)
+        if fork is None:
+            return None
+        agent_id = str(fork.get("fork_agent_id") or "").strip()
+        return self.store.get_agent(agent_id) if agent_id else None
+
+    @staticmethod
+    def _validate_handoff_action_receipt(
+        *,
+        projection: Mapping[str, Any],
+        target_agent: Mapping[str, Any],
+        step: str,
+        outcome: str,
+        evidence: Mapping[str, Any],
+    ) -> None:
+        if outcome not in {"started", "succeeded", "failed", "restored"}:
+            raise ValueError("operator action receipt outcome is invalid")
+        if outcome != "succeeded":
+            return
+        if step == "stop" and not (
+            str(target_agent.get("status") or "").casefold() == "canceled"
+            and not bool(target_agent.get("pbx_active", True))
+        ):
+            raise ValueError("stop receipt requires the exact target fork to be stopped")
+        if step == "resume" and (
+            str(target_agent.get("status") or "").casefold() == "canceled"
+            or not bool(target_agent.get("pbx_active", False))
+        ):
+            raise ValueError("resume receipt requires the exact target fork to be active")
+        scope = projection.get("execution_scope")
+        scope = scope if isinstance(scope, Mapping) else {}
+        if step == "broker_review":
+            if str(evidence.get("head") or "") != str(
+                scope.get("expected_git_parent") or ""
+            ):
+                raise ValueError("broker receipt Git parent does not match approval")
+            if str(evidence.get("commit_subject") or "") != str(
+                scope.get("commit_subject") or ""
+            ):
+                raise ValueError("broker receipt subject does not match approval")
+            if set(evidence.get("approved_stage_paths") or ()) != set(
+                scope.get("exact_paths") or ()
+            ):
+                raise ValueError("broker receipt paths do not match approval")
+        if step == "broker_commit":
+            if str(evidence.get("old_head") or "") != str(
+                scope.get("expected_git_parent") or ""
+            ):
+                raise ValueError("broker result parent does not match approval")
+            if set(evidence.get("committed_paths") or ()) != set(
+                scope.get("exact_paths") or ()
+            ):
+                raise ValueError("broker result paths do not match approval")
 
     def approve_handoff(
         self,

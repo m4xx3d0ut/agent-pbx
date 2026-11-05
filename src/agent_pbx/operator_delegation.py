@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+import hashlib
+import json
 import re
 from typing import Any, Mapping
 
@@ -140,6 +142,97 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
     if host_process_evidence is not None:
         normalized["host_process_evidence"] = host_process_evidence
     return normalized
+
+
+def resolve_handoff_execution_scope(handoff: Mapping[str, Any]) -> dict[str, Any]:
+    """Return one canonical handoff scope, including validated legacy records.
+
+    Structured handoffs created by current Agent PBX releases store the scope in
+    the top-level ``execution_scope`` column.  A small number of handoffs created
+    during the rollout of the feature stored an equivalent, richer description
+    under ``metadata.execution_scope``.  Those records are accepted only when
+    they can be reduced to the same narrow schema without guessing.
+
+    If both representations are present, their immutable execution fields must
+    agree.  A mismatch fails closed instead of silently selecting one source.
+    """
+
+    top_level_raw = handoff.get("execution_scope")
+    top_level = (
+        normalize_execution_scope(top_level_raw)
+        if isinstance(top_level_raw, Mapping) and top_level_raw
+        else {}
+    )
+    metadata = handoff.get("metadata")
+    legacy_raw = metadata.get("execution_scope") if isinstance(metadata, Mapping) else None
+    legacy = _normalize_legacy_execution_scope(legacy_raw)
+    if top_level and legacy and execution_scope_digest(top_level) != execution_scope_digest(legacy):
+        raise ValueError(
+            "handoff top-level and legacy execution scopes do not match"
+        )
+    return top_level or legacy
+
+
+def execution_scope_digest(scope: Mapping[str, Any] | None) -> str:
+    """Hash a canonical scope for drift detection and action receipts."""
+
+    normalized = normalize_execution_scope(scope)
+    if not normalized:
+        return ""
+    return hashlib.sha256(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _normalize_legacy_execution_scope(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or not value:
+        return {}
+    action_class = str(value.get("action_class") or "").strip().lower()
+    if action_class in HANDOFF_ACTION_CLASSES:
+        return normalize_execution_scope(value)
+    if "managed_broker" not in action_class:
+        raise ValueError("legacy handoff execution_scope action_class is unsupported")
+
+    roots: list[str] = []
+    for raw in value.get("allowed_roots") or ():
+        if isinstance(raw, Mapping):
+            path = str(raw.get("path") or "").strip()
+        else:
+            path = str(raw or "").strip()
+        if path:
+            roots.append(path)
+
+    exact_paths: list[str] = []
+    for raw in value.get("exact_paths") or ():
+        if isinstance(raw, Mapping):
+            access = str(raw.get("access") or "").strip().lower()
+            path = str(raw.get("path") or "").strip()
+            if "broker_commit" not in access:
+                continue
+        else:
+            path = str(raw or "").strip()
+        if path:
+            exact_paths.append(path)
+
+    expected_parent = str(
+        value.get("expected_git_parent") or value.get("expected_parent") or ""
+    ).strip()
+    commit_subject = str(value.get("commit_subject") or "").strip()
+    if not roots or not exact_paths or not expected_parent or not commit_subject:
+        raise ValueError("legacy managed-broker scope is incomplete")
+    return normalize_execution_scope(
+        {
+            "action_class": "exact_git_commit_broker",
+            "campaign_id": value.get("campaign_id"),
+            "workspace_set_digest": value.get("workspace_set_digest"),
+            "mutation_mode": "exact_paths",
+            "allowed_roots": roots,
+            "exact_paths": exact_paths,
+            "expected_git_parent": expected_parent,
+            "commit_subject": commit_subject,
+            "denied_actions": value.get("denied_actions") or (),
+        }
+    )
 
 
 def execution_scope_requires_manual_approval(scope: Mapping[str, Any] | None) -> bool:

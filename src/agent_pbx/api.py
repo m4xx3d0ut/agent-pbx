@@ -233,11 +233,15 @@ from .schemas import (
     OperatorDelegationLeaseResponse,
     OperatorDelegationLeaseRevokeRequest,
     OperatorHandoffAckRequest,
+    OperatorHandoffActionListResponse,
+    OperatorHandoffActionReceiptRequest,
+    OperatorHandoffActionTransactionResponse,
     OperatorHandoffApproveRequest,
     OperatorHandoffCancelRequest,
     OperatorHandoffCancelResponse,
     OperatorHandoffCreateRequest,
     OperatorHandoffDeliveryResponse,
+    OperatorHandoffExecutionPreflightResponse,
     OperatorHandoffListResponse,
     OperatorHandoffPreflightRequest,
     OperatorHandoffPreflightResponse,
@@ -5319,6 +5323,61 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             operator_agent_id=payload.operator_agent_id,
             handoff_id=handoff_id,
             delivery=payload.delivery,
+        )
+
+    @app.get(
+        "/v1/operator/handoff-actions",
+        response_model=OperatorHandoffActionListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_handoff_actions(
+        request: Request,
+        target_agent_id: str | None = None,
+        limit: int = 100,
+        include_complete: bool = False,
+    ) -> dict[str, object]:
+        actions = await asyncio.to_thread(
+            request.app.state.operator_service.list_handoff_actions,
+            target_agent_id=target_agent_id,
+            limit=limit,
+            include_complete=include_complete,
+        )
+        return {"actions": actions}
+
+    @app.get(
+        "/v1/operator/handoffs/{handoff_id}/execution-preflight",
+        response_model=OperatorHandoffExecutionPreflightResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def preflight_operator_handoff_execution(
+        handoff_id: str,
+        operator_agent_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.preflight_handoff_execution,
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+        )
+
+    @app.post(
+        "/v1/operator/handoffs/{handoff_id}/action-receipts",
+        response_model=OperatorHandoffActionTransactionResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def record_operator_handoff_action_receipt(
+        handoff_id: str,
+        payload: OperatorHandoffActionReceiptRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.record_handoff_action_receipt,
+            operator_agent_id=payload.operator_agent_id,
+            handoff_id=handoff_id,
+            step=payload.step,
+            outcome=payload.outcome,
+            actor=payload.actor,
+            evidence=payload.evidence,
         )
 
     @app.post(

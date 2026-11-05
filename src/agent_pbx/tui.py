@@ -5817,6 +5817,61 @@ class OperatorHandoffApprovalConfirmScreen(ModalScreen[None]):
             )
 
 
+class OperatorReadyActionScreen(ModalScreen[None]):
+    """Review one approved target-side action without executing it automatically."""
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, action: dict[str, Any]) -> None:
+        super().__init__()
+        self.action = action
+
+    def compose(self) -> ComposeResult:
+        scope = (
+            self.action.get("execution_scope")
+            if isinstance(self.action.get("execution_scope"), dict)
+            else {}
+        )
+        paths = scope.get("exact_paths") if isinstance(scope.get("exact_paths"), list) else []
+        with Vertical(id="operator-handoff-confirm-panel"):
+            yield Static("Operator ready action", id="operator-handoff-confirm-title")
+            yield Static(
+                "\n".join(
+                    [
+                        f"State: {self.action.get('state') or '-'}",
+                        f"Next: {self.action.get('next_action') or 'manual review'}",
+                        f"Handoff: {self.action.get('handoff_id') or '-'}",
+                        f"Campaign: {self.action.get('campaign_id') or '-'}",
+                        f"Target: {self.action.get('target_agent_id') or '-'}",
+                        f"Transaction: {self.action.get('transaction_id') or 'not started'}",
+                        f"Scope: {str(self.action.get('scope_sha256') or '-')[:16]}",
+                        "Exact paths:",
+                        *(f"- {path}" for path in paths),
+                        "",
+                        str(self.action.get("reason") or "Use the guarded palette action shown by Next. Steps are never chained automatically."),
+                    ]
+                ),
+                id="operator-handoff-confirm-summary",
+            )
+            with Horizontal(id="operator-handoff-confirm-actions"):
+                yield Button("Focus target", id="operator-ready-action-focus", variant="primary")
+                yield Button("Close", id="operator-ready-action-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "operator-ready-action-close":
+            self.dismiss()
+            return
+        if event.button.id == "operator-ready-action-focus":
+            work = self.app.focus_operator_ready_action(self.action)  # type: ignore[attr-defined]
+            self.dismiss()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                work,
+                name="operator-ready-action-focus",
+                exclusive=True,
+            )
+
+
 class OperatorHandoffCancelConfirmScreen(ModalScreen[None]):
     """Confirm audited withdrawal of pre-delivery Operator handoffs."""
 
@@ -7962,6 +8017,10 @@ class AgentPBXTUI(App[None]):
             str, tuple[int, float | None]
         ] = {}
         self.handoff_approval_opening_operator_id: str | None = None
+        self.reviewed_handoff_action_signatures: dict[
+            str, tuple[int, float | None]
+        ] = {}
+        self.handoff_action_opening_operator_id: str | None = None
         self.local_starred_agent_ids = str_set_setting(
             self.settings,
             "starred_agent_ids",
@@ -9687,6 +9746,22 @@ class AgentPBXTUI(App[None]):
             return False
         return True
 
+    async def open_native_codex_subagents(self) -> bool:
+        agent_id = str(self.selected_agent_id or "").strip()
+        if not agent_id or not self.is_tmux_direct_enabled(agent_id):
+            self.notify(
+                "Select a tmux-direct Agent or Operator before opening Codex /subagents.",
+                severity="warning",
+            )
+            return False
+        if not await self.send_text_to_tmux(agent_id, "/subagents"):
+            self.notify(
+                "Unable to send /subagents to the selected Codex pane.",
+                severity="error",
+            )
+            return False
+        return True
+
     def select_codex_config_field(self, key: str) -> None:
         self.selected_codex_config_key = key
         if key.startswith("hidden:"):
@@ -10697,6 +10772,11 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/codex config save", "Save the Codex config key/value editor", self.palette_codex_config_save)
         yield SystemCommand("/pbx keymap", "Show PBX and Codex key ownership", self.palette_pbx_keymap)
         yield SystemCommand("/codex keymap", "Open the native Codex /keymap viewer", self.palette_codex_keymap)
+        yield SystemCommand(
+            "/subagents",
+            "Open the native Codex subagent inspector for the selected runtime",
+            self.palette_codex_subagents,
+        )
         yield SystemCommand("/codex keymap portable", "Save the portable Codex newline keymap", self.palette_codex_keymap_portable)
         yield SystemCommand("/codex keymap reset", "Remove the Agent PBX keymap overrides", self.palette_codex_keymap_reset)
         yield SystemCommand("/codex mcp wire", "Write Agent PBX MCP config to global Codex config", self.palette_codex_mcp_wire)
@@ -10909,6 +10989,16 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator fork prev", "View the previous fork pane for the selected operator", self.palette_operator_fork_prev)
         yield SystemCommand("/operator fork review", "Start a read-only review fork for the selected operator", self.palette_operator_fork_review)
         yield SystemCommand("/operator handoffs", "Show handoffs for the selected operator", self.palette_operator_handoffs)
+        yield SystemCommand(
+            "/operator ready actions",
+            "Review approved local actions waiting on guarded TUI controls",
+            self.palette_operator_ready_actions,
+        )
+        yield SystemCommand(
+            "/operator action validate",
+            "Mark the selected fork's post-resume validation complete",
+            self.palette_operator_action_validate,
+        )
         yield SystemCommand("/operator handoff preflight", "Preview delivery readiness for the oldest pending operator handoff", self.palette_operator_handoff_preflight)
         yield SystemCommand("/operator handoff approve", "Open exact-ID Operator handoff approvals", self.palette_operator_handoff_approve)
         yield SystemCommand("/operator handoff launch", "Launch the required fork for a pending handoff", self.palette_operator_handoff_launch)
@@ -11694,6 +11784,13 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_codex_subagents(self) -> None:
+        self.run_worker(
+            self.open_native_codex_subagents(),
+            name="codex-native-subagents",
+            exclusive=True,
+        )
+
     def palette_codex_keymap_portable(self) -> None:
         self.run_worker(
             self.apply_codex_keymap_preset("portable"),
@@ -12390,6 +12487,30 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.show_selected_operator_handoffs(),
             name="palette-operator-handoffs",
+            exclusive=True,
+        )
+
+    def palette_operator_ready_actions(self) -> None:
+        agent_id = self.palette_operator_lifecycle_target("review ready actions for")
+        if agent_id is None:
+            return
+        agent = self.agents.get(agent_id) or {}
+        logical_operator_id = self.logical_operator_id_for_agent(agent)
+        self.run_worker(
+            self.open_operator_ready_action(logical_operator_id),
+            name="palette-operator-ready-actions",
+            exclusive=True,
+        )
+
+    def palette_operator_action_validate(self) -> None:
+        agent_id = self.palette_operator_lifecycle_target(
+            "complete the approved validation action for"
+        )
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.validate_operator_ready_action(agent_id),
+            name="palette-operator-action-validate",
             exclusive=True,
         )
 
@@ -15373,6 +15494,7 @@ class AgentPBXTUI(App[None]):
             self.unseen_latest_agent_ids
             or self.tmux_plan_selector_agent_ids
             or self.pending_handoff_approval_operator_ids
+            or self.ready_handoff_action_operators()
         )
         if not self.agent_blink_enabled or not has_attention_target:
             if self.attention_blink_phase:
@@ -15419,6 +15541,22 @@ class AgentPBXTUI(App[None]):
             if len(approval_ids) > 3:
                 displayed += f", +{len(approval_ids) - 3}"
             marker = "APPROVALS!" if blink_active else "APPROVALS"
+            attention.update(f"{marker} {total}: {displayed} · F8 review")
+            attention.add_class("unseen-active")
+            self.set_attention_flash_class(False)
+            return
+        action_ids = self.ready_handoff_action_operators()
+        if action_ids:
+            self.attention_agent_id = action_ids[0]
+            total = sum(
+                int(self.agents[agent_id].get("ready_handoff_action_count") or 0)
+                for agent_id in action_ids
+                if agent_id in self.agents
+            )
+            displayed = ", ".join(action_ids[:3])
+            if len(action_ids) > 3:
+                displayed += f", +{len(action_ids) - 3}"
+            marker = "ACTIONS!" if blink_active else "ACTIONS"
             attention.update(f"{marker} {total}: {displayed} · F8 review")
             attention.add_class("unseen-active")
             self.set_attention_flash_class(False)
@@ -15472,6 +15610,9 @@ class AgentPBXTUI(App[None]):
             if agent_id in self.agents:
                 return agent_id
         for agent_id in self.pending_handoff_operators():
+            if agent_id in self.agents:
+                return agent_id
+        for agent_id in self.ready_handoff_action_operators():
             if agent_id in self.agents:
                 return agent_id
         if self.attention_agent_id in self.agents:
@@ -15548,6 +15689,60 @@ class AgentPBXTUI(App[None]):
             != self.handoff_approval_signature(operator_agent_id)
         ]
 
+    def ready_handoff_action_operators(self) -> list[str]:
+        operator_ids = [
+            agent_id
+            for agent_id, agent in self.agents.items()
+            if int(agent.get("ready_handoff_action_count") or 0) > 0
+        ]
+        operator_ids.sort(
+            key=lambda agent_id: (
+                float_value(
+                    self.agents[agent_id].get("oldest_ready_handoff_action_at")
+                )
+                or math.inf,
+                agent_id,
+            )
+        )
+        self.reviewed_handoff_action_signatures = {
+            agent_id: signature
+            for agent_id, signature in self.reviewed_handoff_action_signatures.items()
+            if agent_id in operator_ids
+        }
+        return operator_ids
+
+    def handoff_action_signature(
+        self,
+        operator_agent_id: str,
+    ) -> tuple[int, float | None]:
+        agent = self.agents.get(operator_agent_id) or {}
+        return (
+            int(agent.get("ready_handoff_action_count") or 0),
+            float_value(agent.get("oldest_ready_handoff_action_at")),
+        )
+
+    def unreviewed_handoff_action_operators(self) -> list[str]:
+        return [
+            operator_agent_id
+            for operator_agent_id in self.ready_handoff_action_operators()
+            if self.reviewed_handoff_action_signatures.get(operator_agent_id)
+            != self.handoff_action_signature(operator_agent_id)
+        ]
+
+    def active_ready_action_screen(self) -> OperatorReadyActionScreen | None:
+        try:
+            screens = list(self.screen_stack)
+        except ScreenStackError:
+            return None
+        return next(
+            (
+                screen
+                for screen in reversed(screens)
+                if isinstance(screen, OperatorReadyActionScreen)
+            ),
+            None,
+        )
+
     def active_handoff_approval_screen(self) -> OperatorHandoffApprovalScreen | None:
         try:
             screens = list(self.screen_stack)
@@ -15563,12 +15758,24 @@ class AgentPBXTUI(App[None]):
         )
 
     async def action_focus_next_alert(self) -> None:
-        if self.handoff_approval_opening_operator_id is not None:
+        if (
+            self.handoff_approval_opening_operator_id is not None
+            or self.handoff_action_opening_operator_id is not None
+        ):
             self.notify(
                 "Operator handoff approvals are already opening.",
                 severity="information",
             )
             return
+        active_action = self.active_ready_action_screen()
+        if active_action is not None:
+            if self.screen is not active_action:
+                self.notify(
+                    "Finish or close the current ready action before cycling alerts.",
+                    severity="warning",
+                )
+                return
+            await active_action.dismiss()
         active_approval = self.active_handoff_approval_screen()
         closed_approval = False
         if active_approval is not None:
@@ -15583,6 +15790,10 @@ class AgentPBXTUI(App[None]):
         approval_ids = self.unreviewed_handoff_operators()
         if approval_ids:
             await self.open_operator_handoff_approval_center(approval_ids[0])
+            return
+        action_ids = self.unreviewed_handoff_action_operators()
+        if action_ids:
+            await self.open_operator_ready_action(action_ids[0])
             return
         agent_id = self.next_alert_agent_id()
         if agent_id is not None:
@@ -15607,6 +15818,12 @@ class AgentPBXTUI(App[None]):
             for operator_agent_id in remaining_approvals:
                 self.reviewed_handoff_approval_signatures.pop(operator_agent_id, None)
             await self.open_operator_handoff_approval_center(remaining_approvals[0])
+            return
+        remaining_actions = self.ready_handoff_action_operators()
+        if remaining_actions:
+            for operator_agent_id in remaining_actions:
+                self.reviewed_handoff_action_signatures.pop(operator_agent_id, None)
+            await self.open_operator_ready_action(remaining_actions[0])
             return
         self.notify("No Agent or Operator alerts are pending.")
 
@@ -26792,6 +27009,204 @@ class AgentPBXTUI(App[None]):
             reverse=True,
         )
 
+    async def fetch_operator_handoff_actions(
+        self,
+        *,
+        target_agent_id: str | None = None,
+        include_complete: bool = False,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "limit": 100,
+            "include_complete": include_complete,
+        }
+        if target_agent_id:
+            params["target_agent_id"] = target_agent_id
+        response = await self.api_client().get(
+            "/v1/operator/handoff-actions",
+            params=params,
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        raw = payload.get("actions") if isinstance(payload, dict) else []
+        return [item for item in raw if isinstance(item, dict)]
+
+    async def record_operator_handoff_action_receipt(
+        self,
+        *,
+        handoff_id: str,
+        operator_agent_id: str,
+        step: str,
+        outcome: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/handoffs/{handoff_id}/action-receipts",
+            json={
+                "operator_agent_id": operator_agent_id,
+                "step": step,
+                "outcome": outcome,
+                "actor": "agent-pbx-tui",
+                "evidence": evidence or {},
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    async def record_ready_action_for_target(
+        self,
+        target_agent_id: str,
+        *,
+        step: str,
+        outcome: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Link a guarded TUI result to one unambiguous approved handoff."""
+
+        actions = await self.fetch_operator_handoff_actions(
+            target_agent_id=target_agent_id
+        )
+        if not actions:
+            return None
+        if len(actions) != 1:
+            raise RuntimeError(
+                f"{len(actions)} ready handoff actions target {target_agent_id}; "
+                "select an exact handoff before recording execution"
+            )
+        action = actions[0]
+        return await self.record_operator_handoff_action_receipt(
+            handoff_id=str(action.get("handoff_id") or ""),
+            operator_agent_id=str(action.get("target_operator_agent_id") or ""),
+            step=step,
+            outcome=outcome,
+            evidence=evidence,
+        )
+
+    def ready_action_signal_for_target(self, target_agent_id: str) -> bool:
+        target = self.agents.get(target_agent_id) or {}
+        metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+        logical_operator_id = str(
+            metadata.get("logical_operator_agent_id")
+            or metadata.get("operator_agent_id")
+            or ""
+        ).strip()
+        root = self.agents.get(logical_operator_id) or {}
+        return int(root.get("ready_handoff_action_count") or 0) > 0
+
+    async def maybe_record_ready_action_for_target(
+        self,
+        target_agent_id: str,
+        *,
+        step: str,
+        outcome: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.ready_action_signal_for_target(target_agent_id):
+            return
+        try:
+            await self.record_ready_action_for_target(
+                target_agent_id,
+                step=step,
+                outcome=outcome,
+                evidence=evidence,
+            )
+        except Exception as exc:
+            self.notify(
+                f"Guarded action completed, but its handoff receipt was not recorded: {exc}",
+                severity="error",
+            )
+
+    async def validate_operator_ready_action(self, target_agent_id: str) -> None:
+        try:
+            result = await self.record_ready_action_for_target(
+                target_agent_id,
+                step="validate",
+                outcome="succeeded",
+                evidence={"confirmed_by": "agent-pbx-tui"},
+            )
+        except Exception as exc:
+            self.notify(f"Unable to complete ready action: {exc}", severity="error")
+            return
+        if result is None:
+            self.notify(
+                f"No approved validation action targets {target_agent_id}.",
+                severity="warning",
+            )
+            return
+        self.notify(f"Completed the approved validation action for {target_agent_id}.")
+        await self.refresh_agents()
+        await self.refresh_events()
+
+    async def open_operator_ready_action(self, logical_operator_id: str) -> None:
+        if self.handoff_action_opening_operator_id is not None:
+            self.notify("Operator ready actions are already opening.")
+            return
+        self.handoff_action_opening_operator_id = logical_operator_id
+        try:
+            actions = await self.fetch_operator_handoff_actions()
+            matching = [
+                action
+                for action in actions
+                if str(action.get("target_operator_agent_id") or "")
+                == logical_operator_id
+            ]
+            oldest = min(
+                (float_value(action.get("updated_at")) or math.inf for action in matching),
+                default=None,
+            )
+            self.reviewed_handoff_action_signatures[logical_operator_id] = (
+                len(matching),
+                oldest,
+            )
+            if not matching:
+                self.notify(f"No ready actions for {logical_operator_id}.")
+                return
+            self.push_screen(OperatorReadyActionScreen(matching[0]))
+        except Exception as exc:
+            self.notify(f"Unable to open Operator ready actions: {exc}", severity="error")
+        finally:
+            self.handoff_action_opening_operator_id = None
+
+    async def focus_operator_ready_action(self, action: dict[str, Any]) -> None:
+        target_agent_id = str(action.get("target_agent_id") or "").strip()
+        if not target_agent_id or target_agent_id not in self.agents:
+            self.notify("Ready-action target is no longer visible.", severity="warning")
+            return
+        await self.open_agent_latest(target_agent_id)
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None and not self.is_tmux_direct_enabled(target_agent_id):
+            detail.text = self.format_operator_ready_action(action)
+        self.notify(
+            f"Focused {target_agent_id}; next guarded action: "
+            f"{action.get('next_action') or 'manual review'}."
+        )
+
+    @staticmethod
+    def format_operator_ready_action(action: Mapping[str, Any]) -> str:
+        scope = action.get("execution_scope")
+        scope = scope if isinstance(scope, Mapping) else {}
+        paths = scope.get("exact_paths") if isinstance(scope.get("exact_paths"), list) else []
+        return "\n".join(
+            [
+                "Operator ready action",
+                "",
+                f"State: {action.get('state') or '-'}",
+                f"Next: {action.get('next_action') or '-'}",
+                f"Handoff: {action.get('handoff_id') or '-'}",
+                f"Campaign: {action.get('campaign_id') or '-'}",
+                f"Target: {action.get('target_agent_id') or '-'}",
+                f"Transaction: {action.get('transaction_id') or 'not started'}",
+                f"Scope SHA-256: {action.get('scope_sha256') or '-'}",
+                "",
+                "Exact paths:",
+                *(f"- {path}" for path in paths),
+                "",
+                "Use the guarded palette action shown by Next. Agent PBX will not chain lifecycle or Git actions automatically.",
+            ]
+        )
+
     async def approve_operator_handoff(
         self,
         logical_operator_id: str,
@@ -30312,6 +30727,17 @@ class AgentPBXTUI(App[None]):
                 severity="error",
             )
             return
+        await self.maybe_record_ready_action_for_target(
+            context.agent_id,
+            step="broker_review",
+            outcome="succeeded",
+            evidence={
+                "transaction_id": receipt.transaction_id,
+                "head": receipt.head,
+                "commit_subject": receipt.commit_subject,
+                "approved_stage_paths": list(receipt.approved_stage_paths),
+            },
+        )
         self.push_screen(
             LinkedGitCommitConfirmScreen(context=context, receipt=receipt)
         )
@@ -30355,6 +30781,18 @@ class AgentPBXTUI(App[None]):
         except (LinkedGitBrokerError, OSError) as exc:
             self.notify(f"Linked Git commit failed closed: {exc}", severity="error")
             return
+        await self.maybe_record_ready_action_for_target(
+            context.agent_id,
+            step="broker_commit",
+            outcome="succeeded",
+            evidence={
+                "transaction_id": result.transaction_id,
+                "old_head": result.old_head,
+                "new_head": result.new_head,
+                "committed_paths": list(result.committed_paths),
+                "status": result.status,
+            },
+        )
         self.notify(
             f"Committed {len(result.committed_paths)} approved path(s) for "
             f"{context.agent_id}: {result.new_head[:12]}."
@@ -30435,6 +30873,12 @@ class AgentPBXTUI(App[None]):
                 return
             self.notify(
                 f"Restored the exact original linked-Git state for {context.agent_id}."
+            )
+            await self.maybe_record_ready_action_for_target(
+                context.agent_id,
+                step="broker_commit",
+                outcome="restored",
+                evidence={"transaction_id": receipt.transaction_id},
             )
             detail = self.query_one_or_none("#detail", TextArea)
             if detail is not None:
@@ -31023,6 +31467,15 @@ class AgentPBXTUI(App[None]):
             self.notify(f"Resumed {agent_id} from {target.session_id}.")
         self.save_settings()
         await self.refresh_agents()
+        await self.maybe_record_ready_action_for_target(
+            agent_id,
+            step="resume",
+            outcome="succeeded",
+            evidence={
+                "codex_session_id": target.session_id,
+                "tmux_pane_id": resumed_pane_id,
+            },
+        )
         await self.open_latest_for_agent(agent_id)
 
     async def stop_selected_operator(
@@ -31113,6 +31566,12 @@ class AgentPBXTUI(App[None]):
                 self.agents[agent_id] = finalized_agent
             self.notify(f"Stopped and finalized managed Operator {agent_id}.")
             await self.refresh_agents()
+            await self.maybe_record_ready_action_for_target(
+                agent_id,
+                step="stop",
+                outcome="succeeded",
+                evidence={"managed_stop_transaction_id": transaction_id},
+            )
             await self.refresh_events()
             await self.load_thread(agent_id)
         finally:

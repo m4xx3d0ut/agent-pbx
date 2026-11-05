@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -995,6 +995,43 @@ class Store:
                     ON operator_delegation_leases(
                         source_operator_agent_id, status, expires_at DESC
                     );
+
+                CREATE TABLE IF NOT EXISTS operator_action_transactions (
+                    transaction_id TEXT PRIMARY KEY,
+                    handoff_id TEXT NOT NULL UNIQUE,
+                    action_class TEXT NOT NULL,
+                    target_agent_id TEXT NOT NULL,
+                    scope_sha256 TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    reason TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    completed_at REAL,
+                    FOREIGN KEY(handoff_id) REFERENCES operator_handoffs(handoff_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(target_agent_id) REFERENCES agents(agent_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS operator_action_receipts (
+                    receipt_id TEXT PRIMARY KEY,
+                    transaction_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    step TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    UNIQUE(transaction_id, sequence),
+                    FOREIGN KEY(transaction_id)
+                        REFERENCES operator_action_transactions(transaction_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_operator_action_transactions_state
+                    ON operator_action_transactions(state, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_action_receipts_transaction
+                    ON operator_action_receipts(transaction_id, sequence ASC);
 
                 CREATE TABLE IF NOT EXISTS agent_prune_batches (
                     batch_id TEXT PRIMARY KEY,
@@ -3969,6 +4006,7 @@ class Store:
                 self._add_queue_summary(conn, agent)
                 self._add_campaign_summary(conn, agent)
                 self._add_handoff_approval_summary(conn, agent)
+                self._add_handoff_action_summary(conn, agent)
                 self._add_usage_summary(conn, agent)
         return agents
 
@@ -8996,6 +9034,220 @@ class Store:
                 return None
         return self.get_operator_handoff(handoff_id)
 
+    def get_operator_action_transaction(
+        self,
+        *,
+        transaction_id: str | None = None,
+        handoff_id: str | None = None,
+        include_receipts: bool = True,
+    ) -> dict[str, Any] | None:
+        if not transaction_id and not handoff_id:
+            raise ValueError("transaction_id or handoff_id is required")
+        where = "transaction_id = ?" if transaction_id else "handoff_id = ?"
+        value = transaction_id or handoff_id
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT transaction_id, handoff_id, action_class, target_agent_id,
+                       scope_sha256, state, reason, metadata_json, created_at,
+                       updated_at, completed_at
+                FROM operator_action_transactions
+                WHERE {where}
+                """,
+                (value,),
+            ).fetchone()
+            if row is None:
+                return None
+            result = self._operator_action_transaction_from_row(row)
+            if include_receipts:
+                receipt_rows = conn.execute(
+                    """
+                    SELECT receipt_id, transaction_id, sequence, step, outcome,
+                           actor, evidence_json, created_at
+                    FROM operator_action_receipts
+                    WHERE transaction_id = ?
+                    ORDER BY sequence ASC
+                    """,
+                    (result["transaction_id"],),
+                ).fetchall()
+                result["receipts"] = [
+                    self._operator_action_receipt_from_row(receipt)
+                    for receipt in receipt_rows
+                ]
+        return result
+
+    def list_operator_action_transactions(
+        self,
+        *,
+        state: str | None = None,
+        target_agent_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if state:
+            where.append("state = ?")
+            params.append(state)
+        if target_agent_id:
+            where.append("target_agent_id = ?")
+            params.append(target_agent_id)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(min(max(int(limit), 1), 500))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT transaction_id, handoff_id, action_class, target_agent_id,
+                       scope_sha256, state, reason, metadata_json, created_at,
+                       updated_at, completed_at
+                FROM operator_action_transactions
+                {clause}
+                ORDER BY updated_at DESC, transaction_id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._operator_action_transaction_from_row(row) for row in rows]
+
+    def append_operator_action_receipt(
+        self,
+        *,
+        handoff_id: str,
+        action_class: str,
+        target_agent_id: str,
+        scope_sha256: str,
+        initial_state: str,
+        step: str,
+        outcome: str,
+        actor: str,
+        evidence: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append one ordered action receipt and advance its transaction atomically."""
+
+        from .operator_actions import ACTION_STATES, transition_action_state
+
+        if initial_state not in ACTION_STATES:
+            raise ValueError("operator action initial state is invalid")
+        if not scope_sha256:
+            raise ValueError("operator action scope digest is required")
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT transaction_id, handoff_id, action_class, target_agent_id,
+                       scope_sha256, state, reason, metadata_json, created_at,
+                       updated_at, completed_at
+                FROM operator_action_transactions
+                WHERE handoff_id = ?
+                """,
+                (handoff_id,),
+            ).fetchone()
+            if row is None:
+                transaction_id = str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO operator_action_transactions
+                        (transaction_id, handoff_id, action_class, target_agent_id,
+                         scope_sha256, state, metadata_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        transaction_id,
+                        handoff_id,
+                        action_class,
+                        target_agent_id,
+                        scope_sha256,
+                        initial_state,
+                        json.dumps(metadata or {}),
+                        current,
+                        current,
+                    ),
+                )
+                state = initial_state
+            else:
+                transaction_id = str(row["transaction_id"])
+                state = str(row["state"])
+                if str(row["scope_sha256"]) != scope_sha256:
+                    raise ValueError(
+                        "operator action scope changed after execution began; reapproval is required"
+                    )
+                if str(row["action_class"]) != action_class:
+                    raise ValueError("operator action class changed after execution began")
+                if str(row["target_agent_id"]) != target_agent_id:
+                    raise ValueError("operator action target changed after execution began")
+            next_state = transition_action_state(state, step, outcome)
+            sequence_row = conn.execute(
+                """
+                SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence
+                FROM operator_action_receipts
+                WHERE transaction_id = ?
+                """,
+                (transaction_id,),
+            ).fetchone()
+            sequence = int(sequence_row["next_sequence"])
+            receipt_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO operator_action_receipts
+                    (receipt_id, transaction_id, sequence, step, outcome, actor,
+                     evidence_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    receipt_id,
+                    transaction_id,
+                    sequence,
+                    step,
+                    outcome,
+                    actor,
+                    json.dumps(evidence or {}),
+                    current,
+                ),
+            )
+            completed_at = current if next_state == "complete" else None
+            conn.execute(
+                """
+                UPDATE operator_action_transactions
+                SET state = ?, updated_at = ?, completed_at = COALESCE(?, completed_at)
+                WHERE transaction_id = ?
+                """,
+                (next_state, current, completed_at, transaction_id),
+            )
+        result = self.get_operator_action_transaction(transaction_id=transaction_id)
+        if result is None:
+            raise RuntimeError("operator action transaction insert failed")
+        return result
+
+    @staticmethod
+    def _operator_action_transaction_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "transaction_id": row["transaction_id"],
+            "handoff_id": row["handoff_id"],
+            "action_class": row["action_class"],
+            "target_agent_id": row["target_agent_id"],
+            "scope_sha256": row["scope_sha256"],
+            "state": row["state"],
+            "reason": row["reason"],
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "completed_at": row["completed_at"],
+        }
+
+    @staticmethod
+    def _operator_action_receipt_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "receipt_id": row["receipt_id"],
+            "transaction_id": row["transaction_id"],
+            "sequence": int(row["sequence"]),
+            "step": row["step"],
+            "outcome": row["outcome"],
+            "actor": row["actor"],
+            "evidence": json.loads(row["evidence_json"] or "{}"),
+            "created_at": row["created_at"],
+        }
+
     def create_command(
         self,
         request: CommandCreateRequest,
@@ -10400,6 +10652,65 @@ class Store:
         agent["oldest_pending_handoff_created_at"] = (
             row["oldest_created_at"] if row else None
         )
+
+    @staticmethod
+    def _add_handoff_action_summary(
+        conn: sqlite3.Connection, agent: dict[str, Any]
+    ) -> None:
+        """Expose target-side ready work separately from source approvals."""
+
+        agent["ready_handoff_action_count"] = 0
+        agent["oldest_ready_handoff_action_at"] = None
+        if agent.get("agent_type") != "operator":
+            return
+        rows = conn.execute(
+            f"""
+            {Store._operator_handoff_select_sql()}
+            WHERE h.target_operator_agent_id = ?
+              AND h.status IN ('sent', 'acknowledged', 'running', 'complete', 'completed')
+            ORDER BY h.updated_at ASC
+            LIMIT 100
+            """,
+            (agent["agent_id"],),
+        ).fetchall()
+        from .operator_delegation import resolve_handoff_execution_scope
+
+        actionable: list[float] = []
+        for row in rows:
+            handoff = Store._operator_handoff_from_row(row)
+            try:
+                scope = resolve_handoff_execution_scope(handoff)
+            except ValueError:
+                top = handoff.get("execution_scope")
+                metadata = handoff.get("metadata")
+                legacy = (
+                    metadata.get("execution_scope")
+                    if isinstance(metadata, dict)
+                    else None
+                )
+                raw = top if isinstance(top, dict) and top else legacy
+                raw_class = (
+                    str(raw.get("action_class") or "").lower()
+                    if isinstance(raw, dict)
+                    else ""
+                )
+                if raw_class != "exact_git_commit_broker" and "managed_broker" not in raw_class:
+                    continue
+                scope = {"action_class": "blocked"}
+            if scope.get("action_class") not in {"exact_git_commit_broker", "blocked"}:
+                continue
+            transaction = conn.execute(
+                """
+                SELECT state FROM operator_action_transactions
+                WHERE handoff_id = ?
+                """,
+                (handoff["handoff_id"],),
+            ).fetchone()
+            if transaction is not None and str(transaction["state"]) == "complete":
+                continue
+            actionable.append(float(handoff.get("updated_at") or 0.0))
+        agent["ready_handoff_action_count"] = len(actionable)
+        agent["oldest_ready_handoff_action_at"] = min(actionable) if actionable else None
 
     @staticmethod
     def _add_usage_summary(

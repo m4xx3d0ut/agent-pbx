@@ -5,16 +5,19 @@ import subprocess
 import pytest
 
 from agent_pbx.operator import OperatorService
+from agent_pbx.operator_actions import project_handoff_action
 from agent_pbx.operator_authority import (
     OPERATOR_AUTHORITY_PROFILE_CEILING_ENV,
     OPERATOR_AUTHORITY_ROOT_CEILING_ENV,
     OperatorAuthorityService,
 )
 from agent_pbx.operator_delegation import (
+    execution_scope_digest,
     execution_scope_requires_manual_approval,
     normalize_execution_scope,
+    resolve_handoff_execution_scope,
 )
-from agent_pbx.schemas import AgentRegisterRequest
+from agent_pbx.schemas import AgentRegisterRequest, ReportCreateRequest
 from agent_pbx.store import SCHEMA_VERSION, Store
 
 
@@ -84,6 +87,219 @@ def test_handoff_rejects_execution_scope_misplaced_in_metadata(tmp_path: Path) -
         )
 
     assert store.list_operator_handoffs(logical_operator_agent_id="operator-0") == []
+
+
+def test_legacy_managed_broker_scope_is_reduced_without_guessing(tmp_path: Path) -> None:
+    handoff = {
+        "execution_scope": {},
+        "metadata": {
+            "execution_scope": {
+                "action_class": "oss_checkpoint_managed_broker_then_validation",
+                "campaign_id": "campaign-1",
+                "workspace_set_digest": "a" * 64,
+                "allowed_roots": [{"path": str(tmp_path), "access": "exact"}],
+                "exact_paths": [
+                    {"path": "src/app.py", "access": "managed_broker_commit_only"},
+                    {"path": "ci.yml", "access": "read_only_must_remain_identical"},
+                ],
+                "expected_parent": "b" * 40,
+                "commit_subject": "Agent PBX approved commit",
+            }
+        },
+    }
+
+    scope = resolve_handoff_execution_scope(handoff)
+
+    assert scope["action_class"] == "exact_git_commit_broker"
+    assert scope["exact_paths"] == ["src/app.py"]
+    assert scope["expected_git_parent"] == "b" * 40
+    assert len(execution_scope_digest(scope)) == 64
+
+
+def test_ready_action_transaction_records_guarded_stop_broker_resume_validate(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operators(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={"cwd": str(tmp_path)},
+        )
+    )
+    service = OperatorService(store)
+    fork = service.ensure_fork(
+        operator_agent_id="operator-7",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-7-fork-caller-1",
+        status="running",
+        metadata={"cwd": str(tmp_path), "pbx_mode": "report"},
+    )
+    scope = {
+        "action_class": "exact_git_commit_broker",
+        "campaign_id": "campaign-1",
+        "workspace_set_digest": "a" * 64,
+        "mutation_mode": "exact_paths",
+        "allowed_roots": [str(tmp_path)],
+        "exact_paths": ["src/app.py", "tests/test_app.py"],
+        "expected_git_parent": "b" * 40,
+        "commit_subject": "Agent PBX approved commit",
+    }
+    handoff = service.create_handoff(
+        operator_agent_id="operator-0",
+        source_agent_id="operator-0",
+        target_operator_agent_id="operator-7",
+        target_operator_fork_id=fork["operator_fork_id"],
+        message="Use the exact guarded broker path.",
+        execution_scope=scope,
+    )
+    handoff = store.update_operator_handoff(
+        handoff["handoff_id"],
+        status="acknowledged",
+    )
+    assert handoff is not None
+
+    preflight = service.preflight_handoff_execution(
+        operator_agent_id="operator-7",
+        handoff_id=handoff["handoff_id"],
+    )
+    assert preflight["action"]["state"] == "ready_stop"
+    assert preflight["transaction"] is None
+    with pytest.raises(ValueError, match="different operator"):
+        service.preflight_handoff_delivery(
+            operator_agent_id="operator-7",
+            handoff_id=handoff["handoff_id"],
+        )
+
+    service.ensure_fork(
+        operator_agent_id="operator-7",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-7-fork-caller-1",
+        status="canceled",
+        metadata={"cwd": str(tmp_path), "pbx_mode": "report"},
+    )
+    store.create_report(
+        "operator-7-fork-caller-1",
+        ReportCreateRequest(
+            project="agent-pbx-operator",
+            status="canceled",
+            summary="Stopped",
+            detail="Stopped for broker",
+        ),
+    )
+    store.set_agent_pbx_active("operator-7-fork-caller-1", False)
+    stopped = service.record_handoff_action_receipt(
+        operator_agent_id="operator-7",
+        handoff_id=handoff["handoff_id"],
+        step="stop",
+        outcome="succeeded",
+        actor="test",
+    )
+    assert stopped["transaction"]["state"] == "stopped_ready_broker"
+
+    reviewed = service.record_handoff_action_receipt(
+        operator_agent_id="operator-7",
+        handoff_id=handoff["handoff_id"],
+        step="broker_review",
+        outcome="succeeded",
+        actor="test",
+        evidence={
+            "head": "b" * 40,
+            "commit_subject": "Agent PBX approved commit",
+            "approved_stage_paths": ["src/app.py", "tests/test_app.py"],
+        },
+    )
+    assert reviewed["transaction"]["state"] == "receipt_review"
+    committed = service.record_handoff_action_receipt(
+        operator_agent_id="operator-7",
+        handoff_id=handoff["handoff_id"],
+        step="broker_commit",
+        outcome="succeeded",
+        actor="test",
+        evidence={
+            "old_head": "b" * 40,
+            "new_head": "c" * 40,
+            "committed_paths": ["tests/test_app.py", "src/app.py"],
+        },
+    )
+    assert committed["transaction"]["state"] == "committed_ready_resume"
+
+    service.ensure_fork(
+        operator_agent_id="operator-7",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-7-fork-caller-1",
+        status="running",
+        metadata={"cwd": str(tmp_path), "pbx_mode": "report"},
+    )
+    store.set_agent_pbx_active("operator-7-fork-caller-1", True)
+    resumed = service.record_handoff_action_receipt(
+        operator_agent_id="operator-7",
+        handoff_id=handoff["handoff_id"],
+        step="resume",
+        outcome="succeeded",
+        actor="test",
+    )
+    assert resumed["transaction"]["state"] == "resumed_ready_validation"
+    complete = service.record_handoff_action_receipt(
+        operator_agent_id="operator-7",
+        handoff_id=handoff["handoff_id"],
+        step="validate",
+        outcome="succeeded",
+        actor="test",
+        evidence={"result": "green"},
+    )
+    assert complete["transaction"]["state"] == "complete"
+    assert [receipt["step"] for receipt in complete["transaction"]["receipts"]] == [
+        "stop",
+        "broker_review",
+        "broker_commit",
+        "resume",
+        "validate",
+    ]
+
+
+def test_ready_action_scope_drift_requires_reapproval(tmp_path: Path) -> None:
+    handoff = {
+        "handoff_id": "handoff-1",
+        "logical_operator_agent_id": "operator-0",
+        "target_operator_agent_id": "operator-7",
+        "target_operator_fork_id": "fork-1",
+        "status": "acknowledged",
+        "updated_at": 100.0,
+        "execution_scope": {
+            "action_class": "exact_git_commit_broker",
+            "campaign_id": "campaign-1",
+            "workspace_set_digest": "a" * 64,
+            "mutation_mode": "exact_paths",
+            "allowed_roots": [str(tmp_path)],
+            "exact_paths": ["src/app.py"],
+            "expected_git_parent": "b" * 40,
+            "commit_subject": "Agent PBX approved commit",
+        },
+        "metadata": {},
+    }
+    target = {
+        "agent_id": "operator-7-fork",
+        "status": "working",
+        "pbx_active": True,
+    }
+    action = project_handoff_action(
+        handoff,
+        target_agent=target,
+        transaction={
+            "transaction_id": "tx-1",
+            "scope_sha256": "f" * 64,
+            "state": "receipt_review",
+            "updated_at": 101.0,
+        },
+    )
+
+    assert action is not None
+    assert action["state"] == "blocked_reapproval_required"
+    assert action["next_action"] is None
+    assert "scope changed" in action["reason"]
 
 
 @pytest.mark.parametrize(

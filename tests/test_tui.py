@@ -56,6 +56,7 @@ from agent_pbx.tui import (
     OperatorDelegationLeaseConfirmScreen,
     OperatorHandoffApprovalScreen,
     OperatorHandoffCancelConfirmScreen,
+    OperatorReadyActionScreen,
     OperatorHistoryScreen,
     OperatorSessionCandidate,
     ReadingMarkdown,
@@ -7940,6 +7941,10 @@ def linked_git_broker_test_receipt(
         index_sha256="d" * 64,
         branch_ref_sha256="5" * 64,
         branch_reflog_sha256="6" * 64,
+        commit_subject=(
+            "Agent PBX approved commit for "
+            f"{context.agent_id}"
+        ),
     )
 
 
@@ -8126,6 +8131,7 @@ async def test_tui_linked_git_broker_exact_confirmation_executes_once_from_fixed
         execute_calls.append({"receipt": received, **kwargs})
         return SimpleNamespace(
             transaction_id="e" * 64,
+            status="committed",
             committed_paths=("approved.txt",),
             old_head="a" * 40,
             new_head="b" * 40,
@@ -28135,6 +28141,60 @@ async def test_tui_f8_routes_durable_handoff_approval_before_report_alert() -> N
 
     assert opened == ["operator-0"]
     assert app.unseen_latest_agent_ids == {"caller-1"}
+
+
+@pytest.mark.asyncio
+async def test_tui_f8_routes_ready_action_after_approval_before_report() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "pending_handoff_approval_count": 0,
+            "ready_handoff_action_count": 1,
+            "oldest_ready_handoff_action_at": 10.0,
+        },
+        "caller-1": {"agent_id": "caller-1", "agent_type": "caller"},
+    }
+    app.unseen_latest_agent_ids = {"caller-1"}
+    opened: list[str] = []
+
+    async def fake_open(operator_agent_id: str) -> None:
+        opened.append(operator_agent_id)
+
+    app.open_operator_ready_action = fake_open  # type: ignore[method-assign]
+
+    await app.action_focus_next_alert()
+
+    assert opened == ["operator-0"]
+    assert app.unseen_latest_agent_ids == {"caller-1"}
+
+
+@pytest.mark.asyncio
+async def test_ready_action_screen_focuses_without_executing_chain() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    focused: list[str] = []
+    action = {
+        "handoff_id": "handoff-1",
+        "campaign_id": "campaign-1",
+        "target_agent_id": "operator-8-fork",
+        "state": "stopped_ready_broker",
+        "next_action": "broker_review",
+        "scope_sha256": "a" * 64,
+        "execution_scope": {"exact_paths": ["src/app.py"]},
+    }
+
+    async def fake_focus(value: dict[str, object]) -> None:
+        focused.append(str(value["handoff_id"]))
+
+    app.focus_operator_ready_action = fake_focus  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        app.push_screen(OperatorReadyActionScreen(action))
+        await pilot.pause()
+        assert await pilot.click("#operator-ready-action-focus")
+        await pilot.pause()
+
+    assert focused == ["handoff-1"]
 
 
 @pytest.mark.asyncio
