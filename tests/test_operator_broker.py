@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from agent_pbx.operator import OperatorService
 from agent_pbx.operator_broker import (
     OperatorBrokerPolicyError,
     normalize_broker_commit_subject,
@@ -9,6 +10,8 @@ from agent_pbx.operator_broker import (
     normalize_broker_paths,
     operator_broker_posture,
 )
+from agent_pbx.schemas import AgentRegisterRequest
+from agent_pbx.store import SCHEMA_VERSION, Store
 
 
 def test_operator_broker_posture_defaults_to_guided_safe_path() -> None:
@@ -78,3 +81,141 @@ def test_operator_broker_rejects_empty_escaping_or_protected_paths(
 def test_operator_broker_rejects_multiline_subject() -> None:
     with pytest.raises(OperatorBrokerPolicyError):
         normalize_broker_commit_subject("fix: one\nbody")
+
+
+def _broker_store(tmp_path) -> tuple[Store, str, str]:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    for agent_id, role in (("operator-0", "root"), ("operator-7-fork", "fork")):
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=agent_id,
+                project="agent-pbx-operator",
+                agent_type="operator",
+                metadata={
+                    "cwd": str(tmp_path),
+                    "operator_role": role,
+                    "logical_operator_id": "operator-0",
+                },
+            )
+        )
+    handoff = OperatorService(store).create_handoff(
+        operator_agent_id="operator-0",
+        source_agent_id="operator-0",
+        target_operator_agent_id="operator-0",
+        message="Commit the reviewed exact scope.",
+    )
+    return store, str(handoff["handoff_id"]), "a" * 64
+
+
+def _create_request(store: Store, handoff_id: str, digest: str):
+    return store.create_operator_broker_request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff_id,
+        workspace_set_digest=digest,
+        scope_sha256="b" * 64,
+        expected_git_parent="c" * 40,
+        commit_subject="fix: durable broker request",
+        exact_paths=["src/app.py"],
+        ttl_seconds=900,
+        max_in_flight_per_root=1,
+    )
+
+
+def test_store_installs_durable_operator_broker_request_schema(tmp_path) -> None:
+    store, handoff_id, digest = _broker_store(tmp_path)
+
+    request, created = _create_request(store, handoff_id, digest)
+
+    assert store.schema_version() == SCHEMA_VERSION
+    assert created is True
+    assert request["status"] == "pending"
+    assert request["exact_paths"] == ["src/app.py"]
+
+
+def test_store_reuses_identical_open_request_and_limits_root_concurrency(
+    tmp_path,
+) -> None:
+    store, handoff_id, digest = _broker_store(tmp_path)
+    first, created = _create_request(store, handoff_id, digest)
+    reused, reused_created = _create_request(store, handoff_id, digest)
+
+    assert created is True
+    assert reused_created is False
+    assert reused["request_id"] == first["request_id"]
+
+    second_handoff = OperatorService(store).create_handoff(
+        operator_agent_id="operator-0",
+        source_agent_id="operator-0",
+        target_operator_agent_id="operator-0",
+        message="Another exact request.",
+    )
+    with pytest.raises(ValueError, match="maximum"):
+        _create_request(store, str(second_handoff["handoff_id"]), digest)
+
+
+def test_store_claims_with_compare_and_swap_and_rejects_other_executor(
+    tmp_path,
+) -> None:
+    store, handoff_id, digest = _broker_store(tmp_path)
+    request, _created = _create_request(store, handoff_id, digest)
+
+    claimed = store.claim_operator_broker_request(
+        request_id=request["request_id"],
+        executor_id="tui-a",
+    )
+
+    assert claimed["status"] == "claimed"
+    assert claimed["executor_id"] == "tui-a"
+    with pytest.raises(ValueError, match="not claimable"):
+        store.claim_operator_broker_request(
+            request_id=request["request_id"],
+            executor_id="tui-b",
+        )
+    with pytest.raises(PermissionError, match="another executor"):
+        store.transition_operator_broker_request(
+            request_id=request["request_id"],
+            executor_id="tui-b",
+            status="executing",
+            expected_statuses=("claimed",),
+        )
+
+
+def test_store_persists_terminal_result_and_prevents_cancel_after_claim(
+    tmp_path,
+) -> None:
+    store, handoff_id, digest = _broker_store(tmp_path)
+    request, _created = _create_request(store, handoff_id, digest)
+    store.claim_operator_broker_request(
+        request_id=request["request_id"],
+        executor_id="tui-a",
+    )
+
+    with pytest.raises(ValueError, match="allowed to finish"):
+        store.cancel_operator_broker_request(
+            request_id=request["request_id"],
+            root_operator_agent_id="operator-0",
+            reason="too late",
+        )
+
+    executing = store.transition_operator_broker_request(
+        request_id=request["request_id"],
+        executor_id="tui-a",
+        status="executing",
+        expected_statuses=("claimed",),
+        action_transaction_id=None,
+        result={"phase": "stop"},
+    )
+    completed = store.transition_operator_broker_request(
+        request_id=request["request_id"],
+        executor_id="tui-a",
+        status="succeeded",
+        expected_statuses=("executing",),
+        result={"new_head": "d" * 40, "validation_pending": True},
+    )
+
+    assert executing["status"] == "executing"
+    assert completed["status"] == "succeeded"
+    assert completed["result"]["validation_pending"] is True
+    assert completed["completed_at"] is not None

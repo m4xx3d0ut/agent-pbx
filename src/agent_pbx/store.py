@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -218,6 +218,17 @@ OPERATOR_SESSION_ID_METADATA_KEYS = (
     "last_resume_codex_session_id",
     "fork_codex_session_id",
 )
+OPERATOR_BROKER_REQUEST_OPEN_STATUSES = {
+    "pending",
+    "claimed",
+    "executing",
+}
+OPERATOR_BROKER_REQUEST_TERMINAL_STATUSES = {
+    "succeeded",
+    "failed",
+    "canceled",
+    "expired",
+}
 
 
 def _operator_active_state_sql(status_column: str, completed_column: str) -> str:
@@ -1032,6 +1043,48 @@ class Store:
                     ON operator_action_transactions(state, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_operator_action_receipts_transaction
                     ON operator_action_receipts(transaction_id, sequence ASC);
+
+                CREATE TABLE IF NOT EXISTS operator_broker_requests (
+                    request_id TEXT PRIMARY KEY,
+                    root_operator_agent_id TEXT NOT NULL,
+                    target_fork_agent_id TEXT NOT NULL,
+                    handoff_id TEXT NOT NULL,
+                    action_transaction_id TEXT,
+                    workspace_set_digest TEXT NOT NULL,
+                    scope_sha256 TEXT NOT NULL,
+                    expected_git_parent TEXT NOT NULL,
+                    commit_subject TEXT NOT NULL,
+                    exact_paths_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    executor_id TEXT,
+                    claim_expires_at REAL,
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    error_code TEXT,
+                    error TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    completed_at REAL,
+                    canceled_at REAL,
+                    FOREIGN KEY(root_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(target_fork_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(handoff_id) REFERENCES operator_handoffs(handoff_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(action_transaction_id)
+                        REFERENCES operator_action_transactions(transaction_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_operator_broker_requests_status
+                    ON operator_broker_requests(status, expires_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_operator_broker_requests_root
+                    ON operator_broker_requests(
+                        root_operator_agent_id, status, created_at DESC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_operator_broker_requests_target
+                    ON operator_broker_requests(
+                        target_fork_agent_id, status, created_at DESC
+                    );
 
                 CREATE TABLE IF NOT EXISTS agent_prune_batches (
                     batch_id TEXT PRIMARY KEY,
@@ -9033,6 +9086,343 @@ class Store:
             if cursor.rowcount != 1:
                 return None
         return self.get_operator_handoff(handoff_id)
+
+    def create_operator_broker_request(
+        self,
+        *,
+        root_operator_agent_id: str,
+        target_fork_agent_id: str,
+        handoff_id: str,
+        workspace_set_digest: str,
+        scope_sha256: str,
+        expected_git_parent: str,
+        commit_subject: str,
+        exact_paths: list[str] | tuple[str, ...],
+        ttl_seconds: int,
+        max_in_flight_per_root: int,
+    ) -> tuple[dict[str, Any], bool]:
+        """Create or reuse one exact durable broker request atomically."""
+
+        current = now_ts()
+        expires_at = current + int(ttl_seconds)
+        exact_paths_json = json.dumps(list(exact_paths), separators=(",", ":"))
+        open_statuses = tuple(sorted(OPERATOR_BROKER_REQUEST_OPEN_STATUSES))
+        placeholders = ",".join("?" for _ in open_statuses)
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_operator_broker_requests(conn, current=current)
+            existing = conn.execute(
+                f"""
+                SELECT * FROM operator_broker_requests
+                WHERE root_operator_agent_id = ?
+                  AND target_fork_agent_id = ?
+                  AND handoff_id = ?
+                  AND scope_sha256 = ?
+                  AND status IN ({placeholders})
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (
+                    root_operator_agent_id,
+                    target_fork_agent_id,
+                    handoff_id,
+                    scope_sha256,
+                    *open_statuses,
+                ),
+            ).fetchone()
+            if existing is not None:
+                return self._operator_broker_request_from_row(existing), False
+            count_row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM operator_broker_requests
+                WHERE root_operator_agent_id = ?
+                  AND status IN ({placeholders})
+                """,
+                (root_operator_agent_id, *open_statuses),
+            ).fetchone()
+            if int(count_row["count"] or 0) >= int(max_in_flight_per_root):
+                raise ValueError(
+                    "root Operator already has the configured maximum number "
+                    "of in-flight broker requests"
+                )
+            request_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO operator_broker_requests(
+                    request_id, root_operator_agent_id, target_fork_agent_id,
+                    handoff_id, workspace_set_digest, scope_sha256,
+                    expected_git_parent, commit_subject, exact_paths_json,
+                    status, result_json, created_at, updated_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}', ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    root_operator_agent_id,
+                    target_fork_agent_id,
+                    handoff_id,
+                    workspace_set_digest,
+                    scope_sha256,
+                    expected_git_parent,
+                    commit_subject,
+                    exact_paths_json,
+                    current,
+                    current,
+                    expires_at,
+                ),
+            )
+        result = self.get_operator_broker_request(request_id)
+        if result is None:
+            raise RuntimeError("operator broker request insert failed")
+        return result, True
+
+    def get_operator_broker_request(
+        self,
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        current = now_ts()
+        with self.connect() as conn:
+            self._expire_operator_broker_requests(conn, current=current)
+            row = conn.execute(
+                "SELECT * FROM operator_broker_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        return self._operator_broker_request_from_row(row) if row is not None else None
+
+    def list_operator_broker_requests(
+        self,
+        *,
+        root_operator_agent_id: str | None = None,
+        target_fork_agent_id: str | None = None,
+        statuses: tuple[str, ...] | list[str] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        current = now_ts()
+        clauses: list[str] = []
+        values: list[Any] = []
+        if root_operator_agent_id:
+            clauses.append("root_operator_agent_id = ?")
+            values.append(root_operator_agent_id)
+        if target_fork_agent_id:
+            clauses.append("target_fork_agent_id = ?")
+            values.append(target_fork_agent_id)
+        normalized_statuses = tuple(
+            sorted({str(value).strip().lower() for value in statuses or () if str(value).strip()})
+        )
+        if normalized_statuses:
+            clauses.append(
+                "status IN (" + ",".join("?" for _ in normalized_statuses) + ")"
+            )
+            values.extend(normalized_statuses)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connect() as conn:
+            self._expire_operator_broker_requests(conn, current=current)
+            rows = conn.execute(
+                f"""
+                SELECT * FROM operator_broker_requests
+                {where}
+                ORDER BY created_at ASC, request_id ASC
+                LIMIT ?
+                """,
+                (*values, min(max(int(limit), 1), 500)),
+            ).fetchall()
+        return [self._operator_broker_request_from_row(row) for row in rows]
+
+    def claim_operator_broker_request(
+        self,
+        *,
+        request_id: str,
+        executor_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        claim_expires_at = current + min(max(int(lease_seconds), 10), 300)
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_operator_broker_requests(conn, current=current)
+            row = conn.execute(
+                "SELECT * FROM operator_broker_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("operator broker request not found")
+            status = str(row["status"])
+            current_executor = str(row["executor_id"] or "")
+            claim_expiry = float(row["claim_expires_at"] or 0.0)
+            claimable = status == "pending" or (
+                status == "claimed"
+                and (current_executor == executor_id or claim_expiry <= current)
+            )
+            if not claimable:
+                raise ValueError(
+                    f"operator broker request is not claimable from state {status}"
+                )
+            conn.execute(
+                """
+                UPDATE operator_broker_requests
+                SET status = 'claimed', executor_id = ?, claim_expires_at = ?,
+                    updated_at = ?, error_code = NULL, error = NULL
+                WHERE request_id = ?
+                """,
+                (executor_id, claim_expires_at, current, request_id),
+            )
+        result = self.get_operator_broker_request(request_id)
+        assert result is not None
+        return result
+
+    def transition_operator_broker_request(
+        self,
+        *,
+        request_id: str,
+        executor_id: str,
+        status: str,
+        expected_statuses: tuple[str, ...] | list[str],
+        action_transaction_id: str | None = None,
+        result: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
+        error: str | None = None,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        normalized_status = str(status or "").strip().lower()
+        allowed_statuses = OPERATOR_BROKER_REQUEST_OPEN_STATUSES | OPERATOR_BROKER_REQUEST_TERMINAL_STATUSES
+        if normalized_status not in allowed_statuses:
+            raise ValueError(f"unsupported operator broker status: {normalized_status}")
+        expected = tuple(sorted({str(value).strip().lower() for value in expected_statuses}))
+        if not expected:
+            raise ValueError("operator broker transition requires expected statuses")
+        current = now_ts()
+        terminal = normalized_status in OPERATOR_BROKER_REQUEST_TERMINAL_STATUSES
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM operator_broker_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("operator broker request not found")
+            if str(row["status"]) not in expected:
+                raise ValueError(
+                    f"operator broker request changed from expected state; current={row['status']}"
+                )
+            if str(row["executor_id"] or "") != executor_id:
+                raise PermissionError("operator broker request belongs to another executor")
+            conn.execute(
+                """
+                UPDATE operator_broker_requests
+                SET status = ?, action_transaction_id = COALESCE(?, action_transaction_id),
+                    result_json = ?, error_code = ?, error = ?, updated_at = ?,
+                    claim_expires_at = ?, completed_at = ?,
+                    canceled_at = CASE WHEN ? = 'canceled' THEN ? ELSE canceled_at END
+                WHERE request_id = ?
+                """,
+                (
+                    normalized_status,
+                    action_transaction_id,
+                    json.dumps(dict(result or {}), separators=(",", ":")),
+                    error_code,
+                    error,
+                    current,
+                    None if terminal else current + min(max(int(lease_seconds), 10), 300),
+                    current if terminal else None,
+                    normalized_status,
+                    current,
+                    request_id,
+                ),
+            )
+        refreshed = self.get_operator_broker_request(request_id)
+        assert refreshed is not None
+        return refreshed
+
+    def cancel_operator_broker_request(
+        self,
+        *,
+        request_id: str,
+        root_operator_agent_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM operator_broker_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("operator broker request not found")
+            if str(row["root_operator_agent_id"]) != root_operator_agent_id:
+                raise PermissionError("operator broker request belongs to another root")
+            status = str(row["status"])
+            if status in OPERATOR_BROKER_REQUEST_TERMINAL_STATUSES:
+                return self._operator_broker_request_from_row(row)
+            if status != "pending":
+                raise ValueError(
+                    "a claimed or executing broker request must be allowed to finish or fail safely"
+                )
+            conn.execute(
+                """
+                UPDATE operator_broker_requests
+                SET status = 'canceled', error_code = 'OPERATOR_BROKER_CANCELED',
+                    error = ?, updated_at = ?, completed_at = ?, canceled_at = ?
+                WHERE request_id = ?
+                """,
+                (str(reason or "canceled by root Operator")[:1000], current, current, current, request_id),
+            )
+        refreshed = self.get_operator_broker_request(request_id)
+        assert refreshed is not None
+        return refreshed
+
+    @staticmethod
+    def _expire_operator_broker_requests(
+        conn: sqlite3.Connection,
+        *,
+        current: float,
+    ) -> None:
+        conn.execute(
+            """
+            UPDATE operator_broker_requests
+            SET status = 'expired', error_code = 'OPERATOR_BROKER_REQUEST_EXPIRED',
+                error = 'broker request expired before execution', updated_at = ?,
+                completed_at = ?
+            WHERE status IN ('pending', 'claimed') AND expires_at <= ?
+            """,
+            (current, current, current),
+        )
+        conn.execute(
+            """
+            UPDATE operator_broker_requests
+            SET status = 'pending', executor_id = NULL, claim_expires_at = NULL,
+                updated_at = ?
+            WHERE status = 'claimed' AND claim_expires_at IS NOT NULL
+              AND claim_expires_at <= ? AND expires_at > ?
+            """,
+            (current, current, current),
+        )
+
+    @staticmethod
+    def _operator_broker_request_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "request_id": row["request_id"],
+            "root_operator_agent_id": row["root_operator_agent_id"],
+            "target_fork_agent_id": row["target_fork_agent_id"],
+            "handoff_id": row["handoff_id"],
+            "action_transaction_id": row["action_transaction_id"],
+            "workspace_set_digest": row["workspace_set_digest"],
+            "scope_sha256": row["scope_sha256"],
+            "expected_git_parent": row["expected_git_parent"],
+            "commit_subject": row["commit_subject"],
+            "exact_paths": json.loads(row["exact_paths_json"] or "[]"),
+            "status": row["status"],
+            "executor_id": row["executor_id"],
+            "claim_expires_at": row["claim_expires_at"],
+            "result": json.loads(row["result_json"] or "{}"),
+            "error_code": row["error_code"],
+            "error": row["error"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "expires_at": row["expires_at"],
+            "completed_at": row["completed_at"],
+            "canceled_at": row["canceled_at"],
+        }
 
     def get_operator_action_transaction(
         self,
