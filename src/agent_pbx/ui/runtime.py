@@ -112,13 +112,38 @@ def runtime_topology(
     raw_children = snapshot.get("children")
     if not isinstance(raw_children, list) or not raw_children:
         return Text()
-    children = [item for item in raw_children if isinstance(item, Mapping)][: max(1, limit)]
-    text = Text("SUBAGENTS", style=f"bold {PBX_PALETTE['muted']}")
+    all_children = [item for item in raw_children if isinstance(item, Mapping)]
+    terminal_states = {"complete", "error", "interrupted"}
+    active_count = sum(
+        1
+        for child in all_children
+        if str(child.get("state") or "") not in terminal_states
+    )
+    done_count = len(all_children) - active_count
+    children = sorted(
+        all_children,
+        key=lambda child: (
+            hierarchy_depth(child, all_children),
+            float(child.get("started_at") or 0.0),
+            str(child.get("child_id") or ""),
+        ),
+    )[: max(1, limit)]
+    text = Text(
+        f"SUBAGENTS {active_count} active · {done_count} done",
+        style=f"bold {PBX_PALETTE['muted']}",
+    )
+    text.append(
+        " · inherited root authority (unverified)",
+        style=PBX_PALETTE["warning"],
+    )
     for index, child in enumerate(children):
         state = runtime_state(child)
         frames = STATE_FRAMES[state]
         symbol = frames[frame % len(frames)]
-        connector = "└─" if index == len(children) - 1 else "├─"
+        depth = hierarchy_depth(child, all_children)
+        connector = ("  " * depth) + (
+            "└─" if index == len(children) - 1 else "├─"
+        )
         label = single_line(child.get("role"), 28) or short_session(
             single_line(child.get("child_id"), 240) or "child"
         )
@@ -132,6 +157,25 @@ def runtime_topology(
     if extra > 0:
         text.append(f"\n└─ +{extra} more", style=PBX_PALETTE["muted"])
     return text
+
+
+def hierarchy_depth(
+    child: Mapping[str, Any],
+    children: list[Mapping[str, Any]],
+) -> int:
+    by_id = {
+        str(item.get("child_id") or ""): item
+        for item in children
+        if item.get("child_id")
+    }
+    parent_id = str(child.get("parent_thread_id") or "")
+    seen: set[str] = set()
+    depth = 0
+    while parent_id in by_id and parent_id not in seen and depth < 4:
+        seen.add(parent_id)
+        depth += 1
+        parent_id = str(by_id[parent_id].get("parent_thread_id") or "")
+    return depth
 
 
 def workerbee_label(status: Mapping[str, Any] | None) -> str:

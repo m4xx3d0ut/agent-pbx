@@ -141,8 +141,11 @@ async def test_bridge_projects_exact_child_and_discards_private_fields(
             "role": "explorer",
             "model": "gpt-5.6-sol",
             "reasoning_effort": "high",
+            "parent_thread_id": "thread-root",
             "started_at": 100.0,
             "finished_at": None,
+            "last_transition_at": 110.0,
+            "transition_source": "passive_thread_list",
         }
     ]
     # Historical child hydration must not make an idle root look active.
@@ -168,6 +171,8 @@ async def test_bridge_projects_exact_child_and_discards_private_fields(
         "thread/list",
         "thread/items/list",
     ]
+    assert client.calls[0][1]["ancestorThreadId"] == "thread-root"
+    assert client.calls[2][1]["ancestorThreadId"] == "thread-root"
 
 
 @pytest.mark.asyncio
@@ -189,7 +194,7 @@ async def test_bridge_ignores_unrelated_and_ambiguous_sessions(tmp_path: Path) -
     assert bridge.status()["ambiguous_session_count"] == 1
     assert bridge.status()["child_count"] == 0
     assert runtime.snapshot("agent-a")["children"] == []
-    assert [method for method, _params in client.calls] == ["thread/list"]
+    assert client.calls == []
 
 
 def test_child_association_walks_nested_parents_and_stays_exact() -> None:
@@ -208,6 +213,23 @@ def test_child_association_walks_nested_parents_and_stays_exact() -> None:
     assert [(item.agent_id, row["id"]) for item, row in associated] == [
         ("agent-a", "child-one"),
         ("agent-a", "child-two"),
+    ]
+
+
+def test_hidden_live_agent_remains_a_bridge_target(tmp_path: Path) -> None:
+    store, runtime = registered_runtime(tmp_path)
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE agents SET dismissed_at = ?, pbx_active = 1 WHERE agent_id = ?",
+            (123.0, "agent-a"),
+        )
+    bridge = CodexAppServerEventBridge(store, runtime, transport="sidecar")
+
+    targets, ambiguous = bridge._load_targets()  # noqa: SLF001
+
+    assert ambiguous == 0
+    assert [(target.agent_id, target.thread_id) for target in targets] == [
+        ("agent-a", "thread-root")
     ]
 
 

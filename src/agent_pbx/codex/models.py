@@ -25,8 +25,11 @@ class CodexChildRuntime:
     task: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
+    parent_thread_id: str | None = None
     started_at: float | None = None
     finished_at: float | None = None
+    last_transition_at: float | None = None
+    transition_source: str | None = None
 
 
 @dataclass(frozen=True)

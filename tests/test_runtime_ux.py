@@ -106,8 +106,11 @@ def test_runtime_projection_observes_children_without_prompt_or_reasoning(
             "role": None,
             "model": "gpt-5.6-sol",
             "reasoning_effort": "high",
+            "parent_thread_id": "thread-root",
             "started_at": snapshot["children"][0]["started_at"],
             "finished_at": None,
+            "last_transition_at": snapshot["children"][0]["last_transition_at"],
+            "transition_source": "app_server",
         }
     ]
     serialized = json.dumps(
@@ -217,6 +220,109 @@ def test_runtime_projection_degrades_unknown_and_partial_subagent_activity_safel
     )
     assert partial.status_code == 200
     assert partial.json()["children"][0]["child_id"] == "thread-child-future"
+
+
+def test_collab_tool_completion_does_not_falsely_complete_child(tmp_path: Path) -> None:
+    client, _app = runtime_client(tmp_path)
+    item = {
+        "type": "collabAgentToolCall",
+        "tool": "spawnAgent",
+        "status": "completed",
+        "senderThreadId": "thread-root",
+        "receiverThreadIds": ["thread-child"],
+    }
+    started = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "item/started",
+            "observed_at": 200.0,
+            "params": {"item": item},
+        },
+    )
+    assert started.status_code == 200
+    completed = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "item/completed",
+            "observed_at": 210.0,
+            "params": {"item": item},
+        },
+    )
+    assert completed.status_code == 200
+    child = completed.json()["children"][0]
+    assert child["state"] == "starting"
+    assert child["finished_at"] is None
+
+
+def test_older_historical_child_event_cannot_overwrite_newer_live_state(
+    tmp_path: Path,
+) -> None:
+    client, app = runtime_client(tmp_path)
+    live = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "item/started",
+            "observed_at": 300.0,
+            "params": {
+                "item": {
+                    "type": "subAgentActivity",
+                    "agentThreadId": "thread-child",
+                    "kind": "interacted",
+                }
+            },
+        },
+    )
+    assert live.status_code == 200
+    runtime = app.state.codex_runtime
+    historical = runtime.observe_historical_item(
+        "agent-a",
+        thread_id="thread-root",
+        method="item/completed",
+        params={
+            "item": {
+                "type": "subAgentActivity",
+                "agentThreadId": "thread-child",
+                "kind": "completed",
+            }
+        },
+        observed_at=200.0,
+    )
+    child = historical["children"][0]
+    assert child["state"] == "thinking"
+    assert child["last_transition_at"] == 300.0
+    assert child["transition_source"] == "app_server"
+
+
+def test_runtime_bounds_active_and_recent_terminal_children(tmp_path: Path) -> None:
+    _client, app = runtime_client(tmp_path)
+    runtime = app.state.codex_runtime
+    for index in range(40):
+        runtime.observe_discovered_child(
+            "agent-a",
+            thread_id="thread-root",
+            child_id=f"active-{index:02d}",
+            state=CodexRuntimeState.THINKING,
+            observed_at=100.0 + index,
+        )
+        runtime.observe_discovered_child(
+            "agent-a",
+            thread_id="thread-root",
+            child_id=f"done-{index:02d}",
+            state=CodexRuntimeState.COMPLETE,
+            observed_at=200.0 + index,
+            finished_at=200.0 + index,
+        )
+
+    children = runtime.snapshot("agent-a")["children"]
+    assert len(children) == 64
+    assert sum(child["state"] == "thinking" for child in children) == 32
+    assert sum(child["state"] == "complete" for child in children) == 32
 
 
 def test_runtime_context_and_persisted_projection_restore(tmp_path: Path) -> None:
@@ -420,6 +526,22 @@ async def test_tui_agent_selection_preloads_workerbee_runtime_status() -> None:
         await pilot.pause()
 
         assert loaded == [("agent-a", False)]
+
+
+async def test_tui_native_subagents_palette_sends_codex_command() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    sent: list[tuple[str, str]] = []
+
+    async def fake_send(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    app.send_text_to_tmux = fake_send  # type: ignore[method-assign]
+    app.is_tmux_direct_enabled = lambda _agent_id: True  # type: ignore[method-assign]
+    app.selected_agent_id = "agent-a"
+
+    assert await app.open_native_codex_subagents() is True
+    assert sent == [("agent-a", "/subagents")]
 
 
 async def test_tui_restored_selection_preloads_workerbee_runtime_status() -> None:

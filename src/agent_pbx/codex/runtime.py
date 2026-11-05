@@ -22,6 +22,20 @@ from .models import CodexChildRuntime, CodexProfile
 RUNTIME_SNAPSHOT_API_VERSION = "agent-pbx.codex-runtime/v2"
 RUNTIME_EVENT_TYPE = "codex_runtime_observed"
 MAX_CHILDREN = 32
+MAX_RECENT_TERMINAL_CHILDREN = 32
+CHILD_TERMINAL_STATES = frozenset(
+    {
+        CodexRuntimeState.COMPLETE,
+        CodexRuntimeState.ERROR,
+        CodexRuntimeState.INTERRUPTED,
+    }
+)
+CHILD_SOURCE_PRIORITY = {
+    "hydrated_snapshot": 0,
+    "passive_history": 1,
+    "passive_thread_list": 2,
+    "app_server": 3,
+}
 
 PROTOCOL_METHODS = {
     "thread/started",
@@ -127,7 +141,13 @@ class CodexRuntimeService:
             changed = evidence is not None
             changed = self._apply_profile(record, method, raw_params) or changed
             changed = self._apply_context(record, method, raw_params) or changed
-            changed = self._apply_children(record, method, raw_params, current) or changed
+            changed = self._apply_children(
+                record,
+                method,
+                raw_params,
+                current,
+                source="app_server",
+            ) or changed
             if not changed:
                 raise ValueError(
                     "Codex runtime event did not contain a supported state projection"
@@ -178,10 +198,17 @@ class CodexRuntimeService:
                 raise ValueError(
                     "Codex runtime event thread does not match the active PBX session"
                 )
-            if not self._apply_children(record, method, params, observed_at):
-                raise ValueError(
-                    "Codex runtime event did not contain a supported child projection"
-                )
+            if not self._apply_children(
+                record,
+                method,
+                params,
+                observed_at,
+                source="passive_history",
+            ):
+                # A recognized historical item may be older than the persisted
+                # child watermark. Ignoring that stale transition is success,
+                # not a malformed projection.
+                return self._snapshot(agent, record)
             return self._persist_snapshot(
                 agent,
                 record,
@@ -201,6 +228,7 @@ class CodexRuntimeService:
         reasoning_effort: str | None = None,
         started_at: float | None = None,
         finished_at: float | None = None,
+        parent_thread_id: str | None = None,
         observed_at: float | None = None,
     ) -> dict[str, Any]:
         """Project a child returned by read-only app-server thread discovery."""
@@ -244,13 +272,26 @@ class CodexRuntimeService:
                     clean_public_value(reasoning_effort, 80)
                     or (prior.reasoning_effort if prior else None)
                 ),
+                parent_thread_id=(
+                    clean_public_value(parent_thread_id, 240)
+                    or (prior.parent_thread_id if prior else thread_id)
+                ),
                 started_at=resolved_started_at,
                 finished_at=resolved_finished_at,
+                last_transition_at=(
+                    prior.last_transition_at
+                    if state is CodexRuntimeState.UNKNOWN and prior is not None
+                    else current
+                ),
+                transition_source=(
+                    prior.transition_source
+                    if state is CodexRuntimeState.UNKNOWN and prior is not None
+                    else "passive_thread_list"
+                ),
             )
             record.native_subagents_observed = True
-            if child == prior:
+            if not self._upsert_child(record, child):
                 return self._snapshot(agent, record)
-            record.children[resolved_child_id] = child
             return self._persist_snapshot(
                 agent,
                 record,
@@ -373,10 +414,11 @@ class CodexRuntimeService:
             )
         children = snapshot.get("children")
         if record.native_subagents_observed and isinstance(children, list):
-            for child in children[:MAX_CHILDREN]:
+            for child in children[: MAX_CHILDREN + MAX_RECENT_TERMINAL_CHILDREN]:
                 parsed = child_from_snapshot(child)
                 if parsed is not None:
                     record.children[parsed.child_id] = parsed
+            self._prune_children(record)
 
     def _apply_profile(
         self,
@@ -440,6 +482,8 @@ class CodexRuntimeService:
         method: str,
         params: Mapping[str, Any],
         observed_at: float,
+        *,
+        source: str,
     ) -> bool:
         if method not in {"item/started", "item/completed"}:
             return False
@@ -447,7 +491,12 @@ class CodexRuntimeService:
         if not isinstance(item, Mapping):
             return False
         if item.get("type") == "subAgentActivity":
-            return self._apply_subagent_activity(record, item, observed_at)
+            return self._apply_subagent_activity(
+                record,
+                item,
+                observed_at,
+                source=source,
+            )
         if item.get("type") != "collabAgentToolCall":
             return False
         sender = clean_public_value(item.get("senderThreadId"), 240)
@@ -464,6 +513,7 @@ class CodexRuntimeService:
         effort = clean_public_value(item.get("reasoningEffort"), 80)
         changed = False
         for child_id in receivers:
+            prior = record.children.get(child_id)
             child_state = state_map.get(child_id)
             child_status = ""
             if isinstance(child_state, Mapping):
@@ -472,13 +522,16 @@ class CodexRuntimeService:
             if state is None:
                 status = str(item.get("status") or "")
                 if method == "item/completed" and status == "failed":
-                    state = CodexRuntimeState.ERROR
+                    state = prior.state if prior else CodexRuntimeState.ERROR
+                elif prior is not None:
+                    # Completion of spawn/send/wait is the tool-call lifecycle,
+                    # not proof that the child thread itself completed.
+                    state = prior.state
                 elif method == "item/completed":
-                    state = CodexRuntimeState.COMPLETE
+                    state = CodexRuntimeState.UNKNOWN
                 else:
                     state = CodexRuntimeState.STARTING
-            prior = record.children.get(child_id)
-            record.children[child_id] = CodexChildRuntime(
+            child = CodexChildRuntime(
                 child_id=child_id,
                 parent_id=record.adapter.identity.entity_id,
                 state=state,
@@ -486,19 +539,17 @@ class CodexRuntimeService:
                 task=None,
                 model=model or (prior.model if prior else None),
                 reasoning_effort=effort or (prior.reasoning_effort if prior else None),
+                parent_thread_id=record.adapter.identity.codex_session_id,
                 started_at=(prior.started_at if prior else observed_at),
                 finished_at=(
                     observed_at
-                    if state
-                    in {
-                        CodexRuntimeState.COMPLETE,
-                        CodexRuntimeState.ERROR,
-                        CodexRuntimeState.INTERRUPTED,
-                    }
+                    if state in CHILD_TERMINAL_STATES
                     else None
                 ),
+                last_transition_at=observed_at,
+                transition_source=source,
             )
-            changed = True
+            changed = self._upsert_child(record, child) or changed
         if changed:
             record.native_subagents_observed = True
         return changed
@@ -508,6 +559,8 @@ class CodexRuntimeService:
         record: RuntimeRecord,
         item: Mapping[str, Any],
         observed_at: float,
+        *,
+        source: str,
     ) -> bool:
         child_id = clean_public_value(item.get("agentThreadId"), 240)
         if not child_id:
@@ -518,7 +571,7 @@ class CodexRuntimeService:
         effort = clean_public_value(item.get("reasoningEffort"), 80)
         explicit_role = clean_public_value(item.get("agentRole"), 120)
         prior = record.children.get(child_id)
-        record.children[child_id] = CodexChildRuntime(
+        child = CodexChildRuntime(
             child_id=child_id,
             parent_id=record.adapter.identity.entity_id,
             state=state,
@@ -529,6 +582,7 @@ class CodexRuntimeService:
             task=None,
             model=model or (prior.model if prior else None),
             reasoning_effort=effort or (prior.reasoning_effort if prior else None),
+            parent_thread_id=record.adapter.identity.codex_session_id,
             started_at=prior.started_at if prior else observed_at,
             finished_at=(
                 observed_at
@@ -539,9 +593,60 @@ class CodexRuntimeService:
                 }
                 else None
             ),
+            last_transition_at=observed_at,
+            transition_source=source,
         )
         record.native_subagents_observed = True
+        return self._upsert_child(record, child)
+
+    def _upsert_child(
+        self,
+        record: RuntimeRecord,
+        child: CodexChildRuntime,
+    ) -> bool:
+        prior = record.children.get(child.child_id)
+        if prior is not None:
+            prior_at = prior.last_transition_at or prior.started_at or 0.0
+            child_at = child.last_transition_at or child.started_at or 0.0
+            if child_at < prior_at:
+                return False
+            if child_at == prior_at and CHILD_SOURCE_PRIORITY.get(
+                child.transition_source or "", 0
+            ) < CHILD_SOURCE_PRIORITY.get(prior.transition_source or "", 0):
+                return False
+            if child == prior:
+                return False
+        record.children[child.child_id] = child
+        self._prune_children(record)
         return True
+
+    @staticmethod
+    def _prune_children(record: RuntimeRecord) -> None:
+        active = sorted(
+            (
+                child
+                for child in record.children.values()
+                if child.state not in CHILD_TERMINAL_STATES
+            ),
+            key=lambda child: (
+                child.last_transition_at or child.started_at or 0.0,
+                child.child_id,
+            ),
+            reverse=True,
+        )[:MAX_CHILDREN]
+        terminal = sorted(
+            (
+                child
+                for child in record.children.values()
+                if child.state in CHILD_TERMINAL_STATES
+            ),
+            key=lambda child: (
+                child.last_transition_at or child.finished_at or 0.0,
+                child.child_id,
+            ),
+            reverse=True,
+        )[:MAX_RECENT_TERMINAL_CHILDREN]
+        record.children = {child.child_id: child for child in (*active, *terminal)}
 
     def _snapshot(
         self,
@@ -573,6 +678,8 @@ class CodexRuntimeService:
                     if record.native_subagents_observed
                     else CapabilitySupport.ADVERTISED.value
                 ),
+                "native_subagent_events": "observed_with_provenance",
+                "child_authority": "inherited_unverified",
             },
             "children": [child_dict(item) for item in children],
             "updated_at": evidence.observed_at if evidence else None,
@@ -769,8 +876,11 @@ def child_dict(child: CodexChildRuntime) -> dict[str, Any]:
         "role": child.role,
         "model": child.model,
         "reasoning_effort": child.reasoning_effort,
+        "parent_thread_id": child.parent_thread_id,
         "started_at": child.started_at,
         "finished_at": child.finished_at,
+        "last_transition_at": child.last_transition_at,
+        "transition_source": child.transition_source,
     }
 
 
@@ -793,8 +903,12 @@ def child_from_snapshot(raw: object) -> CodexChildRuntime | None:
         task=None,
         model=clean_public_value(raw.get("model"), 160),
         reasoning_effort=clean_public_value(raw.get("reasoning_effort"), 80),
+        parent_thread_id=clean_public_value(raw.get("parent_thread_id"), 240),
         started_at=safe_float(raw.get("started_at")),
         finished_at=safe_float(raw.get("finished_at")),
+        last_transition_at=safe_float(raw.get("last_transition_at")),
+        transition_source=clean_public_value(raw.get("transition_source"), 80)
+        or "hydrated_snapshot",
     )
 
 

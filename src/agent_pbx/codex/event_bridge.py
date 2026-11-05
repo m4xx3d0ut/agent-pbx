@@ -572,7 +572,13 @@ class CodexAppServerEventBridge:
 
     def _load_targets(self) -> tuple[list[BridgeTarget], int]:
         by_thread: dict[str, list[str]] = {}
-        for agent in self.store.list_agents(include_hidden=False):
+        for agent in self.store.list_agents(include_hidden=True):
+            # Hidden live runtimes still own Codex threads and must remain in
+            # the structured projection. Archived/inactive records are skipped.
+            if agent.get("dismissed_at") is not None and not bool(
+                agent.get("pbx_active", False)
+            ):
+                continue
             identity = runtime_identity(self.store, agent)
             thread_id = str(identity.codex_session_id or "").strip()
             if thread_id:
@@ -591,26 +597,35 @@ class CodexAppServerEventBridge:
         client: Any,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        cursor: str | None = None
-        for _ in range(self.child_max_pages):
-            params: dict[str, Any] = {
-                "limit": self.child_page_size,
-                "sortDirection": "desc",
-                "sortKey": "updated_at",
-                "sourceKinds": list(SUBAGENT_SOURCE_KINDS),
-                "useStateDbOnly": True,
-            }
-            if cursor:
-                params["cursor"] = cursor
-            result = await client.request("thread/list", params)
-            data = result.get("data")
-            if not isinstance(data, list):
-                break
-            rows.extend(item for item in data if isinstance(item, dict))
-            raw_cursor = result.get("nextCursor")
-            cursor = str(raw_cursor) if raw_cursor else None
-            if not cursor:
-                break
+        seen: set[str] = set()
+        for root_thread_id in sorted(self._targets_by_thread):
+            cursor: str | None = None
+            for _ in range(self.child_max_pages):
+                params: dict[str, Any] = {
+                    "limit": self.child_page_size,
+                    "sortDirection": "desc",
+                    "sortKey": "updated_at",
+                    "sourceKinds": list(SUBAGENT_SOURCE_KINDS),
+                    "useStateDbOnly": True,
+                    "ancestorThreadId": root_thread_id,
+                }
+                if cursor:
+                    params["cursor"] = cursor
+                result = await client.request("thread/list", params)
+                data = result.get("data")
+                if not isinstance(data, list):
+                    break
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    child_id = public_text(item.get("id"), 240)
+                    if child_id and child_id not in seen:
+                        seen.add(child_id)
+                        rows.append(item)
+                raw_cursor = result.get("nextCursor")
+                cursor = str(raw_cursor) if raw_cursor else None
+                if not cursor:
+                    break
         return rows
 
     async def _observe_discovered_thread(
@@ -659,6 +674,17 @@ class CodexAppServerEventBridge:
             model=public_text(row.get("model"), 160),
             reasoning_effort=public_text(row.get("reasoningEffort"), 80),
             started_at=started_at,
+            finished_at=(
+                observed_at
+                if state
+                in {
+                    CodexRuntimeState.COMPLETE,
+                    CodexRuntimeState.ERROR,
+                    CodexRuntimeState.INTERRUPTED,
+                }
+                else None
+            ),
+            parent_thread_id=child_parent_thread_id(row),
             observed_at=observed_at,
         )
         self._status["observed_updates"] += 1
