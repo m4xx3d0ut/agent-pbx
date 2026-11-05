@@ -500,6 +500,44 @@ def test_prepare_accepts_link_marker_in_tracked_pathname(tmp_path: Path) -> None
     assert receipt.path_identities[0].path == "docs/release-links.md"
 
 
+def test_prepare_binds_exact_descriptive_subject_into_receipt(tmp_path: Path) -> None:
+    _, linked = _fixture(tmp_path)
+    codex_home = _split_codex_home(tmp_path)
+    (linked / "tracked.txt").write_text("changed\n", encoding="utf-8")
+
+    receipt = prepare_linked_git_commit(
+        agent_id="operator-7-fork-test",
+        work_root=linked,
+        approved_roots=(tmp_path,),
+        approved_stage_paths=("tracked.txt",),
+        codex_home=codex_home,
+        authored_at=1_700_000_000,
+        commit_subject="fix: preserve broker evidence",
+    )
+
+    assert receipt.commit_subject == "fix: preserve broker evidence"
+
+
+@pytest.mark.parametrize("subject", ["", "bad\nsubject", "x" * 161])
+def test_prepare_rejects_invalid_exact_subject(
+    tmp_path: Path,
+    subject: str,
+) -> None:
+    _, linked = _fixture(tmp_path)
+    codex_home = _split_codex_home(tmp_path)
+    (linked / "tracked.txt").write_text("changed\n", encoding="utf-8")
+
+    with pytest.raises(LinkedGitBrokerError, match="subject"):
+        prepare_linked_git_commit(
+            agent_id="operator-7-fork-test",
+            work_root=linked,
+            approved_roots=(tmp_path,),
+            approved_stage_paths=("tracked.txt",),
+            codex_home=codex_home,
+            commit_subject=subject,
+        )
+
+
 def test_prepare_rejects_actual_split_index_extension(tmp_path: Path) -> None:
     _, linked = _fixture(tmp_path)
     codex_home = _split_codex_home(tmp_path)

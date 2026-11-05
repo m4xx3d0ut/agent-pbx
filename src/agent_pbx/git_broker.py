@@ -657,6 +657,7 @@ def prepare_linked_git_commit(
     approved_stage_paths: Iterable[str],
     codex_home: Path | None = None,
     authored_at: int | None = None,
+    commit_subject: str | None = None,
 ) -> LinkedGitCommitReceipt:
     """Capture one immutable receipt while observing approved leaves only."""
 
@@ -730,7 +731,10 @@ def prepare_linked_git_commit(
             _read_regular_bytes(reflog_path, "active branch reflog")
         ),
         "path_identities": tuple(asdict(identity) for identity in identities),
-        "commit_subject": _commit_subject(normalized_agent_id),
+        "commit_subject": _normalized_commit_subject(
+            commit_subject,
+            agent_id=normalized_agent_id,
+        ),
         "author_name": BROKER_AUTHOR_NAME,
         "author_email": BROKER_AUTHOR_EMAIL,
         "authored_at": timestamp,
@@ -1276,7 +1280,21 @@ def _capture_again(
         approved_stage_paths=receipt.approved_stage_paths,
         codex_home=codex_home,
         authored_at=receipt.authored_at,
+        commit_subject=receipt.commit_subject,
     )
+
+
+def _normalized_commit_subject(value: str | None, *, agent_id: str) -> str:
+    subject = _commit_subject(agent_id) if value is None else str(value).strip()
+    if not subject:
+        raise LinkedGitBrokerError("broker commit subject cannot be empty")
+    if len(subject) > 160:
+        raise LinkedGitBrokerError("broker commit subject exceeds 160 characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in subject):
+        raise LinkedGitBrokerError(
+            "broker commit subject cannot contain control characters or newlines"
+        )
+    return subject
 
 
 def _qualify_authority(
