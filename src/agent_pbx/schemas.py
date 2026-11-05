@@ -409,6 +409,8 @@ class AgentResponse(BaseModel):
     active_campaign_count: int = 0
     pending_handoff_approval_count: int = 0
     oldest_pending_handoff_created_at: float | None = None
+    ready_handoff_action_count: int = 0
+    oldest_ready_handoff_action_at: float | None = None
 
 
 class OperatorAlertAcknowledgementItem(BaseModel):

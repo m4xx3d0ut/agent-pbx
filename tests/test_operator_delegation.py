@@ -17,7 +17,7 @@ from agent_pbx.operator_delegation import (
     normalize_execution_scope,
     resolve_handoff_execution_scope,
 )
-from agent_pbx.schemas import AgentRegisterRequest, ReportCreateRequest
+from agent_pbx.schemas import AgentRegisterRequest, AgentResponse, ReportCreateRequest
 from agent_pbx.store import SCHEMA_VERSION, Store
 
 
@@ -167,6 +167,12 @@ def test_ready_action_transaction_records_guarded_stop_broker_resume_validate(
     )
     assert preflight["action"]["state"] == "ready_stop"
     assert preflight["transaction"] is None
+    target_summary = next(
+        agent for agent in store.list_agents() if agent["agent_id"] == "operator-7"
+    )
+    serialized_summary = AgentResponse.model_validate(target_summary).model_dump()
+    assert serialized_summary["ready_handoff_action_count"] == 1
+    assert serialized_summary["oldest_ready_handoff_action_at"] is not None
     with pytest.raises(ValueError, match="different operator"):
         service.preflight_handoff_delivery(
             operator_agent_id="operator-7",
