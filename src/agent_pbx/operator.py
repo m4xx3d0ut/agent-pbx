@@ -26,6 +26,7 @@ from .runtime_tmux import (
 )
 from .security import now_ts
 from .store import Store
+from .operator_delegation import normalize_execution_scope
 from .tmux_binary import configured_tmux_binary
 
 
@@ -227,6 +228,7 @@ def operator_runbook_payload() -> dict[str, Any]:
             "When review work needs a new sibling project, request it with pbx_operator_request_project_spawn; the TUI must approve and launch the new caller agent.",
             "When review work needs to transfer domain context to another operator, propose a knowledge handoff; the TUI/root operator approves the executable handoff delivery.",
             "Operator handoffs track required target fork launch, delivery evidence, receiver acknowledgement, running state, TTL expiry, artifact summaries, and terminal state.",
+            "For new handoffs, provide execution_scope with an action_class, mutation_mode, campaign and workspace-set identity where applicable; exact Git commit brokers also require exact_paths, expected_git_parent, and commit_subject.",
             "Manual KB seed runs deliver a seed prompt to the selected operator or fork; that session proposes KB entries and updates seed-run status when finished.",
             "Use pbx_operator_kb_context or handoff metadata.kb_query to attach existing active KB entries before transferring domain context; context lookup uses SQLite-local hybrid keyword/semantic retrieval by default and returns query_id/match_id values for pbx_operator_kb_feedback.",
             "Use pbx_operator_kb_list_queries, pbx_operator_kb_get_query, and pbx_operator_kb_feedback to inspect query history, review top matched chunks, record accepted/rejected retrievals, and report misses.",
@@ -243,6 +245,7 @@ def operator_runbook_payload() -> dict[str, Any]:
             "Do not poll or ack commands for caller agents.",
             "Treat campaign criteria as completion criteria, not loose guidance.",
             "Use explicit blocked states when a caller cannot complete its assignment.",
+            "Free-form allowed_mutation_scope is retained for compatibility but never qualifies a handoff for delegated approval; use the structured execution_scope contract.",
             "Keep operator reports concise and put full review notes in detail.",
         ],
     }
@@ -2246,6 +2249,7 @@ class OperatorService:
         knowledge_link_id: str | None = None,
         knowledge_turn_id: str | None = None,
         allowed_mutation_scope: str | None = None,
+        execution_scope: dict[str, Any] | None = None,
         required_artifacts: list[Any] | None = None,
         artifact_bundle: list[Any] | None = None,
         expires_at: float | None = None,
@@ -2281,6 +2285,7 @@ class OperatorService:
         if not normalized_message:
             raise ValueError("handoff message is required")
         normalized_objective = str(objective or summary or normalized_message).strip()
+        normalized_execution_scope = normalize_execution_scope(execution_scope)
         metadata_payload = self._metadata_with_requested_kb_context(
             metadata or {},
             operator_agent_id=operator_agent_id,
@@ -2302,6 +2307,7 @@ class OperatorService:
             objective=normalized_objective,
             message=normalized_message,
             allowed_mutation_scope=allowed_mutation_scope,
+            execution_scope=normalized_execution_scope,
             required_artifacts=required_artifacts or [],
             artifact_bundle=artifact_bundle or [],
             status="proposed",

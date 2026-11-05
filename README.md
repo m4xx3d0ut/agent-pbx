@@ -583,6 +583,14 @@ success by itself. Tmux evidence records the resolved pane, target command,
 paste/send-key steps, and whether the target looked Codex-like; `submitted` is
 only true for a Codex-like target.
 
+New executable handoffs should also include a machine-readable
+`execution_scope`. It records an `action_class`, `mutation_mode`, campaign and
+workspace-set identity, allowed roots, exact paths, and explicit denied actions.
+The `exact_git_commit_broker` class additionally requires the expected Git
+parent and exact commit subject. Absolute or parent-traversing path entries are
+rejected. The legacy free-form `allowed_mutation_scope` remains readable but is
+never sufficient for delegated approval.
+
 When a knowledge link or handoff produces reusable operating guidance, review
 forks and operators can propose KB entries with `pbx_operator_kb_propose` or
 `pbx_operator_kb_propose_from_link`. Proposed entries stay scoped to the

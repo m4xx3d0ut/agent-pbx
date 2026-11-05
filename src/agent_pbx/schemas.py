@@ -1108,6 +1108,7 @@ class OperatorHandoffCreateRequest(BaseModel):
     knowledge_link_id: str | None = Field(default=None, max_length=120)
     knowledge_turn_id: str | None = Field(default=None, max_length=120)
     allowed_mutation_scope: str | None = Field(default=None, max_length=4000)
+    execution_scope: dict[str, Any] = Field(default_factory=dict)
     required_artifacts: list[Any] = Field(default_factory=list)
     artifact_bundle: list[Any] = Field(default_factory=list)
     expires_at: float | None = None
@@ -1159,6 +1160,7 @@ class OperatorHandoffResponse(BaseModel):
     objective: str
     message: str
     allowed_mutation_scope: str | None = None
+    execution_scope: dict[str, Any] = Field(default_factory=dict)
     required_artifacts: list[Any]
     artifact_bundle: list[Any]
     status: str

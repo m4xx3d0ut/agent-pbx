@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -924,6 +924,7 @@ class Store:
                     objective TEXT NOT NULL,
                     message TEXT NOT NULL,
                     allowed_mutation_scope TEXT,
+                    execution_scope_json TEXT NOT NULL DEFAULT '{}',
                     required_artifacts_json TEXT NOT NULL DEFAULT '[]',
                     artifact_bundle_json TEXT NOT NULL DEFAULT '[]',
                     status TEXT NOT NULL DEFAULT 'proposed',
@@ -1442,6 +1443,12 @@ class Store:
             )
             self._ensure_column(conn, "operator_forks", "source_cwd", "TEXT")
             self._ensure_column(conn, "operator_forks", "work_root", "TEXT")
+            self._ensure_column(
+                conn,
+                "operator_handoffs",
+                "execution_scope_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
             conn.execute(
                 """
                 UPDATE operator_forks
@@ -8441,6 +8448,7 @@ class Store:
         knowledge_link_id: str | None = None,
         knowledge_turn_id: str | None = None,
         allowed_mutation_scope: str | None = None,
+        execution_scope: dict[str, Any] | None = None,
         required_artifacts: list[Any] | None = None,
         artifact_bundle: list[Any] | None = None,
         status: str = "proposed",
@@ -8475,12 +8483,12 @@ class Store:
                      source_agent_id, source_operator_fork_id,
                      target_caller_agent_id, target_operator_fork_id,
                      knowledge_link_id, knowledge_turn_id, objective, message,
-                     allowed_mutation_scope, required_artifacts_json,
+                     allowed_mutation_scope, execution_scope_json, required_artifacts_json,
                      artifact_bundle_json, status, needs_ack, expires_at,
                      acknowledged_at, started_at, completed_at, command_id,
                      tmux_pane_id, delivery_status, delivery_evidence_json,
                      error, summary, metadata_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_id,
@@ -8496,6 +8504,7 @@ class Store:
                     objective,
                     message,
                     allowed_mutation_scope,
+                    json.dumps(execution_scope or {}),
                     json.dumps(required_artifacts or []),
                     json.dumps(artifact_bundle or []),
                     normalized_status,
@@ -8850,7 +8859,7 @@ class Store:
                    h.source_agent_id, h.source_operator_fork_id,
                    h.target_caller_agent_id, h.target_operator_fork_id,
                    h.knowledge_link_id, h.knowledge_turn_id, h.objective,
-                   h.message, h.allowed_mutation_scope,
+                   h.message, h.allowed_mutation_scope, h.execution_scope_json,
                    h.required_artifacts_json, h.artifact_bundle_json,
                    h.status, h.needs_ack, h.expires_at, h.acknowledged_at,
                    h.started_at, h.completed_at, h.command_id, h.tmux_pane_id,
@@ -10293,6 +10302,7 @@ class Store:
         for key, default in (
             ("required_artifacts_json", []),
             ("artifact_bundle_json", []),
+            ("execution_scope_json", {}),
             ("delivery_evidence_json", {}),
             ("metadata_json", {}),
         ):

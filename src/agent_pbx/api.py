@@ -5177,6 +5177,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             knowledge_link_id=payload.knowledge_link_id,
             knowledge_turn_id=payload.knowledge_turn_id,
             allowed_mutation_scope=payload.allowed_mutation_scope,
+            execution_scope=payload.execution_scope,
             required_artifacts=payload.required_artifacts,
             artifact_bundle=payload.artifact_bundle,
             expires_at=payload.expires_at,
