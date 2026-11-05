@@ -18,6 +18,7 @@ from agent_pbx.workerbee_controlled_run import (
     controlled_run_posture,
     load_controlled_run_profile,
 )
+from agent_pbx.workerbee_controlled_run_executor import WorkerBeeControlledRunExecutor
 from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
 
 
@@ -161,6 +162,23 @@ def test_controlled_run_posture_is_guided_and_host_fallback_off_by_default() -> 
     assert posture.root_operator_enabled is False
 
 
+def test_read_only_admin_control_blocks_new_requests_and_decisions(tmp_path: Path) -> None:
+    store, service, fork_id, campaign_id = _service(tmp_path)
+    service.environ["AGENT_PBX_WORKERBEE_CONTROLLED_RUN_CONTROL_MODE"] = "read_only"
+    with pytest.raises(WorkerBeeControlledRunError) as error:
+        service.request(
+            root_operator_agent_id="operator-8",
+            target_fork_agent_id=fork_id,
+            campaign_id=campaign_id,
+            profile_id="isolated-runtime-validation",
+            baseline_commit=BASELINE,
+            candidate_commit=CANDIDATE,
+            requested_by="test",
+        )
+    assert error.value.code == "WORKERBEE_CONTROLLED_RUN_CONTROL_READ_ONLY"
+    assert store.list_workerbee_controlled_run_requests() == []
+
+
 def test_profile_is_private_fail_closed_and_digest_bound(tmp_path: Path) -> None:
     path = _write_profile(tmp_path)
     profile = load_controlled_run_profile(path)
@@ -270,6 +288,27 @@ def test_request_lease_decision_and_receipt_are_exact_and_durable(tmp_path: Path
         cleanup={"complete": True, "residue": []},
     )
     assert completed["receipt"]["cleanup"] == {"complete": True, "residue": []}
+
+
+def test_pending_controlled_run_is_exposed_in_root_operator_workflow_summary(
+    tmp_path: Path,
+) -> None:
+    store, service, fork_id, campaign_id = _service(tmp_path)
+    request = service.request(
+        root_operator_agent_id="operator-8",
+        target_fork_agent_id=fork_id,
+        campaign_id=campaign_id,
+        profile_id="isolated-runtime-validation",
+        baseline_commit=BASELINE,
+        candidate_commit=CANDIDATE,
+        requested_by="test",
+    )["request"]
+    operator = next(
+        item for item in store.list_agents() if item["agent_id"] == "operator-8"
+    )
+    assert operator["pending_workerbee_controlled_run_count"] == 1
+    assert operator["oldest_workerbee_controlled_run_request_id"] == request["request_id"]
+    assert operator["workflow_label"] == "! WB RUN"
 
 
 def test_review_or_untrusted_fork_cannot_request_controlled_run(tmp_path: Path) -> None:
@@ -487,3 +526,229 @@ def test_api_creates_request_only_after_observed_appliance_contract(
         )
         assert listed.status_code == 200
         assert listed.json()["requests"][0]["request_id"] == request["request_id"]
+
+
+def test_api_approval_schedules_daemon_executor_and_hides_internal_transitions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, fork_id, campaign_id = _api_app(tmp_path, monkeypatch)
+    scheduled: list[str] = []
+
+    class Executor:
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        def schedule(self, request_id: str) -> bool:
+            scheduled.append(request_id)
+            return True
+
+    app.state.workerbee_controlled_run_executor = Executor()
+
+    async def capability_call(_endpoint, tool_name, _arguments, **_kwargs):  # type: ignore[no-untyped-def]
+        if tool_name == "workerbee_v1_runtime_policy_status":
+            return {"ok": True, "data": {"profile": "linux-strict-workload"}}
+        return {
+            "data": {
+                "workerbee_version": "0.1.8",
+                "mcp_tools": [
+                    "workerbee_v1_capabilities",
+                    "workerbee_v1_runtime_policy_status",
+                    *CONTROLLED_RUN_REQUIRED_TOOLS,
+                ],
+            }
+        }
+
+    monkeypatch.setattr("agent_pbx.api.call_workerbee_mcp_tool", capability_call)
+    with TestClient(app) as client:
+        created = client.post(
+            "/v2/workerbee/controlled-runs",
+            json=_api_payload(fork_id, campaign_id),
+        )
+        request_id = created.json()["request"]["request_id"]
+        decision = client.post(
+            f"/v2/workerbee/controlled-runs/{request_id}/decision",
+            json={"approve": True, "decided_by": "test-controller"},
+        )
+        assert decision.status_code == 200
+        assert decision.json()["status"] == "approved"
+        assert scheduled == [request_id]
+        assert client.post(
+            f"/v2/workerbee/controlled-runs/{request_id}/claim",
+            json={"executor_id": "external"},
+        ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_executor_uses_only_narrow_contract_and_requires_cleanup_receipt(
+    tmp_path: Path,
+) -> None:
+    store, service, fork_id, campaign_id = _service(tmp_path)
+    request = service.request(
+        root_operator_agent_id="operator-8",
+        target_fork_agent_id=fork_id,
+        campaign_id=campaign_id,
+        profile_id="isolated-runtime-validation",
+        baseline_commit=BASELINE,
+        candidate_commit=CANDIDATE,
+        requested_by="test",
+    )["request"]
+    request = service.decide(request["request_id"], approve=True, decided_by="test")
+    calls: list[tuple[str, dict[str, object]]] = []
+    observed = ["running", "collecting", "cleaning", "succeeded"]
+
+    async def fake_call(_endpoint, tool_name, arguments, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append((tool_name, dict(arguments)))
+        if tool_name == "workerbee_v1_controlled_run_preflight":
+            return {
+                "data": {
+                    "ok": True,
+                    "request_sha256": arguments["request_sha256"],
+                    "profile_sha256": arguments["profile_sha256"],
+                    "tool_manifest_sha256": arguments["tool_manifest_sha256"],
+                }
+            }
+        if tool_name == "workerbee_v1_controlled_run_start":
+            return {"data": {"run_id": "wb-run-1", "workspace_id": "wb-space-1"}}
+        if tool_name == "workerbee_v1_controlled_run_status":
+            return {"data": {"status": observed.pop(0)}}
+        if tool_name == "workerbee_v1_controlled_run_receipt":
+            return {
+                "data": {
+                    "workspace_id": "wb-space-1",
+                    "evidence": {"baseline": BASELINE, "candidate": CANDIDATE},
+                    "cleanup": {"complete": True, "residue": []},
+                }
+            }
+        raise AssertionError(tool_name)
+
+    executor = WorkerBeeControlledRunExecutor(
+        store,
+        service,
+        service.runtime_registry,
+        tool_caller=fake_call,
+        environ={"AGENT_PBX_WORKERBEE_CONTROLLED_RUN_POLL_SECONDS": "0.01"},
+        executor_id="test-executor",
+    )
+    await executor._run(str(request["request_id"]))
+    completed = store.get_workerbee_controlled_run_request(str(request["request_id"]))
+    assert completed is not None
+    assert completed["status"] == "succeeded"
+    assert completed["receipt"]["cleanup"] == {"complete": True, "residue": []}
+    assert {name for name, _ in calls} <= set(CONTROLLED_RUN_REQUIRED_TOOLS)
+    start = next(arguments for name, arguments in calls if name.endswith("_start"))
+    assert start["profile"]["project"] == "k1s-oss-v1"
+    assert "argv" not in start
+    assert "environment" not in start
+
+
+@pytest.mark.asyncio
+async def test_executor_fails_closed_when_cleanup_receipt_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    store, service, fork_id, campaign_id = _service(tmp_path)
+    request = service.request(
+        root_operator_agent_id="operator-8",
+        target_fork_agent_id=fork_id,
+        campaign_id=campaign_id,
+        profile_id="isolated-runtime-validation",
+        baseline_commit=BASELINE,
+        candidate_commit=CANDIDATE,
+        requested_by="test",
+    )["request"]
+    service.decide(request["request_id"], approve=True, decided_by="test")
+
+    async def fake_call(_endpoint, tool_name, arguments, **_kwargs):  # type: ignore[no-untyped-def]
+        if tool_name.endswith("_preflight"):
+            return {
+                "data": {
+                    "ok": True,
+                    "request_sha256": arguments["request_sha256"],
+                    "profile_sha256": arguments["profile_sha256"],
+                    "tool_manifest_sha256": arguments["tool_manifest_sha256"],
+                }
+            }
+        if tool_name.endswith("_start"):
+            return {"data": {"run_id": "wb-run-dirty", "workspace_id": "dirty"}}
+        if tool_name.endswith("_status"):
+            return {"data": {"status": "succeeded"}}
+        if tool_name.endswith("_receipt"):
+            return {"data": {"cleanup": {"complete": False, "residue": ["namespace"]}}}
+        raise AssertionError(tool_name)
+
+    executor = WorkerBeeControlledRunExecutor(
+        store,
+        service,
+        service.runtime_registry,
+        tool_caller=fake_call,
+        environ={"AGENT_PBX_WORKERBEE_CONTROLLED_RUN_POLL_SECONDS": "0.01"},
+        executor_id="test-executor",
+    )
+    await executor._run(str(request["request_id"]))
+    failed = store.get_workerbee_controlled_run_request(str(request["request_id"]))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "WORKERBEE_CONTROLLED_RUN_CLEANUP_INCOMPLETE"
+    assert failed["receipt"]["cleanup"]["residue"] == ["namespace"]
+
+
+@pytest.mark.asyncio
+async def test_executor_recovers_existing_appliance_run_without_starting_it_again(
+    tmp_path: Path,
+) -> None:
+    store, service, fork_id, campaign_id = _service(tmp_path)
+    request = service.request(
+        root_operator_agent_id="operator-8",
+        target_fork_agent_id=fork_id,
+        campaign_id=campaign_id,
+        profile_id="isolated-runtime-validation",
+        baseline_commit=BASELINE,
+        candidate_commit=CANDIDATE,
+        requested_by="test",
+    )["request"]
+    service.decide(request["request_id"], approve=True, decided_by="test")
+    store.claim_workerbee_controlled_run_request(
+        request["request_id"], executor_id="dead-daemon", lease_seconds=10
+    )
+    store.transition_workerbee_controlled_run_request(
+        request["request_id"],
+        executor_id="dead-daemon",
+        status="provisioning",
+        expected_statuses=["claimed"],
+        workerbee_run_id="existing-run",
+    )
+    store.transition_workerbee_controlled_run_request(
+        request["request_id"],
+        executor_id="dead-daemon",
+        status="running",
+        expected_statuses=["provisioning"],
+        workerbee_run_id="existing-run",
+    )
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE workerbee_controlled_run_requests SET claim_expires_at = 0 WHERE request_id = ?",
+            (request["request_id"],),
+        )
+    calls: list[str] = []
+
+    async def fake_call(_endpoint, tool_name, _arguments, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(tool_name)
+        if tool_name.endswith("_status"):
+            return {"data": {"status": "succeeded"}}
+        if tool_name.endswith("_receipt"):
+            return {"data": {"cleanup": {"complete": True, "residue": []}}}
+        raise AssertionError(tool_name)
+
+    executor = WorkerBeeControlledRunExecutor(
+        store,
+        service,
+        service.runtime_registry,
+        tool_caller=fake_call,
+        executor_id="replacement-daemon",
+    )
+    await executor._run(str(request["request_id"]))
+    assert "workerbee_v1_controlled_run_start" not in calls
+    assert store.get_workerbee_controlled_run_request(request["request_id"])["status"] == "succeeded"

@@ -113,6 +113,13 @@ that binding among selected members, but it cannot bind to the collection root,
 an unselected repository, or a path outside the administrator ceiling. Review
 forks retain `review-readonly` through every transition.
 
+Trusted Workbench also permits a root Operator to *request* a PBX-controlled
+WorkerBee validation run for its owned edit fork. It does not authorize the run
+by itself. Public defaults still require F8 approval for the exact source,
+backend generation, profile, recipe, and tool-manifest digests. A private
+workstation profile may allow a bounded campaign lease with a use count and
+expiry; source or backend drift creates a new approval boundary.
+
 ## Administrator posture
 
 ```bash

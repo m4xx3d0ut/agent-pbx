@@ -52,6 +52,7 @@ WORKERBEE_CONTROLLED_RUN_OPEN_STATUSES = {
     "running",
     "collecting",
     "cleaning",
+    "recovery_required",
 }
 WORKERBEE_CONTROLLED_RUN_TERMINAL_STATUSES = {
     "succeeded",
@@ -4244,6 +4245,7 @@ class Store:
                 self._add_handoff_approval_summary(conn, agent)
                 self._add_handoff_action_summary(conn, agent)
                 self._add_handoff_completion_summary(conn, agent)
+                self._add_workerbee_controlled_run_summary(conn, agent)
                 self._add_operator_workflow_summary(conn, agent)
                 self._add_usage_summary(conn, agent)
         return agents
@@ -10190,19 +10192,29 @@ class Store:
             if row is None:
                 raise KeyError("WorkerBee controlled-run request not found")
             status = str(row["status"])
+            same_or_expired = (
+                str(row["executor_id"] or "") == executor_id
+                or float(row["claim_expires_at"] or 0.0) <= current
+            )
             claimable = status == "approved" or (
-                status == "claimed"
-                and (
-                    str(row["executor_id"] or "") == executor_id
-                    or float(row["claim_expires_at"] or 0.0) <= current
-                )
+                status == "claimed" and same_or_expired
+            ) or (
+                status in {
+                    "provisioning", "canary", "running", "collecting",
+                    "cleaning", "recovery_required",
+                }
+                and same_or_expired
             )
             if not claimable:
                 raise ValueError(f"WorkerBee controlled run is not claimable from {status}")
             conn.execute(
                 """
                 UPDATE workerbee_controlled_run_requests
-                SET status = 'claimed', executor_id = ?, claim_expires_at = ?,
+                SET status = CASE WHEN status IN (
+                        'provisioning', 'canary', 'running', 'collecting',
+                        'cleaning', 'recovery_required'
+                    ) THEN status ELSE 'claimed' END,
+                    executor_id = ?, claim_expires_at = ?,
                     updated_at = ?, error_code = NULL, error = NULL
                 WHERE request_id = ?
                 """,
@@ -10239,7 +10251,7 @@ class Store:
         if not expected:
             raise ValueError("WorkerBee controlled-run transition requires expected statuses")
         current = now_ts()
-        terminal = normalized in {"succeeded", "failed"}
+        terminal = normalized in {"succeeded", "failed", "canceled"}
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._expire_workerbee_controlled_runs(conn, current=current)
@@ -12395,6 +12407,12 @@ class Store:
         pending_approvals = int(agent.get("pending_handoff_approval_count") or 0)
         ready_actions = int(agent.get("ready_handoff_action_count") or 0)
         pending_receipts = int(agent.get("pending_completion_delivery_count") or 0)
+        pending_controlled_runs = int(
+            agent.get("pending_workerbee_controlled_run_count") or 0
+        )
+        active_controlled_runs = int(
+            agent.get("active_workerbee_controlled_run_count") or 0
+        )
         active_campaigns = int(agent.get("active_campaign_count") or 0)
 
         state = "idle"
@@ -12411,6 +12429,14 @@ class Store:
             state, label = "blocked", "■ BLOCK"
             reason = "Latest Operator report is blocked"
             source = "latest_report"
+        elif pending_controlled_runs:
+            state, label = "approval", "! WB RUN"
+            reason = f"{pending_controlled_runs} WorkerBee controlled run(s) await approval"
+            source = "workerbee_controlled_run"
+            subject_id = str(
+                agent.get("oldest_workerbee_controlled_run_request_id") or ""
+            ) or None
+            flow = "WB approval"
         elif pending_approvals:
             state, label = "approval", "! APPROVE"
             reason = f"{pending_approvals} outgoing handoff approval(s) pending"
@@ -12447,6 +12473,11 @@ class Store:
             reason = f"{ready_actions} guarded action(s) are ready"
             source = "handoff_action"
             flow = f"{ready_actions} action"
+        elif active_controlled_runs:
+            state, label = "running", "▶ WB RUN"
+            reason = f"{active_controlled_runs} WorkerBee controlled run(s) active"
+            source = "workerbee_controlled_run"
+            flow = "WB run"
         elif status in {"running", "working", "starting", "executing"}:
             state, label = "running", "▶ RUN"
             reason = "Latest Operator report is active"
@@ -12479,6 +12510,55 @@ class Store:
         agent["workflow_source"] = source
         agent["workflow_subject_id"] = subject_id
         agent["workflow_flow"] = flow
+
+    @staticmethod
+    def _add_workerbee_controlled_run_summary(
+        conn: sqlite3.Connection,
+        agent: dict[str, Any],
+    ) -> None:
+        agent["pending_workerbee_controlled_run_count"] = 0
+        agent["active_workerbee_controlled_run_count"] = 0
+        agent["oldest_workerbee_controlled_run_created_at"] = None
+        agent["oldest_workerbee_controlled_run_request_id"] = None
+        if agent.get("agent_type") != OPERATOR_AGENT_TYPE:
+            return
+        row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+                SUM(CASE WHEN status IN (
+                    'approved', 'claimed', 'provisioning', 'canary',
+                    'running', 'collecting', 'cleaning', 'recovery_required'
+                ) THEN 1 ELSE 0 END) AS active_count,
+                MIN(CASE WHEN status = 'pending' THEN created_at END) AS oldest_created_at
+            FROM workerbee_controlled_run_requests
+            WHERE root_operator_agent_id = ?
+            """,
+            (agent["agent_id"],),
+        ).fetchone()
+        agent["pending_workerbee_controlled_run_count"] = int(
+            row["pending_count"] or 0
+        ) if row else 0
+        agent["active_workerbee_controlled_run_count"] = int(
+            row["active_count"] or 0
+        ) if row else 0
+        agent["oldest_workerbee_controlled_run_created_at"] = (
+            row["oldest_created_at"] if row else None
+        )
+        oldest = conn.execute(
+            """
+            SELECT request_id
+            FROM workerbee_controlled_run_requests
+            WHERE root_operator_agent_id = ? AND status = 'pending'
+            ORDER BY created_at ASC, request_id ASC
+            LIMIT 1
+            """,
+            (agent["agent_id"],),
+        ).fetchone()
+        if oldest is not None:
+            agent["oldest_workerbee_controlled_run_request_id"] = oldest[
+                "request_id"
+            ]
 
     @staticmethod
     def _add_usage_summary(

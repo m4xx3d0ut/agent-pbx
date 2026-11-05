@@ -329,3 +329,48 @@ The status helper and switch helper are separate contracts. Do not substitute
 a command named `precheck` unless its implementation is proven observational;
 the Agent PBX preview path intentionally calls only the switcher's true
 non-mutating `--dry-run` mode.
+
+## PBX-controlled validation runs
+
+A trusted root Operator may need one isolated runtime comparison that is wider
+than its interactive Codex sandbox but much narrower than a host shell. Agent
+PBX represents this as a durable `workerbee_controlled_run`; it does not add
+generic execution to `local-deploy`.
+
+The selected WorkerBee appliance must advertise all five narrow methods:
+
+```text
+workerbee_v1_controlled_run_preflight
+workerbee_v1_controlled_run_start
+workerbee_v1_controlled_run_status
+workerbee_v1_controlled_run_cancel
+workerbee_v1_controlled_run_receipt
+```
+
+The request binds the root Operator, owned edit fork, running campaign,
+workspace-set digest, WorkerBee backend instance and generation, workspace
+binding, profile digest, immutable baseline/candidate commits, fixed recipe,
+and pinned tool-manifest digest. A review fork cannot request or approve a run.
+The appliance, rather than Agent PBX or Codex, owns the disposable standard
+workspace and runtime isolation.
+
+Committed defaults use `guided` mode. F8 opens a specialized exact-ID review,
+where the user can approve one run, issue a bounded campaign/profile lease, or
+reject it. `/workerbee run` opens the same review and `/workerbee run status`
+shows recent transitions. Administrators may set the control to `read_only` or
+`hidden` without changing persisted run and receipt records.
+
+Profiles are private TOML files under
+`~/.config/agent-pbx/controlled-runs.d` by default. They must be regular files
+that are not writable by group or other users. The initial profile contract
+requires immutable committed-tree exports, disposable scratch, loopback TCP
+and pathname Unix sockets, denied DNS/non-loopback egress, no ambient
+credentials or host control sockets, pinned tools, explicit resource bounds,
+and mandatory cleanup. Agent PBX records success only after the appliance
+returns a cleanup-complete receipt with no residue.
+
+If the adapter loses contact after the run may have started, state becomes
+`recovery_required`; a replacement daemon may observe the existing appliance
+run and complete collection/cleanup, but it never starts the recipe again.
+Host fallback remains disabled unless both host policy and the exact private
+profile explicitly allow a separately approved fallback.

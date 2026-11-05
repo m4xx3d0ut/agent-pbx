@@ -6506,6 +6506,188 @@ class OperatorHandoffApprovalScreen(ModalScreen[None]):
             )
 
 
+class WorkerBeeControlledRunConfirmScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(
+        self,
+        *,
+        request: dict[str, Any],
+        decision: str,
+        approval_screen: "WorkerBeeControlledRunScreen",
+    ) -> None:
+        super().__init__()
+        self.request = request
+        self.decision = decision
+        self.approval_screen = approval_screen
+
+    def compose(self) -> ComposeResult:
+        request_id = str(self.request.get("request_id") or "")
+        profile = self.request.get("profile")
+        label = (
+            str(profile.get("label") or self.request.get("profile_id") or "-")
+            if isinstance(profile, dict)
+            else str(self.request.get("profile_id") or "-")
+        )
+        action = {
+            "approve": "Approve this exact run once",
+            "lease": "Trust this exact campaign/profile lease",
+            "reject": "Reject this controlled run",
+            "cancel": "Cancel this controlled run",
+        }.get(self.decision, self.decision)
+        with Vertical(id="workerbee-run-confirm-panel"):
+            yield Static("WorkerBee controlled-run confirmation", classes="dialog-title")
+            yield Static(
+                f"{action}\n\n"
+                f"Request: {request_id}\n"
+                f"Root: {self.request.get('root_operator_agent_id') or '-'}\n"
+                f"Fork: {self.request.get('target_fork_agent_id') or '-'}\n"
+                f"Profile: {label}\n"
+                f"Baseline: {self.request.get('baseline_commit') or '-'}\n"
+                f"Candidate: {self.request.get('candidate_commit') or '-'}\n\n"
+                "The appliance must deny external egress and credentials, use immutable "
+                "sources, and return a cleanup-complete receipt.",
+                id="workerbee-run-confirm-detail",
+            )
+            with Horizontal(classes="dialog-actions"):
+                yield Button("Confirm", id="workerbee-run-confirm", variant="warning")
+                yield Button("Back", id="workerbee-run-confirm-back")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "workerbee-run-confirm-back":
+            self.dismiss()
+            return
+        if event.button.id == "workerbee-run-confirm":
+            self.dismiss()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.decide_workerbee_controlled_run(  # type: ignore[attr-defined]
+                    self.approval_screen,
+                    self.request,
+                    self.decision,
+                ),
+                name="workerbee-controlled-run-decision",
+                exclusive=True,
+            )
+
+
+class WorkerBeeControlledRunScreen(ModalScreen[None]):
+    """Specialized F8 review for root-owned WorkerBee controlled runs."""
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(
+        self,
+        *,
+        operator_agent_id: str,
+        requests: list[dict[str, Any]],
+        statuses: tuple[str, ...] = ("pending",),
+    ) -> None:
+        super().__init__()
+        self.operator_agent_id = operator_agent_id
+        self.requests = requests
+        self.statuses = statuses
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="workerbee-run-approval-panel"):
+            yield Static(
+                f"WorkerBee controlled runs · {self.operator_agent_id}",
+                id="workerbee-run-approval-title",
+            )
+            yield Static(
+                "Exact immutable sources, fixed appliance recipe, bounded authority.",
+                id="workerbee-run-approval-summary",
+            )
+            yield DataTable(
+                id="workerbee-run-approval-table",
+                cursor_type="row",
+                show_row_labels=False,
+            )
+            with Horizontal(id="workerbee-run-approval-actions"):
+                yield Button("Approve once", id="workerbee-run-approve", variant="warning")
+                yield Button("Trust campaign", id="workerbee-run-trust", variant="warning")
+                yield Button("Reject", id="workerbee-run-reject", variant="error")
+                yield Button("Cancel", id="workerbee-run-cancel", variant="error")
+                yield Button("Refresh", id="workerbee-run-refresh")
+                yield Button("Close", id="workerbee-run-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#workerbee-run-approval-table", DataTable)
+        table.add_columns("Created", "Fork", "Profile", "Baseline", "Candidate", "ID")
+        self.render_rows()
+
+    def render_rows(self) -> None:
+        table = self.query_one("#workerbee-run-approval-table", DataTable)
+        table.clear(columns=False)
+        for request in self.requests:
+            request_id = str(request.get("request_id") or "")
+            if not request_id:
+                continue
+            table.add_row(
+                OperatorHandoffApprovalScreen.format_timestamp(request.get("created_at")),
+                str(request.get("target_fork_agent_id") or "-"),
+                str(request.get("profile_id") or "-"),
+                str(request.get("baseline_commit") or "-")[:10],
+                str(request.get("candidate_commit") or "-")[:10],
+                request_id,
+                key=request_id,
+            )
+        self.query_one("#workerbee-run-approval-summary", Static).update(
+            f"Showing {table.row_count} · every action remains bound to the displayed exact request."
+        )
+
+    def current_request(self) -> dict[str, Any] | None:
+        table = self.query_one("#workerbee-run-approval-table", DataTable)
+        if table.row_count == 0:
+            return None
+        try:
+            request_id = str(
+                table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            )
+        except Exception:
+            return None
+        return next(
+            (item for item in self.requests if item.get("request_id") == request_id),
+            None,
+        )
+
+    def replace_requests(self, requests: list[dict[str, Any]]) -> None:
+        self.requests = requests
+        self.render_rows()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        button_id = event.button.id
+        if button_id == "workerbee-run-close":
+            self.dismiss()
+            return
+        if button_id == "workerbee-run-refresh":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.refresh_workerbee_controlled_run_screen(self),  # type: ignore[attr-defined]
+                name="workerbee-controlled-run-refresh",
+                exclusive=True,
+            )
+            return
+        request = self.current_request()
+        if request is None:
+            self.app.notify("Select a controlled run.", severity="warning")  # type: ignore[attr-defined]
+            return
+        decision = {
+            "workerbee-run-approve": "approve",
+            "workerbee-run-trust": "lease",
+            "workerbee-run-reject": "reject",
+            "workerbee-run-cancel": "cancel",
+        }.get(button_id)
+        if decision:
+            self.app.push_screen(  # type: ignore[attr-defined]
+                WorkerBeeControlledRunConfirmScreen(
+                    request=request,
+                    decision=decision,
+                    approval_screen=self,
+                )
+            )
+
+
 class AgentPBXTUI(App[None]):
     TITLE = "Agent PBX"
     CSS = """
@@ -6531,7 +6713,9 @@ class AgentPBXTUI(App[None]):
     }
 
     #operator-handoff-approval-panel,
-    #operator-handoff-confirm-panel {
+    #operator-handoff-confirm-panel,
+    #workerbee-run-approval-panel,
+    #workerbee-run-confirm-panel {
         width: 92%;
         height: 82%;
         border: solid $warning;
@@ -6546,7 +6730,15 @@ class AgentPBXTUI(App[None]):
         overflow-y: auto;
     }
 
-    #operator-handoff-approval-table {
+    #workerbee-run-confirm-panel {
+        width: 76%;
+        height: auto;
+        max-height: 92%;
+        overflow-y: auto;
+    }
+
+    #operator-handoff-approval-table,
+    #workerbee-run-approval-table {
         height: 1fr;
     }
 
@@ -8220,6 +8412,10 @@ class AgentPBXTUI(App[None]):
         self.active_agent_tab = "latest-tab"
         self.unseen_latest_agent_ids: set[str] = set()
         self.pending_handoff_approval_operator_ids: set[str] = set()
+        self.reviewed_workerbee_run_signatures: dict[
+            str, tuple[int, float | None]
+        ] = {}
+        self.workerbee_run_opening_operator_id: str | None = None
         self.reviewed_handoff_approval_signatures: dict[
             str, tuple[int, float | None]
         ] = {}
@@ -8255,6 +8451,12 @@ class AgentPBXTUI(App[None]):
         )
         self.workerbee_snapshot_controls_hidden = (
             str(os.getenv("AGENT_PBX_WORKERBEE_SNAPSHOT_CONTROL_MODE") or "")
+            .strip()
+            .lower()
+            == "hidden"
+        )
+        self.workerbee_controlled_run_controls_hidden = (
+            str(os.getenv("AGENT_PBX_WORKERBEE_CONTROLLED_RUN_CONTROL_MODE") or "")
             .strip()
             .lower()
             == "hidden"
@@ -11127,6 +11329,22 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/editor reveal", "Reveal the current editor file in Files", self.palette_editor_reveal)
         yield SystemCommand("/workerbee", "Open and refresh the WorkerBee tab", self.palette_workerbee)
         yield SystemCommand("/workerbee preflight", "Check WorkerBee MCP bootstrap capability", self.palette_workerbee_preflight)
+        if not self.workerbee_controlled_run_controls_hidden:
+            yield SystemCommand(
+                "/workerbee run",
+                "Review pending PBX-controlled WorkerBee runs",
+                self.palette_workerbee_controlled_runs,
+            )
+            yield SystemCommand(
+                "/workerbee run status",
+                "Show recent PBX-controlled WorkerBee run state",
+                self.palette_workerbee_controlled_run_status,
+            )
+            yield SystemCommand(
+                "/workerbee run cancel",
+                "Review and cancel an active PBX-controlled WorkerBee run",
+                self.palette_workerbee_controlled_run_cancel,
+            )
         if not self.workerbee_access_controls_hidden:
             yield SystemCommand("/workerbee access", "Manage the selected Agent WorkerBee authority", self.palette_workerbee_access)
         if not self.workerbee_workspace_controls_hidden:
@@ -12381,6 +12599,42 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.refresh_workerbee_mcp_preflight(),
             name="workerbee-mcp-preflight",
+            exclusive=True,
+        )
+
+    def palette_workerbee_controlled_runs(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_workerbee_controlled_run_center(agent_id),
+            name="workerbee-controlled-run-center",
+            exclusive=True,
+        )
+
+    def palette_workerbee_controlled_run_status(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.show_workerbee_controlled_run_status(agent_id),
+            name="workerbee-controlled-run-status",
+            exclusive=True,
+        )
+
+    def palette_workerbee_controlled_run_cancel(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_workerbee_controlled_run_center(
+                agent_id,
+                statuses=(
+                    "approved", "claimed", "provisioning", "canary", "running",
+                    "collecting", "cleaning", "recovery_required",
+                ),
+            ),
+            name="workerbee-controlled-run-cancel",
             exclusive=True,
         )
 
@@ -14462,8 +14716,8 @@ class AgentPBXTUI(App[None]):
             return (
                 STARRED_AGENT_COLUMN,
                 "New",
-                "Operator",
                 "State",
+                "Operator",
                 "Flow",
                 *live,
                 "Hidden",
@@ -14472,8 +14726,8 @@ class AgentPBXTUI(App[None]):
             return (
                 STARRED_AGENT_COLUMN,
                 "New",
-                "Operator",
                 "State",
+                "Operator",
                 "Flow",
                 "Camp",
                 *live,
@@ -14483,9 +14737,9 @@ class AgentPBXTUI(App[None]):
         return (
             STARRED_AGENT_COLUMN,
             "New",
+            "State",
             "Operator",
             "PBX",
-            "State",
             "Flow",
             "Camp",
             *live,
@@ -15783,6 +16037,8 @@ class AgentPBXTUI(App[None]):
 
         agent = self.agents.get(agent_id) or {}
         if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
+            if int(agent.get("pending_workerbee_controlled_run_count") or 0) > 0:
+                return "WB"
             if int(agent.get("pending_handoff_approval_count") or 0) > 0:
                 return "APRV"
             if int(agent.get("pending_completion_delivery_count") or 0) > 0:
@@ -15833,6 +16089,7 @@ class AgentPBXTUI(App[None]):
             self.unseen_latest_agent_ids
             or self.tmux_plan_selector_agent_ids
             or self.pending_handoff_approval_operator_ids
+            or self.pending_workerbee_controlled_run_operators()
             or self.pending_completion_operators()
             or self.ready_handoff_action_operators()
         )
@@ -15867,6 +16124,22 @@ class AgentPBXTUI(App[None]):
             # The changing PLAN/PLAN! marker is sufficient recurring notice.
             # Toggling a class on the entire Screen here forces both large
             # panels to be restyled every blink and can starve terminal input.
+            self.set_attention_flash_class(False)
+            return
+        workerbee_ids = self.pending_workerbee_controlled_run_operators()
+        if workerbee_ids:
+            self.attention_agent_id = workerbee_ids[0]
+            total = sum(
+                int(self.agents[agent_id].get("pending_workerbee_controlled_run_count") or 0)
+                for agent_id in workerbee_ids
+                if agent_id in self.agents
+            )
+            displayed = ", ".join(workerbee_ids[:3])
+            if len(workerbee_ids) > 3:
+                displayed += f", +{len(workerbee_ids) - 3}"
+            marker = "WB RUN!" if blink_active else "WB RUN"
+            attention.update(f"{marker} {total}: {displayed} · F8 review")
+            attention.add_class("unseen-active")
             self.set_attention_flash_class(False)
             return
         approval_ids = self.pending_handoff_operators()
@@ -15965,6 +16238,9 @@ class AgentPBXTUI(App[None]):
         for agent_id in sorted(self.tmux_plan_selector_agent_ids):
             if agent_id in self.agents:
                 return agent_id
+        for agent_id in self.pending_workerbee_controlled_run_operators():
+            if agent_id in self.agents:
+                return agent_id
         for agent_id in self.pending_handoff_operators():
             if agent_id in self.agents:
                 return agent_id
@@ -16029,6 +16305,50 @@ class AgentPBXTUI(App[None]):
             if agent_id in self.pending_handoff_approval_operator_ids
         }
         return operator_ids
+
+    def pending_workerbee_controlled_run_operators(self) -> list[str]:
+        if self.workerbee_controlled_run_controls_hidden:
+            return []
+        operator_ids = [
+            agent_id
+            for agent_id, agent in self.agents.items()
+            if int(agent.get("pending_workerbee_controlled_run_count") or 0) > 0
+        ]
+        operator_ids.sort(
+            key=lambda agent_id: (
+                float_value(
+                    self.agents[agent_id].get(
+                        "oldest_workerbee_controlled_run_created_at"
+                    )
+                )
+                or math.inf,
+                agent_id,
+            )
+        )
+        valid = set(operator_ids)
+        self.reviewed_workerbee_run_signatures = {
+            agent_id: signature
+            for agent_id, signature in self.reviewed_workerbee_run_signatures.items()
+            if agent_id in valid
+        }
+        return operator_ids
+
+    def workerbee_controlled_run_signature(
+        self, operator_agent_id: str
+    ) -> tuple[int, float | None]:
+        agent = self.agents.get(operator_agent_id) or {}
+        return (
+            int(agent.get("pending_workerbee_controlled_run_count") or 0),
+            float_value(agent.get("oldest_workerbee_controlled_run_created_at")),
+        )
+
+    def unreviewed_workerbee_controlled_run_operators(self) -> list[str]:
+        return [
+            operator_agent_id
+            for operator_agent_id in self.pending_workerbee_controlled_run_operators()
+            if self.reviewed_workerbee_run_signatures.get(operator_agent_id)
+            != self.workerbee_controlled_run_signature(operator_agent_id)
+        ]
 
     def handoff_approval_signature(
         self,
@@ -16157,6 +16477,22 @@ class AgentPBXTUI(App[None]):
             None,
         )
 
+    def active_workerbee_controlled_run_screen(
+        self,
+    ) -> WorkerBeeControlledRunScreen | None:
+        try:
+            screens = list(self.screen_stack)
+        except ScreenStackError:
+            return None
+        return next(
+            (
+                screen
+                for screen in reversed(screens)
+                if isinstance(screen, WorkerBeeControlledRunScreen)
+            ),
+            None,
+        )
+
     def active_completion_receipt_screen(
         self,
     ) -> OperatorHandoffCompletionScreen | None:
@@ -16178,12 +16514,24 @@ class AgentPBXTUI(App[None]):
             self.handoff_approval_opening_operator_id is not None
             or self.handoff_action_opening_operator_id is not None
             or self.completion_receipt_opening_operator_id is not None
+            or self.workerbee_run_opening_operator_id is not None
         ):
             self.notify(
                 "Operator handoff approvals are already opening.",
                 severity="information",
             )
             return
+        active_workerbee = self.active_workerbee_controlled_run_screen()
+        closed_workerbee = False
+        if active_workerbee is not None:
+            if self.screen is not active_workerbee:
+                self.notify(
+                    "Finish or cancel the current WorkerBee run action before cycling alerts.",
+                    severity="warning",
+                )
+                return
+            await active_workerbee.dismiss()
+            closed_workerbee = True
         active_action = self.active_ready_action_screen()
         if active_action is not None:
             if self.screen is not active_action:
@@ -16215,6 +16563,10 @@ class AgentPBXTUI(App[None]):
                 return
             await active_completion.dismiss()
             closed_completion = True
+        workerbee_ids = self.unreviewed_workerbee_controlled_run_operators()
+        if workerbee_ids:
+            await self.open_workerbee_controlled_run_center(workerbee_ids[0])
+            return
         approval_ids = self.unreviewed_handoff_operators()
         if approval_ids:
             await self.open_operator_handoff_approval_center(approval_ids[0])
@@ -16239,6 +16591,17 @@ class AgentPBXTUI(App[None]):
             # already acknowledged this entity's latest report and rerendering now
             # advances the banner to the next pending alert, if one exists.
             self.clear_flash(self.flash_generation)
+            return
+        remaining_workerbee = self.pending_workerbee_controlled_run_operators()
+        if remaining_workerbee:
+            if closed_workerbee:
+                self.notify(
+                    "No other alerts are pending; WorkerBee run review remains openable with F8."
+                )
+                return
+            for operator_agent_id in remaining_workerbee:
+                self.reviewed_workerbee_run_signatures.pop(operator_agent_id, None)
+            await self.open_workerbee_controlled_run_center(remaining_workerbee[0])
             return
         remaining_approvals = self.pending_handoff_operators()
         if remaining_approvals:
@@ -28165,6 +28528,184 @@ class AgentPBXTUI(App[None]):
         await self.refresh_events()
         await self.refresh_operator_completion_screen(screen)
         self.notify(f"Retried completion delivery {delivery_id}.")
+
+    async def fetch_workerbee_controlled_runs(
+        self,
+        operator_agent_id: str,
+        *,
+        statuses: tuple[str, ...] = ("pending",),
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        params: list[tuple[str, str]] = [
+            ("root_operator_agent_id", operator_agent_id),
+            ("limit", str(limit)),
+        ]
+        params.extend(("status", status) for status in statuses)
+        response = await self.api_client().get(
+            "/v2/workerbee/controlled-runs",
+            params=params,
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        requests = payload.get("requests") if isinstance(payload, dict) else None
+        return [dict(item) for item in requests or [] if isinstance(item, dict)]
+
+    async def open_workerbee_controlled_run_center(
+        self,
+        operator_agent_id: str,
+        *,
+        statuses: tuple[str, ...] = ("pending",),
+    ) -> bool:
+        if self.workerbee_controlled_run_controls_hidden:
+            self.notify("WorkerBee controlled-run controls are hidden by policy.", severity="warning")
+            return False
+        active = self.active_workerbee_controlled_run_screen()
+        if active is not None:
+            self.notify(
+                f"WorkerBee run approvals for {active.operator_agent_id} are already open."
+            )
+            return False
+        if self.workerbee_run_opening_operator_id is not None:
+            self.notify("WorkerBee run approvals are already opening.")
+            return False
+        self.workerbee_run_opening_operator_id = operator_agent_id
+        try:
+            try:
+                requests = await self.fetch_workerbee_controlled_runs(
+                    operator_agent_id,
+                    statuses=statuses,
+                )
+            except Exception as exc:
+                self.notify(f"Unable to fetch WorkerBee runs: {exc}", severity="error")
+                return False
+            if not requests:
+                self.notify(f"No pending WorkerBee controlled runs for {operator_agent_id}.")
+                await self.refresh_agents()
+                return False
+            self.reviewed_workerbee_run_signatures[operator_agent_id] = (
+                self.workerbee_controlled_run_signature(operator_agent_id)
+            )
+            await self.push_screen(
+                WorkerBeeControlledRunScreen(
+                    operator_agent_id=operator_agent_id,
+                    requests=requests,
+                    statuses=statuses,
+                )
+            )
+            return True
+        finally:
+            self.workerbee_run_opening_operator_id = None
+
+    async def refresh_workerbee_controlled_run_screen(
+        self,
+        screen: WorkerBeeControlledRunScreen,
+    ) -> None:
+        try:
+            requests = await self.fetch_workerbee_controlled_runs(
+                screen.operator_agent_id,
+                statuses=screen.statuses,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to refresh WorkerBee runs: {exc}", severity="error")
+            return
+        screen.replace_requests(requests)
+        await self.refresh_agents()
+        if not requests:
+            screen.dismiss()
+
+    async def decide_workerbee_controlled_run(
+        self,
+        screen: WorkerBeeControlledRunScreen,
+        request: dict[str, Any],
+        decision: str,
+    ) -> None:
+        request_id = str(request.get("request_id") or "").strip()
+        if not request_id:
+            self.notify("Controlled run has no durable request ID.", severity="error")
+            return
+        try:
+            if decision == "cancel":
+                response = await self.api_client().post(
+                    f"/v2/workerbee/controlled-runs/{request_id}/cancel",
+                    json={
+                        "canceled_by": "local-tui-user",
+                        "reason": "Canceled from the Agent PBX controlled-run review.",
+                    },
+                    headers=auth_headers(self.token),
+                )
+                response.raise_for_status()
+                await self.refresh_events()
+                await self.refresh_workerbee_controlled_run_screen(screen)
+                self.notify(f"WorkerBee controlled run {request_id} canceled.")
+                return
+            lease_id: str | None = None
+            if decision == "lease":
+                lease_response = await self.api_client().post(
+                    f"/v2/workerbee/controlled-runs/{request_id}/leases",
+                    json={"requested_by": "agent-pbx-tui"},
+                    headers=auth_headers(self.token),
+                )
+                lease_response.raise_for_status()
+                lease = lease_response.json()
+                lease_id = str(lease.get("lease_id") or "")
+                if not lease_id:
+                    raise RuntimeError("controlled-run lease response omitted its ID")
+                lease_decision = await self.api_client().post(
+                    f"/v2/workerbee/controlled-run-leases/{lease_id}/decision",
+                    json={"approve": True, "decided_by": "local-tui-user"},
+                    headers=auth_headers(self.token),
+                )
+                lease_decision.raise_for_status()
+            approve = decision in {"approve", "lease"}
+            response = await self.api_client().post(
+                f"/v2/workerbee/controlled-runs/{request_id}/decision",
+                json={
+                    "approve": approve,
+                    "decided_by": "local-tui-user",
+                    "lease_id": lease_id,
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"Unable to decide WorkerBee run: {exc}", severity="error")
+            return
+        await self.refresh_events()
+        await self.refresh_workerbee_controlled_run_screen(screen)
+        verb = "approved" if decision == "approve" else (
+            "trusted for the bounded campaign" if decision == "lease" else "rejected"
+        )
+        self.notify(f"WorkerBee controlled run {request_id} {verb}.")
+
+    async def show_workerbee_controlled_run_status(self, operator_agent_id: str) -> None:
+        try:
+            requests = await self.fetch_workerbee_controlled_runs(
+                operator_agent_id,
+                statuses=(
+                    "pending", "approved", "claimed", "provisioning", "canary",
+                    "running", "collecting", "cleaning", "succeeded", "failed",
+                    "recovery_required", "canceled", "rejected", "expired",
+                ),
+                limit=20,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to fetch WorkerBee run status: {exc}", severity="error")
+            return
+        detail = self.query_one_or_none("#detail", TextArea)
+        if detail is not None:
+            lines = [f"WorkerBee controlled runs · {operator_agent_id}", ""]
+            lines.extend(
+                f"{item.get('status', '-'):>12}  {str(item.get('request_id') or '')[:12]}  "
+                f"{str(item.get('baseline_commit') or '')[:8]}→"
+                f"{str(item.get('candidate_commit') or '')[:8]}  "
+                f"{item.get('profile_id') or '-'}"
+                for item in requests
+            )
+            if not requests:
+                lines.append("No controlled runs recorded.")
+            detail.text = "\n".join(lines)
+        self.notify(f"Loaded {len(requests)} WorkerBee controlled run(s).")
 
     async def open_operator_handoff_approval_center(
         self,

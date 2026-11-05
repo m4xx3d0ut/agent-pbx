@@ -2230,6 +2230,7 @@ class WorkerBeeControlledRunTransitionRequest(BaseModel):
         "running",
         "collecting",
         "cleaning",
+        "recovery_required",
         "succeeded",
         "failed",
     ]

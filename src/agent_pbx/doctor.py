@@ -42,6 +42,11 @@ from .workerbee_materializer import (
     DEBUG_STAGE_PYTHON_ENV,
     DEBUG_STAGE_SCRIPT_ENV,
 )
+from .workerbee_controlled_run import (
+    WorkerBeeControlledRunError,
+    controlled_run_posture,
+    load_controlled_run_profiles,
+)
 
 
 DOCTOR_API_VERSION = "agent-pbx.doctor/v2"
@@ -153,6 +158,7 @@ def run_platform_doctor(
     checks.append(_workerbee_switcher_check(which, timeout))
     checks.append(_workerbee_runtime_binding_check(config, which, timeout))
     checks.append(_workerbee_workspace_policy_check(config))
+    checks.append(_workerbee_controlled_run_check())
     checks.append(_joplin_check(config, timeout, probe_services=probe_services))
     checks.append(_clipboard_check(which))
     return DoctorReport(
@@ -873,6 +879,48 @@ def _workerbee_workspace_policy_check(config: MCPDaemonConfig) -> DoctorCheck:
             "Configure at least one existing allowed root for scoped-workbench policy."
             if not valid
             else ""
+        ),
+    )
+
+
+def _workerbee_controlled_run_check() -> DoctorCheck:
+    try:
+        posture = controlled_run_posture()
+        profiles = load_controlled_run_profiles(posture.profile_root)
+    except WorkerBeeControlledRunError as exc:
+        return DoctorCheck(
+            "workerbee-controlled-runs",
+            "warn",
+            exc.message,
+            remediation=exc.remediation or "Correct the private controlled-run profile directory.",
+        )
+    enabled = [profile for profile in profiles.values() if profile.enabled]
+    if not posture.enabled:
+        return DoctorCheck(
+            "workerbee-controlled-runs",
+            "pass",
+            "disabled by host policy",
+            detail=f"control={posture.control_mode}; host_fallback={posture.host_fallback}",
+        )
+    if not enabled:
+        return DoctorCheck(
+            "workerbee-controlled-runs",
+            "warn" if posture.root_operator_enabled else "pass",
+            f"{posture.mode} mode with no enabled private profiles",
+            detail=f"profile_root={posture.profile_root}; control={posture.control_mode}",
+            remediation=(
+                "Install a private, owner-writable-only controlled-run profile and verify the selected WorkerBee appliance contract."
+                if posture.root_operator_enabled
+                else ""
+            ),
+        )
+    return DoctorCheck(
+        "workerbee-controlled-runs",
+        "pass",
+        f"{posture.mode} mode with {len(enabled)} enabled profile(s)",
+        detail=(
+            f"profile_root={posture.profile_root}; control={posture.control_mode}; "
+            f"host_fallback={posture.host_fallback}; max_in_flight={posture.max_in_flight_per_root}"
         ),
     )
 

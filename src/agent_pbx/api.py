@@ -85,6 +85,7 @@ from .workerbee_controlled_run import (
     WorkerBeeControlledRunError,
     WorkerBeeControlledRunService,
 )
+from .workerbee_controlled_run_executor import WorkerBeeControlledRunExecutor
 from .workerbee_switcher import WorkerBeeSwitchService
 from .events import EventClientRegistry, EventStreamService
 from .codex.runtime import CodexRuntimeService
@@ -169,15 +170,12 @@ from .schemas import (
     WorkerBeeGatewayLeaseRequest,
     WorkerBeeAccessProfileRequest,
     WorkerBeeControlledRunCancelRequest,
-    WorkerBeeControlledRunClaimRequest,
     WorkerBeeControlledRunCreateRequest,
     WorkerBeeControlledRunDecisionRequest,
     WorkerBeeControlledRunLeaseCreateRequest,
     WorkerBeeControlledRunLeaseDecisionRequest,
     WorkerBeeControlledRunLeaseRevokeRequest,
     WorkerBeeControlledRunPreflightRequest,
-    WorkerBeeControlledRunReceiptRequest,
-    WorkerBeeControlledRunTransitionRequest,
     OperatorAuthorityAssignmentRequest,
     OperatorWorkspaceSetRequest,
     WorkerBeeWorkspacePolicyRequest,
@@ -669,6 +667,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         store,
         workerbee_runtime,
     )
+    workerbee_controlled_run_executor = WorkerBeeControlledRunExecutor(
+        store,
+        workerbee_controlled_runs,
+        workerbee_runtime,
+    )
     operator_authority = OperatorAuthorityService(
         store,
         workerbee_access=workerbee_access_policy,
@@ -761,9 +764,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     name="agent-pbx-joplin-sync",
                 )
             await app.state.codex_event_bridge.start()
+            await app.state.workerbee_controlled_run_executor.start()
             try:
                 yield
             finally:
+                await app.state.workerbee_controlled_run_executor.stop()
                 await app.state.codex_event_bridge.stop()
                 with suppress(Exception):
                     shutdown_editor = getattr(
@@ -823,6 +828,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.workerbee_snapshot_policy = workerbee_snapshot_policy
     app.state.workerbee_access_policy = workerbee_access_policy
     app.state.workerbee_controlled_runs = workerbee_controlled_runs
+    app.state.workerbee_controlled_run_executor = workerbee_controlled_run_executor
     app.state.operator_authority = operator_authority
     app.state.workerbee_gateway = workerbee_gateway
     app.state.workerbee_switcher = workerbee_switcher
@@ -2605,15 +2611,19 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         _controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 request.app.state.workerbee_controlled_runs.decide,
                 request_id,
                 approve=payload.approve,
                 decided_by=payload.decided_by,
                 lease_id=payload.lease_id,
             )
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if payload.approve:
+                request.app.state.workerbee_controlled_run_executor.schedule(request_id)
+            return result
+        except (WorkerBeeControlledRunError, KeyError, ValueError) as exc:
+            detail = exc.public_dict() if isinstance(exc, WorkerBeeControlledRunError) else str(exc)
+            raise HTTPException(status_code=409, detail=detail) from exc
 
     @app.post(
         "/v2/workerbee/controlled-runs/{request_id}/cancel",
@@ -2626,8 +2636,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         _controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(
-                request.app.state.workerbee_controlled_runs.cancel,
+            return await request.app.state.workerbee_controlled_run_executor.cancel(
                 request_id,
                 canceled_by=payload.canceled_by,
                 reason=payload.reason,
@@ -2682,18 +2691,19 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     async def decide_workerbee_controlled_run_lease(
         lease_id: str,
         payload: WorkerBeeControlledRunLeaseDecisionRequest,
+        request: Request,
         _controller: ClientPrincipal = Depends(require_global_controller),
-        store: Store = Depends(get_store),
     ) -> dict[str, Any]:
         try:
             return await asyncio.to_thread(
-                store.decide_workerbee_controlled_run_lease,
+                request.app.state.workerbee_controlled_runs.decide_lease,
                 lease_id,
                 approve=payload.approve,
                 decided_by=payload.decided_by,
             )
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (WorkerBeeControlledRunError, KeyError, ValueError) as exc:
+            detail = exc.public_dict() if isinstance(exc, WorkerBeeControlledRunError) else str(exc)
+            raise HTTPException(status_code=409, detail=detail) from exc
 
     @app.post(
         "/v2/workerbee/controlled-run-leases/{lease_id}/revoke",
@@ -2710,76 +2720,6 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 store.revoke_workerbee_controlled_run_lease,
                 lease_id,
                 revoked_by=payload.revoked_by,
-            )
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @app.post(
-        "/v2/workerbee/controlled-runs/{request_id}/claim",
-        response_model=dict[str, Any],
-    )
-    async def claim_workerbee_controlled_run(
-        request_id: str,
-        payload: WorkerBeeControlledRunClaimRequest,
-        _controller: ClientPrincipal = Depends(require_global_controller),
-        store: Store = Depends(get_store),
-    ) -> dict[str, Any]:
-        try:
-            return await asyncio.to_thread(
-                store.claim_workerbee_controlled_run_request,
-                request_id,
-                executor_id=payload.executor_id,
-                lease_seconds=payload.lease_seconds,
-            )
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @app.post(
-        "/v2/workerbee/controlled-runs/{request_id}/transition",
-        response_model=dict[str, Any],
-    )
-    async def transition_workerbee_controlled_run(
-        request_id: str,
-        payload: WorkerBeeControlledRunTransitionRequest,
-        _controller: ClientPrincipal = Depends(require_global_controller),
-        store: Store = Depends(get_store),
-    ) -> dict[str, Any]:
-        try:
-            return await asyncio.to_thread(
-                store.transition_workerbee_controlled_run_request,
-                request_id,
-                executor_id=payload.executor_id,
-                status=payload.status,
-                expected_statuses=payload.expected_statuses,
-                workerbee_run_id=payload.workerbee_run_id,
-                workerbee_workspace_id=payload.workerbee_workspace_id,
-                result=payload.result,
-                error_code=payload.error_code,
-                error=payload.error,
-                lease_seconds=payload.lease_seconds,
-            )
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @app.post(
-        "/v2/workerbee/controlled-runs/{request_id}/receipt",
-        response_model=dict[str, Any],
-    )
-    async def record_workerbee_controlled_run_receipt(
-        request_id: str,
-        payload: WorkerBeeControlledRunReceiptRequest,
-        _controller: ClientPrincipal = Depends(require_global_controller),
-        store: Store = Depends(get_store),
-    ) -> dict[str, Any]:
-        try:
-            return await asyncio.to_thread(
-                store.record_workerbee_controlled_run_receipt,
-                request_id,
-                outcome=payload.outcome,
-                backend_run_id=payload.backend_run_id,
-                workspace_id=payload.workspace_id,
-                evidence=payload.evidence,
-                cleanup=payload.cleanup,
             )
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -71,6 +71,7 @@ from agent_pbx.tui import (
     WorkerBeeLaunchPreflightError,
     WorkerBeeAccessScreen,
     WorkerBeeSwitchConfirmScreen,
+    WorkerBeeControlledRunScreen,
     WorkerBeeSnapshotScreen,
     WorkerBeeWorkspaceScreen,
     DEFAULT_SPLIT_PERCENT,
@@ -5283,6 +5284,61 @@ def test_tui_operator_rows_expose_workflow_state_flow_and_durable_alerts() -> No
     styled = app.style_agent_row(values, operator, columns)
     assert isinstance(styled[columns.index("State")], Text)
     assert "b58cff" in str(styled[columns.index("State")].style)
+
+
+def test_tui_operator_columns_keep_state_visible_before_identity_on_all_layouts() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    for layout in ("tiny", "compact", "split"):
+        app.effective_layout_mode = layout
+        assert app.desired_operator_columns()[:4] == ("*", "New", "State", "Operator")
+
+
+@pytest.mark.asyncio
+async def test_f8_opens_one_specialized_workerbee_controlled_run_review() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.workerbee_controlled_run_controls_hidden = False
+    request = {
+        "request_id": "run-request-1",
+        "root_operator_agent_id": "operator-8",
+        "target_fork_agent_id": "operator-8-fork",
+        "profile_id": "isolated-runtime-validation",
+        "baseline_commit": "a" * 40,
+        "candidate_commit": "b" * 40,
+        "created_at": 10.0,
+        "status": "pending",
+    }
+    fetches = 0
+
+    async def fake_fetch(
+        operator_agent_id: str,
+        *,
+        statuses: tuple[str, ...] = ("pending",),
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        nonlocal fetches
+        assert operator_agent_id == "operator-8"
+        assert statuses == ("pending",)
+        fetches += 1
+        return [request]
+
+    app.fetch_workerbee_controlled_runs = fake_fetch  # type: ignore[method-assign]
+    async with app.run_test():
+        app.agents = {
+            "operator-8": {
+                "agent_id": "operator-8",
+                "agent_type": "operator",
+                "pending_workerbee_controlled_run_count": 1,
+                "oldest_workerbee_controlled_run_created_at": 10.0,
+            }
+        }
+        await app.action_focus_next_alert()
+        await asyncio.sleep(0)
+        assert fetches == 1
+        assert sum(
+            isinstance(screen, WorkerBeeControlledRunScreen)
+            for screen in app.screen_stack
+        ) == 1
+        assert app.format_agent_alert("operator-8") == "WB"
 
 
 def test_tui_keeps_reported_status_for_idle_or_nonterminal_tmux(monkeypatch) -> None:

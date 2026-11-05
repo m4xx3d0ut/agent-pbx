@@ -19,6 +19,7 @@ from agent_pbx.doctor import (
     _tmux_server_diagnostic,
     _compatibility_check,
     _workerbee_runtime_binding_check,
+    _workerbee_controlled_run_check,
     _workerbee_workspace_policy_check,
     doctor_json,
     doctor_markdown,
@@ -85,6 +86,23 @@ def test_doctor_reports_effective_workerbee_workspace_policy(tmp_path: Path) -> 
     assert check.status == "pass"
     assert "Rosie Workbench" in check.summary
     assert "allowed_roots=1" in check.detail
+
+
+def test_doctor_reports_safe_controlled_run_default_and_missing_root_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_root = tmp_path / "profiles"
+    monkeypatch.setenv("AGENT_PBX_WORKERBEE_CONTROLLED_RUN_PROFILE_ROOT", str(profile_root))
+    monkeypatch.delenv("AGENT_PBX_WORKERBEE_CONTROLLED_RUN_MODE", raising=False)
+    guided = _workerbee_controlled_run_check()
+    assert guided.status == "pass"
+    assert "guided" in guided.summary
+
+    monkeypatch.setenv("AGENT_PBX_WORKERBEE_CONTROLLED_RUN_MODE", "root_operator")
+    root = _workerbee_controlled_run_check()
+    assert root.status == "warn"
+    assert "no enabled private profiles" in root.summary
 
 
 def test_doctor_security_rejects_unprotected_lan_and_warns_on_override(

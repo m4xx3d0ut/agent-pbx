@@ -459,7 +459,16 @@ class WorkerBeeControlledRunService:
                 "WORKERBEE_CONTROLLED_RUN_BACKEND_DENIED",
                 f"Profile {profile.profile_id!r} does not allow backend {runtime.backend!r}.",
             )
-        project = str(fork.get("project") or fork_metadata.get("workerbee_workspace_project") or "")
+        # Operator fork rows retain the PBX project (usually
+        # ``agent-pbx-operator``).  The bound WorkerBee scenario/project is the
+        # execution identity and must therefore win when a fork works across
+        # repositories from one trusted workspace set.
+        project = str(
+            fork_metadata.get("workerbee_workspace_scenario")
+            or fork_metadata.get("workerbee_workspace_project")
+            or fork.get("project")
+            or ""
+        )
         if profile.allowed_projects and project not in profile.allowed_projects:
             raise WorkerBeeControlledRunError(
                 "WORKERBEE_CONTROLLED_RUN_PROJECT_DENIED",
@@ -477,6 +486,7 @@ class WorkerBeeControlledRunService:
             "backend_instance_id": runtime.instance_id,
             "backend_generation": runtime.generation,
             "workspace_binding_id": binding_id,
+            "project": project,
             "profile_id": profile.profile_id,
             "profile_version": profile.version,
             "profile_sha256": profile.sha256,
@@ -492,7 +502,7 @@ class WorkerBeeControlledRunService:
             "ok": True,
             "checked_at": now_ts(),
             "posture": posture.public_dict(),
-            "profile": profile.public_dict(),
+            "profile": {**profile.public_dict(), "project": project},
             "runtime": runtime.public_dict(),
             "project": project,
             **request_identity,
@@ -516,6 +526,7 @@ class WorkerBeeControlledRunService:
         requested_by: str,
         reason: str = "",
     ) -> dict[str, Any]:
+        self.require_editable_controls()
         preflight = self.preflight(
             root_operator_agent_id=root_operator_agent_id,
             target_fork_agent_id=target_fork_agent_id,
@@ -542,6 +553,7 @@ class WorkerBeeControlledRunService:
         decided_by: str,
         lease_id: str | None = None,
     ) -> dict[str, Any]:
+        self.require_editable_controls()
         return self.store.decide_workerbee_controlled_run_request(
             request_id,
             approve=approve,
@@ -562,6 +574,7 @@ class WorkerBeeControlledRunService:
         *,
         requested_by: str,
     ) -> dict[str, Any]:
+        self.require_editable_controls()
         posture = controlled_run_posture(self.environ)
         if not posture.root_operator_enabled:
             raise WorkerBeeControlledRunError(
@@ -586,6 +599,28 @@ class WorkerBeeControlledRunService:
             max_uses=profile.lease_max_uses,
             ttl_seconds=profile.lease_ttl_seconds,
         )
+
+    def decide_lease(
+        self,
+        lease_id: str,
+        *,
+        approve: bool,
+        decided_by: str,
+    ) -> dict[str, Any]:
+        self.require_editable_controls()
+        return self.store.decide_workerbee_controlled_run_lease(
+            lease_id,
+            approve=approve,
+            decided_by=decided_by,
+        )
+
+    def require_editable_controls(self) -> None:
+        posture = controlled_run_posture(self.environ)
+        if posture.control_mode != "editable":
+            raise WorkerBeeControlledRunError(
+                "WORKERBEE_CONTROLLED_RUN_CONTROL_READ_ONLY",
+                "WorkerBee controlled-run changes are disabled by administrator policy.",
+            )
 
     @staticmethod
     def _metadata(agent: Mapping[str, Any]) -> dict[str, Any]:
