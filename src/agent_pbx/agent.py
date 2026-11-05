@@ -204,6 +204,12 @@ delivery when pane readiness, queue/nohup routing, or attached KB context should
 be checked without sending anything.
 Receiving operators acknowledge with `pbx_operator_ack_handoff` and report
 running, blocked, failed, or complete state with `pbx_operator_update_handoff`.
+Terminal handoff updates create a durable source-addressed completion receipt.
+The source root or exact source fork lists receipts with
+`pbx_operator_list_handoff_completions`, inspects the authoritative handoff,
+and acknowledges reviewed receipts with
+`pbx_operator_ack_handoff_completion`. Delivery failure does not reopen or
+rewrite the terminal handoff result.
 When a knowledge link or handoff produces reusable operating guidance, operators
 and review forks may propose PBX-managed KB entries with
 `pbx_operator_kb_propose` or `pbx_operator_kb_propose_from_link`, and may query
@@ -590,6 +596,7 @@ def runbook_payload() -> dict[str, Any]:
             "Review forks propose domain handoffs through pbx_operator_propose_knowledge_handoff; the TUI/root operator can preflight delivery through pbx_operator_preflight_handoff and approves executable handoff delivery before another operator receives the workflow.",
             "Review forks can search active KB entries, request SQLite-local hybrid keyword/semantic KB context through pbx_operator_kb_context, inspect KB query history/misses, record retrieval feedback through pbx_operator_kb_feedback, compile explicit report KB candidates through pbx_operator_kb_compile_report, propose KB entries through pbx_operator_kb_propose or pbx_operator_kb_propose_from_link, and mark their KB seed runs complete through pbx_operator_kb_update_seed_run; root operators update, promote, reject, retire, export, import, and rebuild indexes for canonical KB records.",
             "Operators acknowledge handoffs through pbx_operator_ack_handoff and update running or terminal handoff state through pbx_operator_update_handoff.",
+            "Terminal handoff updates return a durable completion receipt to the exact source root or source fork; sources list and explicitly acknowledge reviewed receipts without changing the handoff result.",
             "Knowledge links and operator handoffs do not create fork edges, assignments, or source-session ownership.",
             "Campaign tables are the source of truth for campaign state; reports and commands are linked audit artifacts.",
         ],

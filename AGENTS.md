@@ -221,6 +221,11 @@ delivery when pane readiness, queue/nohup routing, or attached KB context should
 be checked without sending anything.
 Receiving operators acknowledge with `pbx_operator_ack_handoff` and report
 running, blocked, failed, or complete state with `pbx_operator_update_handoff`.
+Terminal updates create a durable completion receipt addressed to the exact
+source root or source fork. Source Operators list receipts with
+`pbx_operator_list_handoff_completions` and acknowledge each reviewed result
+with `pbx_operator_ack_handoff_completion`; receipt delivery failure does not
+rewrite the terminal handoff state.
 When a knowledge link or handoff produces reusable operating guidance, operators
 and review forks may propose PBX-managed KB entries with
 `pbx_operator_kb_propose` or `pbx_operator_kb_propose_from_link`. Active KB

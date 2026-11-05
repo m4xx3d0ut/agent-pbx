@@ -56,6 +56,7 @@ from agent_pbx.tui import (
     ManagedProjectPickerScreen,
     OperatorDelegationLeaseConfirmScreen,
     OperatorHandoffApprovalScreen,
+    OperatorHandoffCompletionScreen,
     OperatorHandoffCancelConfirmScreen,
     OperatorReadyActionScreen,
     OperatorHistoryScreen,
@@ -5236,21 +5237,52 @@ def test_tui_styles_tmux_active_rows_without_changing_status(monkeypatch) -> Non
     assert app.format_agent_status({"status": "done"}) == "done"
 
 
-def test_tui_infers_tmux_working_status_for_active_terminal_report(monkeypatch) -> None:
+def test_tui_keeps_semantic_status_separate_from_active_tmux_liveness(monkeypatch) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
     app.record_tmux_capture_liveness("agent-1", "%1", "changed")
 
     assert (
         app.format_agent_status({"agent_id": "agent-1", "status": "completed"})
-        == "tmux-working"
+        == "completed"
     )
     assert (
         app.format_agent_status(
             {"agent_id": "agent-1", "effective_status": "done", "status": "completed"}
         )
-        == "tmux-working"
+        == "done"
     )
+    assert app.format_tmux_liveness("agent-1") == "active"
+
+
+def test_tui_operator_rows_expose_workflow_state_flow_and_durable_alerts() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    operator = {
+        "agent_id": "operator-0",
+        "agent_type": "operator",
+        "project": "agent-pbx-operator",
+        "pbx_active": True,
+        "last_seen_at": 100.0,
+        "workflow_state": "review",
+        "workflow_label": "⇠ REVIEW",
+        "workflow_flow": "←operator-6 ✓",
+        "pending_completion_delivery_count": 1,
+    }
+    app.agents = {"operator-0": operator}
+    columns = app.desired_operator_columns()
+    values = app.agent_row_values(operator, columns)
+    by_column = dict(zip(columns, values, strict=True))
+
+    assert "State" in columns
+    assert "Flow" in columns
+    assert by_column["New"] == "RCPT"
+    assert by_column["State"] == "⇠ REVIEW"
+    assert by_column["Flow"] == "←operator-6 ✓"
+    assert app.format_agent_status(operator) != "tmux-working"
+
+    styled = app.style_agent_row(values, operator, columns)
+    assert isinstance(styled[columns.index("State")], Text)
+    assert "b58cff" in str(styled[columns.index("State")].style)
 
 
 def test_tui_keeps_reported_status_for_idle_or_nonterminal_tmux(monkeypatch) -> None:
@@ -6540,7 +6572,7 @@ async def test_tui_operator_split_filters_callers_and_operators() -> None:
     assert operators_title.styles.display == "block"
     assert operators.styles.display == "block"
     assert operator_actions.styles.display == "block"
-    assert operators.get_row("operator-0")[2].plain == "operator-0"
+    assert str(operators.get_row("operator-0")[2]) == "operator-0"
 
 
 async def test_tui_operator_review_button_fits_wide_split() -> None:
@@ -28582,6 +28614,105 @@ async def test_tui_f8_routes_ready_action_after_approval_before_report() -> None
 
     assert opened == ["operator-0"]
     assert app.unseen_latest_agent_ids == {"caller-1"}
+
+
+@pytest.mark.asyncio
+async def test_tui_f8_routes_completion_receipt_before_ready_action_and_report() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "pending_completion_delivery_count": 1,
+            "oldest_completion_delivery_at": 10.0,
+        },
+        "operator-7": {
+            "agent_id": "operator-7",
+            "agent_type": "operator",
+            "ready_handoff_action_count": 1,
+            "oldest_ready_handoff_action_at": 20.0,
+        },
+        "caller-1": {"agent_id": "caller-1", "agent_type": "caller"},
+    }
+    app.unseen_latest_agent_ids = {"caller-1"}
+    opened: list[str] = []
+
+    async def fake_open(operator_agent_id: str) -> bool:
+        opened.append(operator_agent_id)
+        return True
+
+    app.open_operator_completion_center = fake_open  # type: ignore[method-assign]
+
+    await app.action_focus_next_alert()
+
+    assert opened == ["operator-0"]
+    assert app.unseen_latest_agent_ids == {"caller-1"}
+
+
+@pytest.mark.asyncio
+async def test_tui_completion_receipt_acknowledges_exact_recipient_and_closes() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    delivery = {
+        "completion_delivery_id": "receipt-1",
+        "handoff_id": "handoff-1",
+        "recipient_agent_id": "operator-0",
+        "target_operator_agent_id": "operator-6",
+        "terminal_status": "complete",
+        "delivery_status": "sent",
+        "summary": "Checkpoint complete.",
+        "created_at": 10.0,
+    }
+    remaining = [delivery]
+    acknowledgements: list[tuple[str, str]] = []
+
+    async def fake_fetch(
+        recipient_agent_id: str,
+        *,
+        unacknowledged_only: bool = True,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        assert recipient_agent_id == "operator-0"
+        assert unacknowledged_only is True
+        assert limit == 100
+        return list(remaining)
+
+    async def fake_ack(
+        recipient_agent_id: str,
+        completion_delivery_id: str,
+    ) -> dict[str, object]:
+        acknowledgements.append((recipient_agent_id, completion_delivery_id))
+        remaining.clear()
+        return {**delivery, "delivery_status": "acknowledged"}
+
+    async def no_refresh() -> None:
+        return None
+
+    async def no_agent_refresh() -> None:
+        return None
+
+    app.fetch_operator_completion_deliveries = fake_fetch  # type: ignore[method-assign]
+    app.acknowledge_operator_completion_delivery = fake_ack  # type: ignore[method-assign]
+    app.refresh_events = no_refresh  # type: ignore[method-assign]
+    app.refresh_agents = no_agent_refresh  # type: ignore[method-assign]
+    app.agents = {
+        "operator-0": {
+            "agent_id": "operator-0",
+            "agent_type": "operator",
+            "pending_completion_delivery_count": 1,
+            "oldest_completion_delivery_at": 10.0,
+        }
+    }
+
+    async with app.run_test() as pilot:
+        assert await app.open_operator_completion_center("operator-0") is True
+        await pilot.pause()
+        screen = app.active_completion_receipt_screen()
+        assert isinstance(screen, OperatorHandoffCompletionScreen)
+        await app.acknowledge_operator_completion_receipt(screen, delivery)
+        await pilot.pause()
+
+        assert acknowledgements == [("operator-0", "receipt-1")]
+        assert app.active_completion_receipt_screen() is None
 
 
 @pytest.mark.asyncio

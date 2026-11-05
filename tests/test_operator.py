@@ -549,6 +549,158 @@ def test_operator_handoff_expires_before_start(tmp_path: Path) -> None:
     assert expired["safe_to_start"] is False
 
 
+def test_operator_handoff_completion_receipt_is_addressed_idempotent_and_acknowledged(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    for agent_id in ("operator-0", "operator-B"):
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=agent_id,
+                project="agent-pbx-operator",
+                agent_type="operator",
+                metadata={"pbx_mode": "nohup", "cwd": str(tmp_path / agent_id)},
+            )
+        )
+    service = OperatorService(store)
+    handoff = service.create_handoff(
+        operator_agent_id="operator-0",
+        source_agent_id="operator-0",
+        target_operator_agent_id="operator-B",
+        message="Return a durable completion to the source Operator.",
+        required_artifacts=["validation"],
+    )
+
+    completed = service.update_handoff(
+        operator_agent_id="operator-B",
+        handoff_id=handoff["handoff_id"],
+        status="complete",
+        summary="Validation complete.",
+        artifact_bundle=[{"kind": "test-report", "path": "results.json"}],
+    )
+    delivery = completed["completion_delivery"]
+
+    assert completed["status"] == "complete"
+    assert delivery["recipient_agent_id"] == "operator-0"
+    assert delivery["target_operator_agent_id"] == "operator-B"
+    assert delivery["delivery_mode"] == "queue"
+    assert delivery["delivery_status"] == "sent"
+    assert delivery["attempt_count"] == 1
+    assert delivery["artifact_kinds"] == ["test-report"]
+    command = store.get_command(delivery["command_id"])
+    assert command is not None
+    assert command["agent_id"] == "operator-0"
+    assert command["payload"]["source"] == "operator_handoff_completion"
+    assert command["payload"]["completion_delivery_id"] == delivery[
+        "completion_delivery_id"
+    ]
+
+    repeated = service.update_handoff(
+        operator_agent_id="operator-B",
+        handoff_id=handoff["handoff_id"],
+        status="complete",
+        summary="Validation complete.",
+        artifact_bundle=[{"kind": "test-report", "path": "results.json"}],
+    )
+    repeated_delivery = repeated["completion_delivery"]
+    assert repeated_delivery["completion_delivery_id"] == delivery[
+        "completion_delivery_id"
+    ]
+    assert repeated_delivery["command_id"] == delivery["command_id"]
+    assert repeated_delivery["attempt_count"] == 1
+    assert len(service.list_handoff_completion_deliveries()) == 1
+    assert [
+        item["completion_delivery_id"]
+        for item in service.list_handoff_completion_deliveries_for_operator(
+            operator_agent_id="operator-0"
+        )
+    ] == [delivery["completion_delivery_id"]]
+    assert (
+        service.list_handoff_completion_deliveries_for_operator(
+            operator_agent_id="operator-B"
+        )
+        == []
+    )
+
+    source = {agent["agent_id"]: agent for agent in store.list_agents()}[
+        "operator-0"
+    ]
+    assert source["pending_completion_delivery_count"] == 1
+    assert source["workflow_state"] == "review"
+    assert source["workflow_label"] == "⇠ REVIEW"
+    assert source["workflow_flow"] == "←operator-B ✓"
+
+    with pytest.raises(ValueError, match="belongs to another operator"):
+        service.acknowledge_handoff_completion(
+            operator_agent_id="operator-B",
+            completion_delivery_id=delivery["completion_delivery_id"],
+        )
+
+    acknowledged = service.acknowledge_handoff_completion(
+        operator_agent_id="operator-0",
+        completion_delivery_id=delivery["completion_delivery_id"],
+    )
+    assert acknowledged["delivery_status"] == "acknowledged"
+    assert acknowledged["acknowledged_by"] == "operator-0"
+    source = {agent["agent_id"]: agent for agent in store.list_agents()}[
+        "operator-0"
+    ]
+    assert source["pending_completion_delivery_count"] == 0
+
+
+def test_operator_handoff_completion_returns_to_exact_source_fork(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-B",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"pbx_mode": "nohup", "cwd": str(tmp_path / "operator-B")},
+        )
+    )
+    service = OperatorService(store)
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        status="running",
+        metadata={"pbx_mode": "nohup"},
+    )
+    handoff = service.create_handoff(
+        operator_agent_id="operator-0-fork-caller-1",
+        source_agent_id="operator-0-fork-caller-1",
+        source_operator_fork_id=fork["operator_fork_id"],
+        target_operator_agent_id="operator-B",
+        message="Return the result to the exact source fork.",
+    )
+
+    completed = service.update_handoff(
+        operator_agent_id="operator-B",
+        handoff_id=handoff["handoff_id"],
+        status="complete",
+        summary="Fork-requested work complete.",
+    )
+    delivery = completed["completion_delivery"]
+    command = store.get_command(delivery["command_id"])
+
+    assert delivery["source_operator_agent_id"] == "operator-0"
+    assert delivery["source_operator_fork_id"] == fork["operator_fork_id"]
+    assert delivery["recipient_agent_id"] == "operator-0-fork-caller-1"
+    assert command is not None
+    assert command["agent_id"] == "operator-0-fork-caller-1"
+    assert service.list_handoff_completion_deliveries_for_operator(
+        operator_agent_id="operator-0-fork-caller-1"
+    )[0]["completion_delivery_id"] == delivery["completion_delivery_id"]
+    assert service.list_handoff_completion_deliveries_for_operator(
+        operator_agent_id="operator-0"
+    )[0]["completion_delivery_id"] == delivery["completion_delivery_id"]
+
+
 def test_operator_custom_terminal_states_do_not_count_active(tmp_path: Path) -> None:
     store = Store(tmp_path / "pbx.sqlite")
     store.init()

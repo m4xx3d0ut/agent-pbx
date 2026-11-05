@@ -433,7 +433,9 @@ Campaign state is stored in dedicated SQLite tables for fast TUI/API queries:
 `operator_campaign_events`. Fork state and optional planning DAG links are
 stored in `operator_forks` and `operator_fork_edges`. Knowledge-link context is
 stored in `operator_knowledge_links` and `operator_knowledge_turns`; executable
-operator-to-operator handoffs are stored in `operator_handoffs`. Handoffs track
+operator-to-operator handoffs are stored in `operator_handoffs`; durable
+source-addressed terminal receipts are stored in
+`operator_handoff_completion_deliveries`. Handoffs track
 approval, required target fork launch, delivery evidence, receiver
 acknowledgement, started/running state, TTL expiry, artifact summaries, and
 terminal status without creating fork edges or changing source-session
@@ -587,6 +589,17 @@ receiver acknowledgement and start, so a pane paste is not treated as workflow
 success by itself. Tmux evidence records the resolved pane, target command,
 paste/send-key steps, and whether the target looked Codex-like; `submitted` is
 only true for a Codex-like target.
+
+A terminal handoff update creates one idempotent completion receipt for the
+exact source root Operator or source fork. The Operators pane keeps semantic
+`State` and `Flow` separate from tmux `Live`; pending results appear as
+`⇠ REVIEW` with an `RCPT` marker. The top banner reports `RECEIPTS N`, and F8
+opens the completion center after pending approvals and before guarded actions.
+Reviewing and acknowledging a receipt stops retry/attention state without
+changing the completed, failed, blocked, or canceled handoff. Nohup recipients
+receive an exact queued command. Report-mode terminal injection requires an
+exact managed runtime mapping or recorded pane; otherwise the durable receipt
+remains pending rather than using global pane discovery.
 
 New executable handoffs should also include a machine-readable
 `execution_scope`. It records an `action_class`, `mutation_mode`, campaign and

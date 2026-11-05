@@ -206,6 +206,11 @@ ATTENTION_EVENT_TYPES = {
     "operator_handoff_approved",
     "operator_handoff_pending_launch",
     "operator_handoff_sent",
+    "operator_handoff_completion_created",
+    "operator_handoff_completion_pending",
+    "operator_handoff_completion_sent",
+    "operator_handoff_completion_failed",
+    "operator_handoff_completion_acknowledged",
     "operator_delegation_lease_requested",
     "operator_delegation_lease_approved",
     "operator_delegation_lease_rejected",
@@ -6159,6 +6164,141 @@ class OperatorDelegationLeaseConfirmScreen(ModalScreen[None]):
             )
 
 
+class OperatorHandoffCompletionScreen(ModalScreen[None]):
+    """Review and acknowledge source-addressed handoff completions."""
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(
+        self,
+        *,
+        recipient_agent_id: str,
+        deliveries: list[dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.recipient_agent_id = recipient_agent_id
+        self.deliveries = deliveries
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="operator-handoff-approval-panel"):
+            yield Static(
+                f"Operator completion receipts · {self.recipient_agent_id}",
+                id="operator-completion-title",
+            )
+            yield Static(
+                "Review the authoritative terminal result before acknowledging it.",
+                id="operator-completion-summary",
+            )
+            yield DataTable(
+                id="operator-completion-table",
+                cursor_type="row",
+                show_row_labels=False,
+            )
+            with Horizontal(id="operator-handoff-approval-actions"):
+                yield Button("Focus sender", id="operator-completion-focus")
+                yield Button(
+                    "Reviewed",
+                    id="operator-completion-ack",
+                    variant="success",
+                )
+                yield Button("Retry delivery", id="operator-completion-retry")
+                yield Button("Refresh", id="operator-completion-refresh")
+                yield Button("Close", id="operator-completion-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#operator-completion-table", DataTable)
+        table.add_columns("Created", "From", "Result", "Delivery", "Summary", "ID")
+        self.render_rows()
+
+    def render_rows(self) -> None:
+        table = self.query_one("#operator-completion-table", DataTable)
+        table.clear(columns=False)
+        for delivery in self.deliveries:
+            delivery_id = str(delivery.get("completion_delivery_id") or "").strip()
+            if not delivery_id:
+                continue
+            table.add_row(
+                OperatorHandoffApprovalScreen.format_timestamp(
+                    delivery.get("created_at")
+                ),
+                str(delivery.get("target_operator_agent_id") or "-"),
+                str(delivery.get("terminal_status") or "-"),
+                str(delivery.get("delivery_status") or "-"),
+                OperatorHandoffApprovalScreen.truncate(
+                    str(delivery.get("summary") or "-"),
+                    56,
+                ),
+                delivery_id,
+                key=delivery_id,
+            )
+        self.query_one("#operator-completion-summary", Static).update(
+            f"Unreviewed {len(self.deliveries)} · acknowledgement stops retries "
+            "without changing the terminal handoff result."
+        )
+
+    def replace_deliveries(self, deliveries: list[dict[str, Any]]) -> None:
+        self.deliveries = deliveries
+        self.render_rows()
+
+    def current_delivery(self) -> dict[str, Any] | None:
+        table = self.query_one("#operator-completion-table", DataTable)
+        if table.row_count == 0:
+            return None
+        try:
+            delivery_id = str(
+                table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            )
+        except Exception:
+            return None
+        return next(
+            (
+                item
+                for item in self.deliveries
+                if str(item.get("completion_delivery_id") or "") == delivery_id
+            ),
+            None,
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        button_id = event.button.id
+        if button_id == "operator-completion-close":
+            self.dismiss()
+            return
+        delivery = self.current_delivery()
+        if delivery is None:
+            self.app.notify("Select a completion receipt first.", severity="warning")
+            return
+        if button_id == "operator-completion-focus":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.focus_operator_completion_receipt(self, delivery),  # type: ignore[attr-defined]
+                name="operator-completion-focus",
+                exclusive=True,
+                exit_on_error=False,
+            )
+        elif button_id == "operator-completion-ack":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.acknowledge_operator_completion_receipt(self, delivery),  # type: ignore[attr-defined]
+                name="operator-completion-ack",
+                exclusive=True,
+                exit_on_error=False,
+            )
+        elif button_id == "operator-completion-retry":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.retry_operator_completion_receipt(self, delivery),  # type: ignore[attr-defined]
+                name="operator-completion-retry",
+                exclusive=True,
+                exit_on_error=False,
+            )
+        elif button_id == "operator-completion-refresh":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.refresh_operator_completion_screen(self),  # type: ignore[attr-defined]
+                name="operator-completion-refresh",
+                exclusive=True,
+                exit_on_error=False,
+            )
+
+
 class OperatorHandoffApprovalScreen(ModalScreen[None]):
     """Durable action center for exact-ID Operator handoff approvals."""
 
@@ -8088,6 +8228,10 @@ class AgentPBXTUI(App[None]):
             str, tuple[int, float | None]
         ] = {}
         self.handoff_action_opening_operator_id: str | None = None
+        self.reviewed_completion_receipt_signatures: dict[
+            str, tuple[int, float | None]
+        ] = {}
+        self.completion_receipt_opening_operator_id: str | None = None
         self.local_starred_agent_ids = str_set_setting(
             self.settings,
             "starred_agent_ids",
@@ -14319,8 +14463,8 @@ class AgentPBXTUI(App[None]):
                 STARRED_AGENT_COLUMN,
                 "New",
                 "Operator",
-                "Status",
-                "Camp",
+                "State",
+                "Flow",
                 *live,
                 "Hidden",
             )
@@ -14329,7 +14473,8 @@ class AgentPBXTUI(App[None]):
                 STARRED_AGENT_COLUMN,
                 "New",
                 "Operator",
-                "Status",
+                "State",
+                "Flow",
                 "Camp",
                 *live,
                 "PBX",
@@ -14340,7 +14485,8 @@ class AgentPBXTUI(App[None]):
             "New",
             "Operator",
             "PBX",
-            "Status",
+            "State",
+            "Flow",
             "Camp",
             *live,
             "Last Seen",
@@ -14426,13 +14572,15 @@ class AgentPBXTUI(App[None]):
         selected_columns = columns or self.rendered_agent_columns
         values = {
             STARRED_AGENT_COLUMN: "*" if agent_id in self.starred_agent_ids else "",
-            "New": self.format_unseen_latest_alert(agent_id),
+            "New": self.format_agent_alert(agent_id),
             "Agent": agent_id,
             "Operator": agent_id,
             "Type": self.format_agent_type(agent),
             "PBX": self.format_pbx_active(agent),
             "Plan": self.format_plan_state(agent),
             "Status": self.format_agent_status(agent),
+            "State": self.format_operator_workflow_state(agent),
+            "Flow": self.format_operator_workflow_flow(agent),
             "Project": str(agent["project"]),
             "Camp": self.format_campaign_count(agent),
             "Last Seen": f"{agent['last_seen_at']:.0f}",
@@ -15096,6 +15244,7 @@ class AgentPBXTUI(App[None]):
             cells = self.style_agent_row(
                 row,
                 agent,
+                self.rendered_agent_columns,
             )
             table.add_row(*cells, key=agent_id)
         restore_agent_id = cursor_agent_id if cursor_agent_id in caller_agent_ids else None
@@ -15123,7 +15272,11 @@ class AgentPBXTUI(App[None]):
         for agent in operator_agents:
             agent_id = str(agent["agent_id"])
             row = self.agent_row_values(agent, self.rendered_operator_columns)
-            cells = self.style_agent_row(row, agent)
+            cells = self.style_agent_row(
+                row,
+                agent,
+                self.rendered_operator_columns,
+            )
             operator_table.add_row(*cells, key=agent_id)
         restore_operator_id = (
             cursor_operator_id if cursor_operator_id in operator_agent_ids else None
@@ -15323,9 +15476,44 @@ class AgentPBXTUI(App[None]):
             and self.active_operator_fork_for_caller(agent) is not None
         ):
             return "blocked/fork-ready"
-        if self.infer_tmux_working_status(agent, status):
-            return "tmux-working"
         return status
+
+    @staticmethod
+    def format_operator_workflow_state(agent: dict[str, Any]) -> str:
+        label = str(agent.get("workflow_label") or "").strip()
+        if label:
+            return label
+        status = str(
+            agent.get("latest_report_status")
+            or agent.get("effective_status")
+            or agent.get("status")
+            or ""
+        ).strip().lower()
+        if status in {"failed", "error"} or status.startswith("failed_"):
+            return "✕ FAIL"
+        if status == "blocked" or status.startswith("blocked_"):
+            return "■ BLOCK"
+        if int(agent.get("pending_handoff_approval_count") or 0):
+            return "! APPROVE"
+        if int(agent.get("pending_completion_delivery_count") or 0):
+            return "⇠ REVIEW"
+        if bool(agent.get("latest_report_action_required")):
+            return "? INPUT"
+        if int(agent.get("ready_handoff_action_count") or 0):
+            return "! ACTION"
+        if status in {"running", "working", "starting", "executing"}:
+            return "▶ RUN"
+        if status in {"waiting", "needs_input", "plan", "planning"}:
+            return "◈ WAIT"
+        if status in {"done", "complete", "completed", "canceled", "cancelled"}:
+            return "✓ DONE"
+        if status in {"offline", "stopped", "disconnected"}:
+            return "○ OFF"
+        return "◇ IDLE"
+
+    @staticmethod
+    def format_operator_workflow_flow(agent: dict[str, Any]) -> str:
+        return str(agent.get("workflow_flow") or "").strip()
 
     def infer_tmux_working_status(self, agent: dict[str, Any], status: str) -> bool:
         agent_id = str(agent.get("agent_id") or "")
@@ -15491,8 +15679,46 @@ class AgentPBXTUI(App[None]):
         return "idle"
 
     def style_agent_row(
-        self, cells: list[str], agent: dict[str, Any]
+        self,
+        cells: list[str],
+        agent: dict[str, Any],
+        columns: tuple[str, ...] | None = None,
     ) -> list[str | Text]:
+        selected_columns = columns or self.rendered_agent_columns
+        if self.agent_type(agent) == OPERATOR_AGENT_TYPE and "State" in selected_columns:
+            styled: list[str | Text] = list(cells)
+            state = str(agent.get("workflow_state") or "idle").strip().lower()
+            state_style = {
+                "failed": "bold bright_red",
+                "blocked": "bold red",
+                "approval": "bold magenta",
+                "review": "bold #b58cff",
+                "input": "bold yellow",
+                "action": "bold magenta",
+                "running": "bold cyan",
+                "waiting": "bold yellow",
+                "done": "bold #41d6c3",
+                "stale": "bold yellow",
+                "offline": "dim",
+                "idle": "dim",
+            }.get(state, "")
+            for name in ("New", "State", "Flow"):
+                if name not in selected_columns:
+                    continue
+                index = selected_columns.index(name)
+                value = cells[index]
+                if not value:
+                    continue
+                style = state_style if name != "New" else "bold yellow"
+                styled[index] = Text(value, style=style)
+            if self.is_hidden_agent(agent):
+                return [
+                    Text(str(cell), style="dim yellow")
+                    if not isinstance(cell, Text)
+                    else cell
+                    for cell in styled
+                ]
+            return styled
         if self.is_hidden_agent(agent):
             style = "dim yellow"
         elif bool(agent.get("status_stale")):
@@ -15517,8 +15743,6 @@ class AgentPBXTUI(App[None]):
                 }.get(tmux_level)
             if style is None and level == "active":
                 style = "bold green"
-            if style is None and self.agent_type(agent) == OPERATOR_AGENT_TYPE:
-                style = "bold magenta"
         if style is None:
             return cells
         return [Text(cell, style=style) for cell in cells]
@@ -15553,6 +15777,19 @@ class AgentPBXTUI(App[None]):
         if agent_id not in self.unseen_latest_agent_ids:
             return ""
         return self.latest_report_alert_label(self.agents.get(agent_id))
+
+    def format_agent_alert(self, agent_id: str) -> str:
+        """Render the highest-priority durable or report alert for one row."""
+
+        agent = self.agents.get(agent_id) or {}
+        if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
+            if int(agent.get("pending_handoff_approval_count") or 0) > 0:
+                return "APRV"
+            if int(agent.get("pending_completion_delivery_count") or 0) > 0:
+                return "RCPT"
+            if int(agent.get("ready_handoff_action_count") or 0) > 0:
+                return "ACT"
+        return self.format_unseen_latest_alert(agent_id)
 
     @staticmethod
     def latest_report_suppressed(agent: dict[str, Any] | None) -> bool:
@@ -15596,6 +15833,7 @@ class AgentPBXTUI(App[None]):
             self.unseen_latest_agent_ids
             or self.tmux_plan_selector_agent_ids
             or self.pending_handoff_approval_operator_ids
+            or self.pending_completion_operators()
             or self.ready_handoff_action_operators()
         )
         if not self.agent_blink_enabled or not has_attention_target:
@@ -15643,6 +15881,22 @@ class AgentPBXTUI(App[None]):
             if len(approval_ids) > 3:
                 displayed += f", +{len(approval_ids) - 3}"
             marker = "APPROVALS!" if blink_active else "APPROVALS"
+            attention.update(f"{marker} {total}: {displayed} · F8 review")
+            attention.add_class("unseen-active")
+            self.set_attention_flash_class(False)
+            return
+        completion_ids = self.pending_completion_operators()
+        if completion_ids:
+            self.attention_agent_id = completion_ids[0]
+            total = sum(
+                int(self.agents[agent_id].get("pending_completion_delivery_count") or 0)
+                for agent_id in completion_ids
+                if agent_id in self.agents
+            )
+            displayed = ", ".join(completion_ids[:3])
+            if len(completion_ids) > 3:
+                displayed += f", +{len(completion_ids) - 3}"
+            marker = "RECEIPTS!" if blink_active else "RECEIPTS"
             attention.update(f"{marker} {total}: {displayed} · F8 review")
             attention.add_class("unseen-active")
             self.set_attention_flash_class(False)
@@ -15712,6 +15966,9 @@ class AgentPBXTUI(App[None]):
             if agent_id in self.agents:
                 return agent_id
         for agent_id in self.pending_handoff_operators():
+            if agent_id in self.agents:
+                return agent_id
+        for agent_id in self.pending_completion_operators():
             if agent_id in self.agents:
                 return agent_id
         for agent_id in self.ready_handoff_action_operators():
@@ -15791,6 +16048,47 @@ class AgentPBXTUI(App[None]):
             != self.handoff_approval_signature(operator_agent_id)
         ]
 
+    def pending_completion_operators(self) -> list[str]:
+        """Return receipt recipients with unacknowledged terminal results."""
+
+        operator_ids = [
+            agent_id
+            for agent_id, agent in self.agents.items()
+            if int(agent.get("pending_completion_delivery_count") or 0) > 0
+        ]
+        operator_ids.sort(
+            key=lambda agent_id: (
+                float_value(self.agents[agent_id].get("oldest_completion_delivery_at"))
+                or math.inf,
+                agent_id,
+            )
+        )
+        valid_ids = set(operator_ids)
+        self.reviewed_completion_receipt_signatures = {
+            agent_id: signature
+            for agent_id, signature in self.reviewed_completion_receipt_signatures.items()
+            if agent_id in valid_ids
+        }
+        return operator_ids
+
+    def completion_receipt_signature(
+        self,
+        operator_agent_id: str,
+    ) -> tuple[int, float | None]:
+        agent = self.agents.get(operator_agent_id) or {}
+        return (
+            int(agent.get("pending_completion_delivery_count") or 0),
+            float_value(agent.get("oldest_completion_delivery_at")),
+        )
+
+    def unreviewed_completion_operators(self) -> list[str]:
+        return [
+            operator_agent_id
+            for operator_agent_id in self.pending_completion_operators()
+            if self.reviewed_completion_receipt_signatures.get(operator_agent_id)
+            != self.completion_receipt_signature(operator_agent_id)
+        ]
+
     def ready_handoff_action_operators(self) -> list[str]:
         operator_ids = [
             agent_id
@@ -15859,10 +16157,27 @@ class AgentPBXTUI(App[None]):
             None,
         )
 
+    def active_completion_receipt_screen(
+        self,
+    ) -> OperatorHandoffCompletionScreen | None:
+        try:
+            screens = list(self.screen_stack)
+        except ScreenStackError:
+            return None
+        return next(
+            (
+                screen
+                for screen in reversed(screens)
+                if isinstance(screen, OperatorHandoffCompletionScreen)
+            ),
+            None,
+        )
+
     async def action_focus_next_alert(self) -> None:
         if (
             self.handoff_approval_opening_operator_id is not None
             or self.handoff_action_opening_operator_id is not None
+            or self.completion_receipt_opening_operator_id is not None
         ):
             self.notify(
                 "Operator handoff approvals are already opening.",
@@ -15889,9 +16204,24 @@ class AgentPBXTUI(App[None]):
                 return
             await active_approval.dismiss()
             closed_approval = True
+        active_completion = self.active_completion_receipt_screen()
+        closed_completion = False
+        if active_completion is not None:
+            if self.screen is not active_completion:
+                self.notify(
+                    "Finish or close the current completion action before cycling alerts.",
+                    severity="warning",
+                )
+                return
+            await active_completion.dismiss()
+            closed_completion = True
         approval_ids = self.unreviewed_handoff_operators()
         if approval_ids:
             await self.open_operator_handoff_approval_center(approval_ids[0])
+            return
+        completion_ids = self.unreviewed_completion_operators()
+        if completion_ids:
+            await self.open_operator_completion_center(completion_ids[0])
             return
         action_ids = self.unreviewed_handoff_action_operators()
         if action_ids:
@@ -15920,6 +16250,20 @@ class AgentPBXTUI(App[None]):
             for operator_agent_id in remaining_approvals:
                 self.reviewed_handoff_approval_signatures.pop(operator_agent_id, None)
             await self.open_operator_handoff_approval_center(remaining_approvals[0])
+            return
+        remaining_completions = self.pending_completion_operators()
+        if remaining_completions:
+            if closed_completion:
+                self.notify(
+                    "No other alerts are pending; completion receipts remain openable with F8.",
+                )
+                return
+            for operator_agent_id in remaining_completions:
+                self.reviewed_completion_receipt_signatures.pop(
+                    operator_agent_id,
+                    None,
+                )
+            await self.open_operator_completion_center(remaining_completions[0])
             return
         remaining_actions = self.ready_handoff_action_operators()
         if remaining_actions:
@@ -27111,6 +27455,55 @@ class AgentPBXTUI(App[None]):
             reverse=True,
         )
 
+    async def fetch_operator_completion_deliveries(
+        self,
+        recipient_agent_id: str,
+        *,
+        unacknowledged_only: bool = True,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        response = await self.api_client().get(
+            "/v1/operator/handoff-completions",
+            params={
+                "recipient_agent_id": recipient_agent_id,
+                "unacknowledged_only": unacknowledged_only,
+                "limit": limit,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        raw = payload.get("completion_deliveries") if isinstance(payload, dict) else []
+        return [item for item in raw if isinstance(item, dict)]
+
+    async def acknowledge_operator_completion_delivery(
+        self,
+        recipient_agent_id: str,
+        completion_delivery_id: str,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/handoff-completions/{completion_delivery_id}/ack",
+            json={"operator_agent_id": recipient_agent_id},
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    async def retry_operator_completion_delivery(
+        self,
+        operator_agent_id: str,
+        completion_delivery_id: str,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/handoff-completions/{completion_delivery_id}/retry",
+            json={"operator_agent_id": operator_agent_id},
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
     async def fetch_operator_handoff_actions(
         self,
         *,
@@ -27645,6 +28038,133 @@ class AgentPBXTUI(App[None]):
         await self.open_operator_handoff_approval_center(
             self.logical_operator_id_for_agent(operator_agent)
         )
+
+    async def open_operator_completion_center(
+        self,
+        recipient_agent_id: str,
+    ) -> bool:
+        active = self.active_completion_receipt_screen()
+        if active is not None:
+            self.notify(
+                f"Completion receipts for {active.recipient_agent_id} are already open.",
+            )
+            return False
+        if self.completion_receipt_opening_operator_id is not None:
+            self.notify("Operator completion receipts are already opening.")
+            return False
+        self.completion_receipt_opening_operator_id = recipient_agent_id
+        try:
+            try:
+                deliveries = await self.fetch_operator_completion_deliveries(
+                    recipient_agent_id,
+                    unacknowledged_only=True,
+                    limit=100,
+                )
+            except Exception as exc:
+                self.notify(
+                    f"Unable to fetch completion receipts: {exc}",
+                    severity="error",
+                )
+                return False
+            if not deliveries:
+                self.notify(f"No unreviewed completion receipts for {recipient_agent_id}.")
+                await self.refresh_agents()
+                return False
+            self.reviewed_completion_receipt_signatures[recipient_agent_id] = (
+                self.completion_receipt_signature(recipient_agent_id)
+            )
+            await self.push_screen(
+                OperatorHandoffCompletionScreen(
+                    recipient_agent_id=recipient_agent_id,
+                    deliveries=deliveries,
+                )
+            )
+            return True
+        finally:
+            self.completion_receipt_opening_operator_id = None
+
+    async def refresh_operator_completion_screen(
+        self,
+        screen: OperatorHandoffCompletionScreen,
+    ) -> None:
+        try:
+            deliveries = await self.fetch_operator_completion_deliveries(
+                screen.recipient_agent_id,
+                unacknowledged_only=True,
+                limit=100,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to refresh completion receipts: {exc}", severity="error")
+            return
+        screen.replace_deliveries(deliveries)
+        await self.refresh_agents()
+        if not deliveries:
+            await screen.dismiss()
+
+    async def focus_operator_completion_receipt(
+        self,
+        screen: OperatorHandoffCompletionScreen,
+        delivery: dict[str, Any],
+    ) -> None:
+        target_agent_id = str(
+            delivery.get("target_operator_agent_id")
+            or delivery.get("source_operator_agent_id")
+            or ""
+        ).strip()
+        if not target_agent_id or target_agent_id not in self.agents:
+            self.notify(
+                "The Operator that produced this completion is no longer visible.",
+                severity="warning",
+            )
+            return
+        await screen.dismiss()
+        if not await self.open_agent_latest(target_agent_id):
+            self.notify(
+                f"Unable to focus completion source {target_agent_id}.",
+                severity="warning",
+            )
+
+    async def acknowledge_operator_completion_receipt(
+        self,
+        screen: OperatorHandoffCompletionScreen,
+        delivery: dict[str, Any],
+    ) -> None:
+        delivery_id = str(delivery.get("completion_delivery_id") or "").strip()
+        if not delivery_id:
+            self.notify("Completion receipt has no durable ID.", severity="error")
+            return
+        try:
+            await self.acknowledge_operator_completion_delivery(
+                screen.recipient_agent_id,
+                delivery_id,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to acknowledge completion receipt: {exc}", severity="error")
+            return
+        await self.refresh_events()
+        await self.refresh_operator_completion_screen(screen)
+        self.notify(f"Reviewed completion receipt {delivery_id}.")
+
+    async def retry_operator_completion_receipt(
+        self,
+        screen: OperatorHandoffCompletionScreen,
+        delivery: dict[str, Any],
+    ) -> None:
+        delivery_id = str(delivery.get("completion_delivery_id") or "").strip()
+        if not delivery_id:
+            self.notify("Completion receipt has no durable ID.", severity="error")
+            return
+        try:
+            await self.retry_operator_completion_delivery(
+                screen.recipient_agent_id,
+                delivery_id,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to retry completion delivery: {exc}", severity="error")
+            return
+        await self.refresh_events()
+        await self.refresh_operator_completion_screen(screen)
+        self.notify(f"Retried completion delivery {delivery_id}.")
 
     async def open_operator_handoff_approval_center(
         self,

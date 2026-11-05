@@ -4,6 +4,13 @@
 
 ### Added
 
+- Add idempotent, source-addressed Operator handoff completion receipts. A
+  terminal update now returns to the exact source root or source fork, remains
+  independent from the authoritative handoff result, and requires explicit
+  review acknowledgement. The TUI exposes durable `RECEIPTS` through F8 and
+  separates Operator workflow `State`/`Flow` from tmux `Live`; report-mode
+  delivery refuses guessed panes when no exact runtime evidence exists.
+
 - Add server-enforced Operator execution authority independent from Operator
   role. The public `scoped-edit` default, immutable `review-readonly`, explicit
   Trusted Workbench, and ceiling-gated local `full-access` profiles use

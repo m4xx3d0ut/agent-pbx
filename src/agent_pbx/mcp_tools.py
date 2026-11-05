@@ -976,6 +976,43 @@ def build_mcp_server(
         )
 
     @mcp.tool()
+    def pbx_operator_list_handoff_completions(
+        operator_agent_id: str,
+        delivery_status: str | None = None,
+        unacknowledged_only: bool = True,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List completion receipts visible to one exact Operator identity."""
+        return operator_service.list_handoff_completion_deliveries_for_operator(
+            operator_agent_id=operator_agent_id,
+            delivery_status=delivery_status,
+            unacknowledged_only=unacknowledged_only,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    def pbx_operator_ack_handoff_completion(
+        operator_agent_id: str,
+        completion_delivery_id: str,
+    ) -> dict[str, Any]:
+        """Acknowledge one source-addressed handoff completion receipt."""
+        return operator_service.acknowledge_handoff_completion(
+            operator_agent_id=operator_agent_id,
+            completion_delivery_id=completion_delivery_id,
+        )
+
+    @mcp.tool()
+    def pbx_operator_retry_handoff_completion(
+        operator_agent_id: str,
+        completion_delivery_id: str,
+    ) -> dict[str, Any]:
+        """Retry delivery of one pending or failed completion receipt."""
+        return operator_service.retry_handoff_completion_delivery(
+            operator_agent_id=operator_agent_id,
+            completion_delivery_id=completion_delivery_id,
+        )
+
+    @mcp.tool()
     def pbx_operator_preflight_handoff(
         operator_agent_id: str,
         handoff_id: str,

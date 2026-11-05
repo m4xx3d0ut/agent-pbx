@@ -258,6 +258,8 @@ def operator_runbook_payload() -> dict[str, Any]:
             "When review work needs to transfer domain context to another operator, propose a knowledge handoff; the TUI/root operator approves delivery, either directly or through a bounded campaign lease it explicitly granted.",
             "Campaign delegation leases are available only when source and target Operators have the same activated Trusted Workbench workspace identity. They never cover credentials, provider/cloud work, deploy, publication, push/tag/release, workspace expansion, authority elevation, destructive work, or ambiguous prose-only scopes.",
             "Operator handoffs track required target fork launch, delivery evidence, receiver acknowledgement, running state, TTL expiry, artifact summaries, and terminal state.",
+            "Every terminal handoff update creates one idempotent completion receipt addressed to the exact source root or source fork; sources review and acknowledge receipts independently of the terminal result.",
+            "Report-mode completion injection requires an exact managed tmux mapping or recorded pane. Without exact evidence the durable receipt stays pending for TUI review instead of targeting a guessed pane.",
             "For new handoffs, provide execution_scope with an action_class, mutation_mode, campaign and workspace-set identity where applicable; exact Git commit brokers also require exact_paths, expected_git_parent, and commit_subject.",
             "On a host with root-supervised broker mode enabled, a root Operator may preflight and request one exact Git checkpoint for its own trusted-workbench edit fork with pbx_operator_preflight_broker_checkpoint and pbx_operator_request_broker_checkpoint. The local TUI executes the durable stop, exact broker commit, and same-session resume; the root reads pbx_operator_get_broker_checkpoint and performs the remaining validation. Edit and review forks cannot request this workflow.",
             "Manual KB seed runs deliver a seed prompt to the selected operator or fork; that session proposes KB entries and updates seed-run status when finished.",
@@ -3190,7 +3192,7 @@ class OperatorService:
             updated,
             summary=summary,
         )
-        return updated
+        return self._deliver_terminal_completion_if_needed(updated)
 
     def update_handoff(
         self,
@@ -3235,7 +3237,305 @@ class OperatorService:
             updated,
             summary=summary,
         )
-        return updated
+        return self._deliver_terminal_completion_if_needed(updated)
+
+    def list_handoff_completion_deliveries(
+        self,
+        *,
+        recipient_agent_id: str | None = None,
+        source_operator_agent_id: str | None = None,
+        delivery_status: str | None = None,
+        unacknowledged_only: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.store.list_operator_handoff_completion_deliveries(
+            recipient_agent_id=recipient_agent_id,
+            source_operator_agent_id=source_operator_agent_id,
+            delivery_status=delivery_status,
+            unacknowledged_only=unacknowledged_only,
+            limit=limit,
+        )
+
+    def list_handoff_completion_deliveries_for_operator(
+        self,
+        *,
+        operator_agent_id: str,
+        delivery_status: str | None = None,
+        unacknowledged_only: bool = True,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List only receipts visible to the requesting root or exact fork."""
+
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        if operator_agent_id == logical_operator_id:
+            return self.store.list_operator_handoff_completion_deliveries(
+                source_operator_agent_id=logical_operator_id,
+                delivery_status=delivery_status,
+                unacknowledged_only=unacknowledged_only,
+                limit=limit,
+            )
+        return self.store.list_operator_handoff_completion_deliveries(
+            recipient_agent_id=operator_agent_id,
+            delivery_status=delivery_status,
+            unacknowledged_only=unacknowledged_only,
+            limit=limit,
+        )
+
+    def acknowledge_handoff_completion(
+        self,
+        *,
+        operator_agent_id: str,
+        completion_delivery_id: str,
+    ) -> dict[str, Any]:
+        self._require_operator(operator_agent_id)
+        delivery = self.store.get_operator_handoff_completion_delivery(
+            completion_delivery_id
+        )
+        if delivery is None:
+            raise ValueError("handoff completion delivery not found")
+        if str(delivery.get("recipient_agent_id") or "") != operator_agent_id:
+            raise ValueError("handoff completion delivery belongs to another operator")
+        acknowledged = self.store.acknowledge_operator_handoff_completion_delivery(
+            completion_delivery_id,
+            acknowledged_by=operator_agent_id,
+        )
+        if acknowledged is None:
+            raise RuntimeError("handoff completion acknowledgement failed")
+        self._record_completion_delivery_event(
+            "operator_handoff_completion_acknowledged",
+            acknowledged,
+        )
+        return acknowledged
+
+    def retry_handoff_completion_delivery(
+        self,
+        *,
+        operator_agent_id: str,
+        completion_delivery_id: str,
+    ) -> dict[str, Any]:
+        delivery = self.store.get_operator_handoff_completion_delivery(
+            completion_delivery_id
+        )
+        if delivery is None:
+            raise ValueError("handoff completion delivery not found")
+        allowed = {
+            str(delivery.get("recipient_agent_id") or ""),
+            str(delivery.get("source_operator_agent_id") or ""),
+            str(delivery.get("target_operator_agent_id") or ""),
+        }
+        operator = self._require_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        if operator_agent_id not in allowed and logical_operator_id not in allowed:
+            raise ValueError("handoff completion delivery belongs to other operators")
+        return self._attempt_handoff_completion_delivery(delivery)
+
+    def _deliver_terminal_completion_if_needed(
+        self,
+        handoff: dict[str, Any],
+    ) -> dict[str, Any]:
+        if str(handoff.get("status") or "").lower() not in HANDOFF_TERMINAL_STATUSES:
+            return handoff
+        delivery = handoff.get("completion_delivery")
+        if not isinstance(delivery, dict):
+            return handoff
+        if (
+            int(delivery.get("attempt_count") or 0) == 0
+            and delivery.get("last_attempt_at") is None
+        ):
+            self._record_completion_delivery_event(
+                "operator_handoff_completion_created",
+                delivery,
+            )
+        handoff["completion_delivery"] = self._attempt_handoff_completion_delivery(
+            delivery
+        )
+        return handoff
+
+    def _attempt_handoff_completion_delivery(
+        self,
+        delivery: dict[str, Any],
+    ) -> dict[str, Any]:
+        current_status = str(delivery.get("delivery_status") or "pending").lower()
+        if current_status in {"sent", "acknowledged"}:
+            return delivery
+        completion_delivery_id = str(delivery["completion_delivery_id"])
+        recipient_agent_id = str(delivery.get("recipient_agent_id") or "")
+        try:
+            recipient = self._require_agent(recipient_agent_id)
+        except ValueError as exc:
+            pending = self.store.update_operator_handoff_completion_delivery(
+                completion_delivery_id,
+                delivery_status="pending",
+                last_error=str(exc),
+                attempted=True,
+            )
+            assert pending is not None
+            self._record_completion_delivery_event(
+                "operator_handoff_completion_pending",
+                pending,
+            )
+            return pending
+
+        mode = str((recipient.get("metadata") or {}).get("pbx_mode") or "report").lower()
+        resolved = "queue" if mode == NOHUP_MODE else "tmux"
+        if resolved == "tmux":
+            metadata = (
+                recipient.get("metadata")
+                if isinstance(recipient.get("metadata"), dict)
+                else {}
+            )
+            has_exact_target = bool(
+                self.store.get_tmux_runtime_mapping(recipient_agent_id)
+                or str(metadata.get("tmux_pane_id") or "").strip()
+            )
+            if not has_exact_target:
+                pending = self.store.update_operator_handoff_completion_delivery(
+                    completion_delivery_id,
+                    delivery_mode="tmux",
+                    delivery_status="pending",
+                    last_error=(
+                        "completion recipient has no exact managed tmux mapping or "
+                        "recorded pane; review the durable receipt in Agent PBX"
+                    ),
+                    attempted=True,
+                )
+                assert pending is not None
+                self._record_completion_delivery_event(
+                    "operator_handoff_completion_pending",
+                    pending,
+                )
+                return pending
+        message = self._handoff_completion_message(delivery)
+        payload = {
+            "message": message,
+            "source": "operator_handoff_completion",
+            "completion_delivery_id": completion_delivery_id,
+            "handoff_id": delivery.get("handoff_id"),
+            "handoff_version": delivery.get("handoff_version"),
+            "source_operator_agent_id": delivery.get("source_operator_agent_id"),
+            "source_operator_fork_id": delivery.get("source_operator_fork_id"),
+            "target_operator_agent_id": delivery.get("target_operator_agent_id"),
+            "terminal_status": delivery.get("terminal_status"),
+            "requested_delivery": "auto",
+            "resolved_delivery": resolved,
+            "delivery_mode": resolved,
+        }
+        try:
+            if resolved == "queue":
+                command = self.store.create_command(
+                    CommandCreateRequest(
+                        agent_id=recipient_agent_id,
+                        type="send_input",
+                        payload=payload,
+                    )
+                )
+            else:
+                delivery_target = self._send_tmux_text(recipient, message)
+                pane = delivery_target.pane
+                payload.update(
+                    {
+                        "tmux_pane_id": pane.pane_id,
+                        "tmux_target": pane.target_label,
+                        "tmux_target_command": pane.current_command,
+                        "tmux_target_title": pane.title,
+                        "tmux_target_cwd": pane.cwd,
+                        "tmux_target_window": pane.window_name,
+                        "tmux_target_codex_like": delivery_target.codex_like_target,
+                        "tmux_target_codex_detection": delivery_target.codex_detection,
+                        "tmux_target_mode_cleared": delivery_target.pane_mode_cleared,
+                    }
+                )
+                command = self.store.create_command(
+                    CommandCreateRequest(
+                        agent_id=recipient_agent_id,
+                        type="send_input",
+                        payload=payload,
+                    ),
+                    status="sent",
+                )
+        except Exception as exc:  # noqa: BLE001 - preserve completed handoff state.
+            failed = self.store.update_operator_handoff_completion_delivery(
+                completion_delivery_id,
+                delivery_mode=resolved,
+                delivery_status="failed",
+                last_error=str(exc),
+                attempted=True,
+            )
+            assert failed is not None
+            self._record_completion_delivery_event(
+                "operator_handoff_completion_failed",
+                failed,
+            )
+            return failed
+
+        sent = self.store.update_operator_handoff_completion_delivery(
+            completion_delivery_id,
+            delivery_mode=resolved,
+            delivery_status="sent",
+            command_id=str(command.get("command_id") or "") or None,
+            last_error=None,
+            attempted=True,
+            metadata={
+                "command_status": command.get("status"),
+                "tmux_pane_id": payload.get("tmux_pane_id"),
+                "tmux_target": payload.get("tmux_target"),
+            },
+        )
+        assert sent is not None
+        self._record_completion_delivery_event(
+            "operator_handoff_completion_sent",
+            sent,
+        )
+        return sent
+
+    @staticmethod
+    def _handoff_completion_message(delivery: Mapping[str, Any]) -> str:
+        artifacts = [
+            str(item)[:80]
+            for item in delivery.get("artifact_kinds") or []
+            if str(item).strip()
+        ][:20]
+        return "\n".join(
+            [
+                "Operator handoff completed",
+                "",
+                f"Completion receipt: {delivery.get('completion_delivery_id')}",
+                f"Handoff: {delivery.get('handoff_id')}",
+                f"Target: {delivery.get('target_operator_agent_id')}",
+                f"Status: {delivery.get('terminal_status')}",
+                f"Summary: {str(delivery.get('summary') or '')[:1000]}",
+                "Artifacts: " + (", ".join(artifacts) if artifacts else "none"),
+                f"Artifact digest: {delivery.get('artifact_bundle_digest')}",
+                "",
+                "Retrieve the authoritative record with pbx_operator_get_handoff.",
+                "Acknowledge this receipt with pbx_operator_ack_handoff_completion after review.",
+            ]
+        )
+
+    def _record_completion_delivery_event(
+        self,
+        event_type: str,
+        delivery: Mapping[str, Any],
+    ) -> None:
+        payload = {
+            "agent_id": delivery.get("recipient_agent_id"),
+            "completion_delivery_id": delivery.get("completion_delivery_id"),
+            "handoff_id": delivery.get("handoff_id"),
+            "handoff_version": delivery.get("handoff_version"),
+            "source_operator_agent_id": delivery.get("source_operator_agent_id"),
+            "source_operator_fork_id": delivery.get("source_operator_fork_id"),
+            "recipient_agent_id": delivery.get("recipient_agent_id"),
+            "target_operator_agent_id": delivery.get("target_operator_agent_id"),
+            "terminal_status": delivery.get("terminal_status"),
+            "delivery_status": delivery.get("delivery_status"),
+            "command_id": delivery.get("command_id"),
+        }
+        self.store.append_event(
+            event_type,
+            payload,
+            str(delivery.get("completion_delivery_id") or ""),
+        )
 
     def cancel_handoff(
         self,

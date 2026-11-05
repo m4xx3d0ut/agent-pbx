@@ -247,6 +247,9 @@ from .schemas import (
     OperatorHandoffApproveRequest,
     OperatorHandoffCancelRequest,
     OperatorHandoffCancelResponse,
+    OperatorHandoffCompletionAckRequest,
+    OperatorHandoffCompletionDeliveryResponse,
+    OperatorHandoffCompletionListResponse,
     OperatorHandoffCreateRequest,
     OperatorHandoffDeliveryResponse,
     OperatorHandoffExecutionPreflightResponse,
@@ -5266,6 +5269,61 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             limit=limit,
         )
         return {"handoffs": handoffs}
+
+    @app.get(
+        "/v1/operator/handoff-completions",
+        response_model=OperatorHandoffCompletionListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_handoff_completions(
+        request: Request,
+        recipient_agent_id: str | None = None,
+        source_operator_agent_id: str | None = None,
+        delivery_status: str | None = None,
+        unacknowledged_only: bool = False,
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, object]:
+        deliveries = await asyncio.to_thread(
+            request.app.state.operator_service.list_handoff_completion_deliveries,
+            recipient_agent_id=recipient_agent_id,
+            source_operator_agent_id=source_operator_agent_id,
+            delivery_status=delivery_status,
+            unacknowledged_only=unacknowledged_only,
+            limit=limit,
+        )
+        return {"completion_deliveries": deliveries}
+
+    @app.post(
+        "/v1/operator/handoff-completions/{completion_delivery_id}/ack",
+        response_model=OperatorHandoffCompletionDeliveryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def acknowledge_operator_handoff_completion(
+        completion_delivery_id: str,
+        payload: OperatorHandoffCompletionAckRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.acknowledge_handoff_completion,
+            operator_agent_id=payload.operator_agent_id,
+            completion_delivery_id=completion_delivery_id,
+        )
+
+    @app.post(
+        "/v1/operator/handoff-completions/{completion_delivery_id}/retry",
+        response_model=OperatorHandoffCompletionDeliveryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def retry_operator_handoff_completion(
+        completion_delivery_id: str,
+        payload: OperatorHandoffCompletionAckRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.retry_handoff_completion_delivery,
+            operator_agent_id=payload.operator_agent_id,
+            completion_delivery_id=completion_delivery_id,
+        )
 
     @app.post(
         "/v1/operator/handoffs",

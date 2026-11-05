@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -978,6 +978,50 @@ class Store:
                     FOREIGN KEY(command_id) REFERENCES commands(command_id)
                         ON DELETE SET NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS operator_handoff_completion_deliveries (
+                    completion_delivery_id TEXT PRIMARY KEY,
+                    handoff_id TEXT NOT NULL,
+                    handoff_version TEXT NOT NULL,
+                    source_operator_agent_id TEXT NOT NULL,
+                    source_operator_fork_id TEXT,
+                    recipient_agent_id TEXT NOT NULL,
+                    target_operator_agent_id TEXT NOT NULL,
+                    terminal_status TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    artifact_kinds_json TEXT NOT NULL DEFAULT '[]',
+                    artifact_bundle_digest TEXT NOT NULL,
+                    delivery_mode TEXT,
+                    delivery_status TEXT NOT NULL DEFAULT 'pending',
+                    command_id TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_attempt_at REAL,
+                    last_error TEXT,
+                    acknowledged_at REAL,
+                    acknowledged_by TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(handoff_id, handoff_version),
+                    FOREIGN KEY(handoff_id) REFERENCES operator_handoffs(handoff_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(source_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(source_operator_fork_id) REFERENCES operator_forks(operator_fork_id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(recipient_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(target_operator_agent_id) REFERENCES agents(agent_id),
+                    FOREIGN KEY(command_id) REFERENCES commands(command_id)
+                        ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_handoff_completion_recipient_status
+                    ON operator_handoff_completion_deliveries(
+                        recipient_agent_id, delivery_status, created_at ASC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_handoff_completion_source_status
+                    ON operator_handoff_completion_deliveries(
+                        source_operator_agent_id, delivery_status, created_at ASC
+                    );
 
                 CREATE TABLE IF NOT EXISTS operator_delegation_leases (
                     lease_id TEXT PRIMARY KEY,
@@ -4060,6 +4104,8 @@ class Store:
                 self._add_campaign_summary(conn, agent)
                 self._add_handoff_approval_summary(conn, agent)
                 self._add_handoff_action_summary(conn, agent)
+                self._add_handoff_completion_summary(conn, agent)
+                self._add_operator_workflow_summary(conn, agent)
                 self._add_usage_summary(conn, agent)
         return agents
 
@@ -8874,7 +8920,28 @@ class Store:
                 """,
                 (handoff_id,),
             ).fetchone()
-        return self._operator_handoff_from_row(row) if row else None
+            delivery_row = (
+                conn.execute(
+                    f"""
+                    {self._operator_handoff_completion_select_sql()}
+                    WHERE d.handoff_id = ?
+                    ORDER BY d.created_at DESC, d.completion_delivery_id DESC
+                    LIMIT 1
+                    """,
+                    (handoff_id,),
+                ).fetchone()
+                if row is not None
+                else None
+            )
+        if row is None:
+            return None
+        handoff = self._operator_handoff_from_row(row)
+        handoff["completion_delivery"] = (
+            self._operator_handoff_completion_from_row(delivery_row)
+            if delivery_row is not None
+            else None
+        )
+        return handoff
 
     def list_operator_handoffs(
         self,
@@ -8925,7 +8992,206 @@ class Store:
         params.append(safe_limit)
         with self.connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
-        return [self._operator_handoff_from_row(row) for row in rows]
+            handoffs = [self._operator_handoff_from_row(row) for row in rows]
+            handoff_ids = [str(handoff["handoff_id"]) for handoff in handoffs]
+            deliveries_by_handoff: dict[str, dict[str, Any]] = {}
+            if handoff_ids:
+                placeholders = ",".join("?" for _ in handoff_ids)
+                delivery_rows = conn.execute(
+                    f"""
+                    {self._operator_handoff_completion_select_sql()}
+                    WHERE d.handoff_id IN ({placeholders})
+                    ORDER BY d.created_at DESC, d.completion_delivery_id DESC
+                    """,
+                    tuple(handoff_ids),
+                ).fetchall()
+                for delivery_row in delivery_rows:
+                    delivery = self._operator_handoff_completion_from_row(delivery_row)
+                    deliveries_by_handoff.setdefault(
+                        str(delivery["handoff_id"]),
+                        delivery,
+                    )
+            for handoff in handoffs:
+                handoff["completion_delivery"] = deliveries_by_handoff.get(
+                    str(handoff["handoff_id"])
+                )
+        return handoffs
+
+    def get_operator_handoff_completion_delivery(
+        self,
+        completion_delivery_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                {self._operator_handoff_completion_select_sql()}
+                WHERE d.completion_delivery_id = ?
+                """,
+                (completion_delivery_id,),
+            ).fetchone()
+        return (
+            self._operator_handoff_completion_from_row(row)
+            if row is not None
+            else None
+        )
+
+    def list_operator_handoff_completion_deliveries(
+        self,
+        *,
+        recipient_agent_id: str | None = None,
+        source_operator_agent_id: str | None = None,
+        delivery_status: str | None = None,
+        unacknowledged_only: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        values: list[Any] = []
+        if recipient_agent_id:
+            where.append("d.recipient_agent_id = ?")
+            values.append(recipient_agent_id)
+        if source_operator_agent_id:
+            where.append("d.source_operator_agent_id = ?")
+            values.append(source_operator_agent_id)
+        if delivery_status:
+            where.append("d.delivery_status = ?")
+            values.append(str(delivery_status).strip().lower())
+        if unacknowledged_only:
+            where.append("d.acknowledged_at IS NULL")
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        values.append(min(max(int(limit), 1), 500))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                {self._operator_handoff_completion_select_sql()}
+                {clause}
+                ORDER BY d.created_at ASC, d.completion_delivery_id ASC
+                LIMIT ?
+                """,
+                tuple(values),
+            ).fetchall()
+        return [self._operator_handoff_completion_from_row(row) for row in rows]
+
+    def update_operator_handoff_completion_delivery(
+        self,
+        completion_delivery_id: str,
+        *,
+        delivery_mode: str | None = None,
+        delivery_status: str | None = None,
+        command_id: str | None = None,
+        last_error: str | None = None,
+        attempted: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        delivery = self.get_operator_handoff_completion_delivery(
+            completion_delivery_id
+        )
+        if delivery is None:
+            return None
+        normalized_status = str(
+            delivery_status or delivery.get("delivery_status") or "pending"
+        ).strip().lower()
+        if normalized_status not in {"pending", "sent", "failed", "acknowledged"}:
+            raise ValueError("completion delivery status is invalid")
+        merged_metadata = dict(delivery.get("metadata") or {})
+        if metadata:
+            merged_metadata.update(metadata)
+        current = now_ts()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_handoff_completion_deliveries
+                SET delivery_mode = COALESCE(?, delivery_mode),
+                    delivery_status = ?,
+                    command_id = COALESCE(?, command_id),
+                    attempt_count = attempt_count + ?,
+                    last_attempt_at = CASE WHEN ? THEN ? ELSE last_attempt_at END,
+                    last_error = ?,
+                    metadata_json = ?,
+                    updated_at = ?
+                WHERE completion_delivery_id = ?
+                """,
+                (
+                    delivery_mode,
+                    normalized_status,
+                    command_id,
+                    1 if attempted else 0,
+                    1 if attempted else 0,
+                    current,
+                    last_error,
+                    json.dumps(merged_metadata),
+                    current,
+                    completion_delivery_id,
+                ),
+            )
+        if cursor.rowcount == 0:
+            return None
+        return self.get_operator_handoff_completion_delivery(completion_delivery_id)
+
+    def acknowledge_operator_handoff_completion_delivery(
+        self,
+        completion_delivery_id: str,
+        *,
+        acknowledged_by: str,
+    ) -> dict[str, Any] | None:
+        delivery = self.get_operator_handoff_completion_delivery(
+            completion_delivery_id
+        )
+        if delivery is None:
+            return None
+        if str(delivery.get("recipient_agent_id") or "") != acknowledged_by:
+            raise ValueError("completion delivery belongs to a different recipient")
+        if delivery.get("acknowledged_at") is not None:
+            return delivery
+        current = now_ts()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_handoff_completion_deliveries
+                SET delivery_status = 'acknowledged',
+                    acknowledged_at = ?,
+                    acknowledged_by = ?,
+                    updated_at = ?
+                WHERE completion_delivery_id = ?
+                  AND acknowledged_at IS NULL
+                """,
+                (current, acknowledged_by, current, completion_delivery_id),
+            )
+        if cursor.rowcount == 0:
+            return self.get_operator_handoff_completion_delivery(
+                completion_delivery_id
+            )
+        return self.get_operator_handoff_completion_delivery(completion_delivery_id)
+
+    @staticmethod
+    def _operator_handoff_artifact_kinds(artifacts: list[Any]) -> list[str]:
+        kinds: list[str] = []
+        for item in artifacts:
+            if isinstance(item, dict):
+                value = next(
+                    (
+                        item.get(key)
+                        for key in ("kind", "type", "name", "title", "artifact")
+                        if item.get(key)
+                    ),
+                    "artifact",
+                )
+            else:
+                value = type(item).__name__
+            normalized = str(value).strip()[:80]
+            if normalized and normalized not in kinds:
+                kinds.append(normalized)
+            if len(kinds) >= 20:
+                break
+        return kinds
+
+    @staticmethod
+    def _operator_handoff_completion_version(
+        handoff_id: str,
+        terminal_status: str,
+        completed_at: float,
+    ) -> str:
+        value = f"{handoff_id}\0{terminal_status}\0{completed_at:.6f}"
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     def update_operator_handoff(
         self,
@@ -8983,6 +9249,7 @@ class Store:
             if artifact_bundle is not None
             else handoff.get("artifact_bundle") or []
         )
+        completion_delivery_id: str | None = None
         with self.connect() as conn:
             cursor = conn.execute(
                 """
@@ -9023,7 +9290,79 @@ class Store:
                     handoff_id,
                 ),
             )
-        return self.get_operator_handoff(handoff_id) if cursor.rowcount else None
+            if cursor.rowcount and terminal and completed_at is not None:
+                handoff_version = self._operator_handoff_completion_version(
+                    handoff_id,
+                    normalized_status,
+                    float(completed_at),
+                )
+                completion_delivery_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        "agent-pbx:operator-handoff-completion:"
+                        f"{handoff_version}",
+                    )
+                )
+                recipient_agent_id = str(
+                    handoff.get("logical_operator_agent_id") or ""
+                )
+                source_operator_fork_id = str(
+                    handoff.get("source_operator_fork_id") or ""
+                ).strip() or None
+                if source_operator_fork_id:
+                    fork_row = conn.execute(
+                        """
+                        SELECT fork_agent_id
+                        FROM operator_forks
+                        WHERE operator_fork_id = ?
+                        """,
+                        (source_operator_fork_id,),
+                    ).fetchone()
+                    if fork_row is not None:
+                        recipient_agent_id = str(fork_row["fork_agent_id"] or "")
+                artifact_payload = json.dumps(
+                    next_bundle,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO operator_handoff_completion_deliveries
+                        (completion_delivery_id, handoff_id, handoff_version,
+                         source_operator_agent_id, source_operator_fork_id,
+                         recipient_agent_id, target_operator_agent_id,
+                         terminal_status, summary, artifact_kinds_json,
+                         artifact_bundle_digest, delivery_status, metadata_json,
+                         created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}', ?, ?)
+                    """,
+                    (
+                        completion_delivery_id,
+                        handoff_id,
+                        handoff_version,
+                        str(handoff.get("logical_operator_agent_id") or ""),
+                        source_operator_fork_id,
+                        recipient_agent_id,
+                        str(handoff.get("target_operator_agent_id") or ""),
+                        normalized_status,
+                        str(summary or handoff.get("summary") or normalized_status)[:4000],
+                        json.dumps(self._operator_handoff_artifact_kinds(next_bundle)),
+                        hashlib.sha256(artifact_payload.encode("utf-8")).hexdigest(),
+                        current,
+                        current,
+                    ),
+                )
+        if not cursor.rowcount:
+            return None
+        updated = self.get_operator_handoff(handoff_id)
+        if updated is not None and completion_delivery_id:
+            updated["completion_delivery"] = (
+                self.get_operator_handoff_completion_delivery(
+                    completion_delivery_id
+                )
+            )
+        return updated
 
     def cancel_operator_handoff(
         self,
@@ -9842,6 +10181,21 @@ class Store:
                    h.delivery_status, h.delivery_evidence_json, h.error,
                    h.summary, h.metadata_json, h.created_at, h.updated_at
             FROM operator_handoffs h
+        """
+
+    @staticmethod
+    def _operator_handoff_completion_select_sql() -> str:
+        return """
+            SELECT d.completion_delivery_id, d.handoff_id, d.handoff_version,
+                   d.source_operator_agent_id, d.source_operator_fork_id,
+                   d.recipient_agent_id, d.target_operator_agent_id,
+                   d.terminal_status, d.summary, d.artifact_kinds_json,
+                   d.artifact_bundle_digest, d.delivery_mode,
+                   d.delivery_status, d.command_id, d.attempt_count,
+                   d.last_attempt_at, d.last_error, d.acknowledged_at,
+                   d.acknowledged_by, d.metadata_json, d.created_at,
+                   d.updated_at
+            FROM operator_handoff_completion_deliveries d
         """
 
     @staticmethod
@@ -10928,6 +11282,17 @@ class Store:
         data["latest_report_action_required"] = False
         data["latest_report_suppress_tui_alerts"] = False
         data["active_campaign_count"] = 0
+        data["pending_completion_delivery_count"] = 0
+        data["failed_completion_delivery_count"] = 0
+        data["oldest_completion_delivery_at"] = None
+        data["latest_completion_delivery_id"] = None
+        data["latest_completion_target_operator_agent_id"] = None
+        data["workflow_state"] = "idle"
+        data["workflow_label"] = "◇ IDLE"
+        data["workflow_reason"] = "No active Operator workflow"
+        data["workflow_source"] = "agent_status"
+        data["workflow_subject_id"] = None
+        data["workflow_flow"] = ""
         return data
 
     @staticmethod
@@ -11136,6 +11501,163 @@ class Store:
         agent["oldest_ready_handoff_action_at"] = min(actionable) if actionable else None
 
     @staticmethod
+    def _add_handoff_completion_summary(
+        conn: sqlite3.Connection,
+        agent: dict[str, Any],
+    ) -> None:
+        """Expose source-side terminal receipts independently of reports."""
+
+        agent["pending_completion_delivery_count"] = 0
+        agent["failed_completion_delivery_count"] = 0
+        agent["oldest_completion_delivery_at"] = None
+        agent["latest_completion_delivery_id"] = None
+        agent["latest_completion_target_operator_agent_id"] = None
+        if agent.get("agent_type") != OPERATOR_AGENT_TYPE:
+            return
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS pending_count,
+                   SUM(CASE WHEN delivery_status = 'failed' THEN 1 ELSE 0 END)
+                       AS failed_count,
+                   MIN(created_at) AS oldest_created_at
+            FROM operator_handoff_completion_deliveries
+            WHERE recipient_agent_id = ?
+              AND acknowledged_at IS NULL
+            """,
+            (agent["agent_id"],),
+        ).fetchone()
+        agent["pending_completion_delivery_count"] = (
+            int(row["pending_count"] or 0) if row else 0
+        )
+        agent["failed_completion_delivery_count"] = (
+            int(row["failed_count"] or 0) if row else 0
+        )
+        agent["oldest_completion_delivery_at"] = (
+            row["oldest_created_at"] if row else None
+        )
+        latest = conn.execute(
+            """
+            SELECT completion_delivery_id, target_operator_agent_id
+            FROM operator_handoff_completion_deliveries
+            WHERE recipient_agent_id = ?
+              AND acknowledged_at IS NULL
+            ORDER BY created_at ASC, completion_delivery_id ASC
+            LIMIT 1
+            """,
+            (agent["agent_id"],),
+        ).fetchone()
+        if latest is not None:
+            agent["latest_completion_delivery_id"] = latest[
+                "completion_delivery_id"
+            ]
+            agent["latest_completion_target_operator_agent_id"] = latest[
+                "target_operator_agent_id"
+            ]
+
+    @staticmethod
+    def _add_operator_workflow_summary(
+        conn: sqlite3.Connection,
+        agent: dict[str, Any],
+    ) -> None:
+        if agent.get("agent_type") != OPERATOR_AGENT_TYPE:
+            return
+        status = str(
+            agent.get("latest_report_status")
+            or agent.get("effective_status")
+            or agent.get("status")
+            or ""
+        ).strip().lower()
+        if status.startswith("stale-"):
+            status = status.removeprefix("stale-")
+        pending_approvals = int(agent.get("pending_handoff_approval_count") or 0)
+        ready_actions = int(agent.get("ready_handoff_action_count") or 0)
+        pending_receipts = int(agent.get("pending_completion_delivery_count") or 0)
+        active_campaigns = int(agent.get("active_campaign_count") or 0)
+
+        state = "idle"
+        label = "◇ IDLE"
+        reason = "Operator runtime is available with no active workflow"
+        source = "agent_status"
+        subject_id: str | None = None
+        flow = ""
+        if status in {"failed", "error"} or status.startswith("failed_"):
+            state, label = "failed", "✕ FAIL"
+            reason = "Latest Operator report failed"
+            source = "latest_report"
+        elif status == "blocked" or status.startswith("blocked_"):
+            state, label = "blocked", "■ BLOCK"
+            reason = "Latest Operator report is blocked"
+            source = "latest_report"
+        elif pending_approvals:
+            state, label = "approval", "! APPROVE"
+            reason = f"{pending_approvals} outgoing handoff approval(s) pending"
+            source = "handoff_approval"
+            outgoing = conn.execute(
+                """
+                SELECT handoff_id, target_operator_agent_id
+                FROM operator_handoffs
+                WHERE logical_operator_agent_id = ?
+                  AND status IN ('proposed', 'approved', 'pending_launch')
+                ORDER BY created_at ASC, handoff_id ASC
+                LIMIT 1
+                """,
+                (agent["agent_id"],),
+            ).fetchone()
+            if outgoing is not None:
+                subject_id = str(outgoing["handoff_id"])
+                flow = f"→{outgoing['target_operator_agent_id']} !"
+        elif pending_receipts:
+            state, label = "review", "⇠ REVIEW"
+            reason = f"{pending_receipts} completion receipt(s) await review"
+            source = "handoff_completion_delivery"
+            subject_id = str(agent.get("latest_completion_delivery_id") or "") or None
+            target = str(
+                agent.get("latest_completion_target_operator_agent_id") or ""
+            )
+            flow = f"←{target} ✓" if target else "← receipt"
+        elif bool(agent.get("latest_report_action_required")):
+            state, label = "input", "? INPUT"
+            reason = "Latest Operator report requires input"
+            source = "latest_report"
+        elif ready_actions:
+            state, label = "action", "! ACTION"
+            reason = f"{ready_actions} guarded action(s) are ready"
+            source = "handoff_action"
+            flow = f"{ready_actions} action"
+        elif status in {"running", "working", "starting", "executing"}:
+            state, label = "running", "▶ RUN"
+            reason = "Latest Operator report is active"
+            source = "latest_report"
+        elif active_campaigns:
+            state, label = "running", "▶ RUN"
+            reason = f"{active_campaigns} active campaign(s)"
+            source = "campaign"
+            flow = f"{active_campaigns} camp"
+        elif status in {"waiting", "needs_input", "plan", "planning"}:
+            state, label = "waiting", "◈ WAIT"
+            reason = "Operator is waiting"
+            source = "latest_report"
+        elif status in {"done", "complete", "completed", "canceled", "cancelled"}:
+            state, label = "done", "✓ DONE"
+            reason = "Latest Operator work is terminal"
+            source = "latest_report"
+        elif status in {"offline", "stopped", "disconnected"}:
+            state, label = "offline", "○ OFF"
+            reason = "Operator runtime is unavailable"
+            source = "agent_status"
+        elif bool(agent.get("status_stale")):
+            state, label = "stale", "△ STALE"
+            reason = "Operator status has not refreshed"
+            source = "agent_status"
+
+        agent["workflow_state"] = state
+        agent["workflow_label"] = label
+        agent["workflow_reason"] = reason
+        agent["workflow_source"] = source
+        agent["workflow_subject_id"] = subject_id
+        agent["workflow_flow"] = flow
+
+    @staticmethod
     def _add_usage_summary(
         conn: sqlite3.Connection, agent: dict[str, Any]
     ) -> None:
@@ -11335,6 +11857,26 @@ class Store:
         except json.JSONDecodeError:
             metadata = {}
         data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return data
+
+    @staticmethod
+    def _operator_handoff_completion_from_row(
+        row: sqlite3.Row,
+    ) -> dict[str, Any]:
+        data = dict(row)
+        try:
+            artifact_kinds = json.loads(data.pop("artifact_kinds_json"))
+        except json.JSONDecodeError:
+            artifact_kinds = []
+        try:
+            metadata = json.loads(data.pop("metadata_json"))
+        except json.JSONDecodeError:
+            metadata = {}
+        data["artifact_kinds"] = (
+            artifact_kinds if isinstance(artifact_kinds, list) else []
+        )
+        data["metadata"] = metadata if isinstance(metadata, dict) else {}
+        data["attempt_count"] = int(data.get("attempt_count") or 0)
         return data
 
     @staticmethod

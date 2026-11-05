@@ -2852,6 +2852,46 @@ def test_operator_handoff_api_create_approve_ack_and_complete(
     assert completed_payload["status"] == "complete"
     assert completed_payload["completed_at"] is not None
     assert completed_payload["artifact_bundle"][0]["path"] == "result.md"
+    completion = completed_payload["completion_delivery"]
+    assert completion["recipient_agent_id"] == "operator-0"
+    assert completion["target_operator_agent_id"] == "operator-B"
+    # This fixture intentionally has no exact tmux mapping for report-mode
+    # operator-0. The receipt remains durable instead of guessing at a live pane.
+    assert completion["delivery_status"] == "pending"
+    assert "no exact managed tmux mapping" in completion["last_error"]
+    assert completed_payload["status"] == "complete"
+
+    listed_completions = client.get(
+        "/v1/operator/handoff-completions",
+        params={
+            "recipient_agent_id": "operator-0",
+            "unacknowledged_only": True,
+        },
+    )
+    assert listed_completions.status_code == 200
+    assert [
+        item["completion_delivery_id"]
+        for item in listed_completions.json()["completion_deliveries"]
+    ] == [completion["completion_delivery_id"]]
+
+    wrong_recipient = client.post(
+        f"/v1/operator/handoff-completions/{completion['completion_delivery_id']}/ack",
+        json={"operator_agent_id": "operator-B"},
+    )
+    assert wrong_recipient.status_code == 409
+    acknowledged = client.post(
+        f"/v1/operator/handoff-completions/{completion['completion_delivery_id']}/ack",
+        json={"operator_agent_id": "operator-0"},
+    )
+    assert acknowledged.status_code == 200
+    assert acknowledged.json()["delivery_status"] == "acknowledged"
+    assert acknowledged.json()["acknowledged_by"] == "operator-0"
+
+    agents_after_ack = client.get("/v1/agents").json()
+    source_after_ack = next(
+        item for item in agents_after_ack if item["agent_id"] == "operator-0"
+    )
+    assert source_after_ack["pending_completion_delivery_count"] == 0
 
 
 def test_operator_handoff_cancel_is_source_owned_audited_and_idempotent(

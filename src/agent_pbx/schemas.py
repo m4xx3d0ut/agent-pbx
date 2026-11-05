@@ -411,6 +411,17 @@ class AgentResponse(BaseModel):
     oldest_pending_handoff_created_at: float | None = None
     ready_handoff_action_count: int = 0
     oldest_ready_handoff_action_at: float | None = None
+    pending_completion_delivery_count: int = 0
+    failed_completion_delivery_count: int = 0
+    oldest_completion_delivery_at: float | None = None
+    latest_completion_delivery_id: str | None = None
+    latest_completion_target_operator_agent_id: str | None = None
+    workflow_state: str = "idle"
+    workflow_label: str = "◇ IDLE"
+    workflow_reason: str = "No active Operator workflow"
+    workflow_source: str = "agent_status"
+    workflow_subject_id: str | None = None
+    workflow_flow: str = ""
 
 
 class OperatorAlertAcknowledgementItem(BaseModel):
@@ -1166,6 +1177,41 @@ class OperatorHandoffUpdateRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class OperatorHandoffCompletionAckRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+
+
+class OperatorHandoffCompletionDeliveryResponse(BaseModel):
+    completion_delivery_id: str
+    handoff_id: str
+    handoff_version: str
+    source_operator_agent_id: str
+    source_operator_fork_id: str | None = None
+    recipient_agent_id: str
+    target_operator_agent_id: str
+    terminal_status: str
+    summary: str
+    artifact_kinds: list[str] = Field(default_factory=list)
+    artifact_bundle_digest: str
+    delivery_mode: str | None = None
+    delivery_status: str
+    command_id: str | None = None
+    attempt_count: int = 0
+    last_attempt_at: float | None = None
+    last_error: str | None = None
+    acknowledged_at: float | None = None
+    acknowledged_by: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: float
+    updated_at: float
+
+
+class OperatorHandoffCompletionListResponse(BaseModel):
+    completion_deliveries: list[OperatorHandoffCompletionDeliveryResponse] = Field(
+        default_factory=list
+    )
+
+
 class OperatorHandoffResponse(BaseModel):
     handoff_id: str
     logical_operator_agent_id: str
@@ -1201,6 +1247,7 @@ class OperatorHandoffResponse(BaseModel):
     metadata: dict[str, Any]
     created_at: float
     updated_at: float
+    completion_delivery: OperatorHandoffCompletionDeliveryResponse | None = None
 
 
 class OperatorHandoffCancelResponse(BaseModel):
