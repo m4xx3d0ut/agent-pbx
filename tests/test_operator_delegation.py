@@ -138,6 +138,80 @@ def test_sensitive_action_classes_are_always_manual() -> None:
     assert execution_scope_requires_manual_approval(scope) is True
 
 
+def test_host_process_attestation_scope_is_canonical_and_always_manual() -> None:
+    scope = normalize_execution_scope(
+        {
+            "action_class": "host_process_identity_attestation",
+            "campaign_id": "campaign-1",
+            "workspace_set_digest": "a" * 64,
+            "mutation_mode": "read_only",
+            "allowed_roots": ["/proc"],
+            "host_process_evidence": {
+                "candidate_pids": [321, 321],
+                "expected_executable": "/usr/bin/sleep",
+                "expected_argv0": "keeper",
+                "expected_user_namespace": "user:[4026531837]",
+                "expected_mount_namespace": "mnt:[4026531841]",
+            },
+        }
+    )
+
+    assert scope["host_process_evidence"]["candidate_pids"] == [321]
+    assert execution_scope_requires_manual_approval(scope) is True
+
+
+def test_host_process_attestation_f8_approval_mints_exact_evidence(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operators(store, tmp_path)
+    service = OperatorService(store)
+    handoff = service.create_handoff(
+        operator_agent_id="operator-0",
+        source_agent_id="operator-0",
+        target_operator_agent_id="operator-7",
+        message="Attest the exact approved host process identity.",
+        metadata={"campaign_id": "campaign-1"},
+        execution_scope={
+            "action_class": "host_process_identity_attestation",
+            "campaign_id": "campaign-1",
+            "workspace_set_digest": "a" * 64,
+            "mutation_mode": "read_only",
+            "allowed_roots": ["/proc"],
+            "host_process_evidence": {
+                "candidate_pids": [321],
+                "expected_executable": "/usr/bin/sleep",
+                "expected_argv0": "keeper",
+                "expected_user_namespace": "user:[4026531837]",
+                "expected_mount_namespace": "mnt:[4026531841]",
+            },
+        },
+    )
+
+    approved = service.approve_handoff(
+        operator_agent_id="operator-0",
+        handoff_id=handoff["handoff_id"],
+        delivery="record_only",
+        metadata={"approved_by": "agent-pbx-tui"},
+    )["handoff"]
+
+    approval = approved["metadata"]["manual_approval"]
+    assert approved["metadata"]["requires_f8_approval"] is True
+    assert approved["metadata"]["approved_by_operator_agent_id"] == "operator-0"
+    assert approval["method"] == "f8"
+    assert approval["handoff_id"] == handoff["handoff_id"]
+    assert approval["campaign_id"] == "campaign-1"
+    assert approval["workspace_set_digest"] == "a" * 64
+
+    with pytest.raises(ValueError, match="exact Agent PBX TUI approval"):
+        service.approve_handoff(
+            operator_agent_id="operator-0",
+            handoff_id=handoff["handoff_id"],
+            delivery="record_only",
+        )
+
+
 def test_trusted_campaign_lease_auto_approves_only_matching_handoff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -114,7 +114,7 @@ def host_process_authority_fixture(
         )
 
     campaign = store.create_operator_campaign(
-        operator_agent_id="operator-6",
+        operator_agent_id="operator-0",
         title="Host process evidence",
         objective="Attest one approved daemon-host process",
         criteria=[],

@@ -114,8 +114,6 @@ def _host_process_authority_error(
     campaign = store.get_operator_campaign(campaign_id)
     if campaign is None or campaign.get("status") != "running":
         return "campaign_not_running"
-    if campaign.get("operator_agent_id") != operator_agent_id:
-        return "campaign_operator_mismatch"
 
     handoff = store.get_operator_handoff(handoff_id)
     if handoff is None or handoff.get("status") not in {"acknowledged", "running"}:
@@ -128,6 +126,10 @@ def _host_process_authority_error(
         "logical_operator_agent_id"
     ):
         return "handoff_delegation_mismatch"
+    if campaign.get("operator_agent_id") != handoff.get(
+        "logical_operator_agent_id"
+    ):
+        return "campaign_operator_mismatch"
 
     metadata = handoff.get("metadata") or {}
     execution_scope = handoff.get("execution_scope") or {}

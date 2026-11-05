@@ -35,6 +35,7 @@ from .operator_authority import (
 from .operator_delegation import (
     DEFAULT_DENIED_ACTIONS,
     delegation_lease_matches_handoff,
+    execution_scope_requires_manual_approval,
     normalize_delegation_lease_scope,
     normalize_execution_scope,
 )
@@ -2651,6 +2652,11 @@ class OperatorService:
             raise ValueError("handoff has expired")
         if str(handoff.get("status") or "") in HANDOFF_TERMINAL_STATUSES:
             raise ValueError("handoff is already terminal")
+        approval_metadata = self._handoff_approval_metadata(
+            handoff=handoff,
+            operator_agent_id=operator_agent_id,
+            metadata=metadata,
+        )
         target_fork = self._handoff_required_target_fork(handoff)
         preflight = self.preflight_handoff_delivery(
             operator_agent_id=operator_agent_id,
@@ -2664,7 +2670,7 @@ class OperatorService:
                 target_operator_fork_id=str(target_fork.get("operator_fork_id") or ""),
                 summary="Required target operator fork is not launched.",
                 metadata={
-                    **(metadata or {}),
+                    **approval_metadata,
                     "delivery_preflight": preflight,
                     "pending_launch_reason": target_fork.get("summary")
                     or target_fork.get("status"),
@@ -2701,7 +2707,7 @@ class OperatorService:
                     "preflight": preflight,
                 },
                 metadata={
-                    **(metadata or {}),
+                    **approval_metadata,
                     "delivery_preflight": preflight,
                 },
             )
@@ -2734,7 +2740,7 @@ class OperatorService:
             delivery_status=str(command.get("status") or ""),
             delivery_evidence=evidence,
             metadata={
-                **(metadata or {}),
+                **approval_metadata,
                 "delivery_preflight": preflight,
                 "approved_by_operator_agent_id": operator_agent_id,
             },
@@ -2753,6 +2759,50 @@ class OperatorService:
             command=command,
         )
         return {"handoff": updated, "command": command}
+
+    @staticmethod
+    def _handoff_approval_metadata(
+        *,
+        handoff: Mapping[str, Any],
+        operator_agent_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        payload = dict(metadata or {})
+        scope = handoff.get("execution_scope")
+        if not isinstance(scope, Mapping) or not execution_scope_requires_manual_approval(
+            scope
+        ):
+            return payload
+        if str(scope.get("action_class") or "") != "host_process_identity_attestation":
+            return payload
+        if payload.get("approved_by") != "agent-pbx-tui":
+            raise ValueError(
+                "host process identity attestation requires exact Agent PBX TUI approval"
+            )
+        campaign_id = str(scope.get("campaign_id") or "").strip()
+        workspace_digest = str(scope.get("workspace_set_digest") or "").strip()
+        if not campaign_id or len(workspace_digest) != 64:
+            raise ValueError(
+                "host process identity attestation requires campaign and workspace identity"
+            )
+        approval_id = str(uuid.uuid4())
+        payload.update(
+            {
+                "requires_f8_approval": True,
+                "approved_by": "agent-pbx-tui",
+                "approved_by_operator_agent_id": operator_agent_id,
+                "manual_approval": {
+                    "approved": True,
+                    "method": "f8",
+                    "approval_id": approval_id,
+                    "approved_at": now_ts(),
+                    "campaign_id": campaign_id,
+                    "handoff_id": str(handoff.get("handoff_id") or ""),
+                    "workspace_set_digest": workspace_digest,
+                },
+            }
+        )
+        return payload
 
     def preflight_handoff_delivery(
         self,

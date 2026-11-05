@@ -13,6 +13,7 @@ HANDOFF_ACTION_CLASSES = frozenset(
         "same_workspace_handoff",
         "exact_git_commit_broker",
         "same_fork_reactivation",
+        "host_process_identity_attestation",
         "deployment",
         "publication",
         "provider_action",
@@ -91,6 +92,13 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
         "read_only",
     }:
         raise ValueError(f"{action_class} must remain read-only")
+    host_process_evidence = None
+    if action_class == "host_process_identity_attestation":
+        if mutation_mode not in {"none", "read_only"}:
+            raise ValueError("host_process_identity_attestation must remain read-only")
+        host_process_evidence = _host_process_evidence(
+            scope.get("host_process_evidence")
+        )
 
     flags = {
         key: bool(scope.get(key, False))
@@ -104,20 +112,19 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
             "authority_elevation",
         )
     }
-    if action_class in ALWAYS_MANUAL_ACTION_CLASSES:
-        flags[
-            {
-                "credential_access": "credential_access",
-                "provider_action": "provider_action",
-                "deployment": "deployment",
-                "publication": "publication",
-                "workspace_expansion": "workspace_expansion",
-                "authority_elevation": "authority_elevation",
-                "destructive_mutation": "destructive",
-            }[action_class]
-        ] = True
+    manual_flag = {
+        "credential_access": "credential_access",
+        "provider_action": "provider_action",
+        "deployment": "deployment",
+        "publication": "publication",
+        "workspace_expansion": "workspace_expansion",
+        "authority_elevation": "authority_elevation",
+        "destructive_mutation": "destructive",
+    }.get(action_class)
+    if manual_flag is not None:
+        flags[manual_flag] = True
 
-    return {
+    normalized = {
         "version": 1,
         "action_class": action_class,
         "campaign_id": campaign_id,
@@ -130,6 +137,9 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
         "denied_actions": list(denied_actions),
         **flags,
     }
+    if host_process_evidence is not None:
+        normalized["host_process_evidence"] = host_process_evidence
+    return normalized
 
 
 def execution_scope_requires_manual_approval(scope: Mapping[str, Any] | None) -> bool:
@@ -236,6 +246,47 @@ def _optional_digest(value: Any) -> str | None:
     if normalized and not re.fullmatch(r"[0-9a-f]{64}", normalized):
         raise ValueError("handoff execution_scope workspace_set_digest must be SHA-256")
     return normalized
+
+
+def _host_process_evidence(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "host_process_identity_attestation requires host_process_evidence"
+        )
+    required = {
+        "candidate_pids",
+        "expected_executable",
+        "expected_argv0",
+        "expected_user_namespace",
+        "expected_mount_namespace",
+    }
+    if set(value) != required:
+        raise ValueError("host_process_evidence fields are invalid")
+    raw_pids = value.get("candidate_pids")
+    if not isinstance(raw_pids, (list, tuple)) or not 1 <= len(raw_pids) <= 32:
+        raise ValueError(
+            "host_process_evidence candidate_pids must contain 1 to 32 PIDs"
+        )
+    candidate_pids: list[int] = []
+    for raw_pid in raw_pids:
+        if isinstance(raw_pid, bool) or not isinstance(raw_pid, int) or raw_pid <= 0:
+            raise ValueError(
+                "host_process_evidence candidate PIDs must be positive integers"
+            )
+        if raw_pid not in candidate_pids:
+            candidate_pids.append(raw_pid)
+    if not candidate_pids:
+        raise ValueError("host_process_evidence requires at least one unique PID")
+
+    evidence: dict[str, Any] = {"candidate_pids": candidate_pids}
+    for key in required - {"candidate_pids"}:
+        text = str(value.get(key) or "").strip()
+        if not text or len(text) > 1000 or any(
+            ord(character) < 32 or ord(character) == 127 for character in text
+        ):
+            raise ValueError(f"host_process_evidence {key} is invalid")
+        evidence[key] = text
+    return evidence
 
 
 def _absolute_roots(value: Any) -> tuple[str, ...]:
