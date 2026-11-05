@@ -25920,6 +25920,43 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert not any(".enabled_tools=" in item for item in overrides)
 
 
+def test_tui_broker_checkpoint_tools_are_root_only() -> None:
+    root_overrides = operator_agent_config_overrides(
+        ("agent-pbx",),
+        mcp_url="http://127.0.0.1:8767/mcp",
+        include_campaign_lifecycle=True,
+    )
+    edit_fork_overrides = operator_agent_config_overrides(
+        ("agent-pbx",),
+        mcp_url="http://127.0.0.1:8767/mcp",
+        include_campaign_lifecycle=False,
+    )
+    review_overrides = review_operator_config_overrides(
+        ("agent-pbx",),
+        mcp_url="http://127.0.0.1:8767/mcp",
+    )
+    root_config = next(
+        item for item in root_overrides if item.startswith("mcp_servers.agent-pbx=")
+    )
+    restricted_configs = [
+        next(
+            item
+            for item in overrides
+            if item.startswith("mcp_servers.agent-pbx=")
+        )
+        for overrides in (edit_fork_overrides, review_overrides)
+    ]
+
+    for tool in (
+        "pbx_operator_preflight_broker_checkpoint",
+        "pbx_operator_request_broker_checkpoint",
+        "pbx_operator_get_broker_checkpoint",
+        "pbx_operator_cancel_broker_checkpoint",
+    ):
+        assert tool in root_config
+        assert all(f'"{tool}"' not in config for config in restricted_configs)
+
+
 def test_tui_codex_terminal_mode_overrides_are_explicit_and_bounded() -> None:
     portable = [
         'tui.keymap.composer.submit=["enter"]',

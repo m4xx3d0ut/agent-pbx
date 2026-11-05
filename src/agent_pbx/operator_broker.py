@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import json
 from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 from typing import Any, Iterable, Mapping
+
+from .operator_actions import project_handoff_action
+from .operator_delegation import (
+    execution_scope_digest,
+    resolve_handoff_execution_scope,
+)
+from .security import now_ts
+from .store import Store
 
 
 OPERATOR_BROKER_MODE_ENV = "AGENT_PBX_OPERATOR_BROKER_MODE"
@@ -23,6 +33,13 @@ DEFAULT_OPERATOR_BROKER_MAX_IN_FLIGHT = 1
 MAX_OPERATOR_BROKER_MAX_IN_FLIGHT = 8
 MAX_OPERATOR_BROKER_PATHS = 256
 MAX_OPERATOR_BROKER_SUBJECT_LENGTH = 160
+OPERATOR_BROKER_REQUEST_EXECUTABLE_STATES = {
+    "ready_stop",
+    "stopped_ready_broker",
+    "receipt_review",
+    "committed_ready_resume",
+    "resumed_ready_validation",
+}
 
 _HEX_OID = re.compile(r"[0-9a-f]{40,64}")
 
@@ -58,6 +75,305 @@ class OperatorBrokerPosture:
             "root_operator_enabled": self.root_operator_enabled,
             "controls_hidden": self.controls_hidden,
         }
+
+
+class OperatorBrokerService:
+    """Validate root-owned checkpoints and persist local TUI execution requests."""
+
+    def __init__(
+        self,
+        store: Store,
+        *,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        self.store = store
+        self.environ = dict(os.environ if environ is None else environ)
+
+    def posture(self) -> OperatorBrokerPosture:
+        return operator_broker_posture(self.environ)
+
+    def preflight(
+        self,
+        *,
+        root_operator_agent_id: str,
+        target_fork_agent_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        posture = self.posture()
+        if posture.mode == "disabled":
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_DISABLED",
+                "The Operator checkpoint broker is disabled by local policy.",
+            )
+        root = self._require_root(root_operator_agent_id)
+        fork = self._require_owned_edit_fork(
+            root_operator_agent_id=root_operator_agent_id,
+            target_fork_agent_id=target_fork_agent_id,
+        )
+        handoff = self.store.get_operator_handoff(handoff_id)
+        if handoff is None:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_HANDOFF_NOT_FOUND",
+                "The exact broker handoff no longer exists.",
+            )
+        if str(handoff.get("logical_operator_agent_id") or "") != root_operator_agent_id:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_HANDOFF_ROOT_MISMATCH",
+                "The handoff belongs to another logical root Operator.",
+            )
+        target_fork_id = str(handoff.get("target_operator_fork_id") or "").strip()
+        target_fork = self.store.get_operator_fork(target_fork_id) if target_fork_id else None
+        if target_fork is None:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_HANDOFF_FORK_MISSING",
+                "The handoff does not bind one durable target edit fork.",
+            )
+        if str(target_fork.get("fork_agent_id") or "") != target_fork_agent_id:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_HANDOFF_FORK_MISMATCH",
+                "The handoff target does not match the requested edit fork.",
+            )
+        try:
+            scope = resolve_handoff_execution_scope(handoff)
+        except ValueError as exc:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_SCOPE_INVALID",
+                str(exc),
+            ) from exc
+        if scope.get("action_class") != "exact_git_commit_broker":
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_SCOPE_WRONG_CLASS",
+                "The handoff is not an exact Git commit broker action.",
+            )
+        campaign_id = str(scope.get("campaign_id") or "").strip()
+        campaign = self.store.get_operator_campaign(campaign_id) if campaign_id else None
+        if (
+            campaign is None
+            or str(campaign.get("operator_agent_id") or "") != root_operator_agent_id
+            or str(campaign.get("status") or "").lower() != "running"
+        ):
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_CAMPAIGN_NOT_RUNNING",
+                "The exact broker handoff must belong to a running root campaign.",
+            )
+        transaction = self.store.get_operator_action_transaction(handoff_id=handoff_id)
+        action = project_handoff_action(
+            handoff,
+            target_agent=fork,
+            transaction=transaction,
+        )
+        if action is None or action.get("state") not in OPERATOR_BROKER_REQUEST_EXECUTABLE_STATES:
+            reason = str((action or {}).get("reason") or "")
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_ACTION_NOT_EXECUTABLE",
+                reason or "The exact handoff is not at an executable broker checkpoint.",
+            )
+        digest = str(scope.get("workspace_set_digest") or "").strip().lower()
+        root_metadata = self._metadata(root)
+        fork_metadata = self._metadata(fork)
+        activated = {
+            str(root_metadata.get("operator_authority_activated_workspace_set_digest") or ""),
+            str(fork_metadata.get("operator_authority_activated_workspace_set_digest") or ""),
+            digest,
+        }
+        if len(activated) != 1 or not digest or len(digest) != 64:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_WORKSPACE_MISMATCH",
+                "Root, fork, and handoff do not share one activated workspace-set digest.",
+            )
+        for metadata, label in ((root_metadata, "root"), (fork_metadata, "fork")):
+            if str(metadata.get("operator_authority_activated_profile") or "") != "trusted-workbench":
+                raise OperatorBrokerPolicyError(
+                    "OPERATOR_BROKER_AUTHORITY_REQUIRED",
+                    f"The {label} Operator is not activated under trusted-workbench authority.",
+                )
+            if metadata.get("operator_authority_requires_restart") is True:
+                raise OperatorBrokerPolicyError(
+                    "OPERATOR_BROKER_AUTHORITY_PENDING_RESTART",
+                    f"The {label} Operator has an unapplied authority change.",
+                )
+        exact_paths = normalize_broker_paths(scope.get("exact_paths") or ())
+        expected_parent = normalize_broker_expected_parent(
+            scope.get("expected_git_parent")
+        )
+        subject = normalize_broker_commit_subject(scope.get("commit_subject"))
+        scope_sha256 = execution_scope_digest(scope)
+        authority_sha256 = hashlib.sha256(
+            json.dumps(
+                {
+                    "root_operator_agent_id": root_operator_agent_id,
+                    "target_fork_agent_id": target_fork_agent_id,
+                    "handoff_id": handoff_id,
+                    "campaign_id": campaign_id,
+                    "workspace_set_digest": digest,
+                    "scope_sha256": scope_sha256,
+                    "expected_git_parent": expected_parent,
+                    "commit_subject": subject,
+                    "exact_paths": exact_paths,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "ok": True,
+            "checked_at": now_ts(),
+            "posture": posture.public_dict(),
+            "root_operator_agent_id": root_operator_agent_id,
+            "target_fork_agent_id": target_fork_agent_id,
+            "handoff_id": handoff_id,
+            "campaign_id": campaign_id,
+            "workspace_set_digest": digest,
+            "scope_sha256": scope_sha256,
+            "authority_sha256": authority_sha256,
+            "expected_git_parent": expected_parent,
+            "commit_subject": subject,
+            "exact_paths": list(exact_paths),
+            "action": action,
+            "transaction": transaction,
+        }
+
+    def request(
+        self,
+        *,
+        root_operator_agent_id: str,
+        target_fork_agent_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        posture = self.posture()
+        if not posture.root_operator_enabled:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_ROOT_MODE_REQUIRED",
+                "Root-supervised broker execution is not enabled; use the guided TUI workflow.",
+            )
+        preflight = self.preflight(
+            root_operator_agent_id=root_operator_agent_id,
+            target_fork_agent_id=target_fork_agent_id,
+            handoff_id=handoff_id,
+        )
+        request, created = self.store.create_operator_broker_request(
+            root_operator_agent_id=root_operator_agent_id,
+            target_fork_agent_id=target_fork_agent_id,
+            handoff_id=handoff_id,
+            workspace_set_digest=str(preflight["workspace_set_digest"]),
+            scope_sha256=str(preflight["scope_sha256"]),
+            expected_git_parent=str(preflight["expected_git_parent"]),
+            commit_subject=str(preflight["commit_subject"]),
+            exact_paths=tuple(preflight["exact_paths"]),
+            ttl_seconds=posture.request_ttl_seconds,
+            max_in_flight_per_root=posture.max_in_flight_per_root,
+        )
+        self.store.append_event(
+            "operator_broker_request_created" if created else "operator_broker_request_reused",
+            {
+                "request_id": request["request_id"],
+                "root_operator_agent_id": root_operator_agent_id,
+                "target_fork_agent_id": target_fork_agent_id,
+                "handoff_id": handoff_id,
+                "scope_sha256": preflight["scope_sha256"],
+                "created": created,
+            },
+            str(request["request_id"]),
+        )
+        return {"request": request, "created": created, "preflight": preflight}
+
+    def get(
+        self,
+        *,
+        root_operator_agent_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        self._require_root(root_operator_agent_id)
+        request = self.store.get_operator_broker_request(request_id)
+        if request is None:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_REQUEST_NOT_FOUND",
+                "The broker request was not found.",
+            )
+        if request["root_operator_agent_id"] != root_operator_agent_id:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_REQUEST_ROOT_MISMATCH",
+                "The broker request belongs to another root Operator.",
+            )
+        return request
+
+    def cancel(
+        self,
+        *,
+        root_operator_agent_id: str,
+        request_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        self.get(
+            root_operator_agent_id=root_operator_agent_id,
+            request_id=request_id,
+        )
+        canceled = self.store.cancel_operator_broker_request(
+            request_id=request_id,
+            root_operator_agent_id=root_operator_agent_id,
+            reason=reason,
+        )
+        self.store.append_event(
+            "operator_broker_request_canceled",
+            {
+                "request_id": request_id,
+                "root_operator_agent_id": root_operator_agent_id,
+                "reason": str(reason or "")[:1000],
+            },
+            request_id,
+        )
+        return canceled
+
+    def _require_root(self, agent_id: str) -> dict[str, Any]:
+        agent = self.store.get_agent(agent_id)
+        if agent is None or agent.get("agent_type") != "operator" or not agent.get("pbx_active"):
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_ROOT_INACTIVE",
+                "The requesting root Operator is not registered and active.",
+            )
+        metadata = self._metadata(agent)
+        if str(metadata.get("operator_role") or "root") != "root":
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_ROOT_REQUIRED",
+                "Only a root Operator may request a broker checkpoint.",
+            )
+        logical = str(metadata.get("logical_operator_id") or agent_id)
+        if logical != agent_id:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_ROOT_IDENTITY_MISMATCH",
+                "The requesting Operator is not its logical root identity.",
+            )
+        return agent
+
+    def _require_owned_edit_fork(
+        self,
+        *,
+        root_operator_agent_id: str,
+        target_fork_agent_id: str,
+    ) -> dict[str, Any]:
+        fork = self.store.get_agent(target_fork_agent_id)
+        if fork is None or fork.get("agent_type") != "operator":
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_FORK_NOT_FOUND",
+                "The target edit fork is not registered.",
+            )
+        metadata = self._metadata(fork)
+        if (
+            str(metadata.get("operator_role") or "") != "fork"
+            or str(metadata.get("logical_operator_id") or "") != root_operator_agent_id
+            or str(metadata.get("fork_purpose") or "edit") != "edit"
+            or str(metadata.get("access_mode") or "edit") != "edit"
+        ):
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_FORK_BOUNDARY",
+                "The target must be an edit fork owned by the requesting root Operator.",
+            )
+        return fork
+
+    @staticmethod
+    def _metadata(agent: Mapping[str, Any]) -> dict[str, Any]:
+        metadata = agent.get("metadata")
+        return dict(metadata) if isinstance(metadata, Mapping) else {}
 
 
 def operator_broker_posture(

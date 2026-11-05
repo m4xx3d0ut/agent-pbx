@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -104,6 +105,7 @@ from .mcp_tools import create_mcp_asgi_app
 from .managed_runtime import ManagedRuntimeService
 from .agent_adoption import AgentPaneAdoptionService
 from .operator import OperatorService, operator_runbook_payload
+from .operator_broker import OperatorBrokerService
 from .operator_authority import OperatorAuthorityError, OperatorAuthorityService
 from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .polling import poll_commands as poll_commands_until
@@ -236,6 +238,12 @@ from .schemas import (
     OperatorHandoffActionListResponse,
     OperatorHandoffActionReceiptRequest,
     OperatorHandoffActionTransactionResponse,
+    OperatorBrokerCheckpointCancelRequest,
+    OperatorBrokerCheckpointClaimRequest,
+    OperatorBrokerCheckpointListResponse,
+    OperatorBrokerCheckpointRequest,
+    OperatorBrokerCheckpointResponse,
+    OperatorBrokerCheckpointTransitionRequest,
     OperatorHandoffApproveRequest,
     OperatorHandoffCancelRequest,
     OperatorHandoffCancelResponse,
@@ -799,6 +807,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.pull_requests = pull_requests
     app.state.issues = issues
     app.state.operator_service = OperatorService(store)
+    app.state.operator_broker_service = OperatorBrokerService(store)
     app.state.managed_runtime = ManagedRuntimeService(
         store,
         codex_bin=resolved_config.codex_bin,
@@ -5344,6 +5353,138 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         )
         return {"actions": actions}
 
+    @app.post(
+        "/v1/operator/broker-checkpoints/preflight",
+        dependencies=[Depends(require_token)],
+    )
+    async def preflight_operator_broker_checkpoint(
+        payload: OperatorBrokerCheckpointRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_broker_service.preflight,
+            root_operator_agent_id=payload.root_operator_agent_id,
+            target_fork_agent_id=payload.target_fork_agent_id,
+            handoff_id=payload.handoff_id,
+        )
+
+    @app.post(
+        "/v1/operator/broker-checkpoints",
+        dependencies=[Depends(require_token)],
+    )
+    async def request_operator_broker_checkpoint(
+        payload: OperatorBrokerCheckpointRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_broker_service.request,
+            root_operator_agent_id=payload.root_operator_agent_id,
+            target_fork_agent_id=payload.target_fork_agent_id,
+            handoff_id=payload.handoff_id,
+        )
+
+    @app.get(
+        "/v1/operator/broker-checkpoints",
+        response_model=OperatorBrokerCheckpointListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_broker_checkpoints(
+        request: Request,
+        root_operator_agent_id: str | None = None,
+        target_fork_agent_id: str | None = None,
+        status_filter: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, object]:
+        statuses = tuple(
+            item.strip().lower()
+            for item in str(status_filter or "").split(",")
+            if item.strip()
+        )
+        requests = await asyncio.to_thread(
+            request.app.state.store.list_operator_broker_requests,
+            root_operator_agent_id=root_operator_agent_id,
+            target_fork_agent_id=target_fork_agent_id,
+            statuses=statuses,
+            limit=limit,
+        )
+        return {"requests": requests}
+
+    @app.get(
+        "/v1/operator/broker-checkpoints/{request_id}",
+        response_model=OperatorBrokerCheckpointResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def get_operator_broker_checkpoint(
+        request_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        result = await asyncio.to_thread(
+            request.app.state.store.get_operator_broker_request,
+            request_id,
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="broker request not found")
+        return result
+
+    @app.post(
+        "/v1/operator/broker-checkpoints/{request_id}/claim",
+        response_model=OperatorBrokerCheckpointResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def claim_operator_broker_checkpoint(
+        request_id: str,
+        payload: OperatorBrokerCheckpointClaimRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        require_local_broker_executor(request)
+        return await run_operator_call(
+            request.app.state.store.claim_operator_broker_request,
+            request_id=request_id,
+            executor_id=payload.executor_id,
+            lease_seconds=payload.lease_seconds,
+        )
+
+    @app.post(
+        "/v1/operator/broker-checkpoints/{request_id}/transition",
+        response_model=OperatorBrokerCheckpointResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def transition_operator_broker_checkpoint(
+        request_id: str,
+        payload: OperatorBrokerCheckpointTransitionRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        require_local_broker_executor(request)
+        return await run_operator_call(
+            request.app.state.store.transition_operator_broker_request,
+            request_id=request_id,
+            executor_id=payload.executor_id,
+            status=payload.status,
+            expected_statuses=payload.expected_statuses,
+            action_transaction_id=payload.action_transaction_id,
+            result=payload.result,
+            error_code=payload.error_code,
+            error=payload.error,
+            lease_seconds=payload.lease_seconds,
+        )
+
+    @app.post(
+        "/v1/operator/broker-checkpoints/{request_id}/cancel",
+        response_model=OperatorBrokerCheckpointResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def cancel_operator_broker_checkpoint(
+        request_id: str,
+        payload: OperatorBrokerCheckpointCancelRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_broker_service.cancel,
+            root_operator_agent_id=payload.root_operator_agent_id,
+            request_id=request_id,
+            reason=payload.reason,
+        )
+
     @app.get(
         "/v1/operator/handoffs/{handoff_id}/execution-preflight",
         response_model=OperatorHandoffExecutionPreflightResponse,
@@ -6507,6 +6648,24 @@ async def run_operator_call(
                 "retryable": response_status == status.HTTP_409_CONFLICT,
             },
         ) from exc
+
+
+def require_local_broker_executor(request: Request) -> None:
+    """Keep privileged broker execution claims on the daemon host."""
+
+    host = str(request.client.host if request.client else "").strip()
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host in {"localhost", "testclient"}
+    if not loopback:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "OPERATOR_BROKER_LOCAL_EXECUTOR_REQUIRED",
+                "message": "Broker execution claims are restricted to a local TUI executor.",
+            },
+        )
 
 
 def joplin_copy_source(

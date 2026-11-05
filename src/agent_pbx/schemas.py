@@ -1260,6 +1260,64 @@ class OperatorHandoffActionTransactionResponse(BaseModel):
     transaction: dict[str, Any]
 
 
+class OperatorBrokerCheckpointRequest(BaseModel):
+    root_operator_agent_id: str = Field(min_length=1, max_length=120)
+    target_fork_agent_id: str = Field(min_length=1, max_length=240)
+    handoff_id: str = Field(min_length=1, max_length=120)
+
+
+class OperatorBrokerCheckpointCancelRequest(BaseModel):
+    root_operator_agent_id: str = Field(min_length=1, max_length=120)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class OperatorBrokerCheckpointClaimRequest(BaseModel):
+    executor_id: str = Field(min_length=1, max_length=240)
+    lease_seconds: int = Field(default=60, ge=10, le=300)
+
+
+class OperatorBrokerCheckpointTransitionRequest(BaseModel):
+    executor_id: str = Field(min_length=1, max_length=240)
+    status: Literal["executing", "succeeded", "failed"]
+    expected_statuses: list[Literal["claimed", "executing"]] = Field(
+        min_length=1,
+        max_length=2,
+    )
+    action_transaction_id: str | None = Field(default=None, max_length=120)
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_code: str | None = Field(default=None, max_length=120)
+    error: str | None = Field(default=None, max_length=4000)
+    lease_seconds: int = Field(default=60, ge=10, le=300)
+
+
+class OperatorBrokerCheckpointResponse(BaseModel):
+    request_id: str
+    root_operator_agent_id: str
+    target_fork_agent_id: str
+    handoff_id: str
+    action_transaction_id: str | None = None
+    workspace_set_digest: str
+    scope_sha256: str
+    expected_git_parent: str
+    commit_subject: str
+    exact_paths: list[str]
+    status: str
+    executor_id: str | None = None
+    claim_expires_at: float | None = None
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_code: str | None = None
+    error: str | None = None
+    created_at: float
+    updated_at: float
+    expires_at: float
+    completed_at: float | None = None
+    canceled_at: float | None = None
+
+
+class OperatorBrokerCheckpointListResponse(BaseModel):
+    requests: list[OperatorBrokerCheckpointResponse] = Field(default_factory=list)
+
+
 class OperatorHandoffPreflightResponse(BaseModel):
     handoff_id: str
     operator_agent_id: str

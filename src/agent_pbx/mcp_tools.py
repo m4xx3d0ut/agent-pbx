@@ -20,6 +20,7 @@ from .host_process_evidence import (
 from .joplin import JoplinService
 from .issues import IssueService
 from .operator import OperatorService, operator_runbook_payload
+from .operator_broker import OperatorBrokerService
 from .polling import poll_commands as poll_commands_until
 from .pull_requests import PullRequestService
 from .schemas import (
@@ -215,6 +216,7 @@ def build_mcp_server(
         stateless_http=True,
     )
     operator_service = OperatorService(store)
+    operator_broker_service = OperatorBrokerService(store)
     process_attestor = host_process_attestor or HostProcessAttestor()
 
     @mcp.tool()
@@ -984,6 +986,56 @@ def build_mcp_server(
             operator_agent_id=operator_agent_id,
             handoff_id=handoff_id,
             delivery=delivery,
+        )
+
+    @mcp.tool()
+    def pbx_operator_preflight_broker_checkpoint(
+        operator_agent_id: str,
+        target_fork_agent_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        """Validate one exact root-owned edit-fork broker checkpoint."""
+        return operator_broker_service.preflight(
+            root_operator_agent_id=operator_agent_id,
+            target_fork_agent_id=target_fork_agent_id,
+            handoff_id=handoff_id,
+        )
+
+    @mcp.tool()
+    def pbx_operator_request_broker_checkpoint(
+        operator_agent_id: str,
+        target_fork_agent_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        """Request local TUI execution of an exact broker checkpoint."""
+        return operator_broker_service.request(
+            root_operator_agent_id=operator_agent_id,
+            target_fork_agent_id=target_fork_agent_id,
+            handoff_id=handoff_id,
+        )
+
+    @mcp.tool()
+    def pbx_operator_get_broker_checkpoint(
+        operator_agent_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Return one root-owned broker request and its durable evidence."""
+        return operator_broker_service.get(
+            root_operator_agent_id=operator_agent_id,
+            request_id=request_id,
+        )
+
+    @mcp.tool()
+    def pbx_operator_cancel_broker_checkpoint(
+        operator_agent_id: str,
+        request_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Cancel one pending root-owned broker request before it is claimed."""
+        return operator_broker_service.cancel(
+            root_operator_agent_id=operator_agent_id,
+            request_id=request_id,
+            reason=reason,
         )
 
     @mcp.tool()

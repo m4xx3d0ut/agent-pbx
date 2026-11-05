@@ -5,6 +5,7 @@ import pytest
 from agent_pbx.operator import OperatorService
 from agent_pbx.operator_broker import (
     OperatorBrokerPolicyError,
+    OperatorBrokerService,
     normalize_broker_commit_subject,
     normalize_broker_expected_parent,
     normalize_broker_paths,
@@ -106,6 +107,101 @@ def _broker_store(tmp_path) -> tuple[Store, str, str]:
         message="Commit the reviewed exact scope.",
     )
     return store, str(handoff["handoff_id"]), "a" * 64
+
+
+def _qualified_broker_service(tmp_path):
+    digest = "a" * 64
+    store = Store(tmp_path / "qualified.sqlite")
+    store.init()
+    root_metadata = {
+        "cwd": str(tmp_path),
+        "operator_role": "root",
+        "logical_operator_id": "operator-0",
+        "operator_authority_activated_profile": "trusted-workbench",
+        "operator_authority_activated_workspace_set_digest": digest,
+    }
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata=root_metadata,
+        )
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-7",
+            project="demo",
+            metadata={
+                "cwd": str(tmp_path),
+                "codex_session_id": "session-caller-7",
+            },
+        )
+    )
+    operator = OperatorService(store)
+    fork = operator.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-7",
+        fork_agent_id="operator-7-fork",
+        fork_track_id="edit",
+        fork_purpose="edit",
+        access_mode="edit",
+        source_cwd=str(tmp_path),
+        work_root=str(tmp_path),
+        fork_codex_session_id="session-fork-7",
+        status="running",
+        metadata={
+            "operator_authority_activated_profile": "trusted-workbench",
+            "operator_authority_activated_workspace_set_digest": digest,
+        },
+    )
+    campaign = store.create_operator_campaign(
+        operator_agent_id="operator-0",
+        title="Exact broker test",
+        objective="Create one reviewed commit",
+        criteria=["exact paths only"],
+        assignments=[
+            {
+                "target_agent_id": "caller-7",
+                "title": "Prepare change",
+                "prompt": "Prepare the exact change.",
+                "criteria": [],
+            }
+        ],
+    )
+    handoff = operator.create_handoff(
+        operator_agent_id="operator-0",
+        source_agent_id="operator-0",
+        target_operator_agent_id="operator-0",
+        target_operator_fork_id=str(fork["operator_fork_id"]),
+        message="Create the reviewed commit.",
+        execution_scope={
+            "action_class": "exact_git_commit_broker",
+            "campaign_id": campaign["campaign_id"],
+            "workspace_set_digest": digest,
+            "mutation_mode": "exact_paths",
+            "allowed_roots": [str(tmp_path)],
+            "exact_paths": ["src/app.py", "tests/test_app.py"],
+            "expected_git_parent": "b" * 40,
+            "commit_subject": "fix: exact root checkpoint",
+        },
+    )
+    operator.approve_handoff(
+        operator_agent_id="operator-0",
+        handoff_id=handoff["handoff_id"],
+        delivery="record_only",
+    )
+    operator.ack_handoff(
+        operator_agent_id="operator-0",
+        handoff_id=handoff["handoff_id"],
+        status="running",
+        summary="Ready for exact checkpoint",
+    )
+    service = OperatorBrokerService(
+        store,
+        environ={"AGENT_PBX_OPERATOR_BROKER_MODE": "root_operator"},
+    )
+    return store, service, handoff, digest
 
 
 def _create_request(store: Store, handoff_id: str, digest: str):
@@ -219,3 +315,57 @@ def test_store_persists_terminal_result_and_prevents_cancel_after_claim(
     assert completed["status"] == "succeeded"
     assert completed["result"]["validation_pending"] is True
     assert completed["completed_at"] is not None
+
+
+def test_broker_service_preflight_binds_root_fork_campaign_and_scope(tmp_path) -> None:
+    _store, service, handoff, digest = _qualified_broker_service(tmp_path)
+
+    result = service.preflight(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+
+    assert result["ok"] is True
+    assert result["workspace_set_digest"] == digest
+    assert result["exact_paths"] == ["src/app.py", "tests/test_app.py"]
+    assert result["action"]["state"] == "ready_stop"
+    assert len(result["authority_sha256"]) == 64
+
+
+def test_broker_service_root_mode_creates_durable_request(tmp_path) -> None:
+    store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+
+    result = service.request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+
+    assert result["created"] is True
+    assert result["request"]["status"] == "pending"
+    events = store.list_events(limit=20)
+    assert any(event["type"] == "operator_broker_request_created" for event in events)
+
+
+def test_broker_service_guided_mode_refuses_root_automation(tmp_path) -> None:
+    store, _service, handoff, _digest = _qualified_broker_service(tmp_path)
+    guided = OperatorBrokerService(store, environ={})
+
+    with pytest.raises(OperatorBrokerPolicyError, match="guided TUI"):
+        guided.request(
+            root_operator_agent_id="operator-0",
+            target_fork_agent_id="operator-7-fork",
+            handoff_id=handoff["handoff_id"],
+        )
+
+
+def test_broker_service_rejects_edit_fork_as_requesting_root(tmp_path) -> None:
+    _store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+
+    with pytest.raises(OperatorBrokerPolicyError, match="Only a root"):
+        service.preflight(
+            root_operator_agent_id="operator-7-fork",
+            target_fork_agent_id="operator-7-fork",
+            handoff_id=handoff["handoff_id"],
+        )

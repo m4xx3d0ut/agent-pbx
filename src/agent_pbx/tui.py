@@ -356,6 +356,10 @@ OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_operator_finish_campaign",
     "pbx_operator_ack_handoff",
     "pbx_operator_update_handoff",
+    "pbx_operator_preflight_broker_checkpoint",
+    "pbx_operator_request_broker_checkpoint",
+    "pbx_operator_get_broker_checkpoint",
+    "pbx_operator_cancel_broker_checkpoint",
 )
 CALLER_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_agent_runbook",
