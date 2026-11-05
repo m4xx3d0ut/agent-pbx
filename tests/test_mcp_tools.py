@@ -1,10 +1,16 @@
 import asyncio
+from contextlib import contextmanager
 import json
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
-from agent_pbx.mcp_tools import build_mcp_server
+from agent_pbx import mcp_tools
+from agent_pbx.config import ServerConfig
+from agent_pbx.host_process_evidence import HostProcessAttestor
+from agent_pbx.mcp_tools import BearerAuthASGIMiddleware, build_mcp_server
+from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import Store
 
 
@@ -43,6 +49,147 @@ def tool_json(result: object) -> object:
             return structured
         return json.loads(content[0].text)
     return json.loads(result[0].text)  # type: ignore[index, attr-defined]
+
+
+@contextmanager
+def authenticated_controller() -> Iterator[None]:
+    token = mcp_tools._authenticated_controller.set(True)
+    try:
+        yield
+    finally:
+        mcp_tools._authenticated_controller.reset(token)
+
+
+def write_fake_process(proc_root: Path, pid: int) -> None:
+    process_root = proc_root / str(pid)
+    namespace_root = process_root / "ns"
+    namespace_root.mkdir(parents=True)
+    (process_root / "exe").symlink_to("/usr/bin/keeper")
+    (process_root / "cmdline").write_bytes(b"keeper\0--private-body\0")
+    (namespace_root / "user").symlink_to("user:[4026531837]")
+    (namespace_root / "mnt").symlink_to("mnt:[4026531841]")
+
+
+def host_process_authority_fixture(
+    tmp_path: Path,
+    *,
+    source_operator_agent_id: str = "operator-0",
+) -> tuple[Store, object, dict[str, object]]:
+    store = Store(tmp_path / "host-process-pbx.sqlite")
+    store.init()
+    workspace_digest = "a" * 64
+    for request in (
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"operator_role": "root"},
+        ),
+        AgentRegisterRequest(
+            agent_id="operator-6",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"operator_role": "root"},
+        ),
+        AgentRegisterRequest(
+            agent_id="operator-6-fork-caller",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={
+                "operator_role": "fork",
+                "logical_operator_id": "operator-6",
+                "operator_authority_activated_workspace_set_digest": workspace_digest,
+            },
+        ),
+    ):
+        store.register_agent(request)
+    if source_operator_agent_id != "operator-0":
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=source_operator_agent_id,
+                project="agent-pbx-operator",
+                agent_type="operator",
+                metadata={"operator_role": "root"},
+            )
+        )
+
+    campaign = store.create_operator_campaign(
+        operator_agent_id="operator-6",
+        title="Host process evidence",
+        objective="Attest one approved daemon-host process",
+        criteria=[],
+        assignments=[],
+    )
+    campaign_id = str(campaign["campaign_id"])
+    approved_evidence = {
+        "candidate_pids": [321],
+        "expected_executable": "/usr/bin/keeper",
+        "expected_argv0": "keeper",
+        "expected_user_namespace": "user:[4026531837]",
+        "expected_mount_namespace": "mnt:[4026531841]",
+    }
+    handoff = store.create_operator_handoff(
+        logical_operator_agent_id="operator-0",
+        source_operator_agent_id=source_operator_agent_id,
+        target_operator_agent_id="operator-6",
+        source_agent_id=source_operator_agent_id,
+        objective="Approved host process attestation",
+        message="Read only the bounded approved proc identity.",
+        execution_scope={
+            "campaign_id": campaign_id,
+            "workspace_set_digest": workspace_digest,
+            "action_class": "host_process_identity_attestation",
+            "host_process_evidence": approved_evidence,
+        },
+        metadata={
+            "campaign_id": campaign_id,
+            "requires_f8_approval": True,
+            "approved_by": "agent-pbx-tui",
+            "approved_by_operator_agent_id": "operator-0",
+        },
+    )
+    handoff_id = str(handoff["handoff_id"])
+    store.update_operator_handoff(
+        handoff_id,
+        status="running",
+        acknowledge=True,
+        start=True,
+        metadata={
+            "campaign_id": campaign_id,
+            "requires_f8_approval": True,
+            "approved_by": "agent-pbx-tui",
+            "approved_by_operator_agent_id": "operator-0",
+            "manual_approval": {
+                "approved": True,
+                "method": "f8",
+                "approval_id": "approval-1",
+                "approved_at": 1_793_853_600.0,
+                "campaign_id": campaign_id,
+                "handoff_id": handoff_id,
+                "workspace_set_digest": workspace_digest,
+            },
+        },
+    )
+    proc_root = tmp_path / "fake-proc"
+    write_fake_process(proc_root, 321)
+    mcp = build_mcp_server(
+        store,
+        host_process_attestor=HostProcessAttestor(
+            proc_root,
+            require_host_proc=False,
+            clock=lambda: 1_793_853_601.0,
+        ),
+    )
+    arguments: dict[str, object] = {
+        "requesting_agent_id": "operator-6-fork-caller",
+        "operator_agent_id": "operator-6",
+        "campaign_id": campaign_id,
+        "handoff_id": handoff_id,
+        "workspace_set_digest": workspace_digest,
+        "approval_id": "approval-1",
+        **approved_evidence,
+    }
+    return store, mcp, arguments
 
 
 @pytest.mark.asyncio
@@ -689,3 +836,183 @@ async def test_mcp_repeated_poll_picks_up_late_command(tmp_path: Path) -> None:
     assert polled[0]["status"] == "delivered"
     assert agent is not None
     assert agent["last_poll_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_mcp_host_process_attestation_requires_authenticated_controller(
+    tmp_path: Path,
+) -> None:
+    _, mcp, arguments = host_process_authority_fixture(tmp_path)
+
+    with pytest.raises(Exception, match="authenticated controller required"):
+        await mcp.call_tool("pbx_attest_host_process_identity", {"request": arguments})
+
+
+@pytest.mark.asyncio
+async def test_mcp_host_process_attestation_returns_bounded_approved_evidence(
+    tmp_path: Path,
+) -> None:
+    store, mcp, arguments = host_process_authority_fixture(tmp_path)
+
+    with authenticated_controller():
+        evidence = tool_json(
+            await mcp.call_tool(
+                "pbx_attest_host_process_identity", {"request": arguments}
+            )
+        )
+
+    assert evidence == {
+        "match_count": 1,
+        "unique_host_pid": 321,
+        "executable_equal": True,
+        "argv0_equal": True,
+        "user_namespace_equal": True,
+        "mount_namespace_equal": True,
+        "timestamp": 1_793_853_601.0,
+        "fail_closed_reason": None,
+    }
+    events = [
+        event
+        for event in store.list_events()
+        if event["type"] == "host_process_identity_attested"
+    ]
+    assert len(events) == 1
+    event_text = json.dumps(events[0], sort_keys=True)
+    assert "private-body" not in event_text
+    assert "/usr/bin/keeper" not in event_text
+    assert '"keeper"' not in event_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changed_argument", "changed_value", "reason"),
+    [
+        ("workspace_set_digest", "b" * 64, "workspace_set_not_activated"),
+        ("approval_id", "wrong-approval", "manual_approval_invalid"),
+        ("campaign_id", "wrong-campaign", "campaign_not_running"),
+        ("handoff_id", "wrong-handoff", "handoff_not_approved"),
+        ("expected_argv0", "unapproved", "process_predicates_not_approved"),
+        ("candidate_pids", [321, 322], "process_predicates_not_approved"),
+    ],
+)
+async def test_mcp_host_process_attestation_rejects_scope_or_approval_drift(
+    tmp_path: Path,
+    changed_argument: str,
+    changed_value: object,
+    reason: str,
+) -> None:
+    store, mcp, arguments = host_process_authority_fixture(tmp_path)
+    arguments[changed_argument] = changed_value
+
+    with authenticated_controller(), pytest.raises(Exception, match=reason):
+        await mcp.call_tool("pbx_attest_host_process_identity", {"request": arguments})
+
+    assert not any(
+        event["type"] == "host_process_identity_attested"
+        for event in store.list_events()
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_host_process_attestation_rejects_inactive_campaign(
+    tmp_path: Path,
+) -> None:
+    store, mcp, arguments = host_process_authority_fixture(tmp_path)
+    store.update_operator_campaign(
+        str(arguments["campaign_id"]), status="blocked", complete=True
+    )
+
+    with authenticated_controller(), pytest.raises(
+        Exception, match="campaign_not_running"
+    ):
+        await mcp.call_tool("pbx_attest_host_process_identity", {"request": arguments})
+
+
+@pytest.mark.asyncio
+async def test_mcp_host_process_attestation_rejects_missing_manual_approval(
+    tmp_path: Path,
+) -> None:
+    store, mcp, arguments = host_process_authority_fixture(tmp_path)
+    store.update_operator_handoff(
+        str(arguments["handoff_id"]), metadata={"manual_approval": {}}
+    )
+
+    with authenticated_controller(), pytest.raises(
+        Exception, match="manual_approval_invalid"
+    ):
+        await mcp.call_tool("pbx_attest_host_process_identity", {"request": arguments})
+
+
+@pytest.mark.asyncio
+async def test_mcp_host_process_attestation_preserves_delegation_boundary(
+    tmp_path: Path,
+) -> None:
+    _, mcp, arguments = host_process_authority_fixture(
+        tmp_path, source_operator_agent_id="operator-9"
+    )
+
+    with authenticated_controller(), pytest.raises(
+        Exception, match="handoff_delegation_mismatch"
+    ):
+        await mcp.call_tool("pbx_attest_host_process_identity", {"request": arguments})
+
+
+@pytest.mark.asyncio
+async def test_mcp_host_process_attestation_rejects_unbounded_identifiers(
+    tmp_path: Path,
+) -> None:
+    _, mcp, arguments = host_process_authority_fixture(tmp_path)
+    arguments["approval_id"] = "x" * 129
+
+    with authenticated_controller(), pytest.raises(
+        Exception, match="invalid_authority_identifier"
+    ):
+        await mcp.call_tool("pbx_attest_host_process_identity", {"request": arguments})
+
+
+@pytest.mark.asyncio
+async def test_mcp_host_process_attestation_has_no_process_action_surface(
+    tmp_path: Path,
+) -> None:
+    _, mcp, arguments = host_process_authority_fixture(tmp_path)
+    arguments["signal"] = 9
+
+    with authenticated_controller(), pytest.raises(Exception):
+        await mcp.call_tool("pbx_attest_host_process_identity", {"request": arguments})
+
+
+@pytest.mark.asyncio
+async def test_bearer_middleware_marks_only_authenticated_controller_context(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "auth.sqlite")
+    store.init()
+    observed: list[bool] = []
+
+    async def downstream(scope: object, receive: object, send: object) -> None:
+        del scope, receive, send
+        observed.append(mcp_tools._authenticated_controller.get())
+
+    middleware = BearerAuthASGIMiddleware(
+        downstream,  # type: ignore[arg-type]
+        store,
+        ServerConfig(token="controller-secret"),
+    )
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        del message
+
+    await middleware(
+        {
+            "type": "http",
+            "headers": [(b"authorization", b"Bearer controller-secret")],
+        },  # type: ignore[arg-type]
+        receive,  # type: ignore[arg-type]
+        send,  # type: ignore[arg-type]
+    )
+
+    assert observed == [True]
+    assert mcp_tools._authenticated_controller.get() is False

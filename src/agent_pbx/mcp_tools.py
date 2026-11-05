@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 import logging
+import math
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .agent import runbook_payload
 from .codex_sessions import enrich_codex_session_metadata
 from .config import ServerConfig
+from .host_process_evidence import (
+    HostProcessAttestor,
+    HostProcessExpectation,
+)
 from .joplin import JoplinService
 from .issues import IssueService
 from .operator import OperatorService, operator_runbook_payload
@@ -27,6 +34,164 @@ from .store import Store
 
 
 logger = logging.getLogger("agent_pbx.mcp")
+_authenticated_controller: ContextVar[bool] = ContextVar(
+    "agent_pbx_authenticated_controller", default=False
+)
+
+
+class HostProcessAttestationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requesting_agent_id: StrictStr
+    operator_agent_id: StrictStr
+    campaign_id: StrictStr
+    handoff_id: StrictStr
+    workspace_set_digest: StrictStr
+    approval_id: StrictStr
+    candidate_pids: list[StrictInt] = Field(min_length=1, max_length=32)
+    expected_executable: StrictStr
+    expected_argv0: StrictStr
+    expected_user_namespace: StrictStr
+    expected_mount_namespace: StrictStr
+
+
+def _bounded_authority_identifier(value: object, *, maximum: int = 128) -> bool:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        return False
+    return not any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
+def _host_process_authority_error(
+    store: Store,
+    *,
+    requesting_agent_id: str,
+    operator_agent_id: str,
+    campaign_id: str,
+    handoff_id: str,
+    workspace_set_digest: str,
+    approval_id: str,
+    candidate_pids: list[int],
+    expectation: HostProcessExpectation,
+) -> str | None:
+    if not all(
+        _bounded_authority_identifier(value)
+        for value in (
+            requesting_agent_id,
+            operator_agent_id,
+            campaign_id,
+            handoff_id,
+            approval_id,
+        )
+    ):
+        return "invalid_authority_identifier"
+    if (
+        len(workspace_set_digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in workspace_set_digest
+        )
+    ):
+        return "invalid_workspace_set_digest"
+    agent = store.get_agent(requesting_agent_id)
+    if (
+        agent is None
+        or agent.get("agent_type") != "operator"
+        or not agent.get("pbx_active")
+    ):
+        return "requesting_operator_inactive"
+    agent_metadata = agent.get("metadata") or {}
+    logical_operator_id = str(
+        agent_metadata.get("logical_operator_id") or requesting_agent_id
+    )
+    if logical_operator_id != operator_agent_id:
+        return "requesting_operator_mismatch"
+    if (
+        agent_metadata.get("operator_authority_activated_workspace_set_digest")
+        != workspace_set_digest
+    ):
+        return "workspace_set_not_activated"
+
+    campaign = store.get_operator_campaign(campaign_id)
+    if campaign is None or campaign.get("status") != "running":
+        return "campaign_not_running"
+    if campaign.get("operator_agent_id") != operator_agent_id:
+        return "campaign_operator_mismatch"
+
+    handoff = store.get_operator_handoff(handoff_id)
+    if handoff is None or handoff.get("status") not in {"acknowledged", "running"}:
+        return "handoff_not_approved"
+    if handoff.get("target_operator_agent_id") != operator_agent_id:
+        return "handoff_target_mismatch"
+    if handoff.get("acknowledged_at") is None:
+        return "handoff_not_acknowledged"
+    if handoff.get("source_operator_agent_id") != handoff.get(
+        "logical_operator_agent_id"
+    ):
+        return "handoff_delegation_mismatch"
+
+    metadata = handoff.get("metadata") or {}
+    execution_scope = handoff.get("execution_scope") or {}
+    if metadata.get("campaign_id") != campaign_id:
+        return "handoff_campaign_mismatch"
+    if execution_scope.get("campaign_id") != campaign_id:
+        return "execution_campaign_mismatch"
+    if execution_scope.get("workspace_set_digest") != workspace_set_digest:
+        return "execution_workspace_mismatch"
+    if execution_scope.get("action_class") != "host_process_identity_attestation":
+        return "execution_action_mismatch"
+    if metadata.get("requires_f8_approval") is not True:
+        return "manual_approval_required"
+    if metadata.get("approved_by") != "agent-pbx-tui":
+        return "manual_approval_source_mismatch"
+    if metadata.get("approved_by_operator_agent_id") != handoff.get(
+        "logical_operator_agent_id"
+    ):
+        return "manual_approval_operator_mismatch"
+
+    manual_approval = metadata.get("manual_approval")
+    required_approval_keys = {
+        "approved",
+        "method",
+        "approval_id",
+        "approved_at",
+        "campaign_id",
+        "handoff_id",
+        "workspace_set_digest",
+    }
+    if (
+        not isinstance(manual_approval, dict)
+        or set(manual_approval) != required_approval_keys
+    ):
+        return "manual_approval_invalid"
+    approved_at = manual_approval.get("approved_at")
+    if (
+        manual_approval.get("approved") is not True
+        or manual_approval.get("method") != "f8"
+        or manual_approval.get("approval_id") != approval_id
+        or not isinstance(approved_at, (int, float))
+        or isinstance(approved_at, bool)
+        or not math.isfinite(float(approved_at))
+        or float(approved_at) <= 0
+        or manual_approval.get("campaign_id") != campaign_id
+        or manual_approval.get("handoff_id") != handoff_id
+        or manual_approval.get("workspace_set_digest") != workspace_set_digest
+    ):
+        return "manual_approval_invalid"
+
+    approved_evidence = execution_scope.get("host_process_evidence")
+    expected_evidence = {
+        "candidate_pids": candidate_pids,
+        "expected_executable": expectation.executable,
+        "expected_argv0": expectation.argv0,
+        "expected_user_namespace": expectation.user_namespace,
+        "expected_mount_namespace": expectation.mount_namespace,
+    }
+    if (
+        not isinstance(approved_evidence, dict)
+        or approved_evidence != expected_evidence
+    ):
+        return "process_predicates_not_approved"
+    return None
 
 
 def build_mcp_server(
@@ -35,6 +200,7 @@ def build_mcp_server(
     pull_requests: PullRequestService | None = None,
     issues: IssueService | None = None,
     legacy_polling_enabled: bool = True,
+    host_process_attestor: HostProcessAttestor | None = None,
 ) -> FastMCP:
     mcp = FastMCP(
         "Agent PBX",
@@ -47,6 +213,7 @@ def build_mcp_server(
         stateless_http=True,
     )
     operator_service = OperatorService(store)
+    process_attestor = host_process_attestor or HostProcessAttestor()
 
     @mcp.tool()
     def pbx_agent_runbook() -> dict[str, Any]:
@@ -57,6 +224,62 @@ def build_mcp_server(
     def pbx_operator_runbook() -> dict[str, Any]:
         """Return Agent PBX operator-agent campaign guidance."""
         return operator_runbook_payload()
+
+    @mcp.tool()
+    def pbx_attest_host_process_identity(
+        request: HostProcessAttestationRequest,
+    ) -> dict[str, object]:
+        """Attest one exact daemon-host process identity under manual approval."""
+        if not _authenticated_controller.get():
+            raise PermissionError("authenticated controller required")
+        expectation = HostProcessExpectation(
+            executable=request.expected_executable,
+            argv0=request.expected_argv0,
+            user_namespace=request.expected_user_namespace,
+            mount_namespace=request.expected_mount_namespace,
+        )
+        authority_error = _host_process_authority_error(
+            store,
+            requesting_agent_id=request.requesting_agent_id,
+            operator_agent_id=request.operator_agent_id,
+            campaign_id=request.campaign_id,
+            handoff_id=request.handoff_id,
+            workspace_set_digest=request.workspace_set_digest,
+            approval_id=request.approval_id,
+            candidate_pids=request.candidate_pids,
+            expectation=expectation,
+        )
+        if authority_error is not None:
+            store.append_event(
+                "host_process_identity_attestation_denied",
+                {
+                    "campaign_id": request.campaign_id,
+                    "handoff_id": request.handoff_id,
+                    "workspace_set_digest": request.workspace_set_digest,
+                    "approval_id": request.approval_id,
+                    "reason": authority_error,
+                },
+                request.requesting_agent_id,
+            )
+            raise PermissionError(
+                f"host process attestation denied: {authority_error}"
+            )
+        evidence = process_attestor.attest(
+            candidate_pids=request.candidate_pids,
+            expectation=expectation,
+        ).as_dict()
+        store.append_event(
+            "host_process_identity_attested",
+            {
+                "campaign_id": request.campaign_id,
+                "handoff_id": request.handoff_id,
+                "workspace_set_digest": request.workspace_set_digest,
+                "approval_id": request.approval_id,
+                "evidence": evidence,
+            },
+            request.requesting_agent_id,
+        )
+        return evidence
 
     @mcp.tool()
     def pbx_operator_list_agents(agent_type: str = "caller") -> list[dict[str, Any]]:
@@ -1364,33 +1587,38 @@ class BearerAuthASGIMiddleware:
                 scope, receive, send
             )
             return
-        if self.config.token and constant_time_equal(token, self.config.token):
+        authenticated = bool(
+            self.config.token and constant_time_equal(token, self.config.token)
+        )
+        if not authenticated:
+            record = self.store.verify_token(token)
+            if record is None:
+                await JSONResponse({"detail": "invalid bearer token"}, status_code=403)(
+                    scope, receive, send
+                )
+                return
+            role = str(record.role or "").strip().lower()
+            if role == "observer" or str(record.kind).strip().lower() == "observer":
+                await JSONResponse(
+                    {"detail": "controller role required"}, status_code=403
+                )(scope, receive, send)
+                return
+            if record.allowed_agent_ids:
+                await JSONResponse(
+                    {"detail": "scoped controller cannot use the global MCP surface"},
+                    status_code=403,
+                )(scope, receive, send)
+                return
+            if record.audience and record.audience != self.config.remote_audience:
+                await JSONResponse(
+                    {"detail": "token audience mismatch"}, status_code=403
+                )(scope, receive, send)
+                return
+        context_token = _authenticated_controller.set(True)
+        try:
             await self.app(scope, receive, send)
-            return
-        record = self.store.verify_token(token)
-        if record is None:
-            await JSONResponse({"detail": "invalid bearer token"}, status_code=403)(
-                scope, receive, send
-            )
-            return
-        role = str(record.role or "").strip().lower()
-        if role == "observer" or str(record.kind).strip().lower() == "observer":
-            await JSONResponse({"detail": "controller role required"}, status_code=403)(
-                scope, receive, send
-            )
-            return
-        if record.allowed_agent_ids:
-            await JSONResponse(
-                {"detail": "scoped controller cannot use the global MCP surface"},
-                status_code=403,
-            )(scope, receive, send)
-            return
-        if record.audience and record.audience != self.config.remote_audience:
-            await JSONResponse({"detail": "token audience mismatch"}, status_code=403)(
-                scope, receive, send
-            )
-            return
-        await self.app(scope, receive, send)
+        finally:
+            _authenticated_controller.reset(context_token)
 
     def _auth_required(self) -> bool:
         if self.config.lan_bound and not self.config.allow_insecure_lan:
