@@ -16892,6 +16892,15 @@ async def test_tui_thread_selection_renders_detail() -> None:
     assert '"ok": true' in detail
 
 
+async def test_tui_load_thread_ignores_report_before_thread_surface_mount() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    # A report may arrive from the event stream before Textual has mounted the
+    # retained Thread pane.  Startup refreshes must remain nonfatal; the next
+    # mounted refresh will load the thread normally.
+    await app.load_thread("agent-1")
+
+
 async def test_tui_structured_plan_options_render_and_queue_metadata() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     queued: list[tuple[str, str, dict[str, object]]] = []

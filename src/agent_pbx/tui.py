@@ -19282,7 +19282,14 @@ class AgentPBXTUI(App[None]):
             stream.text = "Detached. Use Auto or Select Pane to reconnect."
 
     async def load_thread(self, agent_id: str) -> None:
-        thread_detail = self.query_one("#thread-detail", TextArea)
+        # Event-stream reports can arrive while Textual is still mounting the
+        # right-side tab panes.  The selected-agent refresh also loads Thread,
+        # so querying its detail widget before that pane exists turns a valid
+        # startup report into an application-level WorkerFailed traceback.
+        # A later refresh or opening Thread will populate it normally.
+        thread_detail = self.query_one_or_none("#thread-detail", TextArea)
+        if thread_detail is None:
+            return
         try:
             response = await self.api_client().get(
                 f"/v1/agents/{agent_id}/thread",
