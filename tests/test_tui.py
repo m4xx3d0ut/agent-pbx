@@ -26509,6 +26509,7 @@ def test_tui_root_operator_config_includes_campaign_lifecycle_tools(
         for item in overrides
         if item.startswith("mcp_servers.agent-pbx=")
     )
+    assert "pbx_operator_create_handoff" in agent_pbx_config
     assert "pbx_operator_start_campaign" in agent_pbx_config
     assert "pbx_operator_send_followup" in agent_pbx_config
     assert "pbx_operator_finish_campaign" in agent_pbx_config

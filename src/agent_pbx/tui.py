@@ -345,6 +345,7 @@ REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
 )
 OPERATOR_AGENT_PBX_APPROVED_TOOLS = (
     *REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS,
+    "pbx_operator_create_handoff",
     "pbx_operator_start_campaign",
     "pbx_operator_send_followup",
     "pbx_operator_finish_campaign",
