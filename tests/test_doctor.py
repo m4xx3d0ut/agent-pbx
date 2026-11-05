@@ -11,7 +11,9 @@ from agent_pbx.doctor import (
     DoctorCheck,
     DoctorReport,
     _database_check,
+    _launcher_permission_check,
     _managed_tmux_command_check,
+    _operator_broker_policy_check,
     _codex_theme_check,
     _security_check,
     _tmux_server_diagnostic,
@@ -142,6 +144,33 @@ def test_platform_doctor_reports_missing_host_executables(
     assert by_id["codex"].status == "fail"
     assert by_id["database"].status == "warn"
     assert report.ok is False
+
+
+def test_doctor_warns_on_shared_or_world_accessible_local_launcher(
+    tmp_path: Path,
+) -> None:
+    launcher = tmp_path / "apbx"
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o777)
+
+    unsafe = _launcher_permission_check(launcher)
+    launcher.chmod(0o700)
+    safe = _launcher_permission_check(launcher)
+
+    assert unsafe.status == "warn"
+    assert "chmod 700" in unsafe.remediation
+    assert safe.status == "pass"
+
+
+def test_doctor_reports_root_operator_broker_policy(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_PBX_OPERATOR_BROKER_MODE", "root_operator")
+    monkeypatch.setenv("AGENT_PBX_OPERATOR_BROKER_CONTROL_MODE", "hidden")
+
+    check = _operator_broker_policy_check()
+
+    assert check.status == "pass"
+    assert "mode=root_operator" in check.summary
+    assert "controls=hidden" in check.summary
 
 
 def test_doctor_cli_parser_exposes_release_gate_options() -> None:

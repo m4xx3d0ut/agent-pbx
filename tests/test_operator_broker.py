@@ -317,6 +317,39 @@ def test_store_persists_terminal_result_and_prevents_cancel_after_claim(
     assert completed["completed_at"] is not None
 
 
+def test_store_recovers_expired_executing_claim_for_a_new_local_tui(
+    tmp_path,
+) -> None:
+    store, handoff_id, digest = _broker_store(tmp_path)
+    request, _created = _create_request(store, handoff_id, digest)
+    store.claim_operator_broker_request(
+        request_id=request["request_id"],
+        executor_id="old-tui",
+        lease_seconds=10,
+    )
+    store.transition_operator_broker_request(
+        request_id=request["request_id"],
+        executor_id="old-tui",
+        status="executing",
+        expected_statuses=("claimed",),
+        result={"phase": "stop"},
+        lease_seconds=10,
+    )
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE operator_broker_requests SET claim_expires_at = 1 WHERE request_id = ?",
+            (request["request_id"],),
+        )
+
+    recovered = store.claim_operator_broker_request(
+        request_id=request["request_id"],
+        executor_id="new-tui",
+    )
+
+    assert recovered["status"] == "claimed"
+    assert recovered["executor_id"] == "new-tui"
+
+
 def test_broker_service_preflight_binds_root_fork_campaign_and_scope(tmp_path) -> None:
     _store, service, handoff, digest = _qualified_broker_service(tmp_path)
 

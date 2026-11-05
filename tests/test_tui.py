@@ -8314,6 +8314,8 @@ async def test_tui_linked_git_broker_requires_exact_stopped_terminal_posture(
         for status in ("working", "paused", "complete", "unknown", "blocked"):
             app.agents[fork_id]["status"] = status
             assert app.linked_git_broker_tui_context(fork_id) is None
+
+
         app.agents[fork_id]["status"] = "canceled"
         app.agents[fork_id]["pbx_active"] = True
         assert app.linked_git_broker_tui_context(fork_id) is None
@@ -8371,6 +8373,214 @@ async def test_tui_linked_git_broker_requires_exact_stopped_terminal_posture(
         )
         await pilot.pause()
 
+
+@pytest.mark.asyncio
+async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    target_id = "operator-7-fork-linked"
+    session_id = "session-operator-fork"
+    state = {"action": "ready_stop"}
+    transitions: list[dict[str, object]] = []
+    receipts: list[tuple[str, str]] = []
+    agent = linked_git_broker_test_agent(tmp_path, active=True, metadata_shape="current")
+    app.agents = {target_id: agent}
+    app.tmux_runtime_mapping_by_agent = {}
+
+    async def transition(_request_id: str, **kwargs):
+        transitions.append(kwargs)
+        return {
+            "request_id": "request-1",
+            "handoff_id": "handoff-1",
+            "root_operator_agent_id": "operator-7",
+            "target_fork_agent_id": target_id,
+            "commit_subject": "fix: exact checkpoint",
+            "result": kwargs.get("result") or {},
+        }
+
+    async def refresh_agents() -> None:
+        return None
+
+    async def action(**_kwargs):
+        return {
+            "handoff_id": "handoff-1",
+            "scope_sha256": "a" * 64,
+            "state": state["action"],
+            "transaction_id": "action-transaction-1",
+        }
+
+    async def stop_selected_operator(*, agent_id=None) -> None:
+        assert agent_id == target_id
+        state["action"] = "stopped_ready_broker"
+        app.agents[target_id] = linked_git_broker_test_agent(
+            tmp_path,
+            active=False,
+            metadata_shape="current",
+        )
+
+    async def record_ready_action(
+        _target_id: str,
+        *,
+        step: str,
+        outcome: str,
+        evidence=None,
+    ) -> None:
+        assert outcome == "succeeded"
+        receipts.append((step, str((evidence or {}).get("request_id") or "")))
+        if step == "broker_review":
+            state["action"] = "receipt_review"
+        elif step == "broker_commit":
+            state["action"] = "committed_ready_resume"
+
+    async def resume_selected_operator(*, agent_id=None, resume_candidate=None) -> None:
+        assert agent_id == target_id
+        assert resume_candidate.session_id == session_id
+        state["action"] = "resumed_ready_validation"
+        app.agents[target_id] = linked_git_broker_test_agent(
+            tmp_path,
+            active=True,
+            metadata_shape="current",
+        )
+        app.tmux_runtime_mapping_by_agent[target_id] = {
+            "pane_id": "%77",
+            "codex_session_id": session_id,
+        }
+
+    context = LinkedGitBrokerTuiContext(
+        agent_id=target_id,
+        work_root=str(tmp_path / "linked"),
+        approved_roots=(tmp_path,),
+        codex_home=tmp_path / "codex-home",
+        authority_sha256="f" * 64,
+        plan_public=linked_git_broker_test_plan(tmp_path).public_dict(),
+    )
+    receipt = SimpleNamespace(
+        transaction_id="e" * 64,
+        head="b" * 40,
+        approved_stage_paths=("src/app.py",),
+        commit_subject="fix: exact checkpoint",
+    )
+    commit_result = SimpleNamespace(
+        transaction_id="e" * 64,
+        old_head="b" * 40,
+        new_head="c" * 40,
+        committed_paths=("src/app.py",),
+        status="committed",
+    )
+    app.transition_operator_broker_request = transition  # type: ignore[method-assign]
+    app.refresh_agents = refresh_agents  # type: ignore[method-assign]
+    app.operator_broker_action = action  # type: ignore[method-assign]
+    app.stop_selected_operator = stop_selected_operator  # type: ignore[method-assign]
+    app.maybe_record_ready_action_for_target = record_ready_action  # type: ignore[method-assign]
+    app.resume_selected_operator = resume_selected_operator  # type: ignore[method-assign]
+    app.operator_session_candidates = lambda _agent_id: [
+        OperatorSessionCandidate(session_id, 1.0, "metadata")
+    ]  # type: ignore[method-assign]
+    app.linked_git_broker_tui_context = lambda *_args, **_kwargs: context  # type: ignore[method-assign]
+    app.operator_broker_git_evidence = lambda _root: {  # type: ignore[method-assign]
+        "verified_head": "c" * 40,
+        "index_empty": True,
+    }
+    app.query_one_or_none = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    monkeypatch.setattr("agent_pbx.tui.prepare_linked_git_commit", lambda **_kwargs: receipt)
+    monkeypatch.setattr("agent_pbx.tui.execute_linked_git_commit", lambda *_args, **_kwargs: commit_result)
+    monkeypatch.setattr("agent_pbx.tui.load_pending_linked_git_commits", lambda *_args: ())
+
+    await app.execute_operator_broker_request(
+        {
+            "request_id": "request-1",
+            "root_operator_agent_id": "operator-7",
+            "target_fork_agent_id": target_id,
+            "handoff_id": "handoff-1",
+            "scope_sha256": "a" * 64,
+            "expected_git_parent": "b" * 40,
+            "commit_subject": "fix: exact checkpoint",
+            "exact_paths": ["src/app.py"],
+            "created_at": 1_700_000_000,
+        }
+    )
+
+    assert [item["status"] for item in transitions] == [
+        "executing",
+        "executing",
+        "executing",
+        "executing",
+        "succeeded",
+    ]
+    assert receipts == [
+        ("broker_review", "request-1"),
+        ("broker_commit", "request-1"),
+    ]
+    final = transitions[-1]["result"]
+    assert final["old_head"] == "b" * 40
+    assert final["new_head"] == "c" * 40
+    assert final["same_fork_resumed"] is True
+    assert final["resumed_codex_session_id"] == session_id
+    assert final["resumed_tmux_pane_id"] == "%77"
+    assert final["validation_pending"] is True
+    assert final["journal_done"] is True
+
+
+@pytest.mark.asyncio
+async def test_tui_guided_ready_action_runs_only_the_reviewed_next_step() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, str]] = []
+    action = {
+        "handoff_id": "handoff-1",
+        "target_agent_id": "operator-7-fork",
+        "scope_sha256": "a" * 64,
+        "state": "ready_stop",
+        "next_action": "stop",
+    }
+
+    async def current_action(**_kwargs):
+        return dict(action)
+
+    async def open_latest(agent_id: str) -> None:
+        calls.append(("focus", agent_id))
+
+    async def stop(*, agent_id=None) -> None:
+        calls.append(("stop", str(agent_id)))
+
+    app.operator_broker_action = current_action  # type: ignore[method-assign]
+    app.open_agent_latest = open_latest  # type: ignore[method-assign]
+    app.move_operator_cursor = lambda agent_id, focus=False: calls.append(  # type: ignore[method-assign]
+        ("cursor", f"{agent_id}:{focus}")
+    )
+    app.stop_selected_operator = stop  # type: ignore[method-assign]
+
+    await app.advance_operator_ready_action(action)
+
+    assert calls == [
+        ("focus", "operator-7-fork"),
+        ("cursor", "operator-7-fork:True"),
+        ("stop", "operator-7-fork"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tui_guided_ready_action_rejects_scope_or_state_drift() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    stops: list[str] = []
+    action = {
+        "handoff_id": "handoff-1",
+        "target_agent_id": "operator-7-fork",
+        "scope_sha256": "a" * 64,
+        "state": "ready_stop",
+        "next_action": "stop",
+    }
+
+    async def changed(**_kwargs):
+        return {**action, "state": "stopped_ready_broker"}
+
+    app.operator_broker_action = changed  # type: ignore[method-assign]
+    app.stop_selected_operator = lambda **_kwargs: stops.append("stop")  # type: ignore[method-assign]
+
+    await app.advance_operator_ready_action(action)
+
+    assert stops == []
 
 async def test_tui_linked_git_broker_recomputes_legacy_metadata_and_rejects_conflicts(
     tmp_path: Path,

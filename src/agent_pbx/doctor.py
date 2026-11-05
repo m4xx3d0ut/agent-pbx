@@ -19,6 +19,7 @@ from .codex_cli import inspect_codex_posture
 from .codex_theme import MANAGED_CODEX_THEME_NAME, managed_codex_theme_status
 from .compat import compatibility_posture
 from .mcp_daemon import MCPDaemonConfig, lan_auth_guard, mcp_daemon_status
+from .operator_broker import OperatorBrokerPolicyError, operator_broker_posture
 from .store import SCHEMA_VERSION, Store
 from .tmux_binary import (
     configured_tmux_binary,
@@ -139,6 +140,8 @@ def run_platform_doctor(
     checks.extend(_executable_checks(which))
     checks.append(_tmux_check(which, timeout))
     checks.append(_managed_tmux_command_check(config.resolved_state_root, which))
+    checks.append(_launcher_permission_check())
+    checks.append(_operator_broker_policy_check())
     checks.append(_terminal_check())
     checks.append(_database_check(config.resolved_db_path))
     checks.append(_daemon_check(config))
@@ -198,6 +201,80 @@ def _dependency_check() -> DoctorCheck:
         "required packages available" if not missing else f"missing: {', '.join(missing)}",
         detail=", ".join(versions),
         remediation="Reinstall Agent PBX from the release wheelhouse." if missing else "",
+    )
+
+
+def _launcher_permission_check(
+    launcher: Path | None = None,
+) -> DoctorCheck:
+    path = (
+        launcher
+        or Path(os.getenv("AGENT_PBX_LAUNCHER") or "~/.local/bin/apbx")
+    ).expanduser()
+    if not path.exists():
+        return DoctorCheck(
+            "local-launcher-permissions",
+            "pass",
+            f"optional launcher not installed: {path}",
+        )
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        return DoctorCheck(
+            "local-launcher-permissions",
+            "warn",
+            f"unable to inspect {path}",
+            detail=str(exc),
+            remediation=f"Inspect ownership and permissions for {path}.",
+        )
+    mode = stat.st_mode & 0o777
+    owner_ok = not hasattr(os, "getuid") or stat.st_uid == os.getuid()
+    private = mode & 0o077 == 0
+    executable = bool(mode & 0o100)
+    ok = owner_ok and private and executable
+    return DoctorCheck(
+        "local-launcher-permissions",
+        "pass" if ok else "warn",
+        f"{path} mode {mode:04o}",
+        detail=(
+            "launcher is private and user-owned"
+            if ok
+            else f"owner_ok={owner_ok}; private={private}; executable={executable}"
+        ),
+        remediation=(
+            "Set the launcher owner to the Agent PBX user and run "
+            f"`chmod 700 {path}`."
+            if not ok
+            else ""
+        ),
+    )
+
+
+def _operator_broker_policy_check() -> DoctorCheck:
+    try:
+        posture = operator_broker_posture()
+    except OperatorBrokerPolicyError as exc:
+        return DoctorCheck(
+            "operator-broker-policy",
+            "fail",
+            exc.message,
+            remediation="Correct the AGENT_PBX_OPERATOR_BROKER_* environment values.",
+        )
+    summary = (
+        f"mode={posture.mode}; controls={posture.control_mode}; "
+        f"ttl={posture.request_ttl_seconds}s; "
+        f"max_in_flight={posture.max_in_flight_per_root}"
+    )
+    return DoctorCheck(
+        "operator-broker-policy",
+        "pass",
+        summary,
+        detail=(
+            "Root-supervised execution is active; exact handoff, campaign, fork, "
+            "workspace, parent, paths, and subject checks still apply."
+            if posture.root_operator_enabled
+            else "Guided mode keeps each stop, broker, resume, and validation step explicit."
+        ),
     )
 
 

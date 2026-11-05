@@ -9392,7 +9392,7 @@ class Store:
             UPDATE operator_broker_requests
             SET status = 'pending', executor_id = NULL, claim_expires_at = NULL,
                 updated_at = ?
-            WHERE status = 'claimed' AND claim_expires_at IS NOT NULL
+            WHERE status IN ('claimed', 'executing') AND claim_expires_at IS NOT NULL
               AND claim_expires_at <= ? AND expires_at > ?
             """,
             (current, current, current),

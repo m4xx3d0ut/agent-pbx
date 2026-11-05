@@ -101,6 +101,11 @@ from .operator_delegation import (
     LEASE_ELIGIBLE_ACTION_CLASSES,
     execution_scope_requires_manual_approval,
 )
+from .operator_broker import (
+    OperatorBrokerPolicyError,
+    OperatorBrokerPosture,
+    operator_broker_posture,
+)
 from .paths import default_state_root
 from . import tmux as tmux_support
 from .project_spawn import (
@@ -435,6 +440,7 @@ TMUX_POPOUT_MODE_CHOICES = (
 )
 TMUX_WRITER_LEASE_SECONDS = 30.0
 TMUX_WRITER_RENEW_SECONDS = 12.0
+OPERATOR_BROKER_REFRESH_SECONDS = 2.0
 TMUX_RUNTIME_MAPPING_CACHE_SECONDS = 3.0
 TMUX_RUNTIME_SERVER_MODE_CHOICES = (
     ("Dedicated PBX server", RuntimeServerMode.DEDICATED.value),
@@ -5876,6 +5882,12 @@ class OperatorReadyActionScreen(ModalScreen[None]):
                 id="operator-handoff-confirm-summary",
             )
             with Horizontal(id="operator-handoff-confirm-actions"):
+                if self.action.get("next_action"):
+                    yield Button(
+                        f"Run next · {guarded_control}",
+                        id="operator-ready-action-run",
+                        variant="warning",
+                    )
                 yield Button("Focus target", id="operator-ready-action-focus", variant="primary")
                 yield Button("Close", id="operator-ready-action-close")
 
@@ -5891,6 +5903,16 @@ class OperatorReadyActionScreen(ModalScreen[None]):
                 work,
                 name="operator-ready-action-focus",
                 exclusive=True,
+            )
+            return
+        if event.button.id == "operator-ready-action-run":
+            work = self.app.advance_operator_ready_action(self.action)  # type: ignore[attr-defined]
+            self.dismiss()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                work,
+                name="operator-ready-action-run",
+                exclusive=True,
+                exit_on_error=False,
             )
 
 
@@ -8249,6 +8271,22 @@ class AgentPBXTUI(App[None]):
         self.latest_runtime_migration_batch: dict[str, Any] | None = None
         self.latest_agent_pane_adoption_batch: dict[str, Any] | None = None
         self.tmux_terminal_client_id = f"tui-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        self.operator_broker_executor_id = (
+            f"{self.tmux_terminal_client_id}-broker"
+        )
+        self.operator_broker_policy_error = ""
+        try:
+            self.operator_broker_posture = operator_broker_posture()
+        except OperatorBrokerPolicyError as exc:
+            self.operator_broker_posture = OperatorBrokerPosture(
+                mode="disabled",
+                control_mode="read_only",
+                request_ttl_seconds=900,
+                max_in_flight_per_root=1,
+            )
+            self.operator_broker_policy_error = exc.message
+        self.operator_broker_worker_active = False
+        self.operator_broker_request_id: str | None = None
         self.tmux_stop_in_progress_agent_ids: set[str] = set()
         self.embedded_terminal_agent_id: str | None = None
         self.embedded_terminal_target: str | None = None
@@ -8303,6 +8341,7 @@ class AgentPBXTUI(App[None]):
         self.tmux_refresh_timer: Timer | None = None
         self.attention_blink_timer: Timer | None = None
         self.tmux_writer_lease_timer: Timer | None = None
+        self.operator_broker_timer: Timer | None = None
         self.runtime_health_timer: Timer | None = None
 
     @staticmethod
@@ -10566,6 +10605,21 @@ class AgentPBXTUI(App[None]):
             TMUX_WRITER_RENEW_SECONDS,
             self.schedule_tmux_writer_lease_renewal,
         )
+        if self.operator_broker_policy_error:
+            self.notify(
+                f"Operator broker policy is disabled: {self.operator_broker_policy_error}",
+                severity="error",
+            )
+        elif (
+            self.operator_broker_posture.root_operator_enabled
+            and self.remote_client_role != "observer"
+            and is_local_server_url(self.server)
+        ):
+            self.operator_broker_timer = self.set_interval(
+                OPERATOR_BROKER_REFRESH_SECONDS,
+                self.schedule_operator_broker_requests,
+            )
+            self.schedule_operator_broker_requests()
         self.run_worker(
             self.stream_events_v2() if self.event_stream_v2_enabled else self.stream_events(),
             name="events",
@@ -10586,6 +10640,9 @@ class AgentPBXTUI(App[None]):
         if self.tmux_writer_lease_timer is not None:
             self.tmux_writer_lease_timer.stop()
             self.tmux_writer_lease_timer = None
+        if self.operator_broker_timer is not None:
+            self.operator_broker_timer.stop()
+            self.operator_broker_timer = None
         if self.remote_client_state_ready:
             await self.persist_remote_view_state(force=True)
         await self.detach_embedded_tmux_terminal(release_lease=True)
@@ -27206,6 +27263,53 @@ class AgentPBXTUI(App[None]):
             "until that control succeeds."
         )
 
+    async def advance_operator_ready_action(self, action: dict[str, Any]) -> None:
+        """Run only the immutable action's currently displayed guarded step."""
+
+        target_agent_id = str(action.get("target_agent_id") or "").strip()
+        handoff_id = str(action.get("handoff_id") or "").strip()
+        scope_sha256 = str(action.get("scope_sha256") or "").strip()
+        expected_state = str(action.get("state") or "").strip()
+        if not target_agent_id or not handoff_id or not scope_sha256:
+            self.notify("Ready action is incomplete; refresh and retry.", severity="error")
+            return
+        try:
+            current = await self.operator_broker_action(
+                target_agent_id=target_agent_id,
+                handoff_id=handoff_id,
+            )
+        except Exception as exc:
+            self.notify(f"Unable to refresh ready action: {exc}", severity="error")
+            return
+        if (
+            str(current.get("scope_sha256") or "") != scope_sha256
+            or str(current.get("state") or "") != expected_state
+        ):
+            self.notify(
+                "Ready action changed after review; refresh F8 before continuing.",
+                severity="warning",
+            )
+            return
+        next_action = str(current.get("next_action") or "")
+        await self.open_agent_latest(target_agent_id)
+        self.move_operator_cursor(target_agent_id, focus=True)
+        if next_action == "stop":
+            await self.stop_selected_operator(agent_id=target_agent_id)
+        elif next_action == "broker_review":
+            self.palette_operator_git_commit()
+        elif next_action == "resume":
+            await self.resume_selected_operator(agent_id=target_agent_id)
+        elif next_action == "validate":
+            await self.validate_operator_ready_action(target_agent_id)
+        elif next_action == "broker_commit":
+            self.notify(
+                "Return to the open exact broker confirmation, or use "
+                "/operator git recover after an interrupted transaction.",
+                severity="warning",
+            )
+        else:
+            self.notify("The ready action requires manual review.", severity="warning")
+
     @staticmethod
     def format_operator_ready_action(action: Mapping[str, Any]) -> str:
         scope = action.get("execution_scope")
@@ -30455,17 +30559,479 @@ class AgentPBXTUI(App[None]):
             return None
         return cursor_agent_id
 
+    def schedule_operator_broker_requests(self) -> None:
+        if (
+            self.operator_broker_worker_active
+            or self.shutting_down
+            or not self.operator_broker_posture.root_operator_enabled
+            or self.remote_client_role == "observer"
+            or not is_local_server_url(self.server)
+        ):
+            return
+        self.operator_broker_worker_active = True
+        self.run_worker(
+            self.process_operator_broker_requests(),
+            name="operator-broker-requests",
+            group="operator-broker-requests",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def process_operator_broker_requests(self) -> None:
+        """Claim and advance one durable local root-supervised request."""
+
+        try:
+            response = await self.api_client().get(
+                "/v1/operator/broker-checkpoints",
+                params={"status_filter": "pending", "limit": 1},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            raw = payload.get("requests") if isinstance(payload, dict) else []
+            request = next(
+                (item for item in raw if isinstance(item, dict)),
+                None,
+            )
+            if request is None:
+                return
+            request_id = str(request.get("request_id") or "").strip()
+            if not request_id:
+                return
+            claimed_response = await self.api_client().post(
+                f"/v1/operator/broker-checkpoints/{request_id}/claim",
+                json={
+                    "executor_id": self.operator_broker_executor_id,
+                    "lease_seconds": 60,
+                },
+                headers=auth_headers(self.token),
+            )
+            if claimed_response.status_code in {400, 409}:
+                return
+            claimed_response.raise_for_status()
+            claimed = claimed_response.json()
+            if not isinstance(claimed, dict):
+                raise RuntimeError("broker claim response was not an object")
+            self.operator_broker_request_id = request_id
+            await self.execute_operator_broker_request(claimed)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.notify(
+                f"Operator broker request processing failed: {exc}",
+                severity="error",
+            )
+        finally:
+            self.operator_broker_request_id = None
+            self.operator_broker_worker_active = False
+
+    async def transition_operator_broker_request(
+        self,
+        request_id: str,
+        *,
+        status: str,
+        expected_statuses: tuple[str, ...],
+        action_transaction_id: str | None = None,
+        result: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
+        error: str | None = None,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any]:
+        response = await self.api_client().post(
+            f"/v1/operator/broker-checkpoints/{request_id}/transition",
+            json={
+                "executor_id": self.operator_broker_executor_id,
+                "status": status,
+                "expected_statuses": list(expected_statuses),
+                "action_transaction_id": action_transaction_id,
+                "result": dict(result or {}),
+                "error_code": error_code,
+                "error": error,
+                "lease_seconds": lease_seconds,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("broker transition response was not an object")
+        return payload
+
+    async def operator_broker_action(
+        self,
+        *,
+        target_agent_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        actions = await self.fetch_operator_handoff_actions(
+            target_agent_id=target_agent_id,
+            include_complete=True,
+        )
+        action = next(
+            (
+                item
+                for item in actions
+                if str(item.get("handoff_id") or "") == handoff_id
+            ),
+            None,
+        )
+        if action is None:
+            raise RuntimeError("broker handoff no longer exposes a managed action")
+        return action
+
+    @staticmethod
+    def operator_broker_codex_session_id(agent: Mapping[str, Any]) -> str:
+        metadata = agent.get("metadata")
+        values = dict(metadata) if isinstance(metadata, Mapping) else {}
+        for key in FORK_RESUME_IDENTITY_METADATA_KEYS:
+            session_id = str(values.get(key) or "").strip()
+            if session_id:
+                return session_id
+        return ""
+
+    async def execute_operator_broker_request(
+        self,
+        request: Mapping[str, Any],
+    ) -> None:
+        """Advance stop, exact commit, and same-fork resume under local custody."""
+
+        request_id = str(request.get("request_id") or "").strip()
+        root_id = str(request.get("root_operator_agent_id") or "").strip()
+        target_id = str(request.get("target_fork_agent_id") or "").strip()
+        handoff_id = str(request.get("handoff_id") or "").strip()
+        scope_sha256 = str(request.get("scope_sha256") or "").strip()
+        expected_parent = str(request.get("expected_git_parent") or "").strip()
+        commit_subject = str(request.get("commit_subject") or "").strip()
+        exact_paths = tuple(str(item) for item in request.get("exact_paths") or ())
+        if not all(
+            (request_id, root_id, target_id, handoff_id, scope_sha256, expected_parent)
+        ) or not commit_subject or not exact_paths:
+            raise RuntimeError("broker request is incomplete")
+        result_evidence: dict[str, Any] = {
+            "request_id": request_id,
+            "root_operator_agent_id": root_id,
+            "target_fork_agent_id": target_id,
+            "handoff_id": handoff_id,
+            "scope_sha256": scope_sha256,
+            "commit_subject": commit_subject,
+            "exact_paths": list(exact_paths),
+            "started_at": time.time(),
+        }
+        try:
+            await self.transition_operator_broker_request(
+                request_id,
+                status="executing",
+                expected_statuses=("claimed",),
+                result={**result_evidence, "phase": "preflight"},
+            )
+            await self.refresh_agents()
+            target_agent = self.agents.get(target_id)
+            if not isinstance(target_agent, dict):
+                raise RuntimeError("target fork is no longer registered")
+            expected_session_id = self.operator_broker_codex_session_id(target_agent)
+            if not expected_session_id:
+                raise RuntimeError("target fork has no resumable Codex session identity")
+            result_evidence["codex_session_id"] = expected_session_id
+            resume_candidates = await asyncio.to_thread(
+                self.operator_session_candidates,
+                target_id,
+            )
+            resume_candidate = next(
+                (
+                    candidate
+                    for candidate in resume_candidates
+                    if candidate.session_id == expected_session_id
+                ),
+                None,
+            )
+            if resume_candidate is None:
+                raise RuntimeError(
+                    "the target fork's exact Codex session is not locally resumable"
+                )
+
+            action = await self.operator_broker_action(
+                target_agent_id=target_id,
+                handoff_id=handoff_id,
+            )
+            if str(action.get("scope_sha256") or "") != scope_sha256:
+                raise RuntimeError("broker handoff scope changed after request creation")
+            state = str(action.get("state") or "")
+            if state == "ready_stop":
+                await self.transition_operator_broker_request(
+                    request_id,
+                    status="executing",
+                    expected_statuses=("executing",),
+                    result={**result_evidence, "phase": "stop"},
+                )
+                await self.stop_selected_operator(agent_id=target_id)
+                action = await self.operator_broker_action(
+                    target_agent_id=target_id,
+                    handoff_id=handoff_id,
+                )
+                state = str(action.get("state") or "")
+                if state != "stopped_ready_broker":
+                    raise RuntimeError(
+                        f"guarded stop did not reach broker-ready state: {state or 'unknown'}"
+                    )
+
+            commit_result = None
+            if state in {"stopped_ready_broker", "receipt_review"}:
+                await self.transition_operator_broker_request(
+                    request_id,
+                    status="executing",
+                    expected_statuses=("executing",),
+                    action_transaction_id=str(action.get("transaction_id") or "") or None,
+                    result={**result_evidence, "phase": "commit"},
+                )
+                context = self.linked_git_broker_tui_context(
+                    target_id,
+                    require_selection=False,
+                )
+                if context is None:
+                    raise RuntimeError(
+                        "stopped edit fork failed local broker qualification"
+                    )
+                receipt = await asyncio.to_thread(
+                    prepare_linked_git_commit,
+                    agent_id=target_id,
+                    work_root=context.work_root,
+                    approved_roots=context.approved_roots,
+                    approved_stage_paths=exact_paths,
+                    codex_home=context.codex_home,
+                    authored_at=int(float(request.get("created_at") or time.time())),
+                    commit_subject=commit_subject,
+                )
+                if receipt.head != expected_parent:
+                    raise RuntimeError(
+                        "broker Git parent changed after root request creation"
+                    )
+                if tuple(receipt.approved_stage_paths) != exact_paths:
+                    raise RuntimeError("broker exact path receipt changed")
+                if receipt.commit_subject != commit_subject:
+                    raise RuntimeError("broker commit subject receipt changed")
+                if state == "stopped_ready_broker":
+                    await self.maybe_record_ready_action_for_target(
+                        target_id,
+                        step="broker_review",
+                        outcome="succeeded",
+                        evidence={
+                            "request_id": request_id,
+                            "transaction_id": receipt.transaction_id,
+                            "head": receipt.head,
+                            "commit_subject": receipt.commit_subject,
+                            "approved_stage_paths": list(receipt.approved_stage_paths),
+                        },
+                    )
+                commit_result = await asyncio.to_thread(
+                    execute_linked_git_commit,
+                    receipt,
+                    approved_roots=context.approved_roots,
+                    journal_root=self.git_broker_state_root,
+                    codex_home=context.codex_home,
+                )
+                await self.maybe_record_ready_action_for_target(
+                    target_id,
+                    step="broker_commit",
+                    outcome="succeeded",
+                    evidence={
+                        "request_id": request_id,
+                        "transaction_id": commit_result.transaction_id,
+                        "old_head": commit_result.old_head,
+                        "new_head": commit_result.new_head,
+                        "commit_subject": commit_subject,
+                        "committed_paths": list(commit_result.committed_paths),
+                        "status": commit_result.status,
+                    },
+                )
+                result_evidence.update(
+                    {
+                        "broker_transaction_id": commit_result.transaction_id,
+                        "old_head": commit_result.old_head,
+                        "new_head": commit_result.new_head,
+                        "committed_paths": list(commit_result.committed_paths),
+                        "broker_status": commit_result.status,
+                    }
+                )
+                action = await self.operator_broker_action(
+                    target_agent_id=target_id,
+                    handoff_id=handoff_id,
+                )
+                state = str(action.get("state") or "")
+
+            if state == "committed_ready_resume":
+                await self.transition_operator_broker_request(
+                    request_id,
+                    status="executing",
+                    expected_statuses=("executing",),
+                    action_transaction_id=str(action.get("transaction_id") or "") or None,
+                    result={**result_evidence, "phase": "resume"},
+                )
+                await self.resume_selected_operator(
+                    agent_id=target_id,
+                    resume_candidate=resume_candidate,
+                )
+                action = await self.operator_broker_action(
+                    target_agent_id=target_id,
+                    handoff_id=handoff_id,
+                )
+                state = str(action.get("state") or "")
+                if state != "resumed_ready_validation":
+                    raise RuntimeError(
+                        f"same-fork resume did not reach validation-ready state: {state or 'unknown'}"
+                    )
+
+            if state not in {"resumed_ready_validation", "complete"}:
+                raise RuntimeError(
+                    f"broker request stopped at unsupported action state: {state or 'unknown'}"
+                )
+            await self.refresh_agents()
+            resumed_agent = self.agents.get(target_id) or {}
+            resumed_session_id = self.operator_broker_codex_session_id(resumed_agent)
+            if resumed_session_id != expected_session_id:
+                raise RuntimeError("resumed fork Codex session identity changed")
+            mapping = self.tmux_runtime_mapping_by_agent.get(target_id) or {}
+            pane_id = str(
+                mapping.get("pane_id")
+                or self.tmux_agent_targets.get(target_id)
+                or ""
+            )
+            if not pane_id:
+                raise RuntimeError("resumed fork has no managed tmux pane mapping")
+            work_root = str(
+                (resumed_agent.get("metadata") or {}).get("work_root")
+                or (resumed_agent.get("metadata") or {}).get("cwd")
+                or ""
+            )
+            git_evidence = await asyncio.to_thread(
+                self.operator_broker_git_evidence,
+                work_root,
+            )
+            pending = await asyncio.to_thread(
+                load_pending_linked_git_commits,
+                self.git_broker_state_root,
+            )
+            transaction_id = str(result_evidence.get("broker_transaction_id") or "")
+            journal_done = not any(
+                item.receipt.transaction_id == transaction_id for item in pending
+            )
+            result_evidence.update(
+                {
+                    **git_evidence,
+                    "journal_done": journal_done,
+                    "same_fork_resumed": True,
+                    "resumed_codex_session_id": resumed_session_id,
+                    "resumed_tmux_pane_id": pane_id,
+                    "validation_pending": state != "complete",
+                    "action_state": state,
+                    "duration_seconds": round(
+                        time.time() - float(result_evidence["started_at"]),
+                        3,
+                    ),
+                    "completed_at": time.time(),
+                }
+            )
+            if not journal_done:
+                raise RuntimeError("broker journal still contains pending transaction state")
+            completed = await self.transition_operator_broker_request(
+                request_id,
+                status="succeeded",
+                expected_statuses=("executing",),
+                action_transaction_id=str(action.get("transaction_id") or "") or None,
+                result=result_evidence,
+            )
+            self.notify(
+                f"Root-supervised broker checkpoint completed for {target_id}; "
+                "post-commit validation remains with the root Operator."
+            )
+            detail = self.query_one_or_none("#detail", TextArea)
+            if detail is not None:
+                detail.text = self.format_operator_broker_result(completed)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            try:
+                await self.transition_operator_broker_request(
+                    request_id,
+                    status="failed",
+                    expected_statuses=("executing",),
+                    result={
+                        **result_evidence,
+                        "failed_at": time.time(),
+                        "validation_pending": True,
+                    },
+                    error_code="OPERATOR_BROKER_EXECUTION_FAILED",
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+            self.notify(
+                f"Root-supervised broker checkpoint failed closed for {target_id}: {exc}",
+                severity="error",
+            )
+
+    @staticmethod
+    def operator_broker_git_evidence(work_root: str) -> dict[str, Any]:
+        if not work_root:
+            raise RuntimeError("resumed fork has no work root")
+
+        def run(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "-C", work_root, *args],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+        head = run("rev-parse", "HEAD")
+        if head.returncode != 0:
+            raise RuntimeError("unable to read resumed fork Git HEAD")
+        staged = run("diff", "--cached", "--quiet", "--exit-code")
+        if staged.returncode not in {0, 1}:
+            raise RuntimeError("unable to verify resumed fork Git index")
+        return {
+            "verified_head": head.stdout.strip(),
+            "index_empty": staged.returncode == 0,
+        }
+
+    @staticmethod
+    def format_operator_broker_result(request: Mapping[str, Any]) -> str:
+        result = request.get("result")
+        evidence = dict(result) if isinstance(result, Mapping) else {}
+        paths = evidence.get("committed_paths") or evidence.get("exact_paths") or []
+        return (
+            "Root-supervised Operator checkpoint\n\n"
+            f"Request: {request.get('request_id') or '-'}\n"
+            f"Handoff: {request.get('handoff_id') or '-'}\n"
+            f"Root: {request.get('root_operator_agent_id') or '-'}\n"
+            f"Fork: {request.get('target_fork_agent_id') or '-'}\n"
+            f"Session: {evidence.get('resumed_codex_session_id') or '-'}\n"
+            f"Old HEAD: {evidence.get('old_head') or '-'}\n"
+            f"New HEAD: {evidence.get('new_head') or evidence.get('verified_head') or '-'}\n"
+            f"Subject: {request.get('commit_subject') or '-'}\n"
+            f"Index empty: {bool(evidence.get('index_empty'))}\n"
+            f"Journal complete: {bool(evidence.get('journal_done'))}\n"
+            f"Same fork resumed: {bool(evidence.get('same_fork_resumed'))}\n"
+            f"Managed pane: {evidence.get('resumed_tmux_pane_id') or '-'}\n"
+            f"Validation pending: {bool(evidence.get('validation_pending'))}\n"
+            "Committed paths:\n- "
+            + "\n- ".join(str(item) for item in paths)
+        )
+
     def linked_git_broker_tui_context(
         self,
         agent_id: str,
         *,
         expected_authority_sha256: str | None = None,
+        require_selection: bool = True,
     ) -> LinkedGitBrokerTuiContext | None:
         """Resolve one stopped edit fork for the local-only commit broker."""
 
         cursor_agent_id = self.operator_id_at_cursor()
         selected_agent_id = str(self.selected_agent_id or "").strip()
-        if cursor_agent_id != agent_id or selected_agent_id != agent_id:
+        if require_selection and (
+            cursor_agent_id != agent_id or selected_agent_id != agent_id
+        ):
             self.notify(
                 "Linked Git commit selection drifted; no broker action was taken. "
                 "Press Enter on the exact stopped edit-fork row and retry.",
