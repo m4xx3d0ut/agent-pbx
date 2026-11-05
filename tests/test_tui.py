@@ -8421,18 +8421,22 @@ async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
         )
 
     async def record_ready_action(
-        _target_id: str,
         *,
+        handoff_id: str,
+        operator_agent_id: str,
         step: str,
         outcome: str,
         evidence=None,
-    ) -> None:
+    ) -> dict[str, object]:
+        assert handoff_id == "handoff-1"
+        assert operator_agent_id == "operator-7"
         assert outcome == "succeeded"
         receipts.append((step, str((evidence or {}).get("request_id") or "")))
         if step == "broker_review":
             state["action"] = "receipt_review"
         elif step == "broker_commit":
             state["action"] = "committed_ready_resume"
+        return {"transaction": {"transaction_id": "action-transaction-1"}}
 
     async def resume_selected_operator(*, agent_id=None, resume_candidate=None) -> None:
         assert agent_id == target_id
@@ -8472,8 +8476,11 @@ async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
     app.transition_operator_broker_request = transition  # type: ignore[method-assign]
     app.refresh_agents = refresh_agents  # type: ignore[method-assign]
     app.operator_broker_action = action  # type: ignore[method-assign]
+    app.operator_broker_execution_preflight = (  # type: ignore[method-assign]
+        lambda **_kwargs: asyncio.sleep(0, result={"transaction": {"receipts": []}})
+    )
     app.stop_selected_operator = stop_selected_operator  # type: ignore[method-assign]
-    app.maybe_record_ready_action_for_target = record_ready_action  # type: ignore[method-assign]
+    app.record_operator_handoff_action_receipt = record_ready_action  # type: ignore[method-assign]
     app.resume_selected_operator = resume_selected_operator  # type: ignore[method-assign]
     app.operator_session_candidates = lambda _agent_id: [
         OperatorSessionCandidate(session_id, 1.0, "metadata")
@@ -8521,6 +8528,51 @@ async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
     assert final["resumed_tmux_pane_id"] == "%77"
     assert final["validation_pending"] is True
     assert final["journal_done"] is True
+
+
+def test_tui_ready_action_signal_recognizes_current_logical_operator_metadata() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "operator-7": {"ready_handoff_action_count": 1},
+        "operator-7-fork": {
+            "metadata": {"logical_operator_id": "operator-7"},
+        },
+    }
+
+    assert app.ready_action_signal_for_target("operator-7-fork") is True
+
+
+def test_tui_operator_broker_recovers_git_evidence_from_action_receipts() -> None:
+    recovered = AgentPBXTUI.operator_broker_receipt_evidence(
+        {
+            "receipts": [
+                {
+                    "step": "broker_review",
+                    "evidence": {"transaction_id": "journal-1"},
+                },
+                {
+                    "step": "broker_commit",
+                    "evidence": {
+                        "transaction_id": "journal-1",
+                        "old_head": "a" * 40,
+                        "new_head": "b" * 40,
+                        "commit_subject": "fix: exact checkpoint",
+                        "committed_paths": ["src/app.py"],
+                        "status": "committed",
+                    },
+                },
+            ]
+        }
+    )
+
+    assert recovered == {
+        "broker_transaction_id": "journal-1",
+        "old_head": "a" * 40,
+        "new_head": "b" * 40,
+        "commit_subject": "fix: exact checkpoint",
+        "committed_paths": ["src/app.py"],
+        "broker_status": "committed",
+    }
 
 
 @pytest.mark.asyncio

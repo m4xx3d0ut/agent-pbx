@@ -9,6 +9,7 @@ from agent_pbx.operator_broker import (
     normalize_broker_commit_subject,
     normalize_broker_expected_parent,
     normalize_broker_paths,
+    operator_broker_receipt_summary,
     operator_broker_posture,
 )
 from agent_pbx.schemas import AgentRegisterRequest
@@ -315,6 +316,35 @@ def test_store_persists_terminal_result_and_prevents_cancel_after_claim(
     assert completed["status"] == "succeeded"
     assert completed["result"]["validation_pending"] is True
     assert completed["completed_at"] is not None
+    events = store.list_events(limit=20)
+    event_types = {event["type"] for event in events}
+    assert "operator_broker_request_claimed" in event_types
+    assert "operator_broker_request_transitioned" in event_types
+
+
+def test_operator_broker_receipt_summary_is_root_readable() -> None:
+    summary = operator_broker_receipt_summary(
+        {
+            "status": "succeeded",
+            "target_fork_agent_id": "operator-7-fork",
+            "commit_subject": "fix: exact checkpoint",
+            "exact_paths": ["src/app.py"],
+            "result": {
+                "old_head": "a" * 40,
+                "new_head": "b" * 40,
+                "committed_paths": ["src/app.py"],
+                "resumed_codex_session_id": "session-7",
+                "resumed_tmux_pane_id": "%77",
+                "validation_pending": True,
+            },
+        }
+    )
+
+    assert "succeeded" in summary
+    assert "fix: exact checkpoint" in summary
+    assert "session-7" in summary
+    assert "%77" in summary
+    assert "validation remains pending" in summary
 
 
 def test_store_recovers_expired_executing_claim_for_a_new_local_tui(
@@ -377,6 +407,7 @@ def test_broker_service_root_mode_creates_durable_request(tmp_path) -> None:
 
     assert result["created"] is True
     assert result["request"]["status"] == "pending"
+    assert "receipt_summary" in result["request"]
     events = store.list_events(limit=20)
     assert any(event["type"] == "operator_broker_request_created" for event in events)
 

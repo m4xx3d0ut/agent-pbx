@@ -62,6 +62,43 @@ permission profile receives only selected workspace roots and qualified Git
 administration paths; unrelated sibling repositories and parent directories
 remain outside the write set.
 
+## Root-supervised exact Git checkpoints
+
+The committed default is `guided`: a user reviews and runs one guarded stop,
+broker, resume, or validation action at a time. Dedicated single-user hosts may
+choose `root_operator`, which lets a root Operator ask the local TUI to execute
+the stop → exact commit → same-session resume sequence for its own edit fork.
+This is orchestration authority, not direct Git authority for the model.
+
+The daemon accepts a request only when all of these identities agree:
+
+- active root Operator and owned edit fork;
+- running campaign and exact executable handoff;
+- activated Trusted Workbench profile and workspace-set digest;
+- exact paths, expected Git parent, commit subject, and scope digest.
+
+The request is durable and leased to one loopback TUI executor. The TUI uses the
+existing private-journal Git broker, verifies the resulting HEAD and empty
+index, resumes the same Codex session in a managed tmux pane, and writes a
+root-readable receipt. A crash after commit can recover old/new HEAD evidence
+from the durable action receipts. Validation remains with the root Operator.
+Edit and review forks are not given the request tools, remote observers cannot
+control the workflow, and executor endpoints are loopback-only. This does not
+reduce the authority of the normal controller bearer: keep that administrator
+credential out of untrusted processes.
+
+```bash
+export AGENT_PBX_OPERATOR_BROKER_MODE="guided" # guided|root_operator|disabled
+export AGENT_PBX_OPERATOR_BROKER_CONTROL_MODE="editable" # editable|read_only|hidden
+export AGENT_PBX_OPERATOR_BROKER_REQUEST_TTL_SECONDS="900"
+export AGENT_PBX_OPERATOR_BROKER_MAX_IN_FLIGHT="1"
+```
+
+`read_only` keeps posture visible but prevents local control changes; `hidden`
+removes the control from the TUI. The mode remains daemon-enforced in either
+case. Use `agent-pbx doctor` to verify policy and the permissions of the local
+`apbx` launcher before enabling `root_operator`.
+
 ## WorkerBee coupling
 
 Applying Trusted Workbench also assigns:

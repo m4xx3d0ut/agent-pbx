@@ -27169,6 +27169,7 @@ class AgentPBXTUI(App[None]):
         logical_operator_id = str(
             metadata.get("logical_operator_agent_id")
             or metadata.get("operator_agent_id")
+            or metadata.get("logical_operator_id")
             or ""
         ).strip()
         root = self.agents.get(logical_operator_id) or {}
@@ -30679,6 +30680,68 @@ class AgentPBXTUI(App[None]):
             raise RuntimeError("broker handoff no longer exposes a managed action")
         return action
 
+    async def operator_broker_execution_preflight(
+        self,
+        *,
+        root_operator_agent_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        response = await self.api_client().get(
+            f"/v1/operator/handoffs/{quote(handoff_id, safe='')}/execution-preflight",
+            params={"operator_agent_id": root_operator_agent_id},
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("broker execution preflight response was not an object")
+        return payload
+
+    @staticmethod
+    def operator_broker_receipt_evidence(
+        transaction: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Recover durable Git evidence after an executor/UI interruption."""
+
+        if not isinstance(transaction, Mapping):
+            return {}
+        recovered: dict[str, Any] = {}
+        receipts = transaction.get("receipts")
+        if not isinstance(receipts, list):
+            return recovered
+        for receipt in receipts:
+            if not isinstance(receipt, Mapping):
+                continue
+            evidence = receipt.get("evidence")
+            if not isinstance(evidence, Mapping):
+                continue
+            step = str(receipt.get("step") or "")
+            if step == "broker_review":
+                transaction_id = str(evidence.get("transaction_id") or "").strip()
+                if transaction_id:
+                    recovered["broker_transaction_id"] = transaction_id
+            elif step == "broker_commit":
+                for key in (
+                    "transaction_id",
+                    "old_head",
+                    "new_head",
+                    "commit_subject",
+                    "status",
+                ):
+                    value = evidence.get(key)
+                    if value not in {None, ""}:
+                        target_key = {
+                            "transaction_id": "broker_transaction_id",
+                            "status": "broker_status",
+                        }.get(key, key)
+                        recovered[target_key] = value
+                committed_paths = evidence.get("committed_paths")
+                if isinstance(committed_paths, list):
+                    recovered["committed_paths"] = [
+                        str(path) for path in committed_paths
+                    ]
+        return recovered
+
     @staticmethod
     def operator_broker_codex_session_id(agent: Mapping[str, Any]) -> str:
         metadata = agent.get("metadata")
@@ -30707,7 +30770,9 @@ class AgentPBXTUI(App[None]):
             (request_id, root_id, target_id, handoff_id, scope_sha256, expected_parent)
         ) or not commit_subject or not exact_paths:
             raise RuntimeError("broker request is incomplete")
+        prior_result = request.get("result")
         result_evidence: dict[str, Any] = {
+            **(dict(prior_result) if isinstance(prior_result, Mapping) else {}),
             "request_id": request_id,
             "root_operator_agent_id": root_id,
             "target_fork_agent_id": target_id,
@@ -30715,7 +30780,12 @@ class AgentPBXTUI(App[None]):
             "scope_sha256": scope_sha256,
             "commit_subject": commit_subject,
             "exact_paths": list(exact_paths),
-            "started_at": time.time(),
+            "started_at": (
+                float_value(prior_result.get("started_at"))
+                if isinstance(prior_result, Mapping)
+                else None
+            )
+            or time.time(),
         }
         try:
             await self.transition_operator_broker_request(
@@ -30755,6 +30825,13 @@ class AgentPBXTUI(App[None]):
             )
             if str(action.get("scope_sha256") or "") != scope_sha256:
                 raise RuntimeError("broker handoff scope changed after request creation")
+            execution = await self.operator_broker_execution_preflight(
+                root_operator_agent_id=root_id,
+                handoff_id=handoff_id,
+            )
+            result_evidence.update(
+                self.operator_broker_receipt_evidence(execution.get("transaction"))
+            )
             state = str(action.get("state") or "")
             if state == "ready_stop":
                 await self.transition_operator_broker_request(
@@ -30769,6 +30846,28 @@ class AgentPBXTUI(App[None]):
                     handoff_id=handoff_id,
                 )
                 state = str(action.get("state") or "")
+                if state == "ready_stop":
+                    await self.refresh_agents()
+                    stopped_agent = self.agents.get(target_id) or {}
+                    if bool(stopped_agent.get("pbx_active", True)):
+                        raise RuntimeError(
+                            "guarded stop returned without deactivating the target fork"
+                        )
+                    await self.record_operator_handoff_action_receipt(
+                        handoff_id=handoff_id,
+                        operator_agent_id=root_id,
+                        step="stop",
+                        outcome="succeeded",
+                        evidence={
+                            "request_id": request_id,
+                            "managed_stop_verified": True,
+                        },
+                    )
+                    action = await self.operator_broker_action(
+                        target_agent_id=target_id,
+                        handoff_id=handoff_id,
+                    )
+                    state = str(action.get("state") or "")
                 if state != "stopped_ready_broker":
                     raise RuntimeError(
                         f"guarded stop did not reach broker-ready state: {state or 'unknown'}"
@@ -30810,8 +30909,9 @@ class AgentPBXTUI(App[None]):
                 if receipt.commit_subject != commit_subject:
                     raise RuntimeError("broker commit subject receipt changed")
                 if state == "stopped_ready_broker":
-                    await self.maybe_record_ready_action_for_target(
-                        target_id,
+                    await self.record_operator_handoff_action_receipt(
+                        handoff_id=handoff_id,
+                        operator_agent_id=root_id,
                         step="broker_review",
                         outcome="succeeded",
                         evidence={
@@ -30829,8 +30929,9 @@ class AgentPBXTUI(App[None]):
                     journal_root=self.git_broker_state_root,
                     codex_home=context.codex_home,
                 )
-                await self.maybe_record_ready_action_for_target(
-                    target_id,
+                await self.record_operator_handoff_action_receipt(
+                    handoff_id=handoff_id,
+                    operator_agent_id=root_id,
                     step="broker_commit",
                     outcome="succeeded",
                     evidence={
@@ -30875,6 +30976,42 @@ class AgentPBXTUI(App[None]):
                     handoff_id=handoff_id,
                 )
                 state = str(action.get("state") or "")
+                if state == "committed_ready_resume":
+                    await self.refresh_agents()
+                    resumed_agent = self.agents.get(target_id) or {}
+                    resumed_session_id = self.operator_broker_codex_session_id(
+                        resumed_agent
+                    )
+                    mapping = self.tmux_runtime_mapping_by_agent.get(target_id) or {}
+                    pane_id = str(
+                        mapping.get("pane_id")
+                        or self.tmux_agent_targets.get(target_id)
+                        or ""
+                    )
+                    if (
+                        not bool(resumed_agent.get("pbx_active", False))
+                        or resumed_session_id != expected_session_id
+                        or not pane_id
+                    ):
+                        raise RuntimeError(
+                            "same-fork resume returned without a verified active runtime"
+                        )
+                    await self.record_operator_handoff_action_receipt(
+                        handoff_id=handoff_id,
+                        operator_agent_id=root_id,
+                        step="resume",
+                        outcome="succeeded",
+                        evidence={
+                            "request_id": request_id,
+                            "codex_session_id": resumed_session_id,
+                            "tmux_pane_id": pane_id,
+                        },
+                    )
+                    action = await self.operator_broker_action(
+                        target_agent_id=target_id,
+                        handoff_id=handoff_id,
+                    )
+                    state = str(action.get("state") or "")
                 if state != "resumed_ready_validation":
                     raise RuntimeError(
                         f"same-fork resume did not reach validation-ready state: {state or 'unknown'}"

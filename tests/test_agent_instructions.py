@@ -85,6 +85,8 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "rejection, retirement" in instructions
     assert "must not promote durable knowledge directly" in instructions
     assert "operator-mediated path" in instructions
+    assert "pbx_operator_request_broker_checkpoint" in instructions
+    assert "Edit forks and review forks must not" in instructions
 
 
 def test_runbook_payload_includes_command_guidance() -> None:

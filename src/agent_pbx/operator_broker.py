@@ -275,7 +275,11 @@ class OperatorBrokerService:
             },
             str(request["request_id"]),
         )
-        return {"request": request, "created": created, "preflight": preflight}
+        return {
+            "request": with_operator_broker_receipt_summary(request),
+            "created": created,
+            "preflight": preflight,
+        }
 
     def get(
         self,
@@ -295,7 +299,7 @@ class OperatorBrokerService:
                 "OPERATOR_BROKER_REQUEST_ROOT_MISMATCH",
                 "The broker request belongs to another root Operator.",
             )
-        return request
+        return with_operator_broker_receipt_summary(request)
 
     def cancel(
         self,
@@ -322,7 +326,7 @@ class OperatorBrokerService:
             },
             request_id,
         )
-        return canceled
+        return with_operator_broker_receipt_summary(canceled)
 
     def _require_root(self, agent_id: str) -> dict[str, Any]:
         agent = self.store.get_agent(agent_id)
@@ -374,6 +378,51 @@ class OperatorBrokerService:
     def _metadata(agent: Mapping[str, Any]) -> dict[str, Any]:
         metadata = agent.get("metadata")
         return dict(metadata) if isinstance(metadata, Mapping) else {}
+
+
+def operator_broker_receipt_summary(request: Mapping[str, Any]) -> str:
+    """Render a concise root-readable result without exposing hidden runtime data."""
+
+    status = str(request.get("status") or "unknown")
+    target = str(request.get("target_fork_agent_id") or "-")
+    subject = str(request.get("commit_subject") or "-")
+    result = request.get("result")
+    evidence = dict(result) if isinstance(result, Mapping) else {}
+    lines = [
+        f"Broker checkpoint `{status}` for `{target}`.",
+        f"Commit subject: `{subject}`",
+    ]
+    old_head = str(evidence.get("old_head") or "").strip()
+    new_head = str(
+        evidence.get("new_head") or evidence.get("verified_head") or ""
+    ).strip()
+    if old_head:
+        lines.append(f"Git parent: `{old_head}`")
+    if new_head:
+        lines.append(f"Verified Git HEAD: `{new_head}`")
+    paths = evidence.get("committed_paths") or request.get("exact_paths")
+    if isinstance(paths, (list, tuple)) and paths:
+        lines.append("Paths: " + ", ".join(f"`{str(path)}`" for path in paths))
+    session_id = str(evidence.get("resumed_codex_session_id") or "").strip()
+    pane_id = str(evidence.get("resumed_tmux_pane_id") or "").strip()
+    if session_id:
+        lines.append(f"Resumed Codex session: `{session_id}`")
+    if pane_id:
+        lines.append(f"Managed tmux pane: `{pane_id}`")
+    if evidence.get("validation_pending") is True:
+        lines.append("Root validation remains pending.")
+    error = str(request.get("error") or "").strip()
+    if error:
+        lines.append(f"Failure: {error}")
+    return "\n".join(lines)
+
+
+def with_operator_broker_receipt_summary(
+    request: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = dict(request)
+    payload["receipt_summary"] = operator_broker_receipt_summary(request)
+    return payload
 
 
 def operator_broker_posture(

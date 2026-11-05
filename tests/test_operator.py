@@ -55,6 +55,7 @@ def test_operator_runbook_requires_visible_pbx_forks() -> None:
     assert "visible tmux/Codex pane" in delivery
     assert "must not implement caller repo changes directly" in delivery
     assert "Native Codex children may perform bounded local decomposition" in delivery
+    assert "pbx_operator_request_broker_checkpoint" in delivery
     assert "must not poll or acknowledge PBX commands as another identity" in delivery
     assert "Manual KB seed runs" in delivery
     assert "multi_agent_v1" in delivery

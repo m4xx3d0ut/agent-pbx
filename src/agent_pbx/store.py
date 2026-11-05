@@ -9268,6 +9268,17 @@ class Store:
             )
         result = self.get_operator_broker_request(request_id)
         assert result is not None
+        self.append_event(
+            "operator_broker_request_claimed",
+            {
+                "request_id": request_id,
+                "root_operator_agent_id": result["root_operator_agent_id"],
+                "target_fork_agent_id": result["target_fork_agent_id"],
+                "executor_id": executor_id,
+                "claim_expires_at": result["claim_expires_at"],
+            },
+            request_id,
+        )
         return result
 
     def transition_operator_broker_request(
@@ -9331,6 +9342,22 @@ class Store:
             )
         refreshed = self.get_operator_broker_request(request_id)
         assert refreshed is not None
+        phase = ""
+        if isinstance(result, Mapping):
+            phase = str(result.get("phase") or "")[:120]
+        self.append_event(
+            "operator_broker_request_transitioned",
+            {
+                "request_id": request_id,
+                "root_operator_agent_id": refreshed["root_operator_agent_id"],
+                "target_fork_agent_id": refreshed["target_fork_agent_id"],
+                "status": normalized_status,
+                "phase": phase,
+                "action_transaction_id": refreshed.get("action_transaction_id"),
+                "error_code": error_code,
+            },
+            request_id,
+        )
         return refreshed
 
     def cancel_operator_broker_request(

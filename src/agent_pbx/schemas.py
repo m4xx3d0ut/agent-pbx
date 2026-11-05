@@ -1312,6 +1312,7 @@ class OperatorBrokerCheckpointResponse(BaseModel):
     expires_at: float
     completed_at: float | None = None
     canceled_at: float | None = None
+    receipt_summary: str | None = None
 
 
 class OperatorBrokerCheckpointListResponse(BaseModel):

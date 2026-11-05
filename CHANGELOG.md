@@ -16,6 +16,13 @@
   subset, uses raw-byte/no-filter identities, leaves unrelated dirt
   unobserved, journals a closed crash-recovery state machine, and exposes no
   API, MCP, shell, implicit-stage, or arbitrary-message surface.
+- Add an optional root-supervised exact Git checkpoint workflow for dedicated
+  workstations. A root Operator can create one durable request for its own
+  Trusted Workbench edit fork; the loopback TUI revalidates the campaign and
+  immutable scope, executes guarded stop → exact broker commit → same-session
+  resume, and returns readable receipts while leaving root validation explicit.
+  Public installs remain in guided mode, and edit/review forks cannot invoke
+  the request path.
 
 ### Fixed
 

@@ -596,6 +596,30 @@ parent and exact commit subject. Absolute or parent-traversing path entries are
 rejected. The legacy free-form `allowed_mutation_scope` remains readable but is
 never sufficient for delegated approval.
 
+The public/default broker flow remains guided: the TUI exposes one reviewed
+stop, broker, resume, or validation step at a time. A dedicated single-user
+host may enable root-supervised checkpoints. A root Operator can then create a
+durable request for its own activated Trusted Workbench edit fork. The local
+TUI revalidates the exact handoff and campaign, stops the managed fork, commits
+only the pinned paths with the pinned parent and subject, resumes the same Codex
+session, and returns an auditable receipt. Root validation remains a separate
+step. Edit and review forks are not given the request tools, remote observers
+cannot control it, and the executor endpoints accept only loopback clients.
+The normal controller bearer remains an administrator credential and must not
+be exposed to untrusted processes.
+
+```bash
+export AGENT_PBX_OPERATOR_BROKER_MODE="guided" # guided|root_operator|disabled
+export AGENT_PBX_OPERATOR_BROKER_CONTROL_MODE="editable" # editable|read_only|hidden
+export AGENT_PBX_OPERATOR_BROKER_REQUEST_TTL_SECONDS="900"
+export AGENT_PBX_OPERATOR_BROKER_MAX_IN_FLIGHT="1"
+```
+
+`root_operator` is intentionally a local administrator choice; it is not the
+committed default. Requests survive TUI replacement, use a bounded executor
+lease, recover commit evidence from durable action receipts, and fail closed on
+scope, workspace, session, pane, Git parent, or path drift.
+
 The committed default remains manual approval. On a trusted local workstation,
 the approval center's `Trust & approve` action can grant a one-hour,
 use-limited campaign lease and approve the selected structured handoffs. Source

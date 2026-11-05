@@ -174,6 +174,17 @@ Operators can use knowledge links plus executable handoffs for bounded transfers
 between operators or review forks without changing fork ownership, campaign
 assignment state, or source-session associations.
 
+When local policy enables root-supervised Git checkpoints, only the root
+Operator may call `pbx_operator_preflight_broker_checkpoint` and
+`pbx_operator_request_broker_checkpoint` for its own activated
+`trusted-workbench` edit fork and an existing `exact_git_commit_broker`
+handoff. The request carries exact paths, expected parent, commit subject,
+campaign, workspace-set, and authority digests. A local Agent PBX TUI executes
+the durable stop, exact commit, and same-session resume. Read the durable result
+with `pbx_operator_get_broker_checkpoint`, inspect its receipt summary, and
+perform the remaining root validation. Edit forks and review forks must not
+request, cancel, or impersonate this root workflow.
+
 Operator forks have roles. The default/edit fork may coordinate caller-directed
 edits. Review forks use `fork_purpose="review"` and
 `access_mode="review_readonly"`; treat the caller source checkout as read-only
