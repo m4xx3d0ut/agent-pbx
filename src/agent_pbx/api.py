@@ -234,6 +234,8 @@ from .schemas import (
     OperatorDelegationLeaseRevokeRequest,
     OperatorHandoffAckRequest,
     OperatorHandoffApproveRequest,
+    OperatorHandoffCancelRequest,
+    OperatorHandoffCancelResponse,
     OperatorHandoffCreateRequest,
     OperatorHandoffDeliveryResponse,
     OperatorHandoffListResponse,
@@ -5335,6 +5337,27 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             operator_agent_id=payload.operator_agent_id,
             handoff_id=handoff_id,
             delivery=payload.delivery,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/handoffs/{handoff_id}/cancel",
+        response_model=OperatorHandoffCancelResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def cancel_operator_handoff(
+        handoff_id: str,
+        payload: OperatorHandoffCancelRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        operator_service = request.app.state.operator_service
+        return await run_operator_call(
+            operator_service.cancel_handoff,
+            operator_agent_id=payload.operator_agent_id,
+            handoff_id=handoff_id,
+            reason=payload.reason,
+            detail=payload.detail,
+            superseded_by_handoff_ids=payload.superseded_by_handoff_ids,
             metadata=payload.metadata,
         )
 

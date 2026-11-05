@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import os
@@ -146,6 +147,22 @@ HANDOFF_PRESTART_STATUSES = {
     "pending_launch",
     "sent",
     "acknowledged",
+}
+HANDOFF_CANCELABLE_STATUSES = {"proposed", "approved", "pending_launch"}
+HANDOFF_CANCEL_REASONS = {
+    "superseded",
+    "no_longer_needed",
+    "duplicate",
+    "test_or_uat_artifact",
+    "created_in_error",
+    "other",
+}
+HANDOFF_INVALID_REPLACEMENT_STATUSES = {
+    "blocked",
+    "failed",
+    "expired",
+    "canceled",
+    "cancelled",
 }
 OPERATOR_KB_STATUSES = {
     "proposed",
@@ -2958,6 +2975,145 @@ class OperatorService:
         )
         return updated
 
+    def cancel_handoff(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_id: str,
+        reason: str,
+        detail: str | None = None,
+        superseded_by_handoff_ids: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Withdraw one source-owned handoff before it enters delivery."""
+
+        handoff = self._require_handoff_for_source_operator(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+        )
+        normalized_reason = str(reason or "").strip().lower()
+        if normalized_reason not in HANDOFF_CANCEL_REASONS:
+            raise ValueError("handoff cancellation reason is invalid")
+        normalized_detail = str(detail or "").strip()
+        if normalized_reason == "other" and not normalized_detail:
+            raise ValueError("handoff cancellation detail is required for reason other")
+        replacement_ids = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in superseded_by_handoff_ids or []
+                if str(value or "").strip()
+            )
+        )
+        if len(replacement_ids) > 20:
+            raise ValueError("handoff cancellation accepts at most 20 replacement IDs")
+        if handoff_id in replacement_ids:
+            raise ValueError("handoff cannot supersede itself")
+        if normalized_reason == "superseded" and not replacement_ids:
+            raise ValueError("superseded handoff cancellation requires replacement IDs")
+
+        current_status = str(handoff.get("status") or "").strip().lower()
+        if current_status in {"canceled", "cancelled"}:
+            handoff_metadata = handoff.get("metadata")
+            cancellation = (
+                handoff_metadata.get("cancellation", {})
+                if isinstance(handoff_metadata, dict)
+                else {}
+            )
+            previous_status = (
+                str(cancellation.get("previous_status") or "unknown")
+                if isinstance(cancellation, dict)
+                else "unknown"
+            )
+            return {
+                "handoff": handoff,
+                "previous_status": previous_status,
+                "idempotent": True,
+            }
+        handoff = self._expire_handoff_if_due(handoff)
+        current_status = str(handoff.get("status") or "").strip().lower()
+        if current_status not in HANDOFF_CANCELABLE_STATUSES:
+            raise ValueError(
+                "handoff cannot be canceled after delivery or execution; "
+                f"current status is {current_status or 'unknown'}"
+            )
+        if (
+            handoff.get("command_id")
+            or handoff.get("acknowledged_at") is not None
+            or handoff.get("started_at") is not None
+        ):
+            raise ValueError("handoff delivery has already started and cannot be canceled")
+
+        logical_operator_id = str(handoff.get("logical_operator_agent_id") or "")
+        for replacement_id in replacement_ids:
+            replacement = self._require_handoff(replacement_id)
+            if str(replacement.get("logical_operator_agent_id") or "") != logical_operator_id:
+                raise ValueError(
+                    f"replacement handoff {replacement_id} belongs to a different operator"
+                )
+            replacement_status = str(replacement.get("status") or "").strip().lower()
+            if replacement_status in HANDOFF_INVALID_REPLACEMENT_STATUSES:
+                raise ValueError(
+                    f"replacement handoff {replacement_id} is not active or successful"
+                )
+
+        canceled_at = now_ts()
+        cancellation = {
+            "reason": normalized_reason,
+            "detail": normalized_detail,
+            "canceled_by": operator_agent_id,
+            "source_operator_agent_id": logical_operator_id,
+            "previous_status": current_status,
+            "superseded_by_handoff_ids": replacement_ids,
+            "source": "operator-handoff-cancel",
+            "canceled_at": canceled_at,
+        }
+        summary = f"Canceled before delivery: {normalized_reason.replace('_', ' ')}."
+        updated = self.store.cancel_operator_handoff(
+            handoff_id,
+            logical_operator_agent_id=logical_operator_id,
+            expected_status=current_status,
+            summary=summary,
+            cancellation=cancellation,
+            metadata=metadata or {},
+        )
+        if updated is None:
+            latest = self._require_handoff(handoff_id)
+            latest_status = str(latest.get("status") or "unknown")
+            if latest_status in {"canceled", "cancelled"}:
+                latest_metadata = latest.get("metadata")
+                latest_cancellation = (
+                    latest_metadata.get("cancellation", {})
+                    if isinstance(latest_metadata, dict)
+                    else {}
+                )
+                return {
+                    "handoff": latest,
+                    "previous_status": str(
+                        latest_cancellation.get("previous_status") or "unknown"
+                    ),
+                    "idempotent": True,
+                }
+            raise ValueError(
+                "handoff delivery state changed before cancellation; "
+                f"current status is {latest_status}"
+            )
+        self._record_handoff_event(
+            "operator_handoff_canceled",
+            updated,
+            summary=summary,
+            extra={
+                "previous_status": current_status,
+                "reason": normalized_reason,
+                "canceled_by": operator_agent_id,
+                "superseded_by_handoff_ids": replacement_ids,
+            },
+        )
+        return {
+            "handoff": updated,
+            "previous_status": current_status,
+            "idempotent": False,
+        }
+
     def start_campaign(
         self,
         *,
@@ -4400,6 +4556,7 @@ class OperatorService:
         *,
         summary: str,
         command: dict[str, Any] | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> None:
         payload = {
             "handoff_id": handoff.get("handoff_id"),
@@ -4416,6 +4573,8 @@ class OperatorService:
             "expires_at": handoff.get("expires_at"),
             "command_id": command.get("command_id") if command else handoff.get("command_id"),
         }
+        if extra:
+            payload.update(extra)
         self.store.append_event(
             event_type,
             payload,

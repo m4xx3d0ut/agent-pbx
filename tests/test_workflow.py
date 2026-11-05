@@ -2854,6 +2854,178 @@ def test_operator_handoff_api_create_approve_ack_and_complete(
     assert completed_payload["artifact_bundle"][0]["path"] == "result.md"
 
 
+def test_operator_handoff_cancel_is_source_owned_audited_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+    for agent_id in ("operator-0", "operator-7", "operator-8"):
+        response = client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": agent_id,
+                "project": "agent-pbx-operator",
+                "agent_type": "operator",
+                "metadata": {"pbx_mode": "report", "cwd": str(tmp_path / agent_id)},
+            },
+        )
+        assert response.status_code == 200
+
+    replacement = client.post(
+        "/v1/operator/handoffs",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_agent_id": "operator-0",
+            "target_operator_agent_id": "operator-8",
+            "message": "Structured replacement request.",
+            "objective": "Run the replacement checkpoint",
+        },
+    ).json()
+    legacy = client.post(
+        "/v1/operator/handoffs",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_agent_id": "operator-0",
+            "target_operator_agent_id": "operator-7",
+            "message": "Legacy request to withdraw.",
+            "objective": "Run the legacy checkpoint",
+            "metadata": {"preserve": "existing"},
+        },
+    ).json()
+    handoff_id = legacy["handoff_id"]
+
+    denied = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/cancel",
+        json={
+            "operator_agent_id": "operator-7",
+            "reason": "no_longer_needed",
+        },
+    )
+    assert denied.status_code == 400
+
+    missing_replacement = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/cancel",
+        json={
+            "operator_agent_id": "operator-0",
+            "reason": "superseded",
+        },
+    )
+    assert missing_replacement.status_code == 400
+
+    missing_other_detail = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/cancel",
+        json={
+            "operator_agent_id": "operator-0",
+            "reason": "other",
+        },
+    )
+    assert missing_other_detail.status_code == 400
+
+    foreign_replacement = client.post(
+        "/v1/operator/handoffs",
+        json={
+            "operator_agent_id": "operator-7",
+            "source_agent_id": "operator-7",
+            "target_operator_agent_id": "operator-8",
+            "message": "Different logical Operator request.",
+            "objective": "Stay outside the Operator-0 lineage",
+        },
+    ).json()
+    cross_operator_replacement = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/cancel",
+        json={
+            "operator_agent_id": "operator-0",
+            "reason": "superseded",
+            "superseded_by_handoff_ids": [foreign_replacement["handoff_id"]],
+        },
+    )
+    assert cross_operator_replacement.status_code == 400
+
+    canceled = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/cancel",
+        json={
+            "operator_agent_id": "operator-0",
+            "reason": "superseded",
+            "detail": "Replaced by the structured Operator-8 request.",
+            "superseded_by_handoff_ids": [replacement["handoff_id"]],
+            "metadata": {"requested_by": "test-suite"},
+        },
+    )
+    assert canceled.status_code == 200
+    payload = canceled.json()
+    assert payload["previous_status"] == "proposed"
+    assert payload["idempotent"] is False
+    assert payload["handoff"]["status"] == "canceled"
+    assert payload["handoff"]["completed_at"] is not None
+    assert payload["handoff"]["metadata"]["preserve"] == "existing"
+    assert payload["handoff"]["metadata"]["requested_by"] == "test-suite"
+    assert payload["handoff"]["metadata"]["cancellation"] == {
+        "reason": "superseded",
+        "detail": "Replaced by the structured Operator-8 request.",
+        "canceled_by": "operator-0",
+        "source_operator_agent_id": "operator-0",
+        "previous_status": "proposed",
+        "superseded_by_handoff_ids": [replacement["handoff_id"]],
+        "source": "operator-handoff-cancel",
+        "canceled_at": payload["handoff"]["metadata"]["cancellation"]["canceled_at"],
+    }
+
+    retried = client.post(
+        f"/v1/operator/handoffs/{handoff_id}/cancel",
+        json={
+            "operator_agent_id": "operator-0",
+            "reason": "superseded",
+            "superseded_by_handoff_ids": [replacement["handoff_id"]],
+        },
+    )
+    assert retried.status_code == 200
+    assert retried.json()["idempotent"] is True
+
+    agents = client.get("/v1/agents").json()
+    source = next(item for item in agents if item["agent_id"] == "operator-0")
+    assert source["pending_handoff_approval_count"] == 1
+    events = client.get("/v1/events", params={"tail": "true", "limit": 100}).json()
+    canceled_event = next(
+        event for event in events if event["type"] == "operator_handoff_canceled"
+    )
+    assert canceled_event["payload"]["previous_status"] == "proposed"
+    assert canceled_event["payload"]["reason"] == "superseded"
+    assert canceled_event["payload"]["superseded_by_handoff_ids"] == [
+        replacement["handoff_id"]
+    ]
+
+    delivered = client.post(
+        "/v1/operator/handoffs",
+        json={
+            "operator_agent_id": "operator-0",
+            "source_agent_id": "operator-0",
+            "target_operator_agent_id": "operator-7",
+            "message": "Already running request.",
+            "objective": "Already running",
+        },
+    ).json()
+    running = client.post(
+        f"/v1/operator/handoffs/{delivered['handoff_id']}/status",
+        json={
+            "operator_agent_id": "operator-7",
+            "status": "running",
+            "summary": "Receiver already started.",
+        },
+    )
+    assert running.status_code == 200
+    refused = client.post(
+        f"/v1/operator/handoffs/{delivered['handoff_id']}/cancel",
+        json={
+            "operator_agent_id": "operator-0",
+            "reason": "no_longer_needed",
+        },
+    )
+    assert refused.status_code == 409
+    assert client.get(
+        f"/v1/operator/handoffs/{delivered['handoff_id']}",
+        params={"operator_agent_id": "operator-0"},
+    ).json()["status"] == "running"
+
+
 def test_operator_fork_rebind_source_session_api(tmp_path: Path) -> None:
     caller_cwd = tmp_path / "caller-1"
     caller_cwd.mkdir()

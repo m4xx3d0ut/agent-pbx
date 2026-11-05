@@ -8934,6 +8934,68 @@ class Store:
             )
         return self.get_operator_handoff(handoff_id) if cursor.rowcount else None
 
+    def cancel_operator_handoff(
+        self,
+        handoff_id: str,
+        *,
+        logical_operator_agent_id: str,
+        expected_status: str,
+        summary: str,
+        cancellation: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically withdraw one source-owned handoff before delivery."""
+
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT status, metadata_json
+                FROM operator_handoffs
+                WHERE handoff_id = ?
+                  AND logical_operator_agent_id = ?
+                """,
+                (handoff_id, logical_operator_agent_id),
+            ).fetchone()
+            if row is None or str(row["status"] or "") != expected_status:
+                return None
+            merged_metadata = json.loads(str(row["metadata_json"] or "{}"))
+            if not isinstance(merged_metadata, dict):
+                merged_metadata = {}
+            if metadata:
+                merged_metadata.update(metadata)
+            merged_metadata["cancellation"] = cancellation
+            cursor = conn.execute(
+                """
+                UPDATE operator_handoffs
+                SET status = 'canceled',
+                    summary = ?,
+                    metadata_json = ?,
+                    completed_at = ?,
+                    updated_at = ?
+                WHERE handoff_id = ?
+                  AND logical_operator_agent_id = ?
+                  AND status = ?
+                  AND status IN ('proposed', 'approved', 'pending_launch')
+                  AND command_id IS NULL
+                  AND acknowledged_at IS NULL
+                  AND started_at IS NULL
+                """,
+                (
+                    summary,
+                    json.dumps(merged_metadata),
+                    current,
+                    current,
+                    handoff_id,
+                    logical_operator_agent_id,
+                    expected_status,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return self.get_operator_handoff(handoff_id)
+
     def create_command(
         self,
         request: CommandCreateRequest,

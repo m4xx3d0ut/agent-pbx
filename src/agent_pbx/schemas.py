@@ -64,6 +64,14 @@ OperatorHandoffStatus = Literal[
     "canceled",
     "cancelled",
 ]
+OperatorHandoffCancelReason = Literal[
+    "superseded",
+    "no_longer_needed",
+    "duplicate",
+    "test_or_uat_artifact",
+    "created_in_error",
+    "other",
+]
 OperatorKbScope = Literal["global", "project", "repo", "operator", "caller"]
 OperatorKbStatus = Literal["proposed", "active", "retired", "rejected"]
 OperatorKbRedactionStatus = Literal[
@@ -1130,6 +1138,14 @@ class OperatorHandoffPreflightRequest(BaseModel):
     delivery: CampaignDelivery | Literal["record_only"] = "auto"
 
 
+class OperatorHandoffCancelRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    reason: OperatorHandoffCancelReason
+    detail: str | None = Field(default=None, max_length=4000)
+    superseded_by_handoff_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class OperatorHandoffAckRequest(BaseModel):
     operator_agent_id: str = Field(min_length=1, max_length=120)
     status: OperatorHandoffStatus = "acknowledged"
@@ -1183,6 +1199,12 @@ class OperatorHandoffResponse(BaseModel):
     metadata: dict[str, Any]
     created_at: float
     updated_at: float
+
+
+class OperatorHandoffCancelResponse(BaseModel):
+    handoff: OperatorHandoffResponse
+    previous_status: str
+    idempotent: bool = False
 
 
 class OperatorHandoffListResponse(BaseModel):

@@ -42,6 +42,76 @@ def test_agent_summary_keeps_pending_handoff_approval_durable(
     assert by_id["operator-0"]["pending_handoff_approval_count"] == 0
 
 
+def test_cancel_operator_handoff_is_atomic_and_clears_pending_summary(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    for agent_id in ("operator-0", "operator-7"):
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=agent_id,
+                project="demo",
+                agent_type="operator",
+                metadata={"cwd": str(tmp_path / agent_id)},
+            )
+        )
+    handoff = store.create_operator_handoff(
+        logical_operator_agent_id="operator-0",
+        source_operator_agent_id="operator-0",
+        target_operator_agent_id="operator-7",
+        source_agent_id="operator-0",
+        objective="Replace the legacy request",
+        message="Replace the legacy request",
+        metadata={"preserved": True},
+    )
+    cancellation = {
+        "reason": "no_longer_needed",
+        "previous_status": "proposed",
+        "canceled_by": "operator-0",
+    }
+
+    canceled = store.cancel_operator_handoff(
+        handoff["handoff_id"],
+        logical_operator_agent_id="operator-0",
+        expected_status="proposed",
+        summary="Canceled before delivery: no longer needed.",
+        cancellation=cancellation,
+        metadata={"requested_by": "test"},
+    )
+
+    assert canceled is not None
+    assert canceled["status"] == "canceled"
+    assert canceled["completed_at"] is not None
+    assert canceled["metadata"]["preserved"] is True
+    assert canceled["metadata"]["requested_by"] == "test"
+    assert canceled["metadata"]["cancellation"] == cancellation
+    by_id = {agent["agent_id"]: agent for agent in store.list_agents()}
+    assert by_id["operator-0"]["pending_handoff_approval_count"] == 0
+
+    raced = store.create_operator_handoff(
+        logical_operator_agent_id="operator-0",
+        source_operator_agent_id="operator-0",
+        target_operator_agent_id="operator-7",
+        source_agent_id="operator-0",
+        objective="Race cancellation",
+        message="Race cancellation",
+    )
+    store.update_operator_handoff(raced["handoff_id"], status="sent")
+
+    assert (
+        store.cancel_operator_handoff(
+            raced["handoff_id"],
+            logical_operator_agent_id="operator-0",
+            expected_status="proposed",
+            summary="Must not overwrite sent.",
+            cancellation=cancellation,
+        )
+        is None
+    )
+    assert store.get_operator_handoff(raced["handoff_id"])["status"] == "sent"
+
+
 def test_model_elevation_request_is_idempotent_under_concurrency(
     tmp_path: Path,
 ) -> None:
