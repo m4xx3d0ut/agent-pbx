@@ -193,6 +193,15 @@ ATTENTION_EVENT_TYPES = {
     "operator_project_spawn_requested",
     "operator_project_spawn_failed",
     "operator_project_spawn_launched",
+    "operator_handoff_created",
+    "operator_handoff_approved",
+    "operator_handoff_pending_launch",
+    "operator_handoff_sent",
+    "operator_delegation_lease_requested",
+    "operator_delegation_lease_approved",
+    "operator_delegation_lease_rejected",
+    "operator_delegation_lease_revoked",
+    "operator_delegation_lease_used",
 }
 STARRED_AGENT_COLUMN = "*"
 DEFAULT_TUI_THEME = "cyberpunk"
@@ -5793,6 +5802,59 @@ class OperatorHandoffApprovalConfirmScreen(ModalScreen[None]):
             )
 
 
+class OperatorDelegationLeaseConfirmScreen(ModalScreen[None]):
+    """Approve one bounded Trusted Workbench campaign delegation lease."""
+
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_ids: tuple[str, ...],
+        approval_screen: "OperatorHandoffApprovalScreen",
+    ) -> None:
+        super().__init__()
+        self.operator_agent_id = operator_agent_id
+        self.handoff_ids = handoff_ids
+        self.approval_screen = approval_screen
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="operator-handoff-confirm-panel"):
+            yield Static("Approve bounded campaign delegation", id="operator-handoff-confirm-title")
+            yield Static(
+                "This local Trusted Workbench lease is limited to the selected "
+                "handoffs' campaign, targets, workspace digest, action classes, "
+                "roots, and exact paths. It lasts one hour, permits at most eight "
+                "matching uses, and keeps credentials, provider actions, deploy, "
+                "publication, push/tag/release, workspace expansion, authority "
+                "changes, and destructive work manual.\n\n"
+                + "\n".join(self.handoff_ids),
+                id="operator-handoff-confirm-summary",
+            )
+            with Horizontal(id="operator-handoff-confirm-actions"):
+                yield Button("Approve campaign lease", id="operator-delegation-confirm", variant="warning")
+                yield Button("Cancel", id="operator-delegation-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "operator-delegation-cancel":
+            self.dismiss()
+            return
+        if event.button.id == "operator-delegation-confirm":
+            work = self.app.create_operator_delegation_lease_from_handoffs(  # type: ignore[attr-defined]
+                self.operator_agent_id,
+                self.handoff_ids,
+                approval_screen=self.approval_screen,
+            )
+            self.dismiss()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                work,
+                name="operator-delegation-lease-create",
+                exclusive=True,
+            )
+
+
 class OperatorHandoffApprovalScreen(ModalScreen[None]):
     """Durable action center for exact-ID Operator handoff approvals."""
 
@@ -5830,6 +5892,7 @@ class OperatorHandoffApprovalScreen(ModalScreen[None]):
             with Horizontal(id="operator-handoff-approval-actions"):
                 yield Button("Preflight", id="operator-handoff-preflight")
                 yield Button("Approve selected", id="operator-handoff-approve", variant="warning")
+                yield Button("Trust campaign", id="operator-handoff-trust-campaign", variant="warning")
                 yield Button("Refresh", id="operator-handoff-refresh")
                 yield Button("Close", id="operator-handoff-close")
 
@@ -5951,6 +6014,14 @@ class OperatorHandoffApprovalScreen(ModalScreen[None]):
         elif button_id == "operator-handoff-approve":
             self.app.push_screen(  # type: ignore[attr-defined]
                 OperatorHandoffApprovalConfirmScreen(
+                    operator_agent_id=self.operator_agent_id,
+                    handoff_ids=handoff_ids,
+                    approval_screen=self,
+                )
+            )
+        elif button_id == "operator-handoff-trust-campaign":
+            self.app.push_screen(  # type: ignore[attr-defined]
+                OperatorDelegationLeaseConfirmScreen(
                     operator_agent_id=self.operator_agent_id,
                     handoff_ids=handoff_ids,
                     approval_screen=self,
@@ -10610,7 +10681,7 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator fork review", "Start a read-only review fork for the selected operator", self.palette_operator_fork_review)
         yield SystemCommand("/operator handoffs", "Show handoffs for the selected operator", self.palette_operator_handoffs)
         yield SystemCommand("/operator handoff preflight", "Preview delivery readiness for the oldest pending operator handoff", self.palette_operator_handoff_preflight)
-        yield SystemCommand("/operator handoff approve", "Approve or retry the oldest pending operator handoff", self.palette_operator_handoff_approve)
+        yield SystemCommand("/operator handoff approve", "Open exact-ID Operator handoff approvals", self.palette_operator_handoff_approve)
         yield SystemCommand("/operator handoff launch", "Launch the required fork for a pending handoff", self.palette_operator_handoff_launch)
         yield SystemCommand("/operator knowledge links", "Show knowledge links for the selected operator", self.palette_operator_knowledge_links)
         yield SystemCommand("/operator knowledge send", "Approve and send the oldest pending knowledge handoff", self.palette_operator_knowledge_send)
@@ -26622,6 +26693,112 @@ class AgentPBXTUI(App[None]):
             await self.refresh_operator_handoff_approval_screen(approval_screen)
         if approved:
             self.notify(f"Approved {len(approved)} exact Operator handoff ID(s).")
+
+    async def create_operator_delegation_lease_from_handoffs(
+        self,
+        logical_operator_id: str,
+        handoff_ids: tuple[str, ...],
+        *,
+        approval_screen: OperatorHandoffApprovalScreen,
+    ) -> None:
+        by_id = {
+            str(item.get("handoff_id") or ""): item
+            for item in approval_screen.handoffs
+        }
+        selected = [by_id[handoff_id] for handoff_id in handoff_ids if handoff_id in by_id]
+        if len(selected) != len(handoff_ids):
+            self.notify("One or more selected handoffs changed; refresh and retry.", severity="error")
+            return
+        if len(selected) > 8:
+            self.notify(
+                "A local campaign lease can cover at most eight selected handoffs.",
+                severity="warning",
+            )
+            return
+        scopes = [
+            item.get("execution_scope")
+            for item in selected
+            if isinstance(item.get("execution_scope"), dict)
+        ]
+        if len(scopes) != len(selected) or any(not scope for scope in scopes):
+            self.notify(
+                "Delegation requires a structured execution scope on every selected handoff.",
+                severity="warning",
+            )
+            return
+        campaigns = sorted({str(scope.get("campaign_id") or "") for scope in scopes})
+        digests = {str(scope.get("workspace_set_digest") or "") for scope in scopes}
+        if "" in campaigns or "" in digests or len(digests) != 1:
+            self.notify(
+                "Selected handoffs need campaign IDs and one shared workspace-set digest.",
+                severity="warning",
+            )
+            return
+        payload = {
+            "source_operator_agent_id": logical_operator_id,
+            "target_operator_agent_ids": sorted(
+                {str(item.get("target_operator_agent_id") or "") for item in selected}
+            ),
+            "campaign_ids": campaigns,
+            "workspace_set_digest": next(iter(digests)),
+            "allowed_action_classes": sorted(
+                {str(scope.get("action_class") or "") for scope in scopes}
+            ),
+            "allowed_roots": sorted(
+                {
+                    str(root)
+                    for scope in scopes
+                    for root in scope.get("allowed_roots") or ()
+                }
+            ),
+            "exact_paths": sorted(
+                {
+                    str(path)
+                    for scope in scopes
+                    for path in scope.get("exact_paths") or ()
+                }
+            ),
+            "denied_actions": [],
+            "max_uses": 8,
+            "ttl_seconds": 3600,
+            "requested_by": "agent-pbx-tui",
+            "metadata": {
+                "profile_label": "Rosie Workbench",
+                "approved_handoff_ids": list(handoff_ids),
+            },
+        }
+        try:
+            response = await self.api_client().post(
+                "/v1/operator/delegation-leases",
+                json=payload,
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            lease = response.json()
+            lease_id = str(lease.get("lease_id") or "")
+            decision = await self.api_client().post(
+                f"/v1/operator/delegation-leases/{lease_id}/decision",
+                json={"approve": True, "decided_by": "local-tui-user"},
+                headers=auth_headers(self.token),
+            )
+            decision.raise_for_status()
+            applied = 0
+            for handoff_id in handoff_ids:
+                result = await self.api_client().post(
+                    f"/v1/operator/delegation-leases/{lease_id}/apply/{handoff_id}",
+                    headers=auth_headers(self.token),
+                )
+                result.raise_for_status()
+                applied += 1
+        except Exception as exc:
+            self.notify(f"Unable to activate campaign delegation: {exc}", severity="error")
+            return
+        await self.refresh_events()
+        await self.refresh_agents()
+        await self.refresh_operator_handoff_approval_screen(approval_screen)
+        self.notify(
+            f"Approved one-hour campaign lease {lease_id[:8]} and applied {applied} handoff(s)."
+        )
 
     async def preflight_pending_operator_handoff(self) -> None:
         operator_agent_id = self.selected_operator_agent_id()

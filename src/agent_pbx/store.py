@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 35
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -35,6 +35,14 @@ MODEL_ELEVATION_OPEN_STATUSES = {
     "revert_pending",
 }
 OPERATOR_AGENT_TYPE = "operator"
+OPERATOR_DELEGATION_LEASE_STATUSES = {
+    "pending",
+    "approved",
+    "rejected",
+    "revoked",
+    "expired",
+    "exhausted",
+}
 OPERATOR_PROJECT = "agent-pbx-operator"
 OPERATOR_ROLE_ROOT = "root"
 OPERATOR_ROLE_FORK = "fork"
@@ -959,6 +967,34 @@ class Store:
                     FOREIGN KEY(command_id) REFERENCES commands(command_id)
                         ON DELETE SET NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS operator_delegation_leases (
+                    lease_id TEXT PRIMARY KEY,
+                    source_operator_agent_id TEXT NOT NULL,
+                    target_operator_agent_ids_json TEXT NOT NULL DEFAULT '[]',
+                    campaign_ids_json TEXT NOT NULL DEFAULT '[]',
+                    workspace_set_digest TEXT NOT NULL,
+                    allowed_action_classes_json TEXT NOT NULL DEFAULT '[]',
+                    allowed_roots_json TEXT NOT NULL DEFAULT '[]',
+                    exact_paths_json TEXT NOT NULL DEFAULT '[]',
+                    denied_actions_json TEXT NOT NULL DEFAULT '[]',
+                    max_uses INTEGER NOT NULL,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    requested_by TEXT NOT NULL,
+                    approved_by TEXT,
+                    created_at REAL NOT NULL,
+                    approved_at REAL,
+                    expires_at REAL NOT NULL,
+                    revoked_at REAL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY(source_operator_agent_id) REFERENCES agents(agent_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_operator_delegation_lease_source_status
+                    ON operator_delegation_leases(
+                        source_operator_agent_id, status, expires_at DESC
+                    );
 
                 CREATE TABLE IF NOT EXISTS agent_prune_batches (
                     batch_id TEXT PRIMARY KEY,
@@ -8433,6 +8469,215 @@ class Store:
             )
             return entry
 
+    def create_operator_delegation_lease(
+        self,
+        *,
+        source_operator_agent_id: str,
+        target_operator_agent_ids: list[str],
+        campaign_ids: list[str],
+        workspace_set_digest: str,
+        allowed_action_classes: list[str],
+        allowed_roots: list[str],
+        exact_paths: list[str],
+        denied_actions: list[str],
+        max_uses: int,
+        expires_at: float,
+        requested_by: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        lease_id = str(uuid.uuid4())
+        current = now_ts()
+        if expires_at <= current:
+            raise ValueError("delegation lease expiry must be in the future")
+        if not 1 <= int(max_uses) <= 100:
+            raise ValueError("delegation lease max_uses must be between 1 and 100")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_delegation_leases(
+                    lease_id, source_operator_agent_id,
+                    target_operator_agent_ids_json, campaign_ids_json,
+                    workspace_set_digest, allowed_action_classes_json,
+                    allowed_roots_json, exact_paths_json, denied_actions_json,
+                    max_uses, use_count, status, requested_by, approved_by,
+                    created_at, approved_at, expires_at, revoked_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, NULL, ?, NULL, ?, NULL, ?)
+                """,
+                (
+                    lease_id,
+                    source_operator_agent_id,
+                    json.dumps(target_operator_agent_ids),
+                    json.dumps(campaign_ids),
+                    workspace_set_digest,
+                    json.dumps(allowed_action_classes),
+                    json.dumps(allowed_roots),
+                    json.dumps(exact_paths),
+                    json.dumps(denied_actions),
+                    int(max_uses),
+                    requested_by,
+                    current,
+                    float(expires_at),
+                    json.dumps(metadata or {}),
+                ),
+            )
+        lease = self.get_operator_delegation_lease(lease_id)
+        if lease is None:
+            raise RuntimeError("operator delegation lease insert failed")
+        self.append_event(
+            "operator_delegation_lease_requested",
+            {"lease_id": lease_id, "source_operator_agent_id": source_operator_agent_id},
+            source_operator_agent_id,
+        )
+        return lease
+
+    def get_operator_delegation_lease(self, lease_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM operator_delegation_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+        return self._operator_delegation_lease_from_row(row) if row else None
+
+    def list_operator_delegation_leases(
+        self,
+        *,
+        source_operator_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if source_operator_agent_id:
+            where.append("source_operator_agent_id = ?")
+            params.append(source_operator_agent_id)
+        if status:
+            normalized = str(status).strip().lower()
+            if normalized not in OPERATOR_DELEGATION_LEASE_STATUSES:
+                raise ValueError("delegation lease status is invalid")
+            where.append("status = ?")
+            params.append(normalized)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(max(1, min(500, int(limit))))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM operator_delegation_leases
+                {clause}
+                ORDER BY created_at DESC, lease_id ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._operator_delegation_lease_from_row(row) for row in rows]
+
+    def decide_operator_delegation_lease(
+        self,
+        lease_id: str,
+        *,
+        approve: bool,
+        approved_by: str,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        status = "approved" if approve else "rejected"
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_delegation_leases
+                SET status = ?, approved_by = ?, approved_at = ?
+                WHERE lease_id = ? AND status = 'pending' AND expires_at > ?
+                """,
+                (status, approved_by, current, lease_id, current),
+            )
+        if cursor.rowcount != 1:
+            raise ValueError("delegation lease is no longer pending or has expired")
+        lease = self.get_operator_delegation_lease(lease_id)
+        assert lease is not None
+        self.append_event(
+            f"operator_delegation_lease_{status}",
+            {"lease_id": lease_id, "approved_by": approved_by},
+            str(lease["source_operator_agent_id"]),
+        )
+        return lease
+
+    def revoke_operator_delegation_lease(
+        self,
+        lease_id: str,
+        *,
+        revoked_by: str,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operator_delegation_leases
+                SET status = 'revoked', revoked_at = ?,
+                    metadata_json = json_set(metadata_json, '$.revoked_by', ?)
+                WHERE lease_id = ? AND status IN ('pending', 'approved')
+                """,
+                (current, revoked_by, lease_id),
+            )
+        if cursor.rowcount != 1:
+            raise ValueError("delegation lease is not active")
+        lease = self.get_operator_delegation_lease(lease_id)
+        assert lease is not None
+        self.append_event(
+            "operator_delegation_lease_revoked",
+            {"lease_id": lease_id, "revoked_by": revoked_by},
+            str(lease["source_operator_agent_id"]),
+        )
+        return lease
+
+    def consume_operator_delegation_lease(
+        self,
+        lease_id: str,
+        *,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM operator_delegation_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("delegation lease not found")
+            lease = self._operator_delegation_lease_from_row(row)
+            if lease["status"] != "approved" or lease["expired"]:
+                raise ValueError("delegation lease is not active")
+            next_count = int(lease["use_count"]) + 1
+            if next_count > int(lease["max_uses"]):
+                raise ValueError("delegation lease is exhausted")
+            next_status = "exhausted" if next_count >= int(lease["max_uses"]) else "approved"
+            metadata = dict(lease.get("metadata") or {})
+            uses = list(metadata.get("uses") or [])
+            uses.append({"handoff_id": handoff_id, "used_at": current})
+            metadata["uses"] = uses[-100:]
+            cursor = conn.execute(
+                """
+                UPDATE operator_delegation_leases
+                SET use_count = ?, status = ?, metadata_json = ?
+                WHERE lease_id = ? AND status = 'approved' AND use_count = ?
+                """,
+                (
+                    next_count,
+                    next_status,
+                    json.dumps(metadata),
+                    lease_id,
+                    int(lease["use_count"]),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("delegation lease changed during use")
+        updated = self.get_operator_delegation_lease(lease_id)
+        assert updated is not None
+        self.append_event(
+            "operator_delegation_lease_used",
+            {"lease_id": lease_id, "handoff_id": handoff_id, "use_count": next_count},
+            str(updated["source_operator_agent_id"]),
+        )
+        return updated
+
     def create_operator_handoff(
         self,
         *,
@@ -10341,6 +10586,37 @@ class Store:
         )
         data["expired"] = expired
         data["safe_to_start"] = not expired
+        return data
+
+    @staticmethod
+    def _operator_delegation_lease_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        for key, default in (
+            ("target_operator_agent_ids_json", []),
+            ("campaign_ids_json", []),
+            ("allowed_action_classes_json", []),
+            ("allowed_roots_json", []),
+            ("exact_paths_json", []),
+            ("denied_actions_json", []),
+            ("metadata_json", {}),
+        ):
+            raw = data.pop(key)
+            try:
+                decoded = json.loads(raw or json.dumps(default))
+            except json.JSONDecodeError:
+                decoded = default
+            data[key.removesuffix("_json")] = (
+                decoded if isinstance(decoded, type(default)) else default
+            )
+        current = now_ts()
+        expired = float(data["expires_at"]) <= current
+        if expired and data["status"] in {"pending", "approved"}:
+            data["status"] = "expired"
+        data["expired"] = expired
+        data["uses_remaining"] = max(
+            0,
+            int(data["max_uses"]) - int(data["use_count"]),
+        )
         return data
 
     @staticmethod

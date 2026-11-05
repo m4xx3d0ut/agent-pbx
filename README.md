@@ -591,6 +591,18 @@ parent and exact commit subject. Absolute or parent-traversing path entries are
 rejected. The legacy free-form `allowed_mutation_scope` remains readable but is
 never sufficient for delegated approval.
 
+The committed default remains manual approval. On a trusted local workstation,
+the approval center can grant a one-hour, use-limited campaign lease from the
+selected structured handoffs. Source and target Operators must share the same
+activated `trusted-workbench` workspace-set digest. The lease is pinned to the
+selected campaigns, targets, action classes, roots, and exact paths. Matching
+future handoffs may then pass preflight and deliver without another modal.
+Credentials, provider/cloud operations, deployment, publication, push, tag,
+release, repository/worktree/fork creation, workspace expansion, authority
+elevation, destructive mutation, and unstructured legacy requests always stay
+manual. Leases are audited, expire automatically, have a bounded use count,
+and can be revoked through the controller API.
+
 When a knowledge link or handoff produces reusable operating guidance, review
 forks and operators can propose KB entries with `pbx_operator_kb_propose` or
 `pbx_operator_kb_propose_from_link`. Proposed entries stay scoped to the

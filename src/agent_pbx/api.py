@@ -227,6 +227,11 @@ from .schemas import (
     OperatorForkRebindSourceSessionRequest,
     OperatorForkResponse,
     OperatorFollowupRequest,
+    OperatorDelegationLeaseCreateRequest,
+    OperatorDelegationLeaseDecisionRequest,
+    OperatorDelegationLeaseListResponse,
+    OperatorDelegationLeaseResponse,
+    OperatorDelegationLeaseRevokeRequest,
     OperatorHandoffAckRequest,
     OperatorHandoffApproveRequest,
     OperatorHandoffCreateRequest,
@@ -5126,6 +5131,99 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             kb_id=kb_id,
             summary=payload.summary,
             metadata=payload.metadata,
+        )
+
+    @app.get(
+        "/v1/operator/delegation-leases",
+        response_model=OperatorDelegationLeaseListResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def list_operator_delegation_leases(
+        request: Request,
+        source_operator_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, object]:
+        leases = await run_operator_call(
+            request.app.state.operator_service.list_delegation_leases,
+            source_operator_agent_id=source_operator_agent_id,
+            status=status,
+            limit=limit,
+        )
+        return {"leases": leases}
+
+    @app.post(
+        "/v1/operator/delegation-leases",
+        response_model=OperatorDelegationLeaseResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def request_operator_delegation_lease(
+        payload: OperatorDelegationLeaseCreateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.request_delegation_lease,
+            source_operator_agent_id=payload.source_operator_agent_id,
+            target_operator_agent_ids=payload.target_operator_agent_ids,
+            campaign_ids=payload.campaign_ids,
+            workspace_set_digest=payload.workspace_set_digest,
+            allowed_action_classes=payload.allowed_action_classes,
+            allowed_roots=payload.allowed_roots,
+            exact_paths=payload.exact_paths,
+            denied_actions=payload.denied_actions,
+            max_uses=payload.max_uses,
+            ttl_seconds=payload.ttl_seconds,
+            requested_by=payload.requested_by,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/delegation-leases/{lease_id}/decision",
+        response_model=OperatorDelegationLeaseResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def decide_operator_delegation_lease(
+        lease_id: str,
+        payload: OperatorDelegationLeaseDecisionRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.decide_delegation_lease,
+            lease_id=lease_id,
+            approve=payload.approve,
+            decided_by=payload.decided_by,
+        )
+
+    @app.post(
+        "/v1/operator/delegation-leases/{lease_id}/revoke",
+        response_model=OperatorDelegationLeaseResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def revoke_operator_delegation_lease(
+        lease_id: str,
+        payload: OperatorDelegationLeaseRevokeRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.revoke_delegation_lease,
+            lease_id=lease_id,
+            revoked_by=payload.revoked_by,
+        )
+
+    @app.post(
+        "/v1/operator/delegation-leases/{lease_id}/apply/{handoff_id}",
+        response_model=OperatorHandoffDeliveryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def apply_operator_delegation_lease(
+        lease_id: str,
+        handoff_id: str,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.apply_delegation_lease,
+            lease_id=lease_id,
+            handoff_id=handoff_id,
         )
 
     @app.get(

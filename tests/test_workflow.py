@@ -2772,6 +2772,11 @@ def test_operator_handoff_api_create_approve_ack_and_complete(
     handoff_payload = handoff.json()
     handoff_id = handoff_payload["handoff_id"]
 
+    agents = client.get("/v1/agents").json()
+    source_summary = next(item for item in agents if item["agent_id"] == "operator-0")
+    assert source_summary["pending_handoff_approval_count"] == 1
+    assert source_summary["oldest_pending_handoff_created_at"] is not None
+
     preflight = client.post(
         f"/v1/operator/handoffs/{handoff_id}/preflight",
         json={"operator_agent_id": "operator-0", "delivery": "queue"},

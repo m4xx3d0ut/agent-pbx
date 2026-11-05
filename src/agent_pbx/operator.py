@@ -7,6 +7,7 @@ import re
 import sqlite3
 import socket
 import uuid
+from pathlib import Path
 from typing import Any
 
 from . import tmux as tmux_support
@@ -26,7 +27,16 @@ from .runtime_tmux import (
 )
 from .security import now_ts
 from .store import Store
-from .operator_delegation import normalize_execution_scope
+from .operator_authority import (
+    OPERATOR_AUTHORITY_TRUSTED_WORKBENCH,
+    OperatorAuthorityService,
+)
+from .operator_delegation import (
+    DEFAULT_DENIED_ACTIONS,
+    delegation_lease_matches_handoff,
+    normalize_delegation_lease_scope,
+    normalize_execution_scope,
+)
 from .tmux_binary import configured_tmux_binary
 
 
@@ -226,7 +236,8 @@ def operator_runbook_payload() -> dict[str, Any]:
             "Read-only review work should use review forks and write only to the configured work_root outside the caller project directory.",
             "When review work finds an edit task, escalate it to the root operator or to the idle default/edit fork; do not let review forks edit the source project.",
             "When review work needs a new sibling project, request it with pbx_operator_request_project_spawn; the TUI must approve and launch the new caller agent.",
-            "When review work needs to transfer domain context to another operator, propose a knowledge handoff; the TUI/root operator approves the executable handoff delivery.",
+            "When review work needs to transfer domain context to another operator, propose a knowledge handoff; the TUI/root operator approves delivery, either directly or through a bounded campaign lease it explicitly granted.",
+            "Campaign delegation leases are available only when source and target Operators have the same activated Trusted Workbench workspace identity. They never cover credentials, provider/cloud work, deploy, publication, push/tag/release, workspace expansion, authority elevation, destructive work, or ambiguous prose-only scopes.",
             "Operator handoffs track required target fork launch, delivery evidence, receiver acknowledgement, running state, TTL expiry, artifact summaries, and terminal state.",
             "For new handoffs, provide execution_scope with an action_class, mutation_mode, campaign and workspace-set identity where applicable; exact Git commit brokers also require exact_paths, expected_git_parent, and commit_subject.",
             "Manual KB seed runs deliver a seed prompt to the selected operator or fork; that session proposes KB entries and updates seed-run status when finished.",
@@ -2321,7 +2332,236 @@ class OperatorService:
             handoff,
             summary=handoff.get("summary") or "Operator handoff created",
         )
-        return handoff
+        delegated = self._try_delegated_handoff_approval(handoff)
+        return delegated or handoff
+
+    def request_delegation_lease(
+        self,
+        *,
+        source_operator_agent_id: str,
+        target_operator_agent_ids: list[str],
+        campaign_ids: list[str],
+        workspace_set_digest: str,
+        allowed_action_classes: list[str],
+        allowed_roots: list[str],
+        exact_paths: list[str],
+        denied_actions: list[str],
+        max_uses: int,
+        ttl_seconds: int,
+        requested_by: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source = self._require_operator(source_operator_agent_id)
+        source_id = self._logical_operator_agent_id(source)
+        source_view = self._trusted_delegation_authority(source_id)
+        target_ids = tuple(
+            dict.fromkeys(
+                self._logical_operator_agent_id(self._require_operator(agent_id))
+                for agent_id in target_operator_agent_ids
+            )
+        )
+        if not target_ids:
+            raise ValueError("delegation lease requires at least one target Operator")
+        digest = str(workspace_set_digest or "").strip().lower()
+        source_digest = str(source_view["activated_workspace_set_digest"] or "")
+        if not digest or digest != source_digest:
+            raise ValueError("delegation lease workspace-set digest is not activated")
+        for target_id in target_ids:
+            target_view = self._trusted_delegation_authority(target_id)
+            if str(target_view["activated_workspace_set_digest"] or "") != digest:
+                raise ValueError(
+                    f"target Operator {target_id} does not share the activated workspace set"
+                )
+        normalized_campaign_ids = tuple(
+            dict.fromkeys(str(value or "").strip() for value in campaign_ids)
+        )
+        if not normalized_campaign_ids or any(not value for value in normalized_campaign_ids):
+            raise ValueError("delegation lease requires at least one campaign")
+        for campaign_id in normalized_campaign_ids:
+            campaign = self.store.get_operator_campaign(campaign_id)
+            if campaign is None or str(campaign.get("operator_agent_id") or "") != source_id:
+                raise ValueError(f"campaign {campaign_id} does not belong to {source_id}")
+            if campaign.get("completed_at") is not None:
+                raise ValueError(f"campaign {campaign_id} is terminal")
+        normalized = normalize_delegation_lease_scope(
+            allowed_action_classes=allowed_action_classes,
+            allowed_roots=allowed_roots,
+            exact_paths=exact_paths,
+            denied_actions=denied_actions,
+        )
+        workspace_set = source_view.get("workspace_set") or {}
+        workspace_roots = {
+            str(Path(str(member.get("path") or "")).resolve(strict=False))
+            for member in workspace_set.get("members") or ()
+            if isinstance(member, dict) and str(member.get("path") or "").strip()
+        }
+        if not set(normalized["allowed_roots"]).issubset(workspace_roots):
+            raise ValueError("delegation lease roots exceed the activated workspace set")
+        return self.store.create_operator_delegation_lease(
+            source_operator_agent_id=source_id,
+            target_operator_agent_ids=list(target_ids),
+            campaign_ids=list(normalized_campaign_ids),
+            workspace_set_digest=digest,
+            allowed_action_classes=normalized["allowed_action_classes"],
+            allowed_roots=normalized["allowed_roots"],
+            exact_paths=normalized["exact_paths"],
+            denied_actions=normalized["denied_actions"],
+            max_uses=max_uses,
+            expires_at=now_ts() + max(60, min(86400, int(ttl_seconds))),
+            requested_by=requested_by,
+            metadata=metadata,
+        )
+
+    def decide_delegation_lease(
+        self,
+        *,
+        lease_id: str,
+        approve: bool,
+        decided_by: str,
+    ) -> dict[str, Any]:
+        lease = self.store.get_operator_delegation_lease(lease_id)
+        if lease is None:
+            raise ValueError("delegation lease not found")
+        self._trusted_delegation_authority(
+            str(lease["source_operator_agent_id"])
+        )
+        return self.store.decide_operator_delegation_lease(
+            lease_id,
+            approve=approve,
+            approved_by=decided_by,
+        )
+
+    def list_delegation_leases(
+        self,
+        *,
+        source_operator_agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        source_id = None
+        if source_operator_agent_id:
+            source_id = self._logical_operator_agent_id(
+                self._require_operator(source_operator_agent_id)
+            )
+        return self.store.list_operator_delegation_leases(
+            source_operator_agent_id=source_id,
+            status=status,
+            limit=limit,
+        )
+
+    def revoke_delegation_lease(
+        self,
+        *,
+        lease_id: str,
+        revoked_by: str,
+    ) -> dict[str, Any]:
+        return self.store.revoke_operator_delegation_lease(
+            lease_id,
+            revoked_by=revoked_by,
+        )
+
+    def apply_delegation_lease(
+        self,
+        *,
+        lease_id: str,
+        handoff_id: str,
+    ) -> dict[str, Any]:
+        lease = self.store.get_operator_delegation_lease(lease_id)
+        if lease is None:
+            raise ValueError("delegation lease not found")
+        handoff = self._require_handoff(handoff_id)
+        source_id = str(handoff.get("logical_operator_agent_id") or "")
+        target_id = str(handoff.get("target_operator_agent_id") or "")
+        if source_id != str(lease.get("source_operator_agent_id") or ""):
+            raise ValueError("handoff source does not match delegation lease")
+        source_view = self._trusted_delegation_authority(source_id)
+        target_view = self._trusted_delegation_authority(target_id)
+        matched, reason = delegation_lease_matches_handoff(
+            lease,
+            handoff,
+            source_workspace_digest=str(
+                source_view.get("activated_workspace_set_digest") or ""
+            ),
+            target_workspace_digest=str(
+                target_view.get("activated_workspace_set_digest") or ""
+            ),
+        )
+        if not matched:
+            raise ValueError(reason)
+        preflight = self.preflight_handoff_delivery(
+            operator_agent_id=source_id,
+            handoff_id=handoff_id,
+            delivery="auto",
+        )
+        if not bool(preflight.get("ok")):
+            raise ValueError(
+                str(preflight.get("reason") or "delegated handoff preflight failed")
+            )
+        self.store.consume_operator_delegation_lease(
+            lease_id,
+            handoff_id=handoff_id,
+        )
+        return self.approve_handoff(
+            operator_agent_id=source_id,
+            handoff_id=handoff_id,
+            delivery="auto",
+            metadata={
+                "delegated_approval": True,
+                "delegation_lease_id": lease_id,
+                "delegation_match": reason,
+            },
+        )
+
+    def _trusted_delegation_authority(self, agent_id: str) -> dict[str, Any]:
+        view = OperatorAuthorityService(self.store).get_assignment(agent_id)
+        if view.get("effective_profile") != OPERATOR_AUTHORITY_TRUSTED_WORKBENCH:
+            raise ValueError("delegation leases require Trusted Workbench authority")
+        if view.get("pending_activation"):
+            raise ValueError("Trusted Workbench authority is pending activation")
+        if view.get("activated_profile") != OPERATOR_AUTHORITY_TRUSTED_WORKBENCH:
+            raise ValueError("Trusted Workbench authority is not active")
+        if not view.get("activated_workspace_set_digest"):
+            raise ValueError("Trusted Workbench workspace identity is not active")
+        return view
+
+    def _try_delegated_handoff_approval(
+        self,
+        handoff: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        scope = handoff.get("execution_scope")
+        if not isinstance(scope, dict) or not scope:
+            return None
+        source_id = str(handoff.get("logical_operator_agent_id") or "")
+        target_id = str(handoff.get("target_operator_agent_id") or "")
+        try:
+            source_view = self._trusted_delegation_authority(source_id)
+            target_view = self._trusted_delegation_authority(target_id)
+        except ValueError:
+            return None
+        leases = self.store.list_operator_delegation_leases(
+            source_operator_agent_id=source_id,
+            status="approved",
+            limit=100,
+        )
+        for lease in leases:
+            matched, reason = delegation_lease_matches_handoff(
+                lease,
+                handoff,
+                source_workspace_digest=str(
+                    source_view.get("activated_workspace_set_digest") or ""
+                ),
+                target_workspace_digest=str(
+                    target_view.get("activated_workspace_set_digest") or ""
+                ),
+            )
+            if not matched:
+                continue
+            result = self.apply_delegation_lease(
+                lease_id=str(lease["lease_id"]),
+                handoff_id=str(handoff["handoff_id"]),
+            )
+            return result.get("handoff")
+        return None
 
     def list_handoffs(
         self,

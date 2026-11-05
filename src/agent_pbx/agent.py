@@ -186,7 +186,8 @@ project repositories from a review fork outside that operator-mediated path.
 If review work needs to transfer domain context, propose it with
 `pbx_operator_propose_knowledge_handoff`; review forks may list and inspect
 knowledge-link and handoff context, but the root operator/TUI must approve
-delivery with `pbx_operator_approve_handoff` or `/operator handoff approve`.
+delivery with `pbx_operator_approve_handoff`, `/operator handoff approve`, or a
+bounded campaign lease explicitly granted by the user for a structured scope.
 Use `pbx_operator_preflight_handoff` or `/operator handoff preflight` before
 delivery when pane readiness, queue/nohup routing, or attached KB context should
 be checked without sending anything.

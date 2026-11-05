@@ -69,9 +69,10 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
     exact_paths = _relative_paths(scope.get("exact_paths"))
     expected_parent = str(scope.get("expected_git_parent") or "").strip() or None
     commit_subject = str(scope.get("commit_subject") or "").strip() or None
-    denied_actions = _string_tuple(
-        scope.get("denied_actions") or DEFAULT_DENIED_ACTIONS,
-        label="denied_actions",
+    denied_actions = tuple(
+        dict.fromkeys(
+            (*DEFAULT_DENIED_ACTIONS, *_string_tuple(scope.get("denied_actions") or (), label="denied_actions"))
+        )
     )
 
     if mutation_mode == "exact_paths" and not exact_paths:
@@ -148,6 +149,79 @@ def execution_scope_requires_manual_approval(scope: Mapping[str, Any] | None) ->
             "authority_elevation",
         )
     )
+
+
+def normalize_delegation_lease_scope(
+    *,
+    allowed_action_classes: Any,
+    allowed_roots: Any,
+    exact_paths: Any,
+    denied_actions: Any,
+) -> dict[str, list[str]]:
+    actions = tuple(
+        dict.fromkeys(
+            item.lower()
+            for item in _string_tuple(
+                allowed_action_classes,
+                label="allowed_action_classes",
+            )
+        )
+    )
+    if not actions or any(item not in LEASE_ELIGIBLE_ACTION_CLASSES for item in actions):
+        raise ValueError("delegation lease contains an ineligible action class")
+    denied = tuple(
+        dict.fromkeys(
+            (*DEFAULT_DENIED_ACTIONS, *_string_tuple(denied_actions or (), label="denied_actions"))
+        )
+    )
+    return {
+        "allowed_action_classes": list(actions),
+        "allowed_roots": list(_absolute_roots(allowed_roots or ())),
+        "exact_paths": list(_relative_paths(exact_paths or ())),
+        "denied_actions": list(denied),
+    }
+
+
+def delegation_lease_matches_handoff(
+    lease: Mapping[str, Any],
+    handoff: Mapping[str, Any],
+    *,
+    source_workspace_digest: str,
+    target_workspace_digest: str,
+) -> tuple[bool, str]:
+    scope = handoff.get("execution_scope")
+    if not isinstance(scope, Mapping) or not scope:
+        return False, "handoff has no structured execution scope"
+    if execution_scope_requires_manual_approval(scope):
+        return False, "handoff action always requires manual approval"
+    if str(lease.get("status") or "") != "approved" or bool(lease.get("expired")):
+        return False, "delegation lease is not active"
+    if int(lease.get("uses_remaining") or 0) <= 0:
+        return False, "delegation lease is exhausted"
+    target = str(handoff.get("target_operator_agent_id") or "")
+    if target not in set(lease.get("target_operator_agent_ids") or ()):
+        return False, "target Operator is outside the lease"
+    campaign_id = str(scope.get("campaign_id") or "")
+    if not campaign_id or campaign_id not in set(lease.get("campaign_ids") or ()):
+        return False, "campaign is outside the lease"
+    action_class = str(scope.get("action_class") or "")
+    if action_class not in set(lease.get("allowed_action_classes") or ()):
+        return False, "action class is outside the lease"
+    lease_digest = str(lease.get("workspace_set_digest") or "")
+    scope_digest = str(scope.get("workspace_set_digest") or "")
+    if not scope_digest or len({lease_digest, scope_digest, source_workspace_digest, target_workspace_digest}) != 1:
+        return False, "workspace-set identity does not match the lease"
+    if not set(scope.get("allowed_roots") or ()).issubset(
+        set(lease.get("allowed_roots") or ())
+    ):
+        return False, "handoff roots exceed the lease"
+    if not set(scope.get("exact_paths") or ()).issubset(
+        set(lease.get("exact_paths") or ())
+    ):
+        return False, "handoff paths exceed the lease"
+    if not set(DEFAULT_DENIED_ACTIONS).issubset(set(lease.get("denied_actions") or ())):
+        return False, "delegation lease does not preserve mandatory denials"
+    return True, "matched"
 
 
 def _optional_identifier(value: Any, label: str) -> str | None:

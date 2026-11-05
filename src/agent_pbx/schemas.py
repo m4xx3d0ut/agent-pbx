@@ -399,6 +399,8 @@ class AgentResponse(BaseModel):
     latest_report_action_required: bool = False
     latest_report_suppress_tui_alerts: bool = False
     active_campaign_count: int = 0
+    pending_handoff_approval_count: int = 0
+    oldest_pending_handoff_created_at: float | None = None
 
 
 class OperatorAlertAcknowledgementItem(BaseModel):
@@ -1211,6 +1213,58 @@ class OperatorHandoffPreflightResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     kb_context: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorDelegationLeaseCreateRequest(BaseModel):
+    source_operator_agent_id: str = Field(min_length=1, max_length=120)
+    target_operator_agent_ids: list[str] = Field(min_length=1, max_length=32)
+    campaign_ids: list[str] = Field(min_length=1, max_length=32)
+    workspace_set_digest: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    allowed_action_classes: list[str] = Field(min_length=1, max_length=16)
+    allowed_roots: list[str] = Field(default_factory=list, max_length=64)
+    exact_paths: list[str] = Field(default_factory=list, max_length=256)
+    denied_actions: list[str] = Field(default_factory=list, max_length=64)
+    max_uses: int = Field(default=8, ge=1, le=100)
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    requested_by: str = Field(default="agent-pbx-tui", min_length=1, max_length=255)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorDelegationLeaseDecisionRequest(BaseModel):
+    approve: bool
+    decided_by: str = Field(min_length=1, max_length=255)
+
+
+class OperatorDelegationLeaseRevokeRequest(BaseModel):
+    revoked_by: str = Field(min_length=1, max_length=255)
+
+
+class OperatorDelegationLeaseResponse(BaseModel):
+    lease_id: str
+    source_operator_agent_id: str
+    target_operator_agent_ids: list[str]
+    campaign_ids: list[str]
+    workspace_set_digest: str
+    allowed_action_classes: list[str]
+    allowed_roots: list[str]
+    exact_paths: list[str]
+    denied_actions: list[str]
+    max_uses: int
+    use_count: int
+    uses_remaining: int
+    status: str
+    requested_by: str
+    approved_by: str | None = None
+    created_at: float
+    approved_at: float | None = None
+    expires_at: float
+    revoked_at: float | None = None
+    expired: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorDelegationLeaseListResponse(BaseModel):
+    leases: list[OperatorDelegationLeaseResponse] = Field(default_factory=list)
 
 
 class OperatorForkResponse(BaseModel):
