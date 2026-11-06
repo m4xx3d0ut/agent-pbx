@@ -64,6 +64,11 @@ def test_access_profile_ceiling_and_review_fork_fail_closed(tmp_path: Path) -> N
     with pytest.raises(WorkerBeeAccessPolicyError) as readonly:
         review.set_profile("agent-1", profile="local-deploy", updated_by="test")
     assert readonly.value.code == "WORKERBEE_ACCESS_REVIEW_READONLY"
+    with pytest.raises(WorkerBeeAccessPolicyError) as source_readonly:
+        review.set_policy(
+            "agent-1", source_mode="native-direct", updated_by="test"
+        )
+    assert source_readonly.value.code == "WORKERBEE_ACCESS_REVIEW_READONLY"
 
 
 def test_access_profile_controls_can_be_hidden(tmp_path: Path) -> None:

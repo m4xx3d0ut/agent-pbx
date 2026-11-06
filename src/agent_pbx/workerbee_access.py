@@ -315,6 +315,14 @@ class WorkerBeeAccessPolicyService:
     ) -> dict[str, Any]:
         current = self.get_profile(agent_id)
         posture = self.posture()
+        if current["review_readonly"] and any(
+            value is not None
+            for value in (access_profile, source_mode, execution_lane)
+        ):
+            raise WorkerBeeAccessPolicyError(
+                "WORKERBEE_ACCESS_REVIEW_READONLY",
+                "Review forks cannot change WorkerBee runtime policy axes.",
+            )
         changes: dict[str, Any] = {}
         if access_profile is not None:
             try:
@@ -332,11 +340,6 @@ class WorkerBeeAccessPolicyService:
                 raise WorkerBeeAccessPolicyError(
                     "WORKERBEE_ACCESS_POLICY_LOCKED",
                     "WorkerBee access authority is administrator-managed.",
-                )
-            if current["review_readonly"]:
-                raise WorkerBeeAccessPolicyError(
-                    "WORKERBEE_ACCESS_REVIEW_READONLY",
-                    "Review forks cannot change WorkerBee access authority.",
                 )
             if WORKERBEE_PROFILE_RANK[selected_profile] > WORKERBEE_PROFILE_RANK[
                 posture["profile_ceiling"]

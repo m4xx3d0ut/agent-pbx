@@ -2433,10 +2433,21 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         if not principal_allows_agent(controller, agent_id):
             raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
         try:
+            if (
+                payload.profile is not None
+                and payload.access_profile is not None
+                and payload.profile != payload.access_profile
+            ):
+                raise WorkerBeeAccessPolicyError(
+                    "WORKERBEE_ACCESS_PROFILE_CONFLICT",
+                    "profile and access_profile must match when both are supplied.",
+                )
             result = await asyncio.to_thread(
-                request.app.state.workerbee_access_policy.set_profile,
+                request.app.state.workerbee_access_policy.set_policy,
                 agent_id,
-                profile=payload.profile,
+                access_profile=payload.access_profile or payload.profile,
+                source_mode=payload.source_mode,
+                execution_lane=payload.execution_lane,
                 updated_by=controller.token_id or controller.client_id or "local",
             )
             readback = await asyncio.to_thread(

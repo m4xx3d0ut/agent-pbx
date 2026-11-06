@@ -14117,6 +14117,11 @@ async def test_workerbee_access_screen_explains_restart_boundary() -> None:
         "effective_profile": "observe-local",
         "control_mode": "editable",
         "profile_ceiling": "local-deploy",
+        "source_mode": "snapshot-import",
+        "source_mode_control": "editable",
+        "source_mode_ceiling": ["native-direct", "snapshot-import"],
+        "execution_lane": "interactive-gateway",
+        "execution_lane_control": "read_only",
         "review_readonly": False,
     }
 
@@ -14127,6 +14132,14 @@ async def test_workerbee_access_screen_explains_restart_boundary() -> None:
         await pilot.pause()
 
         assert screen.query_one("#workerbee-access-profile", Select).value == "observe-local"
+        assert screen.query_one("#workerbee-source-mode", Select).value == (
+            "snapshot-import"
+        )
+        assert screen.query_one("#workerbee-execution-lane", Select).disabled is True
+        assert screen.policy_payload() == {
+            "access_profile": "observe-local",
+            "source_mode": "snapshot-import",
+        }
         assert "restart" in str(
             screen.query_one("#workerbee-access-summary", Static).renderable
         ).lower()
@@ -14149,6 +14162,8 @@ async def test_workerbee_access_save_updates_cached_restart_profile(monkeypatch)
             return {
                 "requested_profile": "local-deploy",
                 "effective_profile": "local-deploy",
+                "source_mode_preference": "native-direct",
+                "execution_lane": "interactive-gateway",
                 "changed": True,
             }
 
@@ -14160,8 +14175,11 @@ async def test_workerbee_access_save_updates_cached_restart_profile(monkeypatch)
         agent_id = "agent-1"
 
         @staticmethod
-        def selected_profile() -> str:
-            return "local-deploy"
+        def policy_payload() -> dict[str, str]:
+            return {
+                "access_profile": "local-deploy",
+                "source_mode": "native-direct",
+            }
 
         @staticmethod
         def dismiss() -> None:
@@ -14177,6 +14195,113 @@ async def test_workerbee_access_save_updates_cached_restart_profile(monkeypatch)
         == "local-deploy"
     )
     assert app.workerbee_profile_for_agent(app.agents["agent-1"]) == "local-deploy"
+    assert app.agents["agent-1"]["metadata"]["workerbee_source_mode"] == (
+        "native-direct"
+    )
+
+
+async def test_workerbee_policy_screen_keeps_axes_independent_and_hides_direct_bind_by_default() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    view = {
+        "selected_backend": "oss",
+        "effective_profile": "local-deploy",
+        "control_mode": "editable",
+        "profile_ceiling": "trusted-workbench",
+        "trusted_workbench_label": "Rosie Workbench",
+        "source_mode": "native-direct",
+        "source_mode_control": "editable",
+        "source_mode_ceiling": [
+            "native-direct",
+            "snapshot-import",
+            "managed-clone",
+        ],
+        "execution_lane": "interactive-gateway",
+        "execution_lane_control": "read_only",
+        "review_readonly": False,
+    }
+
+    async with app.run_test() as pilot:
+        await pilot.resize_terminal(120, 40)
+        screen = WorkerBeeAccessScreen(agent_id="agent-1", access_view=view)
+        app.push_screen(screen)
+        await pilot.pause()
+
+        access = screen.query_one("#workerbee-access-profile", Select)
+        source = screen.query_one("#workerbee-source-mode", Select)
+        assert access.value == "local-deploy"
+        assert source.value == "native-direct"
+        assert ("Rosie Workbench", "trusted-workbench") in access._options  # type: ignore[attr-defined]
+        assert "trusted-direct-bind" not in {
+            str(value) for _label, value in source._options  # type: ignore[attr-defined]
+        }
+        assert screen.policy_payload() == {
+            "access_profile": "local-deploy",
+            "source_mode": "native-direct",
+        }
+
+
+async def test_workerbee_policy_screen_review_fork_is_fully_nonmutating() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    view = {
+        "selected_backend": "platform_debug",
+        "effective_profile": "review-readonly",
+        "control_mode": "editable",
+        "profile_ceiling": "trusted-workbench",
+        "source_mode": "snapshot-import",
+        "source_mode_control": "editable",
+        "source_mode_ceiling": ["snapshot-import", "trusted-direct-bind"],
+        "execution_lane": "interactive-gateway",
+        "execution_lane_control": "editable",
+        "review_readonly": True,
+    }
+
+    async with app.run_test() as pilot:
+        screen = WorkerBeeAccessScreen(agent_id="review-1", access_view=view)
+        app.push_screen(screen)
+        await pilot.pause()
+
+        assert screen.query_one("#workerbee-access-profile", Select).disabled is True
+        assert screen.query_one("#workerbee-source-mode", Select).disabled is True
+        assert screen.query_one("#workerbee-execution-lane", Select).disabled is True
+        assert screen.policy_payload() == {}
+
+
+async def test_workerbee_policy_screen_honors_mixed_and_all_hidden_posture() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    mixed = {
+        "selected_backend": "platform_debug",
+        "effective_profile": "local-deploy",
+        "control_mode": "hidden",
+        "profile_ceiling": "local-deploy",
+        "source_mode": "snapshot-import",
+        "source_mode_control": "editable",
+        "source_mode_ceiling": ["snapshot-import"],
+        "execution_lane": "interactive-gateway",
+        "execution_lane_control": "hidden",
+        "review_readonly": False,
+    }
+
+    async with app.run_test() as pilot:
+        screen = WorkerBeeAccessScreen(agent_id="agent-1", access_view=mixed)
+        app.push_screen(screen)
+        await pilot.pause()
+
+        assert not screen.query("#workerbee-access-profile")
+        assert not screen.query("#workerbee-execution-lane")
+        assert screen.policy_payload() == {"source_mode": "snapshot-import"}
+        screen.dismiss()
+        await pilot.pause()
+
+        hidden = {
+            **mixed,
+            "source_mode_control": "hidden",
+        }
+        hidden_screen = WorkerBeeAccessScreen(agent_id="agent-1", access_view=hidden)
+        app.push_screen(hidden_screen)
+        await pilot.pause()
+
+        assert hidden_screen.policy_payload() == {}
+        assert hidden_screen.query_one("#workerbee-access-save", Button).disabled is True
 
 
 def test_workerbee_workspace_palette_commands_are_available(monkeypatch) -> None:
@@ -14193,6 +14318,8 @@ def test_workerbee_workspace_palette_commands_can_be_hidden(monkeypatch) -> None
     monkeypatch.setenv("AGENT_PBX_WORKERBEE_WORKSPACE_CONTROL_MODE", "hidden")
     monkeypatch.setenv("AGENT_PBX_WORKERBEE_SNAPSHOT_CONTROL_MODE", "hidden")
     monkeypatch.setenv("AGENT_PBX_WORKERBEE_ACCESS_CONTROL_MODE", "hidden")
+    monkeypatch.setenv("AGENT_PBX_WORKERBEE_SOURCE_MODE_CONTROL_MODE", "hidden")
+    monkeypatch.setenv("AGENT_PBX_WORKERBEE_EXECUTION_LANE_CONTROL_MODE", "hidden")
     names = built_in_palette_command_names()
     assert "/workerbee workspace" not in names
     assert "/workerbee policy" not in names

@@ -2176,7 +2176,14 @@ class WorkerBeeSnapshotPolicyRequest(BaseModel):
 
 
 class WorkerBeeAccessProfileRequest(BaseModel):
-    profile: Literal["observe-local", "local-deploy"]
+    profile: Literal["observe-local", "local-deploy", "trusted-workbench"] | None = None
+    access_profile: Literal[
+        "observe-local", "local-deploy", "trusted-workbench"
+    ] | None = None
+    source_mode: Literal[
+        "native-direct", "snapshot-import", "trusted-direct-bind", "managed-clone"
+    ] | None = None
+    execution_lane: Literal["interactive-gateway", "controlled-run"] | None = None
 
 
 class WorkerBeeControlledRunPreflightRequest(BaseModel):

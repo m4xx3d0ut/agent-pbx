@@ -1035,17 +1035,48 @@ def test_gateway_api_requires_explicit_access_profile_and_restart(tmp_path: Path
         assert contract["reviewed_optional_tools"] == []
         assert contract["unknown_backend_tool_policy"] == "quarantine-deny-and-warn"
 
+        empty = client.put(
+            "/v2/agents/demo-agent/workerbee/access-profile",
+            json={},
+        )
+        assert empty.status_code == 409
+        assert empty.json()["detail"]["code"] == "WORKERBEE_POLICY_EMPTY_UPDATE"
+
         saved = client.put(
             "/v2/agents/demo-agent/workerbee/access-profile",
-            json={"profile": "local-deploy"},
+            json={
+                "access_profile": "local-deploy",
+                "source_mode": "native-direct",
+            },
         )
         assert saved.status_code == 200
         assert saved.json()["effective_profile"] == "local-deploy"
+        assert saved.json()["source_mode"] == "native-direct"
+        assert saved.json()["execution_lane"] == "interactive-gateway"
         assert saved.json()["requires_restart_on_change"] is True
 
         agent = app.state.store.get_agent("demo-agent")
         assert agent is not None
         assert agent["metadata"]["workerbee_mcp_profile"] == "local-deploy"
+        assert agent["metadata"]["workerbee_source_mode"] == "native-direct"
+
+        direct_bind = client.put(
+            "/v2/agents/demo-agent/workerbee/access-profile",
+            json={"source_mode": "trusted-direct-bind"},
+        )
+        assert direct_bind.status_code == 409
+        assert direct_bind.json()["detail"]["code"] == (
+            "WORKERBEE_SOURCE_MODE_CEILING"
+        )
+
+        controlled = client.put(
+            "/v2/agents/demo-agent/workerbee/access-profile",
+            json={"execution_lane": "controlled-run"},
+        )
+        assert controlled.status_code == 409
+        assert controlled.json()["detail"]["code"] == (
+            "WORKERBEE_CONTROLLED_RUN_AUTHORITY_SEPARATE"
+        )
 
         app.state.workerbee_runtime.observe(
             {

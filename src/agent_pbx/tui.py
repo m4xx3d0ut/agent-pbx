@@ -2591,11 +2591,13 @@ def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME
         == "hidden"
     ):
         names.discard("/workerbee content")
-    if (
-        str(os.getenv("AGENT_PBX_WORKERBEE_ACCESS_CONTROL_MODE") or "")
-        .strip()
-        .lower()
-        == "hidden"
+    if all(
+        str(os.getenv(name) or "").strip().lower() == "hidden"
+        for name in (
+            "AGENT_PBX_WORKERBEE_ACCESS_CONTROL_MODE",
+            "AGENT_PBX_WORKERBEE_SOURCE_MODE_CONTROL_MODE",
+            "AGENT_PBX_WORKERBEE_EXECUTION_LANE_CONTROL_MODE",
+        )
     ):
         names.discard("/workerbee access")
     if (
@@ -5229,44 +5231,149 @@ class WorkerBeeAccessScreen(ModalScreen[None]):
         self.access_view = access_view
 
     def compose(self) -> ComposeResult:
-        read_only = (
-            str(self.access_view.get("control_mode") or "editable") != "editable"
-            or bool(self.access_view.get("review_readonly"))
+        review_readonly = bool(self.access_view.get("review_readonly"))
+        access_control = str(self.access_view.get("control_mode") or "editable")
+        source_control = str(
+            self.access_view.get("source_mode_control") or "read_only"
         )
+        lane_control = str(
+            self.access_view.get("execution_lane_control") or "read_only"
+        )
+        access_read_only = access_control != "editable" or review_readonly
+        source_read_only = source_control != "editable" or review_readonly
+        access_rank = {
+            "observe-local": 0,
+            "local-deploy": 1,
+            "trusted-workbench": 2,
+        }
+        ceiling = str(self.access_view.get("profile_ceiling") or "observe-local")
+        ceiling_rank = access_rank.get(ceiling, 0)
+        trusted_label = str(
+            self.access_view.get("trusted_workbench_label") or "Trusted Workbench"
+        )
+        access_options = [
+            ("Inspect runtime state", "observe-local"),
+            ("Build and deploy in this workspace", "local-deploy"),
+            (trusted_label, "trusted-workbench"),
+        ]
+        access_options = [
+            option
+            for option in access_options
+            if access_rank.get(str(option[1]), 99) <= ceiling_rank
+        ]
+        if review_readonly:
+            access_options = [("Review read-only", "review-readonly")]
+        source_labels = {
+            "native-direct": "Native direct checkout",
+            "snapshot-import": "Content-addressed snapshot import",
+            "trusted-direct-bind": "Trusted direct bind",
+            "managed-clone": "Managed appliance clone",
+        }
+        source_ceiling = self.access_view.get("source_mode_ceiling")
+        if not isinstance(source_ceiling, list):
+            source_ceiling = []
+        source_options = [
+            (source_labels.get(str(mode), str(mode)), str(mode))
+            for mode in source_ceiling
+        ]
+        selected_source = str(
+            self.access_view.get("source_mode")
+            or self.access_view.get("source_mode_preference")
+            or "snapshot-import"
+        )
+        if selected_source not in {str(value) for _label, value in source_options}:
+            source_options.append(
+                (source_labels.get(selected_source, selected_source), selected_source)
+            )
+        selected_profile = str(
+            self.access_view.get("effective_profile") or "observe-local"
+        )
+        if review_readonly:
+            selected_profile = "review-readonly"
         with Vertical(id="workerbee-access-panel"):
-            yield Static("WorkerBee Access", id="workerbee-access-title")
+            yield Static("WorkerBee Runtime Policy", id="workerbee-access-title")
             yield Static(
-                f"ceiling={self.access_view.get('profile_ceiling') or '-'} · "
-                f"control={self.access_view.get('control_mode') or '-'}",
+                f"backend={self.access_view.get('selected_backend') or 'unselected'} · "
+                f"access ceiling={ceiling} · access={access_control} · "
+                f"source={source_control} · lane={lane_control}",
                 id="workerbee-access-posture",
             )
-            yield Select(
-                [
-                    ("Inspect runtime state", "observe-local"),
-                    ("Build and deploy in this workspace", "local-deploy"),
-                ],
-                value=(
-                    "observe-local"
-                    if self.access_view.get("effective_profile") == "review-readonly"
-                    else str(self.access_view.get("effective_profile") or "observe-local")
-                ),
-                id="workerbee-access-profile",
-                disabled=read_only,
-            )
+            tool_contract = self.access_view.get("tool_surface_contract")
+            if isinstance(tool_contract, dict):
+                requested = tool_contract.get("required_tools")
+                optional = tool_contract.get("reviewed_optional_tools")
+                yield Static(
+                    f"requested={len(requested) if isinstance(requested, list) else 0} · "
+                    f"backend optional={len(optional) if isinstance(optional, list) else 0} · "
+                    "unknown=quarantined/denied · effective catalog: run doctor",
+                    id="workerbee-tool-surface-summary",
+                )
+            if access_control != "hidden":
+                yield Select(
+                    access_options,
+                    value=selected_profile,
+                    id="workerbee-access-profile",
+                    disabled=access_read_only,
+                )
+            if source_control != "hidden":
+                yield Select(
+                    source_options,
+                    value=selected_source,
+                    id="workerbee-source-mode",
+                    disabled=source_read_only,
+                )
+            if lane_control != "hidden":
+                yield Select(
+                    [
+                        ("Ordinary generation-bound gateway", "interactive-gateway"),
+                        ("Controlled run (root-owned approval)", "controlled-run"),
+                    ],
+                    value=str(
+                        self.access_view.get("execution_lane")
+                        or "interactive-gateway"
+                    ),
+                    id="workerbee-execution-lane",
+                    disabled=True,
+                )
             yield Static(
                 (
                     "Review forks remain read-only."
-                    if self.access_view.get("review_readonly")
-                    else "A changed profile applies after a safe Agent/Operator restart or resume."
+                    if review_readonly
+                    else "Access and source changes apply after a safe Agent/Operator restart or resume. Controlled runs require separate root approval."
                 ),
                 id="workerbee-access-summary",
             )
             with Horizontal(id="workerbee-access-actions"):
-                yield Button("Save", id="workerbee-access-save", disabled=read_only, variant="primary")
+                yield Button(
+                    "Save",
+                    id="workerbee-access-save",
+                    disabled=access_read_only and source_read_only,
+                    variant="primary",
+                )
                 yield Button("Close", id="workerbee-access-close")
 
     def selected_profile(self) -> str:
-        return str(self.query_one("#workerbee-access-profile", Select).value)
+        if str(self.access_view.get("control_mode") or "editable") == "hidden":
+            return str(self.access_view.get("effective_profile") or "observe-local")
+        selected = self.query_one("#workerbee-access-profile", Select)
+        return str(selected.value)
+
+    def policy_payload(self) -> dict[str, str]:
+        payload: dict[str, str] = {}
+        if (
+            str(self.access_view.get("control_mode") or "editable") == "editable"
+            and not self.access_view.get("review_readonly")
+        ):
+            access = self.query_one("#workerbee-access-profile", Select)
+            payload["access_profile"] = str(access.value)
+        if (
+            str(self.access_view.get("source_mode_control") or "read_only")
+            == "editable"
+            and not self.access_view.get("review_readonly")
+        ):
+            source = self.query_one("#workerbee-source-mode", Select)
+            payload["source_mode"] = str(source.value)
+        return payload
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
@@ -8631,11 +8738,13 @@ class AgentPBXTUI(App[None]):
             .lower()
             == "hidden"
         )
-        self.workerbee_access_controls_hidden = (
-            str(os.getenv("AGENT_PBX_WORKERBEE_ACCESS_CONTROL_MODE") or "")
-            .strip()
-            .lower()
-            == "hidden"
+        self.workerbee_access_controls_hidden = all(
+            str(os.getenv(name) or "").strip().lower() == "hidden"
+            for name in (
+                "AGENT_PBX_WORKERBEE_ACCESS_CONTROL_MODE",
+                "AGENT_PBX_WORKERBEE_SOURCE_MODE_CONTROL_MODE",
+                "AGENT_PBX_WORKERBEE_EXECUTION_LANE_CONTROL_MODE",
+            )
         )
         self.pull_request_status_by_agent: dict[str, dict[str, Any]] = {}
         self.pull_requests_by_agent: dict[str, dict[int, dict[str, Any]]] = {}
@@ -40290,7 +40399,14 @@ class AgentPBXTUI(App[None]):
             if isinstance(workspace_policy.get("access"), dict)
             else {}
         )
-        if access_summary.get("control_mode") == "hidden":
+        if all(
+            str(access_summary.get(key) or "") == "hidden"
+            for key in (
+                "control_mode",
+                "source_mode_control",
+                "execution_lane_control",
+            )
+        ):
             self.workerbee_access_controls_hidden = True
         access_button = self.query_one_or_none("#workerbee-access", Button)
         if access_button is not None:
@@ -40560,7 +40676,14 @@ class AgentPBXTUI(App[None]):
         )
         response.raise_for_status()
         view = dict(response.json())
-        if view.get("control_mode") == "hidden":
+        if all(
+            str(view.get(key) or "") == "hidden"
+            for key in (
+                "control_mode",
+                "source_mode_control",
+                "execution_lane_control",
+            )
+        ):
             self.workerbee_access_controls_hidden = True
         access_button = self.query_one_or_none("#workerbee-access", Button)
         if access_button is not None:
@@ -40573,9 +40696,16 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             self.notify(f"WorkerBee access policy failed: {exc}", severity="error")
             return
-        if view.get("control_mode") == "hidden":
+        if all(
+            str(view.get(key) or "") == "hidden"
+            for key in (
+                "control_mode",
+                "source_mode_control",
+                "execution_lane_control",
+            )
+        ):
             self.notify(
-                "WorkerBee access controls are hidden by administrator policy.",
+                "WorkerBee runtime policy controls are hidden by administrator policy.",
                 severity="warning",
             )
             return
@@ -40588,7 +40718,7 @@ class AgentPBXTUI(App[None]):
         try:
             response = await self.api_client().put(
                 f"/v2/agents/{quote(screen.agent_id, safe='')}/workerbee/access-profile",
-                json={"profile": screen.selected_profile()},
+                json=screen.policy_payload(),
                 headers=auth_headers(self.token),
                 timeout=15,
             )
@@ -40599,12 +40729,17 @@ class AgentPBXTUI(App[None]):
             return
         cached_agent = self.agents.get(screen.agent_id)
         requested_profile = str(result.get("requested_profile") or "").strip()
-        if isinstance(cached_agent, dict) and requested_profile:
+        source_mode = str(result.get("source_mode_preference") or "").strip()
+        execution_lane = str(result.get("execution_lane") or "").strip()
+        if isinstance(cached_agent, dict):
             cached_metadata = self.agent_metadata(cached_agent)
-            cached_agent["metadata"] = {
-                **cached_metadata,
-                CALLER_WORKERBEE_PROFILE_METADATA_KEY: requested_profile,
-            }
+            if requested_profile:
+                cached_metadata[CALLER_WORKERBEE_PROFILE_METADATA_KEY] = requested_profile
+            if source_mode:
+                cached_metadata["workerbee_source_mode"] = source_mode
+            if execution_lane:
+                cached_metadata["workerbee_execution_lane"] = execution_lane
+            cached_agent["metadata"] = cached_metadata
         screen.dismiss()
         if result.get("changed"):
             self.notify(
