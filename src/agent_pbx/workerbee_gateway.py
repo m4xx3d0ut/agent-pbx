@@ -45,54 +45,66 @@ from .workerbee_workspace import (
     WorkerBeeWorkspaceService,
     configured_workerbee_workspace_include_paths,
 )
-
-WORKERBEE_GATEWAY_API_VERSION = "agent-pbx.workerbee-gateway/v1"
-WORKERBEE_GATEWAY_TOKEN_ENV = "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN"
-WORKERBEE_PROFILE_OBSERVE = "observe-local"
-WORKERBEE_PROFILE_REVIEW = "review-readonly"
-WORKERBEE_PROFILE_LOCAL_DEPLOY = "local-deploy"
-
-WORKERBEE_OBSERVE_TOOLS = (
-    "workerbee_v1_capabilities",
-    "workerbee_v1_runtime_policy_status",
-    "workerbee_v1_session_start",
-    "workerbee_v1_project_runbook_status",
-    "workerbee_v1_project_status",
-    "workerbee_v1_secret_policy_status",
-    "workerbee_v1_profile_workload_status",
-    "workerbee_v1_edge_link_status",
-    "workerbee_v1_logs",
+from .workerbee_modes import (
+    WORKERBEE_EXECUTION_INTERACTIVE,
+    WORKERBEE_PROFILE_LOCAL_DEPLOY,
+    WORKERBEE_PROFILE_OBSERVE,
+    WORKERBEE_PROFILE_REVIEW,
+    WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+    WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND,
+    WorkerBeeModeError,
+    capability_families_for_profile,
+    canonical_workerbee_execution_lane,
+    reviewed_tools_for_access_profile,
+    resolve_workerbee_tool_surface,
+    tools_for_access_profile,
 )
-WORKERBEE_LOCAL_DEPLOY_TOOLS = (
-    *WORKERBEE_OBSERVE_TOOLS,
-    "workerbee_v1_image_build",
-    "workerbee_v1_manifest_prepare",
-    "workerbee_v1_manifest_validate",
-    "workerbee_v1_manifest_deploy_local",
-    "workerbee_v1_workload_restart",
-    "workerbee_v1_ingress_status",
-    "workerbee_v1_ingress_route_apply",
-    "workerbee_v1_ingress_probe",
-    "workerbee_v1_security_review_project",
+
+WORKERBEE_GATEWAY_API_VERSION = "agent-pbx.workerbee-gateway/v2"
+WORKERBEE_GATEWAY_LEGACY_API_VERSION = "agent-pbx.workerbee-gateway/v1"
+WORKERBEE_GATEWAY_TOKEN_ENV = "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN"
+WORKERBEE_OBSERVE_TOOLS = tools_for_access_profile(WORKERBEE_PROFILE_OBSERVE)
+WORKERBEE_LOCAL_DEPLOY_TOOLS = tools_for_access_profile(
+    WORKERBEE_PROFILE_LOCAL_DEPLOY
 )
 WORKERBEE_PROFILE_TOOLS = {
-    WORKERBEE_PROFILE_OBSERVE: WORKERBEE_OBSERVE_TOOLS,
-    WORKERBEE_PROFILE_REVIEW: WORKERBEE_OBSERVE_TOOLS,
-    WORKERBEE_PROFILE_LOCAL_DEPLOY: WORKERBEE_LOCAL_DEPLOY_TOOLS,
+    profile: reviewed_tools_for_access_profile(profile, "platform_debug")
+    for profile in (
+        WORKERBEE_PROFILE_OBSERVE,
+        WORKERBEE_PROFILE_REVIEW,
+        WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+    )
 }
 WORKERBEE_MUTATING_TOOLS = frozenset(
     {
         "workerbee_v1_session_start",
+        "workerbee_v1_project_mode_set",
+        "workerbee_v1_project_start",
+        "workerbee_v1_project_stop",
+        "workerbee_v1_project_runbook_update",
+        "workerbee_v1_project_runbook_import",
+        "workerbee_v1_profile_start",
+        "workerbee_v1_profile_stop",
+        "workerbee_v1_profile_validate",
+        "workerbee_v1_profile_workload_validate",
+        "workerbee_v1_edge_link_start",
+        "workerbee_v1_edge_link_stop",
+        "workerbee_v1_edge_link_validate",
         "workerbee_v1_image_build",
         "workerbee_v1_manifest_prepare",
         "workerbee_v1_manifest_deploy_local",
         "workerbee_v1_workload_restart",
         "workerbee_v1_ingress_route_apply",
+        "workerbee_v1_exec",
+        "workerbee_v1_project_runbook_export",
+        "workerbee_v1_bundle_export",
     }
 )
 WORKERBEE_PROJECT_SCOPED_TOOLS = frozenset(
     tool
-    for tool in WORKERBEE_LOCAL_DEPLOY_TOOLS
+    for tools in WORKERBEE_PROFILE_TOOLS.values()
+    for tool in tools
     if tool
     not in {
         "workerbee_v1_capabilities",
@@ -127,7 +139,11 @@ class WorkerBeeGatewayLease:
     agent_id: str
     codex_session_id: str
     profile: str
+    capability_families: tuple[str, ...]
+    requested_tools: tuple[str, ...]
     allowed_tools: tuple[str, ...]
+    source_mode: str
+    execution_lane: str
     backend: str
     backend_instance_id: str
     backend_generation: int
@@ -146,6 +162,8 @@ class WorkerBeeGatewayLease:
         return {
             "api_version": WORKERBEE_GATEWAY_API_VERSION,
             **asdict(self),
+            "capability_families": list(self.capability_families),
+            "requested_tools": list(self.requested_tools),
             "allowed_tools": list(self.allowed_tools),
         }
 
@@ -207,14 +225,23 @@ class WorkerBeeGatewayService:
         codex_session_id: str,
         profile: str,
         workspace_binding_id: str,
+        execution_lane: str = WORKERBEE_EXECUTION_INTERACTIVE,
         ttl_seconds: float | None = None,
     ) -> tuple[WorkerBeeGatewayLease, str]:
         selected_profile = str(profile or "").strip().lower()
-        allowed_tools = WORKERBEE_PROFILE_TOOLS.get(selected_profile)
-        if allowed_tools is None:
+        try:
+            requested_tools = tools_for_access_profile(selected_profile)
+            families = capability_families_for_profile(selected_profile)
+            selected_lane = canonical_workerbee_execution_lane(execution_lane)
+        except WorkerBeeModeError as exc:
             raise WorkerBeeGatewayError(
-                "WORKERBEE_PROFILE_UNSUPPORTED",
-                f"Unsupported WorkerBee access profile: {profile or '-'}",
+                exc.code, exc.message, exc.remediation
+            ) from exc
+        if selected_lane != WORKERBEE_EXECUTION_INTERACTIVE:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_GATEWAY_EXECUTION_LANE_DENIED",
+                "Gateway leases use only the interactive-gateway lane.",
+                "Request controlled-run through its root-owned immutable workflow.",
             )
         runtime = self.runtime_registry.selected()
         if runtime is None:
@@ -223,6 +250,9 @@ class WorkerBeeGatewayService:
                 "No verified WorkerBee runtime is selected.",
                 "Refresh WorkerBee runtime posture before issuing a session binding.",
             )
+        allowed_tools = reviewed_tools_for_access_profile(
+            selected_profile, runtime.backend
+        )
         binding = self.workspace_service.load(workspace_binding_id)
         try:
             self.workspace_service.verify_runtime(binding, runtime)
@@ -238,7 +268,11 @@ class WorkerBeeGatewayService:
             agent_id=self._identity(agent_id, "agent_id"),
             codex_session_id=str(codex_session_id or "").strip(),
             profile=selected_profile,
+            capability_families=tuple(families),
+            requested_tools=tuple(requested_tools),
             allowed_tools=tuple(allowed_tools),
+            source_mode=binding.source_mode,
+            execution_lane=selected_lane,
             backend=runtime.backend,
             backend_instance_id=runtime.instance_id,
             backend_generation=runtime.generation,
@@ -268,11 +302,36 @@ class WorkerBeeGatewayService:
                 "WORKERBEE_GATEWAY_LEASE_INVALID",
                 "WorkerBee gateway lease is unreadable.",
             ) from exc
-        if payload.pop("api_version", "") != WORKERBEE_GATEWAY_API_VERSION:
+        api_version = payload.pop("api_version", "")
+        if api_version == WORKERBEE_GATEWAY_LEGACY_API_VERSION:
+            profile = str(payload.get("profile") or "")
+            try:
+                payload["capability_families"] = capability_families_for_profile(
+                    profile
+                )
+                payload["requested_tools"] = tuple(payload.get("allowed_tools") or ())
+            except WorkerBeeModeError as exc:
+                raise WorkerBeeGatewayError(
+                    "WORKERBEE_GATEWAY_LEASE_INVALID",
+                    "Legacy WorkerBee gateway lease has an unknown profile.",
+                ) from exc
+            try:
+                legacy_binding = self.workspace_service.load(
+                    str(payload.get("workspace_binding_id") or "")
+                )
+                payload["source_mode"] = legacy_binding.source_mode
+            except WorkerBeeWorkspaceError as exc:
+                raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
+            payload["execution_lane"] = WORKERBEE_EXECUTION_INTERACTIVE
+        elif api_version != WORKERBEE_GATEWAY_API_VERSION:
             raise WorkerBeeGatewayError(
                 "WORKERBEE_GATEWAY_LEASE_VERSION_UNSUPPORTED",
                 "WorkerBee gateway lease has an unsupported version.",
             )
+        payload["capability_families"] = tuple(
+            payload.get("capability_families") or ()
+        )
+        payload["requested_tools"] = tuple(payload.get("requested_tools") or ())
         payload["allowed_tools"] = tuple(payload.get("allowed_tools") or ())
         payload.setdefault("source_project", str(payload.get("project") or ""))
         payload.setdefault("working_subpath", ".")
@@ -324,6 +383,11 @@ class WorkerBeeGatewayService:
                 "Restart or resume the session through Agent PBX after reviewing its workspace binding.",
             )
         binding = self.workspace_service.load(lease.workspace_binding_id)
+        if binding.source_mode != lease.source_mode:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_SOURCE_MODE_DRIFT",
+                "Gateway lease and workspace binding source modes differ.",
+            )
         try:
             self.workspace_service.verify_runtime(binding, runtime)
         except Exception as exc:
@@ -379,6 +443,26 @@ class WorkerBeeGatewayService:
                 f"WorkerBee tool {tool_name!r} is not allowed by profile {lease.profile!r}.",
             )
         binding = self.workspace_service.load(lease.workspace_binding_id)
+        if (
+            binding.source_mode == WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND
+            and (
+                tool_name == "workerbee_v1_session_start"
+                or tool_name in WORKERBEE_PROJECT_SCOPED_TOOLS
+            )
+        ):
+            runtime = self.runtime_registry.selected()
+            if runtime is None:
+                raise WorkerBeeGatewayError(
+                    "WORKERBEE_RUNTIME_UNSELECTED",
+                    "No verified WorkerBee runtime is selected.",
+                )
+            try:
+                # The workspace service owns both the approved roots and the
+                # administrator ceiling.  Callers cannot substitute either;
+                # every operation-time check derives them from service state.
+                self.workspace_service.revalidate_trusted_direct(binding, runtime)
+            except WorkerBeeWorkspaceError as exc:
+                raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
         supplied = dict(arguments or {})
         supplied_project = str(supplied.get("project") or "").strip()
         if (
@@ -403,6 +487,39 @@ class WorkerBeeGatewayService:
         if tool_name in WORKERBEE_PROJECT_SCOPED_TOOLS:
             supplied.setdefault("project", lease.project)
         return supplied
+
+    def resolve_tool_surface(
+        self,
+        lease: WorkerBeeGatewayLease,
+        backend_tools: tuple[str, ...] | list[str],
+    ) -> tuple[str, ...]:
+        surface = resolve_workerbee_tool_surface(
+            lease.profile,
+            backend_tools,
+            backend=lease.backend,
+        )
+        if tuple(surface.requested_families) != tuple(lease.capability_families):
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_CAPABILITY_FAMILY_DRIFT",
+                "Gateway lease capability families drifted from the reviewed profile registry.",
+            )
+        if tuple(surface.requested_tools) != tuple(lease.requested_tools):
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_TOOL_REGISTRY_DRIFT",
+                "Gateway lease tool registry drifted from the reviewed profile registry.",
+            )
+        if not surface.compatible:
+            detail = surface.public_dict()
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_TOOL_SURFACE_INCOMPATIBLE",
+                (
+                    "Selected WorkerBee backend tool surface is incompatible: "
+                    f"missing={detail['missing_tools']}; "
+                    f"high_risk_allowed={sorted(set(detail['effective_tools']) & set(detail['denied_high_risk_tools']))}."
+                ),
+                str(detail["remediation"]),
+            )
+        return tuple(surface.effective_tools)
 
     def transition_workspace(
         self,
@@ -671,7 +788,9 @@ class WorkerBeeGatewayService:
         current = self.load(lease.lease_id)
         runtime, binding = self._refresh_context(current)
         if (
-            current.profile != WORKERBEE_PROFILE_LOCAL_DEPLOY
+            current.profile
+            not in {WORKERBEE_PROFILE_LOCAL_DEPLOY, WORKERBEE_PROFILE_TRUSTED_WORKBENCH}
+            or binding.source_mode == WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND
             or binding.workspace_strategy == WORKERBEE_WORKSPACE_DIRECT_HOST
         ):
             return current, binding, False
@@ -681,6 +800,8 @@ class WorkerBeeGatewayService:
             project=binding.project,
             source_root=binding.source_root,
             include_paths=include_paths,
+            source_mode=binding.source_mode,
+            source_mode_version=binding.source_mode_version,
         )
         if expected_binding_id == binding.binding_id:
             return current, binding, False
@@ -690,6 +811,7 @@ class WorkerBeeGatewayService:
                 project=binding.project,
                 source_root=binding.source_root,
                 include_paths=include_paths,
+                source_mode=binding.source_mode,
             )
             self.workspace_service.verify_runtime(refreshed_binding, runtime)
             verified_binding_id = self.workspace_service.expected_binding_id(
@@ -697,6 +819,8 @@ class WorkerBeeGatewayService:
                 project=binding.project,
                 source_root=binding.source_root,
                 include_paths=include_paths,
+                source_mode=binding.source_mode,
+                source_mode_version=binding.source_mode_version,
             )
         except WorkerBeeWorkspaceError as exc:
             raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
@@ -737,7 +861,9 @@ class WorkerBeeGatewayService:
         current = self.load(lease.lease_id)
         runtime, binding = self._refresh_context(current)
         if (
-            current.profile != WORKERBEE_PROFILE_LOCAL_DEPLOY
+            current.profile
+            not in {WORKERBEE_PROFILE_LOCAL_DEPLOY, WORKERBEE_PROFILE_TRUSTED_WORKBENCH}
+            or binding.source_mode == WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND
             or binding.workspace_strategy == WORKERBEE_WORKSPACE_DIRECT_HOST
         ):
             return
@@ -748,6 +874,8 @@ class WorkerBeeGatewayService:
                 project=binding.project,
                 source_root=binding.source_root,
                 include_paths=include_paths,
+                source_mode=binding.source_mode,
+                source_mode_version=binding.source_mode_version,
             )
         except WorkerBeeWorkspaceError as exc:
             raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
@@ -912,8 +1040,13 @@ class WorkerBeeGatewayProxy:
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.list_tools()
-        allowed = set(lease.allowed_tools)
-        return [tool for tool in result.tools if tool.name in allowed]
+        effective = set(
+            self.service.resolve_tool_surface(
+                lease,
+                [tool.name for tool in result.tools],
+            )
+        )
+        return [tool for tool in result.tools if tool.name in effective]
 
     async def call_tool(
         self,

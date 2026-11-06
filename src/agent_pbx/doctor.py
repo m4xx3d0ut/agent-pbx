@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass
 import importlib.metadata
 import json
@@ -28,7 +29,7 @@ from .tmux_binary import (
 )
 from .runtime_tmux import RUNTIME_TMUX_SOCKET_ENV, tmux_socket_from_environment
 from .ui.theme import terminal_color_depth
-from .workerbee_mcp import inspect_workerbee_switcher
+from .workerbee_mcp import inspect_workerbee_mcp, inspect_workerbee_switcher
 from .workerbee_runtime import (
     WORKERBEE_BACKEND_PLATFORM_DEBUG,
     WORKERBEE_BACKEND_USER_APPLIANCE,
@@ -46,6 +47,10 @@ from .workerbee_controlled_run import (
     WorkerBeeControlledRunError,
     controlled_run_posture,
     load_controlled_run_profiles,
+)
+from .workerbee_modes import (
+    WORKERBEE_PUBLIC_DEFAULT_ACCESS_PROFILE,
+    resolve_workerbee_tool_surface,
 )
 
 
@@ -157,6 +162,7 @@ def run_platform_doctor(
     checks.append(_workerbee_check(config, which, timeout))
     checks.append(_workerbee_switcher_check(which, timeout))
     checks.append(_workerbee_runtime_binding_check(config, which, timeout))
+    checks.append(_workerbee_tool_surface_runtime_check(config, timeout))
     checks.append(_workerbee_workspace_policy_check(config))
     checks.append(_workerbee_controlled_run_check())
     checks.append(_joplin_check(config, timeout, probe_services=probe_services))
@@ -831,6 +837,100 @@ def _workerbee_runtime_binding_check(
         "pass",
         f"{selected.backend} generation {selected.generation} ready",
         detail=" · ".join(details),
+    )
+
+
+def _workerbee_tool_surface_check(
+    *,
+    profile: str,
+    backend: str,
+    advertised_tools: tuple[str, ...] | list[str],
+) -> DoctorCheck:
+    """Render requested/effective/quarantined WorkerBee catalog posture."""
+
+    surface = resolve_workerbee_tool_surface(
+        profile,
+        advertised_tools,
+        backend=backend,
+    )
+    detail = (
+        f"requested={len(surface.requested_tools)}; "
+        f"effective={len(surface.effective_tools)}; "
+        f"missing={list(surface.missing_tools)}; "
+        f"quarantined={list(surface.quarantined_backend_tools)}"
+    )
+    if not surface.compatible:
+        return DoctorCheck(
+            "workerbee-tool-surface",
+            "warn",
+            "selected WorkerBee backend is missing required profile tools",
+            detail=detail,
+            remediation=(
+                "Select a compatible access profile/backend or install a WorkerBee "
+                "build exposing every required reviewed tool."
+            ),
+        )
+    if not surface.catalog_fully_reviewed:
+        return DoctorCheck(
+            "workerbee-tool-surface",
+            "warn",
+            "unreviewed WorkerBee backend tools are quarantined",
+            detail=detail,
+            remediation=(
+                "Keep the extensions quarantined or add them to a reviewed, "
+                "backend-specific optional capability registry before use."
+            ),
+        )
+    return DoctorCheck(
+        "workerbee-tool-surface",
+        "pass",
+        "WorkerBee requested and effective tool surfaces are compatible",
+        detail=detail,
+    )
+
+
+def _workerbee_tool_surface_runtime_check(
+    config: MCPDaemonConfig,
+    timeout: float,
+) -> DoctorCheck:
+    """Probe the selected backend catalog and expose effective/quarantine posture."""
+
+    selected = WorkerBeeRuntimeRegistry(
+        config.resolved_db_path.parent / "workerbee-runtime"
+    ).selected()
+    if selected is None:
+        return DoctorCheck(
+            "workerbee-tool-surface",
+            "warn",
+            "no selected WorkerBee runtime is available for tool-surface diagnostics",
+            remediation="Select and record a WorkerBee backend, then rerun doctor.",
+        )
+    try:
+        preflight = asyncio.run(
+            inspect_workerbee_mcp(
+                selected.endpoint,
+                timeout_seconds=max(0.1, timeout),
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - doctor normalizes diagnostics
+        return DoctorCheck(
+            "workerbee-tool-surface",
+            "warn",
+            f"WorkerBee tool catalog probe failed ({type(exc).__name__})",
+            remediation="Verify the selected WorkerBee endpoint and rerun doctor.",
+        )
+    if not preflight.ready:
+        return DoctorCheck(
+            "workerbee-tool-surface",
+            "warn",
+            preflight.message,
+            detail=f"backend={selected.backend}; endpoint={selected.endpoint}",
+            remediation=preflight.remediation,
+        )
+    return _workerbee_tool_surface_check(
+        profile=WORKERBEE_PUBLIC_DEFAULT_ACCESS_PROFILE,
+        backend=selected.backend,
+        advertised_tools=list(preflight.advertised_tools),
     )
 
 

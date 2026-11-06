@@ -35,15 +35,34 @@ WORKERBEE_FAMILY_EXPORT = "export"
 WORKERBEE_CAPABILITY_FAMILY_TOOLS: Mapping[str, tuple[str, ...]] = {
     WORKERBEE_FAMILY_RUNTIME_OBSERVE: (
         "workerbee_v1_capabilities",
-        "workerbee_v1_runtime_policy_status",
+        "workerbee_v1_projects",
+        "workerbee_v1_project_mode_get",
         "workerbee_v1_project_runbook_status",
         "workerbee_v1_project_status",
+        "workerbee_v1_profile_list",
+        "workerbee_v1_profile_status",
         "workerbee_v1_secret_policy_status",
         "workerbee_v1_profile_workload_status",
         "workerbee_v1_edge_link_status",
+        "workerbee_v1_ingress_status",
+        "workerbee_v1_trust_status",
     ),
     WORKERBEE_FAMILY_LOCAL_EXEC: ("workerbee_v1_exec",),
-    WORKERBEE_FAMILY_PROJECT_LIFECYCLE: ("workerbee_v1_session_start",),
+    WORKERBEE_FAMILY_PROJECT_LIFECYCLE: (
+        "workerbee_v1_session_start",
+        "workerbee_v1_project_mode_set",
+        "workerbee_v1_project_start",
+        "workerbee_v1_project_stop",
+        "workerbee_v1_project_runbook_update",
+        "workerbee_v1_project_runbook_import",
+        "workerbee_v1_profile_start",
+        "workerbee_v1_profile_stop",
+        "workerbee_v1_profile_validate",
+        "workerbee_v1_profile_workload_validate",
+        "workerbee_v1_edge_link_start",
+        "workerbee_v1_edge_link_stop",
+        "workerbee_v1_edge_link_validate",
+    ),
     WORKERBEE_FAMILY_BUILD_DEPLOY: (
         "workerbee_v1_image_build",
         "workerbee_v1_manifest_prepare",
@@ -52,18 +71,31 @@ WORKERBEE_CAPABILITY_FAMILY_TOOLS: Mapping[str, tuple[str, ...]] = {
         "workerbee_v1_workload_restart",
     ),
     WORKERBEE_FAMILY_INGRESS: (
-        "workerbee_v1_ingress_status",
-        "workerbee_v1_ingress_route_apply",
         "workerbee_v1_ingress_probe",
     ),
     WORKERBEE_FAMILY_LOGS: ("workerbee_v1_logs",),
-    WORKERBEE_FAMILY_SECURITY: ("workerbee_v1_security_review_project",),
-    # WorkerBee private/appliance builds may expose this reviewed name.  OSS
-    # installations that do not implement it report an explicit incompatibility;
-    # the gateway never substitutes a wildcard or an unreviewed backend tool.
-    WORKERBEE_FAMILY_EXPORT: ("workerbee_v1_project_export",),
+    WORKERBEE_FAMILY_SECURITY: (
+        "workerbee_v1_security_assess",
+        "workerbee_v1_security_review_project",
+    ),
+    WORKERBEE_FAMILY_EXPORT: (
+        "workerbee_v1_project_runbook_export",
+        "workerbee_v1_bundle_export",
+    ),
 }
 WORKERBEE_CAPABILITY_FAMILIES = tuple(WORKERBEE_CAPABILITY_FAMILY_TOOLS)
+
+# Backend additions are reviewed separately from the required profile surface.
+# They may become callable only for the named backend/profile family and never
+# make an OSS-required family optional.  Unlisted backend extensions are
+# quarantined from the gateway surface and retained as posture evidence.
+WORKERBEE_BACKEND_OPTIONAL_FAMILY_TOOLS: Mapping[
+    str, Mapping[str, tuple[str, ...]]
+] = {
+    "platform_debug": {
+        WORKERBEE_FAMILY_INGRESS: ("workerbee_v1_ingress_route_apply",),
+    },
+}
 
 WORKERBEE_PROFILE_FAMILIES: Mapping[str, tuple[str, ...]] = {
     WORKERBEE_PROFILE_REVIEW: (
@@ -72,7 +104,6 @@ WORKERBEE_PROFILE_FAMILIES: Mapping[str, tuple[str, ...]] = {
     ),
     WORKERBEE_PROFILE_OBSERVE: (
         WORKERBEE_FAMILY_RUNTIME_OBSERVE,
-        WORKERBEE_FAMILY_PROJECT_LIFECYCLE,
         WORKERBEE_FAMILY_LOGS,
     ),
     WORKERBEE_PROFILE_LOCAL_DEPLOY: (
@@ -101,9 +132,17 @@ WORKERBEE_HIGH_RISK_FAMILY_TOOLS: Mapping[str, tuple[str, ...]] = {
         "workerbee_v1_provider_apply",
         "workerbee_v1_marketplace_install",
     ),
-    "ca-trust": ("workerbee_v1_ingress_ca_regenerate",),
+    "ca-trust": (
+        "workerbee_v1_ingress_ca_regenerate",
+        "workerbee_v1_trust_install",
+        "workerbee_v1_trust_uninstall",
+    ),
     "secrets": ("workerbee_v1_secret_write",),
-    "destructive-cleanup": ("workerbee_v1_project_destroy",),
+    "destructive-cleanup": (
+        "workerbee_v1_project_reset",
+        "workerbee_v1_project_destroy",
+        "workerbee_v1_cleanup",
+    ),
     "publication": ("workerbee_v1_publish",),
 }
 WORKERBEE_HIGH_RISK_FAMILIES = tuple(WORKERBEE_HIGH_RISK_FAMILY_TOOLS)
@@ -174,28 +213,44 @@ class WorkerBeeModeSelection:
 
 @dataclass(frozen=True, slots=True)
 class WorkerBeeToolSurface:
+    backend: str
     access_profile: str
     requested_families: tuple[str, ...]
     requested_tools: tuple[str, ...]
     effective_families: tuple[str, ...]
     effective_tools: tuple[str, ...]
+    reviewed_optional_tools: tuple[str, ...]
+    effective_optional_tools: tuple[str, ...]
     missing_tools: tuple[str, ...]
     unknown_backend_tools: tuple[str, ...]
+    quarantined_backend_tools: tuple[str, ...]
     denied_high_risk_tools: tuple[str, ...]
 
     @property
     def compatible(self) -> bool:
-        return (
-            not self.missing_tools
-            and not self.unknown_backend_tools
-            and not self.denied_high_risk_tools
+        # Compatibility is the callable boundary.  Extra advertised tools are
+        # never callable unless they are in the reviewed backend registry; they
+        # remain visible as quarantine posture rather than disabling an
+        # otherwise complete local profile.
+        return not self.missing_tools and not (
+            set(self.effective_tools) & WORKERBEE_HIGH_RISK_TOOLS
         )
+
+    @property
+    def catalog_fully_reviewed(self) -> bool:
+        return not self.unknown_backend_tools
 
     def public_dict(self) -> dict[str, Any]:
         return {
             "api_version": "agent-pbx.workerbee-tool-surface/v1",
             **asdict(self),
             "compatible": self.compatible,
+            "catalog_fully_reviewed": self.catalog_fully_reviewed,
+            "posture": (
+                "warning-unreviewed-backend-tools-quarantined"
+                if self.unknown_backend_tools
+                else "nominal"
+            ),
             "remediation": (
                 "Use a profile supported by the selected WorkerBee backend or "
                 "install a backend exposing every reviewed requested tool."
@@ -276,11 +331,37 @@ def tools_for_access_profile(profile: object) -> tuple[str, ...]:
     return tools_for_capability_families(capability_families_for_profile(profile))
 
 
+def optional_tools_for_access_profile(profile: object, backend: object) -> tuple[str, ...]:
+    selected_profile = canonical_workerbee_access_profile(profile)
+    selected_backend = str(backend or "").strip().lower().replace("-", "_")
+    optional_by_family = WORKERBEE_BACKEND_OPTIONAL_FAMILY_TOOLS.get(
+        selected_backend, {}
+    )
+    result: list[str] = []
+    for family in capability_families_for_profile(selected_profile):
+        result.extend(optional_by_family.get(family, ()))
+    return tuple(dict.fromkeys(result))
+
+
+def reviewed_tools_for_access_profile(profile: object, backend: object) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                *tools_for_access_profile(profile),
+                *optional_tools_for_access_profile(profile, backend),
+            )
+        )
+    )
+
+
 def resolve_workerbee_tool_surface(
     profile: object,
     backend_tools: Iterable[object],
+    *,
+    backend: object = "",
 ) -> WorkerBeeToolSurface:
     selected = canonical_workerbee_access_profile(profile)
+    selected_backend = str(backend or "").strip().lower().replace("-", "_")
     families = capability_families_for_profile(selected)
     requested = tools_for_capability_families(families)
     available = tuple(
@@ -293,7 +374,16 @@ def resolve_workerbee_tool_surface(
     available_set = set(available)
     requested_set = set(requested)
     denied = tuple(sorted(available_set & WORKERBEE_HIGH_RISK_TOOLS))
-    effective = tuple(tool for tool in requested if tool in available_set)
+    optional = optional_tools_for_access_profile(selected, selected_backend)
+    effective_optional = tuple(tool for tool in optional if tool in available_set)
+    effective = tuple(
+        dict.fromkeys(
+            (
+                *(tool for tool in requested if tool in available_set),
+                *effective_optional,
+            )
+        )
+    )
     missing = tuple(tool for tool in requested if tool not in available_set)
     effective_families = tuple(
         family
@@ -307,16 +397,27 @@ def resolve_workerbee_tool_surface(
         tool
         for tools in WORKERBEE_CAPABILITY_FAMILY_TOOLS.values()
         for tool in tools
+    } | {
+        tool
+        for backend_families in WORKERBEE_BACKEND_OPTIONAL_FAMILY_TOOLS.values()
+        for tools in backend_families.values()
+        for tool in tools
     } | set(WORKERBEE_HIGH_RISK_TOOLS)
     unknown = tuple(sorted(available_set - known))
     return WorkerBeeToolSurface(
+        backend=selected_backend,
         access_profile=selected,
         requested_families=families,
         requested_tools=requested,
         effective_families=effective_families,
         effective_tools=effective,
+        reviewed_optional_tools=optional,
+        effective_optional_tools=effective_optional,
         missing_tools=missing,
         unknown_backend_tools=unknown,
+        quarantined_backend_tools=tuple(
+            sorted((available_set - set(effective)) | set(denied))
+        ),
         denied_high_risk_tools=denied,
     )
 

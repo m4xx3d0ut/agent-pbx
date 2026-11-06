@@ -4,6 +4,7 @@ import hashlib
 import json
 import subprocess
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -614,6 +615,72 @@ def test_gateway_rejects_tools_outside_profile(tmp_path: Path) -> None:
     assert denied.value.code == "WORKERBEE_TOOL_NOT_ALLOWED"
 
 
+def test_gateway_tool_surface_rejects_missing_and_quarantines_unknown_without_silent_drop(
+    tmp_path: Path,
+) -> None:
+    _runtime, _workspace, binding, gateway = services(tmp_path)
+    lease, _token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+
+    with pytest.raises(WorkerBeeGatewayError) as missing:
+        gateway.resolve_tool_surface(lease, list(lease.requested_tools[:-1]))
+    assert missing.value.code == "WORKERBEE_TOOL_SURFACE_INCOMPATIBLE"
+    assert "missing=" in missing.value.message
+
+    effective = gateway.resolve_tool_surface(
+        lease,
+        [*lease.requested_tools, "workerbee_v1_backend_extension"],
+    )
+    assert "workerbee_v1_backend_extension" not in effective
+    assert set(effective) == set(lease.requested_tools)
+    with pytest.raises(WorkerBeeGatewayError) as denied:
+        gateway.prepare_arguments(lease, "workerbee_v1_backend_extension", {})
+    assert denied.value.code == "WORKERBEE_TOOL_NOT_ALLOWED"
+
+
+def test_gateway_revalidates_trusted_direct_bind_before_source_consuming_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _runtime, workspace, binding, gateway = services(tmp_path)
+    direct_binding = replace(
+        binding,
+        source_mode="trusted-direct-bind",
+        workspace_strategy="trusted_direct_bind",
+    )
+    lease, _token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    direct_lease = replace(lease, source_mode="trusted-direct-bind")
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(workspace, "load", lambda _binding_id: direct_binding)
+    monkeypatch.setattr(
+        workspace,
+        "revalidate_trusted_direct",
+        lambda selected, runtime: calls.append((selected.binding_id, runtime.backend)),
+    )
+
+    gateway.prepare_arguments(
+        direct_lease,
+        "workerbee_v1_project_status",
+        {},
+    )
+    gateway.prepare_arguments(
+        direct_lease,
+        "workerbee_v1_capabilities",
+        {},
+    )
+
+    assert calls == [(binding.binding_id, "oss")]
+
+
 def test_gateway_local_deploy_allows_scoped_restart_only_for_mutating_profile(
     tmp_path: Path,
 ) -> None:
@@ -932,6 +999,19 @@ def test_gateway_api_requires_explicit_access_profile_and_restart(tmp_path: Path
     repo = tmp_path / "repo"
     git_repo(repo)
     app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+    app.state.workerbee_runtime.observe(
+        {
+            "backend": "oss",
+            "endpoint": "http://127.0.0.1:8765/mcp",
+            "server_name": "WorkerBee OSS",
+            "server_version": "2.3.0rc2",
+        }
+    )
+    catalog_fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "workerbee_tool_catalogs_rc2.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
     with TestClient(app) as client:
         assert client.post(
@@ -947,7 +1027,13 @@ def test_gateway_api_requires_explicit_access_profile_and_restart(tmp_path: Path
             "/v2/agents/demo-agent/workerbee/access-profile"
         )
         assert initial.status_code == 200
-        assert initial.json()["effective_profile"] == "observe-local"
+        assert initial.json()["effective_profile"] == "local-deploy"
+        assert initial.json()["source_mode"] == "snapshot-import"
+        assert initial.json()["selected_backend"] == "oss"
+        contract = initial.json()["tool_surface_contract"]
+        assert set(contract["required_tools"]).issubset(catalog_fixture["oss_tools"])
+        assert contract["reviewed_optional_tools"] == []
+        assert contract["unknown_backend_tool_policy"] == "quarantine-deny-and-warn"
 
         saved = client.put(
             "/v2/agents/demo-agent/workerbee/access-profile",
@@ -960,6 +1046,23 @@ def test_gateway_api_requires_explicit_access_profile_and_restart(tmp_path: Path
         agent = app.state.store.get_agent("demo-agent")
         assert agent is not None
         assert agent["metadata"]["workerbee_mcp_profile"] == "local-deploy"
+
+        app.state.workerbee_runtime.observe(
+            {
+                "backend": "platform_debug",
+                "endpoint": "http://127.0.0.1:9876/mcp",
+                "server_name": "WorkerBee Platform Debug",
+                "server_version": "2.3.0rc2",
+            }
+        )
+        platform_readback = client.get(
+            "/v2/agents/demo-agent/workerbee/access-profile"
+        )
+        assert platform_readback.status_code == 200
+        assert platform_readback.json()["selected_backend"] == "platform_debug"
+        assert platform_readback.json()["tool_surface_contract"][
+            "reviewed_optional_tools"
+        ] == catalog_fixture["platform_debug_reviewed_optional_tools"]
 
 
 @pytest.mark.parametrize(

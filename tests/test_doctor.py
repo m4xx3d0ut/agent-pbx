@@ -19,6 +19,8 @@ from agent_pbx.doctor import (
     _tmux_server_diagnostic,
     _compatibility_check,
     _workerbee_runtime_binding_check,
+    _workerbee_tool_surface_check,
+    _workerbee_tool_surface_runtime_check,
     _workerbee_controlled_run_check,
     _workerbee_workspace_policy_check,
     doctor_json,
@@ -27,7 +29,7 @@ from agent_pbx.doctor import (
 )
 from agent_pbx.mcp_daemon import MCPDaemonConfig
 from agent_pbx.store import SCHEMA_VERSION, Store
-from agent_pbx.workerbee_mcp import WorkerBeeBackendProvenance
+from agent_pbx.workerbee_mcp import WorkerBeeBackendProvenance, WorkerBeeMcpPreflight
 from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
 from agent_pbx.workerbee_policy import WorkerBeeWorkspacePolicyService
 
@@ -346,3 +348,60 @@ def test_doctor_warns_when_debug_materializer_is_incomplete(
     assert result.status == "warn"
     assert "materializer prerequisites" in result.summary
     assert "AGENT_PBX_WORKERBEE_WORKSPACE_HELPER_BIN" in result.detail
+
+
+def test_doctor_reports_quarantined_workerbee_catalog_with_remediation() -> None:
+    from agent_pbx.workerbee_modes import tools_for_access_profile
+
+    requested = tools_for_access_profile("local-deploy")
+    result = _workerbee_tool_surface_check(
+        profile="local-deploy",
+        backend="oss",
+        advertised_tools=[*requested, "workerbee_v1_unreviewed_extension"],
+    )
+
+    assert result.status == "warn"
+    assert "quarantined" in result.summary
+    assert "workerbee_v1_unreviewed_extension" in result.detail
+    assert "backend-specific optional capability registry" in result.remediation
+
+
+def test_doctor_reachable_runtime_catalog_check_uses_selected_backend(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from agent_pbx.workerbee_modes import tools_for_access_profile
+
+    config = MCPDaemonConfig(state_root=tmp_path / "state")
+    provenance = WorkerBeeBackendProvenance(
+        code="WORKERBEE_SWITCHER_READY",
+        configured=True,
+        ready=True,
+        backend="oss",
+        endpoint="http://127.0.0.1:8765/mcp",
+        server_name="WorkerBee OSS",
+        server_version="2.3.0rc2",
+    )
+    WorkerBeeRuntimeRegistry(
+        config.resolved_db_path.parent / "workerbee-runtime"
+    ).observe(provenance.public_dict())
+
+    async def inspect(_endpoint, **_kwargs):
+        return WorkerBeeMcpPreflight(
+            code="WORKERBEE_INVENTORY_READY",
+            ready=True,
+            message="ready",
+            remediation="",
+            advertised_tools=(
+                *tools_for_access_profile("local-deploy"),
+                "workerbee_v1_unreviewed_extension",
+            ),
+        )
+
+    monkeypatch.setattr("agent_pbx.doctor.inspect_workerbee_mcp", inspect)
+    result = _workerbee_tool_surface_runtime_check(config, 2.0)
+
+    assert result.check_id == "workerbee-tool-surface"
+    assert result.status == "warn"
+    assert "quarantined" in result.summary
+    assert "workerbee_v1_unreviewed_extension" in result.detail

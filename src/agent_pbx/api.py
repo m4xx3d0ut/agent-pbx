@@ -591,6 +591,14 @@ def workerbee_policy_status(app: FastAPI, agent_id: str) -> dict[str, Any]:
     }
 
 
+def workerbee_access_readback(app: FastAPI, agent_id: str) -> dict[str, Any]:
+    runtime = app.state.workerbee_runtime.selected()
+    return app.state.workerbee_access_policy.get_profile(
+        agent_id,
+        selected_backend=(runtime.backend if runtime is not None else None),
+    )
+
+
 def create_app(config: ServerConfig | None = None) -> FastAPI:
     resolved_config = config or ServerConfig()
     store = Store(resolved_config.db_path)
@@ -2403,7 +2411,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
         try:
             return await asyncio.to_thread(
-                request.app.state.workerbee_access_policy.get_profile,
+                workerbee_access_readback,
+                request.app,
                 agent_id,
             )
         except WorkerBeeAccessPolicyError as exc:
@@ -2424,12 +2433,19 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         if not principal_allows_agent(controller, agent_id):
             raise HTTPException(status_code=403, detail="controller is not scoped to this Agent")
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 request.app.state.workerbee_access_policy.set_profile,
                 agent_id,
                 profile=payload.profile,
                 updated_by=controller.token_id or controller.client_id or "local",
             )
+            readback = await asyncio.to_thread(
+                workerbee_access_readback,
+                request.app,
+                agent_id,
+            )
+            readback["changed"] = bool(result.get("changed"))
+            return readback
         except WorkerBeeAccessPolicyError as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
 
