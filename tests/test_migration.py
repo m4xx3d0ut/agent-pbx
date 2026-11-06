@@ -290,3 +290,40 @@ def test_verify_migration_and_cli_contract(tmp_path: Path) -> None:
     assert args.migrate_command == "rollback"
     assert args.confirm == "RESTORE"
     assert args.restore_config is True
+
+
+def test_schema_repairs_pre_activation_controlled_run_fingerprint_columns(
+    tmp_path: Path,
+) -> None:
+    config = config_for(tmp_path)
+    store = Store(config.resolved_db_path)
+    store.init()
+    with store.connect() as conn:
+        conn.execute(
+            "ALTER TABLE workerbee_controlled_run_requests "
+            "DROP COLUMN backend_fingerprint"
+        )
+        conn.execute(
+            "ALTER TABLE workerbee_controlled_run_leases "
+            "DROP COLUMN backend_fingerprint"
+        )
+        conn.execute(
+            "UPDATE metadata SET value = '39' WHERE key = 'schema_version'"
+        )
+
+    store.init()
+    with store.connect() as conn:
+        request_columns = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(workerbee_controlled_run_requests)"
+            ).fetchall()
+        }
+        lease_columns = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(workerbee_controlled_run_leases)"
+            ).fetchall()
+        }
+    assert "backend_fingerprint" in request_columns
+    assert "backend_fingerprint" in lease_columns

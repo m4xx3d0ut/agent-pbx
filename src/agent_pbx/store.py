@@ -1604,6 +1604,23 @@ class Store:
                 """
             )
             previous_schema_version = self._schema_version(conn)
+            # Schema 39 introduced controlled runs in one checkpoint and the
+            # runtime fingerprint was added before activation.  Keep this
+            # repair unconditional so a database briefly initialized by the
+            # earlier checkpoint fails closed with an empty fingerprint rather
+            # than crashing on a missing column.
+            self._ensure_column(
+                conn,
+                "workerbee_controlled_run_requests",
+                "backend_fingerprint",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                "workerbee_controlled_run_leases",
+                "backend_fingerprint",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             conn.execute(
                 """
                 UPDATE joplin_sync_jobs
