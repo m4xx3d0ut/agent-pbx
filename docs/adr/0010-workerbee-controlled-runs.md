@@ -48,6 +48,20 @@ disabled by default and may be offered only after a nonmutating capability probe
 identifies a precise appliance gap and the controller separately approves the
 backend change. Fallback is never silent.
 
+## Relationship to the RC2 WorkerBee axes
+
+The controlled run is an execution lane, not an access profile. Backend,
+source mode, access profile, and execution lane remain independent in durable
+policy and readback. Selecting `trusted-workbench` does not grant controlled-
+run authority, and selecting a controlled run does not change the interactive
+gateway profile or source mode.
+
+Controlled-run requests bind the selected source-mode identity and workspace
+receipt in addition to the backend generation. Legacy receipts are normalized
+to their explicit backend-equivalent source mode before they can be bound. A
+WorkerBee source/helper receipt may attest backend and mount evidence, but it
+cannot claim an Agent PBX access profile or controlled-run approval.
+
 ## Provenance and drift rules
 
 Each request binds all of the following:

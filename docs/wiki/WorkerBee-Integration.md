@@ -1,7 +1,7 @@
 # WorkerBee Integration
 
 > **Applies to:** Agent PBX 2.3.x
-> **Last reviewed:** 2026-10-23
+> **Last reviewed:** 2026-11-06
 
 WorkerBee is an optional runtime-truth plane. Agent PBX remains the authority
 for Agent/Operator identity, routing, lifecycle, policy, and audit. WorkerBee
@@ -42,20 +42,34 @@ mapping first.
 
 ## Choose a workflow posture
 
-Agent PBX keeps four WorkerBee controls independent:
+Agent PBX 2.3.0rc2 keeps four runtime-authority axes independent:
 
-1. **Access** selects observe-only or bounded local build/deploy tools for one
-   Agent or Operator. Review forks are always read-only.
-2. **Workspace** controls whether the runtime may stay in its current checkout,
-   move among worktrees, or bind another repository under approved roots.
-3. **Content** controls which dirty, untracked, or ignored files may enter an
-   appliance snapshot. It does not apply to the OSS direct-host backend.
-4. **Backend** selects OSS, platform-debug, or a future managed user appliance.
+1. **Backend** selects OSS, platform-debug, or a future managed user appliance.
+2. **Source mode** selects `native-direct`, `snapshot-import`,
+   `trusted-direct-bind`, or `managed-clone` without changing the backend or
+   tool authority.
+3. **Access profile** selects `observe-local`, `review-readonly`,
+   `local-deploy`, or `trusted-workbench`. A local installation may label the
+   final profile `Rosie Workbench`; its durable identity remains
+   `trusted-workbench`.
+4. **Execution lane** selects the ordinary generation-bound gateway or the
+   separately authorized immutable controlled-run lane.
 
-The public default remains conservative: observe-only access, a pinned
-workspace with controller approval, and tracked content. This is the normal
-starting point for a new OSS or PaaS user. Appliance content policy does not
-make OSS stricter because OSS reads the exact host checkout directly.
+Workspace mobility and snapshot-content policy remain independent constraints
+inside the selected source mode. Selecting any axis never silently changes
+another one. The committed public policy is `snapshot-import` source,
+`local-deploy` access, and the ordinary gateway lane. Backend selection is
+still explicit. Review forks always resolve to `review-readonly`, and
+`trusted-direct-bind` remains an explicit platform-debug administrator action,
+never a default.
+
+Old durable state is migrated additively rather than reinterpreted as a new
+public choice. An omitted pre-RC2 source mode keeps its legacy backend-equivalent
+behavior: OSS `direct_host` becomes `native-direct`, platform-debug
+`content_addressed_import` becomes `snapshot-import`, and a managed-appliance
+volume becomes `managed-clone`. Fresh policy readback continues to report the
+public `snapshot-import` preference until an explicit source-mode choice is
+stored.
 
 The setup assistant offers backend-neutral presets:
 
@@ -83,23 +97,21 @@ them while the daemon continues to enforce the configured ceilings.
 
 ## Runtime domains and session binding
 
-Agent PBX separates three concepts that must not be conflated:
-
-1. **Access profile:** `observe-local`, `review-readonly`, or `local-deploy`.
-2. **Selected backend:** `oss`, `platform_debug`, or the deferred
-   `user_appliance` contract.
-3. **Workspace binding:** the exact source revision and path visible to that
-   backend.
+The selected backend, source mode, access profile, and execution lane are
+stored and read back separately. A workspace receipt then binds the exact
+source revision, backend generation, and path visible to that backend. A
+WorkerBee receipt supplies backend, source, mount, and helper evidence; it does
+not select or assert an Agent PBX access profile.
 
 Only one backend endpoint is selected at a time. Dormant state may remain in
 each backend's private domain, but Agent PBX does not run a second backend as a
 fallback or merge its project registry into the active backend.
 
-| Backend | Workspace strategy | Availability |
-|---|---|---|
-| `oss` | Direct, exact host Git root | Qualified |
-| `platform_debug` | Content-addressed snapshot in `/workspace/imports/<binding>` by default | Qualified |
-| `user_appliance` | Separate managed appliance volume | Reserved and unavailable until its image is qualified |
+| Backend | Legacy-equivalent source | Fresh supported sources | Availability |
+|---|---|---|---|
+| `oss` | `native-direct` | `native-direct` | Qualified |
+| `platform_debug` | `snapshot-import` | `snapshot-import`; explicit `trusted-direct-bind` after helper qualification | Snapshot qualified; direct bind activation held |
+| `user_appliance` | `managed-clone` | `managed-clone` | Reserved and unavailable until its image is qualified |
 
 At launch or resume, Agent PBX prepares a workspace receipt, issues a private
 gateway lease, and configures the Codex process to use that lease endpoint. The
@@ -253,6 +265,43 @@ stored global and per-entity value. The daemon enforces these settings even if
 a client hides or modifies its own TUI state.
 
 ## Tool policy
+
+### RC2 catalog contract
+
+Capability families expand through a fixed Agent PBX registry. The selected
+profile's required tools must all be advertised by the selected backend. A
+backend may add only reviewed backend-optional tools to the callable surface.
+Every other advertised name is quarantined: it is absent from `allowed_tools`
+and the effective surface, direct invocation is denied, catalog readback is
+non-nominal (`catalog_fully_reviewed=false`), and doctor reports remediation.
+Unknown extensions do not make a complete required profile callable beyond its
+reviewed surface, but they also do not make a platform-debug appliance unusable
+when the required profile remains complete.
+
+`tests/fixtures/workerbee_tool_catalogs_rc2.json` is the reviewed Agent PBX RC2
+contract fixture. It records the required OSS catalog and the reviewed
+platform-debug optional registry. OSS and private WorkerBee implementations
+must advertise every fixed required name used by the selected profile; any
+backend-only addition intended to become callable must match the reviewed
+optional registry. Live OSS/private catalog comparison is a separate
+post-review integration gate. It is not performed by source-only tests and does
+not authorize Agent PBX to inspect or mutate either WorkerBee repository.
+
+The trusted-direct adapter has a separate byte-exact source fixture at
+`tests/fixtures/workerbee_trusted_direct_bind_adapter_v2.json`. Agent PBX
+validates its 2,768-byte SHA-256 contract, exact verify/release field sets,
+canonical WorkerBee receipt identity, source/runtime/mount/private-group and
+helper evidence, protected-mask count/digest, expiry, and zero-residue cleanup.
+Only `verify-direct-bind` receives `--expires-at`; neither operation accepts an
+arbitrary command or `--json` extension. Live private-helper comparison is an
+activation gate and does not broaden the public source-mode default.
+
+The access-policy API exposes the selected backend, required tools, reviewed
+optional tools, and the quarantine policy. `agent-pbx doctor` probes the
+selected runtime catalog and reports requested, effective, missing, and
+quarantined tools. A missing required tool remains incompatible and includes
+remediation; quarantined additions remain unavailable even when the required
+surface is otherwise compatible.
 
 Direct Agents, root Operators, edit forks, and review forks can receive
 `workerbee_v1_capabilities` and `workerbee_v1_session_start` when available.
