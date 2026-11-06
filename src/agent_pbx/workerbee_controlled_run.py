@@ -484,6 +484,7 @@ class WorkerBeeControlledRunService:
             "workspace_set_digest": workspace_digest,
             "backend": runtime.backend,
             "backend_instance_id": runtime.instance_id,
+            "backend_fingerprint": runtime.fingerprint,
             "backend_generation": runtime.generation,
             "workspace_binding_id": binding_id,
             "project": project,
@@ -544,6 +545,40 @@ class WorkerBeeControlledRunService:
             max_in_flight_per_root=posture.max_in_flight_per_root,
         )
         return {"request": request, "created": created, "preflight": preflight}
+
+    def impact(self) -> dict[str, Any]:
+        """Return bounded active-run evidence used to guard backend switches."""
+
+        active = self.store.list_workerbee_controlled_run_requests(
+            statuses=(
+                "approved",
+                "claimed",
+                "provisioning",
+                "canary",
+                "running",
+                "collecting",
+                "cleaning",
+                "recovery_required",
+            ),
+            limit=500,
+        )
+        bounded = [
+            {
+                "request_id": item.get("request_id"),
+                "root_operator_agent_id": item.get("root_operator_agent_id"),
+                "target_fork_agent_id": item.get("target_fork_agent_id"),
+                "status": item.get("status"),
+                "backend": item.get("backend"),
+                "backend_instance_id": item.get("backend_instance_id"),
+                "backend_generation": item.get("backend_generation"),
+            }
+            for item in active
+        ]
+        return {
+            "api_version": "agent-pbx.workerbee-controlled-run-impact/v1",
+            "active_controlled_runs": bounded,
+            "mutation_count": len(bounded),
+        }
 
     def decide(
         self,

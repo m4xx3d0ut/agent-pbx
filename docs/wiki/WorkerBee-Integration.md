@@ -348,7 +348,7 @@ workerbee_v1_controlled_run_receipt
 ```
 
 The request binds the root Operator, owned edit fork, running campaign,
-workspace-set digest, WorkerBee backend instance and generation, workspace
+workspace-set digest, WorkerBee backend instance, fingerprint, and generation, workspace
 binding, profile digest, immutable baseline/candidate commits, fixed recipe,
 and pinned tool-manifest digest. A review fork cannot request or approve a run.
 The appliance, rather than Agent PBX or Codex, owns the disposable standard
@@ -356,9 +356,11 @@ workspace and runtime isolation.
 
 Committed defaults use `guided` mode. F8 opens a specialized exact-ID review,
 where the user can approve one run, issue a bounded campaign/profile lease, or
-reject it. `/workerbee run` opens the same review and `/workerbee run status`
-shows recent transitions. Administrators may set the control to `read_only` or
-`hidden` without changing persisted run and receipt records.
+reject it. `/workerbee run` opens the same review, `/workerbee run status`
+shows recent transitions, `/workerbee run cancel` opens active runs for safe
+cancellation, and `/workerbee run leases` reviews or revokes bounded campaign
+trust. Administrators may set the control to `read_only` or `hidden` without
+changing persisted run and receipt records.
 
 Profiles are private TOML files under
 `~/.config/agent-pbx/controlled-runs.d` by default. They must be regular files
@@ -374,3 +376,8 @@ If the adapter loses contact after the run may have started, state becomes
 run and complete collection/cleanup, but it never starts the recipe again.
 Host fallback remains disabled unless both host policy and the exact private
 profile explicitly allow a separately approved fallback.
+
+An approved or executing controlled run reserves its exact WorkerBee backend
+identity. Backend switch preview, apply, and rollback are blocked until the run
+reaches a terminal state; this closes the approval-to-executor race without
+preventing an unapproved pending request from being rejected or canceled.

@@ -729,10 +729,25 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         snapshot_policy=workerbee_snapshot_policy,
     )
     workerbee_gateway_app = create_workerbee_gateway_app(workerbee_gateway)
+
+    def workerbee_switch_impact() -> dict[str, Any]:
+        gateway_impact = workerbee_gateway.impact()
+        controlled_impact = workerbee_controlled_runs.impact()
+        return {
+            "api_version": "agent-pbx.workerbee-switch-impact/v1",
+            "active_leases": list(gateway_impact.get("active_leases") or []),
+            "active_mutations": dict(gateway_impact.get("active_mutations") or {}),
+            "active_controlled_runs": list(
+                controlled_impact.get("active_controlled_runs") or []
+            ),
+            "mutation_count": int(gateway_impact.get("mutation_count") or 0)
+            + int(controlled_impact.get("mutation_count") or 0),
+        }
+
     workerbee_switcher = WorkerBeeSwitchService(
         state_root=resolved_config.db_path.parent / "workerbee-switch",
         cache_invalidator=workerbee.clear_cache,
-        impact_provider=workerbee_gateway.impact,
+        impact_provider=workerbee_switch_impact,
         selection_recorder=workerbee_runtime.observe,
     )
 
@@ -2641,8 +2656,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 canceled_by=payload.canceled_by,
                 reason=payload.reason,
             )
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (WorkerBeeControlledRunError, KeyError, ValueError, RuntimeError) as exc:
+            detail = (
+                exc.public_dict()
+                if isinstance(exc, WorkerBeeControlledRunError)
+                else str(exc)
+            )
+            raise HTTPException(status_code=409, detail=detail) from exc
 
     @app.post(
         "/v2/workerbee/controlled-runs/{request_id}/leases",

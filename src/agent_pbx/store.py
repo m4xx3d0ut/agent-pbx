@@ -1164,6 +1164,7 @@ class Store:
                     workspace_set_digest TEXT NOT NULL,
                     backend TEXT NOT NULL,
                     backend_instance_id TEXT NOT NULL,
+                    backend_fingerprint TEXT NOT NULL,
                     backend_generation INTEGER NOT NULL,
                     workspace_binding_id TEXT NOT NULL,
                     profile_id TEXT NOT NULL,
@@ -1202,6 +1203,7 @@ class Store:
                     workspace_set_digest TEXT NOT NULL,
                     backend TEXT NOT NULL,
                     backend_instance_id TEXT NOT NULL,
+                    backend_fingerprint TEXT NOT NULL,
                     backend_generation INTEGER NOT NULL,
                     workspace_binding_id TEXT NOT NULL,
                     profile_id TEXT NOT NULL,
@@ -9984,13 +9986,13 @@ class Store:
                 INSERT INTO workerbee_controlled_run_requests(
                     request_id, root_operator_agent_id, target_fork_agent_id,
                     campaign_id, workspace_set_digest, backend,
-                    backend_instance_id, backend_generation,
+                    backend_instance_id, backend_fingerprint, backend_generation,
                     workspace_binding_id, profile_id, profile_version,
                     profile_sha256, profile_json, baseline_commit,
                     candidate_commit, recipe_id, tool_manifest_sha256,
                     request_sha256, status, requested_by, reason,
                     result_json, created_at, updated_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                           'pending', ?, ?, '{}', ?, ?, ?)
                 """,
                 (
@@ -10001,6 +10003,7 @@ class Store:
                     str(identity["workspace_set_digest"]),
                     str(identity["backend"]),
                     str(identity["backend_instance_id"]),
+                    str(identity["backend_fingerprint"]),
                     int(identity["backend_generation"]),
                     str(identity["workspace_binding_id"]),
                     str(identity["profile_id"]),
@@ -10405,12 +10408,12 @@ class Store:
                 INSERT INTO workerbee_controlled_run_leases(
                     lease_id, root_operator_agent_id, target_fork_agent_id,
                     campaign_id, workspace_set_digest, backend,
-                    backend_instance_id, backend_generation,
+                    backend_instance_id, backend_fingerprint, backend_generation,
                     workspace_binding_id, profile_id, profile_sha256,
                     baseline_commit, candidate_commit, recipe_id,
                     tool_manifest_sha256, request_sha256, max_uses, use_count,
                     status, requested_by, created_at, expires_at, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
                           'pending', ?, ?, ?, '{}')
                 """,
                 (
@@ -10421,6 +10424,7 @@ class Store:
                     request["workspace_set_digest"],
                     request["backend"],
                     request["backend_instance_id"],
+                    request["backend_fingerprint"],
                     request["backend_generation"],
                     request["workspace_binding_id"],
                     request["profile_id"],
@@ -10554,6 +10558,7 @@ class Store:
             "workspace_set_digest",
             "backend",
             "backend_instance_id",
+            "backend_fingerprint",
             "backend_generation",
             "workspace_binding_id",
             "profile_id",

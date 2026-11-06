@@ -71,6 +71,7 @@ from agent_pbx.tui import (
     WorkerBeeLaunchPreflightError,
     WorkerBeeAccessScreen,
     WorkerBeeSwitchConfirmScreen,
+    WorkerBeeControlledRunLeaseScreen,
     WorkerBeeControlledRunScreen,
     WorkerBeeSnapshotScreen,
     WorkerBeeWorkspaceScreen,
@@ -5341,6 +5342,44 @@ async def test_f8_opens_one_specialized_workerbee_controlled_run_review() -> Non
         assert app.format_agent_alert("operator-8") == "WB"
 
 
+@pytest.mark.asyncio
+async def test_tui_opens_bounded_workerbee_campaign_trust_review() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.workerbee_controlled_run_controls_hidden = False
+    lease = {
+        "lease_id": "lease-1",
+        "root_operator_agent_id": "operator-8",
+        "target_fork_agent_id": "operator-8-fork",
+        "campaign_id": "campaign-1",
+        "profile_id": "isolated-runtime-validation",
+        "uses_remaining": 2,
+        "expires_at": 100.0,
+        "status": "approved",
+    }
+
+    async def fake_fetch(
+        operator_agent_id: str,
+        *,
+        status: str = "approved",
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        assert operator_agent_id == "operator-8"
+        assert status == "approved"
+        assert limit == 100
+        return [lease]
+
+    app.fetch_workerbee_controlled_run_leases = fake_fetch  # type: ignore[method-assign]
+    async with app.run_test():
+        assert await app.open_workerbee_controlled_run_lease_center("operator-8")
+        screen = app.active_workerbee_controlled_run_lease_screen()
+        assert isinstance(screen, WorkerBeeControlledRunLeaseScreen)
+        assert screen.current_lease() == lease
+
+
+def test_workerbee_campaign_trust_palette_action_is_registered() -> None:
+    assert "/workerbee run leases" in built_in_palette_command_names()
+
+
 def test_tui_keeps_reported_status_for_idle_or_nonterminal_tmux(monkeypatch) -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     monkeypatch.setattr("agent_pbx.tui.time.time", lambda: 1000.0)
@@ -6628,7 +6667,10 @@ async def test_tui_operator_split_filters_callers_and_operators() -> None:
     assert operators_title.styles.display == "block"
     assert operators.styles.display == "block"
     assert operator_actions.styles.display == "block"
-    assert str(operators.get_row("operator-0")[2]) == "operator-0"
+    operator_values = operators.get_row("operator-0")
+    assert str(
+        operator_values[app.rendered_operator_columns.index("Operator")]
+    ) == "operator-0"
 
 
 async def test_tui_operator_review_button_fits_wide_split() -> None:

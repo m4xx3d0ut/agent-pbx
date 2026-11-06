@@ -377,6 +377,7 @@ class WorkerBeeControlledRunExecutor:
         if (
             runtime.backend != request.get("backend")
             or runtime.instance_id != request.get("backend_instance_id")
+            or runtime.fingerprint != request.get("backend_fingerprint")
             or runtime.generation != int(request.get("backend_generation") or 0)
         ):
             raise WorkerBeeControlledRunError(

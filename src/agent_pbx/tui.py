@@ -783,6 +783,10 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/workerbee workspace",
     "/workerbee policy",
     "/workerbee content",
+    "/workerbee run",
+    "/workerbee run status",
+    "/workerbee run cancel",
+    "/workerbee run leases",
     "/workerbee switch oss",
     "/workerbee switch debug",
     "/workerbee switch rollback",
@@ -2594,6 +2598,20 @@ def built_in_palette_command_names(custom_theme_name: str = DEFAULT_CUSTOM_THEME
         == "hidden"
     ):
         names.discard("/workerbee access")
+    if (
+        str(os.getenv("AGENT_PBX_WORKERBEE_CONTROLLED_RUN_CONTROL_MODE") or "")
+        .strip()
+        .lower()
+        == "hidden"
+    ):
+        names.difference_update(
+            {
+                "/workerbee run",
+                "/workerbee run status",
+                "/workerbee run cancel",
+                "/workerbee run leases",
+            }
+        )
     names.add(f"/theme {custom_theme_name}")
     return names
 
@@ -6684,6 +6702,158 @@ class WorkerBeeControlledRunScreen(ModalScreen[None]):
                     request=request,
                     decision=decision,
                     approval_screen=self,
+                )
+            )
+
+
+class WorkerBeeControlledRunLeaseConfirmScreen(ModalScreen[None]):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(
+        self,
+        *,
+        lease: dict[str, Any],
+        lease_screen: "WorkerBeeControlledRunLeaseScreen",
+    ) -> None:
+        super().__init__()
+        self.lease = lease
+        self.lease_screen = lease_screen
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="workerbee-run-confirm-panel"):
+            yield Static("Revoke WorkerBee campaign trust", classes="dialog-title")
+            yield Static(
+                f"Lease: {self.lease.get('lease_id') or '-'}\n"
+                f"Root: {self.lease.get('root_operator_agent_id') or '-'}\n"
+                f"Fork: {self.lease.get('target_fork_agent_id') or '-'}\n"
+                f"Campaign: {self.lease.get('campaign_id') or '-'}\n"
+                f"Profile: {self.lease.get('profile_id') or '-'}\n"
+                f"Uses remaining: {self.lease.get('uses_remaining', 0)}\n\n"
+                "Revocation prevents this bounded lease from approving another exact run.",
+                id="workerbee-run-confirm-detail",
+            )
+            with Horizontal(classes="dialog-actions"):
+                yield Button("Revoke", id="workerbee-run-lease-confirm", variant="error")
+                yield Button("Back", id="workerbee-run-lease-confirm-back")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "workerbee-run-lease-confirm-back":
+            self.dismiss()
+            return
+        if event.button.id == "workerbee-run-lease-confirm":
+            self.dismiss()
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.revoke_workerbee_controlled_run_lease(  # type: ignore[attr-defined]
+                    self.lease_screen,
+                    self.lease,
+                ),
+                name="workerbee-controlled-run-lease-revoke",
+                exclusive=True,
+            )
+
+
+class WorkerBeeControlledRunLeaseScreen(ModalScreen[None]):
+    """Review and revoke bounded WorkerBee campaign trust leases."""
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(
+        self,
+        *,
+        operator_agent_id: str,
+        leases: list[dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.operator_agent_id = operator_agent_id
+        self.leases = leases
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="workerbee-run-approval-panel"):
+            yield Static(
+                f"WorkerBee campaign trust · {self.operator_agent_id}",
+                id="workerbee-run-approval-title",
+            )
+            yield Static(
+                "Approved leases remain bound to one root, fork, campaign, profile, "
+                "backend generation, source pair, and request digest.",
+                id="workerbee-run-approval-summary",
+            )
+            yield DataTable(
+                id="workerbee-run-lease-table",
+                cursor_type="row",
+                show_row_labels=False,
+            )
+            with Horizontal(id="workerbee-run-approval-actions"):
+                yield Button("Revoke", id="workerbee-run-lease-revoke", variant="error")
+                yield Button("Refresh", id="workerbee-run-lease-refresh")
+                yield Button("Close", id="workerbee-run-lease-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#workerbee-run-lease-table", DataTable)
+        table.add_columns("Expires", "Fork", "Profile", "Uses", "Campaign", "ID")
+        self.render_rows()
+
+    def render_rows(self) -> None:
+        table = self.query_one("#workerbee-run-lease-table", DataTable)
+        table.clear(columns=False)
+        for lease in self.leases:
+            lease_id = str(lease.get("lease_id") or "")
+            if not lease_id:
+                continue
+            table.add_row(
+                OperatorHandoffApprovalScreen.format_timestamp(lease.get("expires_at")),
+                str(lease.get("target_fork_agent_id") or "-"),
+                str(lease.get("profile_id") or "-"),
+                str(lease.get("uses_remaining", 0)),
+                str(lease.get("campaign_id") or "-")[:12],
+                lease_id,
+                key=lease_id,
+            )
+        self.query_one("#workerbee-run-approval-summary", Static).update(
+            f"Showing {table.row_count} active bounded trust lease(s)."
+        )
+
+    def current_lease(self) -> dict[str, Any] | None:
+        table = self.query_one("#workerbee-run-lease-table", DataTable)
+        if table.row_count == 0:
+            return None
+        try:
+            lease_id = str(
+                table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            )
+        except Exception:
+            return None
+        return next(
+            (item for item in self.leases if item.get("lease_id") == lease_id),
+            None,
+        )
+
+    def replace_leases(self, leases: list[dict[str, Any]]) -> None:
+        self.leases = leases
+        self.render_rows()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "workerbee-run-lease-close":
+            self.dismiss()
+            return
+        if event.button.id == "workerbee-run-lease-refresh":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.refresh_workerbee_controlled_run_lease_screen(self),  # type: ignore[attr-defined]
+                name="workerbee-controlled-run-lease-refresh",
+                exclusive=True,
+            )
+            return
+        if event.button.id == "workerbee-run-lease-revoke":
+            lease = self.current_lease()
+            if lease is None:
+                self.app.notify("Select a campaign trust lease.", severity="warning")  # type: ignore[attr-defined]
+                return
+            self.app.push_screen(  # type: ignore[attr-defined]
+                WorkerBeeControlledRunLeaseConfirmScreen(
+                    lease=lease,
+                    lease_screen=self,
                 )
             )
 
@@ -11345,6 +11515,11 @@ class AgentPBXTUI(App[None]):
                 "Review and cancel an active PBX-controlled WorkerBee run",
                 self.palette_workerbee_controlled_run_cancel,
             )
+            yield SystemCommand(
+                "/workerbee run leases",
+                "Review or revoke bounded WorkerBee campaign trust",
+                self.palette_workerbee_controlled_run_leases,
+            )
         if not self.workerbee_access_controls_hidden:
             yield SystemCommand("/workerbee access", "Manage the selected Agent WorkerBee authority", self.palette_workerbee_access)
         if not self.workerbee_workspace_controls_hidden:
@@ -12635,6 +12810,16 @@ class AgentPBXTUI(App[None]):
                 ),
             ),
             name="workerbee-controlled-run-cancel",
+            exclusive=True,
+        )
+
+    def palette_workerbee_controlled_run_leases(self) -> None:
+        agent_id = self.palette_agent_id()
+        if agent_id is None:
+            return
+        self.run_worker(
+            self.open_workerbee_controlled_run_lease_center(agent_id),
+            name="workerbee-controlled-run-leases",
             exclusive=True,
         )
 
@@ -16489,6 +16674,22 @@ class AgentPBXTUI(App[None]):
                 screen
                 for screen in reversed(screens)
                 if isinstance(screen, WorkerBeeControlledRunScreen)
+            ),
+            None,
+        )
+
+    def active_workerbee_controlled_run_lease_screen(
+        self,
+    ) -> WorkerBeeControlledRunLeaseScreen | None:
+        try:
+            screens = list(self.screen_stack)
+        except ScreenStackError:
+            return None
+        return next(
+            (
+                screen
+                for screen in reversed(screens)
+                if isinstance(screen, WorkerBeeControlledRunLeaseScreen)
             ),
             None,
         )
@@ -28706,6 +28907,94 @@ class AgentPBXTUI(App[None]):
                 lines.append("No controlled runs recorded.")
             detail.text = "\n".join(lines)
         self.notify(f"Loaded {len(requests)} WorkerBee controlled run(s).")
+
+    async def fetch_workerbee_controlled_run_leases(
+        self,
+        operator_agent_id: str,
+        *,
+        status: str = "approved",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        response = await self.api_client().get(
+            "/v2/workerbee/controlled-run-leases",
+            params={
+                "root_operator_agent_id": operator_agent_id,
+                "status": status,
+                "limit": str(limit),
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        leases = payload.get("leases") if isinstance(payload, dict) else None
+        return [dict(item) for item in leases or [] if isinstance(item, dict)]
+
+    async def open_workerbee_controlled_run_lease_center(
+        self,
+        operator_agent_id: str,
+    ) -> bool:
+        if self.workerbee_controlled_run_controls_hidden:
+            self.notify("WorkerBee controlled-run controls are hidden by policy.", severity="warning")
+            return False
+        active = self.active_workerbee_controlled_run_lease_screen()
+        if active is not None:
+            self.notify(
+                f"WorkerBee campaign trust for {active.operator_agent_id} is already open."
+            )
+            return False
+        try:
+            leases = await self.fetch_workerbee_controlled_run_leases(operator_agent_id)
+        except Exception as exc:
+            self.notify(f"Unable to fetch WorkerBee campaign trust: {exc}", severity="error")
+            return False
+        if not leases:
+            self.notify(f"No active WorkerBee campaign trust for {operator_agent_id}.")
+            return False
+        await self.push_screen(
+            WorkerBeeControlledRunLeaseScreen(
+                operator_agent_id=operator_agent_id,
+                leases=leases,
+            )
+        )
+        return True
+
+    async def refresh_workerbee_controlled_run_lease_screen(
+        self,
+        screen: WorkerBeeControlledRunLeaseScreen,
+    ) -> None:
+        try:
+            leases = await self.fetch_workerbee_controlled_run_leases(
+                screen.operator_agent_id
+            )
+        except Exception as exc:
+            self.notify(f"Unable to refresh WorkerBee campaign trust: {exc}", severity="error")
+            return
+        screen.replace_leases(leases)
+        if not leases:
+            await screen.dismiss()
+
+    async def revoke_workerbee_controlled_run_lease(
+        self,
+        screen: WorkerBeeControlledRunLeaseScreen,
+        lease: dict[str, Any],
+    ) -> None:
+        lease_id = str(lease.get("lease_id") or "").strip()
+        if not lease_id:
+            self.notify("Campaign trust has no durable lease ID.", severity="error")
+            return
+        try:
+            response = await self.api_client().post(
+                f"/v2/workerbee/controlled-run-leases/{lease_id}/revoke",
+                json={"revoked_by": "local-tui-user"},
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            self.notify(f"Unable to revoke WorkerBee campaign trust: {exc}", severity="error")
+            return
+        await self.refresh_events()
+        await self.refresh_workerbee_controlled_run_lease_screen(screen)
+        self.notify(f"Revoked WorkerBee campaign trust {lease_id}.")
 
     async def open_operator_handoff_approval_center(
         self,

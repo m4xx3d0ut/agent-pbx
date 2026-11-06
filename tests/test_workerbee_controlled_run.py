@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -309,6 +308,35 @@ def test_pending_controlled_run_is_exposed_in_root_operator_workflow_summary(
     assert operator["pending_workerbee_controlled_run_count"] == 1
     assert operator["oldest_workerbee_controlled_run_request_id"] == request["request_id"]
     assert operator["workflow_label"] == "! WB RUN"
+
+
+def test_approved_controlled_run_blocks_backend_switch_and_binds_fingerprint(
+    tmp_path: Path,
+) -> None:
+    _store, service, fork_id, campaign_id = _service(tmp_path)
+    preflight = service.preflight(
+        root_operator_agent_id="operator-8",
+        target_fork_agent_id=fork_id,
+        campaign_id=campaign_id,
+        profile_id="isolated-runtime-validation",
+        baseline_commit=BASELINE,
+        candidate_commit=CANDIDATE,
+    )
+    assert preflight["backend_fingerprint"] == preflight["runtime"]["fingerprint"]
+    request = service.request(
+        root_operator_agent_id="operator-8",
+        target_fork_agent_id=fork_id,
+        campaign_id=campaign_id,
+        profile_id="isolated-runtime-validation",
+        baseline_commit=BASELINE,
+        candidate_commit=CANDIDATE,
+        requested_by="test",
+    )["request"]
+    assert service.impact()["mutation_count"] == 0
+    service.decide(request["request_id"], approve=True, decided_by="test")
+    impact = service.impact()
+    assert impact["mutation_count"] == 1
+    assert impact["active_controlled_runs"][0]["request_id"] == request["request_id"]
 
 
 def test_review_or_untrusted_fork_cannot_request_controlled_run(tmp_path: Path) -> None:
