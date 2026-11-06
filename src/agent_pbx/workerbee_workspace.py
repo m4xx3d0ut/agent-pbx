@@ -21,8 +21,22 @@ from .workerbee_runtime import (
     canonical_workerbee_backend,
     workspace_strategy_for_backend,
 )
+from .workerbee_modes import (
+    WORKERBEE_SOURCE_MANAGED_CLONE,
+    WORKERBEE_SOURCE_MODE_VERSION,
+    WORKERBEE_SOURCE_NATIVE_DIRECT,
+    WORKERBEE_SOURCE_SNAPSHOT_IMPORT,
+    WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND,
+    WorkerBeeModeError,
+    canonical_workerbee_source_mode,
+    legacy_strategy_for_source_mode,
+    source_mode_from_legacy_strategy,
+)
 
-WORKERBEE_WORKSPACE_BINDING_API_VERSION = "agent-pbx.workerbee-workspace-binding/v2"
+WORKERBEE_WORKSPACE_BINDING_API_VERSION = "agent-pbx.workerbee-workspace-binding/v3"
+WORKERBEE_WORKSPACE_BINDING_LEGACY_API_VERSION = (
+    "agent-pbx.workerbee-workspace-binding/v2"
+)
 WORKERBEE_WORKSPACE_HELPER_ENV = "AGENT_PBX_WORKERBEE_WORKSPACE_HELPER_BIN"
 WORKERBEE_WORKSPACE_INCLUDE_POLICY_ENV = (
     "AGENT_PBX_WORKERBEE_WORKSPACE_INCLUDES_JSON"
@@ -158,9 +172,13 @@ class WorkerBeeWorkspaceBinding:
     backend_instance_id: str
     backend_generation: int
     backend_fingerprint: str
+    source_mode: str
+    source_mode_version: int
     workspace_strategy: str
     runtime_workspace_path: str
     materializer_receipt: str
+    helper_receipt_sha256: str
+    capability_evidence_sha256: str
     state: str
     created_at: float
     verified_at: float
@@ -179,7 +197,10 @@ class WorkerBeeWorkspaceBinding:
             "project": self.project,
             "open_dashboard": False,
         }
-        if self.workspace_strategy != WORKERBEE_WORKSPACE_DIRECT_HOST:
+        if self.source_mode in {
+            WORKERBEE_SOURCE_SNAPSHOT_IMPORT,
+            WORKERBEE_SOURCE_MANAGED_CLONE,
+        }:
             result.update(
                 workspace_path=self.runtime_workspace_path,
                 workspace_sha256=self.content_sha256,
@@ -231,10 +252,18 @@ class WorkerBeeWorkspaceService:
         project: str,
         source_root: str | Path,
         include_paths: tuple[str, ...] = (),
+        source_mode: str | None = None,
+        trusted_direct_bind_receipt: Mapping[str, Any] | None = None,
+        administrator_ceiling: bool = False,
+        approved_roots: tuple[str | Path, ...] = (),
     ) -> WorkerBeeWorkspaceBinding:
         selected_project = self._safe_project(project)
         source = Path(source_root).expanduser().resolve()
         backend = canonical_workerbee_backend(runtime.backend)
+        selected_source_mode = self._source_mode_for_prepare(
+            backend=backend,
+            source_mode=source_mode,
+        )
         try:
             normalized_include_paths = normalize_workerbee_workspace_include_paths(
                 include_paths
@@ -247,19 +276,21 @@ class WorkerBeeWorkspaceService:
             ) from exc
         identity = self._source_identity(
             source,
-            materialized=(backend != WORKERBEE_BACKEND_OSS),
+            materialized=selected_source_mode
+            in {WORKERBEE_SOURCE_SNAPSHOT_IMPORT, WORKERBEE_SOURCE_MANAGED_CLONE},
             include_paths=normalized_include_paths,
         )
-        if backend == WORKERBEE_BACKEND_OSS:
+        if selected_source_mode == WORKERBEE_SOURCE_NATIVE_DIRECT:
             binding = self._direct_binding(
                 runtime=runtime,
                 project=selected_project,
                 source=source,
                 identity=identity,
+                source_mode=selected_source_mode,
             )
-        elif backend in {
-            WORKERBEE_BACKEND_PLATFORM_DEBUG,
-            WORKERBEE_BACKEND_USER_APPLIANCE,
+        elif selected_source_mode in {
+            WORKERBEE_SOURCE_SNAPSHOT_IMPORT,
+            WORKERBEE_SOURCE_MANAGED_CLONE,
         }:
             binding = self._materialized_binding(
                 runtime=runtime,
@@ -267,6 +298,17 @@ class WorkerBeeWorkspaceService:
                 source=source,
                 identity=identity,
                 include_paths=normalized_include_paths,
+                source_mode=selected_source_mode,
+            )
+        elif selected_source_mode == WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND:
+            binding = self._trusted_direct_binding(
+                runtime=runtime,
+                project=selected_project,
+                source=source,
+                identity=identity,
+                receipt=trusted_direct_bind_receipt,
+                administrator_ceiling=administrator_ceiling,
+                approved_roots=approved_roots,
             )
         else:  # pragma: no cover - runtime selection validates this first
             raise WorkerBeeWorkspaceError(
@@ -282,6 +324,7 @@ class WorkerBeeWorkspaceService:
         runtime: WorkerBeeRuntimeSelection,
         source_root: str | Path,
         include_paths: tuple[str, ...] = (),
+        source_mode: str | None = None,
     ) -> dict[str, Any]:
         """Return the identity used to address one backend workspace snapshot."""
 
@@ -296,11 +339,14 @@ class WorkerBeeWorkspaceService:
                 "Use at most 64 safe source-root-relative paths without .git or traversal.",
             ) from exc
         source = Path(source_root).expanduser().resolve()
+        selected_source_mode = self._source_mode_for_prepare(
+            backend=canonical_workerbee_backend(runtime.backend),
+            source_mode=source_mode,
+        )
         return self._source_identity(
             source,
-            materialized=(
-                canonical_workerbee_backend(runtime.backend) != WORKERBEE_BACKEND_OSS
-            ),
+            materialized=selected_source_mode
+            in {WORKERBEE_SOURCE_SNAPSHOT_IMPORT, WORKERBEE_SOURCE_MANAGED_CLONE},
             include_paths=normalized_include_paths,
         )
 
@@ -311,6 +357,8 @@ class WorkerBeeWorkspaceService:
         project: str,
         source_root: str | Path,
         include_paths: tuple[str, ...] = (),
+        source_mode: str | None = None,
+        source_mode_version: int = WORKERBEE_SOURCE_MODE_VERSION,
     ) -> str:
         """Return the binding ID represented by the checkout's current content."""
 
@@ -318,8 +366,19 @@ class WorkerBeeWorkspaceService:
             runtime=runtime,
             source_root=source_root,
             include_paths=include_paths,
+            source_mode=source_mode,
         )
-        return self._binding_id(runtime, self._safe_project(project), identity)
+        selected_source_mode = self._source_mode_for_prepare(
+            backend=canonical_workerbee_backend(runtime.backend),
+            source_mode=source_mode,
+        )
+        return self._binding_id(
+            runtime,
+            self._safe_project(project),
+            identity,
+            source_mode=selected_source_mode,
+            source_mode_version=source_mode_version,
+        )
 
     def load(self, binding_id: str) -> WorkerBeeWorkspaceBinding:
         path = self._receipt_path(binding_id)
@@ -335,7 +394,21 @@ class WorkerBeeWorkspaceService:
                 "WORKERBEE_WORKSPACE_BINDING_INVALID",
                 "WorkerBee workspace binding receipt is unreadable.",
             ) from exc
-        if payload.pop("api_version", "") != WORKERBEE_WORKSPACE_BINDING_API_VERSION:
+        api_version = payload.pop("api_version", "")
+        if api_version == WORKERBEE_WORKSPACE_BINDING_LEGACY_API_VERSION:
+            try:
+                payload["source_mode"] = source_mode_from_legacy_strategy(
+                    payload.get("workspace_strategy")
+                )
+            except WorkerBeeModeError as exc:
+                raise WorkerBeeWorkspaceError(
+                    "WORKERBEE_WORKSPACE_BINDING_INVALID",
+                    "Legacy WorkerBee workspace binding has an unknown source strategy.",
+                ) from exc
+            payload["source_mode_version"] = 0
+            payload["helper_receipt_sha256"] = ""
+            payload["capability_evidence_sha256"] = ""
+        elif api_version != WORKERBEE_WORKSPACE_BINDING_API_VERSION:
             raise WorkerBeeWorkspaceError(
                 "WORKERBEE_WORKSPACE_BINDING_VERSION_UNSUPPORTED",
                 "WorkerBee workspace binding receipt has an unsupported version.",
@@ -381,7 +454,10 @@ class WorkerBeeWorkspaceService:
         binding = self.load(binding_id)
         if binding.state == "released":
             return binding
-        if binding.workspace_strategy != WORKERBEE_WORKSPACE_DIRECT_HOST:
+        if binding.source_mode in {
+            WORKERBEE_SOURCE_SNAPSHOT_IMPORT,
+            WORKERBEE_SOURCE_MANAGED_CLONE,
+        }:
             self._run_helper("release", binding=binding)
         updated = WorkerBeeWorkspaceBinding(
             **{
@@ -400,10 +476,16 @@ class WorkerBeeWorkspaceService:
         project: str,
         source: Path,
         identity: Mapping[str, Any],
+        source_mode: str,
     ) -> WorkerBeeWorkspaceBinding:
         now = self.clock()
         return WorkerBeeWorkspaceBinding(
-            binding_id=self._binding_id(runtime, project, identity),
+            binding_id=self._binding_id(
+                runtime,
+                project,
+                identity,
+                source_mode=source_mode,
+            ),
             project=project,
             source_root=str(source),
             source_commit=str(identity["source_commit"]),
@@ -414,9 +496,13 @@ class WorkerBeeWorkspaceService:
             backend_instance_id=runtime.instance_id,
             backend_generation=runtime.generation,
             backend_fingerprint=runtime.fingerprint,
-            workspace_strategy=workspace_strategy_for_backend(runtime.backend),
+            source_mode=source_mode,
+            source_mode_version=WORKERBEE_SOURCE_MODE_VERSION,
+            workspace_strategy=legacy_strategy_for_source_mode(source_mode),
             runtime_workspace_path=str(source),
             materializer_receipt="",
+            helper_receipt_sha256="",
+            capability_evidence_sha256="",
             state="ready",
             created_at=now,
             verified_at=now,
@@ -430,6 +516,7 @@ class WorkerBeeWorkspaceService:
         source: Path,
         identity: Mapping[str, Any],
         include_paths: tuple[str, ...],
+        source_mode: str,
     ) -> WorkerBeeWorkspaceBinding:
         if runtime.backend == WORKERBEE_BACKEND_USER_APPLIANCE:
             raise WorkerBeeWorkspaceError(
@@ -443,7 +530,12 @@ class WorkerBeeWorkspaceService:
                 "WorkerBee appliance workspace materializer is not configured.",
                 f"Set {WORKERBEE_WORKSPACE_HELPER_ENV} to the versioned materializer helper.",
             )
-        binding_id = self._binding_id(runtime, project, identity)
+        binding_id = self._binding_id(
+            runtime,
+            project,
+            identity,
+            source_mode=source_mode,
+        )
         command = [
             self.helper_bin,
             "stage",
@@ -526,13 +618,245 @@ class WorkerBeeWorkspaceService:
             backend_instance_id=runtime.instance_id,
             backend_generation=runtime.generation,
             backend_fingerprint=runtime.fingerprint,
-            workspace_strategy=workspace_strategy_for_backend(runtime.backend),
+            source_mode=source_mode,
+            source_mode_version=WORKERBEE_SOURCE_MODE_VERSION,
+            workspace_strategy=legacy_strategy_for_source_mode(source_mode),
             runtime_workspace_path=runtime_path,
             materializer_receipt=str(payload.get("receipt_path") or "").strip(),
+            helper_receipt_sha256="",
+            capability_evidence_sha256="",
             state="ready",
             created_at=now,
             verified_at=now,
         )
+
+    def _trusted_direct_binding(
+        self,
+        *,
+        runtime: WorkerBeeRuntimeSelection,
+        project: str,
+        source: Path,
+        identity: Mapping[str, Any],
+        receipt: Mapping[str, Any] | None,
+        administrator_ceiling: bool,
+        approved_roots: tuple[str | Path, ...],
+    ) -> WorkerBeeWorkspaceBinding:
+        if runtime.backend != WORKERBEE_BACKEND_PLATFORM_DEBUG:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_TRUSTED_DIRECT_BIND_BACKEND_DENIED",
+                "trusted-direct-bind is limited to the platform-debug backend.",
+            )
+        if not administrator_ceiling:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_TRUSTED_DIRECT_BIND_CEILING_REQUIRED",
+                "trusted-direct-bind requires an explicit administrator ceiling.",
+            )
+        canonical_roots = self._trusted_direct_roots(approved_roots)
+        if not any(source == root or root in source.parents for root in canonical_roots):
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_TRUSTED_DIRECT_BIND_ROOT_DENIED",
+                "The source checkout is outside the administrator-approved roots.",
+            )
+        self._require_owner_safe_real_path(source)
+        evidence = self._validate_trusted_direct_receipt(
+            runtime=runtime,
+            source=source,
+            receipt=receipt,
+        )
+        now = self.clock()
+        return WorkerBeeWorkspaceBinding(
+            binding_id=self._binding_id(
+                runtime,
+                project,
+                identity,
+                source_mode=WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND,
+            ),
+            project=project,
+            source_root=str(source),
+            source_commit=str(identity["source_commit"]),
+            source_dirty=bool(identity["source_dirty"]),
+            source_status_sha256=str(identity["source_status_sha256"]),
+            content_sha256="",
+            backend=runtime.backend,
+            backend_instance_id=runtime.instance_id,
+            backend_generation=runtime.generation,
+            backend_fingerprint=runtime.fingerprint,
+            source_mode=WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND,
+            source_mode_version=WORKERBEE_SOURCE_MODE_VERSION,
+            workspace_strategy=legacy_strategy_for_source_mode(
+                WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND
+            ),
+            runtime_workspace_path=evidence["runtime_workspace_path"],
+            materializer_receipt="",
+            helper_receipt_sha256=evidence["helper_receipt_sha256"],
+            capability_evidence_sha256=evidence["capability_evidence_sha256"],
+            state="ready",
+            created_at=now,
+            verified_at=now,
+        )
+
+    @staticmethod
+    def _source_mode_for_prepare(*, backend: str, source_mode: str | None) -> str:
+        if source_mode is None:
+            legacy_strategy = workspace_strategy_for_backend(backend)
+            return source_mode_from_legacy_strategy(legacy_strategy)
+        try:
+            selected = canonical_workerbee_source_mode(source_mode)
+        except WorkerBeeModeError as exc:
+            raise WorkerBeeWorkspaceError(exc.code, exc.message, exc.remediation) from exc
+        allowed = {
+            WORKERBEE_BACKEND_OSS: {WORKERBEE_SOURCE_NATIVE_DIRECT},
+            WORKERBEE_BACKEND_PLATFORM_DEBUG: {
+                WORKERBEE_SOURCE_SNAPSHOT_IMPORT,
+                WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND,
+            },
+            WORKERBEE_BACKEND_USER_APPLIANCE: {WORKERBEE_SOURCE_MANAGED_CLONE},
+        }
+        if selected not in allowed.get(backend, set()):
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_SOURCE_MODE_BACKEND_INCOMPATIBLE",
+                f"Source mode {selected!r} is not supported by backend {backend!r}.",
+                "Select an explicit compatible source mode; Agent PBX will not fall back.",
+            )
+        return selected
+
+    @staticmethod
+    def _trusted_direct_roots(
+        roots: tuple[str | Path, ...],
+    ) -> tuple[Path, ...]:
+        if not roots:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_TRUSTED_DIRECT_BIND_ROOTS_REQUIRED",
+                "trusted-direct-bind requires at least one approved canonical root.",
+            )
+        result: list[Path] = []
+        for raw in roots:
+            path = Path(raw).expanduser()
+            if not path.is_absolute() or path.is_symlink():
+                raise WorkerBeeWorkspaceError(
+                    "WORKERBEE_TRUSTED_DIRECT_BIND_ROOT_INVALID",
+                    "An approved trusted-direct-bind root is not a real absolute path.",
+                )
+            try:
+                canonical = path.resolve(strict=True)
+            except OSError as exc:
+                raise WorkerBeeWorkspaceError(
+                    "WORKERBEE_TRUSTED_DIRECT_BIND_ROOT_INVALID",
+                    "An approved trusted-direct-bind root is unavailable.",
+                ) from exc
+            WorkerBeeWorkspaceService._require_owner_safe_real_path(canonical)
+            result.append(canonical)
+        return tuple(result)
+
+    @staticmethod
+    def _require_owner_safe_real_path(path: Path) -> None:
+        if not path.is_absolute():
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_TRUSTED_DIRECT_BIND_PATH_INVALID",
+                "trusted-direct-bind paths must be absolute.",
+            )
+        current = Path(path.anchor)
+        for part in path.parts[1:]:
+            current /= part
+            try:
+                details = current.lstat()
+            except OSError as exc:
+                raise WorkerBeeWorkspaceError(
+                    "WORKERBEE_TRUSTED_DIRECT_BIND_PATH_INVALID",
+                    "trusted-direct-bind path ancestry is unavailable.",
+                ) from exc
+            if stat.S_ISLNK(details.st_mode):
+                raise WorkerBeeWorkspaceError(
+                    "WORKERBEE_TRUSTED_DIRECT_BIND_SYMLINK_DENIED",
+                    "trusted-direct-bind path ancestry contains a symbolic link.",
+                )
+        if path.lstat().st_uid != os.getuid():
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_TRUSTED_DIRECT_BIND_OWNER_MISMATCH",
+                "trusted-direct-bind path ownership does not match the daemon user.",
+            )
+
+    def _validate_trusted_direct_receipt(
+        self,
+        *,
+        runtime: WorkerBeeRuntimeSelection,
+        source: Path,
+        receipt: Mapping[str, Any] | None,
+    ) -> dict[str, str]:
+        required = {
+            "api_version",
+            "backend",
+            "backend_instance_id",
+            "backend_fingerprint",
+            "source_root",
+            "runtime_workspace_path",
+            "capability",
+            "live",
+            "verified_at",
+            "expires_at",
+            "helper_receipt_id",
+            "helper_receipt_sha256",
+        }
+        if not isinstance(receipt, Mapping) or set(receipt) != required:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_INVALID",
+                "trusted-direct-bind requires one exact verified helper receipt.",
+            )
+        payload = dict(receipt)
+        supplied_digest = str(payload.pop("helper_receipt_sha256") or "").lower()
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        expected_digest = hashlib.sha256(encoded.encode()).hexdigest()
+        runtime_path = str(payload.get("runtime_workspace_path") or "").strip()
+        if (
+            supplied_digest != expected_digest
+            or payload.get("api_version")
+            != "agent-pbx.workerbee-trusted-direct-bind-helper/v1"
+            or canonical_workerbee_backend(payload.get("backend")) != runtime.backend
+            or payload.get("backend_instance_id") != runtime.instance_id
+            or payload.get("backend_fingerprint") != runtime.fingerprint
+            or Path(str(payload.get("source_root") or "")).resolve(strict=False)
+            != source
+            or payload.get("capability") != WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND
+            or payload.get("live") is not True
+            or not runtime_path.startswith("/")
+            or not str(payload.get("helper_receipt_id") or "").strip()
+        ):
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_MISMATCH",
+                "trusted-direct-bind helper evidence does not match the selected runtime and source.",
+            )
+        try:
+            verified_at = float(payload["verified_at"])
+            expires_at = float(payload["expires_at"])
+        except (TypeError, ValueError) as exc:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_INVALID",
+                "trusted-direct-bind helper receipt timestamps are invalid.",
+            ) from exc
+        now = self.clock()
+        if verified_at > now or expires_at <= now or expires_at - verified_at > 300:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_STALE",
+                "trusted-direct-bind helper evidence is stale or has an unsafe lifetime.",
+            )
+        capability_payload = {
+            "backend": runtime.backend,
+            "backend_instance_id": runtime.instance_id,
+            "backend_fingerprint": runtime.fingerprint,
+            "capability": WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND,
+            "live": True,
+        }
+        return {
+            "runtime_workspace_path": runtime_path,
+            "helper_receipt_sha256": supplied_digest,
+            "capability_evidence_sha256": hashlib.sha256(
+                json.dumps(
+                    capability_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+        }
 
     def _run_helper(self, operation: str, *, binding: WorkerBeeWorkspaceBinding) -> None:
         if not self.helper_bin:
@@ -710,6 +1034,9 @@ class WorkerBeeWorkspaceService:
         runtime: WorkerBeeRuntimeSelection,
         project: str,
         identity: Mapping[str, Any],
+        *,
+        source_mode: str,
+        source_mode_version: int = WORKERBEE_SOURCE_MODE_VERSION,
     ) -> str:
         seed_parts = [
             runtime.backend,
@@ -721,6 +1048,8 @@ class WorkerBeeWorkspaceService:
         ]
         if identity.get("materialization_sha256"):
             seed_parts.append(str(identity["materialization_sha256"]))
+        if source_mode_version > 0:
+            seed_parts.extend((str(source_mode_version), source_mode))
         seed = "\0".join(seed_parts)
         return f"wb-{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
 

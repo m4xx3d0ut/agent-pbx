@@ -73,6 +73,19 @@ def test_tool_surface_reports_missing_unknown_and_denied_tools() -> None:
     assert "workerbee_v1_manifest_deploy_remote_k1s" not in surface.effective_tools
 
 
+def test_tool_surface_rejects_unreviewed_backend_extension_when_requested_set_is_complete() -> None:
+    requested = tools_for_access_profile(WORKERBEE_PROFILE_LOCAL_DEPLOY)
+
+    surface = resolve_workerbee_tool_surface(
+        WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        (*requested, "workerbee_v1_backend_extension"),
+    )
+
+    assert surface.missing_tools == ()
+    assert surface.unknown_backend_tools == ("workerbee_v1_backend_extension",)
+    assert surface.compatible is False
+
+
 @pytest.mark.parametrize(
     ("legacy", "source_mode"),
     [

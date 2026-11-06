@@ -185,7 +185,11 @@ class WorkerBeeToolSurface:
 
     @property
     def compatible(self) -> bool:
-        return not self.missing_tools and not self.denied_high_risk_tools
+        return (
+            not self.missing_tools
+            and not self.unknown_backend_tools
+            and not self.denied_high_risk_tools
+        )
 
     def public_dict(self) -> dict[str, Any]:
         return {

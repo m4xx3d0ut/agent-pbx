@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 
 from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
 from agent_pbx.workerbee_workspace import (
+    WORKERBEE_WORKSPACE_BINDING_LEGACY_API_VERSION,
     WORKERBEE_WORKSPACE_INCLUDE_POLICY_ENV,
     WorkerBeeWorkspaceError,
     WorkerBeeWorkspaceIncludePolicyError,
@@ -141,6 +143,8 @@ def test_oss_binding_uses_direct_host_checkout(tmp_path: Path) -> None:
     )
 
     assert binding.backend == "oss"
+    assert binding.source_mode == "native-direct"
+    assert binding.source_mode_version == 1
     assert binding.workspace_strategy == "direct_host"
     assert binding.runtime_workspace_path == str(source.resolve())
     assert binding.source_commit == commit
@@ -178,10 +182,138 @@ def test_debug_binding_uses_exact_materializer_receipt(tmp_path: Path) -> None:
     binding = service.prepare(runtime=selected, project="demo", source_root=source)
 
     assert binding.workspace_strategy == "content_addressed_import"
+    assert binding.source_mode == "snapshot-import"
     assert binding.runtime_workspace_path == "/workspace/imports/demo-123"
     assert binding.content_sha256 == "a" * 64
     assert binding.session_start_args(goal="deploy")["workspace_path"] == binding.runtime_workspace_path
     service.verify_runtime(binding, selected)
+
+
+def test_workspace_service_loads_v2_receipt_as_explicit_legacy_source_mode(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "repo"
+    git_repo(source)
+    service = WorkerBeeWorkspaceService(tmp_path / "state")
+    binding = service.prepare(
+        runtime=runtime(tmp_path, "oss"), project="demo", source_root=source
+    )
+    payload = binding.public_dict()
+    payload["api_version"] = WORKERBEE_WORKSPACE_BINDING_LEGACY_API_VERSION
+    for key in (
+        "source_mode",
+        "source_mode_version",
+        "helper_receipt_sha256",
+        "capability_evidence_sha256",
+    ):
+        payload.pop(key)
+    receipt_path = service.state_root / "bindings" / f"{binding.binding_id}.json"
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = service.load(binding.binding_id)
+
+    assert migrated.source_mode == "native-direct"
+    assert migrated.source_mode_version == 0
+    assert migrated.workspace_strategy == "direct_host"
+
+
+def trusted_direct_receipt(selected, source: Path) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "api_version": "agent-pbx.workerbee-trusted-direct-bind-helper/v1",
+        "backend": selected.backend,
+        "backend_instance_id": selected.instance_id,
+        "backend_fingerprint": selected.fingerprint,
+        "source_root": str(source.resolve()),
+        "runtime_workspace_path": "/workspace/direct/demo",
+        "capability": "trusted-direct-bind",
+        "live": True,
+        "verified_at": 95.0,
+        "expires_at": 110.0,
+        "helper_receipt_id": "helper-receipt-1",
+    }
+    payload["helper_receipt_sha256"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return payload
+
+
+def test_trusted_direct_bind_requires_ceiling_safe_root_and_verified_helper(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "approved" / "repo"
+    source.parent.mkdir()
+    git_repo(source)
+    selected = runtime(tmp_path, "platform_debug")
+    service = WorkerBeeWorkspaceService(tmp_path / "state", clock=lambda: 100.0)
+    receipt = trusted_direct_receipt(selected, source)
+
+    binding = service.prepare(
+        runtime=selected,
+        project="demo",
+        source_root=source,
+        source_mode="trusted-direct-bind",
+        trusted_direct_bind_receipt=receipt,
+        administrator_ceiling=True,
+        approved_roots=(source.parent,),
+    )
+
+    assert binding.source_mode == "trusted-direct-bind"
+    assert binding.workspace_strategy == "trusted_direct_bind"
+    assert binding.runtime_workspace_path == "/workspace/direct/demo"
+    assert binding.helper_receipt_sha256 == receipt["helper_receipt_sha256"]
+    assert len(binding.capability_evidence_sha256) == 64
+
+
+def test_trusted_direct_bind_rejects_missing_ceiling_and_receipt_drift(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "approved" / "repo"
+    source.parent.mkdir()
+    git_repo(source)
+    selected = runtime(tmp_path, "platform_debug")
+    service = WorkerBeeWorkspaceService(tmp_path / "state", clock=lambda: 100.0)
+    receipt = trusted_direct_receipt(selected, source)
+
+    with pytest.raises(WorkerBeeWorkspaceError) as ceiling:
+        service.prepare(
+            runtime=selected,
+            project="demo",
+            source_root=source,
+            source_mode="trusted-direct-bind",
+            trusted_direct_bind_receipt=receipt,
+            approved_roots=(source.parent,),
+        )
+    assert ceiling.value.code == "WORKERBEE_TRUSTED_DIRECT_BIND_CEILING_REQUIRED"
+
+    drifted = dict(receipt)
+    drifted["runtime_workspace_path"] = "/workspace/direct/other"
+    with pytest.raises(WorkerBeeWorkspaceError) as mismatch:
+        service.prepare(
+            runtime=selected,
+            project="demo",
+            source_root=source,
+            source_mode="trusted-direct-bind",
+            trusted_direct_bind_receipt=drifted,
+            administrator_ceiling=True,
+            approved_roots=(source.parent,),
+        )
+    assert mismatch.value.code == "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_MISMATCH"
+
+
+def test_source_mode_backend_mismatch_never_falls_back(tmp_path: Path) -> None:
+    source = tmp_path / "repo"
+    git_repo(source)
+    service = WorkerBeeWorkspaceService(tmp_path / "state")
+
+    with pytest.raises(WorkerBeeWorkspaceError) as failure:
+        service.prepare(
+            runtime=runtime(tmp_path, "oss"),
+            project="demo",
+            source_root=source,
+            source_mode="snapshot-import",
+        )
+
+    assert failure.value.code == "WORKERBEE_SOURCE_MODE_BACKEND_INCOMPATIBLE"
 
 
 def test_debug_binding_identity_changes_with_explicit_include_content(
