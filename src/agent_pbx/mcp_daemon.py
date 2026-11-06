@@ -20,6 +20,13 @@ from urllib.request import urlopen
 
 from . import __version__
 from .compat import POLLING_ENV
+from .config import (
+    WORKERBEE_TRUSTED_DIRECT_ADMIN_CEILING_ENV,
+    WORKERBEE_TRUSTED_DIRECT_APPROVED_ROOTS_ENV,
+    WORKERBEE_TRUSTED_DIRECT_HELPER_ENV,
+    WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT_ENV,
+    WORKERBEE_TRUSTED_DIRECT_RUNTIME_PREFIX_ENV,
+)
 from .codex.event_bridge import (
     CODEX_EVENT_BRIDGE_BIN_ENV,
     CODEX_EVENT_BRIDGE_ENV,
@@ -72,6 +79,11 @@ MANAGED_CHILD_ENV_VARS = {
     WORKERBEE_BIN_ENV,
     WORKERBEE_TIMEOUT_ENV,
     WORKERBEE_CACHE_ENV,
+    WORKERBEE_TRUSTED_DIRECT_HELPER_ENV,
+    WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT_ENV,
+    WORKERBEE_TRUSTED_DIRECT_RUNTIME_PREFIX_ENV,
+    WORKERBEE_TRUSTED_DIRECT_APPROVED_ROOTS_ENV,
+    WORKERBEE_TRUSTED_DIRECT_ADMIN_CEILING_ENV,
     PULL_REQUESTS_ENABLED_ENV,
     PULL_REQUESTS_MERGE_ENABLED_ENV,
     ISSUES_ENABLED_ENV,
@@ -131,6 +143,11 @@ class MCPDaemonConfig:
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
+    workerbee_trusted_direct_helper_bin: Path | None = None
+    workerbee_trusted_direct_receipt_root: Path | None = None
+    workerbee_trusted_direct_runtime_prefix: str = "/workspace/direct-bind"
+    workerbee_trusted_direct_approved_roots: tuple[Path, ...] = ()
+    workerbee_trusted_direct_administrator_ceiling: bool = False
     pull_requests_enabled: bool = False
     pull_request_merge_enabled: bool = False
     issues_enabled: bool = False
@@ -400,6 +417,11 @@ def config_from_args(
     workerbee_bin: Path | None = None,
     workerbee_timeout_seconds: float = 20.0,
     workerbee_cache_seconds: float = 10.0,
+    workerbee_trusted_direct_helper_bin: Path | None = None,
+    workerbee_trusted_direct_receipt_root: Path | None = None,
+    workerbee_trusted_direct_runtime_prefix: str = "/workspace/direct-bind",
+    workerbee_trusted_direct_approved_roots: tuple[Path, ...] = (),
+    workerbee_trusted_direct_administrator_ceiling: bool = False,
     pull_requests_enabled: bool = False,
     pull_request_merge_enabled: bool = False,
     issues_enabled: bool = False,
@@ -447,6 +469,25 @@ def config_from_args(
         workerbee_bin=workerbee_bin.expanduser() if workerbee_bin else None,
         workerbee_timeout_seconds=workerbee_timeout_seconds,
         workerbee_cache_seconds=workerbee_cache_seconds,
+        workerbee_trusted_direct_helper_bin=(
+            workerbee_trusted_direct_helper_bin.expanduser()
+            if workerbee_trusted_direct_helper_bin
+            else None
+        ),
+        workerbee_trusted_direct_receipt_root=(
+            workerbee_trusted_direct_receipt_root.expanduser()
+            if workerbee_trusted_direct_receipt_root
+            else None
+        ),
+        workerbee_trusted_direct_runtime_prefix=str(
+            workerbee_trusted_direct_runtime_prefix or "/workspace/direct-bind"
+        ),
+        workerbee_trusted_direct_approved_roots=tuple(
+            Path(item).expanduser() for item in workerbee_trusted_direct_approved_roots
+        ),
+        workerbee_trusted_direct_administrator_ceiling=bool(
+            workerbee_trusted_direct_administrator_ceiling
+        ),
         pull_requests_enabled=pull_requests_enabled,
         pull_request_merge_enabled=pull_request_merge_enabled,
         issues_enabled=issues_enabled,
@@ -645,6 +686,23 @@ def _child_env(config: MCPDaemonConfig) -> dict[str, str]:
         child_env[WORKERBEE_BIN_ENV] = str(config.workerbee_bin.expanduser())
     child_env[WORKERBEE_TIMEOUT_ENV] = str(config.workerbee_timeout_seconds)
     child_env[WORKERBEE_CACHE_ENV] = str(config.workerbee_cache_seconds)
+    if config.workerbee_trusted_direct_helper_bin:
+        child_env[WORKERBEE_TRUSTED_DIRECT_HELPER_ENV] = str(
+            config.workerbee_trusted_direct_helper_bin.expanduser()
+        )
+    if config.workerbee_trusted_direct_receipt_root:
+        child_env[WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT_ENV] = str(
+            config.workerbee_trusted_direct_receipt_root.expanduser()
+        )
+    child_env[WORKERBEE_TRUSTED_DIRECT_RUNTIME_PREFIX_ENV] = str(
+        config.workerbee_trusted_direct_runtime_prefix
+    )
+    child_env[WORKERBEE_TRUSTED_DIRECT_APPROVED_ROOTS_ENV] = json.dumps(
+        [str(item.expanduser()) for item in config.workerbee_trusted_direct_approved_roots]
+    )
+    child_env[WORKERBEE_TRUSTED_DIRECT_ADMIN_CEILING_ENV] = (
+        "1" if config.workerbee_trusted_direct_administrator_ceiling else "0"
+    )
     child_env[PULL_REQUESTS_ENABLED_ENV] = (
         "1" if config.pull_requests_enabled else "0"
     )

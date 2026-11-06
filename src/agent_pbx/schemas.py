@@ -2148,11 +2148,20 @@ class WorkerBeeWorkspacePrepareRequest(BaseModel):
     project: str | None = Field(default=None, min_length=1, max_length=128)
     source_root: str | None = Field(default=None, min_length=1, max_length=4096)
     include_paths: list[str] = Field(default_factory=list, max_length=64)
+    source_mode: Literal[
+        "native-direct", "snapshot-import", "trusted-direct-bind", "managed-clone"
+    ] | None = None
+    trusted_direct_bind_receipt_id: str = Field(default="", max_length=120)
+    trusted_direct_bind_receipt_sha256: str = Field(
+        default="", pattern=r"^(?:|[0-9a-f]{64})$"
+    )
 
 
 class WorkerBeeGatewayLeaseRequest(BaseModel):
     codex_session_id: str = Field(default="", max_length=240)
-    profile: Literal["observe-local", "review-readonly", "local-deploy"]
+    profile: Literal[
+        "observe-local", "review-readonly", "local-deploy", "trusted-workbench"
+    ]
     workspace_binding_id: str = Field(min_length=1, max_length=160)
     ttl_seconds: float | None = Field(default=None, ge=30, le=86_400)
 

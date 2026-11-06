@@ -63,6 +63,22 @@ still explicit. Review forks always resolve to `review-readonly`, and
 `trusted-direct-bind` remains an explicit platform-debug administrator action,
 never a default.
 
+Host admission for that mode is disabled unless all of the following typed
+daemon settings are present together:
+
+- `AGENT_PBX_WORKERBEE_WORKSPACE_HELPER_BIN`;
+- `AGENT_PBX_WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT`;
+- `AGENT_PBX_WORKERBEE_TRUSTED_DIRECT_APPROVED_ROOTS_JSON`;
+- `AGENT_PBX_WORKERBEE_TRUSTED_DIRECT_RUNTIME_PREFIX`; and
+- `AGENT_PBX_WORKERBEE_TRUSTED_DIRECT_ADMINISTRATOR_CEILING=true`.
+
+The default ceiling is false and the approved-root set is empty. Doctor and
+access-policy readback expose only configured/enabled booleans and the approved
+root count, never host paths or receipt content. A partially configured posture
+remains disabled and reports remediation. Changing these daemon settings takes
+effect only after a separately reviewed daemon restart; it does not alter the
+selected backend, source policy, access profile, or execution lane by itself.
+
 Old durable state is migrated additively rather than reinterpreted as a new
 public choice. An omitted pre-RC2 source mode keeps its legacy backend-equivalent
 behavior: OSS `direct_host` becomes `native-direct`, platform-debug

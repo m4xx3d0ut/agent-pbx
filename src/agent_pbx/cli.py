@@ -18,7 +18,15 @@ from .agent import (
     runbook_markdown,
 )
 from .api import create_app, create_token_helper_app
-from .config import ServerConfig
+from .config import (
+    ServerConfig,
+    WORKERBEE_TRUSTED_DIRECT_HELPER_ENV,
+    WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT_ENV,
+    env_optional_path,
+    env_workerbee_trusted_direct_admin_ceiling,
+    env_workerbee_trusted_direct_roots,
+    env_workerbee_trusted_direct_runtime_prefix,
+)
 from .compat import POLLING_ENV, compatibility_flag
 from .codex_theme import (
     install_managed_codex_theme,
@@ -1242,6 +1250,21 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
             "workerbee_cache",
             env_workerbee_cache_seconds(),
         ),
+        workerbee_trusted_direct_helper_bin=env_optional_path(
+            WORKERBEE_TRUSTED_DIRECT_HELPER_ENV
+        ),
+        workerbee_trusted_direct_receipt_root=env_optional_path(
+            WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT_ENV
+        ),
+        workerbee_trusted_direct_runtime_prefix=(
+            env_workerbee_trusted_direct_runtime_prefix()
+        ),
+        workerbee_trusted_direct_approved_roots=(
+            env_workerbee_trusted_direct_roots()
+        ),
+        workerbee_trusted_direct_administrator_ceiling=(
+            env_workerbee_trusted_direct_admin_ceiling()
+        ),
         pull_requests_enabled=pull_request_config.enabled,
         pull_request_merge_enabled=pull_request_config.merge_enabled,
         issues_enabled=issue_config.enabled,
@@ -1354,6 +1377,21 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         workerbee_bin=daemon_config.workerbee_bin,
         workerbee_timeout_seconds=daemon_config.workerbee_timeout_seconds,
         workerbee_cache_seconds=daemon_config.workerbee_cache_seconds,
+        workerbee_trusted_direct_helper_bin=(
+            daemon_config.workerbee_trusted_direct_helper_bin
+        ),
+        workerbee_trusted_direct_receipt_root=(
+            daemon_config.workerbee_trusted_direct_receipt_root
+        ),
+        workerbee_trusted_direct_runtime_prefix=(
+            daemon_config.workerbee_trusted_direct_runtime_prefix
+        ),
+        workerbee_trusted_direct_approved_roots=(
+            daemon_config.workerbee_trusted_direct_approved_roots
+        ),
+        workerbee_trusted_direct_administrator_ceiling=(
+            daemon_config.workerbee_trusted_direct_administrator_ceiling
+        ),
         pull_requests_enabled=daemon_config.pull_requests_enabled,
         pull_request_merge_enabled=daemon_config.pull_request_merge_enabled,
         issues_enabled=daemon_config.issues_enabled,

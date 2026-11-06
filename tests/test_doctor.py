@@ -21,6 +21,7 @@ from agent_pbx.doctor import (
     _workerbee_runtime_binding_check,
     _workerbee_tool_surface_check,
     _workerbee_tool_surface_runtime_check,
+    _workerbee_trusted_direct_bind_check,
     _workerbee_controlled_run_check,
     _workerbee_workspace_policy_check,
     doctor_json,
@@ -88,6 +89,37 @@ def test_doctor_reports_effective_workerbee_workspace_policy(tmp_path: Path) -> 
     assert check.status == "pass"
     assert "Rosie Workbench" in check.summary
     assert "allowed_roots=1" in check.detail
+
+
+def test_doctor_reports_trusted_direct_bind_disabled_incomplete_and_ready(
+    tmp_path: Path,
+) -> None:
+    disabled = _workerbee_trusted_direct_bind_check(
+        MCPDaemonConfig(state_root=tmp_path / "disabled")
+    )
+    incomplete = _workerbee_trusted_direct_bind_check(
+        MCPDaemonConfig(
+            state_root=tmp_path / "incomplete",
+            workerbee_trusted_direct_helper_bin=tmp_path / "helper",
+        )
+    )
+    ready = _workerbee_trusted_direct_bind_check(
+        MCPDaemonConfig(
+            state_root=tmp_path / "ready",
+            workerbee_trusted_direct_helper_bin=tmp_path / "helper",
+            workerbee_trusted_direct_receipt_root=tmp_path / "receipts",
+            workerbee_trusted_direct_approved_roots=(tmp_path / "git",),
+            workerbee_trusted_direct_administrator_ceiling=True,
+        )
+    )
+
+    assert disabled.status == "pass"
+    assert "disabled by default" in disabled.summary
+    assert incomplete.status == "warn"
+    assert "remains disabled" in incomplete.summary
+    assert ready.status == "pass"
+    assert "host admission is configured" in ready.summary
+    assert "approved_roots=1" in ready.detail
 
 
 def test_doctor_reports_safe_controlled_run_default_and_missing_root_profile(

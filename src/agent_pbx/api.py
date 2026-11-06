@@ -66,6 +66,11 @@ from .workerbee_access import (
     WorkerBeeAccessPolicyError,
     WorkerBeeAccessPolicyService,
 )
+from .workerbee_modes import (
+    WORKERBEE_PROFILE_OBSERVE,
+    WORKERBEE_PROFILE_REVIEW,
+    WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND,
+)
 from .workerbee_runtime import WorkerBeeRuntimeRegistry
 from .workerbee_workspace import (
     WorkerBeeWorkspaceBinding,
@@ -587,16 +592,54 @@ def workerbee_policy_status(app: FastAPI, agent_id: str) -> dict[str, Any]:
             "profile": access.get("effective_profile"),
             "control_mode": access.get("control_mode"),
             "constrained": bool(access.get("constrained")),
+            "trusted_direct_bind": workerbee_trusted_direct_config_readback(app),
         },
+    }
+
+
+def workerbee_trusted_direct_config_readback(app: FastAPI) -> dict[str, Any]:
+    service = app.state.workerbee_workspaces
+    raw_helper = str(getattr(service, "helper_bin", "") or "")
+    helper = bool(raw_helper and Path(raw_helper).is_absolute())
+    verifier = getattr(service, "trusted_direct_verifier", None)
+    receipt_store = bool(
+        verifier is not None
+        and Path(getattr(verifier, "receipt_root", "")).is_absolute()
+    )
+    approved_roots = tuple(
+        getattr(service, "trusted_direct_approved_roots", ()) or ()
+    )
+    approved_root_count = len(approved_roots)
+    roots_valid = bool(approved_roots) and all(
+        Path(root).is_absolute() and ".." not in Path(root).parts
+        for root in approved_roots
+    )
+    administrator_ceiling = bool(
+        getattr(service, "trusted_direct_administrator_ceiling", False)
+    )
+    return {
+        "configured": helper and receipt_store and roots_valid,
+        "enabled": (
+            helper
+            and receipt_store
+            and roots_valid
+            and administrator_ceiling
+        ),
+        "helper_configured": helper,
+        "receipt_store_configured": receipt_store,
+        "approved_root_count": approved_root_count,
+        "administrator_ceiling": administrator_ceiling,
     }
 
 
 def workerbee_access_readback(app: FastAPI, agent_id: str) -> dict[str, Any]:
     runtime = app.state.workerbee_runtime.selected()
-    return app.state.workerbee_access_policy.get_profile(
+    readback = app.state.workerbee_access_policy.get_profile(
         agent_id,
         selected_backend=(runtime.backend if runtime is not None else None),
     )
+    readback["trusted_direct_bind"] = workerbee_trusted_direct_config_readback(app)
+    return readback
 
 
 def create_app(config: ServerConfig | None = None) -> FastAPI:
@@ -666,7 +709,20 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     )
     workerbee_runtime = WorkerBeeRuntimeRegistry(workerbee_state_root)
     workerbee_workspaces = WorkerBeeWorkspaceService(
-        workerbee_state_root / "workspaces"
+        workerbee_state_root / "workspaces",
+        helper_bin=resolved_config.workerbee_trusted_direct_helper_bin,
+        trusted_direct_receipt_root=(
+            resolved_config.workerbee_trusted_direct_receipt_root
+        ),
+        trusted_direct_runtime_prefix=(
+            resolved_config.workerbee_trusted_direct_runtime_prefix
+        ),
+        trusted_direct_approved_roots=(
+            resolved_config.workerbee_trusted_direct_approved_roots
+        ),
+        trusted_direct_administrator_ceiling=(
+            resolved_config.workerbee_trusted_direct_administrator_ceiling
+        ),
     )
     workerbee_workspace_policy = WorkerBeeWorkspacePolicyService(store)
     workerbee_snapshot_policy = WorkerBeeSnapshotPolicyService(store)
@@ -3208,6 +3264,56 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             payload.project or (agent.get("project") if agent is not None else "") or ""
         ).strip()
         try:
+            if agent is None:
+                if payload.source_mode is None:
+                    raise WorkerBeeAccessPolicyError(
+                        "WORKERBEE_SOURCE_MODE_REQUIRED",
+                        "Pre-registration workspace preparation requires an explicit source mode.",
+                        "Select native-direct, snapshot-import, or managed-clone for the chosen backend.",
+                    )
+                source_mode = payload.source_mode
+                if source_mode == WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND:
+                    raise WorkerBeeAccessPolicyError(
+                        "WORKERBEE_TRUSTED_DIRECT_BIND_AGENT_REQUIRED",
+                        "trusted-direct-bind requires a registered Agent with explicit host policy.",
+                    )
+            else:
+                access = await asyncio.to_thread(
+                    request.app.state.workerbee_access_policy.get_profile,
+                    agent_id,
+                    selected_backend=runtime.backend,
+                )
+                if access.get("source_mode_constrained"):
+                    raise WorkerBeeAccessPolicyError(
+                        "WORKERBEE_SOURCE_MODE_CEILING",
+                        "The stored WorkerBee source mode exceeds the administrator ceiling.",
+                        "Select an allowed source mode before preparing a workspace.",
+                    )
+                source_mode = str(access["source_mode"])
+                if payload.source_mode is not None and payload.source_mode != source_mode:
+                    raise WorkerBeeAccessPolicyError(
+                        "WORKERBEE_SOURCE_MODE_POLICY_MISMATCH",
+                        "Requested source mode does not match the Agent's effective policy.",
+                        "Update the source-mode policy first; Agent PBX will not fall back.",
+                    )
+            has_direct_receipt = bool(
+                payload.trusted_direct_bind_receipt_id
+                or payload.trusted_direct_bind_receipt_sha256
+            )
+            if source_mode == WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND:
+                if not (
+                    payload.trusted_direct_bind_receipt_id
+                    and payload.trusted_direct_bind_receipt_sha256
+                ):
+                    raise WorkerBeeAccessPolicyError(
+                        "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_REQUIRED",
+                        "trusted-direct-bind requires an exact host-owned receipt ID and digest.",
+                    )
+            elif has_direct_receipt:
+                raise WorkerBeeAccessPolicyError(
+                    "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_UNEXPECTED",
+                    "Trusted-direct receipt identity is valid only for trusted-direct-bind.",
+                )
             include_paths = await asyncio.to_thread(
                 request.app.state.workerbee_snapshot_policy.resolve_include_paths,
                 agent_id=agent_id,
@@ -3228,8 +3334,19 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 project=project,
                 source_root=cwd,
                 include_paths=include_paths,
+                source_mode=source_mode,
+                trusted_direct_bind_receipt_id=(
+                    payload.trusted_direct_bind_receipt_id
+                ),
+                trusted_direct_bind_receipt_sha256=(
+                    payload.trusted_direct_bind_receipt_sha256
+                ),
             )
-        except (WorkerBeeWorkspaceError, WorkerBeeSnapshotPolicyError) as exc:
+        except (
+            WorkerBeeAccessPolicyError,
+            WorkerBeeWorkspaceError,
+            WorkerBeeSnapshotPolicyError,
+        ) as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
         return binding.public_dict()
 
@@ -3245,33 +3362,36 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         store: Store = Depends(get_store),
     ) -> dict[str, Any]:
         agent = store.get_agent(agent_id)
-        metadata = (
-            agent.get("metadata")
-            if agent is not None and isinstance(agent.get("metadata"), dict)
-            else {}
-        )
-        if (
-            str(metadata.get("access_mode") or "").strip() == "review_readonly"
-            and payload.profile != "review-readonly"
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="read-only review forks require the review-readonly WorkerBee profile",
-            )
-        if (
-            payload.profile == "local-deploy"
-            and (
-                agent is None
-                or str(metadata.get("workerbee_mcp_profile") or "").strip()
-                != "local-deploy"
-            )
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="local-deploy was not approved in this entity's WorkerBee policy",
-            )
         await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
         try:
+            runtime = request.app.state.workerbee_runtime.selected()
+            if runtime is None:
+                raise WorkerBeeAccessPolicyError(
+                    "WORKERBEE_BACKEND_UNSELECTED",
+                    "No verified WorkerBee backend is selected.",
+                )
+            if agent is None:
+                if payload.profile not in {
+                    WORKERBEE_PROFILE_OBSERVE,
+                    WORKERBEE_PROFILE_REVIEW,
+                }:
+                    raise WorkerBeeAccessPolicyError(
+                        "WORKERBEE_ACCESS_PROFILE_UNAPPROVED",
+                        "Pre-registration launch candidates are limited to read-only WorkerBee profiles.",
+                    )
+            else:
+                access = await asyncio.to_thread(
+                    request.app.state.workerbee_access_policy.get_profile,
+                    agent_id,
+                    selected_backend=runtime.backend,
+                )
+                effective_profile = str(access["effective_profile"])
+                if payload.profile != effective_profile:
+                    raise WorkerBeeAccessPolicyError(
+                        "WORKERBEE_ACCESS_PROFILE_POLICY_MISMATCH",
+                        "Requested lease profile does not match the Agent's effective access policy.",
+                        f"Request {effective_profile!r} or update the policy within its administrator ceiling.",
+                    )
             lease, token = await asyncio.to_thread(
                 request.app.state.workerbee_gateway.issue,
                 agent_id=agent_id,
@@ -3280,7 +3400,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 workspace_binding_id=payload.workspace_binding_id,
                 ttl_seconds=payload.ttl_seconds,
             )
-        except WorkerBeeGatewayError as exc:
+        except (WorkerBeeAccessPolicyError, WorkerBeeGatewayError) as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
         if agent is not None:
             await asyncio.to_thread(

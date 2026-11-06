@@ -341,9 +341,12 @@ def trusted_direct_fixture(
         "expires_at": 110.0,
         "release_required": True,
         "adapter_conformance_sha256": direct_bind.TRUSTED_DIRECT_BIND_ADAPTER_CONFORMANCE_SHA256,
-        "adapter_receipt_sha256": "f" * 64,
+        "adapter_receipt_sha256": "",
     }
     payload.update(payload_overrides or {})
+    payload["adapter_receipt_sha256"] = (
+        direct_bind.trusted_direct_adapter_receipt_sha256(payload)
+    )
     raw = (json.dumps(payload, sort_keys=True) + "\n").encode()
     receipt_root = tmp_path / "direct-receipts"
     receipt_root.mkdir(mode=0o700)
@@ -466,6 +469,45 @@ def test_trusted_direct_bind_revalidation_rejects_response_field_drift(
         service.revalidate_trusted_direct(binding, selected)
 
     assert failure.value.code == "WORKERBEE_TRUSTED_DIRECT_BIND_REVALIDATION_FAILED"
+
+
+def test_trusted_direct_bind_rejects_adapter_receipt_self_digest_drift(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "repo"
+    git_repo(source)
+    runtime = WorkerBeeRuntimeRegistry(tmp_path / "runtime")
+    selected = runtime.observe(
+        {
+            "backend": "platform_debug",
+            "endpoint": "http://127.0.0.1:8765/mcp",
+            "server_name": "WorkerBee Debug",
+            "server_version": "2.3.0rc2",
+        }
+    )
+    service, receipt_id, receipt_sha256, _calls = trusted_direct_fixture(
+        tmp_path,
+        selected,
+        source,
+    )
+    assert service.trusted_direct_verifier is not None
+    receipt_path = service.trusted_direct_verifier.receipt_root / f"{receipt_id}.json"
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload["source_identity_sha256"] = "9" * 64
+    receipt_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    receipt_path.chmod(0o600)
+
+    with pytest.raises(WorkerBeeWorkspaceError) as failure:
+        service.prepare(
+            runtime=selected,
+            project="demo",
+            source_root=source,
+            source_mode="trusted-direct-bind",
+            trusted_direct_bind_receipt_id=receipt_id,
+            trusted_direct_bind_receipt_sha256=receipt_sha256,
+        )
+
+    assert failure.value.code == "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_MISMATCH"
 
 
 def test_trusted_direct_bind_requires_ceiling_safe_root_and_verified_helper(

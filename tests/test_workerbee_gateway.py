@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import grp
 import json
+import os
+import pwd
+import stat
 import subprocess
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -12,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
+from agent_pbx import workerbee_direct_bind as direct_bind
 from agent_pbx.workerbee_gateway import (
     WORKERBEE_MUTATING_TOOLS,
     WORKERBEE_PROFILE_LOCAL_DEPLOY,
@@ -36,6 +42,130 @@ def git_repo(root: Path) -> None:
     (root / "README.md").write_text("gateway\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
+
+
+def trusted_direct_api_receipt(
+    *,
+    source: Path,
+    selected,
+    helper: Path,
+    receipt_root: Path,
+):
+    source_stat = source.stat()
+    helper_stat = helper.stat()
+    source_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source_tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source_status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    ).stdout
+    source_status_sha256 = hashlib.sha256(source_status).hexdigest()
+    identity = {
+        "source_commit": source_commit,
+        "source_tree": source_tree,
+        "source_dirty": bool(source_status),
+        "source_status_sha256": source_status_sha256,
+    }
+    binding_id = WorkerBeeWorkspaceService._binding_id(
+        selected,
+        "demo",
+        identity,
+        source_mode="trusted-direct-bind",
+    )
+    account = pwd.getpwuid(os.getuid())
+    group = grp.getgrgid(account.pw_gid)
+    private_group = direct_bind.WorkerBeePrivateGroupIdentity(
+        uid=os.getuid(),
+        gid=account.pw_gid,
+        username=account.pw_name,
+        group_name=group.gr_name,
+        primary_gid_users=tuple(
+            sorted(item.pw_name for item in pwd.getpwall() if item.pw_gid == account.pw_gid)
+        ),
+        explicit_members=tuple(sorted(group.gr_mem)),
+    )
+    receipt_id = "api-receipt-1"
+    workerbee_receipt_sha256 = "a" * 64
+    runtime_path = "/workspace/direct-bind/demo"
+    now = time.time()
+    payload = {
+        "schema": direct_bind.TRUSTED_DIRECT_BIND_RECEIPT_API_VERSION,
+        "action": "verify-direct-bind",
+        "status": "accepted",
+        "receipt_id": receipt_id,
+        "binding_id": binding_id,
+        "workerbee_receipt_schema": direct_bind.TRUSTED_DIRECT_BIND_CANONICAL_SCHEMA,
+        "workerbee_receipt_phase": "prepared",
+        "workerbee_receipt_sha256": workerbee_receipt_sha256,
+        "source_identity_sha256": "b" * 64,
+        "source_dev": source_stat.st_dev,
+        "source_ino": source_stat.st_ino,
+        "source_uid": source_stat.st_uid,
+        "source_gid": source_stat.st_gid,
+        "source_mode": stat.S_IMODE(source_stat.st_mode),
+        "source_git_commit": source_commit,
+        "source_git_tree": source_tree,
+        "source_git_status_sha256": source_status_sha256,
+        "runtime": runtime_path,
+        "backend_id": selected.backend,
+        "backend_instance": selected.instance_id,
+        "backend_image_digest": "sha256:" + "c" * 64,
+        "backend_fingerprint": selected.fingerprint,
+        "backend_generation": selected.generation,
+        "mount_target_sha256": hashlib.sha256(runtime_path.encode()).hexdigest(),
+        "mount_read_only": True,
+        "mount_propagation": "rprivate",
+        "mount_nested_count": 0,
+        "private_group_uid": private_group.uid,
+        "private_group_gid": private_group.gid,
+        "private_group_identity_sha256": private_group.digest(),
+        "path_component_identity_sha256": "d" * 64,
+        "protected_mask_count": 0,
+        "protected_mask_paths_sha256": hashlib.sha256(b"[]").hexdigest(),
+        "helper_sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+        "helper_dev": helper_stat.st_dev,
+        "helper_ino": helper_stat.st_ino,
+        "helper_uid": helper_stat.st_uid,
+        "helper_gid": helper_stat.st_gid,
+        "helper_mode": stat.S_IMODE(helper_stat.st_mode),
+        "generation_identity_sha256": "e" * 64,
+        "issued_at": now - 1,
+        "expires_at": now + 300,
+        "release_required": True,
+        "adapter_conformance_sha256": direct_bind.TRUSTED_DIRECT_BIND_ADAPTER_CONFORMANCE_SHA256,
+        "adapter_receipt_sha256": "",
+    }
+    payload["adapter_receipt_sha256"] = (
+        direct_bind.trusted_direct_adapter_receipt_sha256(payload)
+    )
+    receipt_root.mkdir(mode=0o700)
+    receipt_path = receipt_root / f"{receipt_id}.json"
+    receipt_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    receipt_path.chmod(0o600)
+
+    def runner(command, **_kwargs):  # type: ignore[no-untyped-def]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    return receipt_id, workerbee_receipt_sha256, runner
 
 
 def services(tmp_path: Path):
@@ -798,6 +928,7 @@ def test_gateway_api_prepares_workspace_and_issues_one_time_token(
                 "metadata": {
                     "cwd": str(repo),
                     "workerbee_mcp_profile": "local-deploy",
+                    "workerbee_source_mode": "native-direct",
                 },
             },
         )
@@ -842,6 +973,428 @@ def test_gateway_api_prepares_workspace_and_issues_one_time_token(
         assert revoked.json()["status"] == "revoked"
 
 
+def test_gateway_api_snapshot_import_uses_effective_source_policy(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    helper = tmp_path / "workspace-helper"
+    helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    helper.chmod(0o700)
+    app = create_app(
+        ServerConfig(
+            db_path=tmp_path / "pbx.sqlite",
+            workerbee_trusted_direct_helper_bin=helper,
+        )
+    )
+
+    active = {
+        "ready": True,
+        "backend": "platform_debug",
+        "endpoint": "http://127.0.0.1:8765/mcp",
+        "server_name": "K1S WorkerBee Debug",
+        "server_version": "2.3.0rc2",
+    }
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {"active": active}
+
+    def runner(command, **_kwargs):  # type: ignore[no-untyped-def]
+        binding_id = command[command.index("--binding-id") + 1]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "backend": "platform_debug",
+                    "runtime_workspace_path": f"/workspace/imports/{binding_id}",
+                    "content_sha256": hashlib.sha256(binding_id.encode()).hexdigest(),
+                    "source_commit": subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=repo,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip(),
+                    "source_dirty": False,
+                    "receipt_path": f"/private/{binding_id}.json",
+                }
+            ),
+            stderr="",
+        )
+
+    app.state.workerbee_switcher = Selector()
+    app.state.workerbee_workspaces.runner = runner
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "snapshot-agent",
+                "project": "demo",
+                "metadata": {"cwd": str(repo)},
+            },
+        ).status_code == 200
+
+        prepared = client.post(
+            "/v2/agents/snapshot-agent/workerbee/workspaces",
+            json={"source_mode": "snapshot-import"},
+        )
+
+        assert prepared.status_code == 200
+        assert prepared.json()["source_mode"] == "snapshot-import"
+        assert prepared.json()["runtime_workspace_path"].startswith(
+            "/workspace/imports/"
+        )
+
+
+def test_gateway_api_rejects_source_policy_mismatch_and_constrained_state(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {
+                "active": {
+                    "ready": True,
+                    "backend": "oss",
+                    "endpoint": "http://127.0.0.1:8765/mcp",
+                    "server_name": "WorkerBee OSS",
+                    "server_version": "2.3.0rc2",
+                }
+            }
+
+    app.state.workerbee_switcher = Selector()
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "policy-agent",
+                "project": "demo",
+                "metadata": {"cwd": str(repo)},
+            },
+        ).status_code == 200
+        mismatch = client.post(
+            "/v2/agents/policy-agent/workerbee/workspaces",
+            json={"source_mode": "native-direct"},
+        )
+        assert mismatch.status_code == 409
+        assert mismatch.json()["detail"]["code"] == (
+            "WORKERBEE_SOURCE_MODE_POLICY_MISMATCH"
+        )
+
+        selected = client.put(
+            "/v2/agents/policy-agent/workerbee/access-profile",
+            json={"source_mode": "native-direct"},
+        )
+        assert selected.status_code == 200
+        prepared = client.post(
+            "/v2/agents/policy-agent/workerbee/workspaces",
+            json={"source_mode": "native-direct"},
+        )
+        assert prepared.status_code == 200
+        assert prepared.json()["source_mode"] == "native-direct"
+
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "constrained-agent",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(repo),
+                    "workerbee_source_mode": "trusted-direct-bind",
+                },
+            },
+        ).status_code == 200
+        constrained = client.post(
+            "/v2/agents/constrained-agent/workerbee/workspaces",
+            json={
+                "source_mode": "trusted-direct-bind",
+                "trusted_direct_bind_receipt_id": "unused-receipt",
+                "trusted_direct_bind_receipt_sha256": "a" * 64,
+            },
+        )
+        assert constrained.status_code == 409
+        assert constrained.json()["detail"]["code"] == (
+            "WORKERBEE_SOURCE_MODE_CEILING"
+        )
+
+
+def test_gateway_api_trusted_direct_bind_is_disabled_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    monkeypatch.setenv(
+        "AGENT_PBX_WORKERBEE_SOURCE_MODE_CEILING_JSON",
+        json.dumps(["snapshot-import", "trusted-direct-bind"]),
+    )
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {
+                "active": {
+                    "ready": True,
+                    "backend": "platform_debug",
+                    "endpoint": "http://127.0.0.1:8765/mcp",
+                    "server_name": "K1S WorkerBee Debug",
+                    "server_version": "2.3.0rc2",
+                }
+            }
+
+    app.state.workerbee_switcher = Selector()
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "direct-agent",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(repo),
+                    "workerbee_source_mode": "trusted-direct-bind",
+                },
+            },
+        ).status_code == 200
+        readback = client.get(
+            "/v2/agents/direct-agent/workerbee/access-profile"
+        )
+        assert readback.status_code == 200
+        assert readback.json()["trusted_direct_bind"]["enabled"] is False
+
+        prepared = client.post(
+            "/v2/agents/direct-agent/workerbee/workspaces",
+            json={
+                "source_mode": "trusted-direct-bind",
+                "trusted_direct_bind_receipt_id": "missing-receipt",
+                "trusted_direct_bind_receipt_sha256": "a" * 64,
+            },
+        )
+
+        assert prepared.status_code == 409
+        assert prepared.json()["detail"]["code"] == (
+            "WORKERBEE_TRUSTED_DIRECT_BIND_VERIFIER_UNAVAILABLE"
+        )
+
+
+def test_gateway_api_admits_fully_configured_trusted_direct_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    helper = tmp_path / "trusted-direct-helper"
+    helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    helper.chmod(0o700)
+    receipt_root = tmp_path / "receipts"
+    monkeypatch.setenv(
+        "AGENT_PBX_WORKERBEE_SOURCE_MODE_CEILING_JSON",
+        json.dumps(["snapshot-import", "trusted-direct-bind"]),
+    )
+    app = create_app(
+        ServerConfig(
+            db_path=tmp_path / "pbx.sqlite",
+            workerbee_trusted_direct_helper_bin=helper,
+            workerbee_trusted_direct_receipt_root=receipt_root,
+            workerbee_trusted_direct_approved_roots=(repo,),
+            workerbee_trusted_direct_administrator_ceiling=True,
+        )
+    )
+    active = {
+        "ready": True,
+        "backend": "platform_debug",
+        "endpoint": "http://127.0.0.1:8765/mcp",
+        "server_name": "K1S WorkerBee Debug",
+        "server_version": "2.3.0rc2",
+    }
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {"active": active}
+
+    app.state.workerbee_switcher = Selector()
+    selected = app.state.workerbee_runtime.observe(active)
+    receipt_id, receipt_sha256, runner = trusted_direct_api_receipt(
+        source=repo,
+        selected=selected,
+        helper=helper,
+        receipt_root=receipt_root,
+    )
+    assert app.state.workerbee_workspaces.trusted_direct_verifier is not None
+    app.state.workerbee_workspaces.trusted_direct_verifier.runner = runner
+
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "direct-agent",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(repo),
+                    "workerbee_source_mode": "trusted-direct-bind",
+                },
+            },
+        ).status_code == 200
+        readback = client.get(
+            "/v2/agents/direct-agent/workerbee/access-profile"
+        )
+        assert readback.json()["trusted_direct_bind"] == {
+            "configured": True,
+            "enabled": True,
+            "helper_configured": True,
+            "receipt_store_configured": True,
+            "approved_root_count": 1,
+            "administrator_ceiling": True,
+        }
+
+        prepared = client.post(
+            "/v2/agents/direct-agent/workerbee/workspaces",
+            json={
+                "source_mode": "trusted-direct-bind",
+                "trusted_direct_bind_receipt_id": receipt_id,
+                "trusted_direct_bind_receipt_sha256": receipt_sha256,
+            },
+        )
+
+        assert prepared.status_code == 200
+        assert prepared.json()["source_mode"] == "trusted-direct-bind"
+        assert prepared.json()["helper_receipt_id"] == receipt_id
+        assert prepared.json()["helper_receipt_sha256"] == receipt_sha256
+        assert prepared.json()["helper_adapter_receipt_sha256"] != receipt_sha256
+        assert prepared.json()["capability_evidence_sha256"] not in {
+            receipt_sha256,
+            prepared.json()["helper_adapter_receipt_sha256"],
+        }
+
+
+def test_gateway_api_enforces_effective_profile_for_trusted_and_review_leases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    active = {
+        "ready": True,
+        "backend": "oss",
+        "endpoint": "http://127.0.0.1:8765/mcp",
+        "server_name": "WorkerBee OSS",
+        "server_version": "2.3.0rc2",
+    }
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {"active": active}
+
+    monkeypatch.delenv("AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING", raising=False)
+    denied_app = create_app(ServerConfig(db_path=tmp_path / "denied.sqlite"))
+    denied_app.state.workerbee_switcher = Selector()
+    with TestClient(denied_app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "denied-agent",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(repo),
+                    "workerbee_mcp_profile": "trusted-workbench",
+                    "workerbee_source_mode": "native-direct",
+                },
+            },
+        ).status_code == 200
+        binding = client.post(
+            "/v2/agents/denied-agent/workerbee/workspaces",
+            json={"source_mode": "native-direct"},
+        ).json()
+        denied = client.post(
+            "/v2/agents/denied-agent/workerbee/leases",
+            json={
+                "profile": "trusted-workbench",
+                "workspace_binding_id": binding["binding_id"],
+            },
+        )
+        assert denied.status_code == 409
+        assert denied.json()["detail"]["code"] == (
+            "WORKERBEE_ACCESS_PROFILE_POLICY_MISMATCH"
+        )
+
+    monkeypatch.setenv(
+        "AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING",
+        "trusted-workbench",
+    )
+    allowed_app = create_app(ServerConfig(db_path=tmp_path / "allowed.sqlite"))
+    allowed_app.state.workerbee_switcher = Selector()
+    with TestClient(allowed_app) as client:
+        for agent_id, metadata in (
+            (
+                "trusted-agent",
+                {
+                    "cwd": str(repo),
+                    "workerbee_mcp_profile": "trusted-workbench",
+                    "workerbee_source_mode": "native-direct",
+                },
+            ),
+            (
+                "review-agent",
+                {
+                    "cwd": str(repo),
+                    "access_mode": "review_readonly",
+                    "workerbee_source_mode": "native-direct",
+                },
+            ),
+        ):
+            assert client.post(
+                "/v1/agents/register",
+                json={
+                    "agent_id": agent_id,
+                    "project": "demo",
+                    "metadata": metadata,
+                },
+            ).status_code == 200
+
+        trusted_binding = client.post(
+            "/v2/agents/trusted-agent/workerbee/workspaces",
+            json={"source_mode": "native-direct"},
+        ).json()
+        trusted = client.post(
+            "/v2/agents/trusted-agent/workerbee/leases",
+            json={
+                "profile": "trusted-workbench",
+                "workspace_binding_id": trusted_binding["binding_id"],
+            },
+        )
+        assert trusted.status_code == 200
+        assert trusted.json()["lease"]["profile"] == "trusted-workbench"
+
+        review_binding = client.post(
+            "/v2/agents/review-agent/workerbee/workspaces",
+            json={"source_mode": "native-direct"},
+        ).json()
+        review_denied = client.post(
+            "/v2/agents/review-agent/workerbee/leases",
+            json={
+                "profile": "local-deploy",
+                "workspace_binding_id": review_binding["binding_id"],
+            },
+        )
+        assert review_denied.status_code == 409
+        assert review_denied.json()["detail"]["code"] == (
+            "WORKERBEE_ACCESS_PROFILE_POLICY_MISMATCH"
+        )
+        review = client.post(
+            "/v2/agents/review-agent/workerbee/leases",
+            json={
+                "profile": "review-readonly",
+                "workspace_binding_id": review_binding["binding_id"],
+            },
+        )
+        assert review.status_code == 200
+        assert review.json()["lease"]["profile"] == "review-readonly"
+
+
 def test_gateway_api_manages_workspace_policy_and_controller_transition(
     tmp_path: Path,
 ) -> None:
@@ -876,6 +1429,7 @@ def test_gateway_api_manages_workspace_policy_and_controller_transition(
                 "metadata": {
                     "cwd": str(repo),
                     "workerbee_mcp_profile": "local-deploy",
+                    "workerbee_source_mode": "native-direct",
                 },
             },
         ).status_code == 200
@@ -1125,7 +1679,11 @@ def test_gateway_api_allows_pre_registration_read_only_launch_candidates(
     with TestClient(app) as client:
         prepared = client.post(
             "/v2/agents/new-launch/workerbee/workspaces",
-            json={"project": "demo", "source_root": str(repo)},
+            json={
+                "project": "demo",
+                "source_root": str(repo),
+                "source_mode": "native-direct",
+            },
         )
         assert prepared.status_code == 200
 
@@ -1163,7 +1721,11 @@ def test_gateway_api_rejects_pre_registration_local_deploy_candidate(
     with TestClient(app) as client:
         prepared = client.post(
             "/v2/agents/new-launch/workerbee/workspaces",
-            json={"project": "demo", "source_root": str(repo)},
+            json={
+                "project": "demo",
+                "source_root": str(repo),
+                "source_mode": "native-direct",
+            },
         )
         assert prepared.status_code == 200
 
@@ -1175,7 +1737,7 @@ def test_gateway_api_rejects_pre_registration_local_deploy_candidate(
             },
         )
         assert issued.status_code == 409
-        assert "not approved" in issued.json()["detail"]
+        assert issued.json()["detail"]["code"] == "WORKERBEE_ACCESS_PROFILE_UNAPPROVED"
 
 
 def test_selected_appliance_status_requires_binding_without_host_cli_fallback(

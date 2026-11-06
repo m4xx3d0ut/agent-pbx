@@ -56,11 +56,14 @@ policy and readback. Selecting `trusted-workbench` does not grant controlled-
 run authority, and selecting a controlled run does not change the interactive
 gateway profile or source mode.
 
-Controlled-run requests bind the selected source-mode identity and workspace
-receipt in addition to the backend generation. Legacy receipts are normalized
-to their explicit backend-equivalent source mode before they can be bound. A
-WorkerBee source/helper receipt may attest backend and mount evidence, but it
-cannot claim an Agent PBX access profile or controlled-run approval.
+Controlled-run uses its own immutable-commit-export source contract and binds
+the resulting `workspace_binding_id` in addition to the backend generation. It
+does not inherit or mutate the interactive gateway's selected source mode.
+Legacy interactive workspace receipts are still normalized to their explicit
+backend-equivalent source mode when they are loaded, but that migration does not
+grant controlled-run authority. A WorkerBee source/helper receipt may attest
+backend and mount evidence, but it cannot claim an Agent PBX access profile or
+controlled-run approval.
 
 ## Provenance and drift rules
 

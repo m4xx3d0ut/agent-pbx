@@ -164,6 +164,7 @@ def run_platform_doctor(
     checks.append(_workerbee_runtime_binding_check(config, which, timeout))
     checks.append(_workerbee_tool_surface_runtime_check(config, timeout))
     checks.append(_workerbee_workspace_policy_check(config))
+    checks.append(_workerbee_trusted_direct_bind_check(config))
     checks.append(_workerbee_controlled_run_check())
     checks.append(_joplin_check(config, timeout, probe_services=probe_services))
     checks.append(_clipboard_check(which))
@@ -979,6 +980,55 @@ def _workerbee_workspace_policy_check(config: MCPDaemonConfig) -> DoctorCheck:
             "Configure at least one existing allowed root for scoped-workbench policy."
             if not valid
             else ""
+        ),
+    )
+
+
+def _workerbee_trusted_direct_bind_check(config: MCPDaemonConfig) -> DoctorCheck:
+    helper = bool(
+        config.workerbee_trusted_direct_helper_bin is not None
+        and config.workerbee_trusted_direct_helper_bin.is_absolute()
+    )
+    receipt_root = bool(
+        config.workerbee_trusted_direct_receipt_root is not None
+        and config.workerbee_trusted_direct_receipt_root.is_absolute()
+    )
+    roots = config.workerbee_trusted_direct_approved_roots
+    root_count = len(roots)
+    roots_valid = bool(roots) and all(
+        root.is_absolute() and ".." not in root.parts for root in roots
+    )
+    ceiling = config.workerbee_trusted_direct_administrator_ceiling
+    configured = helper and receipt_root and roots_valid
+    if configured and ceiling:
+        return DoctorCheck(
+            "workerbee-trusted-direct-bind",
+            "pass",
+            "trusted-direct-bind host admission is configured",
+            detail=(
+                f"helper=true · receipt_store=true · approved_roots={root_count} · "
+                "administrator_ceiling=true"
+            ),
+        )
+    if not any((helper, receipt_root, root_count, ceiling)):
+        return DoctorCheck(
+            "workerbee-trusted-direct-bind",
+            "pass",
+            "trusted-direct-bind is disabled by default",
+            detail="helper=false · receipt_store=false · approved_roots=0 · administrator_ceiling=false",
+        )
+    return DoctorCheck(
+        "workerbee-trusted-direct-bind",
+        "warn",
+        "trusted-direct-bind host admission is incomplete and remains disabled",
+        detail=(
+            f"helper={str(helper).lower()} · receipt_store={str(receipt_root).lower()} · "
+            f"approved_roots={root_count} · administrator_ceiling={str(ceiling).lower()}"
+        ),
+        remediation=(
+            "Configure the fixed helper, private receipt store, approved roots, and "
+            "administrator ceiling together; then restart the daemon in a separately "
+            "authorized activation."
         ),
     )
 

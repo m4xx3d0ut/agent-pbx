@@ -8,6 +8,7 @@ from typing import Any
 from agent_pbx.cli import _daemon_config, build_parser, main
 from agent_pbx.mcp_daemon import (
     MCPDaemonConfig,
+    _child_env,
     config_from_args,
     daemon_database_preflight,
     mcp_daemon_status,
@@ -18,6 +19,13 @@ from agent_pbx.mcp_daemon import (
     rotate_mcp_daemon_log,
     rotate_mcp_daemon_log_live,
     _pid_matches_metadata,
+)
+from agent_pbx.config import (
+    WORKERBEE_TRUSTED_DIRECT_ADMIN_CEILING_ENV,
+    WORKERBEE_TRUSTED_DIRECT_APPROVED_ROOTS_ENV,
+    WORKERBEE_TRUSTED_DIRECT_HELPER_ENV,
+    WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT_ENV,
+    WORKERBEE_TRUSTED_DIRECT_RUNTIME_PREFIX_ENV,
 )
 from agent_pbx.paths import default_state_root
 from agent_pbx.store import SCHEMA_VERSION, Store
@@ -38,6 +46,73 @@ def test_default_state_root_uses_xdg_data_home(
     assert default_state_root() == tmp_path / "agent-pbx"
     assert config.resolved_state_root == tmp_path / "agent-pbx"
     assert config.resolved_db_path == tmp_path / "agent-pbx" / "agent-pbx.sqlite"
+
+
+def test_managed_daemon_replaces_trusted_direct_environment_from_typed_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    for name in (
+        WORKERBEE_TRUSTED_DIRECT_HELPER_ENV,
+        WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT_ENV,
+        WORKERBEE_TRUSTED_DIRECT_RUNTIME_PREFIX_ENV,
+        WORKERBEE_TRUSTED_DIRECT_APPROVED_ROOTS_ENV,
+        WORKERBEE_TRUSTED_DIRECT_ADMIN_CEILING_ENV,
+    ):
+        monkeypatch.setenv(name, "untrusted-ambient-value")
+    config = MCPDaemonConfig(
+        state_root=tmp_path / "state",
+        workerbee_trusted_direct_helper_bin=tmp_path / "helper",
+        workerbee_trusted_direct_receipt_root=tmp_path / "receipts",
+        workerbee_trusted_direct_runtime_prefix="/workspace/direct-bind",
+        workerbee_trusted_direct_approved_roots=(tmp_path / "git",),
+        workerbee_trusted_direct_administrator_ceiling=True,
+    )
+
+    child = _child_env(config)
+
+    assert child[WORKERBEE_TRUSTED_DIRECT_HELPER_ENV] == str(tmp_path / "helper")
+    assert child[WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT_ENV] == str(
+        tmp_path / "receipts"
+    )
+    assert child[WORKERBEE_TRUSTED_DIRECT_RUNTIME_PREFIX_ENV] == (
+        "/workspace/direct-bind"
+    )
+    assert json.loads(child[WORKERBEE_TRUSTED_DIRECT_APPROVED_ROOTS_ENV]) == [
+        str(tmp_path / "git")
+    ]
+    assert child[WORKERBEE_TRUSTED_DIRECT_ADMIN_CEILING_ENV] == "1"
+
+
+def test_daemon_config_loads_trusted_direct_environment_as_typed_fields(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    helper = tmp_path / "helper"
+    receipts = tmp_path / "receipts"
+    approved = tmp_path / "git"
+    monkeypatch.setenv(WORKERBEE_TRUSTED_DIRECT_HELPER_ENV, str(helper))
+    monkeypatch.setenv(WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT_ENV, str(receipts))
+    monkeypatch.setenv(
+        WORKERBEE_TRUSTED_DIRECT_RUNTIME_PREFIX_ENV,
+        "/workspace/direct-bind",
+    )
+    monkeypatch.setenv(
+        WORKERBEE_TRUSTED_DIRECT_APPROVED_ROOTS_ENV,
+        json.dumps([str(approved)]),
+    )
+    monkeypatch.setenv(WORKERBEE_TRUSTED_DIRECT_ADMIN_CEILING_ENV, "true")
+    args = build_parser().parse_args(
+        ["mcp", "status", "--state-root", str(tmp_path / "state")]
+    )
+
+    config = _daemon_config(args)
+
+    assert config.workerbee_trusted_direct_helper_bin == helper
+    assert config.workerbee_trusted_direct_receipt_root == receipts
+    assert config.workerbee_trusted_direct_runtime_prefix == "/workspace/direct-bind"
+    assert config.workerbee_trusted_direct_approved_roots == (approved,)
+    assert config.workerbee_trusted_direct_administrator_ceiling is True
 
 
 def test_mcp_daemon_status_reports_stale_metadata(
