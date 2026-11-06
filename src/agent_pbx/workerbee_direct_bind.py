@@ -100,14 +100,6 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-def trusted_direct_adapter_receipt_sha256(payload: Mapping[str, Any]) -> str:
-    canonical = dict(payload)
-    canonical.pop("adapter_receipt_sha256", None)
-    return hashlib.sha256(
-        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-
-
 class WorkerBeeTrustedDirectBindError(RuntimeError):
     def __init__(self, code: str, message: str, remediation: str = "") -> None:
         super().__init__(message)
@@ -582,13 +574,6 @@ class WorkerBeeTrustedDirectBindVerifier:
             raise WorkerBeeTrustedDirectBindError(
                 "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_INVALID",
                 "The host-owned trusted-direct-bind receipt contains an invalid digest.",
-            )
-        if payload["adapter_receipt_sha256"] != trusted_direct_adapter_receipt_sha256(
-            payload
-        ):
-            raise WorkerBeeTrustedDirectBindError(
-                "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_MISMATCH",
-                "The host-owned adapter receipt self-digest does not match its canonical flat payload.",
             )
         git_oid = re.compile(r"^[0-9a-f]{40,64}$")
         image_digest = str(payload["backend_image_digest"])

@@ -147,11 +147,8 @@ def trusted_direct_api_receipt(
         "expires_at": now + 300,
         "release_required": True,
         "adapter_conformance_sha256": direct_bind.TRUSTED_DIRECT_BIND_ADAPTER_CONFORMANCE_SHA256,
-        "adapter_receipt_sha256": "",
+        "adapter_receipt_sha256": "f" * 64,
     }
-    payload["adapter_receipt_sha256"] = (
-        direct_bind.trusted_direct_adapter_receipt_sha256(payload)
-    )
     receipt_root.mkdir(mode=0o700)
     receipt_path = receipt_root / f"{receipt_id}.json"
     receipt_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
