@@ -8594,14 +8594,14 @@ async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
     receipt = SimpleNamespace(
         transaction_id="e" * 64,
         head="b" * 40,
-        approved_stage_paths=("src/app.py",),
+        approved_stage_paths=("src/app.py", "tests/test_app.py"),
         commit_subject="fix: exact checkpoint",
     )
     commit_result = SimpleNamespace(
         transaction_id="e" * 64,
         old_head="b" * 40,
         new_head="c" * 40,
-        committed_paths=("src/app.py",),
+        committed_paths=("src/app.py", "tests/test_app.py"),
         status="committed",
     )
     app.transition_operator_broker_request = transition  # type: ignore[method-assign]
@@ -8635,7 +8635,7 @@ async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
             "scope_sha256": "a" * 64,
             "expected_git_parent": "b" * 40,
             "commit_subject": "fix: exact checkpoint",
-            "exact_paths": ["src/app.py"],
+            "exact_paths": ["tests/test_app.py", "src/app.py"],
             "created_at": 1_700_000_000,
         }
     )

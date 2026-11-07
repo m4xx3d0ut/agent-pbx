@@ -32544,7 +32544,7 @@ class AgentPBXTUI(App[None]):
                     raise RuntimeError(
                         "broker Git parent changed after root request creation"
                     )
-                if tuple(receipt.approved_stage_paths) != exact_paths:
+                if tuple(receipt.approved_stage_paths) != tuple(sorted(exact_paths)):
                     raise RuntimeError("broker exact path receipt changed")
                 if receipt.commit_subject != commit_subject:
                     raise RuntimeError("broker commit subject receipt changed")
