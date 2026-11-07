@@ -473,8 +473,13 @@ def _receipt_from_public_dict(value: Mapping[str, Any]) -> LinkedGitCommitReceip
     if type(authored_at_value) is not int or authored_at_value <= 0:
         raise LinkedGitBrokerError("broker pending authored_at has the wrong type")
     commit_subject = _receipt_text(value, "commit_subject", reject_controls=True)
-    if commit_subject != _commit_subject(agent_id):
-        raise LinkedGitBrokerError("broker pending commit subject is not canonical")
+    # Operator broker checkpoints may bind an explicit, reviewed subject into
+    # the immutable receipt.  Requiring the older generated subject here made
+    # those valid journals unreadable after the commit and caused one completed
+    # transaction to poison every later recovery scan.  Apply the same strict
+    # one-line/length validation used while preparing the receipt; journal and
+    # commit-object validation below still bind the exact approved bytes.
+    _normalized_commit_subject(commit_subject, agent_id=agent_id)
     author_name = _receipt_text(value, "author_name", reject_controls=True)
     author_email = _receipt_text(value, "author_email", reject_controls=True)
     if author_name != BROKER_AUTHOR_NAME or author_email != BROKER_AUTHOR_EMAIL:

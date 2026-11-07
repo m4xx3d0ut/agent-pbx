@@ -186,6 +186,7 @@ def _prepare(
     *,
     branch: str = "pbx-operator-7/broker-test",
     stage_paths: tuple[str, ...] = ("new.txt", "tracked.txt"),
+    commit_subject: str | None = None,
 ):
     main, linked = _fixture(tmp_path, branch=branch)
     codex_home = _split_codex_home(tmp_path)
@@ -198,6 +199,7 @@ def _prepare(
         approved_stage_paths=stage_paths,
         codex_home=codex_home,
         authored_at=1_700_000_000,
+        commit_subject=commit_subject,
     )
     return main, linked, codex_home, receipt
 
@@ -1856,6 +1858,47 @@ def test_pending_loader_accepts_exact_pending_and_excludes_terminal_states(
     assert load_pending_linked_git_commits(done_journal) == ()
 
 
+def test_pending_loader_accepts_explicit_reviewed_subjects(
+    tmp_path: Path,
+) -> None:
+    pending_case = tmp_path / "pending-custom-subject"
+    pending_case.mkdir()
+    _, _, codex_home, receipt = _prepare(
+        pending_case,
+        stage_paths=("tracked.txt",),
+        commit_subject="docs: preserve the reviewed evidence boundary",
+    )
+    journal = pending_case / "journal"
+    with pytest.raises(LinkedGitBrokerError, match="objects_prepared"):
+        execute_linked_git_commit(
+            receipt,
+            approved_roots=(pending_case,),
+            journal_root=journal,
+            codex_home=codex_home,
+            fault_at="objects_prepared",
+        )
+
+    loaded = load_pending_linked_git_commits(journal)
+    assert len(loaded) == 1
+    assert loaded[0].receipt.commit_subject == receipt.commit_subject
+
+    done_case = tmp_path / "done-custom-subject"
+    done_case.mkdir()
+    _, _, done_home, done_receipt = _prepare(
+        done_case,
+        stage_paths=("tracked.txt",),
+        commit_subject="ci: retain the exact reviewed release scope",
+    )
+    done_journal = done_case / "journal"
+    execute_linked_git_commit(
+        done_receipt,
+        approved_roots=(done_case,),
+        journal_root=done_journal,
+        codex_home=done_home,
+    )
+    assert load_pending_linked_git_commits(done_journal) == ()
+
+
 @pytest.mark.parametrize(
     "tamper",
     (
@@ -1936,7 +1979,15 @@ def test_corrupt_journal_state_never_reinterprets_exact_old_repository(
 
 @pytest.mark.parametrize(
     "tamper",
-    ("missing", "extra", "wrong_type", "control", "transaction"),
+    (
+        "missing",
+        "extra",
+        "wrong_type",
+        "control",
+        "subject_control",
+        "subject_too_long",
+        "transaction",
+    ),
 )
 def test_pending_loader_rejects_noncanonical_receipt_schema(
     tmp_path: Path,
@@ -1962,6 +2013,10 @@ def test_pending_loader_rejects_noncanonical_receipt_schema(
         state["receipt"]["approved_roots"] = {"bad": "type"}
     elif tamper == "control":
         state["receipt"]["agent_id"] = "operator-7\nforged"
+    elif tamper == "subject_control":
+        state["receipt"]["commit_subject"] = "fix: reviewed\nforged"
+    elif tamper == "subject_too_long":
+        state["receipt"]["commit_subject"] = "x" * 161
     else:
         state["receipt"]["transaction_id"] = "0" * 64
     state_path.write_text(json.dumps(state), encoding="utf-8")
