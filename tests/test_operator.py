@@ -7,7 +7,7 @@ import pytest
 from agent_pbx import tmux as tmux_support
 from agent_pbx.mcp_tools import build_mcp_server
 from agent_pbx.operator import OperatorService, operator_runbook_payload
-from agent_pbx.schemas import AgentRegisterRequest
+from agent_pbx.schemas import AgentRegisterRequest, ReportCreateRequest
 from agent_pbx.store import Store
 
 
@@ -130,6 +130,198 @@ def test_operator_campaign_queue_delivery_and_state(tmp_path: Path) -> None:
     assert report is not None
     assert report["metadata"]["campaign_id"] == campaign["campaign_id"]
     assert report["metadata"]["completion_state"] == "complete"
+
+
+def test_terminal_fork_report_projects_assignment_and_campaign(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        status="running",
+        metadata={"pbx_mode": "report"},
+    )
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Project terminal reports",
+        objective="Close from the durable fork report.",
+        criteria=["terminal receipt"],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Complete it."}],
+        delivery="queue",
+    )
+    assignment = campaign["assignments"][0]
+
+    report = store.create_report(
+        str(fork["fork_agent_id"]),
+        ReportCreateRequest(
+            project="agent-pbx-operator",
+            status="done",
+            summary="Assignment complete",
+            detail="The assigned checkpoint is complete.",
+            metadata={
+                "campaign_id": campaign["campaign_id"],
+                "assignment_id": assignment["assignment_id"],
+            },
+        ),
+    )
+
+    projected = store.get_operator_campaign_assignment(assignment["assignment_id"])
+    closed = store.get_operator_campaign(campaign["campaign_id"])
+    assert projected is not None
+    assert projected["state"] == "complete"
+    assert projected["last_report_id"] == report["report_id"]
+    assert projected["completed_at"] == report["created_at"]
+    assert closed is not None
+    assert closed["status"] == "complete"
+    assert closed["completed_at"] == report["created_at"]
+
+
+def test_terminal_report_projection_rejects_reporter_and_preserves_terminal_state(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        status="running",
+        metadata={"pbx_mode": "report"},
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="unrelated-caller",
+            project="other",
+            metadata={"cwd": str(tmp_path / "other")},
+        )
+    )
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Guard terminal projection",
+        objective="Reject cross-assignment reports.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Complete it."}],
+        delivery="queue",
+    )
+    assignment = campaign["assignments"][0]
+    scope = {
+        "campaign_id": campaign["campaign_id"],
+        "assignment_id": assignment["assignment_id"],
+    }
+
+    store.create_report(
+        "unrelated-caller",
+        ReportCreateRequest(
+            project="other",
+            status="done",
+            summary="Foreign terminal report",
+            detail="Must not project.",
+            metadata=scope,
+        ),
+    )
+    unchanged = store.get_operator_campaign_assignment(assignment["assignment_id"])
+    assert unchanged is not None
+    assert unchanged["completed_at"] is None
+    assert unchanged["last_report_id"] is None
+
+    first = store.create_report(
+        str(fork["fork_agent_id"]),
+        ReportCreateRequest(
+            project="agent-pbx-operator",
+            status="done",
+            summary="Real terminal report",
+            detail="This report owns the terminal projection.",
+            metadata=scope,
+        ),
+    )
+    store.create_report(
+        str(fork["fork_agent_id"]),
+        ReportCreateRequest(
+            project="agent-pbx-operator",
+            status="blocked",
+            summary="Conflicting late report",
+            detail="Must not rewrite terminal state.",
+            metadata=scope,
+        ),
+    )
+    preserved = store.get_operator_campaign_assignment(assignment["assignment_id"])
+    assert preserved is not None
+    assert preserved["state"] == "complete"
+    assert preserved["last_report_id"] == first["report_id"]
+    assert preserved["completed_at"] == first["created_at"]
+
+
+def test_campaign_status_replays_historical_terminal_report_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "pbx.sqlite"
+    store = Store(database)
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id="operator-0-fork-caller-1",
+        status="running",
+        metadata={"pbx_mode": "report"},
+    )
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Replay terminal reports",
+        objective="Repair a crash gap after report persistence.",
+        criteria=[],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Complete it."}],
+        delivery="queue",
+    )
+    assignment = campaign["assignments"][0]
+    monkeypatch.setattr(
+        store,
+        "reconcile_operator_terminal_report",
+        lambda _report_id: {"status": "deferred"},
+    )
+    report = store.create_report(
+        str(fork["fork_agent_id"]),
+        ReportCreateRequest(
+            project="agent-pbx-operator",
+            status="completed",
+            summary="Persisted before restart",
+            detail="Projection is intentionally deferred.",
+            metadata={
+                "campaign_id": campaign["campaign_id"],
+                "assignment_id": assignment["assignment_id"],
+            },
+        ),
+    )
+    stale = store.get_operator_campaign_assignment(assignment["assignment_id"])
+    assert stale is not None
+    assert stale["completed_at"] is None
+
+    restarted_store = Store(database)
+    restarted = OperatorService(restarted_store)
+    first = restarted.campaign_status(campaign_id=campaign["campaign_id"])[0]
+    second = restarted.campaign_status(campaign_id=campaign["campaign_id"])[0]
+
+    assert first["status"] == "complete"
+    assert first["completed_at"] == report["created_at"]
+    assert first["assignments"][0]["last_report_id"] == report["report_id"]
+    assert second["completed_at"] == first["completed_at"]
+    events = restarted_store.list_operator_campaign_events(
+        assignment_id=assignment["assignment_id"],
+        limit=20,
+    )
+    reconciled = [
+        event
+        for event in events
+        if event["event_type"] == "assignment_terminal_report_reconciled"
+    ]
+    assert len(reconciled) == 1
 
 
 def test_operator_campaign_rejects_nonterminal_finish_and_terminal_regression(

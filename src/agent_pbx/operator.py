@@ -46,6 +46,7 @@ from .tmux_binary import configured_tmux_binary
 CALLER_AGENT_TYPE = "caller"
 OPERATOR_AGENT_TYPE = "operator"
 TERMINAL_OPERATOR_BASE_STATES = {
+    "done",
     "complete",
     "completed",
     "blocked",
@@ -4288,7 +4289,7 @@ class OperatorService:
             operator_family_ids = self._operator_family_agent_ids(
                 self._logical_operator_agent_id(operator)
             )
-        return self.store.list_operator_campaigns(
+        campaigns = self.store.list_operator_campaigns(
             operator_agent_ids=operator_family_ids,
             campaign_id=campaign_id,
             status=status,
@@ -4296,6 +4297,20 @@ class OperatorService:
             include_events=include_events,
             offset=offset,
         )
+        for campaign in campaigns:
+            self.store.reconcile_operator_campaign_reports(
+                str(campaign["campaign_id"])
+            )
+        if campaigns:
+            campaigns = self.store.list_operator_campaigns(
+                operator_agent_ids=operator_family_ids,
+                campaign_id=campaign_id,
+                status=status,
+                limit=limit,
+                include_events=include_events,
+                offset=offset,
+            )
+        return campaigns
 
     def _assignment_payload(
         self, assignment: OperatorAssignmentCreate | dict[str, Any]

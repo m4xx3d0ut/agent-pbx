@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .schemas import (
     AgentRegisterRequest,
@@ -84,6 +84,7 @@ ROOT_OPERATOR_SOURCE_KEYS = (
     "default_source_codex_session_id",
 )
 OPERATOR_TERMINAL_BASE_STATES = (
+    "done",
     "complete",
     "completed",
     "blocked",
@@ -269,6 +270,36 @@ def _operator_active_state_sql(status_column: str, completed_column: str) -> str
         AND lower({status_column}) NOT GLOB 'canceled[_-]*'
         AND lower({status_column}) NOT GLOB 'cancelled[_-]*'
     """
+
+
+def _operator_terminal_projection_state(status: str) -> str | None:
+    normalized = str(status or "").strip().lower()
+    if normalized == "done" or normalized.startswith(("done_", "done-")):
+        return "complete"
+    for canonical, aliases in (
+        ("complete", ("complete", "completed")),
+        ("blocked", ("blocked",)),
+        ("failed", ("failed",)),
+        ("canceled", ("canceled", "cancelled")),
+        ("superseded", ("superseded",)),
+    ):
+        if normalized in aliases or any(
+            normalized.startswith((f"{alias}_", f"{alias}-"))
+            for alias in aliases
+        ):
+            return canonical
+    return None
+
+
+def _operator_campaign_projection_state(states: Sequence[str]) -> str:
+    normalized = {
+        _operator_terminal_projection_state(state) or str(state).strip().lower()
+        for state in states
+    }
+    for state in ("failed", "blocked", "canceled", "superseded"):
+        if state in normalized:
+            return state
+    return "complete"
 
 
 def _non_empty_string(value: Any) -> bool:
@@ -4664,7 +4695,270 @@ class Store:
         report = self.get_report(report_id)
         if report is None:
             raise RuntimeError("report insert failed")
+        try:
+            self.reconcile_operator_terminal_report(report_id)
+        except Exception as exc:  # noqa: BLE001 - preserve the immutable report.
+            self.append_event(
+                "operator_assignment_report_projection_failed",
+                {
+                    "report_id": report_id,
+                    "agent_id": agent_id,
+                    "error": str(exc),
+                },
+                report_id,
+            )
         return report
+
+    def reconcile_operator_terminal_report(self, report_id: str) -> dict[str, Any]:
+        """Project one immutable terminal report into its bound assignment.
+
+        The report remains the durable source of truth. Projection is idempotent,
+        refuses cross-agent/cross-campaign metadata, and never rewrites a terminal
+        assignment or campaign into a different terminal state.
+        """
+
+        report = self.get_report(report_id)
+        if report is None:
+            return {"status": "missing_report", "report_id": report_id}
+        projected_state = _operator_terminal_projection_state(
+            str(report.get("status") or "")
+        )
+        if projected_state is None:
+            return {"status": "ignored_nonterminal", "report_id": report_id}
+        metadata = report.get("metadata")
+        if not isinstance(metadata, dict):
+            return {"status": "ignored_unscoped", "report_id": report_id}
+        if str(metadata.get("source") or "") == "operator_campaign":
+            return {"status": "ignored_control_plane", "report_id": report_id}
+        campaign_value = metadata.get("campaign_id")
+        assignment_value = metadata.get("assignment_id")
+        if (
+            campaign_value is not None
+            and not isinstance(campaign_value, str)
+        ) or (
+            assignment_value is not None
+            and not isinstance(assignment_value, str)
+        ):
+            return {
+                "status": "rejected_scope",
+                "reason": "campaign_id and assignment_id must be strings",
+                "report_id": report_id,
+            }
+        campaign_id = str(campaign_value or "").strip()
+        assignment_id = str(assignment_value or "").strip()
+        if not campaign_id and not assignment_id:
+            return {"status": "ignored_unscoped", "report_id": report_id}
+        if not campaign_id or not assignment_id:
+            return {
+                "status": "rejected_scope",
+                "reason": "terminal report requires campaign_id and assignment_id",
+                "report_id": report_id,
+            }
+
+        event: dict[str, Any] | None = None
+        result: dict[str, Any]
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            assignment = conn.execute(
+                """
+                SELECT a.assignment_id, a.campaign_id, a.target_agent_id,
+                       a.operator_fork_id, a.state, a.last_report_id,
+                       a.completed_at, c.operator_agent_id, c.status AS campaign_status,
+                       c.completed_at AS campaign_completed_at
+                FROM operator_campaign_assignments AS a
+                JOIN operator_campaigns AS c ON c.campaign_id = a.campaign_id
+                WHERE a.assignment_id = ? AND a.campaign_id = ?
+                """,
+                (assignment_id, campaign_id),
+            ).fetchone()
+            if assignment is None:
+                return {
+                    "status": "rejected_scope",
+                    "reason": "assignment is not bound to campaign",
+                    "report_id": report_id,
+                }
+
+            reporting_agent_id = str(report.get("agent_id") or "").strip()
+            authorized_agent_ids = {str(assignment["target_agent_id"] or "").strip()}
+            operator_fork_id = str(assignment["operator_fork_id"] or "").strip()
+            if operator_fork_id:
+                fork = conn.execute(
+                    """
+                    SELECT fork_agent_id, source_caller_agent_id
+                    FROM operator_forks
+                    WHERE operator_fork_id = ?
+                    """,
+                    (operator_fork_id,),
+                ).fetchone()
+                if (
+                    fork is not None
+                    and str(fork["source_caller_agent_id"] or "").strip()
+                    == str(assignment["target_agent_id"] or "").strip()
+                ):
+                    authorized_agent_ids.add(str(fork["fork_agent_id"] or "").strip())
+            authorized_agent_ids.discard("")
+            if reporting_agent_id not in authorized_agent_ids:
+                return {
+                    "status": "rejected_reporter",
+                    "reason": "reporting agent is not the assignment target or bound fork",
+                    "report_id": report_id,
+                }
+
+            prior_state = str(assignment["state"] or "").strip().lower()
+            prior_terminal = _operator_terminal_projection_state(prior_state)
+            if assignment["completed_at"] is not None or prior_terminal is not None:
+                if (
+                    prior_terminal == projected_state
+                    and str(assignment["last_report_id"] or "") == report_id
+                ):
+                    return {
+                        "status": "already_projected",
+                        "report_id": report_id,
+                        "campaign_id": campaign_id,
+                        "assignment_id": assignment_id,
+                    }
+                return {
+                    "status": "preserved_terminal",
+                    "reason": "terminal assignment projection is immutable",
+                    "report_id": report_id,
+                    "campaign_id": campaign_id,
+                    "assignment_id": assignment_id,
+                }
+            if assignment["campaign_completed_at"] is not None:
+                return {
+                    "status": "preserved_terminal",
+                    "reason": "terminal campaign projection is immutable",
+                    "report_id": report_id,
+                    "campaign_id": campaign_id,
+                    "assignment_id": assignment_id,
+                }
+
+            current = now_ts()
+            completed_at = float(report["created_at"])
+            conn.execute(
+                """
+                UPDATE operator_campaign_assignments
+                SET state = ?, last_report_id = ?, updated_at = ?, completed_at = ?
+                WHERE assignment_id = ?
+                """,
+                (
+                    projected_state,
+                    report_id,
+                    current,
+                    completed_at,
+                    assignment_id,
+                ),
+            )
+            rows = conn.execute(
+                """
+                SELECT state, completed_at
+                FROM operator_campaign_assignments
+                WHERE campaign_id = ?
+                ORDER BY assignment_id ASC
+                """,
+                (campaign_id,),
+            ).fetchall()
+            campaign_closed = bool(rows) and all(
+                row["completed_at"] is not None
+                and _operator_terminal_projection_state(str(row["state"] or ""))
+                is not None
+                for row in rows
+            )
+            campaign_state: str | None = None
+            if campaign_closed:
+                campaign_state = _operator_campaign_projection_state(
+                    [str(row["state"] or "") for row in rows]
+                )
+                campaign_completed_at = max(
+                    float(row["completed_at"]) for row in rows
+                )
+                conn.execute(
+                    """
+                    UPDATE operator_campaigns
+                    SET status = ?, updated_at = ?, completed_at = ?
+                    WHERE campaign_id = ? AND completed_at IS NULL
+                    """,
+                    (
+                        campaign_state,
+                        current,
+                        campaign_completed_at,
+                        campaign_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE operator_campaigns SET updated_at = ? WHERE campaign_id = ?
+                    """,
+                    (current, campaign_id),
+                )
+            event = {
+                "campaign_id": campaign_id,
+                "assignment_id": assignment_id,
+                "operator_agent_id": str(assignment["operator_agent_id"] or ""),
+                "target_agent_id": str(assignment["target_agent_id"] or ""),
+                "reporting_agent_id": reporting_agent_id,
+                "state": projected_state,
+                "campaign_state": campaign_state,
+            }
+            result = {
+                "status": "projected",
+                "report_id": report_id,
+                "campaign_id": campaign_id,
+                "assignment_id": assignment_id,
+                "state": projected_state,
+                "campaign_closed": campaign_closed,
+                "campaign_state": campaign_state,
+            }
+
+        if event is not None:
+            self.add_operator_campaign_event(
+                campaign_id=campaign_id,
+                assignment_id=assignment_id,
+                operator_agent_id=str(event["operator_agent_id"]),
+                target_agent_id=str(event["target_agent_id"]),
+                event_type="assignment_terminal_report_reconciled",
+                summary=f"Terminal report projected assignment as {projected_state}",
+                detail=event,
+                report_id=report_id,
+            )
+            if result.get("campaign_closed"):
+                self.append_event(
+                    "operator_campaign_terminal_reports_reconciled",
+                    {
+                        "campaign_id": campaign_id,
+                        "operator_agent_id": event["operator_agent_id"],
+                        "status": result.get("campaign_state"),
+                        "report_id": report_id,
+                    },
+                    campaign_id,
+                )
+        return result
+
+    def reconcile_operator_campaign_reports(
+        self, campaign_id: str
+    ) -> dict[str, Any] | None:
+        """Replay immutable scoped reports into one campaign projection."""
+
+        campaign = self.get_operator_campaign(campaign_id)
+        if campaign is None:
+            return None
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.report_id
+                FROM reports AS r
+                JOIN operator_campaign_assignments AS a
+                  ON a.assignment_id = json_extract(r.metadata_json, '$.assignment_id')
+                WHERE a.campaign_id = ?
+                  AND json_extract(r.metadata_json, '$.campaign_id') = ?
+                ORDER BY r.created_at ASC, r.report_id ASC
+                """,
+                (campaign_id, campaign_id),
+            ).fetchall()
+        for row in rows:
+            self.reconcile_operator_terminal_report(str(row["report_id"]))
+        return self.get_operator_campaign(campaign_id)
 
     @staticmethod
     def report_request_with_identity_metadata(
