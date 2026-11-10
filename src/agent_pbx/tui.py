@@ -33223,6 +33223,7 @@ class AgentPBXTUI(App[None]):
         current = self.linked_git_broker_tui_context(
             context.agent_id,
             expected_authority_sha256=context.authority_sha256,
+            require_selection=False,
         )
         if current is None:
             return
@@ -33241,6 +33242,7 @@ class AgentPBXTUI(App[None]):
         current = self.linked_git_broker_tui_context(
             context.agent_id,
             expected_authority_sha256=context.authority_sha256,
+            require_selection=False,
         )
         if current is None:
             return
@@ -33284,6 +33286,7 @@ class AgentPBXTUI(App[None]):
         current = self.linked_git_broker_tui_context(
             context.agent_id,
             expected_authority_sha256=context.authority_sha256,
+            require_selection=False,
         )
         if current is None:
             return
@@ -33350,6 +33353,7 @@ class AgentPBXTUI(App[None]):
         current = self.linked_git_broker_tui_context(
             context.agent_id,
             expected_authority_sha256=context.authority_sha256,
+            require_selection=False,
         )
         if current is None:
             return

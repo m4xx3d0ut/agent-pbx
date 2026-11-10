@@ -8469,7 +8469,7 @@ async def test_tui_linked_git_broker_approval_drift_and_cancel_never_execute(
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, LinkedGitCommitConfirmScreen)
-        app.selected_agent_id = "operator-7"
+        app.agents[fork_id]["status"] = "working"
         screen.query_one("#linked-git-broker-confirmation", Input).value = (
             screen.expected_confirmation
         )
@@ -8540,6 +8540,7 @@ async def test_tui_linked_git_broker_exact_confirmation_executes_once_from_fixed
         screen.query_one("#linked-git-broker-confirmation", Input).value = (
             screen.expected_confirmation
         )
+        app.selected_agent_id = "operator-0"
         screen.submit()
         await pilot.pause()
 
@@ -9207,6 +9208,7 @@ async def test_tui_linked_git_broker_context_drift_and_execute_failure_fail_clos
         screen.query_one("#linked-git-broker-confirmation", Input).value = (
             screen.expected_confirmation
         )
+        app.selected_agent_id = "operator-0"
         screen.submit()
         await pilot.pause()
 
@@ -9338,6 +9340,7 @@ async def test_tui_linked_git_broker_recovery_is_receipt_bound_and_local_only(
         screen.query_one("#linked-git-broker-confirmation", Input).value = (
             screen.expected_confirmation
         )
+        app.selected_agent_id = "operator-0"
         screen.submit()
         await pilot.pause()
 
