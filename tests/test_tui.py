@@ -3583,6 +3583,111 @@ async def test_tui_discards_embedded_terminal_attach_after_selection_changes(
     assert app.embedded_terminal_agent_id is None
 
 
+async def test_tui_discards_embedded_terminal_attach_after_aba_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    released: list[str] = []
+
+    async def acquire(agent_id: str) -> dict[str, object]:
+        assert agent_id == "agent-a"
+        app.selected_agent_id = "agent-b"
+        app.agent_selection_generation += 1
+        app.selected_agent_id = "agent-a"
+        app.agent_selection_generation += 1
+        return {
+            "state": "ready",
+            "server_id": "server-a",
+            "socket_path": "/tmp/pbx.sock",
+            "session_name": "runtime-a",
+            "window_id": "@12",
+            "pane_id": "%7",
+        }
+
+    async def release(agent_id: str) -> None:
+        released.append(agent_id)
+
+    async with app.run_test():
+        app.selected_agent_id = "agent-a"
+        app.agent_selection_generation = 1
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        monkeypatch.setattr(app, "acquire_tmux_writer_lease", acquire)
+        monkeypatch.setattr(app, "release_tmux_writer_lease", release)
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        attached: list[tuple[object, ...]] = []
+        monkeypatch.setattr(
+            surface,
+            "attach",
+            lambda *args, **kwargs: attached.append((args, kwargs)),
+        )
+
+        assert (
+            await app.attach_embedded_tmux_terminal(
+                "agent-a",
+                {
+                    "state": "ready",
+                    "server_id": "server-a",
+                    "pane_id": "%7",
+                },
+                selection_generation=1,
+            )
+            is False
+        )
+
+    assert released == ["agent-a"]
+    assert attached == []
+    assert app.embedded_terminal_agent_id is None
+
+
+async def test_tui_stale_runtime_header_result_cannot_survive_aba_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    original = {"agent_id": "agent-a", "state": "ready", "profile": None}
+    stale = {
+        "agent_id": "agent-a",
+        "state": "thinking",
+        "profile": {"model": "stale-model", "reasoning_effort": "high"},
+    }
+    rendered: list[str | None] = []
+
+    async def fetch(agent_id: str, *, cache: bool = True) -> dict[str, object]:
+        assert agent_id == "agent-a"
+        assert cache is False
+        app.selected_agent_id = "agent-b"
+        app.agent_selection_generation += 1
+        app.selected_agent_id = "agent-a"
+        app.agent_selection_generation += 1
+        return stale
+
+    async def elevations(_agent_id: str) -> list[dict[str, object]]:
+        return []
+
+    async def reconcile(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(app, "fetch_codex_runtime_snapshot", fetch)
+    monkeypatch.setattr(app, "fetch_model_elevations", elevations)
+    monkeypatch.setattr(app, "reconcile_model_elevation", reconcile)
+    monkeypatch.setattr(
+        app,
+        "render_codex_runtime_surface",
+        lambda: rendered.append(app.selected_agent_id),
+    )
+    app.selected_agent_id = "agent-a"
+    app.agent_selection_generation = 4
+    app.codex_runtime_by_agent["agent-a"] = original
+
+    await app.load_codex_runtime_status(
+        "agent-a",
+        selection_generation=4,
+    )
+
+    assert app.codex_runtime_by_agent["agent-a"] == original
+    assert rendered == []
+
+
 async def test_tui_managed_editor_owns_printable_keys_but_not_plain_f_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3960,6 +4065,140 @@ async def test_tui_direct_entity_switch_keeps_native_surface_during_handoff(
         assert "Switching native terminal to agent-b" in rendered_during_attach[0]
         assert "stale agent-a frame" not in rendered_during_attach[0]
         monkeypatch.setattr(app, "apply_tmux_class", original_apply)
+
+
+async def test_tui_joplin_to_latest_uses_bounded_native_loading_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def fetch(agent_id: str) -> None:
+        assert agent_id == "agent-a"
+        fetch_started.set()
+        await release_fetch.wait()
+        return None
+
+    monkeypatch.setattr(app, "fetch_tmux_runtime_mapping", fetch)
+
+    async with app.run_test(size=(120, 32)) as pilot:
+        app.agents = {
+            "agent-a": {
+                "agent_id": "agent-a",
+                "project": "a",
+                "status": "working",
+                "last_seen_at": 100.0,
+            }
+        }
+        app.selected_agent_id = "agent-a"
+        app.agent_selection_generation = 3
+        app.joplin_configured = True
+        app.embedded_terminal_v2_enabled = True
+        app.legacy_terminal_capture_enabled = False
+        tabs = app.query_one("#agent-tabs", TabbedContent)
+        tabs.active = "joplin-tab"
+        app.active_agent_tab = "joplin-tab"
+        await pilot.pause()
+
+        await pilot.press("f4")
+        await asyncio.wait_for(fetch_started.wait(), timeout=2)
+
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        stream = app.query_one("#tmux-stream", TextArea)
+        assert app.active_agent_tab == "latest-tab"
+        assert app.embedded_terminal_transition_agent_id == "agent-a"
+        assert surface.transitioning is True
+        assert app.screen.has_class("embedded-terminal")
+        assert "Switching native terminal to agent-a" in surface.render().plain
+        assert "capture fallback" not in stream.text
+
+        release_fetch.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app.embedded_terminal_transition_agent_id is None
+        assert surface.transitioning is False
+        assert "capture fallback is disabled" in stream.text
+
+
+async def test_tui_already_latest_f4_keeps_attached_native_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def close(self) -> None:
+            self.alive = False
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    async with app.run_test(size=(120, 32)) as pilot:
+        app.selected_agent_id = "agent-a"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.embedded_terminal_agent_id = "agent-a"
+        app.embedded_terminal_target = "server-a:%7"
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        process = FakeProcess()
+        surface.process = process  # type: ignore[assignment]
+        surface.target = "server-a:%7"
+        app.apply_tmux_class()
+        await pilot.pause()
+
+        await pilot.press("f4")
+        await pilot.pause()
+
+        assert app.embedded_terminal_transition_agent_id is None
+        assert surface.transitioning is False
+        assert surface.process is process
+        assert app.focused is surface
+
+
+async def test_tui_native_attach_failure_ends_transition_before_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return {
+            "state": "ready",
+            "server_id": "server-a",
+            "socket_path": "/tmp/pbx.sock",
+            "session_name": "runtime-a",
+            "window_id": "@12",
+            "pane_id": "%7",
+        }
+
+    async def acquire(_agent_id: str) -> None:
+        return None
+
+    async with app.run_test(size=(120, 32)):
+        app.selected_agent_id = "agent-a"
+        app.agent_selection_generation = 2
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.legacy_terminal_capture_enabled = False
+        app.begin_embedded_terminal_transition("agent-a")
+        monkeypatch.setattr(app, "fetch_tmux_runtime_mapping", fetch)
+        monkeypatch.setattr(app, "acquire_tmux_writer_lease", acquire)
+
+        await app.load_tmux_capture("agent-a", selection_generation=2)
+
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        stream = app.query_one("#tmux-stream", TextArea)
+        assert app.embedded_terminal_transition_agent_id is None
+        assert surface.transitioning is False
+        assert "capture fallback is disabled" in stream.text
 
 
 async def test_tui_waits_for_visible_terminal_layout_before_cold_attach(

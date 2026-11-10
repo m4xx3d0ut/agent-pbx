@@ -8679,6 +8679,7 @@ class AgentPBXTUI(App[None]):
         self.operator_table_order_lock: tuple[str, ...] | None = None
         self.agents: dict[str, dict[str, Any]] = {}
         self.selected_agent_id: str | None = None
+        self.agent_selection_generation = 0
         self.events: list[dict[str, Any]] = []
         self.latest_report_by_agent: dict[str, dict[str, Any]] = {}
         self.thread_items: dict[str, dict[str, Any]] = {}
@@ -9328,7 +9329,12 @@ class AgentPBXTUI(App[None]):
             self.update_codex_model_status()
         return leases
 
-    async def fetch_codex_runtime_snapshot(self, agent_id: str) -> dict[str, Any]:
+    async def fetch_codex_runtime_snapshot(
+        self,
+        agent_id: str,
+        *,
+        cache: bool = True,
+    ) -> dict[str, Any]:
         response = await self.api_client().get(
             f"/v2/agents/{quote(agent_id, safe='')}/codex-runtime",
             headers=auth_headers(self.token),
@@ -9338,7 +9344,8 @@ class AgentPBXTUI(App[None]):
         payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError("Codex runtime endpoint returned a non-object response")
-        self.codex_runtime_by_agent[agent_id] = payload
+        if cache:
+            self.codex_runtime_by_agent[agent_id] = payload
         return payload
 
     async def request_codex_model_restart(
@@ -18325,6 +18332,8 @@ class AgentPBXTUI(App[None]):
             return
         prior_tab = self.active_agent_tab
         tab_changed = prior_tab != activated_tab
+        if tab_changed:
+            self.agent_selection_generation += 1
         agent_id = self.selected_agent_id
         if agent_id and tab_changed:
             self.record_navigation_destination(
@@ -18346,10 +18355,22 @@ class AgentPBXTUI(App[None]):
         self.save_settings()
         if self.active_agent_tab == "latest-tab" and agent_id:
             self.mark_latest_seen(agent_id)
+            selection_generation = self.agent_selection_generation
+            if (
+                self.embedded_terminal_v2_enabled
+                and self.is_tmux_direct_enabled(agent_id)
+                and self.embedded_terminal_agent_id != agent_id
+            ):
+                self.begin_embedded_terminal_transition(agent_id)
             self.apply_tmux_class()
             if self.is_tmux_direct_enabled(agent_id):
                 self.run_async_worker(
-                    lambda agent_id=agent_id: self.load_tmux_capture(agent_id),
+                    lambda agent_id=agent_id, generation=selection_generation: (
+                        self.load_tmux_capture(
+                            agent_id,
+                            selection_generation=generation,
+                        )
+                    ),
                     name="tmux-capture",
                     exclusive=True,
                 )
@@ -18488,6 +18509,8 @@ class AgentPBXTUI(App[None]):
             except Exception:
                 tab_id = "latest-tab"
                 tabs.active = tab_id
+        if tab_id != self.active_agent_tab:
+            self.agent_selection_generation += 1
         self.active_agent_tab = tab_id
         if self.selected_agent_id:
             self.active_agent_tab_by_agent[self.selected_agent_id] = tab_id
@@ -18496,6 +18519,10 @@ class AgentPBXTUI(App[None]):
 
     async def select_agent(self, agent_id: str) -> None:
         previous_agent_id = self.selected_agent_id
+        selection_changed = agent_id != previous_agent_id
+        if selection_changed:
+            self.agent_selection_generation += 1
+        selection_generation = self.agent_selection_generation
         if agent_id != previous_agent_id:
             self.record_navigation_destination()
         smooth_terminal_handoff = self.should_smooth_terminal_handoff(
@@ -18511,6 +18538,8 @@ class AgentPBXTUI(App[None]):
             )
             await self.detach_terminal_editor_surface()
             self.save_current_agent_pane_state(previous_agent_id)
+            if selection_generation != self.agent_selection_generation:
+                return
         was_compact_home = self.is_compact_layout() and self.compact_view == "home"
         self.selected_agent_id = agent_id
         self.query_one("#agent-id", Input).value = self.selected_agent_id
@@ -18523,6 +18552,7 @@ class AgentPBXTUI(App[None]):
                     0,
                     self.navigation_recording_suspended - 1,
                 )
+            selection_generation = self.agent_selection_generation
         self.update_agent_title()
         self.sync_codex_model_preset_for_agent(agent_id)
         if agent_id not in self.codex_runtime_by_agent and agent_id in self.agents:
@@ -18537,15 +18567,26 @@ class AgentPBXTUI(App[None]):
             self.activate_agent_tab(
                 self.active_agent_tab_by_agent.get(agent_id, "latest-tab")
             )
-        await self.refresh_selected_agent(self.selected_agent_id)
+        await self.refresh_selected_agent(
+            self.selected_agent_id,
+            selection_generation=selection_generation,
+        )
         self.run_async_worker(
-            lambda: self.load_codex_runtime_status(agent_id),
+            lambda agent_id=agent_id, generation=selection_generation: (
+                self.load_codex_runtime_status(
+                    agent_id,
+                    selection_generation=generation,
+                )
+            ),
             name=f"codex-runtime-{agent_id}",
             group="codex-runtime",
             exclusive=True,
             exit_on_error=False,
         )
-        self.schedule_workerbee_header_status(agent_id)
+        self.schedule_workerbee_header_status(
+            agent_id,
+            selection_generation=selection_generation,
+        )
         if self.active_agent_tab == "latest-tab":
             self.mark_latest_seen(agent_id)
         self.record_navigation_destination()
@@ -18574,32 +18615,64 @@ class AgentPBXTUI(App[None]):
         view = "tmux" if self.is_tmux_direct_enabled(agent_id) else "pbx"
         title.update(f"Agent: {agent_id} | View: {view} | Plan: {state}")
 
-    async def load_codex_runtime_status(self, agent_id: str) -> None:
+    def agent_selection_is_current(self, agent_id: str, generation: int) -> bool:
+        return (
+            self.selected_agent_id == agent_id
+            and self.agent_selection_generation == generation
+        )
+
+    async def load_codex_runtime_status(
+        self,
+        agent_id: str,
+        *,
+        selection_generation: int | None = None,
+    ) -> None:
         snapshot: dict[str, Any] | None = None
         try:
-            snapshot = await self.fetch_codex_runtime_snapshot(agent_id)
+            snapshot = await self.fetch_codex_runtime_snapshot(
+                agent_id,
+                cache=selection_generation is None,
+            )
         except Exception:
             agent = self.agents.get(agent_id)
             if agent is not None:
                 snapshot = self.local_runtime_snapshot(agent)
-                self.codex_runtime_by_agent[agent_id] = snapshot
         leases: list[dict[str, Any]] | None = None
         try:
             leases = await self.fetch_model_elevations(agent_id)
         except Exception:
             leases = None
+        if (
+            selection_generation is not None
+            and not self.agent_selection_is_current(
+                agent_id,
+                selection_generation,
+            )
+        ):
+            return
         if snapshot is not None and leases is not None:
             await self.reconcile_model_elevation(agent_id, snapshot, leases)
+        if snapshot is not None:
+            self.codex_runtime_by_agent[agent_id] = snapshot
         if self.selected_agent_id == agent_id:
             self.render_codex_runtime_surface()
 
-    def schedule_workerbee_header_status(self, agent_id: str | None) -> None:
+    def schedule_workerbee_header_status(
+        self,
+        agent_id: str | None,
+        *,
+        selection_generation: int | None = None,
+    ) -> None:
         """Load one selected entity's WorkerBee token without polling or panel churn."""
 
         if not agent_id or agent_id in self.workerbee_status_by_agent:
             return
         self.run_async_worker(
-            lambda: self.load_workerbee_status(agent_id, render_detail=False),
+            lambda: self.load_workerbee_status(
+                agent_id,
+                render_detail=False,
+                selection_generation=selection_generation,
+            ),
             name=f"workerbee-runtime-{agent_id}",
             group="workerbee-runtime",
             exclusive=True,
@@ -18699,7 +18772,12 @@ class AgentPBXTUI(App[None]):
             exclusive=exclusive,
         )
 
-    async def refresh_selected_agent(self, agent_id: str) -> None:
+    async def refresh_selected_agent(
+        self,
+        agent_id: str,
+        *,
+        selection_generation: int | None = None,
+    ) -> None:
         if self.active_agent_tab == "files-tab":
             await self.load_agent_files(agent_id)
         elif self.active_agent_tab == "editor-tab":
@@ -18732,7 +18810,10 @@ class AgentPBXTUI(App[None]):
         elif self.active_agent_tab == "joplin-tab":
             await self.load_joplin_notes(agent_id)
         elif self.is_tmux_direct_enabled(agent_id):
-            await self.load_tmux_capture(agent_id)
+            await self.load_tmux_capture(
+                agent_id,
+                selection_generation=selection_generation,
+            )
         else:
             await self.load_latest_report(agent_id)
         await self.load_thread(agent_id)
@@ -18893,15 +18974,38 @@ class AgentPBXTUI(App[None]):
         finally:
             self.tmux_refreshing = False
 
-    async def load_tmux_capture(self, agent_id: str) -> None:
+    async def load_tmux_capture(
+        self,
+        agent_id: str,
+        *,
+        selection_generation: int | None = None,
+    ) -> None:
         status = self.query_one_or_none("#tmux-status", Static)
         stream = self.query_one_or_none("#tmux-stream", TextArea)
         if status is None or stream is None:
             return
         if self.embedded_terminal_v2_enabled:
             mapping = await self.fetch_tmux_runtime_mapping(agent_id)
+            if (
+                selection_generation is not None
+                and not self.agent_selection_is_current(
+                    agent_id,
+                    selection_generation,
+                )
+            ):
+                return
             if mapping is not None and await self.attach_embedded_tmux_terminal(
-                agent_id, mapping
+                agent_id,
+                mapping,
+                selection_generation=selection_generation,
+            ):
+                return
+            if (
+                selection_generation is not None
+                and not self.agent_selection_is_current(
+                    agent_id,
+                    selection_generation,
+                )
             ):
                 return
         if not self.legacy_terminal_capture_enabled:
@@ -18931,6 +19035,14 @@ class AgentPBXTUI(App[None]):
             )
             stream.text = f"Unable to list tmux panes: {exc}"
             self.render_agents()
+            return
+        if (
+            selection_generation is not None
+            and not self.agent_selection_is_current(
+                agent_id,
+                selection_generation,
+            )
+        ):
             return
         self.tmux_panes = panes
         pane, mode = self.resolve_tmux_pane(agent_id, panes)
@@ -18979,7 +19091,17 @@ class AgentPBXTUI(App[None]):
         if mapped and self.embedded_terminal_v2_enabled:
             mapping = self.tmux_runtime_mapping_by_agent.get(agent_id)
             if mapping is not None and await self.attach_embedded_tmux_terminal(
-                agent_id, mapping
+                agent_id,
+                mapping,
+                selection_generation=selection_generation,
+            ):
+                return
+            if (
+                selection_generation is not None
+                and not self.agent_selection_is_current(
+                    agent_id,
+                    selection_generation,
+                )
             ):
                 return
         self.end_embedded_terminal_transition(agent_id)
@@ -19001,6 +19123,14 @@ class AgentPBXTUI(App[None]):
             self.record_tmux_liveness_state(agent_id, "unavailable", pane_id=pane.pane_id)
             stream.text = f"Unable to capture tmux pane {pane.pane_id}: {exc}"
             self.render_agents()
+            return
+        if (
+            selection_generation is not None
+            and not self.agent_selection_is_current(
+                agent_id,
+                selection_generation,
+            )
+        ):
             return
         displayed = self.crop_tmux_capture_for_display(captured or "(empty tmux pane)")
         self.update_tmux_plan_selector_state(
@@ -19515,12 +19645,21 @@ class AgentPBXTUI(App[None]):
         self,
         agent_id: str,
         mapping: dict[str, Any],
+        *,
+        selection_generation: int | None = None,
     ) -> bool:
         if (
             not self.embedded_terminal_v2_enabled
             or self.active_agent_tab != "latest-tab"
             or agent_id != self.selected_agent_id
             or str(mapping.get("state") or "") != "ready"
+            or (
+                selection_generation is not None
+                and not self.agent_selection_is_current(
+                    agent_id,
+                    selection_generation,
+                )
+            )
         ):
             return False
         target = f"{mapping.get('server_id')}:{mapping.get('pane_id')}"
@@ -19554,6 +19693,13 @@ class AgentPBXTUI(App[None]):
             agent_id != self.selected_agent_id
             or self.active_agent_tab != "latest-tab"
             or not self.embedded_terminal_v2_enabled
+            or (
+                selection_generation is not None
+                and not self.agent_selection_is_current(
+                    agent_id,
+                    selection_generation,
+                )
+            )
         ):
             # Selection can change while the writer lease request is in
             # flight. Never let that stale worker replace the terminal for the
@@ -19572,6 +19718,13 @@ class AgentPBXTUI(App[None]):
                 agent_id != self.selected_agent_id
                 or self.active_agent_tab != "latest-tab"
                 or not self.embedded_terminal_v2_enabled
+                or (
+                    selection_generation is not None
+                    and not self.agent_selection_is_current(
+                        agent_id,
+                        selection_generation,
+                    )
+                )
             ):
                 await self.release_tmux_writer_lease(agent_id)
                 self.embedded_terminal_agent_id = None
@@ -40370,6 +40523,7 @@ class AgentPBXTUI(App[None]):
         agent_id: str,
         *,
         render_detail: bool = True,
+        selection_generation: int | None = None,
     ) -> None:
         detail = self.query_one_or_none("#workerbee-detail", TextArea)
         if render_detail and detail is not None:
@@ -40385,6 +40539,14 @@ class AgentPBXTUI(App[None]):
         except Exception as exc:
             if render_detail and detail is not None:
                 detail.text = f"Unable to load WorkerBee status for {agent_id}: {exc}"
+            return
+        if (
+            selection_generation is not None
+            and not self.agent_selection_is_current(
+                agent_id,
+                selection_generation,
+            )
+        ):
             return
         self.workerbee_status_by_agent[agent_id] = status
         workspace_policy = (
