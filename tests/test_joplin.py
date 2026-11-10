@@ -1090,6 +1090,9 @@ def test_joplin_sync_status_separates_writes_from_profile_validation(
     )
 
     status = store.joplin_sync_status()
+    restarted = Store(tmp_path / "pbx.sqlite")
+    restarted.init()
+    restarted_status = restarted.joplin_sync_status()
 
     assert status["latest"]["sync_id"] == profile["sync_id"]
     assert status["write_sync"]["current_status"] == "succeeded"
@@ -1099,6 +1102,8 @@ def test_joplin_sync_status_separates_writes_from_profile_validation(
     assert status["profile_validation"]["latest_error"]["error_code"] == (
         "JOPLIN_E2EE_LOCKED"
     )
+    assert restarted_status["write_sync"] == status["write_sync"]
+    assert restarted_status["profile_validation"] == status["profile_validation"]
 
 
 def test_joplin_sync_profile_lock_reports_actionable_error(tmp_path: Path) -> None:
@@ -1746,6 +1751,46 @@ def test_joplin_gateway_retries_latest_failed_targeted_write(tmp_path: Path) -> 
     event = store.list_events()[-1]
     assert event["type"] == "joplin_sync_retried"
     assert event["payload"]["source_sync_id"] == original["sync_id"]
+
+
+def test_joplin_gateway_retry_reuses_active_targeted_write(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    gateway = JoplinGateway(
+        store,
+        JoplinService(JoplinConfig(api_url="http://joplin.local", token="secret")),
+        sync_on_write=True,
+    )
+    failed = store.enqueue_joplin_sync(
+        reason="note_copy_create",
+        agent_id="agent-1",
+        note_id="note-1",
+        profile_key=gateway.profile_key,
+    )
+    claimed = store.claim_next_joplin_sync_job()
+    assert claimed is not None
+    assert claimed["sync_id"] == failed["sync_id"]
+    store.complete_joplin_sync_job(
+        str(claimed["sync_id"]),
+        success=False,
+        error="remote write failed",
+    )
+
+    first = gateway.retry_latest_failed_write("agent-1")
+    second = gateway.retry_latest_failed_write("agent-1")
+
+    assert second["sync_id"] == first["sync_id"]
+    queued = [
+        job
+        for job in store.list_joplin_sync_jobs(limit=20)
+        if job["status"] == "queued" and job["agent_id"] == "agent-1"
+    ]
+    assert [job["sync_id"] for job in queued] == [first["sync_id"]]
+    retried_events = [
+        event
+        for event in store.list_events(limit=20)
+        if event["type"] == "joplin_sync_retried"
+    ]
+    assert len(retried_events) == 1
 
 
 def test_joplin_gateway_retry_is_scoped_to_selected_agent(tmp_path: Path) -> None:
