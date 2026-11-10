@@ -33,6 +33,26 @@
 
 ### Fixed
 
+- Make native Latest attachment and runtime-header results selection-generation
+  aware. Joplin-to-Latest, F4, and Agent/Operator switches now preserve the
+  last valid native frame or bounded loading state, reject stale A→B→A async
+  results, and retain the compatibility fallback only for a genuine attach
+  failure.
+- Keep linked-Git broker completion and recovery bound to the immutable target,
+  transaction, and authority receipt after the initiating row selection. A
+  harmless later TUI selection change no longer vetoes a valid completion,
+  while target posture, branch, path, or authority drift still fails before a
+  broker call; durable action receipts remain replayable after interruption.
+- Project an assigned caller or bound Operator fork's immutable terminal report
+  into campaign assignment state, `last_report_id`, and report-time completion,
+  then close the campaign when all assignments are terminal. Projection is
+  reporter- and scope-bound, terminal state is immutable, and filtered or
+  unfiltered campaign readback safely replays persisted reports after restart.
+- Preserve the existing split between targeted Joplin write/readback health and
+  strict whole-profile E2EE validation across restart. A verified new note is
+  still a successful write when unrelated historical items remain locked, and
+  repeated write retry reuses the one active target job instead of duplicating
+  work.
 - Keep long linked-Git broker receipts inside a bounded scroll region while
   leaving the receipt-bound confirmation input and actions visible. The input
   now owns initial focus, and app-level priority shortcuts yield only while
