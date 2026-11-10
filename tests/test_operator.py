@@ -305,7 +305,12 @@ def test_campaign_status_replays_historical_terminal_report_once(
 
     restarted_store = Store(database)
     restarted = OperatorService(restarted_store)
-    first = restarted.campaign_status(campaign_id=campaign["campaign_id"])[0]
+    filtered = restarted.campaign_status(
+        campaign_id=campaign["campaign_id"],
+        status="complete",
+    )
+    assert len(filtered) == 1
+    first = filtered[0]
     second = restarted.campaign_status(campaign_id=campaign["campaign_id"])[0]
 
     assert first["status"] == "complete"

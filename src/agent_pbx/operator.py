@@ -4289,7 +4289,21 @@ class OperatorService:
             operator_family_ids = self._operator_family_agent_ids(
                 self._logical_operator_agent_id(operator)
             )
-        campaigns = self.store.list_operator_campaigns(
+        replay_limit = 200 if status else limit
+        replay_offset = 0 if status else offset
+        replay_candidates = self.store.list_operator_campaigns(
+            operator_agent_ids=operator_family_ids,
+            campaign_id=campaign_id,
+            status=None,
+            limit=replay_limit,
+            include_events=False,
+            offset=replay_offset,
+        )
+        for campaign in replay_candidates:
+            self.store.reconcile_operator_campaign_reports(
+                str(campaign["campaign_id"])
+            )
+        return self.store.list_operator_campaigns(
             operator_agent_ids=operator_family_ids,
             campaign_id=campaign_id,
             status=status,
@@ -4297,20 +4311,6 @@ class OperatorService:
             include_events=include_events,
             offset=offset,
         )
-        for campaign in campaigns:
-            self.store.reconcile_operator_campaign_reports(
-                str(campaign["campaign_id"])
-            )
-        if campaigns:
-            campaigns = self.store.list_operator_campaigns(
-                operator_agent_ids=operator_family_ids,
-                campaign_id=campaign_id,
-                status=status,
-                limit=limit,
-                include_events=include_events,
-                offset=offset,
-            )
-        return campaigns
 
     def _assignment_payload(
         self, assignment: OperatorAssignmentCreate | dict[str, Any]
