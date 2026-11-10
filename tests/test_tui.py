@@ -26627,7 +26627,9 @@ def test_tui_workerbee_bootstrap_policy_covers_all_operator_roles() -> None:
         )
         assert "workerbee_v1_capabilities" in workerbee_config, role
         assert "workerbee_v1_session_start" in workerbee_config, role
+        assert "workerbee_v1_k1s_profile_evidence" in workerbee_config, role
         assert "workerbee_v1_workload_restart" not in workerbee_config, role
+        assert "workerbee_v1_manifest_deploy_local" not in workerbee_config, role
         assert "workerbee_v1_exec" not in workerbee_config, role
 
 
@@ -26650,6 +26652,7 @@ def test_tui_caller_local_deploy_profile_is_bounded() -> None:
     assert workerbee_config.startswith("mcp_servers.workerbee=")
     assert 'default_tools_approval_mode = "approve"' in workerbee_config
     assert "workerbee_v1_capabilities" in workerbee_config
+    assert "workerbee_v1_k1s_profile_evidence" in workerbee_config
     assert "workerbee_v1_session_start" in workerbee_config
     assert "workerbee_v1_image_build" in workerbee_config
     assert "workerbee_v1_manifest_validate" in workerbee_config

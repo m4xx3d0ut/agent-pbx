@@ -1,7 +1,27 @@
 {
   "oss_commit": "6a205c7",
+  "k1s_profile_evidence_contract": {
+    "tool": "workerbee_v1_k1s_profile_evidence",
+    "arguments": {
+      "operation": "str",
+      "profile": "str | None",
+      "component": "str | None"
+    },
+    "public_operations": ["list", "doctor", "plan", "status", "logs"],
+    "read_only": true,
+    "local_state": true,
+    "networked": false,
+    "bootstrap": "internal-pure-projection-not-exposed",
+    "capability_contract": "workerbee.k1s-profile-evidence-capabilities/v1",
+    "k1s_core_contracts": {
+      "adapter": "v1",
+      "evidence": "v1"
+    },
+    "qualification": "source-validated/unqualified"
+  },
   "oss_tools": [
     "workerbee_v1_capabilities",
+    "workerbee_v1_k1s_profile_evidence",
     "workerbee_v1_session_start",
     "workerbee_v1_projects",
     "workerbee_v1_project_mode_get",

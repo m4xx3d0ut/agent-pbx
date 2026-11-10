@@ -28,6 +28,10 @@ from agent_pbx.workerbee_gateway import (
     WorkerBeeGatewayProxy,
     WorkerBeeGatewayService,
 )
+from agent_pbx.workerbee_modes import (
+    WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATIONS,
+    WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
+)
 from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
 from agent_pbx.workerbee_policy import WorkerBeeWorkspacePolicyService
 from agent_pbx.workerbee_workspace import WorkerBeeWorkspaceService
@@ -740,6 +744,64 @@ def test_gateway_rejects_tools_outside_profile(tmp_path: Path) -> None:
             lease, "workerbee_v1_manifest_deploy_remote_k1s", {}
         )
     assert denied.value.code == "WORKERBEE_TOOL_NOT_ALLOWED"
+
+
+def test_gateway_k1s_profile_evidence_is_read_only_and_exactly_scoped(
+    tmp_path: Path,
+) -> None:
+    _runtime, _workspace, binding, gateway = services(tmp_path)
+    local_lease, _token = gateway.issue(
+        agent_id="local-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    review_lease, _token = gateway.issue(
+        agent_id="review-agent",
+        codex_session_id="thread-2",
+        profile=WORKERBEE_PROFILE_REVIEW,
+        workspace_binding_id=binding.binding_id,
+    )
+
+    assert WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE not in WORKERBEE_MUTATING_TOOLS
+    for lease in (local_lease, review_lease):
+        assert WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE in lease.allowed_tools
+        for operation in WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATIONS:
+            arguments = {
+                "operation": operation,
+                "profile": "k1s-core",
+                "component": "runtime",
+            }
+            assert gateway.prepare_arguments(
+                lease,
+                WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
+                arguments,
+            ) == arguments
+
+    with pytest.raises(WorkerBeeGatewayError) as internal:
+        gateway.prepare_arguments(
+            review_lease,
+            WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
+            {"operation": "bootstrap"},
+        )
+    assert internal.value.code == (
+        "WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATION_INVALID"
+    )
+
+    for invalid in (
+        {"operation": "status", "project": "other"},
+        {"operation": "status", "profile": 1},
+        {"operation": "status", "component": False},
+    ):
+        with pytest.raises(WorkerBeeGatewayError) as malformed:
+            gateway.prepare_arguments(
+                review_lease,
+                WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
+                invalid,
+            )
+        assert malformed.value.code == (
+            "WORKERBEE_K1S_PROFILE_EVIDENCE_ARGUMENT_INVALID"
+        )
 
 
 def test_gateway_tool_surface_rejects_missing_and_quarantines_unknown_without_silent_drop(

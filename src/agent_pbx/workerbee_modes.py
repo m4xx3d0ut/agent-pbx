@@ -32,9 +32,22 @@ WORKERBEE_FAMILY_LOGS = "logs"
 WORKERBEE_FAMILY_SECURITY = "security"
 WORKERBEE_FAMILY_EXPORT = "export"
 
+WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE = "workerbee_v1_k1s_profile_evidence"
+WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATIONS = (
+    "list",
+    "doctor",
+    "plan",
+    "status",
+    "logs",
+)
+WORKERBEE_K1S_PROFILE_EVIDENCE_CAPABILITY_CONTRACT = (
+    "workerbee.k1s-profile-evidence-capabilities/v1"
+)
+
 WORKERBEE_CAPABILITY_FAMILY_TOOLS: Mapping[str, tuple[str, ...]] = {
     WORKERBEE_FAMILY_RUNTIME_OBSERVE: (
         "workerbee_v1_capabilities",
+        WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
         "workerbee_v1_projects",
         "workerbee_v1_project_mode_get",
         "workerbee_v1_project_runbook_status",

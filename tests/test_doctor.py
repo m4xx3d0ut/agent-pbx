@@ -398,6 +398,29 @@ def test_doctor_reports_quarantined_workerbee_catalog_with_remediation() -> None
     assert "backend-specific optional capability registry" in result.remediation
 
 
+def test_doctor_reports_missing_k1s_profile_evidence_separately() -> None:
+    from agent_pbx.workerbee_modes import (
+        WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
+        tools_for_access_profile,
+    )
+
+    advertised = [
+        tool
+        for tool in tools_for_access_profile("local-deploy")
+        if tool != WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE
+    ]
+    result = _workerbee_tool_surface_check(
+        profile="local-deploy",
+        backend="oss",
+        advertised_tools=advertised,
+    )
+
+    assert result.status == "warn"
+    assert "missing required profile tools" in result.summary
+    assert WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE in result.detail
+    assert "install a WorkerBee build" in result.remediation
+
+
 def test_doctor_reachable_runtime_catalog_check_uses_selected_backend(
     tmp_path: Path,
     monkeypatch,

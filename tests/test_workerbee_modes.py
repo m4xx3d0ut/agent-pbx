@@ -6,14 +6,19 @@ from pathlib import Path
 import pytest
 
 from agent_pbx.workerbee_modes import (
+    WORKERBEE_CAPABILITY_FAMILY_TOOLS,
     WORKERBEE_FAMILY_EXPORT,
+    WORKERBEE_FAMILY_RUNTIME_OBSERVE,
     WORKERBEE_HIGH_RISK_TOOLS,
+    WORKERBEE_K1S_PROFILE_EVIDENCE_CAPABILITY_CONTRACT,
+    WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATIONS,
     WORKERBEE_PROFILE_LOCAL_DEPLOY,
     WORKERBEE_PROFILE_REVIEW,
     WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
     WORKERBEE_SOURCE_MANAGED_CLONE,
     WORKERBEE_SOURCE_NATIVE_DIRECT,
     WORKERBEE_SOURCE_SNAPSHOT_IMPORT,
+    WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
     WorkerBeeModeError,
     capability_families_for_profile,
     legacy_strategy_for_source_mode,
@@ -50,6 +55,60 @@ def test_review_profile_is_nonmutating() -> None:
     assert "workerbee_v1_ingress_route_apply" not in review
     assert "workerbee_v1_project_status" in review
     assert "workerbee_v1_logs" in review
+    assert WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE in review
+
+
+def test_k1s_profile_evidence_contract_is_locked_read_only_local_state() -> None:
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "workerbee_tool_catalogs_rc2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    contract = fixture["k1s_profile_evidence_contract"]
+
+    assert contract == {
+        "tool": WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
+        "arguments": {
+            "operation": "str",
+            "profile": "str | None",
+            "component": "str | None",
+        },
+        "public_operations": list(WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATIONS),
+        "read_only": True,
+        "local_state": True,
+        "networked": False,
+        "bootstrap": "internal-pure-projection-not-exposed",
+        "capability_contract": WORKERBEE_K1S_PROFILE_EVIDENCE_CAPABILITY_CONTRACT,
+        "k1s_core_contracts": {"adapter": "v1", "evidence": "v1"},
+        "qualification": "source-validated/unqualified",
+    }
+    assert WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE in (
+        WORKERBEE_CAPABILITY_FAMILY_TOOLS[WORKERBEE_FAMILY_RUNTIME_OBSERVE]
+    )
+    assert WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE not in WORKERBEE_HIGH_RISK_TOOLS
+
+
+def test_k1s_profile_evidence_missing_is_a_distinct_surface_diagnostic() -> None:
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "workerbee_tool_catalogs_rc2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    advertised = [
+        tool
+        for tool in fixture["oss_tools"]
+        if tool != WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE
+    ]
+
+    surface = resolve_workerbee_tool_surface(
+        WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        advertised,
+        backend="oss",
+    )
+
+    assert surface.compatible is False
+    assert surface.missing_tools == (WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,)
+    assert WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE not in surface.effective_tools
 
 
 def test_unknown_capability_family_fails_closed() -> None:

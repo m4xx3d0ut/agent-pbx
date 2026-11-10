@@ -126,6 +126,7 @@ from .workerbee_gateway import (
     WORKERBEE_PROFILE_OBSERVE,
     WORKERBEE_PROFILE_REVIEW,
 )
+from .workerbee_modes import WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE
 from .contracts import ActionDefinition
 from .terminal import (
     EMBEDDED_SCROLL_MODE_CHILD,
@@ -387,6 +388,7 @@ WORKERBEE_WORKSPACE_BINDING_METADATA_KEY = "workerbee_workspace_binding_id"
 WORKERBEE_GATEWAY_LEASE_METADATA_KEY = "workerbee_gateway_lease_id"
 CALLER_WORKERBEE_LOCAL_DEPLOY_APPROVED_TOOLS = (
     "workerbee_v1_capabilities",
+    WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
     "workerbee_v1_session_start",
     "workerbee_v1_project_runbook_status",
     "workerbee_v1_project_status",
@@ -406,6 +408,7 @@ CALLER_WORKERBEE_LOCAL_DEPLOY_APPROVED_TOOLS = (
 )
 REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS = (
     "workerbee_v1_capabilities",
+    WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
     "workerbee_v1_session_start",
     "workerbee_v1_project_runbook_status",
     "workerbee_v1_project_status",

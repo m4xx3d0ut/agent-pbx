@@ -47,11 +47,13 @@ from .workerbee_workspace import (
 )
 from .workerbee_modes import (
     WORKERBEE_EXECUTION_INTERACTIVE,
+    WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATIONS,
     WORKERBEE_PROFILE_LOCAL_DEPLOY,
     WORKERBEE_PROFILE_OBSERVE,
     WORKERBEE_PROFILE_REVIEW,
     WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
     WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND,
+    WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
     WorkerBeeModeError,
     capability_families_for_profile,
     canonical_workerbee_execution_lane,
@@ -109,6 +111,7 @@ WORKERBEE_PROJECT_SCOPED_TOOLS = frozenset(
     not in {
         "workerbee_v1_capabilities",
         "workerbee_v1_ingress_status",
+        WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
     }
 )
 _LEASE_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -464,6 +467,33 @@ class WorkerBeeGatewayService:
             except WorkerBeeWorkspaceError as exc:
                 raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
         supplied = dict(arguments or {})
+        if tool_name == WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE:
+            allowed_arguments = {"operation", "profile", "component"}
+            unexpected = sorted(set(supplied) - allowed_arguments)
+            operation = supplied.get("operation")
+            if unexpected:
+                raise WorkerBeeGatewayError(
+                    "WORKERBEE_K1S_PROFILE_EVIDENCE_ARGUMENT_INVALID",
+                    "WorkerBee K1s profile evidence received unsupported arguments: "
+                    + ", ".join(unexpected),
+                )
+            if (
+                not isinstance(operation, str)
+                or operation not in WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATIONS
+            ):
+                raise WorkerBeeGatewayError(
+                    "WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATION_INVALID",
+                    "WorkerBee K1s profile evidence operation must be one of: "
+                    + ", ".join(WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATIONS),
+                )
+            for optional in ("profile", "component"):
+                value = supplied.get(optional)
+                if value is not None and not isinstance(value, str):
+                    raise WorkerBeeGatewayError(
+                        "WORKERBEE_K1S_PROFILE_EVIDENCE_ARGUMENT_INVALID",
+                        f"WorkerBee K1s profile evidence {optional} must be a string or null.",
+                    )
+            return supplied
         supplied_project = str(supplied.get("project") or "").strip()
         if (
             tool_name != "workerbee_v1_session_start"
