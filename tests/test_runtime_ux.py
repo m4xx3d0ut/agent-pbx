@@ -486,13 +486,14 @@ async def test_tui_agent_selection_preloads_workerbee_runtime_status() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     loaded: list[tuple[str, bool]] = []
 
-    async def no_refresh(_agent_id: str) -> None:
+    async def no_refresh(_agent_id: str, **_kwargs: object) -> None:
         return None
 
     async def load_workerbee(
         agent_id: str,
         *,
         render_detail: bool = True,
+        selection_generation: int | None = None,
     ) -> None:
         loaded.append((agent_id, render_detail))
         app.workerbee_status_by_agent[agent_id] = {
@@ -552,6 +553,7 @@ async def test_tui_restored_selection_preloads_workerbee_runtime_status() -> Non
         agent_id: str,
         *,
         render_detail: bool = True,
+        selection_generation: int | None = None,
     ) -> None:
         loaded.append((agent_id, render_detail))
         app.workerbee_status_by_agent[agent_id] = {
