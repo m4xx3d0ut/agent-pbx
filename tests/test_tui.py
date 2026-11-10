@@ -283,7 +283,10 @@ def isolate_tui_settings(monkeypatch, tmp_path: Path) -> None:
     ]:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1,0")
-    monkeypatch.setattr("agent_pbx.tui.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        "agent_pbx.tui.shutil.which",
+        lambda name, **_kwargs: f"/usr/bin/{name}",
+    )
     monkeypatch.setenv(
         "AGENT_PBX_TUI_SETTINGS_FILE",
         str(tmp_path / "agent-pbx" / "tui-settings.json"),
@@ -5382,7 +5385,9 @@ async def test_tui_plain_keys_focus_split_sections_for_tiny_terminals() -> None:
 async def test_tui_function_keys_switch_compact_views() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
 
-    async def fake_refresh_selected_agent(agent_id: str) -> None:
+    async def fake_refresh_selected_agent(
+        agent_id: str, **_kwargs: object
+    ) -> None:
         return None
 
     async def fake_load_thread(agent_id: str) -> None:
@@ -6411,7 +6416,7 @@ async def test_tui_tmux_direct_is_tracked_per_agent() -> None:
     reports: list[str] = []
     threads: list[str] = []
 
-    async def fake_load_tmux_capture(agent_id: str) -> None:
+    async def fake_load_tmux_capture(agent_id: str, **_kwargs: object) -> None:
         captures.append(agent_id)
 
     async def fake_load_latest_report(agent_id: str) -> None:
@@ -7122,7 +7127,9 @@ async def test_tui_cycles_operator_fork_panes(monkeypatch) -> None:
     def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         return panes
 
-    async def fake_refresh_selected_agent(agent_id: str) -> None:
+    async def fake_refresh_selected_agent(
+        agent_id: str, **_kwargs: object
+    ) -> None:
         refreshed.append(agent_id)
 
     monkeypatch.setattr(tmux_support, "list_panes", fake_list_panes)
@@ -22729,7 +22736,7 @@ async def test_tui_f8_single_flight_approval_then_advances_report_alert() -> Non
 async def test_tui_navigation_history_composes_with_alert_jump() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 
-    async def no_refresh(_agent_id: str) -> None:
+    async def no_refresh(_agent_id: str, **_kwargs: object) -> None:
         return None
 
     app.refresh_selected_agent = no_refresh  # type: ignore[method-assign]
@@ -22784,7 +22791,7 @@ async def test_tui_navigation_history_skips_missing_and_hidden_stops() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     notices: list[str] = []
 
-    async def no_refresh(_agent_id: str) -> None:
+    async def no_refresh(_agent_id: str, **_kwargs: object) -> None:
         return None
 
     app.refresh_selected_agent = no_refresh  # type: ignore[method-assign]
