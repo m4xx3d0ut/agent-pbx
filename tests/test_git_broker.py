@@ -518,6 +518,129 @@ def test_prepare_binds_exact_descriptive_subject_into_receipt(tmp_path: Path) ->
     )
 
     assert receipt.commit_subject == "fix: preserve broker evidence"
+    assert "commit_parents" not in receipt.public_dict()
+    assert "expected_tree" not in receipt.public_dict()
+
+
+def test_broker_creates_exact_ordered_two_parent_commit(tmp_path: Path) -> None:
+    main, linked = _fixture(tmp_path)
+    codex_home = _split_codex_home(tmp_path)
+    first_parent = _git(linked, "rev-parse", "HEAD")
+
+    (main / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    (main / "new.txt").write_text("new\n", encoding="utf-8")
+    _git(main, "add", "tracked.txt", "new.txt")
+    _git(main, "commit", "-m", "candidate")
+    second_parent = _git(main, "rev-parse", "HEAD")
+    expected_tree = _git(main, "rev-parse", "HEAD^{tree}")
+
+    (linked / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    (linked / "new.txt").write_text("new\n", encoding="utf-8")
+    receipt = prepare_linked_git_commit(
+        agent_id="operator-7-fork-test",
+        work_root=linked,
+        approved_roots=(tmp_path,),
+        approved_stage_paths=("new.txt", "tracked.txt"),
+        codex_home=codex_home,
+        authored_at=1_700_000_000,
+        commit_subject="Merge exact candidate lineage",
+        commit_parents=(first_parent, second_parent),
+        expected_tree=expected_tree,
+    )
+
+    result = execute_linked_git_commit(
+        receipt,
+        approved_roots=(tmp_path,),
+        journal_root=tmp_path / "journal",
+        codex_home=codex_home,
+    )
+
+    assert receipt.commit_parents == (first_parent, second_parent)
+    assert result.commit_parents == (first_parent, second_parent)
+    assert _git(linked, "show", "-s", "--format=%P", result.new_head) == (
+        f"{first_parent} {second_parent}"
+    )
+    assert _git(linked, "rev-parse", "HEAD^{tree}") == expected_tree
+
+
+def test_broker_rejects_exact_merge_when_reviewed_tree_does_not_match(
+    tmp_path: Path,
+) -> None:
+    main, linked = _fixture(tmp_path)
+    codex_home = _split_codex_home(tmp_path)
+    first_parent = _git(linked, "rev-parse", "HEAD")
+    expected_tree = _git(linked, "rev-parse", "HEAD^{tree}")
+    (main / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    _git(main, "add", "candidate.txt")
+    _git(main, "commit", "-m", "candidate")
+    second_parent = _git(main, "rev-parse", "HEAD")
+    (linked / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    original_index = (Path(_git(linked, "rev-parse", "--absolute-git-dir")) / "index").read_bytes()
+
+    receipt = prepare_linked_git_commit(
+        agent_id="operator-7-fork-test",
+        work_root=linked,
+        approved_roots=(tmp_path,),
+        approved_stage_paths=("candidate.txt",),
+        codex_home=codex_home,
+        authored_at=1_700_000_000,
+        commit_subject="Merge exact candidate lineage",
+        commit_parents=(first_parent, second_parent),
+        expected_tree=expected_tree,
+    )
+
+    with pytest.raises(LinkedGitBrokerError, match="exact expected Git tree"):
+        execute_linked_git_commit(
+            receipt,
+            approved_roots=(tmp_path,),
+            journal_root=tmp_path / "journal",
+            codex_home=codex_home,
+        )
+
+    assert _git(linked, "rev-parse", "HEAD") == first_parent
+    assert (
+        Path(_git(linked, "rev-parse", "--absolute-git-dir")) / "index"
+    ).read_bytes() == original_index
+
+
+def test_broker_rejects_ordered_parents_when_head_is_not_first(
+    tmp_path: Path,
+) -> None:
+    main, linked = _fixture(tmp_path)
+    codex_home = _split_codex_home(tmp_path)
+    head = _git(linked, "rev-parse", "HEAD")
+    candidate = _git(main, "commit-tree", f"{head}^{{tree}}", "-p", head, "-m", "candidate")
+    (linked / "tracked.txt").write_text("changed\n", encoding="utf-8")
+
+    with pytest.raises(LinkedGitBrokerError, match="first commit parent"):
+        prepare_linked_git_commit(
+            agent_id="operator-7-fork-test",
+            work_root=linked,
+            approved_roots=(tmp_path,),
+            approved_stage_paths=("tracked.txt",),
+            codex_home=codex_home,
+            authored_at=1_700_000_000,
+            commit_parents=(candidate, head),
+            expected_tree=_git(main, "rev-parse", f"{head}^{{tree}}"),
+        )
+
+
+def test_broker_rejects_ambient_merge_state_before_capture(tmp_path: Path) -> None:
+    _, linked = _fixture(tmp_path)
+    codex_home = _split_codex_home(tmp_path)
+    (linked / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    git_dir = Path(_git(linked, "rev-parse", "--absolute-git-dir"))
+    (git_dir / "MERGE_HEAD").write_text("a" * 40 + "\n", encoding="ascii")
+
+    with pytest.raises(LinkedGitBrokerError, match="active Git operation state"):
+        prepare_linked_git_commit(
+            agent_id="operator-7-fork-test",
+            work_root=linked,
+            approved_roots=(tmp_path,),
+            approved_stage_paths=("tracked.txt",),
+            codex_home=codex_home,
+            authored_at=1_700_000_000,
+        )
 
 
 @pytest.mark.parametrize("subject", ["", "bad\nsubject", "x" * 161])

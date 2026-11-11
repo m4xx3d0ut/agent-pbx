@@ -605,9 +605,18 @@ New executable handoffs should also include a machine-readable
 `execution_scope`. It records an `action_class`, `mutation_mode`, campaign and
 workspace-set identity, allowed roots, exact paths, and explicit denied actions.
 The `exact_git_commit_broker` class additionally requires the expected Git
-parent and exact commit subject. Absolute or parent-traversing path entries are
-rejected. The legacy free-form `allowed_mutation_scope` remains readable but is
-never sufficient for delegated approval.
+parent and exact commit subject. An optional ordered `expected_git_parents`
+list supports an exact merge commit; its first entry must equal the stopped
+fork's HEAD, every entry must be a complete unique commit object ID, and the
+broker verifies the order before and after writing the commit. Multi-parent
+requests also require an `expected_git_tree`; the broker reconstructs that tree
+from the approved raw-byte path set and refuses a mismatch before changing the
+index or branch. Active merge, cherry-pick, revert, rebase, bisect, or sequencer
+state is rejected. Requests that omit the list retain the original
+single-parent behavior. Absolute or parent-traversing path entries are rejected.
+The legacy free-form
+`allowed_mutation_scope` remains readable but is never sufficient for delegated
+approval.
 
 The public/default broker flow remains guided: the TUI exposes one reviewed
 stop, broker, resume, or validation step at a time. A dedicated single-user

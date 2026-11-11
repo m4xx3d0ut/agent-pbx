@@ -71,7 +71,33 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
     allowed_roots = _absolute_roots(scope.get("allowed_roots"))
     exact_paths = _relative_paths(scope.get("exact_paths"))
     expected_parent = str(scope.get("expected_git_parent") or "").strip() or None
+    raw_expected_parents = scope.get("expected_git_parents")
+    expected_parents: tuple[str, ...] | None = None
+    if raw_expected_parents is not None:
+        if not isinstance(raw_expected_parents, (list, tuple)) or not raw_expected_parents:
+            raise ValueError("expected_git_parents must be a non-empty list")
+        normalized_parents: list[str] = []
+        for raw_parent in raw_expected_parents:
+            parent = str(raw_parent or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parent):
+                raise ValueError(
+                    "expected_git_parents requires complete hexadecimal object IDs"
+                )
+            if parent in normalized_parents:
+                raise ValueError("expected_git_parents cannot contain duplicates")
+            normalized_parents.append(parent)
+        expected_parents = tuple(normalized_parents)
+        if expected_parent is not None and expected_parent.lower() != expected_parents[0]:
+            raise ValueError(
+                "expected_git_parent must match the first ordered Git parent"
+            )
+        expected_parent = expected_parents[0]
     commit_subject = str(scope.get("commit_subject") or "").strip() or None
+    expected_tree = str(scope.get("expected_git_tree") or "").strip().lower() or None
+    if expected_tree is not None and not re.fullmatch(
+        r"[0-9a-f]{40}|[0-9a-f]{64}", expected_tree
+    ):
+        raise ValueError("expected_git_tree requires one complete object ID")
     denied_actions = tuple(
         dict.fromkeys(
             (*DEFAULT_DENIED_ACTIONS, *_string_tuple(scope.get("denied_actions") or (), label="denied_actions"))
@@ -87,6 +113,10 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
             raise ValueError("exact_git_commit_broker requires an expected Git parent")
         if not commit_subject:
             raise ValueError("exact_git_commit_broker requires an exact commit subject")
+        if expected_parents is not None and len(expected_parents) > 1 and not expected_tree:
+            raise ValueError(
+                "multi-parent exact_git_commit_broker requires expected_git_tree"
+            )
     if mutation_mode == "workspace" and action_class in LEASE_ELIGIBLE_ACTION_CLASSES:
         raise ValueError("lease-eligible action classes may not request workspace-wide mutation")
     if action_class in {"read_only_verification", "evidence_review"} and mutation_mode not in {
@@ -139,6 +169,10 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
         "denied_actions": list(denied_actions),
         **flags,
     }
+    if expected_parents is not None:
+        normalized["expected_git_parents"] = list(expected_parents)
+    if expected_tree is not None:
+        normalized["expected_git_tree"] = expected_tree
     if host_process_evidence is not None:
         normalized["host_process_evidence"] = host_process_evidence
     return normalized

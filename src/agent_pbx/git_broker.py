@@ -29,6 +29,17 @@ DEDICATED_BRANCH_RE = re.compile(
     r"^refs/heads/pbx-operator-[0-9]+/[A-Za-z0-9._/-]+$"
 )
 UNSAFE_INDEX_EXTENSIONS = {b"link", b"sdir"}
+GIT_OPERATION_STATE_PATHS = (
+    "MERGE_HEAD",
+    "MERGE_MSG",
+    "MERGE_MODE",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+    "rebase-apply",
+    "rebase-merge",
+    "sequencer",
+)
 GIT_INDEX_OBJECT_FORMATS = {
     "sha1": ("sha1", 20),
     "sha256": ("sha256", 32),
@@ -187,9 +198,16 @@ class LinkedGitCommitReceipt:
     author_email: str
     authored_at: int
     qualified_git_admin_paths: tuple[str, ...]
+    commit_parents: tuple[str, ...] | None = None
+    expected_tree: str | None = None
 
     def public_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        if self.commit_parents is None:
+            value.pop("commit_parents")
+        if self.expected_tree is None:
+            value.pop("expected_tree")
+        return value
 
 
 @dataclass(frozen=True)
@@ -200,6 +218,7 @@ class LinkedGitCommitResult:
     new_head: str
     branch_ref: str
     committed_paths: tuple[str, ...]
+    commit_parents: tuple[str, ...] = ()
     idempotent: bool = False
 
     def public_dict(self) -> dict[str, Any]:
@@ -303,6 +322,7 @@ _RECEIPT_FIELDS = {
     "authored_at",
     "qualified_git_admin_paths",
 }
+_RECEIPT_OPTIONAL_FIELDS = {"commit_parents", "expected_tree"}
 _CONFIG_IDENTITY_FIELDS = {"label", "path", "state", "sha256", "uid", "mode"}
 _PATH_IDENTITY_FIELDS = {
     "path",
@@ -327,9 +347,12 @@ _PATH_IDENTITY_FIELDS = {
 def _receipt_from_public_dict(value: Mapping[str, Any]) -> LinkedGitCommitReceipt:
     """Rebuild one immutable receipt from a journal with strict schema checks."""
 
-    if set(value) != _RECEIPT_FIELDS:
-        missing = sorted(_RECEIPT_FIELDS - set(value))
-        extra = sorted(set(value) - _RECEIPT_FIELDS)
+    present_fields = set(value)
+    if not _RECEIPT_FIELDS.issubset(present_fields) or not present_fields.issubset(
+        _RECEIPT_FIELDS | _RECEIPT_OPTIONAL_FIELDS
+    ):
+        missing = sorted(_RECEIPT_FIELDS - present_fields)
+        extra = sorted(present_fields - _RECEIPT_FIELDS - _RECEIPT_OPTIONAL_FIELDS)
         raise LinkedGitBrokerError(
             f"broker pending receipt schema mismatch; missing={missing}, extra={extra}"
         )
@@ -485,6 +508,35 @@ def _receipt_from_public_dict(value: Mapping[str, Any]) -> LinkedGitCommitReceip
     if author_name != BROKER_AUTHOR_NAME or author_email != BROKER_AUTHOR_EMAIL:
         raise LinkedGitBrokerError("broker pending author identity is not canonical")
 
+    head = _receipt_git_oid(value, "head")
+    commit_parents: tuple[str, ...] | None = None
+    if "commit_parents" in value:
+        commit_parents = _receipt_string_tuple(
+            value, "commit_parents", nonempty=True
+        )
+        if any(
+            not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parent)
+            for parent in commit_parents
+        ):
+            raise LinkedGitBrokerError(
+                "broker pending commit parents contain an invalid object id"
+            )
+        if len(commit_parents) != len(set(commit_parents)):
+            raise LinkedGitBrokerError(
+                "broker pending commit parents contain duplicates"
+            )
+        if commit_parents[0] != head:
+            raise LinkedGitBrokerError(
+                "broker pending first commit parent does not match HEAD"
+            )
+    expected_tree: str | None = None
+    if "expected_tree" in value:
+        expected_tree = _receipt_git_oid(value, "expected_tree")
+    if commit_parents is not None and len(commit_parents) > 1 and expected_tree is None:
+        raise LinkedGitBrokerError(
+            "broker pending multi-parent receipt lacks an expected tree"
+        )
+
     receipt = LinkedGitCommitReceipt(
         version=version,
         transaction_id=transaction_id,
@@ -511,7 +563,7 @@ def _receipt_from_public_dict(value: Mapping[str, Any]) -> LinkedGitCommitReceip
         ),
         upstream=_receipt_text(value, "upstream", reject_controls=True),
         upstream_oid=_receipt_git_oid(value, "upstream_oid"),
-        head=_receipt_git_oid(value, "head"),
+        head=head,
         head_tree=_receipt_git_oid(value, "head_tree"),
         index_tree=_receipt_git_oid(value, "index_tree"),
         approved_stage_paths=approved_stage_paths,
@@ -526,6 +578,8 @@ def _receipt_from_public_dict(value: Mapping[str, Any]) -> LinkedGitCommitReceip
         author_email=author_email,
         authored_at=authored_at_value,
         qualified_git_admin_paths=qualified_paths,
+        commit_parents=commit_parents,
+        expected_tree=expected_tree,
     )
     if (
         receipt.write_strategy != BROKER_WRITE_STRATEGY
@@ -663,6 +717,8 @@ def prepare_linked_git_commit(
     codex_home: Path | None = None,
     authored_at: int | None = None,
     commit_subject: str | None = None,
+    commit_parents: Iterable[str] | None = None,
+    expected_tree: str | None = None,
 ) -> LinkedGitCommitReceipt:
     """Capture one immutable receipt while observing approved leaves only."""
 
@@ -684,6 +740,19 @@ def prepare_linked_git_commit(
 
     root = plan.worktree_root
     head = _git_text(root, "rev-parse", "HEAD")
+    normalized_commit_parents = _normalize_commit_parents(
+        root,
+        head=head,
+        values=commit_parents,
+    )
+    normalized_expected_tree = _normalize_expected_tree(
+        root,
+        value=expected_tree,
+        required=(
+            normalized_commit_parents is not None
+            and len(normalized_commit_parents) > 1
+        ),
+    )
     head_tree = _git_text(root, "rev-parse", "HEAD^{tree}")
     index_tree = head_tree
     branch_ref = _git_text(root, "symbolic-ref", "-q", "HEAD")
@@ -747,15 +816,27 @@ def prepare_linked_git_commit(
             str(path) for path in plan.writable_paths
         ),
     }
+    if normalized_commit_parents is not None:
+        payload["commit_parents"] = normalized_commit_parents
+    if normalized_expected_tree is not None:
+        payload["expected_tree"] = normalized_expected_tree
     transaction_id = _sha256(_canonical_json(payload))
     return LinkedGitCommitReceipt(
         transaction_id=transaction_id,
         codex_config_identities=config_identities,
         path_identities=identities,
+        commit_parents=normalized_commit_parents,
+        expected_tree=normalized_expected_tree,
         **{
             key: value
             for key, value in payload.items()
-            if key not in {"codex_config_identities", "path_identities"}
+            if key
+            not in {
+                "codex_config_identities",
+                "path_identities",
+                "commit_parents",
+                "expected_tree",
+            }
         },
     )
 
@@ -933,6 +1014,10 @@ def _execute_prevalidated(
             )
 
     prepared_tree = _git_text(root, "write-tree", env=quarantine_env)
+    if receipt.expected_tree is not None and prepared_tree != receipt.expected_tree:
+        raise LinkedGitBrokerError(
+            "prepared index tree does not match the exact expected Git tree"
+        )
     changed_entries = _tree_changed_paths(
         root,
         receipt.head_tree,
@@ -951,14 +1036,21 @@ def _execute_prevalidated(
         **quarantine_env,
         **_fixed_identity_env(receipt),
     }
+    commit_tree_args = ["commit-tree", prepared_tree]
+    for parent in _effective_commit_parents(receipt):
+        commit_tree_args.extend(("-p", parent))
     new_head = _git_text(
         root,
-        "commit-tree",
-        prepared_tree,
-        "-p",
-        receipt.head,
+        *commit_tree_args,
         input_bytes=(receipt.commit_subject + "\n").encode("utf-8"),
         env=commit_env,
+    )
+    _require_commit_parents(
+        root,
+        new_head,
+        _effective_commit_parents(receipt),
+        env=commit_env,
+        label="prepared",
     )
     message = f"agent-pbx broker {receipt.transaction_id[:12]}"
     expected_ref = f"{new_head}\n".encode("ascii")
@@ -1286,7 +1378,96 @@ def _capture_again(
         codex_home=codex_home,
         authored_at=receipt.authored_at,
         commit_subject=receipt.commit_subject,
+        commit_parents=receipt.commit_parents,
+        expected_tree=receipt.expected_tree,
     )
+
+
+def _normalize_commit_parents(
+    root: Path,
+    *,
+    head: str,
+    values: Iterable[str] | None,
+) -> tuple[str, ...] | None:
+    if values is None:
+        return None
+    parents = tuple(str(value or "").strip().lower() for value in values)
+    if not parents:
+        raise LinkedGitBrokerError("broker commit parents cannot be empty")
+    if len(parents) > 16:
+        raise LinkedGitBrokerError("broker commit parent count exceeds 16")
+    if len(parents) != len(set(parents)):
+        raise LinkedGitBrokerError("broker commit parents cannot contain duplicates")
+    if any(
+        not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parent)
+        for parent in parents
+    ):
+        raise LinkedGitBrokerError(
+            "broker commit parents require complete hexadecimal object IDs"
+        )
+    if parents[0] != head:
+        raise LinkedGitBrokerError(
+            "broker first commit parent must match the active HEAD"
+        )
+    for parent in parents:
+        resolved = _git_text(root, "rev-parse", f"{parent}^{{commit}}")
+        if resolved != parent:
+            raise LinkedGitBrokerError(
+                f"broker commit parent is not an exact commit object: {parent}"
+            )
+    return parents
+
+
+def _effective_commit_parents(
+    receipt: LinkedGitCommitReceipt,
+) -> tuple[str, ...]:
+    return receipt.commit_parents or (receipt.head,)
+
+
+def _normalize_expected_tree(
+    root: Path,
+    *,
+    value: str | None,
+    required: bool,
+) -> str | None:
+    tree = str(value or "").strip().lower()
+    if not tree:
+        if required:
+            raise LinkedGitBrokerError(
+                "multi-parent broker commits require an exact expected Git tree"
+            )
+        return None
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tree):
+        raise LinkedGitBrokerError(
+            "broker expected tree requires one complete hexadecimal object ID"
+        )
+    if _git_text(root, "cat-file", "-t", tree) != "tree":
+        raise LinkedGitBrokerError("broker expected tree is not a tree object")
+    return tree
+
+
+def _require_commit_parents(
+    root: Path,
+    commit_oid: str,
+    expected: tuple[str, ...],
+    *,
+    env: Mapping[str, str] | None = None,
+    label: str,
+) -> None:
+    line = _git_text(
+        root,
+        "rev-list",
+        "--parents",
+        "-n",
+        "1",
+        commit_oid,
+        env=env,
+    )
+    fields = tuple(line.split())
+    if not fields or fields[0] != commit_oid or fields[1:] != expected:
+        raise LinkedGitBrokerError(
+            f"broker {label} commit parent order does not match approval"
+        )
 
 
 def _normalized_commit_subject(value: str | None, *, agent_id: str) -> str:
@@ -1427,6 +1608,19 @@ def _require_broker_topology(plan: LinkedWorktreeGitAdminPlan) -> None:
 
 def _require_plain_clean_index(plan: LinkedWorktreeGitAdminPlan) -> None:
     root = plan.worktree_root
+    for relative in GIT_OPERATION_STATE_PATHS:
+        marker = plan.git_dir / relative
+        try:
+            marker.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise LinkedGitBrokerError(
+                f"unable to inspect Git operation state {relative}: {exc}"
+            ) from exc
+        raise LinkedGitBrokerError(
+            f"linked Git broker rejects active Git operation state: {relative}"
+        )
     for key in ("core.sparseCheckout", "core.sparseCheckoutCone", "core.splitIndex"):
         if _git_optional_text(root, "config", "--bool", key) == "true":
             raise LinkedGitBrokerError(f"linked Git broker rejects {key}=true")
@@ -1824,6 +2018,16 @@ def _postverify(
         raise LinkedGitBrokerError("broker postverify index mismatch")
     if _git_text(root, "rev-parse", "HEAD^{tree}") != tree:
         raise LinkedGitBrokerError("broker postverify commit tree mismatch")
+    if receipt.expected_tree is not None and tree != receipt.expected_tree:
+        raise LinkedGitBrokerError(
+            "broker postverify tree does not match the exact expected tree"
+        )
+    _require_commit_parents(
+        root,
+        new_head,
+        _effective_commit_parents(receipt),
+        label="postverify",
+    )
     if _tree_changed_paths(root, receipt.head_tree, tree) != receipt.approved_stage_paths:
         raise LinkedGitBrokerError(
             "broker postverify commit changed paths outside approval"
@@ -2201,6 +2405,7 @@ def _result(
         new_head=new_head,
         branch_ref=receipt.branch_ref,
         committed_paths=receipt.approved_stage_paths,
+        commit_parents=_effective_commit_parents(receipt),
         idempotent=idempotent,
     )
 

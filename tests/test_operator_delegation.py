@@ -52,6 +52,8 @@ def test_exact_git_scope_is_normalized_and_persisted(tmp_path: Path) -> None:
             "allowed_roots": [str(tmp_path)],
             "exact_paths": ["src/app.py", "tests/test_app.py", "src/app.py"],
             "expected_git_parent": "b" * 40,
+            "expected_git_parents": ["b" * 40, "c" * 40],
+            "expected_git_tree": "d" * 40,
             "commit_subject": "fix: preserve exact scope",
         },
     )
@@ -63,6 +65,11 @@ def test_exact_git_scope_is_normalized_and_persisted(tmp_path: Path) -> None:
         "tests/test_app.py",
     ]
     assert handoff["execution_scope"]["denied_actions"]
+    assert handoff["execution_scope"]["expected_git_parents"] == [
+        "b" * 40,
+        "c" * 40,
+    ]
+    assert handoff["execution_scope"]["expected_git_tree"] == "d" * 40
     assert execution_scope_requires_manual_approval(handoff["execution_scope"]) is False
 
 

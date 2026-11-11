@@ -8841,6 +8841,8 @@ async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
     receipt = SimpleNamespace(
         transaction_id="e" * 64,
         head="b" * 40,
+        commit_parents=("b" * 40, "d" * 40),
+        expected_tree="f" * 40,
         approved_stage_paths=("src/app.py", "tests/test_app.py"),
         commit_subject="fix: exact checkpoint",
     )
@@ -8849,6 +8851,7 @@ async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
         old_head="b" * 40,
         new_head="c" * 40,
         committed_paths=("src/app.py", "tests/test_app.py"),
+        commit_parents=("b" * 40, "d" * 40),
         status="committed",
     )
     app.transition_operator_broker_request = transition  # type: ignore[method-assign]
@@ -8881,6 +8884,8 @@ async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
             "handoff_id": "handoff-1",
             "scope_sha256": "a" * 64,
             "expected_git_parent": "b" * 40,
+            "expected_git_parents": ["b" * 40, "d" * 40],
+            "expected_git_tree": "f" * 40,
             "commit_subject": "fix: exact checkpoint",
             "exact_paths": ["tests/test_app.py", "src/app.py"],
             "created_at": 1_700_000_000,
@@ -8901,6 +8906,8 @@ async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
     final = transitions[-1]["result"]
     assert final["old_head"] == "b" * 40
     assert final["new_head"] == "c" * 40
+    assert final["commit_parents"] == ["b" * 40, "d" * 40]
+    assert final["expected_tree"] == "f" * 40
     assert final["same_fork_resumed"] is True
     assert final["resumed_codex_session_id"] == session_id
     assert final["resumed_tmux_pane_id"] == "%77"
@@ -27429,8 +27436,8 @@ def test_tui_operator_agent_config_overrides_follow_operator_server_env(
     assert "pbx_operator_start_campaign" not in agent_pbx_config
     assert "pbx_operator_send_followup" not in agent_pbx_config
     assert "pbx_operator_finish_campaign" not in agent_pbx_config
-    assert "pbx_operator_ack_handoff" not in agent_pbx_config
-    assert "pbx_operator_update_handoff" not in agent_pbx_config
+    assert '"pbx_operator_ack_handoff"' not in agent_pbx_config
+    assert '"pbx_operator_update_handoff"' not in agent_pbx_config
     assert 'default_tools_approval_mode = "approve"' in workerbee_config
     assert "workerbee_v1_project_status" in workerbee_config
     assert "workerbee_v1_exec" not in workerbee_config

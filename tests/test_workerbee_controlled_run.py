@@ -70,7 +70,7 @@ def _write_profile(root: Path, *, enabled: bool = True, approval: str = "campaig
 def _service(tmp_path: Path, *, mode: str = "root_operator"):
     store = Store(tmp_path / "pbx.sqlite")
     store.init()
-    assert store.schema_version() == SCHEMA_VERSION == 39
+    assert store.schema_version() == SCHEMA_VERSION == 40
     root_metadata = {
         "cwd": str(tmp_path),
         "operator_role": "root",

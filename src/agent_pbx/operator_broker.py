@@ -251,6 +251,14 @@ class OperatorBrokerService:
         expected_parent = normalize_broker_expected_parent(
             scope.get("expected_git_parent")
         )
+        expected_parents = normalize_broker_expected_parents(
+            scope.get("expected_git_parents"),
+            expected_parent=expected_parent,
+        )
+        expected_tree = normalize_broker_expected_tree(
+            scope.get("expected_git_tree"),
+            required=len(expected_parents) > 1,
+        )
         subject = normalize_broker_commit_subject(scope.get("commit_subject"))
         scope_sha256 = execution_scope_digest(scope)
         authority_sha256 = hashlib.sha256(
@@ -265,6 +273,8 @@ class OperatorBrokerService:
                     "workspace_set_digest": digest,
                     "scope_sha256": scope_sha256,
                     "expected_git_parent": expected_parent,
+                    "expected_git_parents": expected_parents,
+                    "expected_git_tree": expected_tree,
                     "commit_subject": subject,
                     "exact_paths": exact_paths,
                 },
@@ -286,6 +296,8 @@ class OperatorBrokerService:
             "scope_sha256": scope_sha256,
             "authority_sha256": authority_sha256,
             "expected_git_parent": expected_parent,
+            "expected_git_parents": list(expected_parents),
+            "expected_git_tree": expected_tree,
             "commit_subject": subject,
             "exact_paths": list(exact_paths),
             "action": action,
@@ -317,6 +329,8 @@ class OperatorBrokerService:
             workspace_set_digest=str(preflight["workspace_set_digest"]),
             scope_sha256=str(preflight["scope_sha256"]),
             expected_git_parent=str(preflight["expected_git_parent"]),
+            expected_git_parents=tuple(preflight["expected_git_parents"]),
+            expected_git_tree=preflight["expected_git_tree"],
             commit_subject=str(preflight["commit_subject"]),
             exact_paths=tuple(preflight["exact_paths"]),
             ttl_seconds=posture.request_ttl_seconds,
@@ -455,7 +469,12 @@ def operator_broker_receipt_summary(request: Mapping[str, Any]) -> str:
     new_head = str(
         evidence.get("new_head") or evidence.get("verified_head") or ""
     ).strip()
-    if old_head:
+    parents = evidence.get("commit_parents") or request.get("expected_git_parents")
+    if isinstance(parents, (list, tuple)) and parents:
+        lines.append(
+            "Git parents: " + " → ".join(f"`{str(parent)}`" for parent in parents)
+        )
+    elif old_head:
         lines.append(f"Git parent: `{old_head}`")
     if new_head:
         lines.append(f"Verified Git HEAD: `{new_head}`")
@@ -552,6 +571,55 @@ def normalize_broker_expected_parent(value: object) -> str:
             "The expected Git parent must be one complete hexadecimal object ID.",
         )
     return parent
+
+
+def normalize_broker_expected_parents(
+    values: object,
+    *,
+    expected_parent: str,
+) -> tuple[str, ...]:
+    """Return one immutable ordered parent set with HEAD first."""
+
+    if values is None:
+        return (expected_parent,)
+    if not isinstance(values, (list, tuple)) or not values:
+        raise OperatorBrokerPolicyError(
+            "OPERATOR_BROKER_PARENTS_INVALID",
+            "Expected Git parents must be a non-empty ordered list.",
+        )
+    parents = tuple(normalize_broker_expected_parent(value) for value in values)
+    if len(parents) != len(set(parents)):
+        raise OperatorBrokerPolicyError(
+            "OPERATOR_BROKER_PARENTS_DUPLICATE",
+            "Expected Git parents cannot contain duplicate object IDs.",
+        )
+    if parents[0] != expected_parent:
+        raise OperatorBrokerPolicyError(
+            "OPERATOR_BROKER_PARENT_ORDER_INVALID",
+            "The first ordered Git parent must match the expected Git parent.",
+        )
+    return parents
+
+
+def normalize_broker_expected_tree(
+    value: object,
+    *,
+    required: bool,
+) -> str | None:
+    tree = str(value or "").strip().lower()
+    if not tree:
+        if required:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_TREE_REQUIRED",
+                "A multi-parent checkpoint requires one exact expected Git tree.",
+            )
+        return None
+    if not _HEX_OID.fullmatch(tree):
+        raise OperatorBrokerPolicyError(
+            "OPERATOR_BROKER_TREE_INVALID",
+            "The expected Git tree must be one complete hexadecimal object ID.",
+        )
+    return tree
 
 
 def normalize_broker_paths(values: Iterable[object]) -> tuple[str, ...]:

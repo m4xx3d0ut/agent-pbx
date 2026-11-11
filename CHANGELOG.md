@@ -33,6 +33,16 @@
 
 ### Fixed
 
+- Preserve explicitly approved ordered Git parents in root-supervised broker
+  checkpoints. Exact two-parent integration commits now bind the first parent
+  to the stopped fork's HEAD, validate every complete parent object before
+  mutation, reconstruct the reviewed target tree from approved raw-byte paths,
+  create the commit with the reviewed parent order, and verify the tree and
+  order from quarantine through post-commit recovery. The broker rejects
+  ambient merge, cherry-pick, revert, rebase, bisect, and sequencer state.
+  Existing single-parent requests and journals retain their prior identity and
+  behavior.
+
 - Make native Latest attachment and runtime-header results selection-generation
   aware. Joplin-to-Latest, F4, and Agent/Operator switches now preserve the
   last valid native frame or bounded loading state, reject stale A→B→A async

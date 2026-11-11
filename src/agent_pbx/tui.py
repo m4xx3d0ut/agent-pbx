@@ -32563,12 +32563,23 @@ class AgentPBXTUI(App[None]):
         handoff_id = str(request.get("handoff_id") or "").strip()
         scope_sha256 = str(request.get("scope_sha256") or "").strip()
         expected_parent = str(request.get("expected_git_parent") or "").strip()
+        expected_parents = tuple(
+            str(parent or "").strip()
+            for parent in (
+                request.get("expected_git_parents") or (expected_parent,)
+            )
+        )
+        expected_tree = str(request.get("expected_git_tree") or "").strip() or None
         commit_subject = str(request.get("commit_subject") or "").strip()
         exact_paths = tuple(str(item) for item in request.get("exact_paths") or ())
         if not all(
             (request_id, root_id, target_id, handoff_id, scope_sha256, expected_parent)
         ) or not commit_subject or not exact_paths:
             raise RuntimeError("broker request is incomplete")
+        if not expected_parents or expected_parents[0] != expected_parent:
+            raise RuntimeError("broker request Git parent order is invalid")
+        if len(expected_parents) > 1 and not expected_tree:
+            raise RuntimeError("multi-parent broker request lacks an expected Git tree")
         prior_result = request.get("result")
         result_evidence: dict[str, Any] = {
             **(dict(prior_result) if isinstance(prior_result, Mapping) else {}),
@@ -32578,6 +32589,8 @@ class AgentPBXTUI(App[None]):
             "handoff_id": handoff_id,
             "scope_sha256": scope_sha256,
             "commit_subject": commit_subject,
+            "expected_git_parents": list(expected_parents),
+            "expected_git_tree": expected_tree,
             "exact_paths": list(exact_paths),
             "started_at": (
                 float_value(prior_result.get("started_at"))
@@ -32698,10 +32711,20 @@ class AgentPBXTUI(App[None]):
                     codex_home=context.codex_home,
                     authored_at=int(float(request.get("created_at") or time.time())),
                     commit_subject=commit_subject,
+                    commit_parents=expected_parents,
+                    expected_tree=expected_tree,
                 )
                 if receipt.head != expected_parent:
                     raise RuntimeError(
                         "broker Git parent changed after root request creation"
+                    )
+                if tuple(receipt.commit_parents or (receipt.head,)) != expected_parents:
+                    raise RuntimeError(
+                        "broker ordered Git parents changed after root request creation"
+                    )
+                if receipt.expected_tree != expected_tree:
+                    raise RuntimeError(
+                        "broker expected Git tree changed after root request creation"
                     )
                 if tuple(receipt.approved_stage_paths) != tuple(sorted(exact_paths)):
                     raise RuntimeError("broker exact path receipt changed")
@@ -32717,6 +32740,10 @@ class AgentPBXTUI(App[None]):
                             "request_id": request_id,
                             "transaction_id": receipt.transaction_id,
                             "head": receipt.head,
+                            "commit_parents": list(
+                                receipt.commit_parents or (receipt.head,)
+                            ),
+                            "expected_tree": receipt.expected_tree,
                             "commit_subject": receipt.commit_subject,
                             "approved_stage_paths": list(receipt.approved_stage_paths),
                         },
@@ -32738,6 +32765,8 @@ class AgentPBXTUI(App[None]):
                         "transaction_id": commit_result.transaction_id,
                         "old_head": commit_result.old_head,
                         "new_head": commit_result.new_head,
+                        "commit_parents": list(commit_result.commit_parents),
+                        "expected_tree": expected_tree,
                         "commit_subject": commit_subject,
                         "committed_paths": list(commit_result.committed_paths),
                         "status": commit_result.status,
@@ -32748,6 +32777,8 @@ class AgentPBXTUI(App[None]):
                         "broker_transaction_id": commit_result.transaction_id,
                         "old_head": commit_result.old_head,
                         "new_head": commit_result.new_head,
+                        "commit_parents": list(commit_result.commit_parents),
+                        "expected_tree": expected_tree,
                         "committed_paths": list(commit_result.committed_paths),
                         "broker_status": commit_result.status,
                     }

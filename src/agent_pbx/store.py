@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .schemas import (
     AgentRegisterRequest,
@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -1154,6 +1154,8 @@ class Store:
                     workspace_set_digest TEXT NOT NULL,
                     scope_sha256 TEXT NOT NULL,
                     expected_git_parent TEXT NOT NULL,
+                    expected_git_parents_json TEXT NOT NULL DEFAULT '[]',
+                    expected_git_tree TEXT,
                     commit_subject TEXT NOT NULL,
                     exact_paths_json TEXT NOT NULL DEFAULT '[]',
                     status TEXT NOT NULL DEFAULT 'pending',
@@ -1677,6 +1679,12 @@ class Store:
             )
             self._ensure_column(
                 conn,
+                "operator_broker_requests",
+                "expected_git_tree",
+                "TEXT",
+            )
+            self._ensure_column(
+                conn,
                 "tokens",
                 "allowed_agent_ids_json",
                 "TEXT NOT NULL DEFAULT '[]'",
@@ -1808,6 +1816,12 @@ class Store:
                 "operator_handoffs",
                 "execution_scope_json",
                 "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._ensure_column(
+                conn,
+                "operator_broker_requests",
+                "expected_git_parents_json",
+                "TEXT NOT NULL DEFAULT '[]'",
             )
             conn.execute(
                 """
@@ -9893,12 +9907,37 @@ class Store:
         exact_paths: list[str] | tuple[str, ...],
         ttl_seconds: int,
         max_in_flight_per_root: int,
+        expected_git_parents: Iterable[str] | None = None,
+        expected_git_tree: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Create or reuse one exact durable broker request atomically."""
 
         current = now_ts()
         expires_at = current + int(ttl_seconds)
         exact_paths_json = json.dumps(list(exact_paths), separators=(",", ":"))
+        parent_values = list(expected_git_parents or (expected_git_parent,))
+        if (
+            not parent_values
+            or parent_values[0] != expected_git_parent
+            or len(parent_values) != len(set(parent_values))
+            or any(
+                not isinstance(parent, str)
+                or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parent)
+                for parent in parent_values
+            )
+        ):
+            raise ValueError(
+                "expected Git parents must be unique complete object IDs with "
+                "the expected Git parent first"
+            )
+        expected_git_parents_json = json.dumps(parent_values, separators=(",", ":"))
+        tree_value = str(expected_git_tree or "").strip().lower() or None
+        if tree_value is not None and not re.fullmatch(
+            r"[0-9a-f]{40}|[0-9a-f]{64}", tree_value
+        ):
+            raise ValueError("expected Git tree must be one complete object ID")
+        if len(parent_values) > 1 and tree_value is None:
+            raise ValueError("multi-parent broker requests require an expected Git tree")
         open_statuses = tuple(sorted(OPERATOR_BROKER_REQUEST_OPEN_STATUSES))
         placeholders = ",".join("?" for _ in open_statuses)
         with self.connect() as conn:
@@ -9946,8 +9985,10 @@ class Store:
                     request_id, root_operator_agent_id, target_fork_agent_id,
                     handoff_id, workspace_set_digest, scope_sha256,
                     expected_git_parent, commit_subject, exact_paths_json,
+                    expected_git_parents_json,
+                    expected_git_tree,
                     status, result_json, created_at, updated_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}', ?, ?, ?)
                 """,
                 (
                     request_id,
@@ -9959,6 +10000,8 @@ class Store:
                     expected_git_parent,
                     commit_subject,
                     exact_paths_json,
+                    expected_git_parents_json,
+                    tree_value,
                     current,
                     current,
                     expires_at,
@@ -10220,6 +10263,10 @@ class Store:
 
     @staticmethod
     def _operator_broker_request_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        expected_parent = row["expected_git_parent"]
+        expected_parents = json.loads(row["expected_git_parents_json"] or "[]")
+        if not expected_parents:
+            expected_parents = [expected_parent]
         return {
             "request_id": row["request_id"],
             "root_operator_agent_id": row["root_operator_agent_id"],
@@ -10228,7 +10275,9 @@ class Store:
             "action_transaction_id": row["action_transaction_id"],
             "workspace_set_digest": row["workspace_set_digest"],
             "scope_sha256": row["scope_sha256"],
-            "expected_git_parent": row["expected_git_parent"],
+            "expected_git_parent": expected_parent,
+            "expected_git_parents": expected_parents,
+            "expected_git_tree": row["expected_git_tree"],
             "commit_subject": row["commit_subject"],
             "exact_paths": json.loads(row["exact_paths_json"] or "[]"),
             "status": row["status"],

@@ -8,6 +8,7 @@ from agent_pbx.operator_broker import (
     OperatorBrokerService,
     normalize_broker_commit_subject,
     normalize_broker_expected_parent,
+    normalize_broker_expected_parents,
     normalize_broker_paths,
     operator_broker_receipt_summary,
     operator_broker_posture,
@@ -64,6 +65,10 @@ def test_operator_broker_normalizes_exact_immutable_scope() -> None:
         "fix: exact broker receipt"
     )
     assert normalize_broker_expected_parent("A" * 40) == "a" * 40
+    assert normalize_broker_expected_parents(
+        ["A" * 40, "B" * 40],
+        expected_parent="a" * 40,
+    ) == ("a" * 40, "b" * 40)
     assert normalize_broker_paths(
         ["src/app.py", "tests/test_app.py", "src/app.py"]
     ) == ("src/app.py", "tests/test_app.py")
@@ -83,6 +88,19 @@ def test_operator_broker_rejects_empty_escaping_or_protected_paths(
 def test_operator_broker_rejects_multiline_subject() -> None:
     with pytest.raises(OperatorBrokerPolicyError):
         normalize_broker_commit_subject("fix: one\nbody")
+
+
+def test_operator_broker_rejects_invalid_ordered_parent_sets() -> None:
+    with pytest.raises(OperatorBrokerPolicyError, match="first ordered"):
+        normalize_broker_expected_parents(
+            ["b" * 40, "a" * 40],
+            expected_parent="a" * 40,
+        )
+    with pytest.raises(OperatorBrokerPolicyError, match="duplicate"):
+        normalize_broker_expected_parents(
+            ["a" * 40, "a" * 40],
+            expected_parent="a" * 40,
+        )
 
 
 def _broker_store(tmp_path) -> tuple[Store, str, str]:
@@ -184,6 +202,8 @@ def _qualified_broker_service(tmp_path):
             "allowed_roots": [str(tmp_path)],
             "exact_paths": ["src/app.py", "tests/test_app.py"],
             "expected_git_parent": "b" * 40,
+            "expected_git_parents": ["b" * 40, "c" * 40],
+            "expected_git_tree": "d" * 40,
             "commit_subject": "fix: exact root checkpoint",
         },
     )
@@ -229,6 +249,30 @@ def test_store_installs_durable_operator_broker_request_schema(tmp_path) -> None
     assert created is True
     assert request["status"] == "pending"
     assert request["exact_paths"] == ["src/app.py"]
+    assert request["expected_git_parents"] == ["c" * 40]
+
+
+def test_store_round_trips_ordered_broker_parents_and_tree(tmp_path) -> None:
+    store, handoff_id, digest = _broker_store(tmp_path)
+
+    request, created = store.create_operator_broker_request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff_id,
+        workspace_set_digest=digest,
+        scope_sha256="b" * 64,
+        expected_git_parent="c" * 40,
+        expected_git_parents=("c" * 40, "d" * 40),
+        expected_git_tree="e" * 40,
+        commit_subject="Merge exact candidate lineage",
+        exact_paths=["src/app.py"],
+        ttl_seconds=900,
+        max_in_flight_per_root=1,
+    )
+
+    assert created is True
+    assert request["expected_git_parents"] == ["c" * 40, "d" * 40]
+    assert request["expected_git_tree"] == "e" * 40
 
 
 def test_store_reuses_identical_open_request_and_limits_root_concurrency(
@@ -544,6 +588,8 @@ def test_broker_service_root_mode_creates_durable_request(tmp_path) -> None:
 
     assert result["created"] is True
     assert result["request"]["status"] == "pending"
+    assert result["request"]["expected_git_parents"] == ["b" * 40, "c" * 40]
+    assert result["request"]["expected_git_tree"] == "d" * 40
     assert "receipt_summary" in result["request"]
     events = store.list_events(limit=20)
     assert any(event["type"] == "operator_broker_request_created" for event in events)
