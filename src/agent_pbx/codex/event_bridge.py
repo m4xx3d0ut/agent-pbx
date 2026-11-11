@@ -430,6 +430,7 @@ class CodexAppServerEventBridge:
             "last_reconcile_at": None,
             "target_count": 0,
             "ambiguous_session_count": 0,
+            "target_request_error_count": 0,
             "child_count": 0,
             "observed_updates": 0,
             "reconnects": 0,
@@ -598,6 +599,7 @@ class CodexAppServerEventBridge:
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
+        target_request_errors = 0
         for root_thread_id in sorted(self._targets_by_thread):
             cursor: str | None = None
             for _ in range(self.child_max_pages):
@@ -611,7 +613,15 @@ class CodexAppServerEventBridge:
                 }
                 if cursor:
                     params["cursor"] = cursor
-                result = await client.request("thread/list", params)
+                try:
+                    result = await client.request("thread/list", params)
+                except AppServerRequestError:
+                    # A stale or synthetic PBX record must not disconnect the
+                    # passive bridge for every valid Codex runtime. Keep the
+                    # rejected target observable in authenticated diagnostics
+                    # and continue reconciling the remaining exact mappings.
+                    target_request_errors += 1
+                    break
                 data = result.get("data")
                 if not isinstance(data, list):
                     break
@@ -626,6 +636,7 @@ class CodexAppServerEventBridge:
                 cursor = str(raw_cursor) if raw_cursor else None
                 if not cursor:
                     break
+        self._status["target_request_error_count"] = target_request_errors
         return rows
 
     async def _observe_discovered_thread(

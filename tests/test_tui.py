@@ -26742,6 +26742,9 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert "pbx_operator_get_knowledge_context" in agent_pbx_config
     assert "pbx_operator_list_handoffs" in agent_pbx_config
     assert "pbx_operator_get_handoff" in agent_pbx_config
+    assert "pbx_operator_list_handoff_completions" in agent_pbx_config
+    assert "pbx_operator_ack_handoff_completion" in agent_pbx_config
+    assert "pbx_operator_retry_handoff_completion" in agent_pbx_config
     assert "pbx_operator_preflight_handoff" in agent_pbx_config
     assert "pbx_operator_kb_search" in agent_pbx_config
     assert "pbx_operator_kb_context" in agent_pbx_config

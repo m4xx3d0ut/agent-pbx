@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from agent_pbx.api import create_app
 from agent_pbx.codex.event_bridge import (
     AppServerJsonlClient,
+    AppServerRequestError,
     AppServerWebSocketClient,
     CodexAppServerEventBridge,
     associate_child_threads,
@@ -195,6 +196,49 @@ async def test_bridge_ignores_unrelated_and_ambiguous_sessions(tmp_path: Path) -
     assert bridge.status()["child_count"] == 0
     assert runtime.snapshot("agent-a")["children"] == []
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_bridge_isolates_rejected_stale_target(tmp_path: Path) -> None:
+    store, runtime = registered_runtime(tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="agent-stale",
+            project="demo",
+            metadata={"codex_session_id": "uat-session-stale"},
+        )
+    )
+
+    class SelectiveClient(FakeAppServerClient):
+        async def request(
+            self,
+            method: str,
+            params: dict[str, Any],
+        ) -> dict[str, Any]:
+            self.calls.append((method, dict(params)))
+            if (
+                method == "thread/list"
+                and params.get("ancestorThreadId") == "uat-session-stale"
+            ):
+                raise AppServerRequestError(-32600, "invalid ancestor thread id")
+            if method == "thread/list":
+                return {"data": [child_thread()], "nextCursor": None}
+            if method == "thread/items/list":
+                return {"data": [], "nextCursor": None}
+            raise AssertionError(f"unexpected app-server method: {method}")
+
+    client = SelectiveClient(threads=[])
+    bridge = CodexAppServerEventBridge(store, runtime, transport="sidecar")
+
+    await bridge.reconcile_once(client)
+
+    status = bridge.status()
+    assert status["target_count"] == 2
+    assert status["target_request_error_count"] == 1
+    assert status["child_count"] == 1
+    assert [child["child_id"] for child in runtime.snapshot("agent-a")["children"]] == [
+        "thread-child"
+    ]
 
 
 def test_child_association_walks_nested_parents_and_stays_exact() -> None:
