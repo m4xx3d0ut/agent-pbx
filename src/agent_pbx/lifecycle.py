@@ -309,16 +309,25 @@ class LifecycleService:
         ) != transaction_id:
             raise ValueError("managed stop transaction does not match the runtime mapping")
         runtime = self._assess_mapping(mapping)
-        if str(runtime.get("state") or "") != "missing":
+        runtime_state = str(runtime.get("state") or "")
+        if runtime_state not in {"missing", "moved"}:
             raise ValueError(
                 str(runtime.get("message") or "managed tmux pane absence is not proven")
             )
         if not self._runtime_process_is_absent(mapping):
             raise ValueError("managed pane process identity is still alive")
+        finalization_metadata = dict(metadata or {})
+        if runtime_state == "moved":
+            # The prepared transaction froze the exact pane/PID identity. A
+            # broad repair candidate is a distinct process once that frozen
+            # process is absent; preserve it rather than blocking finalization.
+            finalization_metadata["preserved_distinct_runtime_candidate"] = runtime.get(
+                "repair_candidate"
+            )
         finalized = self.store.finalize_managed_runtime_stop(
             entity_id,
             transaction_id=transaction_id,
-            metadata=metadata,
+            metadata=finalization_metadata,
         )
         return {
             **finalized,

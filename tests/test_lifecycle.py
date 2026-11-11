@@ -390,6 +390,66 @@ def test_managed_stop_finalizes_agent_runtime_and_fork_atomically(
     assert repeated["report_id"] == finalized["report_id"]
 
 
+def test_managed_stop_finalizes_exact_dead_pane_with_distinct_repair_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    mapping, original_pane = register_operator_fork_runtime(store, workspace)
+    duplicate_pane = RuntimeTmuxPane(
+        session_name=original_pane.session_name,
+        window_id="@9",
+        window_name=original_pane.window_name,
+        pane_id="%9",
+        pane_pid=900,
+        cwd=original_pane.cwd,
+        current_command="codex",
+        title=original_pane.title,
+    )
+    panes: tuple[RuntimeTmuxPane, ...] = (original_pane,)
+    process_ticks: dict[int, int] = {800: 80, 900: 90}
+    monkeypatch.setattr("agent_pbx.lifecycle.validate_tmux_socket", lambda _path: (True, ""))
+    monkeypatch.setattr(
+        "agent_pbx.lifecycle.probe_runtime_panes",
+        lambda _identity: (True, "", panes),
+    )
+    monkeypatch.setattr(
+        "agent_pbx.lifecycle.process_start_ticks",
+        lambda pid: process_ticks.get(int(pid)) if pid is not None else None,
+    )
+    service = LifecycleService(store)
+
+    prepared = service.prepare_managed_runtime_stop(
+        "operator-0-fork-caller-1",
+        expected_identity=store._managed_runtime_stop_identity(mapping),
+        client_id="tui-1",
+    )
+    panes = (duplicate_pane,)
+
+    with pytest.raises(ValueError, match="process identity is still alive"):
+        service.finalize_managed_runtime_stop(
+            "operator-0-fork-caller-1",
+            transaction_id=str(prepared["transaction_id"]),
+        )
+
+    process_ticks.pop(800)
+    finalized = service.finalize_managed_runtime_stop(
+        "operator-0-fork-caller-1",
+        transaction_id=str(prepared["transaction_id"]),
+    )
+
+    assert finalized["runtime_mapping"] is None
+    agent = store.get_agent("operator-0-fork-caller-1")
+    fork = store.get_operator_fork_for_agent("operator-0-fork-caller-1")
+    assert agent is not None
+    assert agent["pbx_active"] is False
+    assert fork is not None
+    assert fork["status"] == "canceled"
+
+
 def test_managed_stop_fails_closed_on_foreign_writer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
