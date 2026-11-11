@@ -49,6 +49,10 @@
   ambient merge, cherry-pick, revert, rebase, bisect, and sequencer state.
   Existing single-parent requests and journals retain their prior identity and
   behavior.
+- Preserve ordered Git parents and the reviewed tree in broker checkpoint API
+  responses. The local TUI now receives the same multi-parent contract that
+  passed daemon preflight instead of silently falling back to a one-parent
+  request during serialization.
 
 - Make native Latest attachment and runtime-header results selection-generation
   aware. Joplin-to-Latest, F4, and Agent/Operator switches now preserve the

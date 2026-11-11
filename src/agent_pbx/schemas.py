@@ -1346,6 +1346,8 @@ class OperatorBrokerCheckpointResponse(BaseModel):
     workspace_set_digest: str
     scope_sha256: str
     expected_git_parent: str
+    expected_git_parents: list[str] = Field(default_factory=list)
+    expected_git_tree: str | None = None
     commit_subject: str
     exact_paths: list[str]
     status: str

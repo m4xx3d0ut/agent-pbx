@@ -13,7 +13,7 @@ from agent_pbx.operator_broker import (
     operator_broker_receipt_summary,
     operator_broker_posture,
 )
-from agent_pbx.schemas import AgentRegisterRequest
+from agent_pbx.schemas import AgentRegisterRequest, OperatorBrokerCheckpointResponse
 from agent_pbx.store import SCHEMA_VERSION, Store
 
 
@@ -72,6 +72,29 @@ def test_operator_broker_normalizes_exact_immutable_scope() -> None:
     assert normalize_broker_paths(
         ["src/app.py", "tests/test_app.py", "src/app.py"]
     ) == ("src/app.py", "tests/test_app.py")
+
+
+def test_operator_broker_response_preserves_ordered_parents_and_tree() -> None:
+    response = OperatorBrokerCheckpointResponse(
+        request_id="request-1",
+        root_operator_agent_id="operator-8",
+        target_fork_agent_id="operator-8-fork",
+        handoff_id="handoff-1",
+        workspace_set_digest="a" * 64,
+        scope_sha256="b" * 64,
+        expected_git_parent="c" * 40,
+        expected_git_parents=["c" * 40, "d" * 40],
+        expected_git_tree="e" * 40,
+        commit_subject="Merge exact candidate lineage",
+        exact_paths=["src/app.py"],
+        status="pending",
+        created_at=1.0,
+        updated_at=1.0,
+        expires_at=901.0,
+    ).model_dump()
+
+    assert response["expected_git_parents"] == ["c" * 40, "d" * 40]
+    assert response["expected_git_tree"] == "e" * 40
 
 
 @pytest.mark.parametrize(
