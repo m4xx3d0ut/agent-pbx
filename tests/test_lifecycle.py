@@ -226,6 +226,71 @@ def test_lifecycle_mapping_repair_requires_unique_matching_candidate(
     assert result["after"]["runtime"]["state"] == "ready"
 
 
+def test_lifecycle_mapping_repair_supersedes_stale_managed_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    mapping, original_pane = register_operator_fork_runtime(store, workspace)
+    replacement_pane = RuntimeTmuxPane(
+        session_name=original_pane.session_name,
+        window_id="@9",
+        window_name=original_pane.window_name,
+        pane_id="%9",
+        pane_pid=900,
+        cwd=original_pane.cwd,
+        current_command="codex",
+        title=original_pane.title,
+    )
+    panes: tuple[RuntimeTmuxPane, ...] = (original_pane,)
+    monkeypatch.setattr("agent_pbx.lifecycle.validate_tmux_socket", lambda _path: (True, ""))
+    monkeypatch.setattr(
+        "agent_pbx.lifecycle.probe_runtime_panes",
+        lambda _identity: (True, "", panes),
+    )
+    monkeypatch.setattr(
+        "agent_pbx.lifecycle.process_start_ticks",
+        lambda pid: {800: 80, 900: 90}.get(pid),
+    )
+    service = LifecycleService(store)
+
+    prepared = service.prepare_managed_runtime_stop(
+        "operator-0-fork-caller-1",
+        expected_identity=store._managed_runtime_stop_identity(mapping),
+        client_id="tui-1",
+    )
+    old_transaction_id = str(prepared["transaction_id"])
+    panes = (replacement_pane,)
+
+    preview = service.preview_mapping_repair("operator-0-fork-caller-1")
+    repaired = service.apply_mapping_repair(
+        "operator-0-fork-caller-1",
+        preview_token=preview["preview_token"],
+    )
+    repaired_mapping = repaired["mapping"]
+
+    assert repaired_mapping["state"] == "ready"
+    assert repaired_mapping["pane_id"] == "%9"
+    assert "managed_stop" not in repaired_mapping["metadata"]
+    assert (
+        repaired_mapping["metadata"]["last_superseded_managed_stop"][
+            "transaction_id"
+        ]
+        == old_transaction_id
+    )
+
+    retried = service.prepare_managed_runtime_stop(
+        "operator-0-fork-caller-1",
+        expected_identity=store._managed_runtime_stop_identity(repaired_mapping),
+        client_id="tui-1",
+    )
+    assert retried["transaction_id"] != old_transaction_id
+    assert retried["mapping"]["metadata"]["managed_stop"]["identity"]["pane_id"] == "%9"
+
+
 def test_lifecycle_api_exposes_preview_before_mutation(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()

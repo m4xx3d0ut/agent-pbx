@@ -377,6 +377,15 @@ class LifecycleService:
             raise ValueError("runtime mapping repair candidate disappeared")
         merged_metadata = dict(mapping.get("metadata") or {})
         merged_metadata.update(metadata or {})
+        superseded_stop = merged_metadata.pop("managed_stop", None)
+        if isinstance(superseded_stop, dict):
+            merged_metadata["last_superseded_managed_stop"] = {
+                "transaction_id": superseded_stop.get("transaction_id"),
+                "phase": superseded_stop.get("phase"),
+                "identity": superseded_stop.get("identity"),
+                "superseded_at": time.time(),
+                "reason": "runtime mapping repaired to a unique live pane",
+            }
         merged_metadata["last_repair"] = {
             "from_pane_id": mapping.get("pane_id"),
             "to_pane_id": candidate.get("pane_id"),
@@ -406,6 +415,11 @@ class LifecycleService:
                 "entity_id": entity_id,
                 "before": preview["before"],
                 "after": self._mapping_identity(updated),
+                "superseded_managed_stop_transaction_id": (
+                    superseded_stop.get("transaction_id")
+                    if isinstance(superseded_stop, dict)
+                    else None
+                ),
             },
             entity_id,
         )
