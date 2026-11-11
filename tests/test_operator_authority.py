@@ -412,6 +412,14 @@ def test_launch_overrides_are_exact_and_review_forks_ignore_them(tmp_path: Path)
             "access_mode": "review_readonly",
         }
     ) == ()
+    assert operator_authority_launch_overrides(
+        {
+            "operator_authority_profile": "scoped-edit",
+            "operator_authority_workspace_roots": roots,
+            "operator_authority_git_common_dirs": [str(Path(roots[0]) / ".git")],
+            "access_mode": "edit",
+        }
+    ) == ()
     assert operator_authority_sandbox(
         {"operator_authority_profile": "full-access", "access_mode": "edit"}
     ) == "danger-full-access"
@@ -429,13 +437,17 @@ def test_launch_overrides_use_common_git_root_instead_of_narrow_admin_mounts(
     main = tmp_path / "main"
     linked = tmp_path / "linked"
     common = main / ".git"
+    separate_common = tmp_path / "separate" / ".git"
     narrow = common / "refs" / "heads" / "pbx-operator-7"
 
     overrides = operator_authority_launch_overrides(
         {
             "operator_authority_profile": "trusted-workbench",
             "operator_authority_workspace_roots": [str(linked)],
-            "operator_authority_git_common_dirs": [str(common)],
+            "operator_authority_git_common_dirs": [
+                str(common),
+                str(separate_common),
+            ],
             "operator_authority_git_admin_paths": [str(narrow)],
             "access_mode": "edit",
         }
@@ -445,19 +457,29 @@ def test_launch_overrides_use_common_git_root_instead_of_narrow_admin_mounts(
     assert permission["workspace_roots"] == {
         str(linked): True,
         str(common): True,
+        str(separate_common): True,
     }
     assert str(narrow) not in permission["filesystem"]
+    assert str(narrow) not in permission["workspace_roots"]
 
 
-def test_launch_overrides_do_not_duplicate_nested_common_git_root(tmp_path: Path) -> None:
+def test_launch_overrides_preserve_nested_common_git_root_and_exactly_deduplicate(
+    tmp_path: Path,
+) -> None:
     main = tmp_path / "main"
     linked = tmp_path / "linked"
+    common = main / ".git"
+    canonical_alias = main / "nested" / ".." / ".git"
 
     overrides = operator_authority_launch_overrides(
         {
             "operator_authority_profile": "trusted-workbench",
-            "operator_authority_workspace_roots": [str(main), str(linked)],
-            "operator_authority_git_common_dirs": [str(main / ".git")],
+            "operator_authority_workspace_roots": [str(main), str(linked), str(main)],
+            "operator_authority_git_common_dirs": [
+                str(main),
+                str(common),
+                str(canonical_alias),
+            ],
             "access_mode": "edit",
         }
     )
@@ -465,6 +487,7 @@ def test_launch_overrides_do_not_duplicate_nested_common_git_root(tmp_path: Path
     assert overrides[0][1]["workspace_roots"] == {
         str(main): True,
         str(linked): True,
+        str(common): True,
     }
 
 

@@ -33,6 +33,13 @@
 
 ### Fixed
 
+- Preserve every authority-qualified common Git directory as an explicit
+  Trusted Workbench launch root, including when it is nested beneath an
+  approved checkout. Exact canonical duplicates are collapsed, while the
+  narrower per-worktree, object, ref, and reflog paths remain qualification
+  evidence rather than launch roots; review and non-Trusted profiles are
+  unchanged.
+
 - Preserve explicitly approved ordered Git parents in root-supervised broker
   checkpoints. Exact two-parent integration commits now bind the first parent
   to the stopped fork's HEAD, validate every complete parent object before

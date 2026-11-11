@@ -27467,6 +27467,7 @@ def test_tui_operator_config_includes_exact_trusted_workbench_permissions() -> N
     )
     assert first in permission
     assert second in permission
+    assert f"{first}/.git" in permission
     assert f"{first}/.git/objects" not in permission
     assert 'default_permissions="agent-pbx-trusted-workbench"' in overrides
 
@@ -27477,6 +27478,10 @@ def test_tui_review_operator_ignores_trusted_workbench_permissions() -> None:
         authority_metadata={
             "operator_authority_profile": "trusted-workbench",
             "operator_authority_workspace_roots": ["/tmp/operator"],
+            "operator_authority_git_common_dirs": ["/tmp/operator/.git"],
+            "operator_authority_git_admin_paths": [
+                "/tmp/operator/.git/refs/heads/pbx-operator-7"
+            ],
             "access_mode": "review_readonly",
             "fork_purpose": "review",
         },

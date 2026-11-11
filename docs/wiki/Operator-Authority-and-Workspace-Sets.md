@@ -58,9 +58,14 @@ no config includes or object alternates, and exact ref/reflog namespaces.
 
 Two selected worktrees cannot share the same branch in one Git common
 directory. Shared object directories are deduplicated. The generated Codex
-permission profile receives only selected workspace roots and qualified Git
-administration paths; unrelated sibling repositories and parent directories
-remain outside the write set.
+Trusted Workbench permission profile receives only selected workspace roots and
+each already-qualified canonical common Git directory. A common Git directory
+remains an explicit writable root when nested beneath a selected checkout,
+because a more-specific read-only sandbox mount can override the writable
+parent. Exact canonical duplicates are collapsed. Narrow per-worktree, object,
+ref, and reflog administration paths remain qualification and broker evidence;
+they are not added as launch roots. Unrelated sibling repositories and parent
+directories remain outside the write set.
 
 ## Root-supervised exact Git checkpoints
 
@@ -161,3 +166,10 @@ safe turn boundary. Agent PBX returns WorkerBee to `observe-local` with
 same-repository mobility requiring approval. The previous workspace-set
 versions remain audit records and can be selected again later. No set change
 deletes repositories, worktrees, Codex transcripts, or WorkerBee workspaces.
+
+For a Trusted Workbench linked-worktree launch update, first verify that
+readback contains the exact qualified common Git directory. Only a new or
+guarded-resumed process receives the corrected mount; no daemon restart is
+required for the TUI-side launch projection. If qualification or mount readback
+fails, leave the fork stopped, restore the previous reviewed TUI/package, and
+do not alter Git refs, indexes, permissions, or workspace-set records.

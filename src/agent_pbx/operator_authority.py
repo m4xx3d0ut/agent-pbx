@@ -962,28 +962,23 @@ def operator_authority_launch_overrides(
         return ()
     raw_roots = metadata.get("operator_authority_workspace_roots")
     roots = tuple(
-        str(Path(str(item)).expanduser().resolve(strict=False))
-        for item in raw_roots or ()
-        if str(item or "").strip()
+        dict.fromkeys(
+            str(Path(str(item)).expanduser().resolve(strict=False))
+            for item in raw_roots or ()
+            if str(item or "").strip()
+        )
     )
     if not roots:
         return ()
     raw_git_common_dirs = metadata.get("operator_authority_git_common_dirs")
     git_common_dirs = tuple(
-        str(Path(str(item)).expanduser().resolve(strict=False))
-        for item in raw_git_common_dirs or ()
-        if str(item or "").strip()
+        dict.fromkeys(
+            str(Path(str(item)).expanduser().resolve(strict=False))
+            for item in raw_git_common_dirs or ()
+            if str(item or "").strip()
+        )
     )
-    permission_roots = list(roots)
-    root_paths = tuple(Path(root) for root in roots)
-    for common_dir in git_common_dirs:
-        common_path = Path(common_dir)
-        if any(
-            common_path == root_path or common_path.is_relative_to(root_path)
-            for root_path in root_paths
-        ):
-            continue
-        permission_roots.append(common_dir)
+    permission_roots = tuple(dict.fromkeys((*roots, *git_common_dirs)))
     permission_name = "agent-pbx-trusted-workbench"
     definition = {
         "description": "Agent PBX explicit multi-project Trusted Workbench",
@@ -1014,10 +1009,12 @@ def operator_authority_launch_overrides(
             candidate = Path(root) / name
             if candidate.exists() or candidate.is_symlink():
                 definition["filesystem"][str(candidate)] = "deny"
-    # Trusted Workbench grants the selected checkout roots and, when a linked
-    # worktree's common Git directory is not already beneath one of them, that
-    # exact common directory as another sandbox root. Do not mount the narrow
-    # writable ref/reflog namespaces used by the stricter edit-fork profile:
+    # Trusted Workbench grants the selected checkout roots and retains every
+    # authority-qualified common Git directory as an explicit sandbox root.
+    # A nested read-only bind can override a writable parent, so nesting alone
+    # must not remove the common Git directory. Exact canonical duplicates are
+    # collapsed. Do not mount the narrow writable ref/reflog namespaces used
+    # by the stricter edit-fork profile:
     # Codex protects metadata-like children below each writable mount and can
     # leave those mount targets inside refs/heads, invalidating Git namespace
     # qualification on the next launch.
