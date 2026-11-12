@@ -113,7 +113,7 @@ def test_schema_43_adds_workerbee_capability_link_without_rewriting_requests(
                 "PRAGMA table_info(dynamic_resource_requests)"
             ).fetchall()
         }
-    assert store.schema_version() == SCHEMA_VERSION == 44
+    assert store.schema_version() == SCHEMA_VERSION == 45
     assert "provider_capability_sha256" in columns
 
 
