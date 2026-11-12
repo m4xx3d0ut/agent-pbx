@@ -76,10 +76,12 @@ LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 TOKEN_ENV = "AGENT_PBX_TOKEN"
 EVIDENCE_EXPORTS_ENABLED_ENV = "AGENT_PBX_EVIDENCE_EXPORTS_ENABLED"
 EVIDENCE_EXPORT_ROOT_ENV = "AGENT_PBX_EVIDENCE_EXPORT_ROOT"
+OPERATOR_KB_BUNDLE_V2_ENABLED_ENV = "AGENT_PBX_OPERATOR_KB_BUNDLE_V2_ENABLED"
 MANAGED_CHILD_ENV_VARS = {
     TOKEN_ENV,
     EVIDENCE_EXPORTS_ENABLED_ENV,
     EVIDENCE_EXPORT_ROOT_ENV,
+    OPERATOR_KB_BUNDLE_V2_ENABLED_ENV,
     WORKERBEE_BIN_ENV,
     WORKERBEE_TIMEOUT_ENV,
     WORKERBEE_CACHE_ENV,
@@ -146,6 +148,7 @@ class MCPDaemonConfig:
     codex_bin: str = "codex"
     evidence_exports_enabled: bool = False
     evidence_export_root: Path | None = None
+    operator_kb_bundle_v2_enabled: bool = False
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
@@ -422,6 +425,7 @@ def config_from_args(
     codex_bin: str = "codex",
     evidence_exports_enabled: bool = False,
     evidence_export_root: Path | None = None,
+    operator_kb_bundle_v2_enabled: bool = False,
     workerbee_bin: Path | None = None,
     workerbee_timeout_seconds: float = 20.0,
     workerbee_cache_seconds: float = 10.0,
@@ -478,6 +482,7 @@ def config_from_args(
         evidence_export_root=(
             evidence_export_root.expanduser() if evidence_export_root else None
         ),
+        operator_kb_bundle_v2_enabled=bool(operator_kb_bundle_v2_enabled),
         workerbee_bin=workerbee_bin.expanduser() if workerbee_bin else None,
         workerbee_timeout_seconds=workerbee_timeout_seconds,
         workerbee_cache_seconds=workerbee_cache_seconds,
@@ -618,6 +623,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
             if config.evidence_export_root
             else None
         ),
+        "operator_kb_bundle_v2_enabled": config.operator_kb_bundle_v2_enabled,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,
@@ -707,6 +713,9 @@ def _child_env(config: MCPDaemonConfig) -> dict[str, str]:
         child_env[EVIDENCE_EXPORT_ROOT_ENV] = str(
             config.evidence_export_root.expanduser()
         )
+    child_env[OPERATOR_KB_BUNDLE_V2_ENABLED_ENV] = (
+        "1" if config.operator_kb_bundle_v2_enabled else "0"
+    )
     if config.workerbee_bin:
         child_env[WORKERBEE_BIN_ENV] = str(config.workerbee_bin.expanduser())
     child_env[WORKERBEE_TIMEOUT_ENV] = str(config.workerbee_timeout_seconds)
@@ -1032,6 +1041,7 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
             if config.evidence_export_root
             else None
         ),
+        "operator_kb_bundle_v2_enabled": config.operator_kb_bundle_v2_enabled,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,

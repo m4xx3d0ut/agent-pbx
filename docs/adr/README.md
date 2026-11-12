@@ -18,3 +18,4 @@ cycle is `next-cycle-baseline-2026-10-02` (`70978b2`).
 - [0012 — Durable helper registry](0012-durable-helper-registry.md)
 - [0013 — Typed dynamic resources](0013-typed-dynamic-resources.md)
 - [0014 — WorkerBee direct-bind development volumes](0014-workerbee-development-volumes.md)
+- [0015 — Operator KB repository synchronization](0015-operator-kb-synchronization.md)

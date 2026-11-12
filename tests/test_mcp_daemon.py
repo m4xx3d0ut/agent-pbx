@@ -9,6 +9,7 @@ from agent_pbx.cli import _daemon_config, build_parser, main
 from agent_pbx.mcp_daemon import (
     EVIDENCE_EXPORTS_ENABLED_ENV,
     EVIDENCE_EXPORT_ROOT_ENV,
+    OPERATOR_KB_BUNDLE_V2_ENABLED_ENV,
     MCPDaemonConfig,
     _child_env,
     config_from_args,
@@ -118,6 +119,32 @@ def test_daemon_config_loads_evidence_export_environment(
 
     assert config.evidence_exports_enabled is True
     assert config.evidence_export_root == root
+
+
+def test_managed_daemon_projects_operator_kb_bundle_v2_gate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(OPERATOR_KB_BUNDLE_V2_ENABLED_ENV, "ambient")
+    config = MCPDaemonConfig(
+        state_root=tmp_path / "state",
+        operator_kb_bundle_v2_enabled=True,
+    )
+
+    child = _child_env(config)
+
+    assert child[OPERATOR_KB_BUNDLE_V2_ENABLED_ENV] == "1"
+
+
+def test_daemon_config_loads_operator_kb_bundle_v2_gate(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(OPERATOR_KB_BUNDLE_V2_ENABLED_ENV, "true")
+    args = build_parser().parse_args(["mcp", "status"])
+
+    config = _daemon_config(args)
+
+    assert config.operator_kb_bundle_v2_enabled is True
 
 
 def test_daemon_config_loads_trusted_direct_environment_as_typed_fields(

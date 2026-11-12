@@ -861,6 +861,23 @@ class OperatorKbImportRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class OperatorKbBundleV2ExportRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    project: str = Field(min_length=1, max_length=240)
+    repo_root: str | None = Field(default=None, max_length=1000)
+    git_remote: str | None = Field(default=None, max_length=1000)
+    parent_bundle_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    limit: int = Field(default=1000, ge=1, le=1000)
+
+
+class OperatorKbBundleV2Request(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    bundle: dict[str, Any]
+
+
 class OperatorKbSourceResponse(BaseModel):
     source_row_id: str
     kb_id: str

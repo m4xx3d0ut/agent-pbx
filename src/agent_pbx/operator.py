@@ -40,6 +40,10 @@ from .operator_delegation import (
     normalize_execution_scope,
 )
 from .operator_actions import project_handoff_action
+from .operator_kb_sync import (
+    OperatorKbBundleV2Service,
+    logical_project_identity,
+)
 from .tmux_binary import configured_tmux_binary
 
 
@@ -2081,6 +2085,122 @@ class OperatorService:
             operator_agent_id,
         )
         return result
+
+    def export_kb_bundle_v2(
+        self,
+        *,
+        operator_agent_id: str,
+        project: str,
+        repo_root: str | None = None,
+        git_remote: str | None = None,
+        parent_bundle_sha256: str | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        bundle_v1 = self.export_kb_entries(
+            operator_agent_id=operator_agent_id,
+            project=project,
+            repo_root=repo_root,
+            status=None,
+            include_expired=True,
+            limit=limit,
+        )
+        logical_project = logical_project_identity(
+            project=project,
+            repo_root=repo_root,
+            git_remote=git_remote,
+        )
+        entries = bundle_v1["entries"]
+        exportable = [
+            entry
+            for entry in entries
+            if str(entry.get("status") or "") in {"retired", "rejected"}
+            or str(entry.get("redaction_status") or "") == "clean"
+        ]
+        exclusions = [
+            {
+                "kb_id": str(entry.get("kb_id") or ""),
+                "reason": "entry redaction status is not clean",
+            }
+            for entry in entries
+            if entry not in exportable
+        ]
+        return OperatorKbBundleV2Service(self.store).export_bundle(
+            entries=exportable,
+            logical_project=logical_project,
+            parent_bundle_sha256=parent_bundle_sha256,
+            redaction_exclusions=exclusions,
+        )
+
+    def preview_kb_bundle_v2(
+        self,
+        *,
+        operator_agent_id: str,
+        bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return OperatorKbBundleV2Service(self.store).preview_import(bundle)
+
+    def import_kb_bundle_v2(
+        self,
+        *,
+        operator_agent_id: str,
+        bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        operator = self._require_root_operator(operator_agent_id)
+        logical_operator_id = self._logical_operator_agent_id(operator)
+        service = OperatorKbBundleV2Service(self.store)
+        validated = service.validate_bundle(bundle)
+        redaction_statuses: dict[str, str] = {}
+        trusted_reviewer_ids: set[str] = set()
+        for record in validated["entries"]:
+            if record["tombstone"]:
+                continue
+            entry = record["entry"]
+            redaction_statuses[record["stable_id"]] = self._operator_kb_redaction_status(
+                title=entry["title"],
+                summary=entry["summary"],
+                body=entry["body"],
+                metadata={"source": "operator_kb_bundle_v2"},
+            )
+            reviewer_id = str(
+                record["reviewer_evidence"].get("reviewer_operator_agent_id") or ""
+            )
+            if reviewer_id:
+                try:
+                    self._require_root_operator(reviewer_id)
+                except ValueError:
+                    pass
+                else:
+                    trusted_reviewer_ids.add(reviewer_id)
+        result = service.import_bundle(
+            bundle=validated,
+            logical_operator_agent_id=logical_operator_id,
+            importing_operator_agent_id=operator_agent_id,
+            redaction_status_by_stable_id=redaction_statuses,
+            trusted_reviewer_ids=trusted_reviewer_ids,
+        )
+        self.store.append_event(
+            "operator_kb_bundle_v2_imported",
+            {
+                "operator_agent_id": operator_agent_id,
+                "logical_operator_agent_id": logical_operator_id,
+                "logical_project_id": result["logical_project_id"],
+                "bundle_sha256": result["bundle_sha256"],
+                "applied_count": result["applied_count"],
+                "unchanged_count": result["unchanged_count"],
+            },
+            operator_agent_id,
+        )
+        return result
+
+    def prepare_kb_bundle_v2_git_tree(
+        self,
+        *,
+        operator_agent_id: str,
+        bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return OperatorKbBundleV2Service(self.store).prepare_git_tree(bundle)
 
     def start_kb_seed_run(
         self,

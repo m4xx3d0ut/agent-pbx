@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -1507,6 +1507,23 @@ class Store:
                         ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS operator_kb_sync_records (
+                    logical_project_id TEXT NOT NULL,
+                    stable_id TEXT NOT NULL,
+                    local_kb_id TEXT,
+                    revision INTEGER NOT NULL,
+                    parent_content_hash TEXT,
+                    content_hash TEXT NOT NULL,
+                    tombstone INTEGER NOT NULL DEFAULT 0,
+                    trusted_reviewer INTEGER NOT NULL DEFAULT 0,
+                    reviewer_evidence_json TEXT NOT NULL DEFAULT '{}',
+                    source_bundle_sha256 TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(logical_project_id, stable_id),
+                    FOREIGN KEY(local_kb_id) REFERENCES operator_kb_entries(kb_id)
+                        ON DELETE SET NULL
+                );
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS operator_kb_fts USING fts5(
                     kb_id UNINDEXED,
                     title,
@@ -1634,6 +1651,8 @@ class Store:
                     ON operator_kb_feedback(query_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_operator_kb_feedback_kb_created
                     ON operator_kb_feedback(kb_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_operator_kb_sync_local
+                    ON operator_kb_sync_records(local_kb_id, updated_at DESC);
                 """
             )
             previous_schema_version = self._schema_version(conn)
@@ -7569,6 +7588,7 @@ class Store:
     def create_operator_kb_entry(
         self,
         *,
+        kb_id: str | None = None,
         scope: str,
         title: str,
         summary: str,
@@ -7605,7 +7625,9 @@ class Store:
             raise ValueError("KB summary is required")
         if not normalized_body:
             raise ValueError("KB body is required")
-        kb_id = str(uuid.uuid4())
+        resolved_kb_id = str(kb_id or uuid.uuid4()).strip()
+        if not resolved_kb_id:
+            raise ValueError("KB entry id is required")
         current = now_ts()
         promoted_at = current if normalized_status == "active" else None
         retired_at = current if normalized_status in OPERATOR_KB_TERMINAL_STATUSES else None
@@ -7622,7 +7644,7 @@ class Store:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    kb_id,
+                    resolved_kb_id,
                     normalized_scope,
                     self._none_if_blank(project),
                     self._none_if_blank(repo_root),
@@ -7650,7 +7672,7 @@ class Store:
                 ),
             )
             for source in self._operator_kb_sources_payload(
-                kb_id=kb_id,
+                kb_id=resolved_kb_id,
                 source_knowledge_link_id=source_knowledge_link_id,
                 source_handoff_id=source_handoff_id,
                 source_turn_ids=source_turn_ids or [],
@@ -7665,7 +7687,7 @@ class Store:
                     """,
                     (
                         source["source_row_id"],
-                        kb_id,
+                        resolved_kb_id,
                         source["source_type"],
                         source["source_id"],
                         json.dumps(source.get("metadata") or {}),
@@ -7680,7 +7702,7 @@ class Store:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    kb_id,
+                    resolved_kb_id,
                     "operator_kb_imported" if imported_at is not None else "operator_kb_created",
                     created_by_operator_agent_id,
                     normalized_summary,
@@ -7690,11 +7712,11 @@ class Store:
             )
             self._queue_operator_kb_index_job(
                 conn,
-                kb_id=kb_id,
+                kb_id=resolved_kb_id,
                 operation="upsert",
                 metadata={"source": "create_operator_kb_entry"},
             )
-        entry = self.get_operator_kb_entry(kb_id)
+        entry = self.get_operator_kb_entry(resolved_kb_id)
         if entry is None:
             raise RuntimeError("operator KB entry insert failed")
         return entry
@@ -8711,6 +8733,110 @@ class Store:
             "entries": imported,
             "skipped": skipped,
         }
+
+    def get_operator_kb_sync_record(
+        self,
+        *,
+        logical_project_id: str,
+        stable_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM operator_kb_sync_records
+                WHERE logical_project_id = ? AND stable_id = ?
+                """,
+                (logical_project_id, stable_id),
+            ).fetchone()
+        return self._operator_kb_sync_record_from_row(row) if row else None
+
+    def list_operator_kb_sync_records(
+        self,
+        *,
+        logical_project_id: str,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM operator_kb_sync_records
+                WHERE logical_project_id = ?
+                ORDER BY stable_id ASC
+                LIMIT ?
+                """,
+                (logical_project_id, min(max(int(limit), 1), 5000)),
+            ).fetchall()
+        return [self._operator_kb_sync_record_from_row(row) for row in rows]
+
+    def upsert_operator_kb_sync_record(
+        self,
+        *,
+        logical_project_id: str,
+        stable_id: str,
+        local_kb_id: str | None,
+        revision: int,
+        parent_content_hash: str | None,
+        content_hash: str,
+        tombstone: bool,
+        trusted_reviewer: bool,
+        reviewer_evidence: dict[str, Any],
+        source_bundle_sha256: str,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO operator_kb_sync_records
+                    (logical_project_id, stable_id, local_kb_id, revision,
+                     parent_content_hash, content_hash, tombstone,
+                     trusted_reviewer, reviewer_evidence_json,
+                     source_bundle_sha256, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(logical_project_id, stable_id) DO UPDATE SET
+                    local_kb_id = excluded.local_kb_id,
+                    revision = excluded.revision,
+                    parent_content_hash = excluded.parent_content_hash,
+                    content_hash = excluded.content_hash,
+                    tombstone = excluded.tombstone,
+                    trusted_reviewer = excluded.trusted_reviewer,
+                    reviewer_evidence_json = excluded.reviewer_evidence_json,
+                    source_bundle_sha256 = excluded.source_bundle_sha256,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    logical_project_id,
+                    stable_id,
+                    local_kb_id,
+                    int(revision),
+                    parent_content_hash,
+                    content_hash,
+                    1 if tombstone else 0,
+                    1 if trusted_reviewer else 0,
+                    json.dumps(reviewer_evidence, sort_keys=True),
+                    source_bundle_sha256,
+                    current,
+                ),
+            )
+        record = self.get_operator_kb_sync_record(
+            logical_project_id=logical_project_id,
+            stable_id=stable_id,
+        )
+        if record is None:
+            raise RuntimeError("operator KB sync record upsert failed")
+        return record
+
+    @staticmethod
+    def _operator_kb_sync_record_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        try:
+            evidence = json.loads(data.pop("reviewer_evidence_json") or "{}")
+        except json.JSONDecodeError:
+            evidence = {}
+        data["reviewer_evidence"] = evidence if isinstance(evidence, dict) else {}
+        data["tombstone"] = bool(data.get("tombstone"))
+        data["trusted_reviewer"] = bool(data.get("trusted_reviewer"))
+        data["revision"] = int(data.get("revision") or 0)
+        return data
 
     def create_operator_kb_seed_run(
         self,

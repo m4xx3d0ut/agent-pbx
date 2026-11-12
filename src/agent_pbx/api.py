@@ -291,6 +291,8 @@ from .schemas import (
     OperatorKbFromLinkRequest,
     OperatorKbImportRequest,
     OperatorKbImportResponse,
+    OperatorKbBundleV2ExportRequest,
+    OperatorKbBundleV2Request,
     OperatorKbIndexJobListResponse,
     OperatorKbIndexJobRequest,
     OperatorKbIndexJobResponse,
@@ -5524,6 +5526,69 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             bundle=payload.bundle,
             import_status=payload.import_status,
             metadata=payload.metadata,
+        )
+
+    def require_kb_bundle_v2_enabled() -> None:
+        if not resolved_config.operator_kb_bundle_v2_enabled:
+            raise HTTPException(
+                status_code=409,
+                detail="Operator KB bundle v2 synchronization is disabled",
+            )
+
+    @app.post("/v1/operator/kb/bundle-v2/export")
+    async def export_operator_kb_bundle_v2(
+        payload: OperatorKbBundleV2ExportRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        require_kb_bundle_v2_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.export_kb_bundle_v2,
+            operator_agent_id=payload.operator_agent_id,
+            project=payload.project,
+            repo_root=payload.repo_root,
+            git_remote=payload.git_remote,
+            parent_bundle_sha256=payload.parent_bundle_sha256,
+            limit=payload.limit,
+        )
+
+    @app.post("/v1/operator/kb/bundle-v2/preview")
+    async def preview_operator_kb_bundle_v2(
+        payload: OperatorKbBundleV2Request,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        require_kb_bundle_v2_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.preview_kb_bundle_v2,
+            operator_agent_id=payload.operator_agent_id,
+            bundle=payload.bundle,
+        )
+
+    @app.post("/v1/operator/kb/bundle-v2/import")
+    async def import_operator_kb_bundle_v2(
+        payload: OperatorKbBundleV2Request,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        require_kb_bundle_v2_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.import_kb_bundle_v2,
+            operator_agent_id=payload.operator_agent_id,
+            bundle=payload.bundle,
+        )
+
+    @app.post("/v1/operator/kb/bundle-v2/git-tree")
+    async def prepare_operator_kb_bundle_v2_git_tree(
+        payload: OperatorKbBundleV2Request,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        require_kb_bundle_v2_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.prepare_kb_bundle_v2_git_tree,
+            operator_agent_id=payload.operator_agent_id,
+            bundle=payload.bundle,
         )
 
     @app.get(

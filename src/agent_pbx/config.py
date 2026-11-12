@@ -115,6 +115,7 @@ class ServerConfig:
     codex_bin: str = "codex"
     evidence_exports_enabled: bool = False
     evidence_export_root: Path | None = None
+    operator_kb_bundle_v2_enabled: bool = False
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
