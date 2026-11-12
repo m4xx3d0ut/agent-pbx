@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 import hashlib
 import json
+import math
 import re
 from typing import Any, Mapping
 
@@ -16,6 +17,7 @@ HANDOFF_ACTION_CLASSES = frozenset(
         "exact_git_commit_broker",
         "same_fork_reactivation",
         "host_process_identity_attestation",
+        "protected_provider_merge_reconciliation",
         "deployment",
         "publication",
         "provider_action",
@@ -131,6 +133,27 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
         host_process_evidence = _host_process_evidence(
             scope.get("host_process_evidence")
         )
+    protected_provider_envelope = None
+    if action_class == "protected_provider_merge_reconciliation":
+        if mutation_mode not in {"none", "read_only"}:
+            raise ValueError(
+                "protected_provider_merge_reconciliation must remain read-only"
+            )
+        protected_provider_envelope = _protected_provider_merge_envelope(
+            scope.get("protected_provider_merge_envelope")
+        )
+        if campaign_id != protected_provider_envelope["campaign_id"]:
+            raise ValueError("protected-provider envelope campaign identity mismatch")
+        if workspace_digest != protected_provider_envelope["workspace_set_digest"]:
+            raise ValueError("protected-provider envelope workspace identity mismatch")
+        repository_root = Path(protected_provider_envelope["repository_root"])
+        if not any(
+            repository_root == Path(root) or repository_root.is_relative_to(Path(root))
+            for root in allowed_roots
+        ):
+            raise ValueError(
+                "protected-provider repository root is outside approved roots"
+            )
 
     flags = {
         key: bool(scope.get(key, False))
@@ -155,6 +178,12 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
     }.get(action_class)
     if manual_flag is not None:
         flags[manual_flag] = True
+    if protected_provider_envelope is not None and any(flags.values()):
+        raise ValueError(
+            "protected_provider_merge_reconciliation cannot grant provider, "
+            "credential, deployment, publication, destructive, workspace, or "
+            "authority elevation access"
+        )
 
     normalized = {
         "version": 1,
@@ -175,6 +204,8 @@ def normalize_execution_scope(scope: Mapping[str, Any] | None) -> dict[str, Any]
         normalized["expected_git_tree"] = expected_tree
     if host_process_evidence is not None:
         normalized["host_process_evidence"] = host_process_evidence
+    if protected_provider_envelope is not None:
+        normalized["protected_provider_merge_envelope"] = protected_provider_envelope
     return normalized
 
 
@@ -414,6 +445,168 @@ def _host_process_evidence(value: Any) -> dict[str, Any]:
             raise ValueError(f"host_process_evidence {key} is invalid")
         evidence[key] = text
     return evidence
+
+
+def _protected_provider_merge_envelope(value: Any) -> dict[str, Any]:
+    """Validate the immutable, metadata-only protected-provider envelope."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "protected_provider_merge_reconciliation requires "
+            "protected_provider_merge_envelope"
+        )
+    required = {
+        "schema",
+        "envelope_id",
+        "campaign_id",
+        "workspace_set_digest",
+        "repository_root",
+        "git_dir",
+        "common_dir",
+        "object_dir",
+        "branch_ref",
+        "head_oid",
+        "upstream_ref",
+        "upstream_oid",
+        "topology_sha256",
+        "owner_uid",
+        "workspace_generation",
+        "provider_generation",
+        "provider_receipt_id",
+        "provider_receipt_sha256",
+        "merge_base_oid",
+        "candidate_oid",
+        "expected_tree_oid",
+        "protected_path_names",
+        "issued_at",
+        "expires_at",
+        "reviewed_by_operator_agent_id",
+        "envelope_sha256",
+    }
+    if set(value) != required:
+        raise ValueError("protected-provider merge envelope fields are invalid")
+    if value.get("schema") != "agent-pbx.protected-provider-merge-envelope/v1":
+        raise ValueError("protected-provider merge envelope schema is invalid")
+
+    normalized: dict[str, Any] = {"schema": value["schema"]}
+    for key in (
+        "envelope_id",
+        "campaign_id",
+        "workspace_generation",
+        "provider_generation",
+        "provider_receipt_id",
+        "reviewed_by_operator_agent_id",
+    ):
+        identifier = _optional_identifier(value.get(key), key)
+        if identifier is None:
+            raise ValueError(f"protected-provider merge envelope {key} is required")
+        normalized[key] = identifier
+
+    workspace_digest = _optional_digest(value.get("workspace_set_digest"))
+    if workspace_digest is None:
+        raise ValueError(
+            "protected-provider merge envelope workspace_set_digest is required"
+        )
+    normalized["workspace_set_digest"] = workspace_digest
+
+    for key in ("repository_root", "git_dir", "common_dir", "object_dir"):
+        raw = str(value.get(key) or "").strip()
+        path = Path(raw).expanduser()
+        if not raw or not path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"protected-provider merge envelope {key} is invalid")
+        normalized[key] = str(path.resolve(strict=False))
+
+    branch_ref = str(value.get("branch_ref") or "").strip()
+    upstream_ref = str(value.get("upstream_ref") or "").strip()
+    branch_parts = branch_ref.removeprefix("refs/heads/").split("/")
+    if (
+        not branch_ref.startswith("refs/heads/")
+        or len(branch_ref) > 251
+        or any(
+            not part
+            or part in {".", ".."}
+            or ".." in part
+            or "@{" in part
+            or "\\" in part
+            or part.endswith(".")
+            or part.endswith(".lock")
+            or any(ord(character) < 32 or ord(character) == 127 for character in part)
+            for part in branch_parts
+        )
+    ):
+        raise ValueError("protected-provider merge envelope branch_ref is invalid")
+    upstream_parts = upstream_ref.split("/")
+    if (
+        not upstream_ref
+        or len(upstream_ref) > 240
+        or any(
+            not part
+            or part in {".", ".."}
+            or ".." in part
+            or "@{" in part
+            or "\\" in part
+            or part.endswith(".lock")
+            or any(ord(character) < 32 or ord(character) == 127 for character in part)
+            for part in upstream_parts
+        )
+    ):
+        raise ValueError("protected-provider merge envelope upstream_ref is invalid")
+    normalized["branch_ref"] = branch_ref
+    normalized["upstream_ref"] = upstream_ref
+
+    for key in (
+        "head_oid",
+        "upstream_oid",
+        "merge_base_oid",
+        "candidate_oid",
+        "expected_tree_oid",
+    ):
+        oid = str(value.get(key) or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid):
+            raise ValueError(f"protected-provider merge envelope {key} is invalid")
+        normalized[key] = oid
+    for key in (
+        "topology_sha256",
+        "provider_receipt_sha256",
+        "envelope_sha256",
+    ):
+        digest = str(value.get(key) or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"protected-provider merge envelope {key} is invalid")
+        normalized[key] = digest
+
+    owner_uid = value.get("owner_uid")
+    if isinstance(owner_uid, bool) or not isinstance(owner_uid, int) or owner_uid < 0:
+        raise ValueError("protected-provider merge envelope owner_uid is invalid")
+    normalized["owner_uid"] = owner_uid
+    for key in ("issued_at", "expires_at"):
+        timestamp = value.get(key)
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, (int, float))
+            or not math.isfinite(float(timestamp))
+            or float(timestamp) <= 0
+        ):
+            raise ValueError(f"protected-provider merge envelope {key} is invalid")
+        normalized[key] = float(timestamp)
+    if normalized["expires_at"] <= normalized["issued_at"]:
+        raise ValueError("protected-provider merge envelope expiry is invalid")
+
+    paths = _relative_paths(value.get("protected_path_names"))
+    if len(paths) != len(value.get("protected_path_names") or ()):
+        raise ValueError(
+            "protected-provider merge envelope protected_path_names contain duplicates"
+        )
+    normalized["protected_path_names"] = list(paths)
+
+    unsigned = dict(normalized)
+    unsigned.pop("envelope_sha256")
+    expected_digest = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if normalized["envelope_sha256"] != expected_digest:
+        raise ValueError("protected-provider merge envelope digest mismatch")
+    return normalized
 
 
 def _absolute_roots(value: Any) -> tuple[str, ...]:

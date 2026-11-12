@@ -3316,33 +3316,52 @@ class OperatorService:
             scope
         ):
             return payload
-        if str(scope.get("action_class") or "") != "host_process_identity_attestation":
+        action_class = str(scope.get("action_class") or "")
+        if action_class not in {
+            "host_process_identity_attestation",
+            "protected_provider_merge_reconciliation",
+        }:
             return payload
         if payload.get("approved_by") != "agent-pbx-tui":
             raise ValueError(
-                "host process identity attestation requires exact Agent PBX TUI approval"
+                f"{action_class} requires exact Agent PBX TUI approval"
             )
         campaign_id = str(scope.get("campaign_id") or "").strip()
         workspace_digest = str(scope.get("workspace_set_digest") or "").strip()
         if not campaign_id or len(workspace_digest) != 64:
             raise ValueError(
-                "host process identity attestation requires campaign and workspace identity"
+                f"{action_class} requires campaign and workspace identity"
             )
         approval_id = str(uuid.uuid4())
+        manual_approval: dict[str, Any] = {
+            "approved": True,
+            "method": "f8",
+            "approval_id": approval_id,
+            "approved_at": now_ts(),
+            "campaign_id": campaign_id,
+            "handoff_id": str(handoff.get("handoff_id") or ""),
+            "workspace_set_digest": workspace_digest,
+        }
+        if action_class == "protected_provider_merge_reconciliation":
+            envelope = scope.get("protected_provider_merge_envelope")
+            if not isinstance(envelope, Mapping) or not envelope.get(
+                "envelope_sha256"
+            ):
+                raise ValueError(
+                    "protected-provider reconciliation requires a reviewed envelope"
+                )
+            manual_approval.update(
+                {
+                    "action_class": action_class,
+                    "envelope_sha256": str(envelope["envelope_sha256"]),
+                }
+            )
         payload.update(
             {
                 "requires_f8_approval": True,
                 "approved_by": "agent-pbx-tui",
                 "approved_by_operator_agent_id": operator_agent_id,
-                "manual_approval": {
-                    "approved": True,
-                    "method": "f8",
-                    "approval_id": approval_id,
-                    "approved_at": now_ts(),
-                    "campaign_id": campaign_id,
-                    "handoff_id": str(handoff.get("handoff_id") or ""),
-                    "workspace_set_digest": workspace_digest,
-                },
+                "manual_approval": manual_approval,
             }
         )
         return payload

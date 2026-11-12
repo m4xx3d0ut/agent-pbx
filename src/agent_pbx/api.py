@@ -124,6 +124,10 @@ from .agent_adoption import AgentPaneAdoptionService
 from .operator import OperatorService, operator_runbook_payload
 from .operator_broker import OperatorBrokerService
 from .operator_authority import OperatorAuthorityError, OperatorAuthorityService
+from .protected_provider import (
+    ProtectedProviderDiagnosticError,
+    ProtectedProviderDiagnosticService,
+)
 from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .polling import poll_commands as poll_commands_until
 from .pull_requests import (
@@ -287,6 +291,7 @@ from .schemas import (
     OperatorHandoffPreflightResponse,
     OperatorHandoffResponse,
     OperatorHandoffUpdateRequest,
+    ProtectedProviderDiagnosticRequest,
     OperatorKbCompileReportRequest,
     OperatorKbCompileReportResponse,
     OperatorKbContextRequest,
@@ -987,6 +992,9 @@ def create_app(
         dynamic_resources=app.state.dynamic_resources,
     )
     app.state.operator_broker_service = OperatorBrokerService(store)
+    app.state.protected_provider_diagnostics = ProtectedProviderDiagnosticService(
+        store
+    )
     app.state.managed_runtime = ManagedRuntimeService(
         store,
         codex_bin=resolved_config.codex_bin,
@@ -6482,6 +6490,25 @@ def create_app(
             operator_agent_id=operator_agent_id,
             handoff_id=handoff_id,
         )
+
+    @app.post(
+        "/v2/operator/protected-provider/diagnose",
+        response_model=dict[str, Any],
+    )
+    async def diagnose_protected_provider_merge(
+        payload: ProtectedProviderDiagnosticRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        """Reconcile approved metadata without invoking a provider or Git write."""
+
+        try:
+            return await asyncio.to_thread(
+                request.app.state.protected_provider_diagnostics.diagnose,
+                **payload.model_dump(),
+            )
+        except ProtectedProviderDiagnosticError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
 
     @app.post(
         "/v1/operator/handoffs/{handoff_id}/action-receipts",

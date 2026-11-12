@@ -1399,6 +1399,17 @@ class OperatorHandoffActionTransactionResponse(BaseModel):
     transaction: dict[str, Any]
 
 
+class ProtectedProviderDiagnosticRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    handoff_id: str = Field(min_length=1, max_length=120)
+    approval_id: str = Field(min_length=1, max_length=160)
+    envelope_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workspace_generation: str = Field(min_length=1, max_length=160)
+    provider_generation: str = Field(min_length=1, max_length=160)
+    provider_receipt_id: str = Field(min_length=1, max_length=160)
+    provider_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class OperatorBrokerCheckpointRequest(BaseModel):
     root_operator_agent_id: str = Field(min_length=1, max_length=120)
     target_fork_agent_id: str = Field(min_length=1, max_length=240)

@@ -34,6 +34,26 @@ broker requests, transactions, or completion receipts remain outstanding.
 Recovery discovered after terminal history uses one idempotent successor
 campaign; it never reopens or rewrites the predecessor or its reports.
 
+## Protected-provider preflight diagnostics
+
+Protected-provider merge preparation now has a metadata-only reconciliation
+surface. Its immutable v1 envelope is included in an always-manual handoff
+scope and binds the campaign and activated workspace set, canonical linked
+worktree topology, branch, HEAD, upstream, owner, merge-base/candidate/tree
+identities, opaque workspace/provider generations, and an opaque provider
+receipt identity. The daemon recomputes the Git metadata before any protected
+or destructive work and rejects drift, expiry, foreign approval, or malformed
+topology.
+
+The diagnostic is not provider authority. It requires an exact F8 approval by
+the source root Operator, accepts only `none` or `read_only` mutation posture,
+and retains the mandatory credential, provider/cloud, deployment, publication,
+and destructive-operation denials. It has no provider adapter, credential
+reader, merge/write command, or runtime lifecycle method. Protected path names
+remain in the reviewed envelope; diagnostic results expose only their count
+and a names-list digest. Activation, provider execution, and any eventual merge
+remain separate root-reviewed actions.
+
 ## Compatibility and security posture
 
 Existing public behavior remains unchanged until each gate is explicitly
