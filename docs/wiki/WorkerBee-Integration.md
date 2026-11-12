@@ -42,7 +42,7 @@ mapping first.
 
 ## Choose a workflow posture
 
-Agent PBX 2.3.0 keeps four runtime-authority axes independent:
+Agent PBX 2.3.0rc5 keeps four runtime-authority axes independent:
 
 1. **Backend** selects OSS, platform-debug, or a future managed user appliance.
 2. **Source mode** selects `native-direct`, `snapshot-import`,

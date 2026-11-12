@@ -4,7 +4,7 @@
 
 No changes yet.
 
-## v2.3.0 - 2026-11-12
+## v2.3.0rc5 - 2026-11-12
 
 ### Highlights
 
@@ -37,6 +37,9 @@ No changes yet.
 
 ### Fixed
 
+- Pass the public-demo bearer token to the isolated daemon as one
+  `--token=<value>` argument, so a cryptographically generated token beginning
+  with `-` cannot be parsed as another command-line option.
 - Preserve the last valid native terminal frame across Agent, Operator,
   Joplin, and F4 transitions; reject stale asynchronous attach results; and
   use compatibility capture only after a genuine attach failure.
@@ -51,9 +54,10 @@ No changes yet.
 - Close the final cross-platform RC fixture gaps without changing production
   trusted-direct admission, F8 alert, or approval behavior.
 
-The stable release is the reviewed RC4 product tree with release identity and
-documentation changes only. See the RC1 through RC4 entries below for the
-complete implementation history.
+RC5 contains the reviewed RC4 product tree plus the isolated public-demo token
+argument repair found by the first stable branch matrix. No stable tag,
+GitHub Release, or PyPI artifact was created from that failed gate. See the
+RC1 through RC4 entries below for the complete implementation history.
 
 ## v2.3.0rc4 - 2026-11-12
 
