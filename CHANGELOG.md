@@ -4,7 +4,7 @@
 
 No changes yet.
 
-## v2.3.0rc5 - 2026-11-12
+## v2.3.0 - 2026-11-12
 
 ### Highlights
 
@@ -54,10 +54,13 @@ No changes yet.
 - Close the final cross-platform RC fixture gaps without changing production
   trusted-direct admission, F8 alert, or approval behavior.
 
-RC5 contains the reviewed RC4 product tree plus the isolated public-demo token
-argument repair found by the first stable branch matrix. No stable tag,
-GitHub Release, or PyPI artifact was created from that failed gate. See the
-RC1 through RC4 entries below for the complete implementation history.
+Stable 2.3.0 contains the reviewed RC4 product tree plus the isolated
+public-demo token argument repair found by the first stable branch matrix.
+The repaired RC5 tree passed the exact-tag GitHub matrix, TestPyPI Trusted
+Publishing, registry hash verification, and a clean install before this
+stable identity was derived. No stable tag, GitHub Release, or PyPI artifact
+was created from the failed gate. See the RC1 through RC4 entries below for
+the complete implementation history.
 
 ## v2.3.0rc4 - 2026-11-12
 
