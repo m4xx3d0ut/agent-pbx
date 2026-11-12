@@ -158,7 +158,7 @@ def _broker_store(tmp_path) -> tuple[Store, str, str]:
     return store, str(handoff["handoff_id"]), "a" * 64
 
 
-def _qualified_broker_service(tmp_path):
+def _qualified_broker_service(tmp_path, *, broker_qualified: bool = True):
     digest = "a" * 64
     store = Store(tmp_path / "qualified.sqlite")
     store.init()
@@ -202,6 +202,11 @@ def _qualified_broker_service(tmp_path):
         metadata={
             "operator_authority_activated_profile": "trusted-workbench",
             "operator_authority_activated_workspace_set_digest": digest,
+            **(
+                {"linked_git_admin": _broker_qualified_linked_metadata(tmp_path)}
+                if broker_qualified
+                else {}
+            ),
         },
     )
     campaign = store.create_operator_campaign(
@@ -253,6 +258,33 @@ def _qualified_broker_service(tmp_path):
         environ={"AGENT_PBX_OPERATOR_BROKER_MODE": "root_operator"},
     )
     return store, service, handoff, digest
+
+
+def _broker_qualified_linked_metadata(tmp_path) -> dict[str, object]:
+    git_dir = tmp_path / ".git" / "worktrees" / "operator-7-fork"
+    common_dir = tmp_path / ".git"
+    qualified = [
+        str(git_dir / "index"),
+        str(common_dir / "objects"),
+        str(common_dir / "refs" / "heads" / "pbx-operator-7"),
+        str(common_dir / "logs" / "refs" / "heads" / "pbx-operator-7"),
+    ]
+    return {
+        "kind": "linked_worktree_edit",
+        "worktree_root": str(tmp_path),
+        "git_dir": str(git_dir),
+        "common_dir": str(common_dir),
+        "object_dir": str(common_dir / "objects"),
+        "branch_ref": "refs/heads/pbx-operator-7/test",
+        "base_permission_profile": ":workspace",
+        "permission_profile": "agent-pbx-linked-edit",
+        "write_strategy": "tui_root_commit_broker",
+        "grant_scope": "tui_root_commit_broker",
+        "additional_workspace_roots": [],
+        "active_write_grants": [],
+        "qualified_git_admin_paths": qualified,
+        "writable_paths": [],
+    }
 
 
 def _create_request(store: Store, handoff_id: str, digest: str):
@@ -474,6 +506,23 @@ def test_broker_service_preflight_binds_root_fork_campaign_and_scope(tmp_path) -
     assert len(result["authority_sha256"]) == 64
 
 
+def test_broker_service_rejects_standalone_fork_before_request(tmp_path) -> None:
+    _store, service, handoff, _digest = _qualified_broker_service(
+        tmp_path,
+        broker_qualified=False,
+    )
+
+    with pytest.raises(OperatorBrokerPolicyError) as exc_info:
+        service.preflight(
+            root_operator_agent_id="operator-0",
+            target_fork_agent_id="operator-7-fork",
+            handoff_id=handoff["handoff_id"],
+        )
+
+    assert exc_info.value.code == "OPERATOR_BROKER_FORK_TOPOLOGY_REQUIRED"
+    assert "standalone repository" in exc_info.value.message
+
+
 def test_broker_service_accepts_tui_approved_cross_root_handoff(tmp_path) -> None:
     digest = "a" * 64
     store = Store(tmp_path / "cross-root.sqlite")
@@ -518,6 +567,7 @@ def test_broker_service_accepts_tui_approved_cross_root_handoff(tmp_path) -> Non
         metadata={
             "operator_authority_activated_profile": "trusted-workbench",
             "operator_authority_activated_workspace_set_digest": digest,
+            "linked_git_admin": _broker_qualified_linked_metadata(tmp_path),
         },
     )
     campaign = store.create_operator_campaign(

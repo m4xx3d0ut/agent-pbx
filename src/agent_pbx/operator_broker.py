@@ -219,6 +219,7 @@ class OperatorBrokerService:
         digest = str(scope.get("workspace_set_digest") or "").strip().lower()
         root_metadata = self._metadata(root)
         fork_metadata = self._metadata(fork)
+        self._require_broker_qualified_fork(fork_metadata)
         activated = {
             str(root_metadata.get("operator_authority_activated_workspace_set_digest") or ""),
             str(fork_metadata.get("operator_authority_activated_workspace_set_digest") or ""),
@@ -314,6 +315,71 @@ class OperatorBrokerService:
             "action": action,
             "transaction": transaction,
         }
+
+    @staticmethod
+    def _require_broker_qualified_fork(metadata: Mapping[str, Any]) -> None:
+        """Reject broker requests that the local TUI can never execute.
+
+        The exact Git broker is deliberately limited to linked edit worktrees
+        whose split permission profile requires TUI-owned Git administration.
+        Standalone repositories use the normal exact-path handoff/direct Git
+        path.  Rejecting that topology here prevents a root Operator from
+        obtaining an approval and stopping a healthy fork only to fail later
+        in the local TUI executor.
+
+        Schema-45 launch metadata uses the explicit strategy/grant fields.
+        The narrow pre-schema form is retained for in-place upgrades; the TUI
+        still recomputes and compares the complete plan before any Git write.
+        """
+
+        linked = metadata.get("linked_git_admin")
+        if not isinstance(linked, Mapping):
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_FORK_TOPOLOGY_REQUIRED",
+                "The exact Git broker requires a broker-qualified linked edit "
+                "worktree. This fork uses a standalone repository; use an "
+                "exact-path same-workspace handoff and the fork's normal Git "
+                "permissions instead.",
+            )
+
+        qualified_paths = linked.get("qualified_git_admin_paths")
+        current = (
+            str(linked.get("kind") or "") == "linked_worktree_edit"
+            and str(linked.get("write_strategy") or "")
+            == "tui_root_commit_broker"
+            and str(linked.get("grant_scope") or "")
+            == "tui_root_commit_broker"
+            and linked.get("active_write_grants") == []
+            and linked.get("writable_paths") == []
+            and isinstance(qualified_paths, list)
+            and len(qualified_paths) == 4
+            and all(isinstance(path, str) and path for path in qualified_paths)
+        )
+        legacy_keys = {
+            "kind",
+            "worktree_root",
+            "git_dir",
+            "common_dir",
+            "branch_ref",
+            "base_permission_profile",
+            "permission_profile",
+            "writable_paths",
+        }
+        legacy_paths = linked.get("writable_paths")
+        legacy = (
+            set(linked) == legacy_keys
+            and str(linked.get("kind") or "") == "linked_worktree_edit"
+            and isinstance(legacy_paths, list)
+            and len(legacy_paths) == 4
+            and all(isinstance(path, str) and path for path in legacy_paths)
+        )
+        if not current and not legacy:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_FORK_TOPOLOGY_INVALID",
+                "The target fork does not carry one complete broker-qualified "
+                "linked-worktree plan. Reconcile or relaunch the fork before "
+                "requesting an exact Git broker checkpoint.",
+            )
 
     def request(
         self,
