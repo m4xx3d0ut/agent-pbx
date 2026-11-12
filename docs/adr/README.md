@@ -13,3 +13,8 @@ cycle is `next-cycle-baseline-2026-10-02` (`70978b2`).
 - [0007 — Embedded terminal engine](0007-terminal-engine.md)
 - [0008 — Runtime presentation and child topology](0008-runtime-presentation.md)
 - [0009 — Public browser demo boundary](0009-public-browser-demo.md)
+- [0010 — PBX-controlled WorkerBee runs](0010-workerbee-controlled-runs.md)
+- [0011 — Engineering evidence exports](0011-engineering-evidence-exports.md)
+- [0012 — Durable helper registry](0012-durable-helper-registry.md)
+- [0013 — Typed dynamic resources](0013-typed-dynamic-resources.md)
+- [0014 — WorkerBee direct-bind development volumes](0014-workerbee-development-volumes.md)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
+from agent_pbx.git_worktree import LinkedWorktreeGitAdminPlan
 from agent_pbx.operator_authority import (
     OPERATOR_AUTHORITY_CONTROL_MODE_ENV,
     OPERATOR_AUTHORITY_DEFAULT_PROFILE_ENV,
@@ -79,6 +81,36 @@ def register_edit_fork(store: Store, agent_id: str, root: Path) -> None:
         fork_purpose="edit",
         access_mode="edit",
         metadata={"workerbee_mcp_profile": "observe-local"},
+    )
+
+
+def linked_git_admin_plan(tmp_path: Path) -> LinkedWorktreeGitAdminPlan:
+    worktree = tmp_path / "linked"
+    common = tmp_path / "main" / ".git"
+    git_dir = common / "worktrees" / "linked"
+    object_dir = common / "objects"
+    ref_namespace = common / "refs" / "heads" / "pbx-operator-6"
+    reflog_namespace = common / "logs" / "refs" / "heads" / "pbx-operator-6"
+    for directory in (
+        worktree,
+        git_dir,
+        object_dir,
+        ref_namespace,
+        reflog_namespace,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    git_file = worktree / ".git"
+    git_file.write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    return LinkedWorktreeGitAdminPlan(
+        worktree_root=worktree,
+        git_file=git_file,
+        git_dir=git_dir,
+        common_dir=common,
+        object_dir=object_dir,
+        branch_ref="refs/heads/pbx-operator-6/durable",
+        ref_namespace=ref_namespace,
+        reflog_namespace=reflog_namespace,
+        writable_paths=(git_dir, object_dir, ref_namespace, reflog_namespace),
     )
 
 
@@ -489,6 +521,131 @@ def test_launch_overrides_preserve_nested_common_git_root_and_exactly_deduplicat
         str(linked): True,
         str(common): True,
     }
+
+
+def test_launch_overrides_merge_exact_post_activation_git_admin_exception(
+    tmp_path: Path,
+) -> None:
+    plan = linked_git_admin_plan(tmp_path)
+    (plan.worktree_root / ".env").write_text("SECRET=redacted\n", encoding="utf-8")
+    digest = "a" * 64
+    overrides = operator_authority_launch_overrides(
+        {
+            "operator_authority_profile": "trusted-workbench",
+            "operator_authority_workspace_roots": [
+                str(plan.worktree_root),
+                str(plan.git_dir),
+                str(plan.worktree_root),
+            ],
+            "operator_authority_git_common_dirs": [
+                str(plan.common_dir),
+                str(plan.common_dir),
+            ],
+            "operator_workspace_set_digest": digest,
+            "operator_authority_activated_workspace_set_digest": digest,
+            "fork_purpose": "edit",
+            "access_mode": "edit",
+        },
+        linked_git_admin_plan=plan,
+    )
+
+    permission = overrides[0][1]
+    assert permission["workspace_roots"] == {
+        str(plan.worktree_root): True,
+        str(plan.common_dir): True,
+    }
+    filesystem = permission["filesystem"]
+    assert filesystem[str(plan.git_dir)] == "write"
+    assert filesystem[str(plan.worktree_root / ".env")] == "deny"
+    assert str(plan.object_dir) not in filesystem
+    assert str(plan.ref_namespace) not in filesystem
+    assert str(plan.reflog_namespace) not in filesystem
+    assert permission["network"] == {
+        "enabled": True,
+        "allow_local_binding": True,
+        "domains": {"*": "allow"},
+    }
+
+
+def test_launch_overrides_reject_drifted_or_noncanonical_git_admin_exception(
+    tmp_path: Path,
+) -> None:
+    plan = linked_git_admin_plan(tmp_path)
+    digest = "b" * 64
+    metadata = {
+        "operator_authority_profile": "trusted-workbench",
+        "operator_authority_workspace_roots": [str(plan.worktree_root)],
+        "operator_authority_git_common_dirs": [str(plan.common_dir)],
+        "operator_workspace_set_digest": digest,
+        "operator_authority_activated_workspace_set_digest": digest,
+        "fork_purpose": "edit",
+        "access_mode": "edit",
+    }
+
+    with pytest.raises(OperatorAuthorityError) as drifted:
+        operator_authority_launch_overrides(
+            {
+                **metadata,
+                "operator_authority_activated_workspace_set_digest": "c" * 64,
+            },
+            linked_git_admin_plan=plan,
+        )
+    assert drifted.value.code == "OPERATOR_AUTHORITY_GIT_ADMIN_WORKSPACE_DRIFT"
+
+    with pytest.raises(OperatorAuthorityError) as broad:
+        operator_authority_launch_overrides(
+            metadata,
+            linked_git_admin_plan=replace(
+                plan,
+                git_dir=plan.common_dir,
+                writable_paths=(plan.common_dir, *plan.writable_paths[1:]),
+            ),
+        )
+    assert broad.value.code == "OPERATOR_AUTHORITY_GIT_ADMIN_TOPOLOGY"
+
+    alias = plan.common_dir / "worktrees" / "alias"
+    alias.symlink_to(plan.git_dir, target_is_directory=True)
+    with pytest.raises(OperatorAuthorityError) as symlinked:
+        operator_authority_launch_overrides(
+            metadata,
+            linked_git_admin_plan=replace(
+                plan,
+                git_dir=alias,
+                writable_paths=(alias, *plan.writable_paths[1:]),
+            ),
+        )
+    assert symlinked.value.code == "OPERATOR_AUTHORITY_GIT_ADMIN_NONCANONICAL"
+
+
+def test_launch_overrides_never_grant_git_admin_to_review_or_nontrusted_forks(
+    tmp_path: Path,
+) -> None:
+    plan = linked_git_admin_plan(tmp_path)
+    digest = "d" * 64
+    base = {
+        "operator_authority_workspace_roots": [str(plan.worktree_root)],
+        "operator_authority_git_common_dirs": [str(plan.common_dir)],
+        "operator_workspace_set_digest": digest,
+        "operator_authority_activated_workspace_set_digest": digest,
+    }
+    assert operator_authority_launch_overrides(
+        {
+            **base,
+            "operator_authority_profile": "trusted-workbench",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+        },
+        linked_git_admin_plan=plan,
+    ) == ()
+    assert operator_authority_launch_overrides(
+        {
+            **base,
+            "operator_authority_profile": "scoped-edit",
+            "fork_purpose": "edit",
+            "access_mode": "edit",
+        },
+        linked_git_admin_plan=plan,
+    ) == ()
 
 
 def test_operator_authority_api_saves_set_and_assigns_profile(

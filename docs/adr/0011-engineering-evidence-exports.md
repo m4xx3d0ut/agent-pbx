@@ -1,0 +1,64 @@
+# ADR 0011: Engineering evidence exports
+
+- Status: Accepted for implementation
+- Date: 2026-11-12
+- Baseline: Agent PBX v2.3.0 (`dcb7d632e66cd22ef4b53718d92871d5f31282e9`)
+
+## Context
+
+Agent PBX already persists reports, campaigns, handoffs, approvals, audit events,
+and exact Git broker receipts. Operators need portable evidence without scraping
+transient TUI widgets or exposing unrelated worktree dirt, prompts, credentials,
+or terminal history.
+
+## Decision
+
+The daemon will own an additive evidence-export service. Every export has a
+versioned `agent-pbx.evidence-export-manifest/v1` manifest, canonical content
+hashes, bounded record counts, source identities, redaction policy identity,
+and deterministic JSON, Markdown, or NDJSON rendering. Thread, campaign, and
+filtered evidence-case exports use this service. The private export root is the
+default; an Operator previews exact paths and retained records before pruning.
+
+Exact Git review uses a separate `agent-pbx.git-review-artifact/v1` receipt. It
+may inspect only the broker-approved leaf set after the fork is stopped and
+frozen. The artifact records path status, object identities, bounded text hunks,
+binary summaries, line counts, truncation evidence, and a SHA-256 digest that is
+reverified before commit. Two-parent commits are represented explicitly and
+never collapsed to an ambient worktree diff.
+
+Trusted Workbench edit forks created after workspace-set activation still run
+the linked-worktree topology qualifier at launch. The qualifier's exact active
+per-worktree Git directory may be merged into the permission profile as an
+absolute filesystem write exception. It is not a workspace root: making it a
+nested workspace root can trigger recursive bubblewrap remounts beneath the
+already-mounted source or common Git root. The exception requires the same
+activated workspace-set digest, approved common Git directory, canonical
+owned non-symlink topology, and edit-fork posture. Objects, shared refs,
+reflogs, sibling worktrees, and the broad common directory are never inferred
+from the exception.
+
+The default redaction policy excludes hidden reasoning, secrets, credentials,
+prompt bodies, unrestricted terminal history, and environment data. Exporters
+use positive field selection; unknown record classes fail closed. Joplin output
+is rendering of the same manifest, not a second evidence source.
+
+## Migration and feature gate
+
+Both features are default-disabled and additive. Existing Thread export remains
+available until the new service is enabled and verified; migration changes its
+implementation, not historical records. Existing broker receipts without an
+artifact remain valid only for legacy flows that do not require diff review.
+No database rewrite occurs in this checkpoint.
+
+## Rollback
+
+Disable the gates, preserve immutable manifests and broker receipts, and return
+Thread export to its legacy renderer. Rollback never deletes exported evidence
+or weakens a receipt that already requires a review-artifact digest.
+
+## Security consequences
+
+The service does not gain credential, provider, terminal-control, or arbitrary
+filesystem authority. Export roots are private, manifests are metadata-bounded,
+and exact-leaf Git review never enumerates unapproved dirt.

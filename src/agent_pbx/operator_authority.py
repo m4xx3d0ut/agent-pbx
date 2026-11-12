@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from .git_worktree import (
+    LinkedWorktreeGitAdminPlan,
     LinkedWorktreeQualificationError,
     qualify_linked_worktree_git_admin,
 )
@@ -950,6 +951,8 @@ class OperatorAuthorityService:
 
 def operator_authority_launch_overrides(
     metadata: Mapping[str, Any],
+    *,
+    linked_git_admin_plan: LinkedWorktreeGitAdminPlan | None = None,
 ) -> tuple[tuple[str, object], ...]:
     """Return launch-local Codex permission overrides for an assigned profile."""
 
@@ -978,7 +981,85 @@ def operator_authority_launch_overrides(
             if str(item or "").strip()
         )
     )
-    permission_roots = tuple(dict.fromkeys((*roots, *git_common_dirs)))
+    git_admin_exception: str | None = None
+    if linked_git_admin_plan is not None:
+        if purpose != "edit" or access != "edit":
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_EDIT_ONLY",
+                "Linked Git administration is available only to exact edit forks.",
+            )
+        workspace_digest = str(
+            metadata.get("operator_workspace_set_digest")
+            or metadata.get("operator_authority_workspace_set_digest")
+            or ""
+        ).strip()
+        activated_digest = str(
+            metadata.get("operator_authority_activated_workspace_set_digest") or ""
+        ).strip()
+        if not workspace_digest or activated_digest != workspace_digest:
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_WORKSPACE_DRIFT",
+                "Linked Git administration requires the exact activated workspace-set digest.",
+            )
+        try:
+            worktree_root = linked_git_admin_plan.worktree_root.resolve(strict=True)
+            common_dir = linked_git_admin_plan.common_dir.resolve(strict=True)
+            git_dir = linked_git_admin_plan.git_dir.resolve(strict=True)
+        except OSError as exc:
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_UNAVAILABLE",
+                f"Qualified linked Git administration is unavailable: {exc}",
+            ) from exc
+        if worktree_root != linked_git_admin_plan.worktree_root:
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_NONCANONICAL",
+                "Qualified linked-worktree root is not canonical.",
+            )
+        if common_dir != linked_git_admin_plan.common_dir:
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_NONCANONICAL",
+                "Qualified common Git directory is not canonical.",
+            )
+        if git_dir != linked_git_admin_plan.git_dir:
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_NONCANONICAL",
+                "Qualified per-worktree Git directory is not canonical.",
+            )
+        if str(worktree_root) not in roots:
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_WORKSPACE_DRIFT",
+                "Linked worktree is outside the activated workspace set.",
+            )
+        if str(common_dir) not in git_common_dirs:
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_COMMON_DIR",
+                "Linked worktree does not use an authority-qualified common Git directory.",
+            )
+        if git_dir.parent != common_dir / "worktrees":
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_TOPOLOGY",
+                "Qualified Git directory is not an exact per-worktree administration root.",
+            )
+        if git_dir not in linked_git_admin_plan.writable_paths:
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_TOPOLOGY",
+                "Qualified Git plan does not include its per-worktree administration root.",
+            )
+        git_dir_stat = git_dir.lstat()
+        if git_dir.is_symlink() or not git_dir.is_dir() or git_dir_stat.st_uid != os.getuid():
+            raise OperatorAuthorityError(
+                "OPERATOR_AUTHORITY_GIT_ADMIN_OWNER",
+                "Qualified per-worktree Git directory must be an owned real directory.",
+            )
+        git_admin_exception = str(git_dir)
+
+    # A post-activation linked worktree may appear in persisted launch metadata
+    # as a temporary workspace root.  Projecting that nested path as another
+    # Codex workspace root makes bubblewrap recursively remount beneath the
+    # already-mounted source/common root.  Move only the exact requalified
+    # per-worktree admin path into the filesystem policy instead.
+    workspace_roots = tuple(root for root in roots if root != git_admin_exception)
+    permission_roots = tuple(dict.fromkeys((*workspace_roots, *git_common_dirs)))
     permission_name = "agent-pbx-trusted-workbench"
     definition = {
         "description": "Agent PBX explicit multi-project Trusted Workbench",
@@ -996,6 +1077,8 @@ def operator_authority_launch_overrides(
             "domains": {"*": "allow"},
         },
     }
+    if git_admin_exception is not None:
+        definition["filesystem"][git_admin_exception] = "write"
     # Codex expands filesystem glob rules with ripgrep while building its
     # bubblewrap command. A legitimate project may contain unreadable runtime
     # artifacts (for example a root-owned crash-report directory); recursive
@@ -1004,7 +1087,7 @@ def operator_authority_launch_overrides(
     # paths. Do not add absent paths: bubblewrap creates read-only mount targets
     # for them in the host checkout. The profile still extends Codex's managed
     # ``:workspace`` baseline for its built-in protections.
-    for root in roots:
+    for root in workspace_roots:
         for name in _TRUSTED_WORKBENCH_SECRET_NAMES:
             candidate = Path(root) / name
             if candidate.exists() or candidate.is_symlink():

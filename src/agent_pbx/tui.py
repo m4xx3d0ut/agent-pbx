@@ -2046,6 +2046,7 @@ def operator_agent_config_overrides(
     terminal_mode: str = CODEX_TERMINAL_MODE_DEFAULT,
     workerbee_gateway_binding: Mapping[str, object] | None = None,
     authority_metadata: Mapping[str, object] | None = None,
+    linked_git_admin_plan: LinkedWorktreeGitAdminPlan | None = None,
 ) -> list[str]:
     """Build a least-privilege operator MCP allowlist for a launch.
 
@@ -2077,7 +2078,8 @@ def operator_agent_config_overrides(
     overrides.extend(
         codex_config_override(key, value)
         for key, value in operator_authority_launch_overrides(
-            authority_metadata or {}
+            authority_metadata or {},
+            linked_git_admin_plan=linked_git_admin_plan,
         )
     )
     return overrides
@@ -23213,6 +23215,7 @@ class AgentPBXTUI(App[None]):
                 terminal_mode=self.codex_terminal_mode,
                 workerbee_gateway_binding=workerbee_gateway_binding,
                 authority_metadata=metadata,
+                linked_git_admin_plan=git_admin_plan,
             )
         )
         launch_config_overrides.extend(
@@ -23902,6 +23905,7 @@ class AgentPBXTUI(App[None]):
                         terminal_mode=self.codex_terminal_mode,
                         workerbee_gateway_binding=workerbee_gateway_binding,
                         authority_metadata=metadata,
+                        linked_git_admin_plan=git_admin_plan,
                     )
                 )
                 sandbox = operator_authority_sandbox(metadata)
@@ -27799,6 +27803,7 @@ class AgentPBXTUI(App[None]):
                 terminal_mode=self.codex_terminal_mode,
                 workerbee_gateway_binding=workerbee_gateway_binding,
                 authority_metadata=fork_metadata,
+                linked_git_admin_plan=git_admin_plan,
             )
         )
         launch_config_overrides = [
@@ -33852,6 +33857,7 @@ class AgentPBXTUI(App[None]):
                 terminal_mode=self.codex_terminal_mode,
                 workerbee_gateway_binding=workerbee_gateway_binding,
                 authority_metadata=metadata,
+                linked_git_admin_plan=git_admin_plan,
             )
             sandbox = operator_authority_sandbox(metadata)
         launch_config_overrides.extend(

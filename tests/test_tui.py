@@ -27476,6 +27476,67 @@ def test_tui_operator_config_includes_exact_trusted_workbench_permissions() -> N
     assert 'default_permissions="agent-pbx-trusted-workbench"' in overrides
 
 
+def test_tui_operator_config_merges_only_exact_qualified_git_admin_exception(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "linked"
+    common = tmp_path / "main" / ".git"
+    git_dir = common / "worktrees" / "linked"
+    object_dir = common / "objects"
+    ref_namespace = common / "refs" / "heads" / "pbx-operator-6"
+    reflog_namespace = common / "logs" / "refs" / "heads" / "pbx-operator-6"
+    for directory in (
+        worktree,
+        git_dir,
+        object_dir,
+        ref_namespace,
+        reflog_namespace,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    git_file = worktree / ".git"
+    git_file.write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    plan = LinkedWorktreeGitAdminPlan(
+        worktree_root=worktree,
+        git_file=git_file,
+        git_dir=git_dir,
+        common_dir=common,
+        object_dir=object_dir,
+        branch_ref="refs/heads/pbx-operator-6/durable",
+        ref_namespace=ref_namespace,
+        reflog_namespace=reflog_namespace,
+        writable_paths=(git_dir, object_dir, ref_namespace, reflog_namespace),
+    )
+    digest = "a" * 64
+
+    overrides = operator_agent_config_overrides(
+        mcp_url="http://127.0.0.1:8767/mcp",
+        work_root=str(worktree),
+        authority_metadata={
+            "operator_authority_profile": "trusted-workbench",
+            "operator_authority_workspace_roots": [str(worktree), str(git_dir)],
+            "operator_authority_git_common_dirs": [str(common)],
+            "operator_workspace_set_digest": digest,
+            "operator_authority_activated_workspace_set_digest": digest,
+            "fork_purpose": "edit",
+            "access_mode": "edit",
+        },
+        linked_git_admin_plan=plan,
+    )
+
+    permission = next(
+        item
+        for item in overrides
+        if item.startswith("permissions.agent-pbx-trusted-workbench=")
+    )
+    assert f'{json.dumps(str(git_dir))} = "write"' in permission
+    assert f'{json.dumps(str(git_dir))} = true' not in permission
+    assert f'{json.dumps(str(worktree))} = true' in permission
+    assert f'{json.dumps(str(common))} = true' in permission
+    assert str(object_dir) not in permission
+    assert str(ref_namespace) not in permission
+    assert str(reflog_namespace) not in permission
+
+
 def test_tui_review_operator_ignores_trusted_workbench_permissions() -> None:
     overrides = operator_agent_config_overrides(
         mcp_url="http://127.0.0.1:8767/mcp",
