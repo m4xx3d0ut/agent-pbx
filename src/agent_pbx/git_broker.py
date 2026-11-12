@@ -19,6 +19,13 @@ from .git_worktree import (
     LinkedWorktreeQualificationError,
     qualify_linked_worktree_git_admin,
 )
+from .git_review import (
+    GIT_REVIEW_MAX_SOURCE_BYTES,
+    GitReviewArtifact,
+    GitReviewArtifactError,
+    GitReviewContent,
+    build_git_review_artifact,
+)
 
 
 BROKER_VERSION = "agent-pbx-linked-git-broker-v3"
@@ -200,6 +207,7 @@ class LinkedGitCommitReceipt:
     qualified_git_admin_paths: tuple[str, ...]
     commit_parents: tuple[str, ...] | None = None
     expected_tree: str | None = None
+    git_review_artifact: Mapping[str, Any] | None = None
 
     def public_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -207,6 +215,8 @@ class LinkedGitCommitReceipt:
             value.pop("commit_parents")
         if self.expected_tree is None:
             value.pop("expected_tree")
+        if self.git_review_artifact is None:
+            value.pop("git_review_artifact")
         return value
 
 
@@ -322,7 +332,11 @@ _RECEIPT_FIELDS = {
     "authored_at",
     "qualified_git_admin_paths",
 }
-_RECEIPT_OPTIONAL_FIELDS = {"commit_parents", "expected_tree"}
+_RECEIPT_OPTIONAL_FIELDS = {
+    "commit_parents",
+    "expected_tree",
+    "git_review_artifact",
+}
 _CONFIG_IDENTITY_FIELDS = {"label", "path", "state", "sha256", "uid", "mode"}
 _PATH_IDENTITY_FIELDS = {
     "path",
@@ -536,6 +550,21 @@ def _receipt_from_public_dict(value: Mapping[str, Any]) -> LinkedGitCommitReceip
         raise LinkedGitBrokerError(
             "broker pending multi-parent receipt lacks an expected tree"
         )
+    git_review_artifact: dict[str, Any] | None = None
+    if "git_review_artifact" in value:
+        raw_review = value.get("git_review_artifact")
+        if not isinstance(raw_review, Mapping):
+            raise LinkedGitBrokerError(
+                "broker pending Git review artifact has the wrong type"
+            )
+        try:
+            git_review_artifact = GitReviewArtifact.from_public_dict(
+                raw_review
+            ).public_dict()
+        except GitReviewArtifactError as exc:
+            raise LinkedGitBrokerError(
+                f"broker pending Git review artifact is invalid: {exc}"
+            ) from exc
 
     receipt = LinkedGitCommitReceipt(
         version=version,
@@ -580,6 +609,7 @@ def _receipt_from_public_dict(value: Mapping[str, Any]) -> LinkedGitCommitReceip
         qualified_git_admin_paths=qualified_paths,
         commit_parents=commit_parents,
         expected_tree=expected_tree,
+        git_review_artifact=git_review_artifact,
     )
     if (
         receipt.write_strategy != BROKER_WRITE_STRATEGY
@@ -588,6 +618,8 @@ def _receipt_from_public_dict(value: Mapping[str, Any]) -> LinkedGitCommitReceip
         or not receipt.permission_profile
     ):
         raise LinkedGitBrokerError("broker pending strategy/profile identity is invalid")
+    if receipt.git_review_artifact is not None:
+        _require_bound_git_review_artifact(receipt)
     payload = {
         key: item
         for key, item in receipt.public_dict().items()
@@ -770,6 +802,19 @@ def prepare_linked_git_commit(
     timestamp = int(time.time()) if authored_at is None else int(authored_at)
     config_identities = _codex_config_identities(normalized_codex_home)
     git_config_sha256 = _git_config_sha256(root)
+    index_sha256 = _sha256(_read_regular_bytes(index_path, "Git index"))
+    effective_parents = normalized_commit_parents or (head,)
+    git_review_artifact = _build_broker_git_review_artifact(
+        plan,
+        agent_id=normalized_agent_id,
+        branch_ref=branch_ref,
+        head=head,
+        head_tree=head_tree,
+        index_tree=index_tree,
+        index_sha256=index_sha256,
+        parent_oids=effective_parents,
+        identities=identities,
+    )
     payload: dict[str, Any] = {
         "version": BROKER_VERSION,
         "agent_id": normalized_agent_id,
@@ -797,7 +842,7 @@ def prepare_linked_git_commit(
         "head_tree": head_tree,
         "index_tree": index_tree,
         "approved_stage_paths": stage_paths,
-        "index_sha256": _sha256(_read_regular_bytes(index_path, "Git index")),
+        "index_sha256": index_sha256,
         "branch_ref_sha256": _sha256(
             _read_regular_bytes(ref_path, "active branch ref")
         ),
@@ -815,6 +860,7 @@ def prepare_linked_git_commit(
         "qualified_git_admin_paths": tuple(
             str(path) for path in plan.writable_paths
         ),
+        "git_review_artifact": git_review_artifact.public_dict(),
     }
     if normalized_commit_parents is not None:
         payload["commit_parents"] = normalized_commit_parents
@@ -827,6 +873,7 @@ def prepare_linked_git_commit(
         path_identities=identities,
         commit_parents=normalized_commit_parents,
         expected_tree=normalized_expected_tree,
+        git_review_artifact=git_review_artifact.public_dict(),
         **{
             key: value
             for key, value in payload.items()
@@ -836,6 +883,7 @@ def prepare_linked_git_commit(
                 "path_identities",
                 "commit_parents",
                 "expected_tree",
+                "git_review_artifact",
             }
         },
     )
@@ -851,6 +899,15 @@ def execute_linked_git_commit(
     _test_crash_at: str | None = None,
 ) -> LinkedGitCommitResult:
     """Execute one exact TUI-approved transaction without shell or hooks."""
+
+    if receipt.git_review_artifact is None:
+        legacy_journal = Path(journal_root).expanduser() / receipt.transaction_id
+        if not legacy_journal.exists():
+            raise LinkedGitBrokerError(
+                "new broker execution requires an exact Git review artifact"
+            )
+    else:
+        _require_bound_git_review_artifact(receipt)
 
     roots, normalized_codex_home = _validate_authority_inputs(
         receipt,
@@ -897,6 +954,14 @@ def execute_linked_git_commit(
         )
     finally:
         journal.release_lock()
+
+
+def validate_linked_git_commit_review(
+    receipt: LinkedGitCommitReceipt,
+) -> GitReviewArtifact:
+    """Validate the exact artifact bound to a prepared broker receipt."""
+
+    return _require_bound_git_review_artifact(receipt)
 
 
 def recover_linked_git_commit(
@@ -1381,6 +1446,148 @@ def _capture_again(
         commit_parents=receipt.commit_parents,
         expected_tree=receipt.expected_tree,
     )
+
+
+def _build_broker_git_review_artifact(
+    plan: LinkedWorktreeGitAdminPlan,
+    *,
+    agent_id: str,
+    branch_ref: str,
+    head: str,
+    head_tree: str,
+    index_tree: str,
+    index_sha256: str,
+    parent_oids: tuple[str, ...],
+    identities: tuple[BrokerPathIdentity, ...],
+) -> GitReviewArtifact:
+    """Render review evidence from approved leaves and their exact index blobs."""
+
+    root = plan.worktree_root
+    old_content: dict[str, GitReviewContent] = {}
+    new_content: dict[str, GitReviewContent] = {}
+    for identity in identities:
+        old_content[identity.path] = _git_review_index_content(
+            root,
+            mode=identity.index_mode,
+            oid=identity.index_oid,
+        )
+        if identity.state == "deleted":
+            new_content[identity.path] = GitReviewContent(
+                mode=None,
+                oid=None,
+                size=0,
+                prefix=b"",
+                complete=True,
+            )
+            continue
+        raw = _identity_bytes(root, identity)
+        new_content[identity.path] = GitReviewContent(
+            mode=identity.mode,
+            oid=identity.raw_blob_oid,
+            size=len(raw),
+            prefix=raw[:GIT_REVIEW_MAX_SOURCE_BYTES],
+            complete=len(raw) <= GIT_REVIEW_MAX_SOURCE_BYTES,
+        )
+    try:
+        return build_git_review_artifact(
+            agent_id=agent_id,
+            branch_ref=branch_ref,
+            head=head,
+            head_tree=head_tree,
+            index_tree=index_tree,
+            index_sha256=index_sha256,
+            parent_oids=parent_oids,
+            approved_paths=tuple(identity.path for identity in identities),
+            old_content=old_content,
+            new_content=new_content,
+        )
+    except GitReviewArtifactError as exc:
+        raise LinkedGitBrokerError(f"unable to build exact Git review: {exc}") from exc
+
+
+def _git_review_index_content(
+    root: Path,
+    *,
+    mode: str | None,
+    oid: str | None,
+) -> GitReviewContent:
+    if oid is None:
+        if mode is not None:
+            raise LinkedGitBrokerError("index review identity has a mode without an OID")
+        return GitReviewContent(
+            mode=None,
+            oid=None,
+            size=0,
+            prefix=b"",
+            complete=True,
+        )
+    if mode is None:
+        raise LinkedGitBrokerError("index review identity has an OID without a mode")
+    raw_size = _git_text(root, "cat-file", "-s", oid)
+    if not raw_size.isdigit():
+        raise LinkedGitBrokerError("approved prior index blob has an invalid size")
+    size = int(raw_size)
+    if size > GIT_REVIEW_MAX_SOURCE_BYTES:
+        return GitReviewContent(
+            mode=mode,
+            oid=oid,
+            size=size,
+            prefix=b"",
+            complete=False,
+        )
+    raw = _git_bytes(root, "cat-file", "blob", oid)
+    if len(raw) != size:
+        raise LinkedGitBrokerError("approved prior index blob size changed during review")
+    return GitReviewContent(
+        mode=mode,
+        oid=oid,
+        size=size,
+        prefix=raw,
+        complete=True,
+    )
+
+
+def _require_bound_git_review_artifact(
+    receipt: LinkedGitCommitReceipt,
+) -> GitReviewArtifact:
+    raw = receipt.git_review_artifact
+    if not isinstance(raw, Mapping):
+        raise LinkedGitBrokerError("broker receipt lacks exact Git review evidence")
+    try:
+        artifact = GitReviewArtifact.from_public_dict(raw)
+    except GitReviewArtifactError as exc:
+        raise LinkedGitBrokerError(f"broker Git review evidence is invalid: {exc}") from exc
+    expected = (
+        artifact.agent_id == receipt.agent_id
+        and artifact.branch_ref == receipt.branch_ref
+        and artifact.head == receipt.head
+        and artifact.head_tree == receipt.head_tree
+        and artifact.index_tree == receipt.index_tree
+        and artifact.index_sha256 == receipt.index_sha256
+        and artifact.parent_oids == _effective_commit_parents(receipt)
+        and artifact.approved_paths == receipt.approved_stage_paths
+    )
+    if not expected:
+        raise LinkedGitBrokerError(
+            "broker Git review evidence does not match the immutable receipt"
+        )
+    details = {item.path: item for item in artifact.paths}
+    for identity in receipt.path_identities:
+        detail = details.get(identity.path)
+        if detail is None:
+            raise LinkedGitBrokerError("broker Git review omits an approved leaf")
+        new_mode = None if identity.state == "deleted" else identity.mode
+        new_oid = None if identity.state == "deleted" else identity.raw_blob_oid
+        if (
+            detail.old_mode != identity.index_mode
+            or detail.old_oid != identity.index_oid
+            or detail.new_mode != new_mode
+            or detail.new_oid != new_oid
+        ):
+            raise LinkedGitBrokerError(
+                f"broker Git review object identity drifted: {identity.path}"
+            )
+    return artifact
 
 
 def _normalize_commit_parents(

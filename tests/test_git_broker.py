@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import fcntl
 import hashlib
@@ -246,6 +247,46 @@ def _git_index_fixture(
         body.extend(payload)
     body.extend(hashlib.new(object_format, body).digest())
     return bytes(body)
+
+
+def test_prepare_binds_exact_git_review_artifact_to_receipt(tmp_path: Path) -> None:
+    _main, _linked, _codex_home, receipt = _prepare(tmp_path)
+
+    artifact = receipt.git_review_artifact
+    assert isinstance(artifact, dict)
+    assert artifact["agent_id"] == receipt.agent_id
+    assert artifact["branch_ref"] == receipt.branch_ref
+    assert artifact["head"] == receipt.head
+    assert artifact["head_tree"] == receipt.head_tree
+    assert artifact["index_tree"] == receipt.index_tree
+    assert artifact["index_sha256"] == receipt.index_sha256
+    assert artifact["parent_oids"] == [receipt.head]
+    assert artifact["approved_paths"] == list(receipt.approved_stage_paths)
+    assert [item["path"] for item in artifact["paths"]] == list(
+        receipt.approved_stage_paths
+    )
+    assert all(item["unified_diff"] for item in artifact["paths"])
+
+
+def test_execute_rejects_git_review_digest_drift_before_journal_or_git_write(
+    tmp_path: Path,
+) -> None:
+    _main, linked, codex_home, receipt = _prepare(tmp_path)
+    artifact = dict(receipt.git_review_artifact or {})
+    artifact["sha256"] = "0" * 64
+    drifted = replace(receipt, git_review_artifact=artifact)
+    journal = tmp_path / "journal"
+
+    with pytest.raises(LinkedGitBrokerError, match="review evidence is invalid"):
+        execute_linked_git_commit(
+            drifted,
+            approved_roots=(tmp_path,),
+            journal_root=journal,
+            codex_home=codex_home,
+        )
+
+    assert _git(linked, "rev-parse", "HEAD") == receipt.head
+    assert not journal.exists()
 
 
 def _rehash_git_index(index: bytes, *, object_format: str = "sha1") -> bytes:
@@ -556,6 +597,11 @@ def test_broker_creates_exact_ordered_two_parent_commit(tmp_path: Path) -> None:
     )
 
     assert receipt.commit_parents == (first_parent, second_parent)
+    assert receipt.git_review_artifact is not None
+    assert receipt.git_review_artifact["parent_oids"] == [
+        first_parent,
+        second_parent,
+    ]
     assert result.commit_parents == (first_parent, second_parent)
     assert _git(linked, "show", "-s", "--format=%P", result.new_head) == (
         f"{first_parent} {second_parent}"

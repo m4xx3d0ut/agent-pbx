@@ -33,6 +33,7 @@ from agent_pbx.git_broker import (
     LinkedGitBrokerRestored,
     PendingLinkedGitCommit,
 )
+from agent_pbx.git_review import GitReviewContent, build_git_review_artifact
 from agent_pbx.operator_broker import OperatorBrokerPosture
 from agent_pbx.tui import (
     ActiveCodexSession,
@@ -51,6 +52,7 @@ from agent_pbx.tui import (
     LinkedGitBrokerTuiContext,
     LinkedGitCommitConfirmScreen,
     LinkedGitCommitPathsScreen,
+    LinkedGitReviewArtifactScreen,
     LinkedGitRecoveryConfirmScreen,
     ModelElevationScreen,
     ManagedProjectPickerScreen,
@@ -8292,6 +8294,34 @@ def linked_git_broker_test_receipt(
         index_mode="100644",
         index_oid="3" * 40,
     )
+    review_artifact = build_git_review_artifact(
+        agent_id=context.agent_id,
+        branch_ref=plan["branch_ref"],
+        head="a" * 40,
+        head_tree="4" * 40,
+        index_tree="4" * 40,
+        index_sha256="d" * 64,
+        parent_oids=("a" * 40,),
+        approved_paths=("approved.txt",),
+        old_content={
+            "approved.txt": GitReviewContent(
+                mode="100644",
+                oid="3" * 40,
+                size=4,
+                prefix=b"old\n",
+                complete=True,
+            )
+        },
+        new_content={
+            "approved.txt": GitReviewContent(
+                mode="100644",
+                oid="2" * 40,
+                size=4,
+                prefix=b"new\n",
+                complete=True,
+            )
+        },
+    )
     return SimpleNamespace(
         transaction_id=transaction_id,
         agent_id=context.agent_id,
@@ -8318,6 +8348,8 @@ def linked_git_broker_test_receipt(
         index_sha256="d" * 64,
         branch_ref_sha256="5" * 64,
         branch_reflog_sha256="6" * 64,
+        git_review_artifact=review_artifact.public_dict(),
+        commit_parents=None,
         commit_subject=(
             "Agent PBX approved commit for "
             f"{context.agent_id}"
@@ -8486,6 +8518,37 @@ async def test_tui_linked_git_broker_approval_drift_and_cancel_never_execute(
     assert execute_calls == []
 
 
+async def test_tui_linked_git_broker_review_digest_drift_opens_no_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    fork_id = "operator-7-fork-linked"
+    install_linked_git_broker_tui_qualification(tmp_path, monkeypatch)
+
+    def fake_prepare(**_kwargs: object):
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert context is not None
+        receipt = linked_git_broker_test_receipt(context)
+        receipt.git_review_artifact["sha256"] = "0" * 64
+        return receipt
+
+    monkeypatch.setattr("agent_pbx.tui.prepare_linked_git_commit", fake_prepare)
+    async with app.run_test() as pilot:
+        app.agents = {fork_id: linked_git_broker_test_agent(tmp_path)}
+        app.render_agents()
+        operators = app.query_one("#operators", DataTable)
+        operators.move_cursor(row=operators.get_row_index(fork_id), animate=False)
+        app.selected_agent_id = fork_id
+        context = app.linked_git_broker_tui_context(fork_id)
+        assert isinstance(context, LinkedGitBrokerTuiContext)
+
+        await app.review_linked_git_broker_commit(context, ("approved.txt",))
+        await pilot.pause()
+
+        assert not isinstance(app.screen, LinkedGitCommitConfirmScreen)
+
+
 async def test_tui_linked_git_broker_exact_confirmation_executes_once_from_fixed_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -8554,6 +8617,49 @@ async def test_tui_linked_git_broker_exact_confirmation_executes_once_from_fixed
     assert len(execute_calls) == 1
     assert execute_calls[0]["receipt"] is prepared[0]
     assert execute_calls[0]["journal_root"] == app.git_broker_state_root
+
+
+async def test_tui_linked_git_broker_shows_compact_review_and_full_read_only_diff(
+    tmp_path: Path,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    context = LinkedGitBrokerTuiContext(
+        agent_id="operator-7-fork-linked",
+        work_root=str(tmp_path),
+        approved_roots=(tmp_path,),
+        codex_home=tmp_path / "codex-home",
+        authority_sha256="7" * 64,
+        plan_public=linked_git_broker_test_plan(tmp_path).public_dict(),
+    )
+    receipt = linked_git_broker_test_receipt(context)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.push_screen(LinkedGitCommitConfirmScreen(context=context, receipt=receipt))
+        await pilot.pause()
+        confirm = app.screen
+        assert isinstance(confirm, LinkedGitCommitConfirmScreen)
+        compact = str(
+            confirm.query_one("#linked-git-broker-receipt", Static).renderable
+        )
+        artifact = receipt.git_review_artifact
+        assert artifact["sha256"] in compact
+        assert "Review summary: 1 paths, +1/-1" in compact
+        assert confirm.query_one("#linked-git-broker-confirmation", Input).has_focus
+
+        await pilot.click("#linked-git-broker-view-diff")
+        await pilot.pause()
+        viewer = app.screen
+        assert isinstance(viewer, LinkedGitReviewArtifactScreen)
+        review_text = viewer.query_one("#linked-git-review-diff", TextArea)
+        assert review_text.read_only is True
+        assert "--- a/approved.txt" in review_text.text
+        assert "+++ b/approved.txt" in review_text.text
+        assert "-old" in review_text.text
+        assert "+new" in review_text.text
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is confirm
 
 
 async def test_tui_linked_git_broker_long_receipt_keeps_confirmation_visible_and_focused(

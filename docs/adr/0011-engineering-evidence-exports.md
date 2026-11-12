@@ -27,6 +27,16 @@ binary summaries, line counts, truncation evidence, and a SHA-256 digest that is
 reverified before commit. Two-parent commits are represented explicitly and
 never collapsed to an ambient worktree diff.
 
+The broker obtains prior content only from each approved stage-0 index object;
+it never runs a whole-worktree status or diff. Source capture is capped at 1
+MiB per side for rendering, individual unified diffs are capped at 32 KiB, and
+the receipt's aggregate rendered diff is capped at 256 KiB. Larger inputs keep
+their exact mode, object ID, and byte count and carry explicit truncation
+evidence. Binary inputs expose metadata only. The compact confirmation binds
+the artifact digest and totals; a separate read-only viewer renders the bounded
+full artifact. Execution reparses the artifact and recaptures the complete
+receipt before the first repository object write.
+
 Trusted Workbench edit forks created after workspace-set activation still run
 the linked-worktree topology qualifier at launch. The qualifier's exact active
 per-worktree Git directory may be merged into the permission profile as an
@@ -49,7 +59,9 @@ Both features are default-disabled and additive. Existing Thread export remains
 available until the new service is enabled and verified; migration changes its
 implementation, not historical records. Existing broker receipts without an
 artifact remain valid only for legacy flows that do not require diff review.
-No database rewrite occurs in this checkpoint.
+They cannot start a new broker execution; only an already-journaled legacy
+transaction may enter its existing recovery flow. No database rewrite occurs
+in this checkpoint.
 
 ## Rollback
 

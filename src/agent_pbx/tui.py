@@ -91,7 +91,9 @@ from .git_broker import (
     load_pending_linked_git_commits,
     prepare_linked_git_commit,
     recover_linked_git_commit,
+    validate_linked_git_commit_review,
 )
+from .git_review import GitReviewArtifact, GitReviewArtifactError
 from .managed_runtime import default_managed_project_roots
 from .operator_authority import (
     operator_authority_launch_overrides,
@@ -4191,6 +4193,40 @@ class LinkedGitCommitPathsScreen(ModalScreen[None]):
             self.submit()
 
 
+class LinkedGitReviewArtifactScreen(ModalScreen[None]):
+    """Read-only, bounded full-diff view for one immutable broker receipt."""
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, *, artifact: GitReviewArtifact) -> None:
+        super().__init__()
+        self.artifact = artifact
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="linked-git-review-panel"):
+            yield Static(
+                "Exact approved Git diff\n"
+                f"Artifact: {self.artifact.sha256}\n"
+                f"Paths: {len(self.artifact.approved_paths)} | "
+                f"+{self.artifact.total_additions} "
+                f"-{self.artifact.total_deletions} | "
+                f"binary={self.artifact.binary_path_count} | "
+                f"truncated={self.artifact.truncated_path_count}",
+                id="linked-git-review-summary",
+            )
+            yield TextArea(
+                self.artifact.render_full_diff(),
+                read_only=True,
+                id="linked-git-review-diff",
+            )
+            yield Button("Close", id="linked-git-review-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "linked-git-review-close":
+            event.stop()
+            self.dismiss()
+
+
 class LinkedGitCommitConfirmScreen(ModalScreen[None]):
     """Root/TUI-local confirmation for one immutable broker receipt."""
 
@@ -4211,6 +4247,7 @@ class LinkedGitCommitConfirmScreen(ModalScreen[None]):
         return f"COMMIT {self.context.agent_id} {self.receipt.transaction_id[:12]}"
 
     def compose(self) -> ComposeResult:
+        artifact = self._review_artifact()
         approved = json.dumps(
             [
                 {
@@ -4226,6 +4263,16 @@ class LinkedGitCommitConfirmScreen(ModalScreen[None]):
             ],
             ensure_ascii=False,
             indent=2,
+        )
+        review_summary = (
+            "Git review artifact: "
+            f"{artifact.sha256}\n"
+            f"Review summary: {len(artifact.approved_paths)} paths, "
+            f"+{artifact.total_additions}/-{artifact.total_deletions}, "
+            f"binary={artifact.binary_path_count}, "
+            f"truncated={artifact.truncated_path_count}\n"
+            if artifact is not None
+            else "Git review artifact: legacy receipt unavailable\n"
         )
         with Vertical(id="linked-git-broker-confirm-panel"):
             yield Static(
@@ -4246,6 +4293,7 @@ class LinkedGitCommitConfirmScreen(ModalScreen[None]):
                     f"Index SHA-256: {self.receipt.index_sha256}\n"
                     f"Ref SHA-256: {self.receipt.branch_ref_sha256}\n"
                     f"Reflog SHA-256: {self.receipt.branch_reflog_sha256}\n"
+                    f"{review_summary}"
                     f"Approved raw-byte identities:\n{approved}",
                     id="linked-git-broker-receipt",
                 )
@@ -4264,12 +4312,26 @@ class LinkedGitCommitConfirmScreen(ModalScreen[None]):
                 id="linked-git-broker-confirmation",
             )
             with Horizontal(id="linked-git-broker-actions"):
+                if artifact is not None:
+                    yield Button(
+                        "View Exact Diff",
+                        id="linked-git-broker-view-diff",
+                    )
                 yield Button(
                     "Commit Exact Subset",
                     id="linked-git-broker-commit",
                     variant="error",
                 )
                 yield Button("Cancel", id="linked-git-broker-cancel")
+
+    def _review_artifact(self) -> GitReviewArtifact | None:
+        raw = getattr(self.receipt, "git_review_artifact", None)
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            return GitReviewArtifact.from_public_dict(raw)
+        except GitReviewArtifactError:
+            return None
 
     def on_mount(self) -> None:
         confirmation = self.query_one("#linked-git-broker-confirmation", Input)
@@ -4298,6 +4360,14 @@ class LinkedGitCommitConfirmScreen(ModalScreen[None]):
         if event.button.id == "linked-git-broker-cancel":
             event.stop()
             self.dismiss()
+            return
+        if event.button.id == "linked-git-broker-view-diff":
+            event.stop()
+            artifact = self._review_artifact()
+            if artifact is None:
+                self.notify("Exact Git review artifact is unavailable.", severity="error")
+                return
+            self.app.push_screen(LinkedGitReviewArtifactScreen(artifact=artifact))
             return
         if event.button.id == "linked-git-broker-commit":
             event.stop()
@@ -33292,6 +33362,14 @@ class AgentPBXTUI(App[None]):
                 severity="error",
             )
             return
+        try:
+            review_artifact = validate_linked_git_commit_review(receipt)
+        except LinkedGitBrokerError as exc:
+            self.notify(
+                f"Prepared broker Git review is invalid: {exc}",
+                severity="error",
+            )
+            return
         await self.maybe_record_ready_action_for_target(
             context.agent_id,
             step="broker_review",
@@ -33301,6 +33379,7 @@ class AgentPBXTUI(App[None]):
                 "head": receipt.head,
                 "commit_subject": receipt.commit_subject,
                 "approved_stage_paths": list(receipt.approved_stage_paths),
+                "git_review_sha256": review_artifact.sha256,
             },
         )
         self.push_screen(
