@@ -98,6 +98,7 @@ class OperatorBrokerService:
         root_operator_agent_id: str,
         target_fork_agent_id: str,
         handoff_id: str,
+        allow_completed_validation: bool = False,
     ) -> dict[str, Any]:
         posture = self.posture()
         if posture.mode == "disabled":
@@ -195,13 +196,21 @@ class OperatorBrokerService:
                 "OPERATOR_BROKER_CAMPAIGN_NOT_RUNNING",
                 "The exact broker handoff must belong to a running root campaign.",
             )
+        assignment_id = self._resolve_campaign_assignment(
+            campaign_id=campaign_id,
+            handoff=handoff,
+            target_fork=target_fork,
+        )
         transaction = self.store.get_operator_action_transaction(handoff_id=handoff_id)
         action = project_handoff_action(
             handoff,
             target_agent=fork,
             transaction=transaction,
         )
-        if action is None or action.get("state") not in OPERATOR_BROKER_REQUEST_EXECUTABLE_STATES:
+        executable_states = set(OPERATOR_BROKER_REQUEST_EXECUTABLE_STATES)
+        if allow_completed_validation:
+            executable_states.add("complete")
+        if action is None or action.get("state") not in executable_states:
             reason = str((action or {}).get("reason") or "")
             raise OperatorBrokerPolicyError(
                 "OPERATOR_BROKER_ACTION_NOT_EXECUTABLE",
@@ -270,6 +279,7 @@ class OperatorBrokerService:
                     "target_fork_agent_id": target_fork_agent_id,
                     "handoff_id": handoff_id,
                     "campaign_id": campaign_id,
+                    "assignment_id": assignment_id,
                     "workspace_set_digest": digest,
                     "scope_sha256": scope_sha256,
                     "expected_git_parent": expected_parent,
@@ -292,6 +302,7 @@ class OperatorBrokerService:
             "target_fork_agent_id": target_fork_agent_id,
             "handoff_id": handoff_id,
             "campaign_id": campaign_id,
+            "assignment_id": assignment_id,
             "workspace_set_digest": digest,
             "scope_sha256": scope_sha256,
             "authority_sha256": authority_sha256,
@@ -326,6 +337,8 @@ class OperatorBrokerService:
             root_operator_agent_id=root_operator_agent_id,
             target_fork_agent_id=target_fork_agent_id,
             handoff_id=handoff_id,
+            campaign_id=str(preflight["campaign_id"]),
+            assignment_id=str(preflight["assignment_id"]),
             workspace_set_digest=str(preflight["workspace_set_digest"]),
             scope_sha256=str(preflight["scope_sha256"]),
             expected_git_parent=str(preflight["expected_git_parent"]),
@@ -336,6 +349,19 @@ class OperatorBrokerService:
             ttl_seconds=posture.request_ttl_seconds,
             max_in_flight_per_root=posture.max_in_flight_per_root,
         )
+        if not created and str(request.get("status") or "") not in {
+            "pending",
+            "claimed",
+            "executing",
+        }:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_TERMINAL_REPLAY",
+                "A terminal broker request cannot be reopened or retried; create a "
+                "new exact handoff under a successor campaign when authorized.",
+            )
+        approval_report = self.store.project_operator_broker_approval(
+            str(request["request_id"])
+        )
         self.store.append_event(
             "operator_broker_request_created" if created else "operator_broker_request_reused",
             {
@@ -345,6 +371,7 @@ class OperatorBrokerService:
                 "handoff_id": handoff_id,
                 "scope_sha256": preflight["scope_sha256"],
                 "created": created,
+                "approval_report_id": approval_report["report_id"],
             },
             str(request["request_id"]),
         )
@@ -352,6 +379,239 @@ class OperatorBrokerService:
             "request": with_operator_broker_receipt_summary(request),
             "created": created,
             "preflight": preflight,
+            "approval_report": approval_report,
+        }
+
+    def validate(
+        self,
+        *,
+        root_operator_agent_id: str,
+        request_id: str,
+        action_transaction_id: str,
+    ) -> dict[str, Any]:
+        """Validate one exact terminal broker receipt and close its workflow."""
+
+        self._require_root(root_operator_agent_id)
+        request = self.store.get_operator_broker_request(request_id)
+        if request is None:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_REQUEST_NOT_FOUND", "The broker request was not found."
+            )
+        if request["root_operator_agent_id"] != root_operator_agent_id:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_REQUEST_ROOT_MISMATCH",
+                "The broker request belongs to another root Operator.",
+            )
+        if str(request.get("status") or "") != "succeeded":
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_RESULT_NOT_SUCCEEDED",
+                "Only a succeeded terminal broker result can be validated.",
+            )
+        if str(request.get("action_transaction_id") or "") != action_transaction_id:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_TRANSACTION_MISMATCH",
+                "The supplied action transaction does not match the broker result.",
+            )
+        if request.get("validated_at") is not None:
+            transaction = self.store.get_operator_action_transaction(
+                transaction_id=action_transaction_id
+            )
+            handoff = self.store.get_operator_handoff(str(request["handoff_id"]))
+            if (
+                transaction is None
+                or str(transaction.get("state") or "") != "complete"
+                or handoff is None
+                or not str(request.get("validation_sha256") or "")
+            ):
+                raise OperatorBrokerPolicyError(
+                    "OPERATOR_BROKER_VALIDATION_REPLAY_MISSING",
+                    "The validated broker workflow is no longer durably complete.",
+                )
+            if str(handoff.get("status") or "") not in {"complete", "completed"}:
+                handoff = self.store.update_operator_handoff(
+                    str(request["handoff_id"]),
+                    status="complete",
+                    complete=True,
+                    summary="Exact broker transaction validated by the root Operator",
+                    artifact_bundle=[
+                        {
+                            "kind": "operator_broker_validation",
+                            "request_id": request_id,
+                            "transaction_id": action_transaction_id,
+                            "validation_sha256": request["validation_sha256"],
+                        }
+                    ],
+                    metadata={
+                        "broker_request_id": request_id,
+                        "broker_validation_sha256": request["validation_sha256"],
+                        "broker_validated_by": root_operator_agent_id,
+                    },
+                )
+                if handoff is None:
+                    raise OperatorBrokerPolicyError(
+                        "OPERATOR_BROKER_HANDOFF_NOT_FOUND",
+                        "The validated broker handoff disappeared before completion.",
+                    )
+            return {
+                "request": with_operator_broker_receipt_summary(request),
+                "transaction": transaction,
+                "handoff": handoff,
+                "validation_sha256": str(request.get("validation_sha256") or ""),
+            }
+        preflight = self.preflight(
+            root_operator_agent_id=root_operator_agent_id,
+            target_fork_agent_id=str(request["target_fork_agent_id"]),
+            handoff_id=str(request["handoff_id"]),
+            allow_completed_validation=True,
+        )
+        for key in (
+            "campaign_id",
+            "assignment_id",
+            "workspace_set_digest",
+            "scope_sha256",
+            "expected_git_parent",
+            "expected_git_tree",
+            "commit_subject",
+        ):
+            if request.get(key) != preflight.get(key):
+                raise OperatorBrokerPolicyError(
+                    "OPERATOR_BROKER_VALIDATION_SCOPE_DRIFT",
+                    f"Broker validation identity changed: {key}.",
+                )
+        if list(request.get("expected_git_parents") or []) != list(
+            preflight.get("expected_git_parents") or []
+        ) or list(request.get("exact_paths") or []) != list(
+            preflight.get("exact_paths") or []
+        ):
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_VALIDATION_SCOPE_DRIFT",
+                "Broker validation parents or exact paths changed.",
+            )
+        result = request.get("result")
+        evidence = dict(result) if isinstance(result, Mapping) else {}
+        new_head = str(evidence.get("new_head") or "").strip().lower()
+        verified_head = str(evidence.get("verified_head") or "").strip().lower()
+        committed_paths = [str(item) for item in evidence.get("committed_paths") or []]
+        result_parents = [str(item) for item in evidence.get("commit_parents") or []]
+        required_booleans = {
+            "journal_done": True,
+            "same_fork_resumed": True,
+            "index_empty": True,
+        }
+        if (
+            not _HEX_OID.fullmatch(new_head)
+            or new_head != verified_head
+            or str(evidence.get("old_head") or "") != request["expected_git_parent"]
+            or result_parents != list(request["expected_git_parents"])
+            or committed_paths != list(request["exact_paths"])
+            or str(evidence.get("commit_subject") or "") != request["commit_subject"]
+            or any(evidence.get(key) is not value for key, value in required_booleans.items())
+        ):
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_TERMINAL_RECEIPT_INVALID",
+                "The terminal broker receipt does not exactly satisfy the approved request.",
+            )
+        transaction = self.store.get_operator_action_transaction(
+            transaction_id=action_transaction_id
+        )
+        if transaction is None or str(transaction.get("handoff_id") or "") != request["handoff_id"]:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_TRANSACTION_MISMATCH",
+                "The durable action transaction is missing or belongs to another handoff.",
+            )
+        validation_payload = {
+            "request_id": request_id,
+            "action_transaction_id": action_transaction_id,
+            "campaign_id": request["campaign_id"],
+            "assignment_id": request["assignment_id"],
+            "scope_sha256": request["scope_sha256"],
+            "old_head": evidence["old_head"],
+            "new_head": new_head,
+            "commit_parents": result_parents,
+            "commit_subject": request["commit_subject"],
+            "committed_paths": committed_paths,
+            "journal_done": True,
+            "same_fork_resumed": True,
+            "index_empty": True,
+        }
+        validation_sha256 = hashlib.sha256(
+            json.dumps(
+                validation_payload, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        transaction_state = str(transaction.get("state") or "")
+        if transaction_state == "resumed_ready_validation":
+            transaction = self.store.append_operator_action_receipt(
+                handoff_id=str(request["handoff_id"]),
+                action_class="exact_git_commit_broker",
+                target_agent_id=str(request["target_fork_agent_id"]),
+                scope_sha256=str(request["scope_sha256"]),
+                initial_state="resumed_ready_validation",
+                step="validate",
+                outcome="succeeded",
+                actor=root_operator_agent_id,
+                evidence={
+                    "request_id": request_id,
+                    "validation_sha256": validation_sha256,
+                    "verified_head": new_head,
+                },
+            )
+        elif transaction_state != "complete":
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_TRANSACTION_NOT_VALIDATABLE",
+                f"Broker action transaction is not validation-ready: {transaction_state}.",
+            )
+        else:
+            receipts = transaction.get("receipts") or []
+            last = receipts[-1] if receipts else {}
+            last_evidence = last.get("evidence") if isinstance(last, Mapping) else {}
+            if (
+                last.get("step") != "validate"
+                or last.get("outcome") != "succeeded"
+                or last.get("actor") != root_operator_agent_id
+                or not isinstance(last_evidence, Mapping)
+                or last_evidence.get("request_id") != request_id
+                or last_evidence.get("validation_sha256") != validation_sha256
+            ):
+                raise OperatorBrokerPolicyError(
+                    "OPERATOR_BROKER_VALIDATION_REPLAY_MISMATCH",
+                    "The completed transaction lacks this exact root validation receipt.",
+                )
+        validated = self.store.validate_operator_broker_request(
+            request_id=request_id,
+            root_operator_agent_id=root_operator_agent_id,
+            action_transaction_id=action_transaction_id,
+            validation_sha256=validation_sha256,
+        )
+        updated_handoff = self.store.update_operator_handoff(
+            str(request["handoff_id"]),
+            status="complete",
+            complete=True,
+            summary="Exact broker transaction validated by the root Operator",
+            artifact_bundle=[
+                {
+                    "kind": "operator_broker_validation",
+                    "request_id": request_id,
+                    "transaction_id": action_transaction_id,
+                    "validation_sha256": validation_sha256,
+                }
+            ],
+            metadata={
+                "broker_request_id": request_id,
+                "broker_validation_sha256": validation_sha256,
+                "broker_validated_by": root_operator_agent_id,
+            },
+        )
+        if updated_handoff is None:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_HANDOFF_NOT_FOUND",
+                "The validated broker handoff disappeared before completion.",
+            )
+        return {
+            "request": with_operator_broker_receipt_summary(validated),
+            "transaction": transaction,
+            "handoff": updated_handoff,
+            "validation_sha256": validation_sha256,
         }
 
     def get(
@@ -446,6 +706,39 @@ class OperatorBrokerService:
                 "The target must be an edit fork owned by the requesting root Operator.",
             )
         return fork
+
+    def _resolve_campaign_assignment(
+        self,
+        *,
+        campaign_id: str,
+        handoff: Mapping[str, Any],
+        target_fork: Mapping[str, Any],
+    ) -> str:
+        metadata = self._metadata(handoff)
+        requested = str(metadata.get("assignment_id") or "").strip()
+        assignments = self.store.list_operator_campaign_assignments(
+            campaign_id=campaign_id,
+            limit=500,
+        )
+        source_caller = str(target_fork.get("source_caller_agent_id") or "").strip()
+        matches = [
+            assignment
+            for assignment in assignments
+            if str(assignment.get("target_agent_id") or "") == source_caller
+            and (not requested or assignment.get("assignment_id") == requested)
+        ]
+        if len(matches) != 1:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_ASSIGNMENT_AMBIGUOUS",
+                "The exact broker handoff must resolve to one campaign assignment.",
+            )
+        assignment = matches[0]
+        if assignment.get("completed_at") is not None:
+            raise OperatorBrokerPolicyError(
+                "OPERATOR_BROKER_ASSIGNMENT_TERMINAL",
+                "A terminal campaign assignment cannot create a new broker request.",
+            )
+        return str(assignment["assignment_id"])
 
     @staticmethod
     def _metadata(agent: Mapping[str, Any]) -> dict[str, Any]:

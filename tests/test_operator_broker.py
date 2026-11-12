@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import pytest
+from fastapi.testclient import TestClient
 
+from agent_pbx.api import create_app
+from agent_pbx.config import ServerConfig
 from agent_pbx.operator import OperatorService
 from agent_pbx.operator_broker import (
     OperatorBrokerPolicyError,
@@ -13,7 +16,11 @@ from agent_pbx.operator_broker import (
     operator_broker_receipt_summary,
     operator_broker_posture,
 )
-from agent_pbx.schemas import AgentRegisterRequest, OperatorBrokerCheckpointResponse
+from agent_pbx.schemas import (
+    AgentRegisterRequest,
+    OperatorBrokerCheckpointResponse,
+    ReportCreateRequest,
+)
 from agent_pbx.store import SCHEMA_VERSION, Store
 
 
@@ -253,6 +260,8 @@ def _create_request(store: Store, handoff_id: str, digest: str):
         root_operator_agent_id="operator-0",
         target_fork_agent_id="operator-7-fork",
         handoff_id=handoff_id,
+        campaign_id="campaign-1",
+        assignment_id="assignment-1",
         workspace_set_digest=digest,
         scope_sha256="b" * 64,
         expected_git_parent="c" * 40,
@@ -282,6 +291,8 @@ def test_store_round_trips_ordered_broker_parents_and_tree(tmp_path) -> None:
         root_operator_agent_id="operator-0",
         target_fork_agent_id="operator-7-fork",
         handoff_id=handoff_id,
+        campaign_id="campaign-1",
+        assignment_id="assignment-1",
         workspace_set_digest=digest,
         scope_sha256="b" * 64,
         expected_git_parent="c" * 40,
@@ -614,8 +625,289 @@ def test_broker_service_root_mode_creates_durable_request(tmp_path) -> None:
     assert result["request"]["expected_git_parents"] == ["b" * 40, "c" * 40]
     assert result["request"]["expected_git_tree"] == "d" * 40
     assert "receipt_summary" in result["request"]
+    assert result["approval_report"]["status"] == "awaiting_broker_approval"
+    assert result["approval_report"]["needs_input"] is True
+    assignment = store.get_operator_campaign_assignment(
+        result["request"]["assignment_id"]
+    )
+    assert assignment is not None
+    assert assignment["state"] == "awaiting_broker_approval"
+    assert assignment["last_report_id"] == result["approval_report"]["report_id"]
     events = store.list_events(limit=20)
     assert any(event["type"] == "operator_broker_request_created" for event in events)
+
+
+def test_broker_request_and_needs_input_projection_are_restart_idempotent(
+    tmp_path,
+) -> None:
+    store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+    first = service.request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+
+    restarted = OperatorBrokerService(
+        Store(store.path),
+        environ={"AGENT_PBX_OPERATOR_BROKER_MODE": "root_operator"},
+    )
+    second = restarted.request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+
+    assert first["created"] is True
+    assert second["created"] is False
+    assert second["request"]["request_id"] == first["request"]["request_id"]
+    assert second["approval_report"]["report_id"] == first["approval_report"]["report_id"]
+    reports = [
+        report
+        for report in restarted.store.list_reports("operator-0", limit=50)
+        if report["metadata"].get("source") == "operator_broker"
+    ]
+    assert len(reports) == 1
+
+
+def test_terminal_caller_report_is_preserved_but_deferred_by_open_broker(
+    tmp_path,
+) -> None:
+    store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+    requested = service.request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+    request = requested["request"]
+    report = store.create_report(
+        "caller-7",
+        ReportCreateRequest(
+            project="demo",
+            status="complete",
+            summary="Work is locally complete",
+            detail="The root broker validation is deliberately still pending.",
+            metadata={
+                "campaign_id": request["campaign_id"],
+                "assignment_id": request["assignment_id"],
+            },
+        ),
+    )
+
+    assignment = store.get_operator_campaign_assignment(request["assignment_id"])
+    projection = store.reconcile_operator_terminal_report(report["report_id"])
+    assert assignment is not None
+    assert assignment["state"] == "awaiting_broker_approval"
+    assert assignment["completed_at"] is None
+    assert projection["status"] == "deferred_workflow"
+    assert any(item["kind"] == "broker_request" for item in projection["blockers"])
+
+
+def test_store_deterministic_broker_request_does_not_reopen_terminal_result(
+    tmp_path,
+) -> None:
+    store, handoff_id, digest = _broker_store(tmp_path)
+    first, created = _create_request(store, handoff_id, digest)
+    canceled = store.cancel_operator_broker_request(
+        request_id=first["request_id"],
+        root_operator_agent_id="operator-0",
+        reason="root canceled before claim",
+    )
+    replayed, replay_created = _create_request(store, handoff_id, digest)
+
+    assert created is True
+    assert canceled["status"] == "canceled"
+    assert replay_created is False
+    assert replayed["request_id"] == first["request_id"]
+    assert replayed["status"] == "canceled"
+
+
+def test_broker_service_rejects_terminal_request_replay(tmp_path) -> None:
+    store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+    requested = service.request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+    store.cancel_operator_broker_request(
+        request_id=requested["request"]["request_id"],
+        root_operator_agent_id="operator-0",
+        reason="cancel before claim",
+    )
+
+    with pytest.raises(OperatorBrokerPolicyError, match="cannot be reopened"):
+        service.request(
+            root_operator_agent_id="operator-0",
+            target_fork_agent_id="operator-7-fork",
+            handoff_id=handoff["handoff_id"],
+        )
+
+
+def test_root_validates_exact_terminal_broker_receipt_before_completion(
+    tmp_path,
+) -> None:
+    store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+    requested = service.request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+    request = requested["request"]
+    transaction = None
+    for step in ("stop", "broker_review", "broker_commit", "resume"):
+        transaction = store.append_operator_action_receipt(
+            handoff_id=handoff["handoff_id"],
+            action_class="exact_git_commit_broker",
+            target_agent_id="operator-7-fork",
+            scope_sha256=request["scope_sha256"],
+            initial_state="ready_stop",
+            step=step,
+            outcome="succeeded",
+            actor="operator-0",
+            evidence={"request_id": request["request_id"]},
+        )
+    assert transaction is not None
+    transaction_id = transaction["transaction_id"]
+    store.claim_operator_broker_request(
+        request_id=request["request_id"], executor_id="tui-a"
+    )
+    store.transition_operator_broker_request(
+        request_id=request["request_id"],
+        executor_id="tui-a",
+        status="executing",
+        expected_statuses=("claimed",),
+        action_transaction_id=transaction_id,
+        result={"phase": "validation"},
+    )
+    store.transition_operator_broker_request(
+        request_id=request["request_id"],
+        executor_id="tui-a",
+        status="succeeded",
+        expected_statuses=("executing",),
+        action_transaction_id=transaction_id,
+        result={
+            "old_head": request["expected_git_parent"],
+            "new_head": "e" * 40,
+            "verified_head": "e" * 40,
+            "commit_parents": request["expected_git_parents"],
+            "commit_subject": request["commit_subject"],
+            "committed_paths": request["exact_paths"],
+            "journal_done": True,
+            "same_fork_resumed": True,
+            "index_empty": True,
+            "validation_pending": True,
+        },
+    )
+    assignment_id = request["assignment_id"]
+    campaign_id = request["campaign_id"]
+    operator = OperatorService(store)
+    with pytest.raises(ValueError, match="broker_request"):
+        operator.report_assignment(
+            operator_agent_id="operator-0",
+            campaign_id=campaign_id,
+            assignment_id=assignment_id,
+            state="complete",
+            summary="Too early",
+            detail="Root validation is still pending.",
+        )
+
+    validated = service.validate(
+        root_operator_agent_id="operator-0",
+        request_id=request["request_id"],
+        action_transaction_id=transaction_id,
+    )
+    replayed = service.validate(
+        root_operator_agent_id="operator-0",
+        request_id=request["request_id"],
+        action_transaction_id=transaction_id,
+    )
+
+    assert validated["request"]["validated_at"] is not None
+    assert validated["request"]["result"]["validation_pending"] is False
+    assert validated["transaction"]["state"] == "complete"
+    assert replayed["validation_sha256"] == validated["validation_sha256"]
+    delivery = validated["handoff"]["completion_delivery"]
+    with pytest.raises(ValueError, match="completion_receipt"):
+        operator.report_assignment(
+            operator_agent_id="operator-0",
+            campaign_id=campaign_id,
+            assignment_id=assignment_id,
+            state="complete",
+            summary="Receipt unreviewed",
+            detail="The source receipt still awaits acknowledgment.",
+        )
+    acknowledged = store.acknowledge_operator_handoff_completion_delivery(
+        delivery["completion_delivery_id"],
+        acknowledged_by=delivery["recipient_agent_id"],
+    )
+    assert acknowledged is not None
+    operator.report_assignment(
+        operator_agent_id="operator-0",
+        campaign_id=campaign_id,
+        assignment_id=assignment_id,
+        state="complete",
+        summary="Validated",
+        detail="Exact terminal receipt and handoff completion were reviewed.",
+    )
+    campaign = operator.finish_campaign(
+        operator_agent_id="operator-0",
+        campaign_id=campaign_id,
+        status="complete",
+        summary="Complete",
+        detail="All durable workflow records are closed.",
+    )
+    assert campaign["status"] == "complete"
+
+
+def test_root_validation_rejects_foreign_transaction_and_receipt_drift(
+    tmp_path,
+) -> None:
+    _store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+    requested = service.request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+
+    with pytest.raises(OperatorBrokerPolicyError, match="succeeded terminal"):
+        service.validate(
+            root_operator_agent_id="operator-0",
+            request_id=requested["request"]["request_id"],
+            action_transaction_id="foreign-transaction",
+        )
+
+
+def test_broker_validation_api_is_authenticated_and_fail_closed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+    requested = service.request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+    monkeypatch.setenv("AGENT_PBX_OPERATOR_BROKER_MODE", "root_operator")
+    app = create_app(ServerConfig(db_path=store.path, token="secret"))
+    client = TestClient(app)
+    route = f"/v1/operator/broker-checkpoints/{requested['request']['request_id']}/validate"
+
+    assert client.post(
+        route,
+        json={
+            "root_operator_agent_id": "operator-0",
+            "action_transaction_id": "foreign-transaction",
+        },
+    ).status_code == 401
+    rejected = client.post(
+        route,
+        headers={"Authorization": "Bearer secret"},
+        json={
+            "root_operator_agent_id": "operator-0",
+            "action_transaction_id": "foreign-transaction",
+        },
+    )
+    assert rejected.status_code == 400
+    assert "succeeded terminal" in rejected.json()["detail"]["message"]
 
 
 def test_broker_service_guided_mode_refuses_root_automation(tmp_path) -> None:

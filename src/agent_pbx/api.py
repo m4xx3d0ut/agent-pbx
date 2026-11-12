@@ -249,6 +249,7 @@ from .schemas import (
     OperatorCampaignListResponse,
     OperatorCampaignResponse,
     OperatorCampaignStartRequest,
+    OperatorCampaignSuccessorRequest,
     OperatorForkEdgeCreateRequest,
     OperatorForkEdgeResponse,
     OperatorForkEnsureRequest,
@@ -271,6 +272,7 @@ from .schemas import (
     OperatorBrokerCheckpointRequest,
     OperatorBrokerCheckpointResponse,
     OperatorBrokerCheckpointTransitionRequest,
+    OperatorBrokerCheckpointValidateRequest,
     OperatorHandoffApproveRequest,
     OperatorHandoffCancelRequest,
     OperatorHandoffCancelResponse,
@@ -6449,6 +6451,22 @@ def create_app(
             reason=payload.reason,
         )
 
+    @app.post(
+        "/v1/operator/broker-checkpoints/{request_id}/validate",
+        dependencies=[Depends(require_token)],
+    )
+    async def validate_operator_broker_checkpoint(
+        request_id: str,
+        payload: OperatorBrokerCheckpointValidateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_broker_service.validate,
+            root_operator_agent_id=payload.root_operator_agent_id,
+            request_id=request_id,
+            action_transaction_id=payload.action_transaction_id,
+        )
+
     @app.get(
         "/v1/operator/handoffs/{handoff_id}/execution-preflight",
         response_model=OperatorHandoffExecutionPreflightResponse,
@@ -6852,6 +6870,21 @@ def create_app(
             status=payload.status,
             summary=payload.summary,
             detail=payload.detail,
+        )
+
+    @app.post(
+        "/v1/operator/campaigns/{campaign_id}/successor",
+        dependencies=[Depends(require_token)],
+    )
+    async def create_operator_campaign_successor(
+        campaign_id: str,
+        payload: OperatorCampaignSuccessorRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.create_campaign_successor,
+            operator_agent_id=payload.operator_agent_id,
+            predecessor_campaign_id=campaign_id,
         )
 
     @app.post(

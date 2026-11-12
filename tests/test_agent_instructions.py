@@ -86,6 +86,8 @@ def test_agent_instructions_include_pbx_loop() -> None:
     assert "must not promote durable knowledge directly" in instructions
     assert "operator-mediated path" in instructions
     assert "pbx_operator_request_broker_checkpoint" in instructions
+    assert "pbx_operator_validate_broker_checkpoint" in instructions
+    assert "pbx_operator_create_campaign_successor" in instructions
     assert "Edit forks and review forks must not" in instructions
 
 

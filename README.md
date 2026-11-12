@@ -640,7 +640,16 @@ export AGENT_PBX_OPERATOR_BROKER_MAX_IN_FLIGHT="1"
 `root_operator` is intentionally a local administrator choice; it is not the
 committed default. Requests survive TUI replacement, use a bounded executor
 lease, recover commit evidence from durable action receipts, and fail closed on
-scope, workspace, session, pane, Git parent, or path drift.
+scope, workspace, session, pane, Git parent, or path drift. In root-supervised
+mode, F8 first persists a deterministic request and an
+`awaiting_broker_approval` needs-input report. A succeeded executor result is
+not campaign completion: the root must validate the exact terminal action
+transaction with `pbx_operator_validate_broker_checkpoint`, then acknowledge
+the resulting handoff completion receipt. Assignment and campaign completion
+fail closed while any request, transaction, actionable handoff, or completion
+receipt is outstanding. If recovery is needed after terminal history exists,
+`pbx_operator_create_campaign_successor` creates one idempotent successor
+without reopening or rewriting the predecessor.
 
 The committed default remains manual approval. On a trusted local workstation,
 the approval center's `Trust & approve` action can grant a one-hour,

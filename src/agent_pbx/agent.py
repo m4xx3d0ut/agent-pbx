@@ -182,7 +182,13 @@ handoff. The request carries exact paths, expected parent, commit subject,
 campaign, workspace-set, and authority digests. A local Agent PBX TUI executes
 the durable stop, exact commit, and same-session resume. Read the durable result
 with `pbx_operator_get_broker_checkpoint`, inspect its receipt summary, and
-perform the remaining root validation. Edit forks and review forks must not
+validate the exact terminal action transaction with
+`pbx_operator_validate_broker_checkpoint` before assignment or campaign
+completion. The durable request and its `awaiting_broker_approval` needs-input
+report are restart-idempotent. Outstanding handoffs, transactions, requests,
+or unacknowledged completion receipts block completion. Use
+`pbx_operator_create_campaign_successor` for new recovery work after a campaign
+became terminal; terminal history is never reopened. Edit forks and review forks must not
 request, cancel, or impersonate this root workflow.
 
 Operator forks have roles. The default/edit fork may coordinate caller-directed

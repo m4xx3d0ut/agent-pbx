@@ -1063,6 +1063,19 @@ def build_mcp_server(
         )
 
     @mcp.tool()
+    def pbx_operator_validate_broker_checkpoint(
+        operator_agent_id: str,
+        request_id: str,
+        action_transaction_id: str,
+    ) -> dict[str, Any]:
+        """Validate one exact terminal broker receipt before campaign completion."""
+        return operator_broker_service.validate(
+            root_operator_agent_id=operator_agent_id,
+            request_id=request_id,
+            action_transaction_id=action_transaction_id,
+        )
+
+    @mcp.tool()
     def pbx_operator_cancel_broker_checkpoint(
         operator_agent_id: str,
         request_id: str,
@@ -1445,6 +1458,17 @@ def build_mcp_server(
             status=status,
             summary=summary,
             detail=detail,
+        )
+
+    @mcp.tool()
+    def pbx_operator_create_campaign_successor(
+        operator_agent_id: str,
+        predecessor_campaign_id: str,
+    ) -> dict[str, Any]:
+        """Create one recovery successor without changing terminal history."""
+        return operator_service.create_campaign_successor(
+            operator_agent_id=operator_agent_id,
+            predecessor_campaign_id=predecessor_campaign_id,
         )
 
     @mcp.tool()

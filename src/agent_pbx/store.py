@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 44
+SCHEMA_VERSION = 45
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -815,6 +815,7 @@ class Store:
 
                 CREATE TABLE IF NOT EXISTS operator_campaigns (
                     campaign_id TEXT PRIMARY KEY,
+                    predecessor_campaign_id TEXT,
                     operator_agent_id TEXT NOT NULL,
                     title TEXT NOT NULL,
                     objective TEXT NOT NULL,
@@ -1150,6 +1151,8 @@ class Store:
                     root_operator_agent_id TEXT NOT NULL,
                     target_fork_agent_id TEXT NOT NULL,
                     handoff_id TEXT NOT NULL,
+                    campaign_id TEXT,
+                    assignment_id TEXT,
                     action_transaction_id TEXT,
                     workspace_set_digest TEXT NOT NULL,
                     scope_sha256 TEXT NOT NULL,
@@ -1169,6 +1172,10 @@ class Store:
                     expires_at REAL NOT NULL,
                     completed_at REAL,
                     canceled_at REAL,
+                    approval_report_id TEXT,
+                    validated_by_operator_agent_id TEXT,
+                    validated_at REAL,
+                    validation_sha256 TEXT,
                     FOREIGN KEY(root_operator_agent_id) REFERENCES agents(agent_id),
                     FOREIGN KEY(target_fork_agent_id) REFERENCES agents(agent_id),
                     FOREIGN KEY(handoff_id) REFERENCES operator_handoffs(handoff_id)
@@ -1911,6 +1918,16 @@ class Store:
             self._ensure_column(conn, "operator_forks", "source_cwd", "TEXT")
             self._ensure_column(conn, "operator_forks", "work_root", "TEXT")
             self._ensure_column(
+                conn, "operator_campaigns", "predecessor_campaign_id", "TEXT"
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_campaign_successor
+                ON operator_campaigns(predecessor_campaign_id)
+                WHERE predecessor_campaign_id IS NOT NULL
+                """
+            )
+            self._ensure_column(
                 conn,
                 "operator_handoffs",
                 "execution_scope_json",
@@ -1921,6 +1938,21 @@ class Store:
                 "operator_broker_requests",
                 "expected_git_parents_json",
                 "TEXT NOT NULL DEFAULT '[]'",
+            )
+            self._ensure_column(conn, "operator_broker_requests", "campaign_id", "TEXT")
+            self._ensure_column(conn, "operator_broker_requests", "assignment_id", "TEXT")
+            self._ensure_column(
+                conn, "operator_broker_requests", "approval_report_id", "TEXT"
+            )
+            self._ensure_column(
+                conn,
+                "operator_broker_requests",
+                "validated_by_operator_agent_id",
+                "TEXT",
+            )
+            self._ensure_column(conn, "operator_broker_requests", "validated_at", "REAL")
+            self._ensure_column(
+                conn, "operator_broker_requests", "validation_sha256", "TEXT"
             )
             self._ensure_column(
                 conn,
@@ -4952,6 +4984,21 @@ class Store:
                     "assignment_id": assignment_id,
                 }
 
+            blockers = self._operator_campaign_completion_blockers(
+                conn,
+                campaign_id,
+                assignment_id=assignment_id,
+            )
+            if blockers:
+                return {
+                    "status": "deferred_workflow",
+                    "reason": "durable operator workflow validation remains outstanding",
+                    "report_id": report_id,
+                    "campaign_id": campaign_id,
+                    "assignment_id": assignment_id,
+                    "blockers": blockers,
+                }
+
             current = now_ts()
             completed_at = float(report["created_at"])
             conn.execute(
@@ -4983,6 +5030,11 @@ class Store:
                 is not None
                 for row in rows
             )
+            if campaign_closed and self._operator_campaign_completion_blockers(
+                conn,
+                campaign_id,
+            ):
+                campaign_closed = False
             campaign_state: str | None = None
             if campaign_closed:
                 campaign_state = _operator_campaign_projection_state(
@@ -6383,6 +6435,120 @@ class Store:
             raise RuntimeError("operator campaign insert failed")
         return campaign
 
+    def create_operator_campaign_successor(
+        self,
+        *,
+        operator_agent_id: str,
+        predecessor_campaign_id: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Create or return one deterministic successor without rewriting history."""
+
+        successor_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"agent-pbx:operator-campaign-successor:{predecessor_campaign_id}",
+            )
+        )
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            predecessor = conn.execute(
+                "SELECT * FROM operator_campaigns WHERE campaign_id = ?",
+                (predecessor_campaign_id,),
+            ).fetchone()
+            if predecessor is None:
+                raise KeyError("predecessor campaign not found")
+            if str(predecessor["operator_agent_id"]) != operator_agent_id:
+                raise PermissionError("predecessor campaign belongs to another Operator")
+            if predecessor["completed_at"] is None:
+                raise ValueError("only a terminal campaign can have a recovery successor")
+            existing = conn.execute(
+                "SELECT campaign_id FROM operator_campaigns WHERE predecessor_campaign_id = ?",
+                (predecessor_campaign_id,),
+            ).fetchone()
+            if existing is not None:
+                conn.commit()
+                campaign = self.get_operator_campaign(str(existing["campaign_id"]))
+                assert campaign is not None
+                return campaign, False
+            conn.execute(
+                """
+                INSERT INTO operator_campaigns(
+                    campaign_id, predecessor_campaign_id, operator_agent_id,
+                    title, objective, criteria_json, status, summary,
+                    created_at, updated_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'running', NULL, ?, ?, NULL)
+                """,
+                (
+                    successor_id,
+                    predecessor_campaign_id,
+                    operator_agent_id,
+                    f"Successor: {predecessor['title']}",
+                    "Immutable recovery successor for campaign "
+                    f"{predecessor_campaign_id}: {predecessor['objective']}",
+                    predecessor["criteria_json"],
+                    current,
+                    current,
+                ),
+            )
+            assignments = conn.execute(
+                """
+                SELECT * FROM operator_campaign_assignments
+                WHERE campaign_id = ? ORDER BY assignment_id
+                """,
+                (predecessor_campaign_id,),
+            ).fetchall()
+            for assignment in assignments:
+                assignment_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        "agent-pbx:operator-campaign-successor-assignment:"
+                        f"{successor_id}:{assignment['assignment_id']}",
+                    )
+                )
+                conn.execute(
+                    """
+                    INSERT INTO operator_campaign_assignments(
+                        assignment_id, campaign_id, target_agent_id,
+                        operator_fork_id, fork_track_id, title, prompt,
+                        criteria_json, state, last_report_id, last_command_id,
+                        created_at, updated_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
+                    """,
+                    (
+                        assignment_id,
+                        successor_id,
+                        assignment["target_agent_id"],
+                        assignment["operator_fork_id"],
+                        assignment["fork_track_id"],
+                        assignment["title"],
+                        assignment["prompt"],
+                        assignment["criteria_json"],
+                        current,
+                        current,
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO operator_campaign_events(
+                    campaign_id, assignment_id, operator_agent_id,
+                    target_agent_id, event_type, summary, detail_json,
+                    report_id, command_id, created_at
+                ) VALUES (?, NULL, ?, NULL, 'campaign_successor_created', ?, ?, NULL, NULL, ?)
+                """,
+                (
+                    successor_id,
+                    operator_agent_id,
+                    "Created immutable historical-campaign recovery successor",
+                    json.dumps({"predecessor_campaign_id": predecessor_campaign_id}),
+                    current,
+                ),
+            )
+        campaign = self.get_operator_campaign(successor_id)
+        if campaign is None:
+            raise RuntimeError("operator campaign successor insert failed")
+        return campaign, True
+
     def get_operator_campaign(self, campaign_id: str) -> dict[str, Any] | None:
         campaigns = self.list_operator_campaigns(campaign_id=campaign_id, limit=1)
         return campaigns[0] if campaigns else None
@@ -6424,7 +6590,7 @@ class Store:
             params.append(status)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         query = f"""
-            SELECT campaign_id, operator_agent_id, title, objective,
+            SELECT campaign_id, predecessor_campaign_id, operator_agent_id, title, objective,
                    criteria_json, status, summary, created_at, updated_at,
                    completed_at
             FROM operator_campaigns
@@ -10648,6 +10814,8 @@ class Store:
         root_operator_agent_id: str,
         target_fork_agent_id: str,
         handoff_id: str,
+        campaign_id: str,
+        assignment_id: str,
         workspace_set_digest: str,
         scope_sha256: str,
         expected_git_parent: str,
@@ -10686,31 +10854,50 @@ class Store:
             raise ValueError("expected Git tree must be one complete object ID")
         if len(parent_values) > 1 and tree_value is None:
             raise ValueError("multi-parent broker requests require an expected Git tree")
+        if not campaign_id or not assignment_id:
+            raise ValueError("broker request campaign and assignment are required")
+        request_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "agent-pbx:operator-broker-request:"
+                + "\0".join(
+                    (
+                        root_operator_agent_id,
+                        target_fork_agent_id,
+                        handoff_id,
+                        campaign_id,
+                        assignment_id,
+                        scope_sha256,
+                    )
+                ),
+            )
+        )
         open_statuses = tuple(sorted(OPERATOR_BROKER_REQUEST_OPEN_STATUSES))
         placeholders = ",".join("?" for _ in open_statuses)
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._expire_operator_broker_requests(conn, current=current)
             existing = conn.execute(
-                f"""
-                SELECT * FROM operator_broker_requests
-                WHERE root_operator_agent_id = ?
-                  AND target_fork_agent_id = ?
-                  AND handoff_id = ?
-                  AND scope_sha256 = ?
-                  AND status IN ({placeholders})
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (
-                    root_operator_agent_id,
-                    target_fork_agent_id,
-                    handoff_id,
-                    scope_sha256,
-                    *open_statuses,
-                ),
+                "SELECT * FROM operator_broker_requests WHERE request_id = ?",
+                (request_id,),
             ).fetchone()
             if existing is not None:
+                immutable = {
+                    "root_operator_agent_id": root_operator_agent_id,
+                    "target_fork_agent_id": target_fork_agent_id,
+                    "handoff_id": handoff_id,
+                    "campaign_id": campaign_id,
+                    "assignment_id": assignment_id,
+                    "workspace_set_digest": workspace_set_digest,
+                    "scope_sha256": scope_sha256,
+                    "expected_git_parent": expected_git_parent,
+                    "expected_git_parents_json": expected_git_parents_json,
+                    "expected_git_tree": tree_value,
+                    "commit_subject": commit_subject,
+                    "exact_paths_json": exact_paths_json,
+                }
+                if any(existing[key] != value for key, value in immutable.items()):
+                    raise ValueError("deterministic broker request identity drifted")
                 return self._operator_broker_request_from_row(existing), False
             count_row = conn.execute(
                 f"""
@@ -10726,23 +10913,25 @@ class Store:
                     "root Operator already has the configured maximum number "
                     "of in-flight broker requests"
                 )
-            request_id = str(uuid.uuid4())
             conn.execute(
                 """
                 INSERT INTO operator_broker_requests(
                     request_id, root_operator_agent_id, target_fork_agent_id,
-                    handoff_id, workspace_set_digest, scope_sha256,
+                    handoff_id, campaign_id, assignment_id,
+                    workspace_set_digest, scope_sha256,
                     expected_git_parent, commit_subject, exact_paths_json,
                     expected_git_parents_json,
                     expected_git_tree,
                     status, result_json, created_at, updated_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '{}', ?, ?, ?)
                 """,
                 (
                     request_id,
                     root_operator_agent_id,
                     target_fork_agent_id,
                     handoff_id,
+                    campaign_id,
+                    assignment_id,
                     workspace_set_digest,
                     scope_sha256,
                     expected_git_parent,
@@ -10759,6 +10948,143 @@ class Store:
         if result is None:
             raise RuntimeError("operator broker request insert failed")
         return result, True
+
+    def project_operator_broker_approval(self, request_id: str) -> dict[str, Any]:
+        """Persist one idempotent needs-input projection after the request exists."""
+
+        current = now_ts()
+        report_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"agent-pbx:operator-broker-approval-report:{request_id}",
+            )
+        )
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT r.*, a.state AS assignment_state,
+                       a.completed_at AS assignment_completed_at,
+                       c.status AS campaign_status, c.completed_at AS campaign_completed_at,
+                       g.project AS root_project
+                FROM operator_broker_requests AS r
+                JOIN operator_campaign_assignments AS a
+                  ON a.assignment_id = r.assignment_id
+                 AND a.campaign_id = r.campaign_id
+                JOIN operator_campaigns AS c ON c.campaign_id = r.campaign_id
+                JOIN agents AS g ON g.agent_id = r.root_operator_agent_id
+                WHERE r.request_id = ?
+                """,
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("operator broker request campaign binding is missing")
+            if row["campaign_completed_at"] is not None:
+                raise ValueError("broker approval cannot project into a terminal campaign")
+            if row["assignment_completed_at"] is not None:
+                raise ValueError("broker approval cannot project into a terminal assignment")
+            if _operator_terminal_projection_state(
+                str(row["assignment_state"] or "")
+            ) is not None:
+                raise ValueError("broker approval cannot reopen a terminal assignment")
+            existing_report_id = str(row["approval_report_id"] or "")
+            if existing_report_id and existing_report_id != report_id:
+                raise ValueError("broker approval report identity drifted")
+            metadata = {
+                "source": "operator_broker",
+                "campaign_id": row["campaign_id"],
+                "assignment_id": row["assignment_id"],
+                "request_id": request_id,
+                "handoff_id": row["handoff_id"],
+                "scope_sha256": row["scope_sha256"],
+                "workspace_set_digest": row["workspace_set_digest"],
+                "reporting_agent_id": row["root_operator_agent_id"],
+            }
+            inserted = conn.execute(
+                """
+                INSERT OR IGNORE INTO reports(
+                    report_id, agent_id, project, status, summary, detail,
+                    needs_input, plan_options_json, metadata_json, created_at
+                ) VALUES (?, ?, ?, 'awaiting_broker_approval', ?, ?, 1, '[]', ?, ?)
+                """,
+                (
+                    report_id,
+                    row["root_operator_agent_id"],
+                    row["root_project"],
+                    "Broker checkpoint awaits durable completion validation",
+                    "F8 created the exact durable broker request before this needs-input "
+                    "projection. Validate its terminal transaction receipt before "
+                    "completing the assignment.",
+                    json.dumps(metadata, sort_keys=True),
+                    current,
+                ),
+            ).rowcount
+            report_row = conn.execute(
+                """
+                SELECT agent_id, status, needs_input, metadata_json
+                FROM reports WHERE report_id = ?
+                """,
+                (report_id,),
+            ).fetchone()
+            if report_row is None:
+                raise RuntimeError("broker approval report insert failed")
+            try:
+                report_metadata = json.loads(report_row["metadata_json"] or "{}")
+            except json.JSONDecodeError as exc:
+                raise ValueError("broker approval report metadata is malformed") from exc
+            if (
+                str(report_row["agent_id"]) != str(row["root_operator_agent_id"])
+                or str(report_row["status"]) != "awaiting_broker_approval"
+                or int(report_row["needs_input"] or 0) != 1
+                or report_metadata != metadata
+            ):
+                raise ValueError("deterministic broker approval report identity drifted")
+            conn.execute(
+                """
+                UPDATE operator_broker_requests
+                SET approval_report_id = ?, updated_at = ?
+                WHERE request_id = ?
+                  AND (approval_report_id IS NULL OR approval_report_id = ?)
+                """,
+                (report_id, current, request_id, report_id),
+            )
+            conn.execute(
+                """
+                UPDATE operator_campaign_assignments
+                SET state = 'awaiting_broker_approval', last_report_id = ?,
+                    updated_at = ?, completed_at = NULL
+                WHERE assignment_id = ? AND campaign_id = ? AND completed_at IS NULL
+                """,
+                (report_id, current, row["assignment_id"], row["campaign_id"]),
+            )
+            if inserted:
+                conn.execute(
+                    """
+                    INSERT INTO operator_campaign_events(
+                        campaign_id, assignment_id, operator_agent_id,
+                        target_agent_id, event_type, summary, detail_json,
+                        report_id, command_id, created_at
+                    )
+                    SELECT ?, ?, ?, a.target_agent_id,
+                           'broker_approval_awaiting', ?, ?, ?, NULL, ?
+                    FROM operator_campaign_assignments AS a
+                    WHERE a.assignment_id = ?
+                    """,
+                    (
+                        row["campaign_id"],
+                        row["assignment_id"],
+                        row["root_operator_agent_id"],
+                        "Durable broker approval request created",
+                        json.dumps({"request_id": request_id}),
+                        report_id,
+                        current,
+                        row["assignment_id"],
+                    ),
+                )
+        report = self.get_report(report_id)
+        if report is None:
+            raise RuntimeError("broker approval report projection failed")
+        return report
 
     def get_operator_broker_request(
         self,
@@ -10982,6 +11308,186 @@ class Store:
         assert refreshed is not None
         return refreshed
 
+    def validate_operator_broker_request(
+        self,
+        *,
+        request_id: str,
+        root_operator_agent_id: str,
+        action_transaction_id: str,
+        validation_sha256: str,
+    ) -> dict[str, Any]:
+        """Mark one exact succeeded broker result as root-validated."""
+
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM operator_broker_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("operator broker request not found")
+            if str(row["root_operator_agent_id"]) != root_operator_agent_id:
+                raise PermissionError("operator broker request belongs to another root")
+            if str(row["status"]) != "succeeded":
+                raise ValueError("only a succeeded broker request can be validated")
+            if str(row["action_transaction_id"] or "") != action_transaction_id:
+                raise ValueError("broker action transaction identity changed")
+            prior_digest = str(row["validation_sha256"] or "")
+            prior_actor = str(row["validated_by_operator_agent_id"] or "")
+            if row["validated_at"] is not None:
+                if prior_digest != validation_sha256 or prior_actor != root_operator_agent_id:
+                    raise ValueError("broker validation receipt is immutable")
+                return self._operator_broker_request_from_row(row)
+            result = json.loads(row["result_json"] or "{}")
+            if not isinstance(result, dict):
+                raise ValueError("broker terminal result is malformed")
+            result["validation_pending"] = False
+            result["validated_at"] = current
+            result["validation_sha256"] = validation_sha256
+            cursor = conn.execute(
+                """
+                UPDATE operator_broker_requests
+                SET validated_by_operator_agent_id = ?, validated_at = ?,
+                    validation_sha256 = ?, result_json = ?, updated_at = ?
+                WHERE request_id = ? AND validated_at IS NULL
+                """,
+                (
+                    root_operator_agent_id,
+                    current,
+                    validation_sha256,
+                    json.dumps(result, sort_keys=True, separators=(",", ":")),
+                    current,
+                    request_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("broker validation compare-and-swap failed")
+        refreshed = self.get_operator_broker_request(request_id)
+        assert refreshed is not None
+        self.append_event(
+            "operator_broker_request_validated",
+            {
+                "request_id": request_id,
+                "root_operator_agent_id": root_operator_agent_id,
+                "action_transaction_id": action_transaction_id,
+                "validation_sha256": validation_sha256,
+            },
+            request_id,
+        )
+        return refreshed
+
+    def operator_campaign_completion_blockers(
+        self,
+        campaign_id: str,
+        *,
+        assignment_id: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Return durable workflow records that make completion unsafe."""
+
+        with self.connect() as conn:
+            return self._operator_campaign_completion_blockers(
+                conn, campaign_id, assignment_id=assignment_id
+            )
+
+    @staticmethod
+    def _operator_campaign_completion_blockers(
+        conn: sqlite3.Connection,
+        campaign_id: str,
+        *,
+        assignment_id: str | None = None,
+    ) -> list[dict[str, str]]:
+        blockers: list[dict[str, str]] = []
+        request_rows = conn.execute(
+                """
+                SELECT request_id, assignment_id, status, validated_at
+                FROM operator_broker_requests
+                WHERE campaign_id = ?
+                  AND (? IS NULL OR assignment_id = ?)
+                ORDER BY request_id
+                """,
+                (campaign_id, assignment_id, assignment_id),
+            ).fetchall()
+        for row in request_rows:
+            status = str(row["status"] or "")
+            if status != "succeeded" or row["validated_at"] is None:
+                blockers.append(
+                    {
+                        "kind": "broker_request",
+                        "id": str(row["request_id"]),
+                        "state": status or "unknown",
+                    }
+                )
+        handoff_rows = conn.execute(
+                """
+                SELECT h.handoff_id, h.status,
+                       t.transaction_id, t.state AS transaction_state
+                FROM operator_handoffs AS h
+                LEFT JOIN operator_action_transactions AS t
+                  ON t.handoff_id = h.handoff_id
+                WHERE json_extract(h.execution_scope_json, '$.campaign_id') = ?
+                ORDER BY h.handoff_id
+                """,
+                (campaign_id,),
+            ).fetchall()
+        broker_handoff_ids = {
+            str(row["handoff_id"])
+            for row in conn.execute(
+                    """
+                    SELECT handoff_id FROM operator_broker_requests
+                    WHERE campaign_id = ? AND (? IS NULL OR assignment_id = ?)
+                    """,
+                    (campaign_id, assignment_id, assignment_id),
+                ).fetchall()
+        }
+        for row in handoff_rows:
+            handoff_id = str(row["handoff_id"])
+            if assignment_id is not None and handoff_id not in broker_handoff_ids:
+                continue
+            status = str(row["status"] or "")
+            if status not in OPERATOR_HANDOFF_TERMINAL_STATUSES:
+                blockers.append(
+                    {"kind": "handoff", "id": handoff_id, "state": status}
+                )
+            transaction_id = str(row["transaction_id"] or "")
+            transaction_state = str(row["transaction_state"] or "")
+            if transaction_id and transaction_state != "complete":
+                blockers.append(
+                    {
+                        "kind": "broker_transaction",
+                        "id": transaction_id,
+                        "state": transaction_state or "unknown",
+                    }
+                )
+        delivery_rows = conn.execute(
+                """
+                SELECT d.completion_delivery_id, d.delivery_status
+                FROM operator_handoff_completion_deliveries AS d
+                JOIN operator_handoffs AS h ON h.handoff_id = d.handoff_id
+                WHERE json_extract(h.execution_scope_json, '$.campaign_id') = ?
+                  AND d.acknowledged_at IS NULL
+                ORDER BY d.completion_delivery_id
+                """,
+                (campaign_id,),
+            ).fetchall()
+        for row in delivery_rows:
+            if assignment_id is not None:
+                handoff = conn.execute(
+                    "SELECT handoff_id FROM operator_handoff_completion_deliveries "
+                    "WHERE completion_delivery_id = ?",
+                    (row["completion_delivery_id"],),
+                ).fetchone()
+                if handoff is None or str(handoff["handoff_id"]) not in broker_handoff_ids:
+                    continue
+            blockers.append(
+                {
+                    "kind": "completion_receipt",
+                    "id": str(row["completion_delivery_id"]),
+                    "state": str(row["delivery_status"] or "pending"),
+                }
+            )
+        return blockers
+
     @staticmethod
     def _expire_operator_broker_requests(
         conn: sqlite3.Connection,
@@ -11020,6 +11526,8 @@ class Store:
             "root_operator_agent_id": row["root_operator_agent_id"],
             "target_fork_agent_id": row["target_fork_agent_id"],
             "handoff_id": row["handoff_id"],
+            "campaign_id": row["campaign_id"],
+            "assignment_id": row["assignment_id"],
             "action_transaction_id": row["action_transaction_id"],
             "workspace_set_digest": row["workspace_set_digest"],
             "scope_sha256": row["scope_sha256"],
@@ -11039,6 +11547,12 @@ class Store:
             "expires_at": row["expires_at"],
             "completed_at": row["completed_at"],
             "canceled_at": row["canceled_at"],
+            "approval_report_id": row["approval_report_id"],
+            "validated_by_operator_agent_id": row[
+                "validated_by_operator_agent_id"
+            ],
+            "validated_at": row["validated_at"],
+            "validation_sha256": row["validation_sha256"],
         }
 
     def create_workerbee_controlled_run_request(

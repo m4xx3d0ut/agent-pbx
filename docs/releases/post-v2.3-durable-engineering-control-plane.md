@@ -23,6 +23,17 @@ an activation, publication, or deployment record.
    contract for managed virtual environments, caches, build/test scratch,
    service state, Unix sockets/runtime, and generated-output staging.
 
+## Broker and campaign durability follow-up
+
+Root-supervised Git checkpoints now persist one deterministic request and one
+`awaiting_broker_approval` report before F8 returns. Executor success remains
+nonterminal for campaign purposes until the root validates the exact durable
+action transaction and acknowledges the handoff completion receipt. Campaign
+and immutable-report projection reject completion while actionable handoffs,
+broker requests, transactions, or completion receipts remain outstanding.
+Recovery discovered after terminal history uses one idempotent successor
+campaign; it never reopens or rewrites the predecessor or its reports.
+
 ## Compatibility and security posture
 
 Existing public behavior remains unchanged until each gate is explicitly

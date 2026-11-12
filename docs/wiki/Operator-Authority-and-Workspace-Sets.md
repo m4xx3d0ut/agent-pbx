@@ -83,7 +83,10 @@ The daemon accepts a request only when all of these identities agree:
 - exact paths, expected Git parent or reviewed ordered parent list, commit
   subject, exact target tree for merge checkpoints, and scope digest.
 
-The request is durable and leased to one loopback TUI executor. The TUI uses the
+The request ID is deterministic for the exact handoff, campaign assignment,
+workspace, and scope. It is persisted before F8 emits an idempotent
+`awaiting_broker_approval` needs-input report, then leased to one loopback TUI
+executor. The TUI uses the
 existing private-journal Git broker, verifies the resulting HEAD, ordered
 parents, and empty index, resumes the same Codex session in a managed tmux pane,
 and writes a root-readable receipt. For a merge checkpoint, the first parent
@@ -91,7 +94,13 @@ must remain the stopped fork's exact HEAD and all additional parents are pinned
 complete commit IDs. The broker rebuilds the reviewed target tree from only the
 pinned raw-byte paths and rejects ambient merge, cherry-pick, revert, rebase,
 bisect, or sequencer state. A crash after commit can recover old/new HEAD evidence
-from the durable action receipts. Validation remains with the root Operator.
+from the durable action receipts. Validation remains with the root Operator,
+which must validate the exact terminal transaction and acknowledge the handoff
+completion receipt before assignment or campaign completion. Actionable
+handoffs, open or unvalidated requests, incomplete transactions, and
+unacknowledged completion receipts all block completion. Recovery discovered
+after terminal history is handled by one immutable campaign successor rather
+than reopening or rewriting the predecessor.
 Edit and review forks are not given the request tools, remote observers cannot
 control the workflow, and executor endpoints are loopback-only. This does not
 reduce the authority of the normal controller bearer: keep that administrator

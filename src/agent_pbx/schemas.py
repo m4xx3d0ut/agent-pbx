@@ -105,6 +105,7 @@ AssignmentState = Literal[
     "sent",
     "waiting",
     "needs_followup",
+    "awaiting_broker_approval",
     "complete",
     "completed",
     "blocked",
@@ -598,6 +599,10 @@ class OperatorCampaignFinishRequest(BaseModel):
     status: CampaignStatus
     summary: str = Field(min_length=1, max_length=4000)
     detail: str = Field(min_length=1)
+
+
+class OperatorCampaignSuccessorRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
 
 
 class OperatorForkEnsureRequest(BaseModel):
@@ -1405,6 +1410,11 @@ class OperatorBrokerCheckpointCancelRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class OperatorBrokerCheckpointValidateRequest(BaseModel):
+    root_operator_agent_id: str = Field(min_length=1, max_length=120)
+    action_transaction_id: str = Field(min_length=1, max_length=120)
+
+
 class OperatorBrokerCheckpointClaimRequest(BaseModel):
     executor_id: str = Field(min_length=1, max_length=240)
     lease_seconds: int = Field(default=60, ge=10, le=300)
@@ -1429,6 +1439,8 @@ class OperatorBrokerCheckpointResponse(BaseModel):
     root_operator_agent_id: str
     target_fork_agent_id: str
     handoff_id: str
+    campaign_id: str | None = None
+    assignment_id: str | None = None
     action_transaction_id: str | None = None
     workspace_set_digest: str
     scope_sha256: str
@@ -1448,6 +1460,10 @@ class OperatorBrokerCheckpointResponse(BaseModel):
     expires_at: float
     completed_at: float | None = None
     canceled_at: float | None = None
+    approval_report_id: str | None = None
+    validated_by_operator_agent_id: str | None = None
+    validated_at: float | None = None
+    validation_sha256: str | None = None
     receipt_summary: str | None = None
 
 
@@ -1622,6 +1638,7 @@ class OperatorCampaignAssignmentResponse(BaseModel):
 
 class OperatorCampaignResponse(BaseModel):
     campaign_id: str
+    predecessor_campaign_id: str | None = None
     operator_agent_id: str
     title: str
     objective: str

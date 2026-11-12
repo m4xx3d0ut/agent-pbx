@@ -33,7 +33,6 @@ from .operator_authority import (
     OperatorAuthorityService,
 )
 from .operator_delegation import (
-    DEFAULT_DENIED_ACTIONS,
     delegation_lease_matches_handoff,
     execution_scope_requires_manual_approval,
     normalize_delegation_lease_scope,
@@ -253,7 +252,7 @@ def operator_runbook_payload() -> dict[str, Any]:
             "Keep the root operator turn active while assignments are running; periodically recheck campaign state.",
             "Inspect caller reports and threads with pbx_operator_get_thread.",
             "Mark each assignment complete, blocked, or needing follow-up with pbx_operator_report_assignment.",
-            "Finish the campaign with pbx_operator_finish_campaign only after every assignment is complete or explicitly blocked.",
+            "Finish the campaign with pbx_operator_finish_campaign only after every assignment is terminal and every actionable handoff, broker request, transaction, and completion receipt is durably validated or acknowledged.",
         ],
         "delivery": [
             "Operator work is routed only to the per-caller Agent PBX forked operator session.",
@@ -268,7 +267,8 @@ def operator_runbook_payload() -> dict[str, Any]:
             "Every terminal handoff update creates one idempotent completion receipt addressed to the exact source root or source fork; sources review and acknowledge receipts independently of the terminal result.",
             "Report-mode completion injection requires an exact managed tmux mapping or recorded pane. Without exact evidence the durable receipt stays pending for TUI review instead of targeting a guessed pane.",
             "For new handoffs, provide execution_scope with an action_class, mutation_mode, campaign and workspace-set identity where applicable; exact Git commit brokers also require exact_paths, expected_git_parent, and commit_subject.",
-            "On a host with root-supervised broker mode enabled, a root Operator may preflight and request one exact Git checkpoint for its own trusted-workbench edit fork with pbx_operator_preflight_broker_checkpoint and pbx_operator_request_broker_checkpoint. The local TUI executes the durable stop, exact broker commit, and same-session resume; the root reads pbx_operator_get_broker_checkpoint and performs the remaining validation. Edit and review forks cannot request this workflow.",
+            "On a host with root-supervised broker mode enabled, a root Operator may preflight and request one exact Git checkpoint for its own trusted-workbench edit fork with pbx_operator_preflight_broker_checkpoint and pbx_operator_request_broker_checkpoint. The request and awaiting_broker_approval report are durable before F8 returns. The local TUI executes the durable stop, exact broker commit, and same-session resume; the root reads pbx_operator_get_broker_checkpoint and must call pbx_operator_validate_broker_checkpoint with the exact terminal transaction before assignment completion. Edit and review forks cannot request this workflow.",
+            "If durable work is discovered after a campaign became terminal, use pbx_operator_create_campaign_successor. It creates one idempotent running successor and never rewrites the predecessor campaign or its reports.",
             "Manual KB seed runs deliver a seed prompt to the selected operator or fork; that session proposes KB entries and updates seed-run status when finished.",
             "Use pbx_operator_kb_context or handoff metadata.kb_query to attach existing active KB entries before transferring domain context; context lookup uses SQLite-local hybrid keyword/semantic retrieval by default and returns query_id/match_id values for pbx_operator_kb_feedback.",
             "Use pbx_operator_kb_list_queries, pbx_operator_kb_get_query, and pbx_operator_kb_feedback to inspect query history, review top matched chunks, record accepted/rejected retrievals, and report misses.",
@@ -4512,6 +4512,20 @@ class OperatorService:
         if campaign.get("completed_at") is not None:
             raise ValueError("campaign is already terminal")
         complete = operator_state_is_terminal(normalized_state)
+        if complete:
+            blockers = self.store.operator_campaign_completion_blockers(
+                campaign_id,
+                assignment_id=assignment_id,
+            )
+            if blockers:
+                summary_text = ", ".join(
+                    f"{item['kind']}:{item['id']}[{item['state']}]"
+                    for item in blockers
+                )
+                raise ValueError(
+                    "assignment has outstanding durable workflow records: "
+                    + summary_text
+                )
         report = self.store.create_report(
             operator_agent_id,
             ReportCreateRequest(
@@ -4577,6 +4591,15 @@ class OperatorService:
             raise ValueError(
                 "campaign has nonterminal assignments: " + ", ".join(unfinished)
             )
+        blockers = self.store.operator_campaign_completion_blockers(campaign_id)
+        if blockers:
+            summary_text = ", ".join(
+                f"{item['kind']}:{item['id']}[{item['state']}]"
+                for item in blockers
+            )
+            raise ValueError(
+                "campaign has outstanding durable workflow records: " + summary_text
+            )
         report = self.store.create_report(
             operator_agent_id,
             ReportCreateRequest(
@@ -4607,6 +4630,26 @@ class OperatorService:
             report_id=report["report_id"],
         )
         return updated or self._require_campaign(campaign_id)
+
+    def create_campaign_successor(
+        self,
+        *,
+        operator_agent_id: str,
+        predecessor_campaign_id: str,
+    ) -> dict[str, Any]:
+        """Create one idempotent recovery campaign while preserving history."""
+
+        operator = self._require_operator(operator_agent_id)
+        self._require_campaign_for_operator(predecessor_campaign_id, operator)
+        campaign, created = self.store.create_operator_campaign_successor(
+            operator_agent_id=operator_agent_id,
+            predecessor_campaign_id=predecessor_campaign_id,
+        )
+        return {
+            "campaign": campaign,
+            "created": created,
+            "predecessor_campaign_id": predecessor_campaign_id,
+        }
 
     def campaign_status(
         self,

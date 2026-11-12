@@ -56,6 +56,8 @@ def test_operator_runbook_requires_visible_pbx_forks() -> None:
     assert "must not implement caller repo changes directly" in delivery
     assert "Native Codex children may perform bounded local decomposition" in delivery
     assert "pbx_operator_request_broker_checkpoint" in delivery
+    assert "pbx_operator_validate_broker_checkpoint" in delivery
+    assert "pbx_operator_create_campaign_successor" in delivery
     assert "must not poll or acknowledge PBX commands as another identity" in delivery
     assert "Manual KB seed runs" in delivery
     assert "multi_agent_v1" in delivery
@@ -387,6 +389,57 @@ def test_operator_campaign_rejects_nonterminal_finish_and_terminal_regression(
             summary="Regressed",
             detail="This must not reopen the assignment.",
         )
+
+
+def test_terminal_campaign_recovery_uses_one_immutable_successor(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    campaign = store.create_operator_campaign(
+        operator_agent_id="operator-0",
+        title="Historical campaign",
+        objective="Preserve this campaign after completion.",
+        criteria=["terminal history is immutable"],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Complete it."}],
+    )
+    assignment = campaign["assignments"][0]
+    service.report_assignment(
+        operator_agent_id="operator-0",
+        campaign_id=campaign["campaign_id"],
+        assignment_id=assignment["assignment_id"],
+        state="complete",
+        summary="Complete",
+        detail="The historical assignment is terminal.",
+    )
+    terminal = service.finish_campaign(
+        operator_agent_id="operator-0",
+        campaign_id=campaign["campaign_id"],
+        status="complete",
+        summary="Terminal",
+        detail="The historical campaign is closed.",
+    )
+
+    first = service.create_campaign_successor(
+        operator_agent_id="operator-0",
+        predecessor_campaign_id=campaign["campaign_id"],
+    )
+    second = service.create_campaign_successor(
+        operator_agent_id="operator-0",
+        predecessor_campaign_id=campaign["campaign_id"],
+    )
+
+    assert first["created"] is True
+    assert second["created"] is False
+    assert second["campaign"]["campaign_id"] == first["campaign"]["campaign_id"]
+    assert first["campaign"]["predecessor_campaign_id"] == campaign["campaign_id"]
+    assert first["campaign"]["status"] == "running"
+    assert first["campaign"]["assignments"][0]["state"] == "pending"
+    preserved = service.campaign_status(campaign_id=campaign["campaign_id"])[0]
+    assert preserved["status"] == terminal["status"]
+    assert preserved["completed_at"] == terminal["completed_at"]
 
 
 def test_operator_campaign_enforces_logical_owner_and_archived_target_policy(
@@ -1435,6 +1488,15 @@ async def test_mcp_operator_campaign_tools_queue_delivery(tmp_path: Path) -> Non
             },
         )
     )
+    successor = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_create_campaign_successor",
+            {
+                "operator_agent_id": "operator-0",
+                "predecessor_campaign_id": campaign["campaign_id"],
+            },
+        )
+    )
 
     assert status[0]["campaign_id"] == campaign["campaign_id"]
     assert assignment["state"] == "waiting"
@@ -1443,6 +1505,8 @@ async def test_mcp_operator_campaign_tools_queue_delivery(tmp_path: Path) -> Non
     assert followup["payload"]["assignment_id"] == assignment["assignment_id"]
     assert reported["state"] == "complete"
     assert finished["status"] == "complete"
+    assert successor["created"] is True
+    assert successor["campaign"]["predecessor_campaign_id"] == campaign["campaign_id"]
 
 
 @pytest.mark.asyncio
