@@ -100,11 +100,27 @@ def test_workerbee_development_boundary_accepts_only_exact_readonly_evidence() -
     boundary = WORKERBEE_DEVELOPMENT_CAPABILITY_BOUNDARY
     evidence = {
         "schema": boundary.schema,
-        "backend_generation": 7,
+        "provider": "workerbee-development/v1",
+        "provider_generation": "provider-7",
+        "backend": "platform_debug",
+        "backend_instance": "debug-1",
+        "backend_generation": "generation-7",
+        "workspace_binding_id": "binding-1",
         "resource_classes": list(boundary.resource_classes),
+        "mount_targets": {},
+        "request_schema": "agent-pbx.workerbee-development-resource/v1",
+        "receipt_schema": "workerbee.platform-debug-development-resource/v1",
+        "cleanup_schema": (
+            "workerbee.platform-debug-development-resource-cleanup/v1"
+        ),
         "trusted_direct_bind_read_only": True,
         "trusted_direct_bind_rprivate": True,
         "writable_source": False,
+        "max_ttl_seconds": 3600,
+        "max_quota_bytes": 4096,
+        "issued_at": 1.0,
+        "expires_at": 2.0,
+        "capability_sha256": "a" * 64,
     }
     boundary.validate_provider_evidence(evidence)
 

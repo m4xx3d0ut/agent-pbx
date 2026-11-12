@@ -287,18 +287,32 @@ class WorkerBeeDevelopmentCapabilityBoundary:
     def validate_provider_evidence(self, evidence: Mapping[str, Any]) -> None:
         if set(evidence) != {
             "schema",
+            "provider",
+            "provider_generation",
+            "backend",
+            "backend_instance",
             "backend_generation",
+            "workspace_binding_id",
             "resource_classes",
+            "mount_targets",
+            "request_schema",
+            "receipt_schema",
+            "cleanup_schema",
             "trusted_direct_bind_read_only",
             "trusted_direct_bind_rprivate",
             "writable_source",
+            "max_ttl_seconds",
+            "max_quota_bytes",
+            "issued_at",
+            "expires_at",
+            "capability_sha256",
         }:
             raise ValueError("WorkerBee capability evidence has unexpected fields")
         if evidence.get("schema") != self.schema:
             raise ValueError("WorkerBee capability schema mismatch")
         generation = evidence.get("backend_generation")
-        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
-            raise ValueError("WorkerBee backend generation must be a positive integer")
+        if not isinstance(generation, str) or not generation.strip():
+            raise ValueError("WorkerBee backend generation must be an identity")
         classes = evidence.get("resource_classes")
         if not isinstance(classes, list) or tuple(classes) != self.resource_classes:
             raise ValueError("WorkerBee development resource classes mismatch")

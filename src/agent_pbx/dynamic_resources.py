@@ -14,11 +14,26 @@ from .store import Store
 
 RESOURCE_CLASSES = frozenset(
     {
+        "build_scratch",
+        "generated_output_staging",
+        "managed_venv",
         "workspace_unix_socket",
         "loopback_service",
         "managed_cache",
+        "service_state",
         "existing_workerbee_service",
         "port_reservation",
+        "unix_socket_runtime",
+    }
+)
+WORKERBEE_DEVELOPMENT_RESOURCE_CLASSES = frozenset(
+    {
+        "build_scratch",
+        "generated_output_staging",
+        "managed_cache",
+        "managed_venv",
+        "service_state",
+        "unix_socket_runtime",
     }
 )
 DISABLED_RESOURCE_CLASSES = frozenset(
@@ -112,6 +127,7 @@ class DynamicResourceBroker:
         spec: Mapping[str, Any],
         workerbee_binding_id: str | None = None,
         workerbee_backend_generation: str | None = None,
+        provider_capability_sha256: str | None = None,
         ttl_seconds: int = 3600,
         quota: int = 1,
         max_uses: int = 1,
@@ -145,18 +161,55 @@ class DynamicResourceBroker:
             handoff_id=handoff,
             workspace_set_digest=str(workspace_set_digest),
         )
-        normalized_spec = self._validate_spec(normalized_class, spec)
         binding = self._optional_safe_id(workerbee_binding_id, "WorkerBee binding")
         generation = self._optional_safe_id(
             workerbee_backend_generation,
             "WorkerBee backend generation",
         )
+        if (binding is None) != (generation is None):
+            raise DynamicResourceError(
+                "WorkerBee binding and backend generation must be supplied together"
+            )
+        if (
+            binding is not None
+            and normalized_class not in WORKERBEE_DEVELOPMENT_RESOURCE_CLASSES
+            and normalized_class != "existing_workerbee_service"
+        ):
+            raise DynamicResourceError(
+                "WorkerBee identity is unexpected for this resource class"
+            )
         if normalized_class == "existing_workerbee_service" and not (
             binding and generation
         ):
             raise DynamicResourceError(
                 "WorkerBee service resources require binding and backend generation"
             )
+        workerbee_development = (
+            normalized_class in WORKERBEE_DEVELOPMENT_RESOURCE_CLASSES
+            and binding is not None
+            and generation is not None
+        )
+        if (
+            normalized_class
+            in WORKERBEE_DEVELOPMENT_RESOURCE_CLASSES - {"managed_cache"}
+            and not workerbee_development
+        ):
+            raise DynamicResourceError(
+                "WorkerBee development resources require binding and backend generation"
+            )
+        normalized_spec = self._validate_spec(
+            normalized_class,
+            spec,
+            workerbee_development=workerbee_development,
+        )
+        capability_sha256 = str(provider_capability_sha256 or "").strip() or None
+        if workerbee_development:
+            if not capability_sha256 or not SHA256_RE.fullmatch(capability_sha256):
+                raise DynamicResourceError(
+                    "WorkerBee development resource capability digest is invalid"
+                )
+        elif capability_sha256 is not None:
+            raise DynamicResourceError("unexpected provider capability digest")
         if (
             isinstance(ttl_seconds, bool)
             or not isinstance(ttl_seconds, int)
@@ -177,7 +230,7 @@ class DynamicResourceBroker:
             raise DynamicResourceError("resource max uses must be between 1 and 100")
         expected_quota = (
             normalized_spec["max_bytes"]
-            if normalized_class == "managed_cache"
+            if normalized_class == "managed_cache" or workerbee_development
             else 1
         )
         if quota != expected_quota:
@@ -193,6 +246,7 @@ class DynamicResourceBroker:
         if normalized_mode == "auto" and not (
             normalized_policy == "trusted_rosie"
             and normalized_class in TRUSTED_ROSIE_AUTO_RESOURCE_CLASSES
+            and not workerbee_development
         ):
             raise DynamicResourceError(
                 "automatic resources require reviewed Trusted Rosie low-risk policy"
@@ -205,7 +259,10 @@ class DynamicResourceBroker:
         normalized_runtime = str(runtime_state or "").strip().lower()
         if normalized_runtime not in {"stopped", "running"}:
             raise DynamicResourceError("resource runtime state is invalid")
-        provider = self._provider_for(normalized_class)
+        provider = self._provider_for(
+            normalized_class,
+            workerbee_development=workerbee_development,
+        )
         authority = {
             "schema": DYNAMIC_RESOURCE_REQUEST_CONTRACT.schema,
             "resource_class": normalized_class,
@@ -216,6 +273,7 @@ class DynamicResourceBroker:
             "workspace_set_digest": workspace_set_digest,
             "workerbee_binding_id": binding,
             "workerbee_backend_generation": generation,
+            "provider_capability_sha256": capability_sha256,
             "spec": normalized_spec,
             "provider": provider,
             "ttl_seconds": int(ttl_seconds),
@@ -227,6 +285,14 @@ class DynamicResourceBroker:
             "restart_required": normalized_runtime == "running",
         }
         digest = _sha256(_canonical_json(authority))
+        if workerbee_development:
+            provider_impl = self.providers.get(provider)
+            qualifier = getattr(provider_impl, "qualify_request", None)
+            if not callable(qualifier):
+                raise DynamicResourceError(
+                    "WorkerBee development resource provider is not configured"
+                )
+            qualifier(authority)
         initial_status = "approved" if normalized_mode == "auto" else "pending_approval"
         request, created = self.store.request_or_reuse_dynamic_resource(
             request_id=str(uuid.uuid4()),
@@ -239,6 +305,7 @@ class DynamicResourceBroker:
             workspace_set_digest=workspace_set_digest,
             workerbee_binding_id=binding,
             workerbee_backend_generation=generation,
+            provider_capability_sha256=capability_sha256,
             spec=normalized_spec,
             provider=provider,
             ttl_seconds=int(ttl_seconds),
@@ -546,7 +613,12 @@ class DynamicResourceBroker:
         )
 
     @staticmethod
-    def _validate_spec(resource_class: str, spec: Mapping[str, Any]) -> dict[str, Any]:
+    def _validate_spec(
+        resource_class: str,
+        spec: Mapping[str, Any],
+        *,
+        workerbee_development: bool = False,
+    ) -> dict[str, Any]:
         if not isinstance(spec, Mapping):
             raise DynamicResourceError("resource specification must be an object")
         value = dict(spec)
@@ -582,6 +654,21 @@ class DynamicResourceBroker:
             if value.get("protocol") not in {"tcp", "udp"}:
                 raise DynamicResourceError("loopback service protocol is invalid")
             return value
+        if workerbee_development:
+            if set(value) != {"max_bytes"}:
+                raise DynamicResourceError(
+                    "WorkerBee development resource fields are invalid"
+                )
+            size = value.get("max_bytes")
+            if (
+                isinstance(size, bool)
+                or not isinstance(size, int)
+                or not 1 <= size <= 1_000_000_000
+            ):
+                raise DynamicResourceError(
+                    "WorkerBee development resource byte quota is invalid"
+                )
+            return {"max_bytes": size}
         if resource_class == "managed_cache":
             if set(value) != {"name", "max_bytes"}:
                 raise DynamicResourceError("managed cache fields are invalid")
@@ -613,7 +700,13 @@ class DynamicResourceBroker:
         return value
 
     @staticmethod
-    def _provider_for(resource_class: str) -> str:
+    def _provider_for(
+        resource_class: str,
+        *,
+        workerbee_development: bool = False,
+    ) -> str:
+        if workerbee_development:
+            return "workerbee-development/v1"
         if resource_class == "existing_workerbee_service":
             return "workerbee-existing/v1"
         return "agent-pbx-local/v1"
@@ -715,11 +808,14 @@ class DynamicResourceBroker:
             "schema", "request_id", "request_sha256", "resource_class",
             "provider", "provider_generation", "resource_identity",
             "workspace_set_digest", "workerbee_binding_id",
-            "workerbee_backend_generation", "spec_sha256", "quota",
-            "max_uses", "activated_at", "expires_at", "restart_required",
+            "workerbee_backend_generation", "provider_capability_sha256",
+            "spec_sha256", "resource_metadata", "resource_metadata_sha256",
+            "quota", "max_uses", "activated_at", "expires_at",
+            "restart_required",
         }
         activated_at = receipt.get("activated_at") if isinstance(receipt, Mapping) else None
         expected_spec_sha256 = _sha256(_canonical_json(request.get("spec") or {}))
+        metadata = receipt.get("resource_metadata") if isinstance(receipt, Mapping) else None
         now = float(self.clock())
         if (
             not isinstance(receipt, Mapping)
@@ -737,7 +833,13 @@ class DynamicResourceBroker:
             != request.get("workerbee_binding_id")
             or receipt.get("workerbee_backend_generation")
             != request.get("workerbee_backend_generation")
+            or receipt.get("provider_capability_sha256")
+            != request.get("provider_capability_sha256")
             or receipt.get("spec_sha256") != expected_spec_sha256
+            or not isinstance(metadata, Mapping)
+            or len(_canonical_json(metadata)) > MAX_SPEC_BYTES
+            or receipt.get("resource_metadata_sha256")
+            != _sha256(_canonical_json(metadata))
             or isinstance(receipt.get("quota"), bool)
             or receipt.get("quota") != request.get("quota")
             or isinstance(receipt.get("max_uses"), bool)

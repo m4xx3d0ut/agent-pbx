@@ -921,6 +921,10 @@ class DynamicResourceCreateRequest(DynamicResourceOperatorRequest):
     spec: dict[str, Any]
     workerbee_binding_id: str | None = Field(default=None, max_length=120)
     workerbee_backend_generation: str | None = Field(default=None, max_length=120)
+    provider_capability_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     ttl_seconds: int = Field(default=3600, ge=60, le=86400, strict=True)
     quota: int = Field(default=1, ge=1, le=1_000_000_000, strict=True)
     max_uses: int = Field(default=1, ge=1, le=100, strict=True)

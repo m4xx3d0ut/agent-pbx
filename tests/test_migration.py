@@ -90,6 +90,33 @@ def test_migration_dry_run_and_apply_reach_current_schema(tmp_path: Path) -> Non
     assert Path(applied["backup"]["backup_path"]).is_dir()
 
 
+def test_schema_43_adds_workerbee_capability_link_without_rewriting_requests(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    with store.connect() as conn:
+        conn.execute(
+            "ALTER TABLE dynamic_resource_requests "
+            "DROP COLUMN provider_capability_sha256"
+        )
+        conn.execute(
+            "UPDATE metadata SET value = '43' WHERE key = 'schema_version'"
+        )
+
+    store.init()
+
+    with store.connect() as conn:
+        columns = {
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(dynamic_resource_requests)"
+            ).fetchall()
+        }
+    assert store.schema_version() == SCHEMA_VERSION == 44
+    assert "provider_capability_sha256" in columns
+
+
 def test_schema_30_fixture_migrates_with_retained_entities_and_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

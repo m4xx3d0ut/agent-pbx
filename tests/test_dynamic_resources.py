@@ -73,6 +73,13 @@ class FakeProvider:
             separators=(",", ":"),
             ensure_ascii=False,
         ).encode("utf-8")
+        metadata: dict[str, Any] = {}
+        metadata_bytes = json.dumps(
+            metadata,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
         return {
             "schema": RESOURCE_RECEIPT_SCHEMA,
             "request_id": request["request_id"],
@@ -86,7 +93,12 @@ class FakeProvider:
             "workerbee_backend_generation": request[
                 "workerbee_backend_generation"
             ],
+            "provider_capability_sha256": request[
+                "provider_capability_sha256"
+            ],
             "spec_sha256": hashlib.sha256(spec_bytes).hexdigest(),
+            "resource_metadata": metadata,
+            "resource_metadata_sha256": hashlib.sha256(metadata_bytes).hexdigest(),
             "quota": request["quota"],
             "max_uses": request["max_uses"],
             "activated_at": time.time(),

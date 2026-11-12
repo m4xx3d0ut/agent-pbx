@@ -1270,6 +1270,9 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         dynamic_resources_enabled=env_flag(
             "AGENT_PBX_DYNAMIC_RESOURCES_ENABLED"
         ),
+        workerbee_development_resources_enabled=env_flag(
+            "AGENT_PBX_WORKERBEE_DEVELOPMENT_RESOURCES_ENABLED"
+        ),
         workerbee_bin=env_workerbee_bin(),
         workerbee_timeout_seconds=getattr(
             args,
@@ -1419,6 +1422,9 @@ def _serve_foreground(args: argparse.Namespace) -> int:
             daemon_config.durable_helper_measurements_enabled
         ),
         dynamic_resources_enabled=daemon_config.dynamic_resources_enabled,
+        workerbee_development_resources_enabled=(
+            daemon_config.workerbee_development_resources_enabled
+        ),
         workerbee_bin=daemon_config.workerbee_bin,
         workerbee_timeout_seconds=daemon_config.workerbee_timeout_seconds,
         workerbee_cache_seconds=daemon_config.workerbee_cache_seconds,

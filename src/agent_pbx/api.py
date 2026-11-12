@@ -96,6 +96,10 @@ from .events import EventClientRegistry, EventStreamService
 from .evidence_export import EvidenceExportError, EvidenceExportService
 from .durable_helpers import DurableHelperRegistry
 from .dynamic_resources import DynamicResourceBroker
+from .workerbee_development_resources import (
+    WorkerBeeDevelopmentAdapter,
+    WorkerBeeDevelopmentProvider,
+)
 from .codex.runtime import CodexRuntimeService
 from .joplin import (
     JoplinApiError,
@@ -660,7 +664,11 @@ def workerbee_access_readback(app: FastAPI, agent_id: str) -> dict[str, Any]:
     return readback
 
 
-def create_app(config: ServerConfig | None = None) -> FastAPI:
+def create_app(
+    config: ServerConfig | None = None,
+    *,
+    workerbee_development_adapter: WorkerBeeDevelopmentAdapter | None = None,
+) -> FastAPI:
     resolved_config = config or ServerConfig()
     store = Store(resolved_config.db_path)
     store.init()
@@ -951,10 +959,26 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             resolved_config.durable_helper_measurements_enabled
         ),
     )
+    dynamic_resource_providers = {}
+    if (
+        resolved_config.workerbee_development_resources_enabled
+        and workerbee_development_adapter is not None
+    ):
+        workerbee_development_provider = WorkerBeeDevelopmentProvider(
+            workerbee_development_adapter
+        )
+        dynamic_resource_providers[
+            workerbee_development_provider.provider_id
+        ] = workerbee_development_provider
     app.state.dynamic_resources = DynamicResourceBroker(
         store,
         enabled=resolved_config.dynamic_resources_enabled,
+        providers=dynamic_resource_providers,
     )
+    app.state.workerbee_development_resources = {
+        "enabled": resolved_config.workerbee_development_resources_enabled,
+        "provider_configured": workerbee_development_adapter is not None,
+    }
     app.state.operator_service = OperatorService(
         store,
         durable_helpers=app.state.durable_helpers,

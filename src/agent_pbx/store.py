@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -1566,6 +1566,7 @@ class Store:
                     workspace_set_digest TEXT NOT NULL,
                     workerbee_binding_id TEXT,
                     workerbee_backend_generation TEXT,
+                    provider_capability_sha256 TEXT,
                     spec_json TEXT NOT NULL,
                     provider TEXT NOT NULL,
                     ttl_seconds INTEGER NOT NULL,
@@ -1920,6 +1921,12 @@ class Store:
                 "operator_broker_requests",
                 "expected_git_parents_json",
                 "TEXT NOT NULL DEFAULT '[]'",
+            )
+            self._ensure_column(
+                conn,
+                "dynamic_resource_requests",
+                "provider_capability_sha256",
+                "TEXT",
             )
             conn.execute(
                 """
@@ -9136,6 +9143,7 @@ class Store:
         workspace_set_digest: str,
         workerbee_binding_id: str | None,
         workerbee_backend_generation: str | None,
+        provider_capability_sha256: str | None,
         spec: dict[str, Any],
         provider: str,
         ttl_seconds: int,
@@ -9174,12 +9182,13 @@ class Store:
                     request_id, request_sha256, resource_class,
                     requester_agent_id, operator_agent_id, campaign_id,
                     handoff_id, workspace_set_digest, workerbee_binding_id,
-                    workerbee_backend_generation, spec_json, provider,
+                    workerbee_backend_generation, provider_capability_sha256,
+                    spec_json, provider,
                     ttl_seconds, quota, max_uses, use_count, status,
                     approval_mode, approval_json, delegation_lease_id,
                     provider_receipt_json, cleanup_receipt_json,
                     restart_required, expires_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
                           ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?)
                 """,
                 (
@@ -9193,6 +9202,7 @@ class Store:
                     workspace_set_digest,
                     workerbee_binding_id,
                     workerbee_backend_generation,
+                    provider_capability_sha256,
                     json.dumps(spec, sort_keys=True),
                     provider,
                     int(ttl_seconds),

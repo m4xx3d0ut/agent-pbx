@@ -1,0 +1,31 @@
+{
+  "schema": "agent-pbx.workerbee-development-resource-conformance/v1",
+  "provider": "workerbee-development/v1",
+  "capability_schema": "agent-pbx.workerbee-development-capabilities/v1",
+  "request_schema": "agent-pbx.workerbee-development-resource/v1",
+  "receipt_schema": "workerbee.platform-debug-development-resource/v1",
+  "cleanup_schema": "workerbee.platform-debug-development-resource-cleanup/v1",
+  "resource_classes": [
+    "build_scratch",
+    "generated_output_staging",
+    "managed_cache",
+    "managed_venv",
+    "service_state",
+    "unix_socket_runtime"
+  ],
+  "mount_targets": {
+    "build_scratch": "/workspace/.agent-pbx-dev/build",
+    "generated_output_staging": "/workspace/.agent-pbx-dev/output",
+    "managed_cache": "/workspace/.agent-pbx-dev/cache",
+    "managed_venv": "/workspace/.agent-pbx-dev/venv",
+    "service_state": "/workspace/.agent-pbx-dev/state",
+    "unix_socket_runtime": "/workspace/.agent-pbx-dev/run"
+  },
+  "invariants": {
+    "trusted_direct_bind_read_only": true,
+    "trusted_direct_bind_rprivate": true,
+    "writable_source": false,
+    "resource_mode": 448,
+    "cleanup_residue_count": 0
+  }
+}
