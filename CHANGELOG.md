@@ -4,6 +4,57 @@
 
 No changes yet.
 
+## v2.3.0 - 2026-11-12
+
+### Highlights
+
+- Add durable, source-addressed Operator handoff completion receipts and
+  clearer workflow, live-runtime, and alert state in the TUI.
+- Add versioned Operator execution authority, exact workspace sets, bounded
+  delegation leases, and Trusted Workbench edit-fork inheritance while
+  retaining conservative public defaults and immutable review forks.
+- Add a local-only, root-supervised exact Git checkpoint broker for qualified
+  stopped edit forks whose split policy cannot safely receive direct Git
+  administration grants.
+- Separate WorkerBee backend, source mode, access profile, execution lane,
+  workspace mobility, and snapshot-content policy into explicit,
+  independently constrained controls.
+- Advance the additive database contract from schema 30 to schema 40 with
+  backup, dry-run, verification, and rollback qualification that preserves
+  Agents, Operators, forks, stars, campaigns, sessions, and runtime mappings.
+
+### Changed
+
+- Make managed stop, purge, restart, resume, and reconciliation require the
+  complete tmux executable, socket, server, session, window, pane, process,
+  and Codex-session identity before any mutation.
+- Project immutable terminal reports into campaign assignment completion and
+  close campaigns only when every bound assignment is terminal.
+- Keep Agent PBX, Codex, tmux, and WorkerBee responsibilities explicit:
+  Agent PBX owns durable control-plane state, Codex owns reasoning and
+  execution, tmux owns terminal persistence, and WorkerBee remains an
+  optional runtime-truth plane.
+
+### Fixed
+
+- Preserve the last valid native terminal frame across Agent, Operator,
+  Joplin, and F4 transitions; reject stale asynchronous attach results; and
+  use compatibility capture only after a genuine attach failure.
+- Keep Joplin targeted write/readback health independent from strict
+  whole-profile E2EE validation and reuse an existing target retry instead of
+  duplicating a write job.
+- Preserve authority-qualified linked-worktree Git roots without promoting
+  them to broader Codex workspaces, and preserve exact ordered Git parents and
+  reviewed trees through broker preflight, execution, receipt, and recovery.
+- Reconcile missing inactive runtimes and complete exact managed stops without
+  adopting, signaling, or deleting a distinct replacement pane.
+- Close the final cross-platform RC fixture gaps without changing production
+  trusted-direct admission, F8 alert, or approval behavior.
+
+The stable release is the reviewed RC4 product tree with release identity and
+documentation changes only. See the RC1 through RC4 entries below for the
+complete implementation history.
+
 ## v2.3.0rc4 - 2026-11-12
 
 ### Fixed
