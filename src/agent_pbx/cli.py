@@ -139,6 +139,21 @@ def env_text_value(name: str) -> str | None:
     return value or None
 
 
+def env_path_list(name: str) -> tuple[Path, ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be a JSON list of paths") from exc
+    if not isinstance(parsed, list) or any(
+        not isinstance(item, str) or not item.strip() for item in parsed
+    ):
+        raise ValueError(f"{name} must be a JSON list of non-empty paths")
+    return tuple(Path(item).expanduser() for item in parsed)
+
+
 def default_host() -> str:
     return env_text("AGENT_PBX_HOST", "127.0.0.1")
 
@@ -1244,6 +1259,14 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
         operator_kb_bundle_v2_enabled=env_flag(
             "AGENT_PBX_OPERATOR_KB_BUNDLE_V2_ENABLED"
         ),
+        durable_helpers_enabled=env_flag("AGENT_PBX_DURABLE_HELPERS_ENABLED"),
+        durable_helper_root=env_optional_path("AGENT_PBX_DURABLE_HELPER_ROOT"),
+        durable_helper_proposal_roots=env_path_list(
+            "AGENT_PBX_DURABLE_HELPER_PROPOSAL_ROOTS"
+        ),
+        durable_helper_measurements_enabled=env_flag(
+            "AGENT_PBX_DURABLE_HELPER_MEASUREMENTS_ENABLED"
+        ),
         workerbee_bin=env_workerbee_bin(),
         workerbee_timeout_seconds=getattr(
             args,
@@ -1383,6 +1406,14 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         evidence_export_root=daemon_config.evidence_export_root,
         operator_kb_bundle_v2_enabled=(
             daemon_config.operator_kb_bundle_v2_enabled
+        ),
+        durable_helpers_enabled=daemon_config.durable_helpers_enabled,
+        durable_helper_root=daemon_config.durable_helper_root,
+        durable_helper_proposal_roots=(
+            daemon_config.durable_helper_proposal_roots
+        ),
+        durable_helper_measurements_enabled=(
+            daemon_config.durable_helper_measurements_enabled
         ),
         workerbee_bin=daemon_config.workerbee_bin,
         workerbee_timeout_seconds=daemon_config.workerbee_timeout_seconds,

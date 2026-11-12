@@ -878,6 +878,36 @@ class OperatorKbBundleV2Request(BaseModel):
     bundle: dict[str, Any]
 
 
+class DurableHelperOperatorRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+
+
+class DurableHelperProposalRequest(DurableHelperOperatorRequest):
+    source_path: str = Field(min_length=1, max_length=2000)
+    name: str = Field(min_length=1, max_length=120)
+    scopes: list[str] = Field(min_length=1, max_length=32)
+    kb_refs: list[str] = Field(default_factory=list, max_length=64)
+
+
+class DurableHelperTransitionRequest(DurableHelperOperatorRequest):
+    target_status: Literal[
+        "reviewed",
+        "active",
+        "deprecated",
+        "retired",
+        "rejected",
+        "quarantined",
+    ]
+
+
+class DurableHelperImportRequest(DurableHelperOperatorRequest):
+    bundle: dict[str, Any]
+
+
+class DurableHelperInvocationRequest(DurableHelperOperatorRequest):
+    scope: str = Field(min_length=1, max_length=120)
+
+
 class OperatorKbSourceResponse(BaseModel):
     source_row_id: str
     kb_id: str

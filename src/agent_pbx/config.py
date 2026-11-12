@@ -116,6 +116,10 @@ class ServerConfig:
     evidence_exports_enabled: bool = False
     evidence_export_root: Path | None = None
     operator_kb_bundle_v2_enabled: bool = False
+    durable_helpers_enabled: bool = False
+    durable_helper_root: Path | None = None
+    durable_helper_proposal_roots: tuple[Path, ...] = field(default_factory=tuple)
+    durable_helper_measurements_enabled: bool = False
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0

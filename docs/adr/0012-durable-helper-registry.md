@@ -24,15 +24,34 @@ bounded harness. Active content is materialized read-only; output is a separate
 writable directory, and invocation always names the helper and reviewed scope.
 The registry never crawls or auto-ingests temporary directories.
 
+The first implementation accepts only bounded, single-link Python source files
+under explicitly configured proposal roots. Every lexical component is
+no-follow checked before canonicalization; source ownership, mode, identity,
+and bytes are rechecked across one bounded read. Validation invokes a fixed
+Python syntax compiler in an owner-private harness with `-I -S`, closed file
+descriptors, a minimal environment, no helper execution, and a five-second
+timeout. Promotion requires that exact digest-bound validation receipt.
+
+Objects are private and content addressed. Activation materializes `helper.py`
+mode 0444 with a mode-0400 manifest and a separate mode-0700 output directory.
+The API returns an exact, shell-free invocation plan but does not execute it;
+execution remains an explicit downstream action. Imports always return to
+`proposed` regardless of source lifecycle state. The root-only TUI review
+center exposes validate+review, promote, reject, retire, and quarantine.
+
 Reuse/churn UAT is opt-in and records only counters: proposals, activations,
 reuses, replacements, and quarantines. It records no helper input, output, KB
 body, command body, or credential data.
 
 ## Migration and feature gate
 
-The registry is default-disabled and uses additive tables plus a private object
-root. KB v1 references remain plain text and acquire no executable meaning.
-Migration can attach helper IDs to KB entries only after an explicit review.
+The registry is default-disabled via `AGENT_PBX_DURABLE_HELPERS_ENABLED` and
+uses additive schema-42 tables plus a private object root configured by
+`AGENT_PBX_DURABLE_HELPER_ROOT`. Proposal roots are an explicit JSON list in
+`AGENT_PBX_DURABLE_HELPER_PROPOSAL_ROOTS`. Content-free reuse/churn metrics are
+separately opt in with `AGENT_PBX_DURABLE_HELPER_MEASUREMENTS_ENABLED`. KB v1
+references remain plain text and acquire no executable meaning. Migration can
+attach helper IDs to KB entries only after explicit helper review.
 
 ## Rollback
 

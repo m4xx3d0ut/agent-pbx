@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -1524,6 +1524,37 @@ class Store:
                         ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS durable_helper_bundles (
+                    helper_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    object_sha256 TEXT NOT NULL,
+                    object_bytes INTEGER NOT NULL,
+                    source_path TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    provenance_json TEXT NOT NULL,
+                    validation_receipt_json TEXT,
+                    scopes_json TEXT NOT NULL DEFAULT '[]',
+                    kb_refs_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL,
+                    created_by_operator_agent_id TEXT NOT NULL,
+                    reviewed_by_operator_agent_id TEXT,
+                    activated_by_operator_agent_id TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(name, object_sha256)
+                );
+
+                CREATE TABLE IF NOT EXISTS durable_helper_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    helper_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    operator_agent_id TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(helper_id) REFERENCES durable_helper_bundles(helper_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS operator_kb_fts USING fts5(
                     kb_id UNINDEXED,
                     title,
@@ -1653,6 +1684,10 @@ class Store:
                     ON operator_kb_feedback(kb_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_operator_kb_sync_local
                     ON operator_kb_sync_records(local_kb_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_durable_helpers_status_name
+                    ON durable_helper_bundles(status, name, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_durable_helper_events_helper
+                    ON durable_helper_events(helper_id, event_id DESC);
                 """
             )
             previous_schema_version = self._schema_version(conn)
@@ -8837,6 +8872,212 @@ class Store:
         data["trusted_reviewer"] = bool(data.get("trusted_reviewer"))
         data["revision"] = int(data.get("revision") or 0)
         return data
+
+    def create_durable_helper_bundle(
+        self,
+        *,
+        helper_id: str,
+        name: str,
+        object_sha256: str,
+        object_bytes: int,
+        source_path: str,
+        manifest: dict[str, Any],
+        provenance: dict[str, Any],
+        scopes: list[str],
+        kb_refs: list[str],
+        status: str,
+        created_by_operator_agent_id: str,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO durable_helper_bundles
+                    (helper_id, name, object_sha256, object_bytes, source_path,
+                     manifest_json, provenance_json, scopes_json, kb_refs_json,
+                     status, created_by_operator_agent_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    helper_id,
+                    name,
+                    object_sha256,
+                    int(object_bytes),
+                    source_path,
+                    json.dumps(manifest, sort_keys=True),
+                    json.dumps(provenance, sort_keys=True),
+                    json.dumps(scopes, sort_keys=True),
+                    json.dumps(kb_refs, sort_keys=True),
+                    status,
+                    created_by_operator_agent_id,
+                    current,
+                    current,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO durable_helper_events
+                    (helper_id, event_type, operator_agent_id, metadata_json, created_at)
+                VALUES (?, 'proposed', ?, '{}', ?)
+                """,
+                (helper_id, created_by_operator_agent_id, current),
+            )
+        bundle = self.get_durable_helper_bundle(helper_id)
+        if bundle is None:
+            raise RuntimeError("durable helper insert failed")
+        return bundle
+
+    def get_durable_helper_bundle(self, helper_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM durable_helper_bundles WHERE helper_id = ?",
+                (helper_id,),
+            ).fetchone()
+        return self._durable_helper_from_row(row) if row else None
+
+    def find_durable_helper_bundle(
+        self,
+        *,
+        name: str,
+        object_sha256: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM durable_helper_bundles
+                WHERE name = ? AND object_sha256 = ?
+                """,
+                (name, object_sha256),
+            ).fetchone()
+        return self._durable_helper_from_row(row) if row else None
+
+    def list_durable_helper_bundles(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if status is not None:
+            where = "WHERE status = ?"
+            params.append(status)
+        params.append(min(max(int(limit), 1), 1000))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM durable_helper_bundles
+                {where}
+                ORDER BY updated_at DESC, helper_id ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._durable_helper_from_row(row) for row in rows]
+
+    def update_durable_helper_bundle(
+        self,
+        helper_id: str,
+        *,
+        status: str | None = None,
+        validation_receipt: dict[str, Any] | None = None,
+        reviewed_by_operator_agent_id: str | None = None,
+        activated_by_operator_agent_id: str | None = None,
+        event_type: str,
+        operator_agent_id: str,
+        event_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        current = now_ts()
+        assignments: list[str] = ["updated_at = ?"]
+        values: list[Any] = [current]
+        if status is not None:
+            assignments.append("status = ?")
+            values.append(status)
+        if validation_receipt is not None:
+            assignments.append("validation_receipt_json = ?")
+            values.append(json.dumps(validation_receipt, sort_keys=True))
+        if reviewed_by_operator_agent_id is not None:
+            assignments.append("reviewed_by_operator_agent_id = ?")
+            values.append(reviewed_by_operator_agent_id)
+        if activated_by_operator_agent_id is not None:
+            assignments.append("activated_by_operator_agent_id = ?")
+            values.append(activated_by_operator_agent_id)
+        values.append(helper_id)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE durable_helper_bundles SET {', '.join(assignments)} "
+                "WHERE helper_id = ?",
+                values,
+            )
+            if cursor.rowcount == 0:
+                return None
+            conn.execute(
+                """
+                INSERT INTO durable_helper_events
+                    (helper_id, event_type, operator_agent_id, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    helper_id,
+                    event_type,
+                    operator_agent_id,
+                    json.dumps(event_metadata or {}, sort_keys=True),
+                    current,
+                ),
+            )
+        return self.get_durable_helper_bundle(helper_id)
+
+    def list_durable_helper_events(
+        self,
+        *,
+        helper_id: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if helper_id is not None:
+            where = "WHERE helper_id = ?"
+            params.append(helper_id)
+        params.append(min(max(int(limit), 1), 2000))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM durable_helper_events
+                {where}
+                ORDER BY event_id ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                metadata = json.loads(item.pop("metadata_json") or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            item["metadata"] = metadata if isinstance(metadata, dict) else {}
+            events.append(item)
+        return events
+
+    @staticmethod
+    def _durable_helper_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        for column, target, fallback in (
+            ("manifest_json", "manifest", {}),
+            ("provenance_json", "provenance", {}),
+            ("validation_receipt_json", "validation_receipt", None),
+            ("scopes_json", "scopes", []),
+            ("kb_refs_json", "kb_refs", []),
+        ):
+            raw = item.pop(column)
+            try:
+                value = json.loads(raw) if raw is not None else fallback
+            except json.JSONDecodeError:
+                value = fallback
+            item[target] = value
+        item["object_bytes"] = int(item.get("object_bytes") or 0)
+        return item
 
     def create_operator_kb_seed_run(
         self,

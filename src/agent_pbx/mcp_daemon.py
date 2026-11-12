@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -77,11 +77,19 @@ TOKEN_ENV = "AGENT_PBX_TOKEN"
 EVIDENCE_EXPORTS_ENABLED_ENV = "AGENT_PBX_EVIDENCE_EXPORTS_ENABLED"
 EVIDENCE_EXPORT_ROOT_ENV = "AGENT_PBX_EVIDENCE_EXPORT_ROOT"
 OPERATOR_KB_BUNDLE_V2_ENABLED_ENV = "AGENT_PBX_OPERATOR_KB_BUNDLE_V2_ENABLED"
+DURABLE_HELPERS_ENABLED_ENV = "AGENT_PBX_DURABLE_HELPERS_ENABLED"
+DURABLE_HELPER_ROOT_ENV = "AGENT_PBX_DURABLE_HELPER_ROOT"
+DURABLE_HELPER_PROPOSAL_ROOTS_ENV = "AGENT_PBX_DURABLE_HELPER_PROPOSAL_ROOTS"
+DURABLE_HELPER_MEASUREMENTS_ENV = "AGENT_PBX_DURABLE_HELPER_MEASUREMENTS_ENABLED"
 MANAGED_CHILD_ENV_VARS = {
     TOKEN_ENV,
     EVIDENCE_EXPORTS_ENABLED_ENV,
     EVIDENCE_EXPORT_ROOT_ENV,
     OPERATOR_KB_BUNDLE_V2_ENABLED_ENV,
+    DURABLE_HELPERS_ENABLED_ENV,
+    DURABLE_HELPER_ROOT_ENV,
+    DURABLE_HELPER_PROPOSAL_ROOTS_ENV,
+    DURABLE_HELPER_MEASUREMENTS_ENV,
     WORKERBEE_BIN_ENV,
     WORKERBEE_TIMEOUT_ENV,
     WORKERBEE_CACHE_ENV,
@@ -149,6 +157,10 @@ class MCPDaemonConfig:
     evidence_exports_enabled: bool = False
     evidence_export_root: Path | None = None
     operator_kb_bundle_v2_enabled: bool = False
+    durable_helpers_enabled: bool = False
+    durable_helper_root: Path | None = None
+    durable_helper_proposal_roots: tuple[Path, ...] = field(default_factory=tuple)
+    durable_helper_measurements_enabled: bool = False
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
@@ -426,6 +438,10 @@ def config_from_args(
     evidence_exports_enabled: bool = False,
     evidence_export_root: Path | None = None,
     operator_kb_bundle_v2_enabled: bool = False,
+    durable_helpers_enabled: bool = False,
+    durable_helper_root: Path | None = None,
+    durable_helper_proposal_roots: tuple[Path, ...] = (),
+    durable_helper_measurements_enabled: bool = False,
     workerbee_bin: Path | None = None,
     workerbee_timeout_seconds: float = 20.0,
     workerbee_cache_seconds: float = 10.0,
@@ -483,6 +499,16 @@ def config_from_args(
             evidence_export_root.expanduser() if evidence_export_root else None
         ),
         operator_kb_bundle_v2_enabled=bool(operator_kb_bundle_v2_enabled),
+        durable_helpers_enabled=bool(durable_helpers_enabled),
+        durable_helper_root=(
+            durable_helper_root.expanduser() if durable_helper_root else None
+        ),
+        durable_helper_proposal_roots=tuple(
+            Path(item).expanduser() for item in durable_helper_proposal_roots
+        ),
+        durable_helper_measurements_enabled=bool(
+            durable_helper_measurements_enabled
+        ),
         workerbee_bin=workerbee_bin.expanduser() if workerbee_bin else None,
         workerbee_timeout_seconds=workerbee_timeout_seconds,
         workerbee_cache_seconds=workerbee_cache_seconds,
@@ -624,6 +650,16 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
             else None
         ),
         "operator_kb_bundle_v2_enabled": config.operator_kb_bundle_v2_enabled,
+        "durable_helpers_enabled": config.durable_helpers_enabled,
+        "durable_helper_root": (
+            str(config.durable_helper_root) if config.durable_helper_root else None
+        ),
+        "durable_helper_proposal_roots": [
+            str(item) for item in config.durable_helper_proposal_roots
+        ],
+        "durable_helper_measurements_enabled": (
+            config.durable_helper_measurements_enabled
+        ),
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,
@@ -715,6 +751,17 @@ def _child_env(config: MCPDaemonConfig) -> dict[str, str]:
         )
     child_env[OPERATOR_KB_BUNDLE_V2_ENABLED_ENV] = (
         "1" if config.operator_kb_bundle_v2_enabled else "0"
+    )
+    child_env[DURABLE_HELPERS_ENABLED_ENV] = (
+        "1" if config.durable_helpers_enabled else "0"
+    )
+    child_env[DURABLE_HELPER_MEASUREMENTS_ENV] = (
+        "1" if config.durable_helper_measurements_enabled else "0"
+    )
+    if config.durable_helper_root:
+        child_env[DURABLE_HELPER_ROOT_ENV] = str(config.durable_helper_root.expanduser())
+    child_env[DURABLE_HELPER_PROPOSAL_ROOTS_ENV] = json.dumps(
+        [str(item.expanduser()) for item in config.durable_helper_proposal_roots]
     )
     if config.workerbee_bin:
         child_env[WORKERBEE_BIN_ENV] = str(config.workerbee_bin.expanduser())
@@ -1042,6 +1089,16 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
             else None
         ),
         "operator_kb_bundle_v2_enabled": config.operator_kb_bundle_v2_enabled,
+        "durable_helpers_enabled": config.durable_helpers_enabled,
+        "durable_helper_root": (
+            str(config.durable_helper_root) if config.durable_helper_root else None
+        ),
+        "durable_helper_proposal_roots": [
+            str(item) for item in config.durable_helper_proposal_roots
+        ],
+        "durable_helper_measurements_enabled": (
+            config.durable_helper_measurements_enabled
+        ),
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,

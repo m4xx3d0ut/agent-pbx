@@ -10,6 +10,10 @@ from agent_pbx.mcp_daemon import (
     EVIDENCE_EXPORTS_ENABLED_ENV,
     EVIDENCE_EXPORT_ROOT_ENV,
     OPERATOR_KB_BUNDLE_V2_ENABLED_ENV,
+    DURABLE_HELPERS_ENABLED_ENV,
+    DURABLE_HELPER_MEASUREMENTS_ENV,
+    DURABLE_HELPER_PROPOSAL_ROOTS_ENV,
+    DURABLE_HELPER_ROOT_ENV,
     MCPDaemonConfig,
     _child_env,
     config_from_args,
@@ -145,6 +149,51 @@ def test_daemon_config_loads_operator_kb_bundle_v2_gate(
     config = _daemon_config(args)
 
     assert config.operator_kb_bundle_v2_enabled is True
+
+
+def test_managed_daemon_projects_typed_durable_helper_configuration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(DURABLE_HELPERS_ENABLED_ENV, "ambient")
+    monkeypatch.setenv(DURABLE_HELPER_ROOT_ENV, "/untrusted/root")
+    monkeypatch.setenv(DURABLE_HELPER_PROPOSAL_ROOTS_ENV, "not-json")
+    root = tmp_path / "helper-state"
+    proposal = tmp_path / "proposals"
+    config = MCPDaemonConfig(
+        state_root=tmp_path / "state",
+        durable_helpers_enabled=True,
+        durable_helper_root=root,
+        durable_helper_proposal_roots=(proposal,),
+        durable_helper_measurements_enabled=True,
+    )
+
+    child = _child_env(config)
+
+    assert child[DURABLE_HELPERS_ENABLED_ENV] == "1"
+    assert child[DURABLE_HELPER_ROOT_ENV] == str(root)
+    assert json.loads(child[DURABLE_HELPER_PROPOSAL_ROOTS_ENV]) == [str(proposal)]
+    assert child[DURABLE_HELPER_MEASUREMENTS_ENV] == "1"
+
+
+def test_daemon_config_loads_durable_helper_environment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "helper-state"
+    proposal = tmp_path / "proposals"
+    monkeypatch.setenv(DURABLE_HELPERS_ENABLED_ENV, "true")
+    monkeypatch.setenv(DURABLE_HELPER_ROOT_ENV, str(root))
+    monkeypatch.setenv(DURABLE_HELPER_PROPOSAL_ROOTS_ENV, json.dumps([str(proposal)]))
+    monkeypatch.setenv(DURABLE_HELPER_MEASUREMENTS_ENV, "true")
+    args = build_parser().parse_args(["mcp", "status"])
+
+    config = _daemon_config(args)
+
+    assert config.durable_helpers_enabled is True
+    assert config.durable_helper_root == root
+    assert config.durable_helper_proposal_roots == (proposal,)
+    assert config.durable_helper_measurements_enabled is True
 
 
 def test_daemon_config_loads_trusted_direct_environment_as_typed_fields(

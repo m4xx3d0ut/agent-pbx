@@ -44,6 +44,7 @@ from .operator_kb_sync import (
     OperatorKbBundleV2Service,
     logical_project_identity,
 )
+from .durable_helpers import DurableHelperRegistry
 from .tmux_binary import configured_tmux_binary
 
 
@@ -290,9 +291,16 @@ def operator_runbook_payload() -> dict[str, Any]:
 
 
 class OperatorService:
-    def __init__(self, store: Store, *, tmux_bin: str = "tmux") -> None:
+    def __init__(
+        self,
+        store: Store,
+        *,
+        tmux_bin: str = "tmux",
+        durable_helpers: DurableHelperRegistry | None = None,
+    ) -> None:
         self.store = store
         self.tmux_bin = configured_tmux_binary(tmux_bin)
+        self.durable_helpers = durable_helpers
 
     def list_agents(self, *, agent_type: str = "caller") -> list[dict[str, Any]]:
         requested = str(agent_type or "caller").strip().lower()
@@ -2201,6 +2209,108 @@ class OperatorService:
     ) -> dict[str, Any]:
         self._require_root_operator(operator_agent_id)
         return OperatorKbBundleV2Service(self.store).prepare_git_tree(bundle)
+
+    def list_durable_helpers(
+        self,
+        *,
+        operator_agent_id: str,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        self._require_root_operator(operator_agent_id)
+        return self._durable_helper_registry().list(status=status, limit=limit)
+
+    def propose_durable_helper(
+        self,
+        *,
+        operator_agent_id: str,
+        source_path: str,
+        name: str,
+        scopes: list[str],
+        kb_refs: list[str],
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._durable_helper_registry().propose(
+            source_path=source_path,
+            name=name,
+            scopes=scopes,
+            kb_refs=kb_refs,
+            operator_agent_id=operator_agent_id,
+        )
+
+    def validate_durable_helper(
+        self,
+        *,
+        operator_agent_id: str,
+        helper_id: str,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._durable_helper_registry().validate(
+            helper_id=helper_id,
+            operator_agent_id=operator_agent_id,
+        )
+
+    def transition_durable_helper(
+        self,
+        *,
+        operator_agent_id: str,
+        helper_id: str,
+        target_status: str,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._durable_helper_registry().transition(
+            helper_id=helper_id,
+            target_status=target_status,
+            operator_agent_id=operator_agent_id,
+        )
+
+    def export_durable_helper(
+        self,
+        *,
+        operator_agent_id: str,
+        helper_id: str,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._durable_helper_registry().export_bundle(helper_id)
+
+    def import_durable_helper(
+        self,
+        *,
+        operator_agent_id: str,
+        bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._durable_helper_registry().import_bundle(
+            bundle=bundle,
+            operator_agent_id=operator_agent_id,
+        )
+
+    def prepare_durable_helper_invocation(
+        self,
+        *,
+        operator_agent_id: str,
+        helper_id: str,
+        scope: str,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._durable_helper_registry().invocation_plan(
+            helper_id=helper_id,
+            scope=scope,
+            operator_agent_id=operator_agent_id,
+        )
+
+    def durable_helper_measurements(
+        self,
+        *,
+        operator_agent_id: str,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._durable_helper_registry().measurements()
+
+    def _durable_helper_registry(self) -> DurableHelperRegistry:
+        if self.durable_helpers is None:
+            raise ValueError("durable helper registry is not configured")
+        return self.durable_helpers
 
     def start_kb_seed_run(
         self,

@@ -869,6 +869,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/operator kb promote",
     "/operator kb reject",
     "/operator kb retire",
+    "/operator helpers",
     "/operator project spawn",
     "/operator project spawn inspect",
     "/operator project spawn cancel",
@@ -6367,6 +6368,118 @@ class OperatorDelegationLeaseConfirmScreen(ModalScreen[None]):
             )
 
 
+class DurableHelperRegistryScreen(ModalScreen[None]):
+    """Review root-controlled durable helper lifecycle state."""
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(
+        self,
+        *,
+        operator_agent_id: str,
+        helpers: list[dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.operator_agent_id = operator_agent_id
+        self.helpers = helpers
+        self.helper_ids: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="operator-handoff-approval-panel"):
+            yield Static(
+                f"Durable helpers · {self.operator_agent_id}",
+                id="operator-completion-title",
+            )
+            yield Static(
+                "Validation compiles the private object without executing helper "
+                "code. Promote materializes only a reviewed helper; invocation "
+                "remains an explicit separate action.",
+                id="operator-completion-summary",
+            )
+            yield DataTable(
+                id="durable-helper-table",
+                cursor_type="row",
+                show_row_labels=False,
+            )
+            with Horizontal(id="operator-handoff-approval-actions"):
+                yield Button("Review", id="durable-helper-review")
+                yield Button("Promote", id="durable-helper-promote", variant="success")
+                yield Button("Reject", id="durable-helper-reject", variant="error")
+                yield Button("Retire", id="durable-helper-retire")
+                yield Button("Quarantine", id="durable-helper-quarantine", variant="warning")
+                yield Button("Refresh", id="durable-helper-refresh")
+                yield Button("Close", id="durable-helper-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#durable-helper-table", DataTable)
+        table.add_columns("Name", "Status", "Digest", "Scopes", "Helper ID")
+        self.render_rows()
+
+    def render_rows(self) -> None:
+        table = self.query_one("#durable-helper-table", DataTable)
+        table.clear(columns=False)
+        self.helper_ids = []
+        for helper in self.helpers:
+            helper_id = str(helper.get("helper_id") or "").strip()
+            if not helper_id:
+                continue
+            self.helper_ids.append(helper_id)
+            scopes = helper.get("scopes")
+            table.add_row(
+                str(helper.get("name") or "-"),
+                str(helper.get("status") or "-"),
+                str(helper.get("object_sha256") or "-")[:12],
+                ", ".join(str(item) for item in scopes)
+                if isinstance(scopes, list)
+                else "-",
+                helper_id,
+            )
+
+    def selected_helper_id(self) -> str | None:
+        table = self.query_one("#durable-helper-table", DataTable)
+        if table.cursor_row < 0 or table.cursor_row >= len(self.helper_ids):
+            return None
+        return self.helper_ids[table.cursor_row]
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        button_id = str(event.button.id or "")
+        if button_id == "durable-helper-close":
+            self.dismiss()
+            return
+        app = self.app
+        if button_id == "durable-helper-refresh":
+            app.run_worker(  # type: ignore[attr-defined]
+                app.refresh_durable_helper_screen(self),  # type: ignore[attr-defined]
+                name="durable-helper-refresh",
+                exclusive=True,
+                exit_on_error=False,
+            )
+            return
+        actions = {
+            "durable-helper-review": "review",
+            "durable-helper-promote": "active",
+            "durable-helper-reject": "rejected",
+            "durable-helper-retire": "retired",
+            "durable-helper-quarantine": "quarantined",
+        }
+        action = actions.get(button_id)
+        helper_id = self.selected_helper_id()
+        if action is None or helper_id is None:
+            app.notify("Select one durable helper first", severity="warning")  # type: ignore[attr-defined]
+            return
+        app.run_worker(  # type: ignore[attr-defined]
+            app.apply_durable_helper_action(  # type: ignore[attr-defined]
+                self,
+                helper_id=helper_id,
+                action=action,
+            ),
+            name=f"durable-helper-{action}",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+
 class OperatorHandoffCompletionScreen(ModalScreen[None]):
     """Review and acknowledge source-addressed handoff completions."""
 
@@ -11853,6 +11966,11 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/operator kb promote", "Promote the oldest clean proposed KB entry", self.palette_operator_kb_promote)
         yield SystemCommand("/operator kb reject", "Reject the oldest proposed KB entry", self.palette_operator_kb_reject)
         yield SystemCommand("/operator kb retire", "Retire the selected active KB entry", self.palette_operator_kb_retire)
+        yield SystemCommand(
+            "/operator helpers",
+            "Review durable helper lifecycle state",
+            self.palette_operator_helpers,
+        )
         yield SystemCommand("/operator project spawn", "Launch the oldest pending review project spawn", self.palette_operator_project_spawn)
         yield SystemCommand("/operator project spawn inspect", "Inspect the oldest pending review project spawn", self.palette_operator_project_spawn_inspect)
         yield SystemCommand("/operator project spawn cancel", "Cancel the oldest pending review project spawn", self.palette_operator_project_spawn_cancel)
@@ -13541,6 +13659,14 @@ class AgentPBXTUI(App[None]):
             self.retire_selected_operator_kb_entry(),
             name="palette-operator-kb-retire",
             exclusive=True,
+        )
+
+    def palette_operator_helpers(self) -> None:
+        self.run_worker(
+            self.show_durable_helpers(),
+            name="palette-operator-helpers",
+            exclusive=True,
+            exit_on_error=False,
         )
 
     def palette_operator_project_spawn(self) -> None:
@@ -30189,6 +30315,91 @@ class AgentPBXTUI(App[None]):
                 ]
             )
         return "\n".join(lines)
+
+    async def fetch_durable_helpers(
+        self,
+        logical_operator_id: str,
+    ) -> list[dict[str, Any]]:
+        response = await self.api_client().get(
+            "/v1/operator/helpers",
+            params={"operator_agent_id": logical_operator_id, "limit": 200},
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise RuntimeError("durable helper response was not a list")
+        return [item for item in payload if isinstance(item, dict)]
+
+    async def show_durable_helpers(self) -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            self.notify("Select a root Operator first", severity="warning")
+            return
+        operator = self.agents.get(operator_agent_id)
+        if (
+            not isinstance(operator, dict)
+            or self.operator_role(operator) != OPERATOR_ROLE_ROOT
+            or self.logical_operator_id_for_agent(operator) != operator_agent_id
+        ):
+            self.notify("Durable helpers require the exact root Operator row", severity="warning")
+            return
+        try:
+            helpers = await self.fetch_durable_helpers(operator_agent_id)
+        except Exception as exc:
+            self.notify(f"Unable to load durable helpers: {exc}", severity="error")
+            return
+        self.push_screen(
+            DurableHelperRegistryScreen(
+                operator_agent_id=operator_agent_id,
+                helpers=helpers,
+            )
+        )
+
+    async def refresh_durable_helper_screen(
+        self,
+        screen: DurableHelperRegistryScreen,
+    ) -> None:
+        try:
+            screen.helpers = await self.fetch_durable_helpers(screen.operator_agent_id)
+            screen.render_rows()
+        except Exception as exc:
+            self.notify(f"Unable to refresh durable helpers: {exc}", severity="error")
+
+    async def apply_durable_helper_action(
+        self,
+        screen: DurableHelperRegistryScreen,
+        *,
+        helper_id: str,
+        action: str,
+    ) -> None:
+        try:
+            if action == "review":
+                validation = await self.api_client().post(
+                    f"/v1/operator/helpers/{helper_id}/validate",
+                    json={"operator_agent_id": screen.operator_agent_id},
+                    headers=auth_headers(self.token),
+                )
+                validation.raise_for_status()
+                payload = validation.json()
+                if not isinstance(payload, dict) or payload.get("passed") is not True:
+                    raise RuntimeError("isolated helper validation did not pass")
+                target_status = "reviewed"
+            else:
+                target_status = action
+            transitioned = await self.api_client().post(
+                f"/v1/operator/helpers/{helper_id}/transition",
+                json={
+                    "operator_agent_id": screen.operator_agent_id,
+                    "target_status": target_status,
+                },
+                headers=auth_headers(self.token),
+            )
+            transitioned.raise_for_status()
+            self.notify(f"Durable helper is now {target_status}")
+            await self.refresh_durable_helper_screen(screen)
+        except Exception as exc:
+            self.notify(f"Durable helper action failed: {exc}", severity="error")
 
     async def fetch_operator_kb_entries(
         self,

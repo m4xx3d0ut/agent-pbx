@@ -46,6 +46,7 @@ from agent_pbx.tui import (
     CODEX_TERMINAL_MODE_RAW,
     CODEX_TERMINAL_MODE_SCROLLBACK,
     CustomSlashCommand,
+    DurableHelperRegistryScreen,
     EditorCloseConfirmScreen,
     JoplinReferencePromptScreen,
     JoplinPasteConfirmScreen,
@@ -24151,6 +24152,91 @@ async def test_tui_operator_kb_tab_loads_entries() -> None:
     assert "KB ID: kb-1" in detail.text
     assert "Use the KB tab to inspect proposed durable knowledge." in detail.text
     assert "1 proposed entry for operator-0" in str(status.renderable)
+
+
+async def test_tui_durable_helper_registry_exposes_root_lifecycle_actions() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    helper = {
+        "helper_id": "11111111-1111-4111-8111-111111111111",
+        "name": "evidence-helper",
+        "status": "proposed",
+        "object_sha256": "a" * 64,
+        "scopes": ["evidence.render"],
+    }
+
+    async def fake_fetch(logical_operator_id: str) -> list[dict[str, object]]:
+        assert logical_operator_id == "operator-0"
+        return [helper]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.posts: list[tuple[str, dict[str, object]]] = []
+
+        async def post(self, path: str, *, json, headers):  # type: ignore[no-untyped-def]
+            self.posts.append((path, json))
+            payload = (
+                {"passed": True}
+                if path.endswith("/validate")
+                else {**helper, "status": json["target_status"]}
+            )
+            return httpx.Response(
+                200,
+                json=payload,
+                request=httpx.Request("POST", f"http://test{path}"),
+            )
+
+    client = FakeClient()
+    app.fetch_durable_helpers = fake_fetch  # type: ignore[method-assign]
+    app.api_client = lambda: client  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "running",
+                "last_seen_at": 123.0,
+                "metadata": {"operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        await app.show_durable_helpers()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DurableHelperRegistryScreen)
+        assert screen.query_one("#durable-helper-table", DataTable).row_count == 1
+        for button_id in (
+            "durable-helper-review",
+            "durable-helper-promote",
+            "durable-helper-reject",
+            "durable-helper-retire",
+            "durable-helper-quarantine",
+        ):
+            assert screen.query_one(f"#{button_id}", Button)
+
+        async def no_refresh(_screen):  # type: ignore[no-untyped-def]
+            return None
+
+        app.refresh_durable_helper_screen = no_refresh  # type: ignore[method-assign]
+        await app.apply_durable_helper_action(
+            screen,
+            helper_id=helper["helper_id"],
+            action="review",
+        )
+
+    assert client.posts == [
+        (
+            f"/v1/operator/helpers/{helper['helper_id']}/validate",
+            {"operator_agent_id": "operator-0"},
+        ),
+        (
+            f"/v1/operator/helpers/{helper['helper_id']}/transition",
+            {"operator_agent_id": "operator-0", "target_status": "reviewed"},
+        ),
+    ]
+    assert "/operator helpers" in built_in_palette_command_names()
 
 
 async def test_tui_operator_kb_search_history_and_feedback() -> None:
