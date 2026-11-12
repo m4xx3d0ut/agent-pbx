@@ -74,8 +74,12 @@ DEFAULT_MCP_DAEMON_LOG_BACKUPS = 3
 DEFAULT_MCP_DAEMON_LOG_CHECK_SECONDS = 30
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 TOKEN_ENV = "AGENT_PBX_TOKEN"
+EVIDENCE_EXPORTS_ENABLED_ENV = "AGENT_PBX_EVIDENCE_EXPORTS_ENABLED"
+EVIDENCE_EXPORT_ROOT_ENV = "AGENT_PBX_EVIDENCE_EXPORT_ROOT"
 MANAGED_CHILD_ENV_VARS = {
     TOKEN_ENV,
+    EVIDENCE_EXPORTS_ENABLED_ENV,
+    EVIDENCE_EXPORT_ROOT_ENV,
     WORKERBEE_BIN_ENV,
     WORKERBEE_TIMEOUT_ENV,
     WORKERBEE_CACHE_ENV,
@@ -140,6 +144,8 @@ class MCPDaemonConfig:
     codex_event_bridge_poll_seconds: float = 5.0
     codex_event_bridge_transport: str = "auto"
     codex_bin: str = "codex"
+    evidence_exports_enabled: bool = False
+    evidence_export_root: Path | None = None
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
@@ -414,6 +420,8 @@ def config_from_args(
     codex_event_bridge_poll_seconds: float = 5.0,
     codex_event_bridge_transport: str = "auto",
     codex_bin: str = "codex",
+    evidence_exports_enabled: bool = False,
+    evidence_export_root: Path | None = None,
     workerbee_bin: Path | None = None,
     workerbee_timeout_seconds: float = 20.0,
     workerbee_cache_seconds: float = 10.0,
@@ -466,6 +474,10 @@ def config_from_args(
         codex_event_bridge_poll_seconds=max(0.25, codex_event_bridge_poll_seconds),
         codex_event_bridge_transport=codex_event_bridge_transport,
         codex_bin=codex_bin,
+        evidence_exports_enabled=bool(evidence_exports_enabled),
+        evidence_export_root=(
+            evidence_export_root.expanduser() if evidence_export_root else None
+        ),
         workerbee_bin=workerbee_bin.expanduser() if workerbee_bin else None,
         workerbee_timeout_seconds=workerbee_timeout_seconds,
         workerbee_cache_seconds=workerbee_cache_seconds,
@@ -600,6 +612,12 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "codex_event_bridge_poll_seconds": config.codex_event_bridge_poll_seconds,
         "codex_event_bridge_transport": config.codex_event_bridge_transport,
         "codex_bin": config.codex_bin,
+        "evidence_exports_enabled": config.evidence_exports_enabled,
+        "evidence_export_root": (
+            str(config.evidence_export_root.expanduser())
+            if config.evidence_export_root
+            else None
+        ),
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,
@@ -682,6 +700,13 @@ def _child_env(config: MCPDaemonConfig) -> dict[str, str]:
     )
     child_env[CODEX_EVENT_BRIDGE_TRANSPORT_ENV] = config.codex_event_bridge_transport
     child_env[CODEX_EVENT_BRIDGE_BIN_ENV] = config.codex_bin
+    child_env[EVIDENCE_EXPORTS_ENABLED_ENV] = (
+        "1" if config.evidence_exports_enabled else "0"
+    )
+    if config.evidence_export_root:
+        child_env[EVIDENCE_EXPORT_ROOT_ENV] = str(
+            config.evidence_export_root.expanduser()
+        )
     if config.workerbee_bin:
         child_env[WORKERBEE_BIN_ENV] = str(config.workerbee_bin.expanduser())
     child_env[WORKERBEE_TIMEOUT_ENV] = str(config.workerbee_timeout_seconds)
@@ -1001,6 +1026,12 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "codex_event_bridge_poll_seconds": config.codex_event_bridge_poll_seconds,
         "codex_event_bridge_transport": config.codex_event_bridge_transport,
         "codex_bin": config.codex_bin,
+        "evidence_exports_enabled": config.evidence_exports_enabled,
+        "evidence_export_root": (
+            str(config.evidence_export_root.expanduser())
+            if config.evidence_export_root
+            else None
+        ),
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,

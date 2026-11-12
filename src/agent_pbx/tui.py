@@ -11648,6 +11648,7 @@ class AgentPBXTUI(App[None]):
         )
         yield SystemCommand("/latest", "Open the Latest tab", self.palette_latest)
         yield SystemCommand("/thread", "Open the Thread tab", self.palette_thread)
+        yield SystemCommand("/thread export", "Export the selected Agent thread through the daemon evidence center", self.palette_thread_export)
         yield SystemCommand("/files", "Open and refresh the Files tab", self.palette_files)
         yield SystemCommand("/files refresh", "Refresh the selected agent Files tab", self.palette_files_refresh)
         yield SystemCommand("/files up", "Open the parent directory in the Files tab", self.palette_files_up)
@@ -11728,6 +11729,8 @@ class AgentPBXTUI(App[None]):
         yield SystemCommand("/campaign monitor", "Ask the root operator to monitor selected campaign", self.palette_campaign_monitor)
         yield SystemCommand("/campaign report", "View the selected campaign report", self.palette_campaign_report)
         yield SystemCommand("/campaign copy", "Copy selected campaign to a new Joplin note", self.palette_campaign_copy)
+        yield SystemCommand("/campaign export", "Export the selected campaign through the daemon evidence center", self.palette_campaign_export)
+        yield SystemCommand("/evidence export", "Export a filtered evidence case for the selected Agent", self.palette_evidence_export)
         yield SystemCommand("/pr", "Open and refresh pull requests", self.palette_pull_requests)
         yield SystemCommand("/pr refresh", "Refresh pull requests", self.palette_pull_requests_refresh)
         yield SystemCommand("/pr review", "Ask selected agent to review the selected PR", self.palette_pull_request_review)
@@ -12716,6 +12719,13 @@ class AgentPBXTUI(App[None]):
             exclusive=True,
         )
 
+    def palette_thread_export(self) -> None:
+        self.run_worker(
+            self.export_thread_scope("all"),
+            name="palette-thread-export",
+            exclusive=True,
+        )
+
     def palette_files(self) -> None:
         agent_id = self.palette_agent_id()
         if agent_id is None:
@@ -13102,6 +13112,20 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.copy_selected_campaign_to_joplin(),
             name="palette-campaign-copy",
+            exclusive=True,
+        )
+
+    def palette_campaign_export(self) -> None:
+        self.run_worker(
+            self.export_selected_campaign_evidence(),
+            name="palette-campaign-export",
+            exclusive=True,
+        )
+
+    def palette_evidence_export(self) -> None:
+        self.run_worker(
+            self.export_selected_agent_evidence_case(),
+            name="palette-evidence-export",
             exclusive=True,
         )
 
@@ -20934,13 +20958,13 @@ class AgentPBXTUI(App[None]):
             await self.mark_agent_canceled()
             return
         if event.button.id == "export-item":
-            self.export_thread_scope("item")
+            await self.export_thread_scope("item")
             return
         if event.button.id == "export-marked":
-            self.export_thread_scope("marked")
+            await self.export_thread_scope("marked")
             return
         if event.button.id == "export-all":
-            self.export_thread_scope("all")
+            await self.export_thread_scope("all")
             return
         if event.button.id == "clear-marks":
             self.clear_thread_marks()
@@ -34615,6 +34639,71 @@ class AgentPBXTUI(App[None]):
             success_message="Copied campaign to a new Joplin note.",
         )
 
+    async def export_selected_campaign_evidence(self) -> dict[str, Any] | None:
+        operator_id = self.selected_agent_id
+        if not operator_id:
+            self.notify("Select an operator campaign first.", severity="warning")
+            return None
+        campaign = self.selected_campaign_for_operator(operator_id)
+        campaign_id = str((campaign or {}).get("campaign_id") or "").strip()
+        if not campaign_id:
+            self.notify("Select a campaign before exporting evidence.", severity="warning")
+            return None
+        return await self.create_evidence_export(
+            {
+                "kind": "campaign",
+                "subject_id": campaign_id,
+                "formats": ["json", "markdown", "ndjson"],
+            },
+            label="campaign",
+        )
+
+    async def export_selected_agent_evidence_case(self) -> dict[str, Any] | None:
+        agent_id = self.selected_agent_id
+        if not agent_id:
+            self.notify("Select an Agent before exporting evidence.", severity="warning")
+            return None
+        return await self.create_evidence_export(
+            {
+                "kind": "evidence_case",
+                "subject_id": agent_id,
+                "categories": [
+                    "git_broker",
+                    "lifecycle",
+                    "runtime",
+                    "handoff",
+                    "workerbee_workspace",
+                    "workerbee_run",
+                    "workerbee_resource",
+                ],
+                "formats": ["json", "markdown", "ndjson"],
+            },
+            label="evidence case",
+        )
+
+    async def create_evidence_export(
+        self,
+        payload: dict[str, Any],
+        *,
+        label: str,
+    ) -> dict[str, Any] | None:
+        try:
+            response = await self.api_client().post(
+                "/v1/evidence/exports",
+                json=payload,
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:  # noqa: BLE001 - surfaced as a bounded TUI error
+            self.notify(f"{label.title()} export failed: {exc}", severity="error")
+            return None
+        self.notify(
+            f"Exported {label}: {result.get('export_id')} "
+            f"({result.get('content_sha256')})"
+        )
+        return result
+
     def campaign_monitor_prompt(
         self,
         operator_id: str,
@@ -43035,18 +43124,37 @@ class AgentPBXTUI(App[None]):
                 command_ids.append(str(command_id))
         return command_ids
 
-    def export_thread_scope(self, scope: str) -> Path | None:
+    async def export_thread_scope(self, scope: str) -> dict[str, Any] | None:
         item_ids = self.thread_item_ids_for_scope(scope)
         if not item_ids:
             self.notify(f"No thread items to export for {scope}.", severity="warning")
             return None
+        agent_id = self.selected_agent_id
+        if not agent_id:
+            self.notify("Select an Agent before exporting evidence.", severity="warning")
+            return None
         try:
-            path = self.write_thread_export(scope, item_ids)
-        except OSError as exc:
+            response = await self.api_client().post(
+                "/v1/evidence/exports",
+                json={
+                    "kind": "thread",
+                    "subject_id": agent_id,
+                    "scope": scope,
+                    "item_ids": item_ids,
+                    "formats": ["json", "markdown", "ndjson"],
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:  # noqa: BLE001 - surfaced as a bounded TUI error
             self.notify(f"Thread export failed: {exc}", severity="error")
             return None
-        self.notify(f"Exported thread {scope} to {path}")
-        return path
+        self.notify(
+            f"Exported thread {scope}: {result.get('export_id')} "
+            f"({result.get('content_sha256')})"
+        )
+        return result
 
     def thread_item_ids_for_scope(self, scope: str) -> list[str]:
         if scope == "item":
@@ -43060,54 +43168,6 @@ class AgentPBXTUI(App[None]):
         if scope == "all":
             return list(self.thread_order)
         raise ValueError(f"unknown export scope: {scope}")
-
-    def write_thread_export(self, scope: str, item_ids: list[str]) -> Path:
-        agent_id = self.selected_agent_id or "agent"
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        path = self.export_dir / f"{slugify(agent_id)}-{timestamp}-{scope}.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            self.format_thread_export(scope, item_ids),
-            encoding="utf-8",
-        )
-        return path
-
-    def format_thread_export(self, scope: str, item_ids: list[str]) -> str:
-        agent_id = self.selected_agent_id or "unknown"
-        exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        items = [self.thread_items[item_id] for item_id in item_ids if item_id in self.thread_items]
-        lines = [
-            f"# Agent PBX Thread Export: {agent_id}",
-            "",
-            f"- Exported: {exported_at}",
-            f"- Scope: {scope}",
-            f"- Items: {len(items)}",
-            "",
-        ]
-        for index, item in enumerate(items, start=1):
-            lines.extend(
-                [
-                    f"## {index}. {item['kind'].title()}: {item['title']}",
-                    "",
-                    f"- Item: {item['item_id']}",
-                    f"- Status: {item['status']}",
-                    f"- Created: {item['created_at']:.0f}",
-                    "",
-                    str(item.get("body") or ""),
-                    "",
-                ]
-            )
-            metadata = item.get("metadata")
-            if metadata:
-                lines.extend(
-                    [
-                        "```json",
-                        json.dumps(metadata, indent=2, sort_keys=True),
-                        "```",
-                        "",
-                    ]
-                )
-        return "\n".join(lines).rstrip() + "\n"
 
     def format_thread_item(self, item: dict[str, Any]) -> str:
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}

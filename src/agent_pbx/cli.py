@@ -1239,6 +1239,8 @@ def _daemon_config(args: argparse.Namespace) -> MCPDaemonConfig:
             CODEX_EVENT_BRIDGE_BIN_ENV,
             env_text("AGENT_PBX_TUI_CODEX_BIN", "codex"),
         ),
+        evidence_exports_enabled=env_flag("AGENT_PBX_EVIDENCE_EXPORTS_ENABLED"),
+        evidence_export_root=env_optional_path("AGENT_PBX_EVIDENCE_EXPORT_ROOT"),
         workerbee_bin=env_workerbee_bin(),
         workerbee_timeout_seconds=getattr(
             args,
@@ -1374,6 +1376,8 @@ def _serve_foreground(args: argparse.Namespace) -> int:
         ),
         codex_event_bridge_transport=daemon_config.codex_event_bridge_transport,
         codex_bin=daemon_config.codex_bin,
+        evidence_exports_enabled=daemon_config.evidence_exports_enabled,
+        evidence_export_root=daemon_config.evidence_export_root,
         workerbee_bin=daemon_config.workerbee_bin,
         workerbee_timeout_seconds=daemon_config.workerbee_timeout_seconds,
         workerbee_cache_seconds=daemon_config.workerbee_cache_seconds,

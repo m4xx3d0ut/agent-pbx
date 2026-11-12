@@ -53,11 +53,29 @@ prompt bodies, unrestricted terminal history, and environment data. Exporters
 use positive field selection; unknown record classes fail closed. Joplin output
 is rendering of the same manifest, not a second evidence source.
 
+The export center is a global-controller daemon capability. It accepts only the
+typed `thread`, `campaign`, and filtered `evidence_case` sources and the fixed
+JSON, Markdown, and NDJSON renderings. Clients never select a filesystem path.
+The daemon writes owner-private `0700` export directories and `0600` files,
+records per-file and canonical bundle SHA-256 identities, and verifies those
+identities before reuse. Retention is preview-first: this checkpoint lists the
+exact immutable export IDs eligible for a later prune but exposes no delete
+operation.
+
+Thread export is routed through the daemon service rather than writing from the
+TUI. Campaign evidence positively selects campaign, assignment, event, report,
+handoff/completion, delegation-lease, and KB-reference metadata; assignment
+prompts, handoff bodies, event payloads, and KB bodies are excluded. Evidence
+cases select reviewed journal/audit/runtime/broker/WorkerBee categories and are
+filtered to the requested Agent identity. Joplin rendering reads the verified
+Markdown member of the same export and introduces no separate collection path.
+
 ## Migration and feature gate
 
-Both features are default-disabled and additive. Existing Thread export remains
-available until the new service is enabled and verified; migration changes its
-implementation, not historical records. Existing broker receipts without an
+Both features are default-disabled and additive. When the evidence gate is
+disabled, daemon preview, export, verification, retention preview, and Joplin
+rendering all fail closed. Enabling it moves Thread export to the daemon without
+rewriting historical records. Existing broker receipts without an
 artifact remain valid only for legacy flows that do not require diff review.
 They cannot start a new broker execution; only an already-journaled legacy
 transaction may enter its existing recovery flow. No database rewrite occurs

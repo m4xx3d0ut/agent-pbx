@@ -7,6 +7,8 @@ from typing import Any
 
 from agent_pbx.cli import _daemon_config, build_parser, main
 from agent_pbx.mcp_daemon import (
+    EVIDENCE_EXPORTS_ENABLED_ENV,
+    EVIDENCE_EXPORT_ROOT_ENV,
     MCPDaemonConfig,
     _child_env,
     config_from_args,
@@ -82,6 +84,40 @@ def test_managed_daemon_replaces_trusted_direct_environment_from_typed_config(
         str(tmp_path / "git")
     ]
     assert child[WORKERBEE_TRUSTED_DIRECT_ADMIN_CEILING_ENV] == "1"
+
+
+def test_managed_daemon_projects_typed_evidence_export_gate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(EVIDENCE_EXPORTS_ENABLED_ENV, "untrusted-ambient-value")
+    monkeypatch.setenv(EVIDENCE_EXPORT_ROOT_ENV, "/untrusted/ambient")
+    root = tmp_path / "private-exports"
+    config = MCPDaemonConfig(
+        state_root=tmp_path / "state",
+        evidence_exports_enabled=True,
+        evidence_export_root=root,
+    )
+
+    child = _child_env(config)
+
+    assert child[EVIDENCE_EXPORTS_ENABLED_ENV] == "1"
+    assert child[EVIDENCE_EXPORT_ROOT_ENV] == str(root)
+
+
+def test_daemon_config_loads_evidence_export_environment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "private-exports"
+    monkeypatch.setenv(EVIDENCE_EXPORTS_ENABLED_ENV, "true")
+    monkeypatch.setenv(EVIDENCE_EXPORT_ROOT_ENV, str(root))
+    args = build_parser().parse_args(["mcp", "status"])
+
+    config = _daemon_config(args)
+
+    assert config.evidence_exports_enabled is True
+    assert config.evidence_export_root == root
 
 
 def test_daemon_config_loads_trusted_direct_environment_as_typed_fields(

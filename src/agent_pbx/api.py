@@ -93,6 +93,7 @@ from .workerbee_controlled_run import (
 from .workerbee_controlled_run_executor import WorkerBeeControlledRunExecutor
 from .workerbee_switcher import WorkerBeeSwitchService
 from .events import EventClientRegistry, EventStreamService
+from .evidence_export import EvidenceExportError, EvidenceExportService
 from .codex.runtime import CodexRuntimeService
 from .joplin import (
     JoplinApiError,
@@ -169,6 +170,9 @@ from .schemas import (
     CommandResponse,
     EventResponse,
     EventStreamEnvelope,
+    EvidenceExportRequest,
+    EvidenceRetentionPreviewRequest,
+    EvidenceVerifyRequest,
     FileDiagnosticsRequest,
     TerminalEditorStartRequest,
     WorkerBeeSwitchApplyRequest,
@@ -873,6 +877,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     )
     app.state.config = resolved_config
     app.state.store = store
+    app.state.evidence_exports = EvidenceExportService(
+        store,
+        root=(
+            resolved_config.evidence_export_root
+            or resolved_config.db_path.parent / "evidence-exports"
+        ),
+        enabled=resolved_config.evidence_exports_enabled,
+    )
     app.state.event_stream = EventStreamService(store)
     app.state.event_clients = EventClientRegistry(
         max_clients=max(1, resolved_config.remote_max_clients),
@@ -2277,6 +2289,52 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         if store.get_agent(agent_id) is None:
             raise HTTPException(status_code=404, detail="agent not registered")
         return store.list_thread(agent_id, limit=limit)
+
+    async def evidence_call(method: str, **kwargs: Any) -> dict[str, Any]:
+        service = app.state.evidence_exports
+        try:
+            return await asyncio.to_thread(getattr(service, method), **kwargs)
+        except EvidenceExportError as exc:
+            detail = str(exc)
+            code = 409 if "disabled" in detail or "drift" in detail else 422
+            raise HTTPException(status_code=code, detail=detail) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="evidence export not found") from exc
+
+    @app.post("/v1/evidence/preview")
+    async def preview_evidence_export(
+        payload: EvidenceExportRequest,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        return await evidence_call("preview", **payload.model_dump())
+
+    @app.post("/v1/evidence/exports")
+    async def create_evidence_export(
+        payload: EvidenceExportRequest,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        return await evidence_call("export", **payload.model_dump())
+
+    @app.post("/v1/evidence/verify")
+    async def verify_evidence_export(
+        payload: EvidenceVerifyRequest,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        return await evidence_call("verify", export_id=payload.export_id)
+
+    @app.post("/v1/evidence/retention/preview")
+    async def preview_evidence_retention(
+        payload: EvidenceRetentionPreviewRequest,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        return await evidence_call("retention_preview", older_than=payload.older_than)
+
+    @app.post("/v1/evidence/{export_id}/joplin-render")
+    async def render_evidence_for_joplin(
+        export_id: str,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        return await evidence_call("render_joplin", export_id=export_id)
 
     @app.get(
         "/v1/agents/{agent_id}/workerbee",

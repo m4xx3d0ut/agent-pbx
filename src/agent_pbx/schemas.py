@@ -2134,6 +2134,40 @@ class WorkerBeeSwitchPreviewRequest(BaseModel):
     target: Literal["oss", "platform_debug"]
 
 
+class EvidenceExportRequest(BaseModel):
+    kind: Literal["thread", "campaign", "evidence_case"]
+    subject_id: str = Field(min_length=1, max_length=240)
+    scope: Literal["all", "item", "marked"] = "all"
+    item_ids: list[str] = Field(default_factory=list, max_length=200)
+    categories: list[
+        Literal[
+            "event_journal",
+            "remote_audit",
+            "model_elevation",
+            "git_broker",
+            "lifecycle",
+            "runtime",
+            "handoff",
+            "workerbee_workspace",
+            "workerbee_run",
+            "workerbee_resource",
+        ]
+    ] = Field(default_factory=list, max_length=10)
+    formats: list[Literal["json", "markdown", "ndjson"]] = Field(
+        default_factory=lambda: ["json", "markdown", "ndjson"],
+        min_length=1,
+        max_length=3,
+    )
+
+
+class EvidenceVerifyRequest(BaseModel):
+    export_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class EvidenceRetentionPreviewRequest(BaseModel):
+    older_than: float = Field(ge=0.0)
+
+
 class WorkerBeeSwitchApplyRequest(BaseModel):
     transaction_id: str = Field(min_length=24, max_length=24)
     preview_token: str = Field(min_length=16, max_length=256)

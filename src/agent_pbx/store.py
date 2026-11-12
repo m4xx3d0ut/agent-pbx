@@ -10431,6 +10431,7 @@ class Store:
         target_fork_agent_id: str | None = None,
         statuses: tuple[str, ...] | list[str] | None = None,
         limit: int = 100,
+        expire: bool = True,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         values: list[Any] = []
@@ -10449,7 +10450,8 @@ class Store:
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         current = now_ts()
         with self.connect() as conn:
-            self._expire_workerbee_controlled_runs(conn, current=current)
+            if expire:
+                self._expire_workerbee_controlled_runs(conn, current=current)
             rows = conn.execute(
                 f"""
                 SELECT * FROM workerbee_controlled_run_requests
@@ -10825,6 +10827,7 @@ class Store:
         root_operator_agent_id: str | None = None,
         status: str | None = None,
         limit: int = 100,
+        expire: bool = True,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         values: list[Any] = []
@@ -10836,7 +10839,8 @@ class Store:
             values.append(str(status).lower())
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with self.connect() as conn:
-            self._expire_workerbee_controlled_runs(conn, current=now_ts())
+            if expire:
+                self._expire_workerbee_controlled_runs(conn, current=now_ts())
             rows = conn.execute(
                 f"SELECT * FROM workerbee_controlled_run_leases {where} ORDER BY created_at DESC LIMIT ?",
                 (*values, min(max(int(limit), 1), 500)),

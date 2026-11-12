@@ -18060,8 +18060,12 @@ async def test_tui_thread_marking_tracks_rows() -> None:
     assert app.marked_thread_item_ids == {"report:r1", "command:c1"}
 
 
-def test_tui_thread_export_writes_markdown(tmp_path: Path) -> None:
-    app = AgentPBXTUI(server="http://127.0.0.1:8765", export_dir=tmp_path)
+async def test_tui_thread_export_uses_daemon_evidence_service(tmp_path: Path) -> None:
+    legacy_export_dir = tmp_path / "legacy-thread-exports"
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        export_dir=legacy_export_dir,
+    )
     app.selected_agent_id = "agent-1"
     app.thread_items = {
         "report:r1": {
@@ -18077,14 +18081,68 @@ def test_tui_thread_export_writes_markdown(tmp_path: Path) -> None:
     }
     app.thread_order = ["report:r1"]
 
-    path = app.write_thread_export("all", ["report:r1"])
+    requests: list[dict[str, object]] = []
 
-    assert path.parent == tmp_path
-    assert path.name.endswith("-all.md")
-    content = path.read_text(encoding="utf-8")
-    assert "# Agent PBX Thread Export: agent-1" in content
-    assert "Full report detail" in content
-    assert '"report_id": "r1"' in content
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"export_id": "e1", "content_sha256": "a" * 64}
+
+    class Client:
+        async def post(self, path: str, **kwargs: object) -> Response:
+            requests.append({"path": path, **kwargs})
+            return Response()
+
+    app.api_client = lambda: Client()  # type: ignore[method-assign]
+    async with app.run_test():
+        result = await app.export_thread_scope("all")
+
+    assert result == {"export_id": "e1", "content_sha256": "a" * 64}
+    assert requests[0]["path"] == "/v1/evidence/exports"
+    assert requests[0]["json"] == {
+        "kind": "thread",
+        "subject_id": "agent-1",
+        "scope": "all",
+        "item_ids": ["report:r1"],
+        "formats": ["json", "markdown", "ndjson"],
+    }
+    assert not legacy_export_dir.exists()
+
+
+async def test_tui_campaign_and_case_exports_use_selected_identity() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.selected_agent_id = "operator-1"
+    app.campaigns_by_operator = {
+        "operator-1": {
+            "campaign-1": {"campaign_id": "campaign-1", "title": "Campaign"}
+        }
+    }
+    app.selected_campaign_id_by_operator = {"operator-1": "campaign-1"}
+    payloads: list[dict[str, object]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"export_id": "e1", "content_sha256": "b" * 64}
+
+    class Client:
+        async def post(self, _path: str, **kwargs: object) -> Response:
+            payloads.append(kwargs["json"])  # type: ignore[arg-type]
+            return Response()
+
+    app.api_client = lambda: Client()  # type: ignore[method-assign]
+    async with app.run_test():
+        await app.export_selected_campaign_evidence()
+        await app.export_selected_agent_evidence_case()
+
+    assert payloads[0]["kind"] == "campaign"
+    assert payloads[0]["subject_id"] == "campaign-1"
+    assert payloads[1]["kind"] == "evidence_case"
+    assert payloads[1]["subject_id"] == "operator-1"
 
 
 def test_tui_queued_command_ids_for_delete_prefers_marked_items() -> None:
