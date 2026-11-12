@@ -11,6 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -36,6 +37,24 @@ from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
 from agent_pbx.workerbee_policy import WorkerBeeWorkspacePolicyService
 from agent_pbx.workerbee_workspace import WorkerBeeWorkspaceService
 from agent_pbx.store import Store
+
+
+@pytest.fixture(autouse=True)
+def deterministic_private_primary_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep trusted-direct fixtures independent from the CI host account DB."""
+
+    account = pwd.getpwuid(os.getuid())
+    original_getgrgid = grp.getgrgid
+    group = original_getgrgid(os.getgid())
+    private_group = SimpleNamespace(gr_name=group.gr_name, gr_mem=())
+    monkeypatch.setattr(direct_bind.pwd, "getpwall", lambda: [account])
+    monkeypatch.setattr(
+        direct_bind.grp,
+        "getgrgid",
+        lambda gid: private_group if gid == os.getgid() else original_getgrgid(gid),
+    )
 
 
 def git_repo(root: Path) -> None:
