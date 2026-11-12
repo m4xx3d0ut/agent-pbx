@@ -94,7 +94,7 @@ def test_schema_30_fixture_migrates_with_retained_entities_and_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Qualify the v2.2 schema boundary without touching workstation state."""
+    """Qualify the v2.2 stable schema-30 boundary through current schema 40."""
 
     config = config_for(tmp_path)
     store = Store(config.resolved_db_path)
@@ -122,14 +122,27 @@ def test_schema_30_fixture_migrates_with_retained_entities_and_rolls_back(
         {"agent_id": "retained-agent"},
         "retained-agent",
     )
-    v23_tables = (
+    post_v22_tables = (
+        "operator_action_receipts",
+        "operator_action_transactions",
+        "operator_authority_assignments",
+        "operator_broker_requests",
+        "operator_delegation_leases",
+        "operator_handoff_completion_deliveries",
+        "operator_workspace_set_versions",
+        "workerbee_controlled_run_leases",
+        "workerbee_controlled_run_receipts",
+        "workerbee_controlled_run_requests",
         "workerbee_workspace_policies",
         "workerbee_snapshot_policies",
         "workerbee_workspace_transitions",
     )
     with store.connect() as conn:
-        for table in v23_tables:
+        for table in post_v22_tables:
             conn.execute(f"DROP TABLE {table}")
+        conn.execute(
+            "ALTER TABLE operator_handoffs DROP COLUMN execution_scope_json"
+        )
         conn.execute(
             "UPDATE metadata SET value = '30' WHERE key = 'schema_version'"
         )
@@ -149,13 +162,18 @@ def test_schema_30_fixture_migrates_with_retained_entities_and_rolls_back(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
+        source_handoff_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(operator_handoffs)").fetchall()
+        }
 
     assert dry_run["source_schema"] == 30
     assert dry_run["simulated_schema"] == SCHEMA_VERSION
     assert dry_run["simulated_integrity"] == "ok"
     assert source_schema_after_dry_run == 30
     assert source_integrity == "ok"
-    assert not set(v23_tables) & source_tables
+    assert not set(post_v22_tables) & source_tables
+    assert "execution_scope_json" not in source_handoff_columns
 
     applied = apply_migration(config)
     migrated = Store(config.resolved_db_path)
@@ -170,10 +188,15 @@ def test_schema_30_fixture_migrates_with_retained_entities_and_rolls_back(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
+        migrated_handoff_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(operator_handoffs)").fetchall()
+        }
 
     assert applied["ok"] is True
     assert applied["verification"]["schema"] == SCHEMA_VERSION
-    assert set(v23_tables) <= migrated_tables
+    assert set(post_v22_tables) <= migrated_tables
+    assert "execution_scope_json" in migrated_handoff_columns
     assert set(migrated_agents) >= {"retained-agent", "retained-operator"}
     assert migrated_agents["retained-agent"]["name"] == "Retained Agent"
     assert migrated_agents["retained-agent"]["starred_at"] is not None
@@ -185,22 +208,31 @@ def test_schema_30_fixture_migrates_with_retained_entities_and_rolls_back(
         Path(applied["backup"]["backup_path"]),
         restore_config=False,
     )
-    rolled_back = Store(config.resolved_db_path)
-    rolled_back_agents = {
-        item["agent_id"]: item
-        for item in rolled_back.list_agents(include_hidden=True)
-    }
-    with rolled_back.connect() as conn:
+    rolled_back_schema, rolled_back_integrity = database_posture(
+        config.resolved_db_path
+    )
+    with sqlite3.connect(config.resolved_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rolled_back_agents = {
+            str(row["agent_id"]): dict(row)
+            for row in conn.execute("SELECT * FROM agents").fetchall()
+        }
         rolled_back_tables = {
             str(row["name"])
             for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
+        rolled_back_handoff_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(operator_handoffs)").fetchall()
+        }
 
     assert restored["ok"] is True
-    assert rolled_back.schema_version() == 30
-    assert not set(v23_tables) & rolled_back_tables
+    assert rolled_back_schema == 30
+    assert rolled_back_integrity == "ok"
+    assert not set(post_v22_tables) & rolled_back_tables
+    assert "execution_scope_json" not in rolled_back_handoff_columns
     assert set(rolled_back_agents) >= {"retained-agent", "retained-operator"}
     assert rolled_back_agents["retained-agent"]["starred_at"] is not None
 

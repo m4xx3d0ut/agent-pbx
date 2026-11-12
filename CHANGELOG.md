@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+No changes yet.
+
+## v2.3.0rc3 - 2026-11-12
+
 ### Added
 
 - Add idempotent, source-addressed Operator handoff completion receipts. A
@@ -87,6 +91,10 @@
   target-owned pane before discarding only that local cache entry.
   Missing, stale, unreadable, active, leased, live, or ambiguous evidence still
   fails closed.
+- Finalize an exact managed stop after its frozen pane process is conclusively
+  absent even when reconciliation observes a distinct replacement candidate.
+  The replacement remains preserved as audit evidence and is never adopted,
+  stopped, or deleted as part of the original transaction.
 - Bind Operator stop, purge, restart, and resume operations to the complete
   managed tmux identity: executable, socket, server, session, window, and pane.
   Missing or mismatched provenance now fails before mutation, so a pane ID that
