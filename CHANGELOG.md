@@ -4,6 +4,15 @@
 
 No changes yet.
 
+## v2.3.0rc4 - 2026-11-12
+
+### Fixed
+
+- Make trusted-direct-bind test identity deterministic across Linux and macOS
+  without relaxing the production private-primary-group requirement.
+- Complete the F8 single-flight alert fixture with the required Agent API
+  fields so background rendering cannot race against a partial test record.
+
 ## v2.3.0rc3 - 2026-11-12
 
 ### Added

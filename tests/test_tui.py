@@ -22694,12 +22694,16 @@ async def test_tui_f8_single_flight_approval_then_advances_report_alert() -> Non
             "operator-0": {
                 "agent_id": "operator-0",
                 "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "working",
+                "last_seen_at": 10.0,
                 "pending_handoff_approval_count": 1,
                 "oldest_pending_handoff_created_at": 10.0,
             },
             "caller-1": {
                 "agent_id": "caller-1",
                 "agent_type": "caller",
+                "project": "agent-pbx",
                 "status": "done",
                 "last_seen_at": 20.0,
             },
