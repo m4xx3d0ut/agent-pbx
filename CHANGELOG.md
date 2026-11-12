@@ -2,7 +2,25 @@
 
 ## Unreleased
 
-No changes yet.
+### Added
+
+- Add exact-leaf Git review artifacts, daemon-owned evidence exports, Operator
+  KB bundle-v2 synchronization, a content-addressed durable helper registry,
+  a typed dynamic-resource broker, and a capability-gated WorkerBee
+  platform-debug development-resource contract.
+- Add isolated restart/recovery qualification across receipt-bound approval,
+  WorkerBee resource truth, redacted evidence export, and zero-residue cleanup.
+
+### Fixed
+
+- Preserve authority-qualified per-worktree Git administration as an exact
+  filesystem exception for Trusted Workbench edit launches without projecting
+  a nested workspace root or exposing sibling/common Git administration.
+- Match durable event `subject_id` during filtered evidence-case export so
+  real lifecycle and resource events remain visible without exporting payloads.
+
+The final post-2.3 release version remains intentionally undecided. All new
+subsystems are additive and default-disabled pending separate activation review.
 
 ## v2.3.0 - 2026-11-12
 

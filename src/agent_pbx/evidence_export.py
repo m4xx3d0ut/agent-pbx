@@ -676,13 +676,19 @@ class EvidenceExportService:
                         if isinstance(payload, Mapping)
                         else None
                     )
-                    if str(event.get("agent_id") or payload_agent or "") != case_id:
+                    if str(
+                        event.get("agent_id")
+                        or event.get("subject_id")
+                        or payload_agent
+                        or ""
+                    ) != case_id:
                         continue
                 if category == "event_journal" or any(
                     event_type.startswith(prefix) for prefix in prefixes
                 ):
                     records.append(_record(category, _select(event, (
-                        "id", "event_id", "type", "event_type", "agent_id", "created_at"
+                        "id", "event_id", "type", "event_type", "agent_id",
+                        "subject_id", "created_at"
                     ))))
         return records
 
