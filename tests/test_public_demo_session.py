@@ -120,6 +120,7 @@ def test_demo_daemon_start_retries_with_a_fresh_loopback_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = DemoSession(DemoSessionConfig(keep=True, ttl_seconds=60))
+    session.token = "-leading-hyphen-demo-token"
     processes = [_FakeProcess(98), _FakeProcess(None)]
     ports = iter((41001, 41002))
     spawned: list[tuple[list[str], _FakeProcess]] = []
@@ -155,6 +156,9 @@ def test_demo_daemon_start_retries_with_a_fresh_loopback_port(
             "41001",
             "41002",
         ]
+        for argv, _process in spawned:
+            assert f"--token={session.token}" in argv
+            assert "--token" not in argv
     finally:
         session.daemon_process = None
         session.close()
@@ -190,6 +194,7 @@ def test_demo_readiness_reports_early_process_exit_and_redacts_token() -> None:
 )
 def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
     session = DemoSession(DemoSessionConfig(keep=True, ttl_seconds=60))
+    session.token = "-leading-hyphen-demo-token"
     root = session.root
     pane_pids: list[int] = []
     try:
