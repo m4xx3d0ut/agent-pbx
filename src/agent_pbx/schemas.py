@@ -908,6 +908,42 @@ class DurableHelperInvocationRequest(DurableHelperOperatorRequest):
     scope: str = Field(min_length=1, max_length=120)
 
 
+class DynamicResourceOperatorRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+
+
+class DynamicResourceCreateRequest(DynamicResourceOperatorRequest):
+    resource_class: str = Field(min_length=1, max_length=80)
+    requester_agent_id: str = Field(min_length=1, max_length=120)
+    campaign_id: str | None = Field(default=None, max_length=120)
+    handoff_id: str | None = Field(default=None, max_length=120)
+    workspace_set_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    spec: dict[str, Any]
+    workerbee_binding_id: str | None = Field(default=None, max_length=120)
+    workerbee_backend_generation: str | None = Field(default=None, max_length=120)
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400, strict=True)
+    quota: int = Field(default=1, ge=1, le=1_000_000_000, strict=True)
+    max_uses: int = Field(default=1, ge=1, le=100, strict=True)
+    approval_mode: Literal["manual", "campaign_lease", "auto"] = "manual"
+    delegation_lease_id: str | None = Field(default=None, max_length=120)
+    policy: Literal["public", "trusted_rosie"] = "public"
+    runtime_state: Literal["stopped", "running"] = "stopped"
+
+
+class DynamicResourceApprovalRequest(DynamicResourceOperatorRequest):
+    approval_method: Literal["agent-pbx-tui-f8"]
+    confirmation: str = Field(min_length=1, max_length=200)
+    approve: bool = Field(default=True, strict=True)
+
+
+class DynamicResourceUseRequest(DynamicResourceOperatorRequest):
+    requester_agent_id: str = Field(min_length=1, max_length=120)
+
+
+class DynamicResourceReleaseRequest(DynamicResourceOperatorRequest):
+    revoke: bool = Field(default=False, strict=True)
+
+
 class OperatorKbSourceResponse(BaseModel):
     source_row_id: str
     kb_id: str

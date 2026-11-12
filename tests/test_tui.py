@@ -47,6 +47,7 @@ from agent_pbx.tui import (
     CODEX_TERMINAL_MODE_SCROLLBACK,
     CustomSlashCommand,
     DurableHelperRegistryScreen,
+    DynamicResourceApprovalScreen,
     EditorCloseConfirmScreen,
     JoplinReferencePromptScreen,
     JoplinPasteConfirmScreen,
@@ -24237,6 +24238,170 @@ async def test_tui_durable_helper_registry_exposes_root_lifecycle_actions() -> N
         ),
     ]
     assert "/operator helpers" in built_in_palette_command_names()
+
+
+async def test_tui_dynamic_resource_f8_approves_exact_revalidated_request() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    request = {
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "request_sha256": "a" * 64,
+        "resource_class": "managed_cache",
+        "requester_agent_id": "caller-1",
+        "operator_agent_id": "operator-0",
+        "campaign_id": "22222222-2222-4222-8222-222222222222",
+        "handoff_id": None,
+        "workspace_set_digest": "b" * 64,
+        "spec": {"name": "pytest-cache", "max_bytes": 4096},
+        "status": "pending_approval",
+        "approval_mode": "manual",
+        "approval_confirmation": (
+            "APPROVE RESOURCE 11111111-1111-4111-8111-111111111111 " + "a" * 64
+        ),
+        "restart_required": False,
+        "expires_at": 4102444800.0,
+    }
+
+    async def fake_fetch(operator_agent_id: str) -> list[dict[str, object]]:
+        assert operator_agent_id == "operator-0"
+        return [request]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.posts: list[tuple[str, dict[str, object]]] = []
+
+        async def post(self, path: str, *, json, headers):  # type: ignore[no-untyped-def]
+            self.posts.append((path, json))
+            return httpx.Response(
+                200,
+                json={**request, "status": "approved"},
+                request=httpx.Request("POST", f"http://test{path}"),
+            )
+
+    client = FakeClient()
+    app.fetch_dynamic_resources = fake_fetch  # type: ignore[method-assign]
+    app.api_client = lambda: client  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "status": "running",
+                "last_seen_at": 123.0,
+                "metadata": {"operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        await app.show_dynamic_resources()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DynamicResourceApprovalScreen)
+        assert screen.query_one("#dynamic-resource-table", DataTable).row_count == 1
+        assert request["approval_confirmation"] in str(
+            screen.query_one("#dynamic-resource-detail", Static).renderable
+        )
+        await pilot.press("f8")
+        await pilot.pause()
+
+    assert client.posts == [
+        (
+            f"/v1/operator/resources/{request['request_id']}/approve",
+            {
+                "operator_agent_id": "operator-0",
+                "approval_method": "agent-pbx-tui-f8",
+                "confirmation": request["approval_confirmation"],
+                "approve": True,
+            },
+        )
+    ]
+    assert "/operator resources" in built_in_palette_command_names()
+
+
+async def test_tui_dynamic_resource_f8_rejects_revalidation_drift() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    reviewed = {
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "request_sha256": "a" * 64,
+        "resource_class": "managed_cache",
+        "requester_agent_id": "caller-1",
+        "operator_agent_id": "operator-0",
+        "campaign_id": "22222222-2222-4222-8222-222222222222",
+        "workspace_set_digest": "b" * 64,
+        "spec": {"name": "pytest-cache", "max_bytes": 4096},
+        "status": "pending_approval",
+        "approval_mode": "manual",
+        "approval_confirmation": (
+            "APPROVE RESOURCE 11111111-1111-4111-8111-111111111111 " + "a" * 64
+        ),
+        "restart_required": False,
+        "expires_at": 4102444800.0,
+    }
+    calls = 0
+
+    async def fake_fetch(_operator_agent_id: str) -> list[dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [reviewed]
+        return [{**reviewed, "request_sha256": "c" * 64}]
+
+    class NoPostClient:
+        async def post(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("drifted resource must not reach approval API")
+
+    app.fetch_dynamic_resources = fake_fetch  # type: ignore[method-assign]
+    app.api_client = lambda: NoPostClient()  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "status": "running",
+                "metadata": {"operator_role": "root"},
+            }
+        }
+        app.selected_agent_id = "operator-0"
+        await app.show_dynamic_resources()
+        await pilot.pause()
+        assert isinstance(app.screen, DynamicResourceApprovalScreen)
+        await pilot.press("f8")
+        await pilot.pause()
+
+    assert calls == 2
+
+
+async def test_tui_dynamic_resource_review_filters_nonmanual_requests() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "request_id": "manual",
+                    "approval_mode": "manual",
+                },
+                {
+                    "request_id": "leased",
+                    "approval_mode": "campaign_lease",
+                },
+            ]
+
+    class Client:
+        async def get(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return Response()
+
+    app.api_client = lambda: Client()  # type: ignore[method-assign]
+
+    assert await app.fetch_dynamic_resources("operator-0") == [
+        {"request_id": "manual", "approval_mode": "manual"}
+    ]
 
 
 async def test_tui_operator_kb_search_history_and_feedback() -> None:

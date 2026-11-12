@@ -14,6 +14,7 @@ from agent_pbx.mcp_daemon import (
     DURABLE_HELPER_MEASUREMENTS_ENV,
     DURABLE_HELPER_PROPOSAL_ROOTS_ENV,
     DURABLE_HELPER_ROOT_ENV,
+    DYNAMIC_RESOURCES_ENABLED_ENV,
     MCPDaemonConfig,
     _child_env,
     config_from_args,
@@ -194,6 +195,30 @@ def test_daemon_config_loads_durable_helper_environment(
     assert config.durable_helper_root == root
     assert config.durable_helper_proposal_roots == (proposal,)
     assert config.durable_helper_measurements_enabled is True
+
+
+def test_managed_daemon_projects_dynamic_resource_gate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(DYNAMIC_RESOURCES_ENABLED_ENV, "ambient")
+    config = MCPDaemonConfig(
+        state_root=tmp_path / "state",
+        dynamic_resources_enabled=True,
+    )
+
+    child = _child_env(config)
+
+    assert child[DYNAMIC_RESOURCES_ENABLED_ENV] == "1"
+
+
+def test_daemon_config_loads_dynamic_resource_gate(monkeypatch) -> None:
+    monkeypatch.setenv(DYNAMIC_RESOURCES_ENABLED_ENV, "true")
+    args = build_parser().parse_args(["mcp", "status"])
+
+    config = _daemon_config(args)
+
+    assert config.dynamic_resources_enabled is True
 
 
 def test_daemon_config_loads_trusted_direct_environment_as_typed_fields(

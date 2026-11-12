@@ -45,6 +45,7 @@ from .operator_kb_sync import (
     logical_project_identity,
 )
 from .durable_helpers import DurableHelperRegistry
+from .dynamic_resources import DynamicResourceBroker
 from .tmux_binary import configured_tmux_binary
 
 
@@ -297,10 +298,12 @@ class OperatorService:
         *,
         tmux_bin: str = "tmux",
         durable_helpers: DurableHelperRegistry | None = None,
+        dynamic_resources: DynamicResourceBroker | None = None,
     ) -> None:
         self.store = store
         self.tmux_bin = configured_tmux_binary(tmux_bin)
         self.durable_helpers = durable_helpers
+        self.dynamic_resources = dynamic_resources
 
     def list_agents(self, *, agent_type: str = "caller") -> list[dict[str, Any]]:
         requested = str(agent_type or "caller").strip().lower()
@@ -2311,6 +2314,108 @@ class OperatorService:
         if self.durable_helpers is None:
             raise ValueError("durable helper registry is not configured")
         return self.durable_helpers
+
+    def list_dynamic_resources(
+        self,
+        *,
+        operator_agent_id: str,
+        status: str | None = None,
+        campaign_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        self._require_root_operator(operator_agent_id)
+        return self._dynamic_resource_broker().list(
+            status=status,
+            campaign_id=campaign_id,
+            limit=limit,
+        )
+
+    def request_dynamic_resource(
+        self,
+        *,
+        operator_agent_id: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._dynamic_resource_broker().request(
+            operator_agent_id=operator_agent_id,
+            **kwargs,
+        )
+
+    def decide_dynamic_resource(
+        self,
+        *,
+        operator_agent_id: str,
+        request_id: str,
+        approval_method: str,
+        confirmation: str,
+        approve: bool,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._dynamic_resource_broker().approve(
+            request_id=request_id,
+            operator_agent_id=operator_agent_id,
+            approval_method=approval_method,
+            confirmation=confirmation,
+            approve=approve,
+        )
+
+    def acquire_dynamic_resource(
+        self,
+        *,
+        operator_agent_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._dynamic_resource_broker().acquire(
+            request_id=request_id,
+            operator_agent_id=operator_agent_id,
+        )
+
+    def use_dynamic_resource(
+        self,
+        *,
+        operator_agent_id: str,
+        request_id: str,
+        requester_agent_id: str,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._dynamic_resource_broker().use(
+            request_id=request_id,
+            requester_agent_id=requester_agent_id,
+            operator_agent_id=operator_agent_id,
+        )
+
+    def release_dynamic_resource(
+        self,
+        *,
+        operator_agent_id: str,
+        request_id: str,
+        revoke: bool = False,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._dynamic_resource_broker().release(
+            request_id=request_id,
+            operator_agent_id=operator_agent_id,
+            revoke=revoke,
+        )
+
+    def recover_dynamic_resource(
+        self,
+        *,
+        operator_agent_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        self._require_root_operator(operator_agent_id)
+        return self._dynamic_resource_broker().recover(
+            request_id=request_id,
+            operator_agent_id=operator_agent_id,
+        )
+
+    def _dynamic_resource_broker(self) -> DynamicResourceBroker:
+        if self.dynamic_resources is None:
+            raise ValueError("dynamic resource broker is not configured")
+        return self.dynamic_resources
 
     def start_kb_seed_run(
         self,

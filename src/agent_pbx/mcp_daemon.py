@@ -81,6 +81,7 @@ DURABLE_HELPERS_ENABLED_ENV = "AGENT_PBX_DURABLE_HELPERS_ENABLED"
 DURABLE_HELPER_ROOT_ENV = "AGENT_PBX_DURABLE_HELPER_ROOT"
 DURABLE_HELPER_PROPOSAL_ROOTS_ENV = "AGENT_PBX_DURABLE_HELPER_PROPOSAL_ROOTS"
 DURABLE_HELPER_MEASUREMENTS_ENV = "AGENT_PBX_DURABLE_HELPER_MEASUREMENTS_ENABLED"
+DYNAMIC_RESOURCES_ENABLED_ENV = "AGENT_PBX_DYNAMIC_RESOURCES_ENABLED"
 MANAGED_CHILD_ENV_VARS = {
     TOKEN_ENV,
     EVIDENCE_EXPORTS_ENABLED_ENV,
@@ -90,6 +91,7 @@ MANAGED_CHILD_ENV_VARS = {
     DURABLE_HELPER_ROOT_ENV,
     DURABLE_HELPER_PROPOSAL_ROOTS_ENV,
     DURABLE_HELPER_MEASUREMENTS_ENV,
+    DYNAMIC_RESOURCES_ENABLED_ENV,
     WORKERBEE_BIN_ENV,
     WORKERBEE_TIMEOUT_ENV,
     WORKERBEE_CACHE_ENV,
@@ -161,6 +163,7 @@ class MCPDaemonConfig:
     durable_helper_root: Path | None = None
     durable_helper_proposal_roots: tuple[Path, ...] = field(default_factory=tuple)
     durable_helper_measurements_enabled: bool = False
+    dynamic_resources_enabled: bool = False
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0
@@ -442,6 +445,7 @@ def config_from_args(
     durable_helper_root: Path | None = None,
     durable_helper_proposal_roots: tuple[Path, ...] = (),
     durable_helper_measurements_enabled: bool = False,
+    dynamic_resources_enabled: bool = False,
     workerbee_bin: Path | None = None,
     workerbee_timeout_seconds: float = 20.0,
     workerbee_cache_seconds: float = 10.0,
@@ -509,6 +513,7 @@ def config_from_args(
         durable_helper_measurements_enabled=bool(
             durable_helper_measurements_enabled
         ),
+        dynamic_resources_enabled=bool(dynamic_resources_enabled),
         workerbee_bin=workerbee_bin.expanduser() if workerbee_bin else None,
         workerbee_timeout_seconds=workerbee_timeout_seconds,
         workerbee_cache_seconds=workerbee_cache_seconds,
@@ -660,6 +665,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 30.0) -> dict[
         "durable_helper_measurements_enabled": (
             config.durable_helper_measurements_enabled
         ),
+        "dynamic_resources_enabled": config.dynamic_resources_enabled,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,
@@ -757,6 +763,9 @@ def _child_env(config: MCPDaemonConfig) -> dict[str, str]:
     )
     child_env[DURABLE_HELPER_MEASUREMENTS_ENV] = (
         "1" if config.durable_helper_measurements_enabled else "0"
+    )
+    child_env[DYNAMIC_RESOURCES_ENABLED_ENV] = (
+        "1" if config.dynamic_resources_enabled else "0"
     )
     if config.durable_helper_root:
         child_env[DURABLE_HELPER_ROOT_ENV] = str(config.durable_helper_root.expanduser())
@@ -1099,6 +1108,7 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "durable_helper_measurements_enabled": (
             config.durable_helper_measurements_enabled
         ),
+        "dynamic_resources_enabled": config.dynamic_resources_enabled,
         "workerbee_bin": str(config.workerbee_bin) if config.workerbee_bin else None,
         "workerbee_timeout_seconds": config.workerbee_timeout_seconds,
         "workerbee_cache_seconds": config.workerbee_cache_seconds,

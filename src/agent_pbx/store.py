@@ -20,7 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -1555,6 +1555,46 @@ class Store:
                         ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS dynamic_resource_requests (
+                    request_id TEXT PRIMARY KEY,
+                    request_sha256 TEXT NOT NULL,
+                    resource_class TEXT NOT NULL,
+                    requester_agent_id TEXT NOT NULL,
+                    operator_agent_id TEXT NOT NULL,
+                    campaign_id TEXT,
+                    handoff_id TEXT,
+                    workspace_set_digest TEXT NOT NULL,
+                    workerbee_binding_id TEXT,
+                    workerbee_backend_generation TEXT,
+                    spec_json TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    ttl_seconds INTEGER NOT NULL,
+                    quota INTEGER NOT NULL,
+                    max_uses INTEGER NOT NULL,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    approval_mode TEXT NOT NULL,
+                    approval_json TEXT,
+                    delegation_lease_id TEXT,
+                    provider_receipt_json TEXT,
+                    cleanup_receipt_json TEXT,
+                    restart_required INTEGER NOT NULL DEFAULT 0,
+                    expires_at REAL NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS dynamic_resource_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    operator_agent_id TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(request_id) REFERENCES dynamic_resource_requests(request_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS operator_kb_fts USING fts5(
                     kb_id UNINDEXED,
                     title,
@@ -1688,6 +1728,10 @@ class Store:
                     ON durable_helper_bundles(status, name, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_durable_helper_events_helper
                     ON durable_helper_events(helper_id, event_id DESC);
+                CREATE INDEX IF NOT EXISTS idx_dynamic_resource_status_expiry
+                    ON dynamic_resource_requests(status, expires_at, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_dynamic_resource_campaign
+                    ON dynamic_resource_requests(campaign_id, status, created_at DESC);
                 """
             )
             previous_schema_version = self._schema_version(conn)
@@ -9077,6 +9121,333 @@ class Store:
                 value = fallback
             item[target] = value
         item["object_bytes"] = int(item.get("object_bytes") or 0)
+        return item
+
+    def request_or_reuse_dynamic_resource(
+        self,
+        *,
+        request_id: str,
+        request_sha256: str,
+        resource_class: str,
+        requester_agent_id: str,
+        operator_agent_id: str,
+        campaign_id: str | None,
+        handoff_id: str | None,
+        workspace_set_digest: str,
+        workerbee_binding_id: str | None,
+        workerbee_backend_generation: str | None,
+        spec: dict[str, Any],
+        provider: str,
+        ttl_seconds: int,
+        quota: int,
+        max_uses: int,
+        status: str,
+        approval_mode: str,
+        delegation_lease_id: str | None,
+        restart_required: bool,
+        expires_at: float,
+    ) -> tuple[dict[str, Any], bool]:
+        current = now_ts()
+        open_states = (
+            "pending_approval",
+            "approved",
+            "leased",
+            "recovery_required",
+        )
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM dynamic_resource_requests
+                WHERE request_sha256 = ?
+                  AND status IN (?, ?, ?, ?)
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (request_sha256, *open_states),
+            ).fetchone()
+            if row is not None:
+                return self._dynamic_resource_from_row(row), False
+            conn.execute(
+                """
+                INSERT INTO dynamic_resource_requests(
+                    request_id, request_sha256, resource_class,
+                    requester_agent_id, operator_agent_id, campaign_id,
+                    handoff_id, workspace_set_digest, workerbee_binding_id,
+                    workerbee_backend_generation, spec_json, provider,
+                    ttl_seconds, quota, max_uses, use_count, status,
+                    approval_mode, approval_json, delegation_lease_id,
+                    provider_receipt_json, cleanup_receipt_json,
+                    restart_required, expires_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                          ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    request_sha256,
+                    resource_class,
+                    requester_agent_id,
+                    operator_agent_id,
+                    campaign_id,
+                    handoff_id,
+                    workspace_set_digest,
+                    workerbee_binding_id,
+                    workerbee_backend_generation,
+                    json.dumps(spec, sort_keys=True),
+                    provider,
+                    int(ttl_seconds),
+                    int(quota),
+                    int(max_uses),
+                    status,
+                    approval_mode,
+                    delegation_lease_id,
+                    1 if restart_required else 0,
+                    float(expires_at),
+                    current,
+                    current,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO dynamic_resource_events(
+                    request_id, event_type, operator_agent_id,
+                    metadata_json, created_at
+                ) VALUES (?, 'requested', ?, '{}', ?)
+                """,
+                (request_id, operator_agent_id, current),
+            )
+        request = self.get_dynamic_resource_request(request_id)
+        if request is None:
+            raise RuntimeError("dynamic resource request insert failed")
+        self.append_event(
+            "dynamic_resource_requested",
+            {
+                "request_id": request_id,
+                "request_sha256": request_sha256,
+                "resource_class": resource_class,
+                "campaign_id": campaign_id,
+                "handoff_id": handoff_id,
+                "workspace_set_digest": workspace_set_digest,
+                "status": status,
+            },
+            operator_agent_id,
+        )
+        return request, True
+
+    def get_dynamic_resource_request(self, request_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM dynamic_resource_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        return self._dynamic_resource_from_row(row) if row else None
+
+    def list_dynamic_resource_requests(
+        self,
+        *,
+        status: str | None = None,
+        campaign_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        if campaign_id:
+            where.append("campaign_id = ?")
+            params.append(campaign_id)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        params.append(min(max(int(limit), 1), 1000))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM dynamic_resource_requests
+                {clause}
+                ORDER BY created_at DESC, request_id ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._dynamic_resource_from_row(row) for row in rows]
+
+    def update_dynamic_resource_request(
+        self,
+        request_id: str,
+        *,
+        expected_statuses: tuple[str, ...],
+        status: str,
+        operator_agent_id: str,
+        event_type: str,
+        approval: dict[str, Any] | None = None,
+        provider_receipt: dict[str, Any] | None = None,
+        cleanup_receipt: dict[str, Any] | None = None,
+        event_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not expected_statuses:
+            raise ValueError("dynamic resource update requires expected states")
+        current = now_ts()
+        assignments = ["status = ?", "updated_at = ?"]
+        values: list[Any] = [status, current]
+        if approval is not None:
+            assignments.append("approval_json = ?")
+            values.append(json.dumps(approval, sort_keys=True))
+        if provider_receipt is not None:
+            assignments.append("provider_receipt_json = ?")
+            values.append(json.dumps(provider_receipt, sort_keys=True))
+        if cleanup_receipt is not None:
+            assignments.append("cleanup_receipt_json = ?")
+            values.append(json.dumps(cleanup_receipt, sort_keys=True))
+        placeholders = ", ".join("?" for _ in expected_statuses)
+        values.extend((request_id, *expected_statuses))
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE dynamic_resource_requests
+                SET {', '.join(assignments)}
+                WHERE request_id = ? AND status IN ({placeholders})
+                """,
+                values,
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("dynamic resource state changed")
+            conn.execute(
+                """
+                INSERT INTO dynamic_resource_events(
+                    request_id, event_type, operator_agent_id,
+                    metadata_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    event_type,
+                    operator_agent_id,
+                    json.dumps(event_metadata or {}, sort_keys=True),
+                    current,
+                ),
+            )
+        request = self.get_dynamic_resource_request(request_id)
+        if request is None:
+            raise RuntimeError("dynamic resource request disappeared")
+        self.append_event(
+            f"dynamic_resource_{event_type}",
+            {
+                "request_id": request_id,
+                "request_sha256": request["request_sha256"],
+                "resource_class": request["resource_class"],
+                "status": status,
+            },
+            operator_agent_id,
+        )
+        return request
+
+    def consume_dynamic_resource_request(
+        self,
+        request_id: str,
+        *,
+        requester_agent_id: str,
+    ) -> dict[str, Any]:
+        current = now_ts()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM dynamic_resource_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("dynamic resource request not found")
+            request = self._dynamic_resource_from_row(row)
+            if request["status"] != "leased" or request["expires_at"] <= current:
+                raise ValueError("dynamic resource lease is not active")
+            if request["requester_agent_id"] != requester_agent_id:
+                raise ValueError("dynamic resource requester identity mismatch")
+            next_count = int(request["use_count"]) + 1
+            if next_count > int(request["max_uses"]):
+                raise ValueError("dynamic resource use quota is exhausted")
+            cursor = conn.execute(
+                """
+                UPDATE dynamic_resource_requests
+                SET use_count = ?, updated_at = ?
+                WHERE request_id = ? AND status = 'leased' AND use_count = ?
+                """,
+                (next_count, current, request_id, request["use_count"]),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("dynamic resource use raced")
+            conn.execute(
+                """
+                INSERT INTO dynamic_resource_events(
+                    request_id, event_type, operator_agent_id,
+                    metadata_json, created_at
+                ) VALUES (?, 'used', NULL, ?, ?)
+                """,
+                (request_id, json.dumps({"use_count": next_count}), current),
+            )
+        updated = self.get_dynamic_resource_request(request_id)
+        assert updated is not None
+        self.append_event(
+            "dynamic_resource_used",
+            {
+                "request_id": request_id,
+                "request_sha256": updated["request_sha256"],
+                "resource_class": updated["resource_class"],
+                "use_count": next_count,
+            },
+            requester_agent_id,
+        )
+        return updated
+
+    def list_dynamic_resource_events(
+        self,
+        *,
+        request_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if request_id:
+            where = "WHERE request_id = ?"
+            params.append(request_id)
+        params.append(min(max(int(limit), 1), 2000))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM dynamic_resource_events
+                {where}
+                ORDER BY event_id ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                metadata = json.loads(item.pop("metadata_json") or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            item["metadata"] = metadata if isinstance(metadata, dict) else {}
+            events.append(item)
+        return events
+
+    @staticmethod
+    def _dynamic_resource_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        for column, target in (
+            ("spec_json", "spec"),
+            ("approval_json", "approval"),
+            ("provider_receipt_json", "provider_receipt"),
+            ("cleanup_receipt_json", "cleanup_receipt"),
+        ):
+            raw = item.pop(column)
+            try:
+                value = json.loads(raw) if raw is not None else None
+            except json.JSONDecodeError:
+                value = None
+            item[target] = value
+        for key in ("ttl_seconds", "quota", "max_uses", "use_count"):
+            item[key] = int(item.get(key) or 0)
+        item["restart_required"] = bool(item.get("restart_required"))
         return item
 
     def create_operator_kb_seed_run(

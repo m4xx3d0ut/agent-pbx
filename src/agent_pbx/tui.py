@@ -870,6 +870,7 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/operator kb reject",
     "/operator kb retire",
     "/operator helpers",
+    "/operator resources",
     "/operator project spawn",
     "/operator project spawn inspect",
     "/operator project spawn cancel",
@@ -6480,6 +6481,134 @@ class DurableHelperRegistryScreen(ModalScreen[None]):
         )
 
 
+class DynamicResourceApprovalScreen(ModalScreen[None]):
+    """Review exact typed resource requests; only modal-local F8 approves."""
+
+    BINDINGS = [
+        Binding("f8", "approve_selected", "Approve exact request", priority=True),
+        Binding("escape", "dismiss", "Close", priority=True),
+    ]
+
+    def __init__(
+        self,
+        *,
+        operator_agent_id: str,
+        requests: list[dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.operator_agent_id = operator_agent_id
+        self.requests = requests
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="operator-handoff-approval-panel"):
+            yield Static(
+                f"Typed dynamic resources · {self.operator_agent_id}",
+                id="operator-completion-title",
+            )
+            yield Static(
+                "F8 approves only the highlighted receipt-bound request. "
+                "A running sandbox remains restart-required; approval never remaps it.",
+                id="dynamic-resource-summary",
+            )
+            yield DataTable(
+                id="dynamic-resource-table",
+                cursor_type="row",
+                show_row_labels=False,
+            )
+            yield Static("Select a request to review its exact F8 phrase.", id="dynamic-resource-detail")
+            with Horizontal(id="operator-handoff-approval-actions"):
+                yield Button("Refresh", id="dynamic-resource-refresh")
+                yield Button("Close", id="dynamic-resource-close")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#dynamic-resource-table", DataTable)
+        table.add_columns(
+            "Class",
+            "Requester",
+            "Campaign",
+            "Restart",
+            "Expires",
+            "Request ID",
+        )
+        self.render_rows()
+
+    def render_rows(self) -> None:
+        table = self.query_one("#dynamic-resource-table", DataTable)
+        table.clear(columns=False)
+        for request in self.requests:
+            request_id = str(request.get("request_id") or "")
+            if not request_id:
+                continue
+            table.add_row(
+                str(request.get("resource_class") or "-"),
+                str(request.get("requester_agent_id") or "-"),
+                str(request.get("campaign_id") or request.get("handoff_id") or "-")[:12],
+                "yes" if request.get("restart_required") is True else "no",
+                OperatorHandoffApprovalScreen.format_timestamp(request.get("expires_at")),
+                request_id,
+                key=request_id,
+            )
+        self._render_selected_detail()
+
+    def current_request(self) -> dict[str, Any] | None:
+        table = self.query_one("#dynamic-resource-table", DataTable)
+        if table.row_count == 0:
+            return None
+        try:
+            request_id = str(
+                table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            )
+        except Exception:
+            return None
+        return next(
+            (item for item in self.requests if item.get("request_id") == request_id),
+            None,
+        )
+
+    def _render_selected_detail(self) -> None:
+        request = self.current_request()
+        detail = self.query_one("#dynamic-resource-detail", Static)
+        if request is None:
+            detail.update("No pending manual resource request.")
+            return
+        detail.update(
+            "Request: "
+            f"{request.get('request_id')}\n"
+            f"Digest: {request.get('request_sha256')}\n"
+            f"Workspace: {request.get('workspace_set_digest')}\n"
+            f"Spec: {json.dumps(request.get('spec') or {}, sort_keys=True)}\n"
+            f"F8 phrase: {request.get('approval_confirmation') or '-'}"
+        )
+
+    def on_data_table_row_highlighted(self, _event: DataTable.RowHighlighted) -> None:
+        self._render_selected_detail()
+
+    def action_approve_selected(self) -> None:
+        request = self.current_request()
+        if request is None:
+            self.app.notify("Select one pending resource request", severity="warning")  # type: ignore[attr-defined]
+            return
+        self.app.run_worker(  # type: ignore[attr-defined]
+            self.app.approve_dynamic_resource_request(self, request),  # type: ignore[attr-defined]
+            name="dynamic-resource-f8-approve",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if event.button.id == "dynamic-resource-close":
+            self.dismiss()
+            return
+        if event.button.id == "dynamic-resource-refresh":
+            self.app.run_worker(  # type: ignore[attr-defined]
+                self.app.refresh_dynamic_resource_screen(self),  # type: ignore[attr-defined]
+                name="dynamic-resource-refresh",
+                exclusive=True,
+                exit_on_error=False,
+            )
+
+
 class OperatorHandoffCompletionScreen(ModalScreen[None]):
     """Review and acknowledge source-addressed handoff completions."""
 
@@ -11971,6 +12100,11 @@ class AgentPBXTUI(App[None]):
             "Review durable helper lifecycle state",
             self.palette_operator_helpers,
         )
+        yield SystemCommand(
+            "/operator resources",
+            "Review pending typed dynamic-resource approvals",
+            self.palette_operator_resources,
+        )
         yield SystemCommand("/operator project spawn", "Launch the oldest pending review project spawn", self.palette_operator_project_spawn)
         yield SystemCommand("/operator project spawn inspect", "Inspect the oldest pending review project spawn", self.palette_operator_project_spawn_inspect)
         yield SystemCommand("/operator project spawn cancel", "Cancel the oldest pending review project spawn", self.palette_operator_project_spawn_cancel)
@@ -13665,6 +13799,14 @@ class AgentPBXTUI(App[None]):
         self.run_worker(
             self.show_durable_helpers(),
             name="palette-operator-helpers",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def palette_operator_resources(self) -> None:
+        self.run_worker(
+            self.show_dynamic_resources(),
+            name="palette-operator-resources",
             exclusive=True,
             exit_on_error=False,
         )
@@ -17055,6 +17197,9 @@ class AgentPBXTUI(App[None]):
         )
 
     async def action_focus_next_alert(self) -> None:
+        if isinstance(self.screen, DynamicResourceApprovalScreen):
+            self.screen.action_approve_selected()
+            return
         if (
             self.handoff_approval_opening_operator_id is not None
             or self.handoff_action_opening_operator_id is not None
@@ -30400,6 +30545,122 @@ class AgentPBXTUI(App[None]):
             await self.refresh_durable_helper_screen(screen)
         except Exception as exc:
             self.notify(f"Durable helper action failed: {exc}", severity="error")
+
+    async def fetch_dynamic_resources(
+        self,
+        operator_agent_id: str,
+    ) -> list[dict[str, Any]]:
+        response = await self.api_client().get(
+            "/v1/operator/resources",
+            params={
+                "operator_agent_id": operator_agent_id,
+                "status": "pending_approval",
+                "limit": 200,
+            },
+            headers=auth_headers(self.token),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise RuntimeError("dynamic resource response was not a list")
+        return [
+            item
+            for item in payload
+            if isinstance(item, dict) and item.get("approval_mode") == "manual"
+        ]
+
+    async def show_dynamic_resources(self) -> None:
+        operator_agent_id = self.selected_operator_kb_agent_id()
+        if not operator_agent_id:
+            self.notify("Select a root Operator first", severity="warning")
+            return
+        operator = self.agents.get(operator_agent_id)
+        if (
+            not isinstance(operator, dict)
+            or self.operator_role(operator) != OPERATOR_ROLE_ROOT
+            or self.logical_operator_id_for_agent(operator) != operator_agent_id
+        ):
+            self.notify(
+                "Dynamic resources require the exact root Operator row",
+                severity="warning",
+            )
+            return
+        try:
+            requests = await self.fetch_dynamic_resources(operator_agent_id)
+        except Exception as exc:
+            self.notify(f"Unable to load dynamic resources: {exc}", severity="error")
+            return
+        self.push_screen(
+            DynamicResourceApprovalScreen(
+                operator_agent_id=operator_agent_id,
+                requests=requests,
+            )
+        )
+
+    async def refresh_dynamic_resource_screen(
+        self,
+        screen: DynamicResourceApprovalScreen,
+    ) -> None:
+        try:
+            screen.requests = await self.fetch_dynamic_resources(
+                screen.operator_agent_id
+            )
+            screen.render_rows()
+        except Exception as exc:
+            self.notify(f"Unable to refresh dynamic resources: {exc}", severity="error")
+
+    async def approve_dynamic_resource_request(
+        self,
+        screen: DynamicResourceApprovalScreen,
+        reviewed: dict[str, Any],
+    ) -> None:
+        request_id = str(reviewed.get("request_id") or "")
+        reviewed_digest = str(reviewed.get("request_sha256") or "")
+        reviewed_confirmation = str(reviewed.get("approval_confirmation") or "")
+        try:
+            current = await self.fetch_dynamic_resources(screen.operator_agent_id)
+            exact = next(
+                (
+                    item
+                    for item in current
+                    if item.get("request_id") == request_id
+                ),
+                None,
+            )
+            if (
+                exact is None
+                or exact.get("status") != "pending_approval"
+                or exact.get("approval_mode") != "manual"
+                or exact.get("operator_agent_id") != screen.operator_agent_id
+                or exact.get("request_sha256") != reviewed_digest
+                or exact.get("approval_confirmation") != reviewed_confirmation
+            ):
+                raise RuntimeError(
+                    "resource request changed after review; refresh before F8"
+                )
+            response = await self.api_client().post(
+                f"/v1/operator/resources/{request_id}/approve",
+                json={
+                    "operator_agent_id": screen.operator_agent_id,
+                    "approval_method": "agent-pbx-tui-f8",
+                    "confirmation": reviewed_confirmation,
+                    "approve": True,
+                },
+                headers=auth_headers(self.token),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if (
+                not isinstance(payload, dict)
+                or payload.get("request_id") != request_id
+                or payload.get("request_sha256") != reviewed_digest
+                or payload.get("status") != "approved"
+            ):
+                raise RuntimeError("dynamic resource approval receipt mismatch")
+            self.notify("Exact typed resource request approved")
+            await self.refresh_dynamic_resource_screen(screen)
+        except Exception as exc:
+            self.notify(f"Dynamic resource approval failed: {exc}", severity="error")
 
     async def fetch_operator_kb_entries(
         self,

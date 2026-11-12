@@ -120,6 +120,7 @@ class ServerConfig:
     durable_helper_root: Path | None = None
     durable_helper_proposal_roots: tuple[Path, ...] = field(default_factory=tuple)
     durable_helper_measurements_enabled: bool = False
+    dynamic_resources_enabled: bool = False
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0

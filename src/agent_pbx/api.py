@@ -95,6 +95,7 @@ from .workerbee_switcher import WorkerBeeSwitchService
 from .events import EventClientRegistry, EventStreamService
 from .evidence_export import EvidenceExportError, EvidenceExportService
 from .durable_helpers import DurableHelperRegistry
+from .dynamic_resources import DynamicResourceBroker
 from .codex.runtime import CodexRuntimeService
 from .joplin import (
     JoplinApiError,
@@ -299,6 +300,11 @@ from .schemas import (
     DurableHelperOperatorRequest,
     DurableHelperProposalRequest,
     DurableHelperTransitionRequest,
+    DynamicResourceApprovalRequest,
+    DynamicResourceCreateRequest,
+    DynamicResourceOperatorRequest,
+    DynamicResourceReleaseRequest,
+    DynamicResourceUseRequest,
     OperatorKbIndexJobListResponse,
     OperatorKbIndexJobRequest,
     OperatorKbIndexJobResponse,
@@ -945,9 +951,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             resolved_config.durable_helper_measurements_enabled
         ),
     )
+    app.state.dynamic_resources = DynamicResourceBroker(
+        store,
+        enabled=resolved_config.dynamic_resources_enabled,
+    )
     app.state.operator_service = OperatorService(
         store,
         durable_helpers=app.state.durable_helpers,
+        dynamic_resources=app.state.dynamic_resources,
     )
     app.state.operator_broker_service = OperatorBrokerService(store)
     app.state.managed_runtime = ManagedRuntimeService(
@@ -5732,6 +5743,113 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         return await run_operator_call(
             request.app.state.operator_service.durable_helper_measurements,
             operator_agent_id=operator_agent_id,
+        )
+
+    def require_dynamic_resources_enabled() -> None:
+        if not resolved_config.dynamic_resources_enabled:
+            raise HTTPException(
+                status_code=409,
+                detail="dynamic resource broker is disabled",
+            )
+
+    @app.get("/v1/operator/resources")
+    async def list_dynamic_resources(
+        request: Request,
+        operator_agent_id: str = Query(min_length=1, max_length=120),
+        status: str | None = Query(default=None, max_length=40),
+        campaign_id: str | None = Query(default=None, max_length=120),
+        limit: int = Query(default=200, ge=1, le=1000),
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> list[dict[str, Any]]:
+        require_dynamic_resources_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.list_dynamic_resources,
+            operator_agent_id=operator_agent_id,
+            status=status,
+            campaign_id=campaign_id,
+            limit=limit,
+        )
+
+    @app.post("/v1/operator/resources/request")
+    async def request_dynamic_resource(
+        payload: DynamicResourceCreateRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        require_dynamic_resources_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.request_dynamic_resource,
+            **payload.model_dump(),
+        )
+
+    @app.post("/v1/operator/resources/{request_id}/approve")
+    async def approve_dynamic_resource(
+        request_id: str,
+        payload: DynamicResourceApprovalRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        require_dynamic_resources_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.decide_dynamic_resource,
+            request_id=request_id,
+            **payload.model_dump(),
+        )
+
+    @app.post("/v1/operator/resources/{request_id}/acquire")
+    async def acquire_dynamic_resource(
+        request_id: str,
+        payload: DynamicResourceOperatorRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        require_dynamic_resources_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.acquire_dynamic_resource,
+            request_id=request_id,
+            operator_agent_id=payload.operator_agent_id,
+        )
+
+    @app.post("/v1/operator/resources/{request_id}/use")
+    async def use_dynamic_resource(
+        request_id: str,
+        payload: DynamicResourceUseRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        require_dynamic_resources_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.use_dynamic_resource,
+            request_id=request_id,
+            **payload.model_dump(),
+        )
+
+    @app.post("/v1/operator/resources/{request_id}/release")
+    async def release_dynamic_resource(
+        request_id: str,
+        payload: DynamicResourceReleaseRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        require_dynamic_resources_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.release_dynamic_resource,
+            request_id=request_id,
+            **payload.model_dump(),
+        )
+
+    @app.post("/v1/operator/resources/{request_id}/recover")
+    async def recover_dynamic_resource(
+        request_id: str,
+        payload: DynamicResourceOperatorRequest,
+        request: Request,
+        _controller: ClientPrincipal = Depends(require_global_controller),
+    ) -> dict[str, Any]:
+        require_dynamic_resources_enabled()
+        return await run_operator_call(
+            request.app.state.operator_service.recover_dynamic_resource,
+            request_id=request_id,
+            operator_agent_id=payload.operator_agent_id,
         )
 
     @app.get(

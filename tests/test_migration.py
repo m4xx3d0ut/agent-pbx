@@ -128,6 +128,8 @@ def test_schema_30_fixture_migrates_with_retained_entities_and_rolls_back(
         "operator_authority_assignments",
         "operator_broker_requests",
         "operator_delegation_leases",
+        "dynamic_resource_events",
+        "dynamic_resource_requests",
         "operator_handoff_completion_deliveries",
         "operator_workspace_set_versions",
         "workerbee_controlled_run_leases",
