@@ -17197,8 +17197,12 @@ class AgentPBXTUI(App[None]):
         )
 
     async def action_focus_next_alert(self) -> None:
-        if isinstance(self.screen, DynamicResourceApprovalScreen):
-            self.screen.action_approve_selected()
+        try:
+            active_screen = self.screen
+        except ScreenStackError:
+            active_screen = None
+        if isinstance(active_screen, DynamicResourceApprovalScreen):
+            active_screen.action_approve_selected()
             return
         if (
             self.handoff_approval_opening_operator_id is not None
