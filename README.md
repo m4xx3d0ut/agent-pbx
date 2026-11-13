@@ -592,9 +592,14 @@ only true for a Codex-like target.
 
 A terminal handoff update creates one idempotent completion receipt for the
 exact source root Operator or source fork. The Operators pane keeps semantic
-`State` and `Flow` separate from tmux `Live`; pending results appear as
-`⇠ REVIEW` with an `RCPT` marker. The top banner reports `RECEIPTS N`, and F8
-opens the completion center after pending approvals and before guarded actions.
+`State` and `Flow` separate from tmux `Live`: `State` is the projected PBX
+workflow, `Flow` is its highest-priority durable route or action, `Camp` is the
+active nonterminal campaign count, and `Live` is tmux/runtime liveness. Raw
+Codex activity does not drive `State`, `Flow`, or `Camp`. Selecting an Operator
+shows the projection reason, source, and durable subject identity in Latest
+detail. Pending results appear as `⇠ REVIEW` with an `RCPT` marker. The top
+banner reports `RECEIPTS N`, and F8 opens the completion center after pending
+approvals and before guarded actions.
 Reviewing and acknowledging a receipt stops retry/attention state without
 changing the completed, failed, blocked, or canceled handoff. Nohup recipients
 receive an exact queued command. Report-mode terminal injection requires an

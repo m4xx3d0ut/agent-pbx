@@ -2,8 +2,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import threading
 
-from agent_pbx.schemas import AgentRegisterRequest
-from agent_pbx.store import SCHEMA_VERSION, Store
+import pytest
+
+from agent_pbx.schemas import AgentRegisterRequest, ReportCreateRequest
+from agent_pbx.store import SCHEMA_VERSION, STALE_WORKING_SECONDS, Store
 
 
 def test_agent_summary_keeps_pending_handoff_approval_durable(
@@ -40,6 +42,64 @@ def test_agent_summary_keeps_pending_handoff_approval_durable(
     store.update_operator_handoff(handoff["handoff_id"], status="sent")
     by_id = {agent["agent_id"]: agent for agent in store.list_agents()}
     assert by_id["operator-0"]["pending_handoff_approval_count"] == 0
+
+
+@pytest.mark.parametrize("report_status", ["working", "waiting"])
+def test_operator_stale_status_precedes_report_state_but_not_durable_work(
+    tmp_path: Path,
+    report_status: str,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    for agent_id in ("operator-0", "operator-7"):
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=agent_id,
+                project="agent-pbx-operator",
+                agent_type="operator",
+                metadata={"cwd": str(tmp_path / agent_id)},
+            )
+        )
+    store.create_report(
+        "operator-0",
+        ReportCreateRequest(
+            project="agent-pbx-operator",
+            status=report_status,
+            summary=f"Operator is {report_status}",
+            detail="The latest durable report state is retained for explanation.",
+        ),
+    )
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE agents SET status = 'working', last_seen_at = ? WHERE agent_id = ?",
+            (0.0, "operator-0"),
+        )
+
+    stale = {agent["agent_id"]: agent for agent in store.list_agents()}[
+        "operator-0"
+    ]
+    assert stale["status_age_seconds"] >= STALE_WORKING_SECONDS
+    assert stale["workflow_state"] == "stale"
+    assert stale["workflow_label"] == "△ STALE"
+    assert stale["workflow_reason"].endswith(
+        f"latest report remains {report_status}"
+    )
+    assert stale["workflow_source"] == "agent_status"
+
+    store.create_operator_handoff(
+        logical_operator_agent_id="operator-0",
+        source_operator_agent_id="operator-0",
+        target_operator_agent_id="operator-7",
+        source_agent_id="operator-0",
+        objective="Review durable work",
+        message="Review the exact durable state.",
+    )
+    durable = {agent["agent_id"]: agent for agent in store.list_agents()}[
+        "operator-0"
+    ]
+    assert durable["status_stale"] is True
+    assert durable["workflow_state"] == "approval"
+    assert durable["workflow_source"] == "handoff_approval"
 
 
 def test_cancel_operator_handoff_is_atomic_and_clears_pending_summary(

@@ -16450,6 +16450,8 @@ class AgentPBXTUI(App[None]):
             return "? INPUT"
         if int(agent.get("ready_handoff_action_count") or 0):
             return "! ACTION"
+        if bool(agent.get("status_stale")):
+            return "△ STALE"
         if status in {"running", "working", "starting", "executing"}:
             return "▶ RUN"
         if status in {"waiting", "needs_input", "plan", "planning"}:
@@ -16463,6 +16465,23 @@ class AgentPBXTUI(App[None]):
     @staticmethod
     def format_operator_workflow_flow(agent: dict[str, Any]) -> str:
         return str(agent.get("workflow_flow") or "").strip()
+
+    def operator_workflow_explainability_lines(
+        self,
+        agent: Mapping[str, Any] | None,
+    ) -> list[str]:
+        if (
+            not isinstance(agent, Mapping)
+            or self.agent_type(agent) != OPERATOR_AGENT_TYPE
+        ):
+            return []
+        return [
+            f"Workflow State: {self.format_operator_workflow_state(dict(agent))}",
+            f"Workflow Reason: {str(agent.get('workflow_reason') or '-').strip()}",
+            f"Workflow Source: {str(agent.get('workflow_source') or '-').strip()}",
+            "Workflow Subject ID: "
+            f"{str(agent.get('workflow_subject_id') or '-').strip()}",
+        ]
 
     def infer_tmux_working_status(self, agent: dict[str, Any], status: str) -> bool:
         agent_id = str(agent.get("agent_id") or "")
@@ -19308,6 +19327,9 @@ class AgentPBXTUI(App[None]):
         detail = self.query_one_or_none("#detail", TextArea)
         if detail is None:
             return
+        workflow_lines = self.operator_workflow_explainability_lines(
+            self.agents.get(agent_id)
+        )
         try:
             response = await self.api_client().get(
                 f"/v1/agents/{agent_id}/reports",
@@ -19321,7 +19343,10 @@ class AgentPBXTUI(App[None]):
             self.render_latest_plan_choice_panel(None)
             return
         if not reports:
-            detail.text = f"No reports for {agent_id}."
+            lines = [f"No reports for {agent_id}."]
+            if workflow_lines:
+                lines.extend(["", *workflow_lines])
+            detail.text = "\n".join(lines)
             self.latest_report_by_agent.pop(agent_id, None)
             self.render_latest_plan_choice_panel(None)
             return
@@ -19331,6 +19356,7 @@ class AgentPBXTUI(App[None]):
         lines = [
             f"Agent: {report['agent_id']}",
             f"Status: {report['status']}",
+            *workflow_lines,
             f"Needs Input: {'yes' if report.get('needs_input') else 'no'}",
             f"Summary: {report['summary']}",
             "",

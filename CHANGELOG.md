@@ -13,6 +13,9 @@
 
 ### Fixed
 
+- Refresh Operator workflow projections for all durable workflow event
+  families, display stale state before an underlying running/waiting report,
+  and expose the selected workflow reason, source, and subject identity.
 - Preserve authority-qualified per-worktree Git administration as an exact
   filesystem exception for Trusted Workbench edit launches without projecting
   a nested workspace root or exposing sibling/common Git administration.

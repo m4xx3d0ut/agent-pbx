@@ -14140,15 +14140,21 @@ class Store:
             reason = f"{active_controlled_runs} WorkerBee controlled run(s) active"
             source = "workerbee_controlled_run"
             flow = "WB run"
-        elif status in {"running", "working", "starting", "executing"}:
-            state, label = "running", "▶ RUN"
-            reason = "Latest Operator report is active"
-            source = "latest_report"
         elif active_campaigns:
             state, label = "running", "▶ RUN"
             reason = f"{active_campaigns} active campaign(s)"
             source = "campaign"
             flow = f"{active_campaigns} camp"
+        elif bool(agent.get("status_stale")):
+            state, label = "stale", "△ STALE"
+            reason = "Operator status has not refreshed"
+            if status:
+                reason = f"{reason}; latest report remains {status}"
+            source = "agent_status"
+        elif status in {"running", "working", "starting", "executing"}:
+            state, label = "running", "▶ RUN"
+            reason = "Latest Operator report is active"
+            source = "latest_report"
         elif status in {"waiting", "needs_input", "plan", "planning"}:
             state, label = "waiting", "◈ WAIT"
             reason = "Operator is waiting"
@@ -14161,11 +14167,6 @@ class Store:
             state, label = "offline", "○ OFF"
             reason = "Operator runtime is unavailable"
             source = "agent_status"
-        elif bool(agent.get("status_stale")):
-            state, label = "stale", "△ STALE"
-            reason = "Operator status has not refreshed"
-            source = "agent_status"
-
         agent["workflow_state"] = state
         agent["workflow_label"] = label
         agent["workflow_reason"] = reason

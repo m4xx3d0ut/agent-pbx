@@ -5595,6 +5595,52 @@ def test_tui_operator_rows_expose_workflow_state_flow_and_durable_alerts() -> No
     assert "b58cff" in str(styled[columns.index("State")].style)
 
 
+async def test_tui_selected_operator_detail_exposes_workflow_reason_and_source() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "report_id": "report-1",
+                    "agent_id": "operator-0",
+                    "status": "working",
+                    "summary": "Campaign is active",
+                    "detail": "The durable campaign remains in progress.",
+                    "needs_input": False,
+                    "plan_options": [],
+                }
+            ]
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            assert path == "/v1/agents/operator-0/reports"
+            return Response()
+
+    async with app.run_test():
+        app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+        app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "workflow_label": "⇠ REVIEW",
+                "workflow_reason": "One completion receipt awaits review",
+                "workflow_source": "handoff_completion_delivery",
+                "workflow_subject_id": "completion-1",
+            }
+        }
+        await app.load_latest_report("operator-0")
+        detail = app.query_one("#detail", TextArea).text
+
+    assert "Workflow State: ⇠ REVIEW" in detail
+    assert "Workflow Reason: One completion receipt awaits review" in detail
+    assert "Workflow Source: handoff_completion_delivery" in detail
+    assert "Workflow Subject ID: completion-1" in detail
+
+
 def test_tui_operator_columns_keep_state_visible_before_identity_on_all_layouts() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     for layout in ("tiny", "compact", "split"):
