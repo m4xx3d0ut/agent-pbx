@@ -100,3 +100,26 @@ def test_owned_route_families_remain_complete(tmp_path: Path) -> None:
     for family, expected in ROUTE_OWNERSHIP.items():
         missing = expected - actual
         assert not missing, f"{family} lost routes: {sorted(missing)}"
+
+
+def test_typed_service_container_preserves_legacy_state_and_route_owner(
+    tmp_path: Path,
+) -> None:
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    assert app.state.api_services.config is app.state.config
+    assert app.state.api_services.evidence_exports is app.state.evidence_exports
+    assert app.state.api_services.operator_service is app.state.operator_service
+    assert app.state.api_services.durable_helpers is app.state.durable_helpers
+    assert app.state.api_services.dynamic_resources is app.state.dynamic_resources
+    assert (
+        app.state.api_services.protected_provider_diagnostics
+        is app.state.protected_provider_diagnostics
+    )
+    evidence_routes = {
+        route.path: route.endpoint.__module__
+        for route in app.routes
+        if route.path.startswith("/v1/evidence/")
+    }
+    assert evidence_routes
+    assert set(evidence_routes.values()) == {"agent_pbx.api_routes.evidence"}
