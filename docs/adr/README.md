@@ -19,3 +19,4 @@ cycle is `next-cycle-baseline-2026-10-02` (`70978b2`).
 - [0013 — Typed dynamic resources](0013-typed-dynamic-resources.md)
 - [0014 — WorkerBee direct-bind development volumes](0014-workerbee-development-volumes.md)
 - [0015 — Operator KB repository synchronization](0015-operator-kb-synchronization.md)
+- [0016 — Behavior-preserving component decomposition](0016-component-decomposition.md)
