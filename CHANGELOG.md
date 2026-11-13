@@ -12,6 +12,9 @@
 
 - Retry clean package-index installation while a newly published release is
   propagating from PyPI metadata to the Simple API.
+- Link the stable wheelhouse, checksum, and installer directly from the v2.4.0
+  release notes so they remain discoverable when GitHub collapses its Assets
+  section.
 - Separate Git modal-routing tests from pane-refresh scheduling so background
   terminal refreshes cannot create nondeterministic release-gate failures.
 
