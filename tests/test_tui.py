@@ -122,6 +122,7 @@ from agent_pbx.tui import (
     run_tui,
     slash_completion_direction,
     tmux_features_available,
+    workflow_projection_event_requires_agent_refresh,
 )
 from agent_pbx.terminal import (
     EMBEDDED_SCROLL_MODE_CHILD,
@@ -1069,6 +1070,65 @@ def test_tui_event_stream_parser_ignores_keepalive_and_bad_data() -> None:
         "event_id": 12,
         "type": "report_created",
     }
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "report_created",
+        "operator_campaign_event",
+        "operator_handoff_completion_sent",
+        "operator_broker_request_created",
+        "workerbee_controlled_run_request_created",
+        "operator_delegation_lease_approved",
+        "dynamic_resource_request_released",
+    ],
+)
+def test_tui_classifies_workflow_projection_events(event_type: str) -> None:
+    assert workflow_projection_event_requires_agent_refresh(event_type) is True
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "operator_handoff_",
+        "operator_broker",
+        "workerbee_controlled_run",
+        "operator_kb_updated",
+        "joplin_sync_succeeded",
+    ],
+)
+def test_tui_rejects_nonworkflow_projection_events(event_type: str) -> None:
+    assert workflow_projection_event_requires_agent_refresh(event_type) is False
+
+
+async def test_tui_workflow_projection_events_force_agent_refresh() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    refresh_forces: list[bool] = []
+    event_types = [
+        "operator_handoff_completion_acknowledged",
+        "operator_broker_request_validated",
+        "workerbee_controlled_run_receipt_recorded",
+        "operator_delegation_lease_revoked",
+        "dynamic_resource_request_recovered",
+    ]
+
+    def capture_refresh(force: bool = False) -> None:
+        refresh_forces.append(force)
+
+    async with app.run_test():
+        app.schedule_refresh_agents = capture_refresh  # type: ignore[method-assign]
+        for event_id, event_type in enumerate(event_types, start=1):
+            app.handle_event(
+                {
+                    "event_id": event_id,
+                    "type": event_type,
+                    "subject_id": f"subject-{event_id}",
+                    "payload": {},
+                }
+            )
+
+    assert refresh_forces == [True] * len(event_types)
 
 
 def test_tui_refresh_workers_use_non_default_groups() -> None:

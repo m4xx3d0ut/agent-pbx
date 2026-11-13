@@ -220,6 +220,17 @@ ATTENTION_EVENT_TYPES = {
     "operator_delegation_lease_revoked",
     "operator_delegation_lease_used",
 }
+WORKFLOW_PROJECTION_EVENT_TYPES = {
+    "operator_campaign_event",
+    "report_created",
+}
+WORKFLOW_PROJECTION_EVENT_PREFIXES = (
+    "dynamic_resource_",
+    "operator_broker_",
+    "operator_delegation_lease_",
+    "operator_handoff_",
+    "workerbee_controlled_run_",
+)
 STARRED_AGENT_COLUMN = "*"
 DEFAULT_TUI_THEME = "cyberpunk"
 ACCESSIBLE_TUI_THEME = "cyberpunk-accessible"
@@ -1421,6 +1432,17 @@ DEFAULT_CUSTOM_PALETTE = {
     "panel": "#000000",
     "boost": "#00ff00",
 }
+
+
+def workflow_projection_event_requires_agent_refresh(event_type: str) -> bool:
+    """Return whether a durable workflow event changes the Agent projection."""
+
+    if event_type in WORKFLOW_PROJECTION_EVENT_TYPES:
+        return True
+    return any(
+        event_type.startswith(prefix) and len(event_type) > len(prefix)
+        for prefix in WORKFLOW_PROJECTION_EVENT_PREFIXES
+    )
 
 
 def build_theme(name: str, palette: dict[str, str]) -> Theme:
@@ -43205,9 +43227,10 @@ class AgentPBXTUI(App[None]):
             self.apply_report_created_event(agent_id, event)
         if event_type == "agent_starred_changed" and agent_id:
             self.apply_agent_starred_event(agent_id, event)
-        if event_type in {
+        refresh_agent_projection = workflow_projection_event_requires_agent_refresh(
+            event_type
+        ) or event_type in {
             "agent_registered",
-            "report_created",
             "command_queued",
             "command_delivered",
             "command_acked",
@@ -43217,8 +43240,8 @@ class AgentPBXTUI(App[None]):
             "agent_unhidden",
             "latest_seen",
             "agent_starred_changed",
-            "operator_campaign_event",
-        }:
+        }
+        if refresh_agent_projection:
             self.schedule_refresh_agents(force=True)
         if event_type == "report_created" and agent_id:
             self.mark_latest_unseen(agent_id)
