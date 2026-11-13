@@ -445,6 +445,53 @@ def test_register_endpoint_allows_source_caller_idempotent_legacy_session(
     ] == []
 
 
+def test_register_source_caller_does_not_infer_linked_operator_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    source_cwd = tmp_path / "shared-source"
+    source_cwd.mkdir()
+    write_codex_session(codex_home, source_cwd, "operator-session")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    operator = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "operator-7",
+            "project": "agent-pbx-operator",
+            "agent_type": "operator",
+            "metadata": {
+                "cwd": str(source_cwd),
+                "codex_session_id": "operator-session",
+                "default_source_caller_agent_id": "caller-1",
+            },
+        },
+    )
+    caller = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "caller-1",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(source_cwd),
+                "codex_session_id": "caller-session",
+            },
+        },
+    )
+
+    assert operator.status_code == 200
+    assert caller.status_code == 200
+    assert caller.json()["metadata"]["codex_session_id"] == "caller-session"
+    assert caller.json()["metadata"]["codex_thread_id"] == "caller-session"
+    assert [
+        event
+        for event in client.get("/v1/events").json()
+        if event["type"] == "agent_registration_identity_violation"
+    ] == []
+
+
 def test_register_agent_infers_codex_session_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

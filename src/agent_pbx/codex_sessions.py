@@ -401,7 +401,20 @@ def enrich_codex_session_metadata(
     codex_home: str | Path | None = None,
 ) -> dict[str, Any]:
     enriched = dict(metadata)
-    if enriched.get("codex_session_id") and enriched.get("codex_thread_id"):
+    session_id = str(enriched.get("codex_session_id") or "").strip()
+    thread_id = str(enriched.get("codex_thread_id") or "").strip()
+    if session_id and thread_id:
+        return enriched
+    # Codex currently uses the same durable UUID for its session and thread
+    # identity.  When a caller supplies either half explicitly, complete that
+    # identity pair before considering cwd-based inference.  Inferring only the
+    # missing half from the newest rollout in a shared checkout can otherwise
+    # combine a caller session with a linked Operator fork session.
+    if session_id:
+        enriched["codex_thread_id"] = session_id
+        return enriched
+    if thread_id:
+        enriched["codex_session_id"] = thread_id
         return enriched
     cwd = str(enriched.get("cwd") or "").strip()
     if not cwd:

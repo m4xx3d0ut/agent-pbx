@@ -7,6 +7,7 @@ from agent_pbx.codex_sessions import (
     codex_thread_writer_lock_available,
     codex_thread_writer_lock_path,
     codex_session_transcript_boundary,
+    enrich_codex_session_metadata,
     find_codex_session_file,
     latest_assistant_output_for_session,
     latest_assistant_output_from_session_file,
@@ -41,6 +42,56 @@ def user_message(text: str) -> dict[str, object]:
         "type": "event_msg",
         "payload": {"type": "user_message", "message": text},
     }
+
+
+def test_metadata_enrichment_preserves_explicit_session_identity(tmp_path) -> None:
+    unrelated_session_id = "operator-session"
+    cwd = tmp_path / "shared-checkout"
+    session_file = (
+        tmp_path
+        / "sessions"
+        / "2026"
+        / "11"
+        / "13"
+        / f"rollout-{unrelated_session_id}.jsonl"
+    )
+    cwd.mkdir()
+    write_jsonl(
+        session_file,
+        [
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": unrelated_session_id,
+                    "cwd": str(cwd),
+                },
+            }
+        ],
+    )
+
+    enriched = enrich_codex_session_metadata(
+        {
+            "cwd": str(cwd),
+            "codex_session_id": "caller-session",
+        },
+        codex_home=tmp_path,
+    )
+
+    assert enriched["codex_session_id"] == "caller-session"
+    assert enriched["codex_thread_id"] == "caller-session"
+
+
+def test_metadata_enrichment_preserves_explicit_thread_identity(tmp_path) -> None:
+    enriched = enrich_codex_session_metadata(
+        {
+            "cwd": str(tmp_path),
+            "codex_thread_id": "caller-thread",
+        },
+        codex_home=tmp_path,
+    )
+
+    assert enriched["codex_session_id"] == "caller-thread"
+    assert enriched["codex_thread_id"] == "caller-thread"
 
 
 def test_codex_thread_writer_lock_probe_uses_advisory_flock(tmp_path) -> None:
