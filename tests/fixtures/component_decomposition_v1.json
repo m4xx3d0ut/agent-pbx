@@ -17,15 +17,15 @@
       "lines": 14652
     },
     "src/agent_pbx/tui.py": {
-      "ast_nodes": 238230,
-      "bytes": 1758561,
+      "ast_nodes": 238478,
+      "bytes": 1760563,
       "classes": 71,
-      "functions": 1670,
+      "functions": 1671,
       "imports": 67,
-      "lines": 43874
+      "lines": 43928
     }
   },
-  "baseline_commit": "acbc24b6a95cff33b3381d6d178702b9ebcb20f0",
+  "baseline_commit": "9d62240f7c4370763d442d65549f7e950111028b",
   "schema": "agent-pbx.component-decomposition-contract/v1",
   "store_contract": {
     "begin_immediate_methods": [

@@ -55,3 +55,14 @@ Run `python scripts/check_component_boundaries.py` plus the owning route-family
 tests after every extraction. A failed OpenAPI, dependency, schema, transaction,
 or no-growth check blocks the checkpoint. Rollback reverts only the route move;
 because schema and migrations do not change, no data rollback is required.
+
+### Post-v2.4 baseline alignment
+
+The reviewed decomposition chain is aligned on dev commit
+`9d62240f7c4370763d442d65549f7e950111028b`. That base added the reviewed
+WorkerBee gateway launch allowlist to `tui.py`, moving only its ceilings from
+43,874 to 43,928 lines, 1,758,561 to 1,760,563 bytes, 238,230 to 238,478 AST
+nodes, and 1,670 to 1,671 functions. Class and import ceilings are unchanged.
+The API, OpenAPI, Store schema, transaction inventory, and migration ceilings
+remain the original Checkpoint 0 contract; this alignment does not authorize
+additional growth in any of them.

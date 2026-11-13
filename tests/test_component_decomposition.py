@@ -83,6 +83,10 @@ def test_store_schema_and_transaction_inventory_are_versioned() -> None:
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
 
     assert contract["schema"] == "agent-pbx.component-decomposition-contract/v1"
+    assert (
+        contract["baseline_commit"]
+        == "9d62240f7c4370763d442d65549f7e950111028b"
+    )
     assert contract["store_contract"] == _checker().collect_store_contract()
     assert contract["store_contract"]["schema_version"] == 45
     assert contract["store_contract"]["begin_immediate_methods"]

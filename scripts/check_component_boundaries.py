@@ -189,7 +189,7 @@ def collect_openapi() -> dict[str, Any]:
 def write_fixtures() -> None:
     contract = {
         "schema": "agent-pbx.component-decomposition-contract/v1",
-        "baseline_commit": "acbc24b6a95cff33b3381d6d178702b9ebcb20f0",
+        "baseline_commit": "9d62240f7c4370763d442d65549f7e950111028b",
         "ast_maxima": collect_ast_inventory(),
         "store_contract": collect_store_contract(),
     }
