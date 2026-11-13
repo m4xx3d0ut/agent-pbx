@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+No changes recorded yet.
+
+## v2.4.0rc1 - 2026-11-13
+
+### Highlights
+
+- Add a durable engineering control-plane layer for exact Git review,
+  redacted evidence export, Operator knowledge synchronization, reusable
+  helper bundles, typed development resources, and bounded WorkerBee
+  development overlays.
+- Keep the new subsystems additive and default-disabled, with root-Operator
+  ownership, explicit approval, immutable receipts, bounded leases, and
+  feature-local rollback.
+- Make Operator workflow state explainable and event-driven without coupling
+  `State`, `Flow`, or `Camp` to raw Codex terminal activity.
+
 ### Added
 
 - Add exact-leaf Git review artifacts, daemon-owned evidence exports, Operator
@@ -10,6 +26,21 @@
   platform-debug development-resource contract.
 - Add isolated restart/recovery qualification across receipt-bound approval,
   WorkerBee resource truth, redacted evidence export, and zero-residue cleanup.
+- Add metadata-only protected-provider preflight diagnostics that bind exact
+  Git, workspace, campaign, approval, and opaque provider-generation evidence
+  without granting provider, credential, publication, or mutation authority.
+
+### Changed
+
+- Advance the additive database contract from schema 40 to schema 45 while
+  preserving existing Agent, Operator, campaign, handoff, runtime, and policy
+  records through migration and rollback.
+- Keep WorkerBee development-resource support behind a checked capability
+  contract and a separately qualified private adapter; trusted-direct source
+  remains read-only and writable overlays remain receipt-bound.
+- Define Operator columns consistently: `State` is the projected PBX workflow,
+  `Flow` is its highest-priority durable route or action, `Camp` is the active
+  nonterminal campaign count, and `Live` is tmux/runtime liveness.
 
 ### Fixed
 
@@ -21,9 +52,18 @@
   a nested workspace root or exposing sibling/common Git administration.
 - Match durable event `subject_id` during filtered evidence-case export so
   real lifecycle and resource events remain visible without exporting payloads.
+- Persist exact broker approval lifecycle and terminalize failed broker
+  actions so reconciled successor campaigns can close without rewriting their
+  immutable predecessor history.
 
-The final post-2.3 release version remains intentionally undecided. All new
-subsystems are additive and default-disabled pending separate activation review.
+### Security
+
+- Retain positive-field evidence exports, private output roots, bounded diff
+  rendering, exact-path review, content-addressed helpers, fail-closed
+  capability and generation checks, and zero-residue resource cleanup.
+- Keep high-risk network, host-socket, device, credential, provider,
+  publication, deployment, and destructive-operation authority outside the
+  automatic resource path.
 
 ## v2.3.0 - 2026-11-12
 
