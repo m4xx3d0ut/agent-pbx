@@ -207,7 +207,10 @@ def test_platform_debug_optional_surface_is_reviewed_without_changing_public_req
     )
 
     assert surface.compatible is True
-    assert surface.effective_optional_tools == ("workerbee_v1_ingress_route_apply",)
+    assert surface.effective_optional_tools == (
+        "workerbee_v1_runtime_policy_status",
+        "workerbee_v1_ingress_route_apply",
+    )
     assert set(surface.effective_tools) == set(
         reviewed_tools_for_access_profile(
             WORKERBEE_PROFILE_TRUSTED_WORKBENCH, "platform_debug"

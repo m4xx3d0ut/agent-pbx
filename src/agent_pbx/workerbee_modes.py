@@ -106,6 +106,9 @@ WORKERBEE_BACKEND_OPTIONAL_FAMILY_TOOLS: Mapping[
     str, Mapping[str, tuple[str, ...]]
 ] = {
     "platform_debug": {
+        WORKERBEE_FAMILY_RUNTIME_OBSERVE: (
+            "workerbee_v1_runtime_policy_status",
+        ),
         WORKERBEE_FAMILY_INGRESS: ("workerbee_v1_ingress_route_apply",),
     },
 }

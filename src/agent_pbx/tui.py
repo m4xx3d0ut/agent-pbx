@@ -2030,9 +2030,13 @@ def caller_workerbee_mcp_config_overrides(
     if not transport_config.get("url") and not transport_config.get("command"):
         return []
     transport_config["enabled_tools"] = list(
-        CALLER_WORKERBEE_LOCAL_DEPLOY_APPROVED_TOOLS
-        if normalized_profile == CALLER_WORKERBEE_LOCAL_DEPLOY_PROFILE
-        else REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS
+        workerbee_gateway_launch_tools(gateway_binding)
+        if gateway_binding
+        else (
+            CALLER_WORKERBEE_LOCAL_DEPLOY_APPROVED_TOOLS
+            if normalized_profile == CALLER_WORKERBEE_LOCAL_DEPLOY_PROFILE
+            else REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS
+        )
     )
     transport_config["default_tools_approval_mode"] = "approve"
     return [

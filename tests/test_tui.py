@@ -27581,6 +27581,13 @@ def test_tui_workerbee_gateway_binding_replaces_direct_transport_and_sets_env() 
             "profile": "local-deploy",
             "backend": "platform_debug",
             "backend_generation": 8,
+            "allowed_tools": [
+                "workerbee_v1_capabilities",
+                "workerbee_v1_runtime_policy_status",
+                "workerbee_v1_k1s_profile_evidence",
+                "workerbee_v1_session_start",
+                "workerbee_v1_publish",
+            ],
         },
         "workspace_binding": {"binding_id": "wb-binding", "state": "ready"},
     }
@@ -27603,6 +27610,9 @@ def test_tui_workerbee_gateway_binding_replaces_direct_transport_and_sets_env() 
     assert 'url = "http://127.0.0.1:8765/workerbee-mcp/lease-1"' in overrides[0]
     assert 'bearer_token_env_var = "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN"' in overrides[0]
     assert "http://127.0.0.1:8765/mcp" not in overrides[0]
+    assert "workerbee_v1_runtime_policy_status" in overrides[0]
+    assert "workerbee_v1_session_start" in overrides[0]
+    assert "workerbee_v1_publish" not in overrides[0]
     assert env["AGENT_PBX_WORKERBEE_GATEWAY_TOKEN"] == "apbx_secret"
     assert env["AGENT_PBX_WORKERBEE_BACKEND"] == "platform_debug"
     assert env["AGENT_PBX_WORKERBEE_BACKEND_GENERATION"] == "8"

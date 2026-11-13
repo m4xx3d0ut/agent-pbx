@@ -66,6 +66,7 @@
     "workerbee_v1_trust_uninstall"
   ],
   "platform_debug_reviewed_optional_tools": [
+    "workerbee_v1_runtime_policy_status",
     "workerbee_v1_ingress_route_apply"
   ],
   "platform_debug_quarantined_extensions": [
