@@ -132,3 +132,12 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
     assert set(helper_routes.values()) == {
         "agent_pbx.api_routes.durable_helpers"
     }
+    resource_routes = {
+        route.path: route.endpoint.__module__
+        for route in app.routes
+        if route.path.startswith("/v1/operator/resources")
+    }
+    assert resource_routes
+    assert set(resource_routes.values()) == {
+        "agent_pbx.api_routes.dynamic_resources"
+    }

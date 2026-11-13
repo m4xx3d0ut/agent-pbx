@@ -3,6 +3,7 @@
 from ..api_services import ApiServices
 from ..evidence_export import EvidenceExportService
 from .durable_helpers import register_durable_helper_routes
+from .dynamic_resources import register_dynamic_resource_routes
 from .evidence import register_evidence_routes
 
 
@@ -10,5 +11,6 @@ __all__ = (
     "ApiServices",
     "EvidenceExportService",
     "register_durable_helper_routes",
+    "register_dynamic_resource_routes",
     "register_evidence_routes",
 )
