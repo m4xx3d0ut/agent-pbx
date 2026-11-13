@@ -12427,14 +12427,30 @@ class Store:
                     current,
                 ),
             )
-            completed_at = current if next_state == "complete" else None
+            completed_at = (
+                current
+                if next_state in {"complete", "blocked_reapproval_required"}
+                else None
+            )
+            failure_reason = (
+                str((evidence or {}).get("reason") or "").strip() or None
+                if next_state == "blocked_reapproval_required"
+                else None
+            )
             conn.execute(
                 """
                 UPDATE operator_action_transactions
-                SET state = ?, updated_at = ?, completed_at = COALESCE(?, completed_at)
+                SET state = ?, reason = COALESCE(?, reason), updated_at = ?,
+                    completed_at = COALESCE(?, completed_at)
                 WHERE transaction_id = ?
                 """,
-                (next_state, current, completed_at, transaction_id),
+                (
+                    next_state,
+                    failure_reason,
+                    current,
+                    completed_at,
+                    transaction_id,
+                ),
             )
         result = self.get_operator_action_transaction(transaction_id=transaction_id)
         if result is None:

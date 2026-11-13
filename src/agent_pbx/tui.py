@@ -33493,15 +33493,60 @@ class AgentPBXTUI(App[None]):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            failed_transaction_id: str | None = None
+            try:
+                failed_action = await self.operator_broker_action(
+                    target_agent_id=target_id,
+                    handoff_id=handoff_id,
+                )
+                failed_state = str(failed_action.get("state") or "")
+                failed_step = {
+                    "ready_stop": "stop",
+                    "stopped_ready_broker": "broker_review",
+                    "receipt_review": "broker_commit",
+                    "committed_ready_resume": "resume",
+                    "resumed_ready_validation": "validate",
+                }.get(failed_state)
+                if failed_step is not None:
+                    failed_receipt = await self.record_operator_handoff_action_receipt(
+                        handoff_id=handoff_id,
+                        operator_agent_id=root_id,
+                        step=failed_step,
+                        outcome="failed",
+                        evidence={
+                            "request_id": request_id,
+                            "phase": result_evidence.get("phase"),
+                            "reason": str(exc),
+                            "git_mutation_confirmed": bool(
+                                result_evidence.get("new_head")
+                            ),
+                        },
+                    )
+                    transaction = failed_receipt.get("transaction")
+                    if isinstance(transaction, Mapping):
+                        failed_transaction_id = str(
+                            transaction.get("transaction_id") or ""
+                        ).strip() or None
+            except Exception:
+                # Preserve the primary broker failure. The daemon-side request
+                # remains terminal even if legacy/inconsistent action state
+                # cannot accept the best-effort failure receipt.
+                pass
             try:
                 await self.transition_operator_broker_request(
                     request_id,
                     status="failed",
                     expected_statuses=("executing",),
+                    action_transaction_id=failed_transaction_id,
                     result={
                         **result_evidence,
                         "failed_at": time.time(),
-                        "validation_pending": True,
+                        "validation_pending": False,
+                        "action_state": (
+                            "blocked_reapproval_required"
+                            if failed_transaction_id
+                            else None
+                        ),
                     },
                     error_code="OPERATOR_BROKER_EXECUTION_FAILED",
                     error=str(exc),

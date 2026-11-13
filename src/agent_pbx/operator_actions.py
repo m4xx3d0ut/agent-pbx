@@ -126,7 +126,7 @@ def transition_action_state(state: str, step: str, outcome: str) -> str:
     if step not in ACTION_STEPS or outcome not in ACTION_OUTCOMES:
         raise ValueError("operator action receipt step or outcome is invalid")
     if outcome == "failed":
-        return state
+        return "blocked_reapproval_required"
     if outcome == "restored":
         return "stopped_ready_broker"
     expected = {

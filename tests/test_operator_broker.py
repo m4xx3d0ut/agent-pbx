@@ -506,6 +506,41 @@ def test_broker_service_preflight_binds_root_fork_campaign_and_scope(tmp_path) -
     assert len(result["authority_sha256"]) == 64
 
 
+def test_failed_broker_action_receipt_is_terminal_and_records_reason(tmp_path) -> None:
+    store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+    preflight = service.preflight(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+    transaction = store.append_operator_action_receipt(
+        handoff_id=handoff["handoff_id"],
+        action_class="exact_git_commit_broker",
+        target_agent_id="operator-7-fork",
+        scope_sha256=preflight["scope_sha256"],
+        initial_state="ready_stop",
+        step="stop",
+        outcome="succeeded",
+        actor="operator-0",
+    )
+
+    transaction = store.append_operator_action_receipt(
+        handoff_id=handoff["handoff_id"],
+        action_class="exact_git_commit_broker",
+        target_agent_id="operator-7-fork",
+        scope_sha256=preflight["scope_sha256"],
+        initial_state=transaction["state"],
+        step="broker_review",
+        outcome="failed",
+        actor="agent-pbx-tui",
+        evidence={"reason": "linked worktree qualification failed"},
+    )
+
+    assert transaction["state"] == "blocked_reapproval_required"
+    assert transaction["reason"] == "linked worktree qualification failed"
+    assert transaction["completed_at"] is not None
+
+
 def test_broker_service_rejects_standalone_fork_before_request(tmp_path) -> None:
     _store, service, handoff, _digest = _qualified_broker_service(
         tmp_path,

@@ -9023,6 +9023,106 @@ async def test_tui_root_supervised_broker_executes_exact_stop_commit_resume(
     assert final["journal_done"] is True
 
 
+@pytest.mark.asyncio
+async def test_tui_root_supervised_broker_terminalizes_failed_action(
+    tmp_path: Path,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    target_id = "operator-7-fork-linked"
+    session_id = "session-operator-fork"
+    state = {"action": "ready_stop"}
+    transitions: list[dict[str, object]] = []
+    receipts: list[tuple[str, str, str]] = []
+    app.agents = {
+        target_id: linked_git_broker_test_agent(
+            tmp_path,
+            active=True,
+            metadata_shape="current",
+        )
+    }
+
+    async def transition(_request_id: str, **kwargs):
+        transitions.append(kwargs)
+        return {"request_id": "request-1", "result": kwargs.get("result") or {}}
+
+    async def action(**_kwargs):
+        return {
+            "handoff_id": "handoff-1",
+            "scope_sha256": "a" * 64,
+            "state": state["action"],
+            "transaction_id": "action-transaction-1",
+        }
+
+    async def stop_selected_operator(*, agent_id=None) -> None:
+        assert agent_id == target_id
+        state["action"] = "stopped_ready_broker"
+        app.agents[target_id] = linked_git_broker_test_agent(
+            tmp_path,
+            active=False,
+            metadata_shape="current",
+        )
+
+    async def record_action(
+        *,
+        handoff_id: str,
+        operator_agent_id: str,
+        step: str,
+        outcome: str,
+        evidence=None,
+    ) -> dict[str, object]:
+        assert handoff_id == "handoff-1"
+        assert operator_agent_id == "operator-7"
+        receipts.append((step, outcome, str((evidence or {}).get("request_id") or "")))
+        state["action"] = "blocked_reapproval_required"
+        return {
+            "transaction": {
+                "transaction_id": "action-transaction-1",
+                "state": "blocked_reapproval_required",
+            }
+        }
+
+    app.transition_operator_broker_request = transition  # type: ignore[method-assign]
+    app.refresh_agents = lambda: asyncio.sleep(0)  # type: ignore[method-assign]
+    app.operator_broker_action = action  # type: ignore[method-assign]
+    app.operator_broker_execution_preflight = (  # type: ignore[method-assign]
+        lambda **_kwargs: asyncio.sleep(0, result={"transaction": {"receipts": []}})
+    )
+    app.stop_selected_operator = stop_selected_operator  # type: ignore[method-assign]
+    app.record_operator_handoff_action_receipt = record_action  # type: ignore[method-assign]
+    app.operator_session_candidates = lambda _agent_id: [
+        OperatorSessionCandidate(session_id, 1.0, "metadata")
+    ]  # type: ignore[method-assign]
+    app.linked_git_broker_tui_context = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    app.query_one_or_none = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    await app.execute_operator_broker_request(
+        {
+            "request_id": "request-1",
+            "root_operator_agent_id": "operator-7",
+            "target_fork_agent_id": target_id,
+            "handoff_id": "handoff-1",
+            "scope_sha256": "a" * 64,
+            "expected_git_parent": "b" * 40,
+            "commit_subject": "fix: exact checkpoint",
+            "exact_paths": ["src/app.py"],
+            "created_at": 1_700_000_000,
+        }
+    )
+
+    assert receipts == [("broker_review", "failed", "request-1")]
+    assert [item["status"] for item in transitions] == [
+        "executing",
+        "executing",
+        "executing",
+        "failed",
+    ]
+    assert transitions[-1]["action_transaction_id"] == "action-transaction-1"
+    assert transitions[-1]["result"]["validation_pending"] is False
+    assert transitions[-1]["result"]["action_state"] == (
+        "blocked_reapproval_required"
+    )
+
+
 def test_tui_ready_action_signal_recognizes_current_logical_operator_metadata() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     app.agents = {
