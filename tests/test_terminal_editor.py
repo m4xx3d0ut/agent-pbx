@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import time
 
 import pytest
@@ -390,9 +391,11 @@ def test_neovim_tab_drop_routes_real_files_without_replacing_workspace(
     if nvim is None:
         pytest.skip("Neovim is not installed")
     root = tmp_path / "repo"
-    runtime_root = tmp_path / "runtimes"
+    # Keep the RPC socket outside pytest-xdist's deeply nested temporary path.
+    # AF_UNIX paths are commonly limited to roughly 100 bytes, and Neovim exits
+    # before creating its listener when that limit is exceeded.
+    runtime_root = Path(tempfile.mkdtemp(prefix="apbx-nvim-"))
     root.mkdir()
-    runtime_root.mkdir()
     first = root / "one.txt"
     second = root / "file 'two' with spaces.txt"
     first.write_text("one\ntwo\nthree\n", encoding="utf-8")
@@ -501,6 +504,7 @@ def test_neovim_tab_drop_routes_real_files_without_replacing_workspace(
                 timeout=5,
             )
         process.wait(timeout=5)
+        shutil.rmtree(runtime_root, ignore_errors=True)
 
 
 def test_review_readonly_editor_requires_matching_work_root(tmp_path: Path) -> None:
