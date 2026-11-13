@@ -417,6 +417,10 @@ class AgentResponse(BaseModel):
     oldest_completion_delivery_at: float | None = None
     latest_completion_delivery_id: str | None = None
     latest_completion_target_operator_agent_id: str | None = None
+    pending_workerbee_controlled_run_count: int = 0
+    active_workerbee_controlled_run_count: int = 0
+    oldest_workerbee_controlled_run_created_at: float | None = None
+    oldest_workerbee_controlled_run_request_id: str | None = None
     workflow_state: str = "idle"
     workflow_label: str = "◇ IDLE"
     workflow_reason: str = "No active Operator workflow"

@@ -493,7 +493,12 @@ def test_api_preflight_reports_missing_appliance_contract(
 ) -> None:
     app, fork_id, campaign_id = _api_app(tmp_path, monkeypatch)
 
-    async def capability_call(_endpoint, tool_name, _arguments, **_kwargs):  # type: ignore[no-untyped-def]
+    async def capability_call(  # type: ignore[no-untyped-def]
+        _endpoint,
+        tool_name,
+        _arguments,
+        **_kwargs,
+    ):
         assert tool_name == "workerbee_v1_capabilities"
         return {"data": {"workerbee_version": "0.1.7", "mcp_tools": ["workerbee_v1_capabilities"]}}
 
@@ -554,6 +559,50 @@ def test_api_creates_request_only_after_observed_appliance_contract(
         )
         assert listed.status_code == 200
         assert listed.json()["requests"][0]["request_id"] == request["request_id"]
+
+
+def test_agent_response_preserves_controlled_run_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, fork_id, campaign_id = _api_app(tmp_path, monkeypatch)
+
+    async def capability_call(_endpoint, tool_name, _arguments, **_kwargs):  # type: ignore[no-untyped-def]
+        if tool_name == "workerbee_v1_runtime_policy_status":
+            return {"ok": True, "data": {"profile": "linux-strict-workload"}}
+        return {
+            "data": {
+                "workerbee_version": "0.1.8",
+                "mcp_tools": [
+                    "workerbee_v1_capabilities",
+                    "workerbee_v1_runtime_policy_status",
+                    *CONTROLLED_RUN_REQUIRED_TOOLS,
+                ],
+            }
+        }
+
+    monkeypatch.setattr("agent_pbx.api.call_workerbee_mcp_tool", capability_call)
+    with TestClient(app) as client:
+        created = client.post(
+            "/v2/workerbee/controlled-runs",
+            json=_api_payload(fork_id, campaign_id),
+        )
+        assert created.status_code == 200
+        request = created.json()["request"]
+
+        agents = client.get("/v1/agents")
+        assert agents.status_code == 200
+        operator = next(
+            item for item in agents.json() if item["agent_id"] == "operator-8"
+        )
+
+    assert operator["pending_workerbee_controlled_run_count"] == 1
+    assert operator["active_workerbee_controlled_run_count"] == 0
+    assert (
+        operator["oldest_workerbee_controlled_run_created_at"]
+        == request["created_at"]
+    )
+    assert operator["oldest_workerbee_controlled_run_request_id"] == request["request_id"]
 
 
 def test_api_approval_schedules_daemon_executor_and_hides_internal_transitions(
