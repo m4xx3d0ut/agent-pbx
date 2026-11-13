@@ -141,3 +141,12 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
     assert set(resource_routes.values()) == {
         "agent_pbx.api_routes.dynamic_resources"
     }
+    kb_v2_routes = {
+        route.path: route.endpoint.__module__
+        for route in app.routes
+        if route.path.startswith("/v1/operator/kb/bundle-v2/")
+    }
+    assert kb_v2_routes
+    assert set(kb_v2_routes.values()) == {
+        "agent_pbx.api_routes.operator_kb_v2"
+    }
