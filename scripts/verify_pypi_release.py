@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -81,12 +81,41 @@ def _venv_executable(root: Path, name: str) -> Path:
     return root / directory / f"{name}{suffix}"
 
 
+def run_checked_with_retry(
+    command: list[str],
+    *,
+    attempts: int,
+    wait_seconds: float,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> None:
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    if wait_seconds < 0:
+        raise ValueError("wait_seconds cannot be negative")
+    for attempt in range(1, attempts + 1):
+        try:
+            runner(command, check=True)
+            return
+        except subprocess.CalledProcessError:
+            if attempt >= attempts:
+                raise
+            print(
+                f"package-index install attempt {attempt}/{attempts} failed; "
+                f"retrying in {wait_seconds:g}s",
+                file=sys.stderr,
+            )
+            sleeper(wait_seconds)
+
+
 def verify_index_install(
     *,
     project: str,
     version: str,
     simple_index_url: str,
     extra_index_url: str | None,
+    attempts: int = 12,
+    wait_seconds: float = 10.0,
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="agent-pbx-index-verify-") as temporary:
         environment = Path(temporary) / "venv"
@@ -105,7 +134,11 @@ def verify_index_install(
         if extra_index_url:
             command.extend(["--extra-index-url", extra_index_url])
         command.append(f"{project}=={version}")
-        subprocess.run(command, check=True)
+        run_checked_with_retry(
+            command,
+            attempts=attempts,
+            wait_seconds=wait_seconds,
+        )
         subprocess.run(
             [
                 str(python),
@@ -150,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
                 version=args.version,
                 simple_index_url=args.simple_index_url,
                 extra_index_url=args.extra_index_url,
+                attempts=args.attempts,
+                wait_seconds=args.wait_seconds,
             )
     except (OSError, ReleaseValidationError, subprocess.SubprocessError) as exc:
         print(f"error: {exc}", file=sys.stderr)

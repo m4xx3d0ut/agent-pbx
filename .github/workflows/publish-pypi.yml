@@ -43,6 +43,34 @@ jobs:
           packages-dir: release-artifact/packages/
           attestations: true
 
+  build-github-assets:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Build checksummed Linux wheelhouse and installer
+        run: scripts/build_wheelhouse.sh --out release-assets/agent-pbx-wheelhouse
+      - name: Verify release manifest
+        run: python scripts/release_manifest.py verify --wheelhouse release-assets/agent-pbx-wheelhouse
+      - name: Retain exact GitHub release assets for recovery
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: github-release-assets
+          path: |
+            release-assets/agent-pbx-wheelhouse.tar.gz
+            release-assets/agent-pbx-wheelhouse.tar.gz.sha256
+            release-assets/install-agent-pbx.sh
+          if-no-files-found: error
+          retention-days: 7
+
   verify-pypi:
     needs: [quality, publish-pypi]
     runs-on: ubuntu-latest
@@ -68,30 +96,22 @@ jobs:
           --dist release-artifact/packages
 
   publish-github-assets:
-    needs: [quality, verify-pypi]
+    needs: [quality, verify-pypi, build-github-assets]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Check out the exact release tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download the exact tested GitHub release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          ref: ${{ github.event.release.tag_name }}
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: "3.10"
-          cache: pip
-      - name: Build checksummed Linux wheelhouse and installer
-        run: scripts/build_wheelhouse.sh --out dist/agent-pbx-wheelhouse
-      - name: Verify release manifest
-        run: python scripts/release_manifest.py verify --wheelhouse dist/agent-pbx-wheelhouse
+          name: github-release-assets
+          path: release-assets
       - name: Attach wheelhouse assets to the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: >-
           gh release upload "$RELEASE_TAG"
-          dist/agent-pbx-wheelhouse.tar.gz
-          dist/agent-pbx-wheelhouse.tar.gz.sha256
-          dist/install-agent-pbx.sh
+          release-assets/agent-pbx-wheelhouse.tar.gz
+          release-assets/agent-pbx-wheelhouse.tar.gz.sha256
+          release-assets/install-agent-pbx.sh

@@ -2,7 +2,18 @@
 
 ## Unreleased
 
-No changes recorded yet.
+### Added
+
+- Add a manual, exact-tag recovery workflow that verifies already-published
+  PyPI files and restores prebuilt GitHub Release assets without receiving
+  OIDC publication authority.
+
+### Fixed
+
+- Retry clean package-index installation while a newly published release is
+  propagating from PyPI metadata to the Simple API.
+- Separate Git modal-routing tests from pane-refresh scheduling so background
+  terminal refreshes cannot create nondeterministic release-gate failures.
 
 ## v2.4.0 - 2026-11-13
 

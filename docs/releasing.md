@@ -152,6 +152,17 @@ PyPI versions and files are immutable. Never delete and reuse a public version.
   Trusted Publisher identity and rerun the failed job.
 - If only part of a release reaches PyPI, stop and publish a new version after
   diagnosis; do not enable `skip-existing` to conceal the partial state.
+- If publication succeeded but registry propagation caused `verify-pypi` or
+  GitHub asset attachment to fail, do not rerun the publisher. Open **recover
+  Agent PBX PyPI verification and GitHub assets**, enter the immutable stable
+  tag and the original `publish-pypi` workflow run ID, and review the recovery
+  result. The recovery workflow binds that source run to the exact tag commit,
+  downloads the original distributions and prebuilt wheelhouse assets, verifies
+  PyPI hashes plus a clean installation, validates the wheelhouse manifest and
+  installer identity, and restores the GitHub assets idempotently.
+- The recovery workflow has no OIDC permission and contains no package-index
+  publisher action. It cannot upload or replace PyPI files. Its only write
+  permission is scoped to restoring assets on the existing GitHub Release.
 - If a published release is defective, yank it, annotate the GitHub Release,
   fix the defect, and publish a new patch version.
 - If publisher integrity is in doubt, remove the Trusted Publisher from PyPI,

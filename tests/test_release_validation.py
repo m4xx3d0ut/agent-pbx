@@ -230,6 +230,53 @@ def test_pypi_verification_rejects_unexpected_remote_distribution(tmp_path: Path
         verify_pypi_release.verify_distribution_hashes(metadata, dist)
 
 
+def test_package_index_install_retries_propagation_failures() -> None:
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def runner(
+        command: list[str], *, check: bool
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        assert check is True
+        if len(calls) < 3:
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 0)
+
+    verify_pypi_release.run_checked_with_retry(
+        ["pip", "install", "agent-pbx==2.4.0"],
+        attempts=4,
+        wait_seconds=2.5,
+        runner=runner,
+        sleeper=sleeps.append,
+    )
+
+    assert len(calls) == 3
+    assert sleeps == [2.5, 2.5]
+
+
+def test_package_index_install_stops_after_retry_budget() -> None:
+    calls: list[list[str]] = []
+
+    def runner(
+        command: list[str], *, check: bool
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        assert check is True
+        raise subprocess.CalledProcessError(1, command)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        verify_pypi_release.run_checked_with_retry(
+            ["pip", "install", "agent-pbx==2.4.0"],
+            attempts=3,
+            wait_seconds=0,
+            runner=runner,
+            sleeper=lambda _seconds: None,
+        )
+
+    assert len(calls) == 3
+
+
 def test_production_workflow_has_narrow_trusted_publishing_boundary() -> None:
     root = Path(__file__).parents[1]
     workflow = root.joinpath(".github/workflows/publish-pypi.yml").read_text(
@@ -243,6 +290,28 @@ def test_production_workflow_has_narrow_trusted_publishing_boundary() -> None:
     assert "skip-existing" not in workflow
     assert "password:" not in workflow
     assert "user:" not in workflow
+    assert "name: github-release-assets" in workflow
+    assert "Retain exact GitHub release assets for recovery" in workflow
+
+
+def test_release_recovery_workflow_cannot_publish_to_pypi() -> None:
+    root = Path(__file__).parents[1]
+    workflow = root.joinpath(
+        ".github/workflows/recover-pypi-release.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow
+    assert "source_run_id:" in workflow
+    assert "actions: read" in workflow
+    assert "contents: write" in workflow
+    assert "id-token: write" not in workflow
+    assert "gh-action-pypi-publish" not in workflow
+    assert "repository-url:" not in workflow
+    assert "skip-existing" not in workflow
+    assert ".github/workflows/publish-pypi.yml" in workflow
+    assert workflow.count("run-id: ${{ inputs.source_run_id }}") == 3
+    assert "Verify PyPI hashes and clean installation" in workflow
+    assert "--clobber" in workflow
 
 
 def test_testpypi_workflow_is_manual_tag_only_and_cannot_select_production() -> None:
@@ -264,6 +333,7 @@ def test_release_workflows_pin_every_external_action_to_commit_sha() -> None:
     workflows = [
         root / ".github/workflows/publish-pypi.yml",
         root / ".github/workflows/publish-testpypi.yml",
+        root / ".github/workflows/recover-pypi-release.yml",
         root / ".github/workflows/release-quality.yml",
         root / ".github/workflows/v2-release-gate.yml",
     ]

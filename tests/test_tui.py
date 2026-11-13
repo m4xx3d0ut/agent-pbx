@@ -17456,20 +17456,49 @@ async def test_tui_palette_git_stage_and_commit_sends_prompt_to_tmux() -> None:
     assert sent == [("agent-1", "stage and commit the changes")]
 
 
-async def test_tui_palette_gitdiff_modal_sends_optional_target() -> None:
+async def test_tui_palette_send_tmux_prompt_sends_records_and_refreshes_once() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
     sent: list[tuple[str, str]] = []
+    recorded: list[tuple[str, str]] = []
     captures: list[str] = []
+    notifications: list[str] = []
 
     async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
         sent.append((agent_id, message))
         return True
 
+    async def fake_record_tmux_joplin_interaction(
+        agent_id: str, message: str
+    ) -> None:
+        recorded.append((agent_id, message))
+
     async def fake_load_tmux_capture(agent_id: str) -> None:
         captures.append(agent_id)
 
+    def fake_notify(message: str, **_kwargs: object) -> None:
+        notifications.append(message)
+
     app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
+    app.record_tmux_joplin_interaction = fake_record_tmux_joplin_interaction  # type: ignore[method-assign]
     app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.notify = fake_notify  # type: ignore[method-assign]
+
+    await app.palette_send_tmux_prompt("agent-1", "!git push origin dev", "Git push")
+
+    assert sent == [("agent-1", "!git push origin dev")]
+    assert recorded == [("agent-1", "!git push origin dev")]
+    assert captures == ["agent-1"]
+    assert notifications == ["Git push sent to tmux for agent-1."]
+
+
+async def test_tui_palette_gitdiff_modal_sends_optional_target() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    targets: list[tuple[str, str]] = []
+
+    async def fake_palette_git_diff_target(agent_id: str, target: str = "") -> None:
+        targets.append((agent_id, target))
+
+    app.palette_git_diff_target = fake_palette_git_diff_target  # type: ignore[method-assign]
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -17481,24 +17510,17 @@ async def test_tui_palette_gitdiff_modal_sends_optional_target() -> None:
         app.screen.submit()  # type: ignore[attr-defined]
         await pilot.pause()
 
-    assert sent == [("agent-1", "!git diff main:README.md")]
-    assert captures == ["agent-1"]
+    assert targets == [("agent-1", "main:README.md")]
 
 
 async def test_tui_palette_gitpush_modal_sends_optional_branch() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
-    sent: list[tuple[str, str]] = []
-    captures: list[str] = []
+    targets: list[tuple[str, str]] = []
 
-    async def fake_send_text_to_tmux(agent_id: str, message: str) -> bool:
-        sent.append((agent_id, message))
-        return True
+    async def fake_palette_git_push_target(agent_id: str, branch: str = "") -> None:
+        targets.append((agent_id, branch))
 
-    async def fake_load_tmux_capture(agent_id: str) -> None:
-        captures.append(agent_id)
-
-    app.send_text_to_tmux = fake_send_text_to_tmux  # type: ignore[method-assign]
-    app.load_tmux_capture = fake_load_tmux_capture  # type: ignore[method-assign]
+    app.palette_git_push_target = fake_palette_git_push_target  # type: ignore[method-assign]
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -17510,8 +17532,7 @@ async def test_tui_palette_gitpush_modal_sends_optional_branch() -> None:
         app.screen.submit()  # type: ignore[attr-defined]
         await pilot.pause()
 
-    assert sent == [("agent-1", "!git push origin dev")]
-    assert captures == ["agent-1"]
+    assert targets == [("agent-1", "dev")]
 
 
 async def test_tui_gitpush_slash_input_defaults_to_current_branch() -> None:
