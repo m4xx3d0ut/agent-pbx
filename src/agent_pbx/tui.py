@@ -127,8 +127,12 @@ from .workerbee_gateway import (
     WORKERBEE_PROFILE_LOCAL_DEPLOY,
     WORKERBEE_PROFILE_OBSERVE,
     WORKERBEE_PROFILE_REVIEW,
+    WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
 )
-from .workerbee_modes import WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE
+from .workerbee_modes import (
+    WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
+    reviewed_tools_for_access_profile,
+)
 from .contracts import ActionDefinition
 from .terminal import (
     EMBEDDED_SCROLL_MODE_CHILD,
@@ -1851,6 +1855,7 @@ def review_operator_mcp_config_overrides(
     codex_home: Path | None = None,
     server_configs: Mapping[str, Mapping[str, object]] | None = None,
     agent_pbx_approved_tools: Iterable[str] | None = None,
+    workerbee_approved_tools: Iterable[str] | None = None,
     workerbee_gateway_binding: Mapping[str, object] | None = None,
 ) -> list[str]:
     overrides: list[str] = []
@@ -1874,7 +1879,11 @@ def review_operator_mcp_config_overrides(
         approved_tools = (
             resolved_agent_pbx_tools
             if server_name == "agent-pbx" and resolved_agent_pbx_tools
-            else REVIEW_OPERATOR_MCP_APPROVED_TOOLS.get(server_name)
+            else (
+                tuple(workerbee_approved_tools or ())
+                if server_name == "workerbee" and workerbee_approved_tools
+                else REVIEW_OPERATOR_MCP_APPROVED_TOOLS.get(server_name)
+            )
         )
         if not approved_tools:
             continue
@@ -1914,6 +1923,44 @@ def review_operator_mcp_config_overrides(
             )
         )
     return overrides
+
+
+def workerbee_gateway_launch_tools(
+    binding: Mapping[str, object] | None,
+) -> tuple[str, ...]:
+    """Return the reviewed Codex allowlist for one gateway lease.
+
+    The gateway remains the authorization boundary, but Codex also needs an
+    explicit launch-time allowlist.  Derive that allowlist from the exact lease
+    rather than falling back to the review-only operator surface.  Unknown or
+    incomplete leases fail closed to the review surface.
+    """
+
+    lease = binding.get("lease") if isinstance(binding, Mapping) else None
+    if not isinstance(lease, Mapping):
+        return REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS
+    profile = str(lease.get("profile") or "").strip().lower()
+    if profile not in {
+        WORKERBEE_PROFILE_REVIEW,
+        WORKERBEE_PROFILE_OBSERVE,
+        WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+    }:
+        return REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS
+    backend = str(lease.get("backend") or "").strip()
+    reviewed = reviewed_tools_for_access_profile(profile, backend)
+    raw_allowed = lease.get("allowed_tools")
+    if not isinstance(raw_allowed, (list, tuple)):
+        return reviewed
+    reviewed_set = set(reviewed)
+    allowed = tuple(
+        dict.fromkeys(
+            str(tool).strip()
+            for tool in raw_allowed
+            if str(tool).strip() in reviewed_set
+        )
+    )
+    return allowed or REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS
 
 
 def agent_pbx_mcp_config_override(
@@ -2090,6 +2137,9 @@ def operator_agent_config_overrides(
             OPERATOR_AGENT_PBX_APPROVED_TOOLS
             if include_campaign_lifecycle
             else None
+        ),
+        workerbee_approved_tools=workerbee_gateway_launch_tools(
+            workerbee_gateway_binding
         ),
         workerbee_gateway_binding=workerbee_gateway_binding,
     )

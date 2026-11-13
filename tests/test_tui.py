@@ -27609,6 +27609,81 @@ def test_tui_workerbee_gateway_binding_replaces_direct_transport_and_sets_env() 
     assert env["AGENT_PBX_WORKERBEE_WORKSPACE_BINDING_ID"] == "wb-binding"
 
 
+def test_tui_operator_gateway_binding_uses_exact_local_deploy_surface() -> None:
+    binding = {
+        "gateway_url": "http://127.0.0.1:8765/workerbee-mcp/lease-1",
+        "bearer_token_env_var": "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN",
+        "lease": {
+            "lease_id": "lease-1",
+            "profile": "local-deploy",
+            "backend": "platform_debug",
+            "allowed_tools": [
+                "workerbee_v1_capabilities",
+                "workerbee_v1_session_start",
+                "workerbee_v1_image_build",
+                "workerbee_v1_manifest_deploy_local",
+                "workerbee_v1_ingress_route_apply",
+                "workerbee_v1_exec",
+            ],
+        },
+    }
+
+    operator = operator_agent_config_overrides(
+        ("workerbee",),
+        workerbee_gateway_binding=binding,
+    )
+    review = review_operator_config_overrides(
+        ("workerbee",),
+        workerbee_gateway_binding=binding,
+    )
+    operator_config = next(
+        item for item in operator if item.startswith("mcp_servers.workerbee=")
+    )
+    review_config = next(
+        item for item in review if item.startswith("mcp_servers.workerbee=")
+    )
+
+    assert "workerbee_v1_session_start" in operator_config
+    assert "workerbee_v1_image_build" in operator_config
+    assert "workerbee_v1_manifest_deploy_local" in operator_config
+    assert "workerbee_v1_ingress_route_apply" in operator_config
+    assert "workerbee_v1_exec" not in operator_config
+    assert "workerbee_v1_session_start" in review_config
+    assert "workerbee_v1_image_build" not in review_config
+    assert "workerbee_v1_manifest_deploy_local" not in review_config
+
+
+def test_tui_operator_gateway_binding_supports_reviewed_trusted_workbench_tools() -> None:
+    binding = {
+        "gateway_url": "http://127.0.0.1:8765/workerbee-mcp/lease-2",
+        "lease": {
+            "lease_id": "lease-2",
+            "profile": "trusted-workbench",
+            "backend": "platform_debug",
+            "allowed_tools": [
+                "workerbee_v1_capabilities",
+                "workerbee_v1_session_start",
+                "workerbee_v1_exec",
+                "workerbee_v1_bundle_export",
+                "workerbee_v1_publish",
+            ],
+        },
+    }
+
+    overrides = operator_agent_config_overrides(
+        ("workerbee",),
+        workerbee_gateway_binding=binding,
+    )
+    workerbee_config = next(
+        item for item in overrides if item.startswith("mcp_servers.workerbee=")
+    )
+
+    assert "workerbee_v1_session_start" in workerbee_config
+    assert "workerbee_v1_exec" in workerbee_config
+    assert "workerbee_v1_bundle_export" in workerbee_config
+    assert "workerbee_v1_publish" not in workerbee_config
+
+
 @pytest.mark.asyncio
 async def test_tui_workerbee_gateway_launch_is_optional_without_selected_runtime() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
