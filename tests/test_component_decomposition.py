@@ -123,3 +123,12 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
     }
     assert evidence_routes
     assert set(evidence_routes.values()) == {"agent_pbx.api_routes.evidence"}
+    helper_routes = {
+        route.path: route.endpoint.__module__
+        for route in app.routes
+        if route.path.startswith("/v1/operator/helpers")
+    }
+    assert helper_routes
+    assert set(helper_routes.values()) == {
+        "agent_pbx.api_routes.durable_helpers"
+    }
