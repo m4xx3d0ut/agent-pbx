@@ -364,9 +364,55 @@ def test_completed_handoff_requires_an_existing_action_transaction(
     assert action["next_action"] == "broker_commit"
 
 
+def test_blocked_handoff_retains_existing_action_transaction_for_reconciliation(
+    tmp_path: Path,
+) -> None:
+    handoff = {
+        "handoff_id": "handoff-1",
+        "logical_operator_agent_id": "operator-0",
+        "target_operator_agent_id": "operator-0",
+        "target_operator_fork_id": "fork-1",
+        "status": "blocked",
+        "updated_at": 100.0,
+        "execution_scope": {
+            "action_class": "exact_git_commit_broker",
+            "campaign_id": "campaign-1",
+            "workspace_set_digest": "a" * 64,
+            "mutation_mode": "exact_paths",
+            "allowed_roots": [str(tmp_path)],
+            "exact_paths": ["src/app.py"],
+            "expected_git_parent": "b" * 40,
+            "commit_subject": "Agent PBX approved commit",
+        },
+        "metadata": {},
+    }
+    target = {
+        "agent_id": "operator-0-fork",
+        "status": "canceled",
+        "pbx_active": False,
+    }
+    transaction = {
+        "transaction_id": "tx-1",
+        "scope_sha256": execution_scope_digest(handoff["execution_scope"]),
+        "state": "stopped_ready_broker",
+        "updated_at": 101.0,
+    }
+
+    action = project_handoff_action(
+        handoff,
+        target_agent=target,
+        transaction=transaction,
+    )
+
+    assert action is not None
+    assert action["state"] == "stopped_ready_broker"
+    assert action["next_action"] == "broker_review"
+    assert action["transaction_id"] == "tx-1"
+
+
 @pytest.mark.parametrize(
     "status",
-    ["canceled", "cancelled", "failed", "expired"],
+    ["blocked", "canceled", "cancelled", "failed", "expired"],
 )
 def test_terminal_legacy_handoff_is_not_projected_as_blocked_action(
     status: str,

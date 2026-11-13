@@ -31,13 +31,23 @@ def project_handoff_action(
     """Derive the next guarded local action for one acknowledged handoff."""
 
     handoff_status = str(handoff.get("status") or "").lower()
-    if handoff_status not in {
+    active_handoff_statuses = {
         "sent",
         "acknowledged",
         "running",
         "complete",
         "completed",
-    }:
+    }
+    terminal_handoff_statuses = {
+        "blocked",
+        "failed",
+        "expired",
+        "canceled",
+        "cancelled",
+    }
+    if handoff_status not in active_handoff_statuses and not (
+        transaction and handoff_status in terminal_handoff_statuses
+    ):
         return None
     # A terminal handoff with no action transaction has no local work left to
     # execute. Filter it before resolving legacy execution scopes so canceled,
