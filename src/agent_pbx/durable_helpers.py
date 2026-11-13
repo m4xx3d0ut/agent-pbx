@@ -657,12 +657,20 @@ class DurableHelperRegistry:
         try:
             path = self.python_bin.resolve(strict=True)
             value = path.lstat()
+            current_python = Path(sys.executable).expanduser().resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise DurableHelperError("isolated validator binary is unavailable") from exc
         mode = stat.S_IMODE(value.st_mode)
+        # The default validator is the interpreter already executing Agent PBX.
+        # Some supported Python distributions (notably GitHub's hosted
+        # toolcache) install that interpreter group-writable.  Rejecting the
+        # process's own executable does not add a trust boundary: replacing it
+        # would already compromise the running control plane.  Keep the strict
+        # no-shared-write rule for every separately configured interpreter.
+        uses_current_python = path == current_python
         if (
             not stat.S_ISREG(value.st_mode)
-            or mode & 0o022
+            or (not uses_current_python and mode & 0o022)
             or not mode & 0o100
         ):
             raise DurableHelperError("isolated validator binary identity is unsafe")

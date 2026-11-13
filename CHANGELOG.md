@@ -4,6 +4,18 @@
 
 No changes recorded yet.
 
+## v2.4.0rc2 - 2026-11-13
+
+### Fixed
+
+- Permit the already-running Agent PBX Python interpreter to serve as the
+  isolated durable-helper validator when a supported distribution installs
+  that interpreter with a group-writable tool-cache mode. Separately
+  configured validator interpreters retain the strict no-shared-write check.
+- Restore Linux/Python 3.12 release qualification without weakening exact
+  validator-path resolution, regular-file and owner-execute checks, or the
+  before/after executable-identity comparison.
+
 ## v2.4.0rc1 - 2026-11-13
 
 ### Highlights

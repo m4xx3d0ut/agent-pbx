@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -232,6 +233,35 @@ def test_registry_is_default_disabled(tmp_path: Path) -> None:
     with pytest.raises(DurableHelperError, match="disabled"):
         service.list()
     assert not (tmp_path / "registry").exists()
+
+
+def test_current_python_toolcache_mode_is_accepted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    python = tmp_path / "python"
+    python.write_bytes(b"hosted-toolcache-python")
+    python.chmod(0o775)
+    monkeypatch.setattr("agent_pbx.durable_helpers.sys.executable", str(python))
+
+    service = registry(tmp_path / "current")
+    resolved, identity = service._verified_python_binary()
+
+    assert resolved == python.resolve()
+    assert identity.st_ino == os.stat(python).st_ino
+
+
+def test_separately_configured_shared_writable_python_is_rejected(
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "custom-python"
+    python.write_bytes(b"custom-python")
+    python.chmod(0o775)
+    service = registry(tmp_path / "custom")
+    service.python_bin = python
+
+    with pytest.raises(DurableHelperError, match="identity is unsafe"):
+        service._verified_python_binary()
 
 
 def test_api_is_default_disabled_and_root_operator_controlled(tmp_path: Path) -> None:
