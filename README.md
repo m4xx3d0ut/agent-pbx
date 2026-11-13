@@ -71,8 +71,8 @@ origin policy, and versioned product-site contract.
 
 See [the architecture overview](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/architecture.md),
 [the project wiki](https://github.com/m4xx3d0ut/agent-pbx/wiki),
-[the stable v2.3.0 release notes](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/releases/v2.3.0.md),
-[the v2.4.0rc2 candidate notes](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/releases/v2.4.0rc2.md), and
+[the stable v2.4.0 release notes](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/releases/v2.4.0.md),
+[the v2.4 acceptance record](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/acceptance/v2.4-uat.md), and
 [the accepted architecture decisions](https://github.com/m4xx3d0ut/agent-pbx/blob/dev/docs/adr/README.md) for the complete
 control-plane and compatibility boundaries.
 

@@ -4,6 +4,44 @@
 
 No changes recorded yet.
 
+## v2.4.0 - 2026-11-13
+
+### Highlights
+
+- Promote the complete v2.4 durable engineering control-plane boundary after
+  the immutable RC2 tree passed Linux and macOS qualification on Python 3.10
+  and 3.12, TestPyPI Trusted Publishing, registry-hash verification, clean
+  installation, and managed workstation activation.
+- Add exact Git review artifacts, private evidence export, Operator KB bundle
+  v2 synchronization, content-addressed durable helpers, typed dynamic
+  resources, and capability-gated WorkerBee development-resource contracts.
+- Keep all new high-authority engineering subsystems additive,
+  default-disabled, receipt-bound, and independently constrained from Agent,
+  Operator, WorkerBee backend, provider, deployment, publication, and
+  credential authority.
+
+### Changed
+
+- Advance the additive database contract from schema 40 to schema 45 while
+  preserving existing Agents, Operators, forks, stars, campaigns, handoffs,
+  Codex sessions, managed tmux mappings, and compatibility surfaces.
+- Define Operator `State`, `Flow`, `Camp`, and `Live` as separate durable
+  workflow and runtime projections, with event-driven refresh and explicit
+  reason, source, and subject evidence.
+
+### Security
+
+- Retain positive-field evidence export, private output roots, exact-path Git
+  review, content-addressed helper validation, bounded resource classes,
+  capability and generation binding, immutable receipts, and zero-residue
+  cleanup.
+- Permit a shared-write Python executable as the durable-helper validator only
+  when it resolves to the interpreter already running Agent PBX. Separately
+  configured interpreters retain the strict no-group-or-world-write rule.
+
+Stable 2.4.0 is derived from the qualified RC2 product tree by release identity
+and documentation only. No semantic production change was added after RC2.
+
 ## v2.4.0rc2 - 2026-11-13
 
 ### Fixed
