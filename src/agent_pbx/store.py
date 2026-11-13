@@ -11397,10 +11397,12 @@ class Store:
         *,
         assignment_id: str | None = None,
     ) -> list[dict[str, str]]:
+        from .operator_actions import TERMINAL_ACTION_STATES
+
         blockers: list[dict[str, str]] = []
         request_rows = conn.execute(
                 """
-                SELECT request_id, assignment_id, status, validated_at
+                SELECT request_id, assignment_id, status, validated_at, completed_at
                 FROM operator_broker_requests
                 WHERE campaign_id = ?
                   AND (? IS NULL OR assignment_id = ?)
@@ -11410,7 +11412,15 @@ class Store:
             ).fetchall()
         for row in request_rows:
             status = str(row["status"] or "")
-            if status != "succeeded" or row["validated_at"] is None:
+            succeeded_and_validated = (
+                status == "succeeded" and row["validated_at"] is not None
+            )
+            terminal_failure = (
+                status in OPERATOR_BROKER_REQUEST_TERMINAL_STATUSES
+                and status != "succeeded"
+                and row["completed_at"] is not None
+            )
+            if not succeeded_and_validated and not terminal_failure:
                 blockers.append(
                     {
                         "kind": "broker_request",
@@ -11421,7 +11431,8 @@ class Store:
         handoff_rows = conn.execute(
                 """
                 SELECT h.handoff_id, h.status,
-                       t.transaction_id, t.state AS transaction_state
+                       t.transaction_id, t.state AS transaction_state,
+                       t.completed_at AS transaction_completed_at
                 FROM operator_handoffs AS h
                 LEFT JOIN operator_action_transactions AS t
                   ON t.handoff_id = h.handoff_id
@@ -11451,7 +11462,11 @@ class Store:
                 )
             transaction_id = str(row["transaction_id"] or "")
             transaction_state = str(row["transaction_state"] or "")
-            if transaction_id and transaction_state != "complete":
+            transaction_is_terminal = (
+                transaction_state in TERMINAL_ACTION_STATES
+                and row["transaction_completed_at"] is not None
+            )
+            if transaction_id and not transaction_is_terminal:
                 blockers.append(
                     {
                         "kind": "broker_transaction",

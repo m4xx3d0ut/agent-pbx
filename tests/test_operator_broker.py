@@ -943,6 +943,87 @@ def test_root_validates_exact_terminal_broker_receipt_before_completion(
     assert campaign["status"] == "complete"
 
 
+def test_campaign_completion_allows_reconciled_terminal_broker_failures(
+    tmp_path,
+) -> None:
+    store, service, handoff, _digest = _qualified_broker_service(tmp_path)
+    requested = service.request(
+        root_operator_agent_id="operator-0",
+        target_fork_agent_id="operator-7-fork",
+        handoff_id=handoff["handoff_id"],
+    )
+    request = requested["request"]
+    transaction = store.append_operator_action_receipt(
+        handoff_id=handoff["handoff_id"],
+        action_class="exact_git_commit_broker",
+        target_agent_id="operator-7-fork",
+        scope_sha256=request["scope_sha256"],
+        initial_state="stopped_ready_broker",
+        step="broker_review",
+        outcome="failed",
+        actor="tui-a",
+        evidence={
+            "request_id": request["request_id"],
+            "reason": "local broker qualification failed safely",
+        },
+    )
+    store.claim_operator_broker_request(
+        request_id=request["request_id"], executor_id="tui-a"
+    )
+    failed_request = store.transition_operator_broker_request(
+        request_id=request["request_id"],
+        executor_id="tui-a",
+        status="failed",
+        expected_statuses=("claimed",),
+        action_transaction_id=transaction["transaction_id"],
+        error_code="OPERATOR_BROKER_EXECUTION_FAILED",
+        error="local broker qualification failed safely",
+    )
+    failed_handoff = store.update_operator_handoff(
+        handoff["handoff_id"],
+        status="failed",
+        error="local broker qualification failed safely",
+    )
+    assert failed_handoff is not None
+
+    for delivery in store.list_operator_handoff_completion_deliveries(
+        recipient_agent_id="operator-0",
+        limit=20,
+    ):
+        store.acknowledge_operator_handoff_completion_delivery(
+            delivery["completion_delivery_id"],
+            acknowledged_by="operator-0",
+        )
+
+    assert failed_request["completed_at"] is not None
+    assert transaction["state"] == "blocked_reapproval_required"
+    assert transaction["completed_at"] is not None
+    assert store.operator_campaign_completion_blockers(
+        request["campaign_id"],
+        assignment_id=request["assignment_id"],
+    ) == []
+
+    operator = OperatorService(store)
+    completed = operator.report_assignment(
+        operator_agent_id="operator-0",
+        campaign_id=request["campaign_id"],
+        assignment_id=request["assignment_id"],
+        state="complete",
+        summary="Recovered through an approved alternate path",
+        detail="The failed broker evidence is terminal and retained for audit.",
+    )
+    campaign = operator.finish_campaign(
+        operator_agent_id="operator-0",
+        campaign_id=request["campaign_id"],
+        status="complete",
+        summary="Recovered",
+        detail="All durable workflow records are terminal and reviewed.",
+    )
+
+    assert completed["state"] == "complete"
+    assert campaign["status"] == "complete"
+
+
 def test_root_validation_rejects_foreign_transaction_and_receipt_drift(
     tmp_path,
 ) -> None:
