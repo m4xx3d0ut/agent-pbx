@@ -6,6 +6,11 @@ from agent_pbx import operator_delegation, tui
 from agent_pbx.ui import preferences
 from agent_pbx.ui import presentation_options
 from agent_pbx.ui import screens
+from agent_pbx.ui.screens._shared import format_timestamp, truncate
+from agent_pbx.ui.screens.operator_resources import (
+    DurableHelperRegistryScreen,
+    DynamicResourceApprovalScreen,
+)
 
 
 def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
@@ -229,6 +234,221 @@ def test_extracted_operator_handoff_family_aliases_are_object_identical() -> Non
         tui.OPERATOR_HANDOFF_CANCEL_REASON_CHOICES
         is presentation_options.OPERATOR_HANDOFF_CANCEL_REASON_CHOICES
     )
+
+
+def test_extracted_operator_resource_aliases_and_shared_helpers_are_preserved() -> None:
+    assert (
+        tui.DurableHelperRegistryScreen
+        is screens.DurableHelperRegistryScreen
+        is DurableHelperRegistryScreen
+    )
+    assert (
+        tui.DynamicResourceApprovalScreen
+        is screens.DynamicResourceApprovalScreen
+        is DynamicResourceApprovalScreen
+    )
+    assert format_timestamp(0.0) == "1970-01-01 00:00"
+    assert format_timestamp("invalid") == "-"
+    assert truncate("abcdef", 4) == "abc…"
+    assert truncate("abc", 4) == "abc"
+    assert screens.OperatorHandoffApprovalScreen.format_timestamp is format_timestamp
+    assert screens.OperatorHandoffApprovalScreen.truncate is truncate
+
+
+async def test_extracted_durable_helper_screen_preserves_table_and_app_hooks() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, object, str | None, str | None]] = []
+    helper = {
+        "helper_id": "helper-1",
+        "name": "release-check",
+        "status": "reviewed",
+        "object_sha256": "1234567890abcdef",
+        "scopes": ["project", "campaign"],
+    }
+
+    async def refresh(screen: object) -> None:
+        calls.append(("refresh", screen, None, None))
+
+    async def apply(
+        screen: object,
+        *,
+        helper_id: str,
+        action: str,
+    ) -> None:
+        calls.append(("apply", screen, helper_id, action))
+
+    app.refresh_durable_helper_screen = refresh  # type: ignore[method-assign]
+    app.apply_durable_helper_action = apply  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        screen = DurableHelperRegistryScreen(
+            operator_agent_id="operator-0",
+            helpers=[helper, {"name": "missing-id"}],
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+
+        table = screen.query_one("#durable-helper-table", DataTable)
+        assert screen.BINDINGS == [("escape", "dismiss", "Close")]
+        assert [column.label.plain for column in table.columns.values()] == [
+            "Name",
+            "Status",
+            "Digest",
+            "Scopes",
+            "Helper ID",
+        ]
+        assert table.get_row_at(0) == [
+            "release-check",
+            "reviewed",
+            "1234567890ab",
+            "project, campaign",
+            "helper-1",
+        ]
+        assert screen.selected_helper_id() == "helper-1"
+        assert [button.id for button in screen.query(Button)] == [
+            "durable-helper-review",
+            "durable-helper-promote",
+            "durable-helper-reject",
+            "durable-helper-retire",
+            "durable-helper-quarantine",
+            "durable-helper-refresh",
+            "durable-helper-close",
+        ]
+
+        for button_id in (
+            "durable-helper-review",
+            "durable-helper-promote",
+            "durable-helper-reject",
+            "durable-helper-retire",
+            "durable-helper-quarantine",
+            "durable-helper-refresh",
+        ):
+            screen.on_button_pressed(  # type: ignore[arg-type]
+                SimpleNamespace(
+                    button=screen.query_one(f"#{button_id}", Button),
+                    stop=lambda: None,
+                )
+            )
+            await pilot.pause()
+
+        screen.on_button_pressed(  # type: ignore[arg-type]
+            SimpleNamespace(
+                button=screen.query_one("#durable-helper-close", Button),
+                stop=lambda: None,
+            )
+        )
+        await pilot.pause()
+        assert app.screen is not screen
+
+    assert calls == [
+        ("apply", screen, "helper-1", "review"),
+        ("apply", screen, "helper-1", "active"),
+        ("apply", screen, "helper-1", "rejected"),
+        ("apply", screen, "helper-1", "retired"),
+        ("apply", screen, "helper-1", "quarantined"),
+        ("refresh", screen, None, None),
+    ]
+
+
+async def test_extracted_dynamic_resource_screen_preserves_f8_selection_and_hooks() -> (
+    None
+):
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, object, object | None]] = []
+    requests = [
+        {
+            "request_id": "resource-1",
+            "request_sha256": "a" * 64,
+            "resource_class": "managed_cache",
+            "requester_agent_id": "caller-1",
+            "campaign_id": "campaign-1234567890",
+            "workspace_set_digest": "b" * 64,
+            "spec": {"max_bytes": 4096, "name": "pytest-cache"},
+            "approval_confirmation": "APPROVE RESOURCE resource-1",
+            "restart_required": False,
+            "expires_at": 0.0,
+        },
+        {
+            "request_id": "resource-2",
+            "request_sha256": "c" * 64,
+            "resource_class": "managed_tmpfs",
+            "requester_agent_id": "caller-2",
+            "handoff_id": "handoff-1234567890",
+            "workspace_set_digest": "d" * 64,
+            "spec": {"size_mb": 128},
+            "approval_confirmation": "APPROVE RESOURCE resource-2",
+            "restart_required": True,
+            "expires_at": "invalid",
+        },
+    ]
+
+    async def approve(screen: object, request: object) -> None:
+        calls.append(("approve", screen, request))
+
+    async def refresh(screen: object) -> None:
+        calls.append(("refresh", screen, None))
+
+    app.approve_dynamic_resource_request = approve  # type: ignore[method-assign]
+    app.refresh_dynamic_resource_screen = refresh  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        screen = DynamicResourceApprovalScreen(
+            operator_agent_id="operator-0",
+            requests=requests,
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+
+        table = screen.query_one("#dynamic-resource-table", DataTable)
+        assert [column.label.plain for column in table.columns.values()] == [
+            "Class",
+            "Requester",
+            "Campaign",
+            "Restart",
+            "Expires",
+            "Request ID",
+        ]
+        assert table.get_row("resource-1") == [
+            "managed_cache",
+            "caller-1",
+            "campaign-123",
+            "no",
+            "1970-01-01 00:00",
+            "resource-1",
+        ]
+        assert table.get_row("resource-2") == [
+            "managed_tmpfs",
+            "caller-2",
+            "handoff-1234",
+            "yes",
+            "-",
+            "resource-2",
+        ]
+        assert screen.current_request() is requests[0]
+        assert requests[0]["approval_confirmation"] in str(
+            screen.query_one("#dynamic-resource-detail", Static).renderable
+        )
+        assert [button.id for button in screen.query(Button)] == [
+            "dynamic-resource-refresh",
+            "dynamic-resource-close",
+        ]
+
+        table.move_cursor(row=1, animate=False, scroll=False)
+        await pilot.pause()
+        assert screen.current_request() is requests[1]
+        assert requests[1]["approval_confirmation"] in str(
+            screen.query_one("#dynamic-resource-detail", Static).renderable
+        )
+        await pilot.press("f8")
+        await pilot.pause()
+        assert await pilot.click("#dynamic-resource-refresh")
+        await pilot.pause()
+        assert await pilot.click("#dynamic-resource-close")
+        await pilot.pause()
+        assert app.screen is not screen
+
+    assert calls == [
+        ("approve", screen, requests[1]),
+        ("refresh", screen, None),
+    ]
 
 
 async def test_extracted_handoff_cancel_preserves_validation_and_payload() -> None:

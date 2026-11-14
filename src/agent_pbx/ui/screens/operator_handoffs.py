@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
 import re
 from typing import Any, Protocol
 
@@ -12,6 +11,7 @@ from textual.widgets import Button, DataTable, Input, Select, Static
 
 from ...operator_delegation import delegation_lease_ineligibility_reason
 from ..presentation_options import OPERATOR_HANDOFF_CANCEL_REASON_CHOICES
+from ._shared import format_timestamp, truncate
 
 
 class OperatorHandoffApprovalScreenProtocol(Protocol):
@@ -241,7 +241,7 @@ class OperatorHandoffCancelConfirmScreen(ModalScreen[None]):
         for handoff in self.handoffs:
             handoff_id = str(handoff.get("handoff_id") or "-")
             target = str(handoff.get("target_operator_agent_id") or "-")
-            objective = OperatorHandoffApprovalScreen.truncate(
+            objective = truncate(
                 str(handoff.get("objective") or "-"),
                 72,
             )
@@ -384,13 +384,11 @@ class OperatorHandoffCompletionScreen(ModalScreen[None]):
             if not delivery_id:
                 continue
             table.add_row(
-                OperatorHandoffApprovalScreen.format_timestamp(
-                    delivery.get("created_at")
-                ),
+                format_timestamp(delivery.get("created_at")),
                 str(delivery.get("target_operator_agent_id") or "-"),
                 str(delivery.get("terminal_status") or "-"),
                 str(delivery.get("delivery_status") or "-"),
-                OperatorHandoffApprovalScreen.truncate(
+                truncate(
                     str(delivery.get("summary") or "-"),
                     56,
                 ),
@@ -547,18 +545,8 @@ class OperatorHandoffApprovalScreen(ModalScreen[None]):
             "approval always targets the displayed immutable IDs."
         )
 
-    @staticmethod
-    def format_timestamp(value: Any) -> str:
-        try:
-            return datetime.fromtimestamp(float(value), timezone.utc).strftime(
-                "%Y-%m-%d %H:%M"
-            )
-        except (TypeError, ValueError, OSError):
-            return "-"
-
-    @staticmethod
-    def truncate(value: str, limit: int) -> str:
-        return value if len(value) <= limit else value[: max(1, limit - 1)] + "…"
+    format_timestamp = staticmethod(format_timestamp)
+    truncate = staticmethod(truncate)
 
     def current_handoff_id(self) -> str | None:
         table = self.query_one("#operator-handoff-approval-table", DataTable)

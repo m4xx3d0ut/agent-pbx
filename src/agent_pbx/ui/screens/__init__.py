@@ -30,6 +30,10 @@ from .operator_handoffs import (
     OperatorReadyActionScreen,
     operator_ready_action_control,
 )
+from .operator_resources import (
+    DurableHelperRegistryScreen,
+    DynamicResourceApprovalScreen,
+)
 from .operators import (
     OperatorAuthorityScreen,
     OperatorHistoryScreen,
@@ -48,6 +52,8 @@ from .workerbee_policy import (
 
 __all__ = [
     "CustomSlashCommandArgScreen",
+    "DurableHelperRegistryScreen",
+    "DynamicResourceApprovalScreen",
     "EditorCloseConfirmScreen",
     "FileDeleteConfirmScreen",
     "FilePathActionScreen",
