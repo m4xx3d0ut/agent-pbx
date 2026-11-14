@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
+from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static, TextArea
 
 from agent_pbx import tui
 from agent_pbx.ui import preferences
@@ -22,11 +22,13 @@ def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
         "LinkedGitCommitPathsScreen",
         "LinkedGitRecoveryConfirmScreen",
         "LinkedGitReviewArtifactScreen",
+        "ManagedProjectPickerScreen",
         "JoplinNoteTitleScreen",
         "JoplinDeleteConfirmScreen",
         "JoplinPasteConfirmScreen",
         "ModelElevationScreen",
         "PullRequestMergeConfirmScreen",
+        "RuntimeMigrationScreen",
         "SettingsScreen",
         "slugify",
     )
@@ -35,6 +37,126 @@ def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
         assert getattr(tui, name) is getattr(screens, name)
 
     assert tui.normalize_joplin_copy_mode is preferences.normalize_joplin_copy_mode
+
+
+async def test_extracted_managed_project_picker_preserves_launch_order_and_payload() -> (
+    None
+):
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    launched: list[dict[str, object]] = []
+    projects = [
+        {
+            "path": "/tmp/demo",
+            "name": "demo",
+            "branch": "dev",
+            "available": True,
+            "owned_by": ["agent-existing"],
+        },
+        {
+            "path": "/tmp/next",
+            "name": "next",
+            "branch": "main",
+            "available": True,
+            "owned_by": ["agent-next"],
+        },
+    ]
+
+    async def launch(**request: object) -> bool:
+        assert app.screen is not screen
+        assert app.query_one("#agent-id", Input) is not None
+        launched.append(request)
+        return True
+
+    app.launch_managed_workspace_from_picker = launch  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        screen = screens.ManagedProjectPickerScreen(projects, ["/tmp"])
+        app.push_screen(screen)
+        await pilot.pause()
+
+        table = screen.query_one("#managed-projects", DataTable)
+        assert table.row_count == 2
+        assert screen.selected_path == "/tmp/demo"
+        assert screen.selected_owners == ["agent-existing"]
+        table.focus()
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        assert screen.selected_path == "/tmp/next"
+        assert screen.selected_owners == ["agent-next"]
+        screen.query_one("#managed-agent-id", Input).value = "agent-demo"
+        screen.query_one("#managed-launch-mode", Select).value = "agent_operator"
+        screen.query_one("#managed-agent-profile", Select).value = "sol-xhigh"
+
+        screen.query_one("#managed-project-launch", Button).press()
+        await pilot.pause()
+
+    assert launched == [
+        {
+            "project_path": "/tmp/next",
+            "agent_id": "agent-demo",
+            "profile_id": "sol-xhigh",
+            "runtime_server_mode": "dedicated",
+            "launch_mode": "agent_operator",
+            "existing_owner_ids": ["agent-next"],
+        }
+    ]
+
+
+async def test_extracted_runtime_migration_preserves_apply_and_rollback_hooks() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    applied: list[dict[str, object]] = []
+    rolled_back: list[str] = []
+    batch = {
+        "batch_id": "batch-1",
+        "eligible_count": 1,
+        "blocked_count": 0,
+        "retention_until": "2026-11-21T00:00:00Z",
+        "candidates": [
+            {
+                "agent_id": "agent-demo",
+                "agent_type": "caller",
+                "session_id": "session-demo",
+                "eligible": True,
+                "blockers": [],
+            }
+        ],
+    }
+
+    async def apply(received: dict[str, object]) -> list[dict[str, object]]:
+        assert app.screen is apply_screen
+        applied.append(received)
+        return []
+
+    async def rollback(batch_id: str) -> None:
+        assert app.screen is rollback_screen
+        rolled_back.append(batch_id)
+
+    app.apply_runtime_migration_batch = apply  # type: ignore[method-assign]
+    app.rollback_runtime_migration_batch = rollback  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        apply_screen = screens.RuntimeMigrationScreen(batch)
+        app.push_screen(apply_screen)
+        await pilot.pause()
+
+        assert (
+            apply_screen.query_one("#runtime-migration-candidates", DataTable).row_count
+            == 1
+        )
+        assert "Eligible 1 · Blocked 0" in str(
+            apply_screen.query_one("#runtime-migration-summary", Static).renderable
+        )
+        apply_screen.query_one("#runtime-migration-apply", Button).press()
+        await pilot.pause()
+        assert app.screen is not apply_screen
+
+        rollback_screen = screens.RuntimeMigrationScreen(batch)
+        app.push_screen(rollback_screen)
+        await pilot.pause()
+        rollback_screen.query_one("#runtime-migration-rollback", Button).press()
+        await pilot.pause()
+        assert app.screen is not rollback_screen
+
+    assert applied == [batch]
+    assert rolled_back == ["batch-1"]
 
 
 def test_extracted_settings_normalizes_constructor_values() -> None:
