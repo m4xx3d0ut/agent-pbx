@@ -4920,6 +4920,12 @@
               }
             ],
             "title": "Source Codex Session Id"
+          },
+          "workerbee_profile": {
+            "const": "local-deploy",
+            "default": "local-deploy",
+            "title": "Workerbee Profile",
+            "type": "string"
           }
         },
         "required": [
@@ -6757,6 +6763,19 @@
             ],
             "title": "Delivery",
             "type": "string"
+          },
+          "delivery_request_id": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivery Request Id"
           },
           "fork_track_id": {
             "anyOf": [
