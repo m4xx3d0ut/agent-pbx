@@ -1,5 +1,8 @@
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
+from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static, TextArea
 
 from agent_pbx import operator_delegation, tui
@@ -11,6 +14,72 @@ from agent_pbx.ui.screens.operator_resources import (
     DurableHelperRegistryScreen,
     DynamicResourceApprovalScreen,
 )
+
+
+EXTRACTED_MODAL_SCREENS = (
+    "CustomSlashCommandArgScreen",
+    "DurableHelperRegistryScreen",
+    "DynamicResourceApprovalScreen",
+    "EditorCloseConfirmScreen",
+    "FileDeleteConfirmScreen",
+    "FilePathActionScreen",
+    "FileTrashScreen",
+    "GitDiffScreen",
+    "GitPushScreen",
+    "LinkedGitCommitConfirmScreen",
+    "LinkedGitCommitPathsScreen",
+    "LinkedGitRecoveryConfirmScreen",
+    "LinkedGitReviewArtifactScreen",
+    "ManagedProjectPickerScreen",
+    "JoplinDeleteConfirmScreen",
+    "JoplinNoteTitleScreen",
+    "JoplinPasteConfirmScreen",
+    "JoplinReferencePromptScreen",
+    "IssueClearConfirmScreen",
+    "ModelElevationScreen",
+    "OperatorAuthorityScreen",
+    "OperatorDelegationLeaseConfirmScreen",
+    "OperatorHandoffApprovalScreen",
+    "OperatorHandoffApprovalConfirmScreen",
+    "OperatorHandoffCancelConfirmScreen",
+    "OperatorHandoffCompletionScreen",
+    "OperatorHistoryScreen",
+    "OperatorKillConfirmScreen",
+    "OperatorProjectSpawnCancelScreen",
+    "OperatorReadyActionScreen",
+    "PullRequestMergeConfirmScreen",
+    "RuntimeMigrationScreen",
+    "SettingsScreen",
+    "WorkerBeeAccessScreen",
+    "WorkerBeeControlledRunConfirmScreen",
+    "WorkerBeeControlledRunLeaseConfirmScreen",
+    "WorkerBeeControlledRunLeaseScreen",
+    "WorkerBeeControlledRunScreen",
+    "WorkerBeeSnapshotScreen",
+    "WorkerBeeSwitchConfirmScreen",
+    "WorkerBeeWorkspaceScreen",
+)
+
+
+def test_ui_screens_owns_complete_modal_inventory() -> None:
+    actual = tuple(
+        name
+        for name in screens.__all__
+        if isinstance(getattr(screens, name), type)
+        and issubclass(getattr(screens, name), ModalScreen)
+    )
+
+    assert actual == EXTRACTED_MODAL_SCREENS
+    assert all(getattr(tui, name) is getattr(screens, name) for name in actual)
+
+    tree = ast.parse(Path(tui.__file__).read_text(encoding="utf-8"))
+    modal_classes = [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and any("ModalScreen" in ast.unparse(base) for base in node.bases)
+    ]
+    assert modal_classes == []
 
 
 def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
