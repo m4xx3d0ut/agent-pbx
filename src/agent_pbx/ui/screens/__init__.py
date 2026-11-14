@@ -21,6 +21,7 @@ from .joplin import (
     JoplinPasteConfirmScreen,
     JoplinReferencePromptScreen,
 )
+from .operator_handoffs import OperatorHandoffApprovalConfirmScreen
 from .operators import (
     OperatorAuthorityScreen,
     OperatorHistoryScreen,
@@ -57,6 +58,7 @@ __all__ = [
     "IssueClearConfirmScreen",
     "ModelElevationScreen",
     "OperatorAuthorityScreen",
+    "OperatorHandoffApprovalConfirmScreen",
     "OperatorHistoryScreen",
     "OperatorKillConfirmScreen",
     "OperatorProjectSpawnCancelScreen",

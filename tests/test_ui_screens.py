@@ -47,6 +47,56 @@ def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
     assert tui.normalize_joplin_copy_mode is preferences.normalize_joplin_copy_mode
 
 
+async def test_extracted_handoff_approval_confirm_alias_cancel_and_approve_hook() -> None:
+    assert (
+        tui.OperatorHandoffApprovalConfirmScreen
+        is screens.OperatorHandoffApprovalConfirmScreen
+    )
+
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    approved: list[tuple[str, tuple[str, ...], object]] = []
+    approval_screen = SimpleNamespace(app=app)
+
+    async def approve_operator_handoff_ids(
+        operator_agent_id: str,
+        handoff_ids: tuple[str, ...],
+        *,
+        approval_screen: object,
+    ) -> None:
+        approved.append((operator_agent_id, handoff_ids, approval_screen))
+
+    app.approve_operator_handoff_ids = approve_operator_handoff_ids  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        cancel_screen = screens.OperatorHandoffApprovalConfirmScreen(
+            operator_agent_id="operator-0",
+            handoff_ids=("handoff-1",),
+            approval_screen=approval_screen,
+        )
+        app.push_screen(cancel_screen)
+        await pilot.pause()
+        await pilot.click("#operator-handoff-confirm-cancel")
+        await pilot.pause()
+
+        assert app.screen is not cancel_screen
+        assert approved == []
+
+        confirm_screen = screens.OperatorHandoffApprovalConfirmScreen(
+            operator_agent_id="operator-0",
+            handoff_ids=("handoff-1", "handoff-2"),
+            approval_screen=approval_screen,
+        )
+        app.push_screen(confirm_screen)
+        await pilot.pause()
+        await pilot.click("#operator-handoff-confirm")
+        await pilot.pause()
+
+        assert app.screen is not confirm_screen
+
+    assert approved == [
+        ("operator-0", ("handoff-1", "handoff-2"), approval_screen)
+    ]
+
+
 async def test_extracted_managed_project_picker_preserves_launch_order_and_payload() -> (
     None
 ):
