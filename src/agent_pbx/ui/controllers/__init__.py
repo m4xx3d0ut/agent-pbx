@@ -41,6 +41,7 @@ from ..references import (
 from ._base import ControllerHost, TUIController, controller_method
 from .github import GitHubController
 from .joplin import JoplinController
+from .operator_handoffs import OperatorHandoffController
 from .references import PromptReferenceController
 from .workerbee_projection import WorkerBeeProjectionController
 
@@ -83,6 +84,7 @@ __all__ = [
     "ControllerHost",
     "GitHubController",
     "JoplinController",
+    "OperatorHandoffController",
     "TUIController",
     "WorkerBeeProjectionController",
     "controller_method",

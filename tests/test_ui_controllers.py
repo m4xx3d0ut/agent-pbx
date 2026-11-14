@@ -10,6 +10,7 @@ from agent_pbx.ui.async_jobs import AsyncGenerationGate
 from agent_pbx.ui.controllers import TUIController, controller_method
 from agent_pbx.ui.controllers.github import GitHubController
 from agent_pbx.ui.controllers.joplin import JoplinController
+from agent_pbx.ui.controllers.operator_handoffs import OperatorHandoffController
 from agent_pbx.ui.controllers.references import PromptReferenceController
 from agent_pbx.ui.controllers.workerbee_projection import (
     WorkerBeeProjectionController,
@@ -191,6 +192,22 @@ def test_controller_honors_instance_level_host_overrides() -> None:
     app.ensure_joplin_available = replacement  # type: ignore[method-assign]
 
     assert app._joplin_controller.ensure_joplin_available is replacement
+
+
+def test_operator_handoff_controller_preserves_legacy_tui_entry_points() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert isinstance(app._operator_handoff_controller, OperatorHandoffController)
+    assert app.pending_source_handoffs(
+        "operator-0",
+        [
+            {
+                "logical_operator_agent_id": "operator-0",
+                "status": "approved",
+                "handoff_id": "handoff-1",
+            }
+        ],
+    )[0]["handoff_id"] == "handoff-1"
 
 
 def test_action_registry_rejects_duplicate_ids() -> None:
