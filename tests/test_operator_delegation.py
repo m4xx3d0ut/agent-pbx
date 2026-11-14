@@ -12,6 +12,7 @@ from agent_pbx.operator_authority import (
     OperatorAuthorityService,
 )
 from agent_pbx.operator_delegation import (
+    delegation_lease_ineligibility_reason,
     execution_scope_digest,
     execution_scope_requires_manual_approval,
     normalize_execution_scope,
@@ -31,6 +32,36 @@ def register_operators(store: Store, tmp_path: Path) -> None:
                 metadata={"cwd": str(tmp_path / agent_id)},
             )
         )
+
+
+def test_delegation_lease_ineligibility_reason_owns_selection_policy() -> None:
+    eligible = {
+        "target_operator_agent_id": "operator-7",
+        "execution_scope": {
+            "action_class": "test_validation",
+            "campaign_id": "campaign-1",
+            "workspace_set_digest": "a" * 64,
+        },
+    }
+
+    assert delegation_lease_ineligibility_reason([]) == "Select at least one handoff."
+    assert "structured execution_scope" in str(
+        delegation_lease_ineligibility_reason([{"execution_scope": {}}])
+    )
+    assert "manual-only authority flag" in str(
+        delegation_lease_ineligibility_reason(
+            [
+                {
+                    **eligible,
+                    "execution_scope": {
+                        **eligible["execution_scope"],
+                        "deployment": True,
+                    },
+                }
+            ]
+        )
+    )
+    assert delegation_lease_ineligibility_reason([eligible]) is None
 
 
 def test_exact_git_scope_is_normalized_and_persisted(tmp_path: Path) -> None:

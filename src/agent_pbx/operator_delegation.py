@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 
 HANDOFF_ACTION_CLASSES = frozenset(
@@ -317,6 +317,51 @@ def execution_scope_requires_manual_approval(scope: Mapping[str, Any] | None) ->
             "authority_elevation",
         )
     )
+
+
+def delegation_lease_ineligibility_reason(
+    handoffs: Iterable[Mapping[str, Any]],
+) -> str | None:
+    """Return a concise reason when handoffs cannot seed a trusted lease."""
+
+    selected = tuple(handoffs)
+    if not selected:
+        return "Select at least one handoff."
+    scopes: list[Mapping[str, Any]] = []
+    for handoff in selected:
+        scope = handoff.get("execution_scope")
+        if not isinstance(scope, Mapping) or not scope:
+            return (
+                "Trusted leases require a structured execution_scope on every "
+                "handoff; approve this legacy handoff once or create a structured "
+                "successor."
+            )
+        scopes.append(scope)
+    action_classes = {
+        str(scope.get("action_class") or "").strip().lower() for scope in scopes
+    }
+    if "" in action_classes or not action_classes.issubset(
+        LEASE_ELIGIBLE_ACTION_CLASSES
+    ):
+        return "One or more selected action classes always require manual approval."
+    if any(execution_scope_requires_manual_approval(scope) for scope in scopes):
+        return "One or more selected handoffs contain a manual-only authority flag."
+    campaigns = {str(scope.get("campaign_id") or "").strip() for scope in scopes}
+    if "" in campaigns:
+        return "Trusted leases require a campaign ID on every selected handoff."
+    digests = {
+        str(scope.get("workspace_set_digest") or "").strip().lower()
+        for scope in scopes
+    }
+    if "" in digests or len(digests) != 1:
+        return "Selected handoffs must share one activated workspace-set digest."
+    targets = {
+        str(handoff.get("target_operator_agent_id") or "").strip()
+        for handoff in selected
+    }
+    if "" in targets:
+        return "Trusted leases require an exact target Operator on every handoff."
+    return None
 
 
 def normalize_delegation_lease_scope(

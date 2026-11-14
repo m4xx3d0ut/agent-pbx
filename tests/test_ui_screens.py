@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static, TextArea
 
-from agent_pbx import tui
+from agent_pbx import operator_delegation, tui
 from agent_pbx.ui import preferences
 from agent_pbx.ui import screens
 
@@ -28,9 +28,11 @@ def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
         "JoplinPasteConfirmScreen",
         "ModelElevationScreen",
         "OperatorAuthorityScreen",
+        "OperatorDelegationLeaseConfirmScreen",
         "OperatorHistoryScreen",
         "OperatorKillConfirmScreen",
         "OperatorProjectSpawnCancelScreen",
+        "OperatorReadyActionScreen",
         "PullRequestMergeConfirmScreen",
         "RuntimeMigrationScreen",
         "SettingsScreen",
@@ -45,6 +47,14 @@ def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
         assert getattr(tui, name) is getattr(screens, name)
 
     assert tui.normalize_joplin_copy_mode is preferences.normalize_joplin_copy_mode
+    assert (
+        tui.operator_ready_action_control
+        is screens.operator_ready_action_control
+    )
+    assert (
+        tui.delegation_lease_ineligibility_reason
+        is operator_delegation.delegation_lease_ineligibility_reason
+    )
 
 
 async def test_extracted_handoff_approval_confirm_alias_cancel_and_approve_hook() -> None:
@@ -93,6 +103,115 @@ async def test_extracted_handoff_approval_confirm_alias_cancel_and_approve_hook(
         assert app.screen is not confirm_screen
 
     assert approved == [
+        ("operator-0", ("handoff-1", "handoff-2"), approval_screen)
+    ]
+
+
+def test_extracted_operator_ready_action_control_preserves_guarded_controls() -> None:
+    assert screens.operator_ready_action_control({"next_action": "stop"}) == (
+        "/operator stop"
+    )
+    assert screens.operator_ready_action_control({"next_action": "broker_review"}) == (
+        "/operator git commit"
+    )
+    assert screens.operator_ready_action_control({"next_action": "broker_commit"}) == (
+        "finish the open broker confirmation "
+        "(/operator git recover after an interrupted transaction)"
+    )
+    assert screens.operator_ready_action_control({"next_action": "resume"}) == (
+        "/operator resume"
+    )
+    assert screens.operator_ready_action_control({"next_action": "validate"}) == (
+        "/operator action validate"
+    )
+    assert screens.operator_ready_action_control({"next_action": "unknown"}) == (
+        "manual review"
+    )
+
+
+async def test_extracted_operator_ready_action_screen_preserves_focus_and_run_hooks() -> (
+    None
+):
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, object]] = []
+    action = {
+        "handoff_id": "handoff-1",
+        "campaign_id": "campaign-1",
+        "target_agent_id": "operator-8-fork",
+        "state": "stopped_ready_broker",
+        "next_action": "broker_review",
+        "scope_sha256": "a" * 64,
+        "execution_scope": {"exact_paths": ["src/app.py"]},
+    }
+
+    async def focus_operator_ready_action(received: dict[str, object]) -> None:
+        calls.append(("focus", received))
+
+    async def advance_operator_ready_action(received: dict[str, object]) -> None:
+        calls.append(("run", received))
+
+    app.focus_operator_ready_action = focus_operator_ready_action  # type: ignore[method-assign]
+    app.advance_operator_ready_action = advance_operator_ready_action  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        focus_screen = screens.OperatorReadyActionScreen(action)
+        app.push_screen(focus_screen)
+        await pilot.pause()
+
+        summary = focus_screen.query_one(
+            "#operator-handoff-confirm-summary", Static
+        )
+        assert "Guarded control: /operator git commit" in str(summary.render())
+        assert await pilot.click("#operator-ready-action-focus")
+        await pilot.pause()
+        assert app.screen is not focus_screen
+
+        run_screen = screens.OperatorReadyActionScreen(action)
+        app.push_screen(run_screen)
+        await pilot.pause()
+        assert await pilot.click("#operator-ready-action-run")
+        await pilot.pause()
+        assert app.screen is not run_screen
+
+    assert calls == [("focus", action), ("run", action)]
+
+
+async def test_extracted_delegation_lease_screen_guards_duplicate_submit() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    submitted: list[tuple[str, tuple[str, ...], object]] = []
+    approval_screen = SimpleNamespace(app=app)
+
+    async def create_operator_delegation_lease_from_handoffs(
+        operator_agent_id: str,
+        handoff_ids: tuple[str, ...],
+        *,
+        approval_screen: object,
+    ) -> None:
+        submitted.append((operator_agent_id, handoff_ids, approval_screen))
+
+    app.create_operator_delegation_lease_from_handoffs = (  # type: ignore[method-assign]
+        create_operator_delegation_lease_from_handoffs
+    )
+    async with app.run_test() as pilot:
+        screen = screens.OperatorDelegationLeaseConfirmScreen(
+            operator_agent_id="operator-0",
+            handoff_ids=("handoff-1", "handoff-2"),
+            approval_screen=approval_screen,
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+        confirm = screen.query_one("#operator-delegation-confirm", Button)
+        cancel = screen.query_one("#operator-delegation-cancel", Button)
+        event = SimpleNamespace(button=confirm, stop=lambda: None)
+
+        screen.on_button_pressed(event)  # type: ignore[arg-type]
+        screen.on_button_pressed(event)  # type: ignore[arg-type]
+        await pilot.pause()
+
+        assert screen.submitted is True
+        assert confirm.disabled is True
+        assert cancel.disabled is True
+
+    assert submitted == [
         ("operator-0", ("handoff-1", "handoff-2"), approval_screen)
     ]
 

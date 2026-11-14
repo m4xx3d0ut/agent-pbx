@@ -21,7 +21,12 @@ from .joplin import (
     JoplinPasteConfirmScreen,
     JoplinReferencePromptScreen,
 )
-from .operator_handoffs import OperatorHandoffApprovalConfirmScreen
+from .operator_handoffs import (
+    OperatorDelegationLeaseConfirmScreen,
+    OperatorHandoffApprovalConfirmScreen,
+    OperatorReadyActionScreen,
+    operator_ready_action_control,
+)
 from .operators import (
     OperatorAuthorityScreen,
     OperatorHistoryScreen,
@@ -58,10 +63,12 @@ __all__ = [
     "IssueClearConfirmScreen",
     "ModelElevationScreen",
     "OperatorAuthorityScreen",
+    "OperatorDelegationLeaseConfirmScreen",
     "OperatorHandoffApprovalConfirmScreen",
     "OperatorHistoryScreen",
     "OperatorKillConfirmScreen",
     "OperatorProjectSpawnCancelScreen",
+    "OperatorReadyActionScreen",
     "PullRequestMergeConfirmScreen",
     "RuntimeMigrationScreen",
     "SettingsScreen",
@@ -69,5 +76,6 @@ __all__ = [
     "WorkerBeeSnapshotScreen",
     "WorkerBeeSwitchConfirmScreen",
     "WorkerBeeWorkspaceScreen",
+    "operator_ready_action_control",
     "slugify",
 ]
