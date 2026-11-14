@@ -3,11 +3,16 @@ from types import SimpleNamespace
 import pytest
 
 from agent_pbx.contracts import ActionDefinition
+from agent_pbx.tui import AgentPBXTUI
 from agent_pbx.ui.actions import ActionRegistry
 from agent_pbx.ui.async_jobs import AsyncGenerationGate
 from agent_pbx.ui.controllers import TUIController, controller_method
+from agent_pbx.ui.controllers.workerbee_projection import (
+    WorkerBeeProjectionController,
+)
 from agent_pbx.ui.focus import FocusGenerationGuard
 from agent_pbx.ui.panels.joplin import JoplinPanelState
+from agent_pbx.workerbee_mcp import WorkerBeeMcpPreflight
 
 
 class _ExampleController(TUIController[SimpleNamespace]):
@@ -30,6 +35,72 @@ def test_controller_method_preserves_host_state_and_legacy_call_shape() -> None:
     assert host.increment(2) == 3
     assert host.value == 3
     assert host.controller.value == 3
+
+
+def test_workerbee_projection_controller_preserves_nested_status_rendering() -> None:
+    controller = WorkerBeeProjectionController(SimpleNamespace())
+    rendered = controller.format_workerbee_status(
+        {
+            "agent_id": "operator-8",
+            "cwd": "/workspace",
+            "workerbee_bin": "/usr/bin/workerbee",
+            "available": True,
+            "project": "workerbee",
+            "mode": "local",
+            "status_kind": "ready",
+            "running": True,
+            "dashboard_url": "https://dashboard.workerbee.home.arpa:19443/",
+            "state_dir": "/state",
+            "description": "Debug appliance",
+            "app_status": {
+                "state": "ready",
+                "ready": True,
+                "message": "green",
+                "declared_workload_count": 1,
+                "ready_workload_count": 1,
+                "degraded_workload_count": 0,
+                "orphaned_workload_count": 0,
+                "declared_workloads": [
+                    {"kind": "Deployment", "namespace": "demo", "name": "api"}
+                ],
+            },
+        }
+    )
+
+    assert "Agent: operator-8" in rendered
+    assert "Status: ready" in rendered
+    assert "Workloads: 1 declared, 1 ready, 0 degraded, 0 orphaned" in rendered
+    assert "- Deployment demo/api" in rendered
+
+
+def test_workerbee_projection_controller_redacts_preflight_query() -> None:
+    controller = WorkerBeeProjectionController(SimpleNamespace())
+
+    rendered = controller.format_workerbee_mcp_preflight(
+        WorkerBeeMcpPreflight(
+            code="WORKERBEE_READY",
+            ready=True,
+            message="ready",
+            remediation="",
+            endpoint="https://workerbee.example/mcp?token=secret",
+            workerbee_version="1.0.0",
+        )
+    )
+
+    assert "Endpoint: https://workerbee.example/mcp" in rendered
+    assert "secret" not in rendered
+
+
+def test_workerbee_projection_controller_keeps_legacy_tui_entry_points() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert isinstance(
+        app._workerbee_projection_controller,
+        WorkerBeeProjectionController,
+    )
+    assert app.format_workerbee_workload(
+        {"kind": "Service", "namespace": "demo", "name": "web"}
+    ) == "Service demo/web"
 
 
 def test_action_registry_rejects_duplicate_ids() -> None:
