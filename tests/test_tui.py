@@ -7849,6 +7849,17 @@ async def test_tui_existing_operator_root_is_reused_before_launch_metadata_chang
             return self.data
 
     class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            assert path == "/v2/workerbee/workspace-policy"
+            return Response(
+                {
+                    "access_posture": {
+                        "operator_default_effective_profile": "local-deploy",
+                        "profile_ceiling": "local-deploy",
+                    }
+                }
+            )
+
         async def post(self, path: str, **kwargs: object) -> Response:
             assert path == "/v1/agents/register"
             posts.append({"path": path, **kwargs})
@@ -19021,8 +19032,17 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
 
     class Client:
         async def get(self, path: str, **_kwargs: object) -> Response:
-            assert path == "/v2/tmux/runtimes/operator-0"
-            return Response(app.tmux_runtime_mapping_by_agent["operator-0"])
+            if path == "/v2/tmux/runtimes/operator-0":
+                return Response(app.tmux_runtime_mapping_by_agent["operator-0"])
+            assert path == "/v2/workerbee/workspace-policy"
+            return Response(
+                {
+                    "access_posture": {
+                        "operator_default_effective_profile": "local-deploy",
+                        "profile_ceiling": "local-deploy",
+                    }
+                }
+            )
 
         async def post(self, path: str, **kwargs: object) -> Response:
             posts.append({"path": path, **kwargs})
@@ -22080,6 +22100,15 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
             gets.append({"path": path, **kwargs})
             if path == "/v1/auth/check":
                 return Response({"ok": True})
+            if path == "/v2/workerbee/workspace-policy":
+                return Response(
+                    {
+                        "access_posture": {
+                            "operator_default_effective_profile": "observe-local",
+                            "profile_ceiling": "local-deploy",
+                        }
+                    }
+                )
             if path == "/v1/operator/forks":
                 return Response({"forks": []})
             raise AssertionError(path)
@@ -22160,6 +22189,9 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
     app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
+    app.linked_edit_fork_git_admin_plan = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=None)
+    )
     runtime_registrations: list[dict[str, object]] = []
 
     async def use_managed_test_tmux(
