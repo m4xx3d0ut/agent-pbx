@@ -8,6 +8,7 @@ from agent_pbx.tui import AgentPBXTUI
 from agent_pbx.ui.actions import ActionRegistry
 from agent_pbx.ui.async_jobs import AsyncGenerationGate
 from agent_pbx.ui.controllers import TUIController, controller_method
+from agent_pbx.ui.controllers.campaigns import CampaignController
 from agent_pbx.ui.controllers.github import GitHubController
 from agent_pbx.ui.controllers.joplin import JoplinController
 from agent_pbx.ui.controllers.operator_handoffs import OperatorHandoffController
@@ -216,6 +217,15 @@ def test_workerbee_controller_preserves_legacy_tui_entry_points() -> None:
 
     assert isinstance(app._workerbee_controller, WorkerBeeController)
     assert app.load_workerbee_status.__self__ is app._workerbee_controller
+
+
+def test_campaign_controller_preserves_legacy_tui_entry_points() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert isinstance(app._campaign_controller, CampaignController)
+    assert app.campaign_report_ids(
+        {"assignments": [{"last_report_id": "report-1"}]}
+    ) == ["report-1"]
 
 
 def test_action_registry_rejects_duplicate_ids() -> None:

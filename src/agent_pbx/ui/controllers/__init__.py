@@ -39,6 +39,7 @@ from ..references import (
     pull_request_ref_completion_tokens,
 )
 from ._base import ControllerHost, TUIController, controller_method
+from .campaigns import CampaignController
 from .github import GitHubController
 from .joplin import JoplinController
 from .operator_handoffs import OperatorHandoffController
@@ -83,6 +84,7 @@ __all__ = [
     "markdown_fence_for",
     "pull_request_ref_completion_tokens",
     "ControllerHost",
+    "CampaignController",
     "GitHubController",
     "JoplinController",
     "OperatorHandoffController",
