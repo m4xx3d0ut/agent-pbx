@@ -4,6 +4,7 @@ from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static, 
 
 from agent_pbx import operator_delegation, tui
 from agent_pbx.ui import preferences
+from agent_pbx.ui import presentation_options
 from agent_pbx.ui import screens
 
 
@@ -213,6 +214,288 @@ async def test_extracted_delegation_lease_screen_guards_duplicate_submit() -> No
 
     assert submitted == [
         ("operator-0", ("handoff-1", "handoff-2"), approval_screen)
+    ]
+
+
+def test_extracted_operator_handoff_family_aliases_are_object_identical() -> None:
+    for name in (
+        "OperatorHandoffApprovalScreen",
+        "OperatorHandoffCancelConfirmScreen",
+        "OperatorHandoffCompletionScreen",
+    ):
+        assert getattr(tui, name) is getattr(screens, name)
+
+    assert (
+        tui.OPERATOR_HANDOFF_CANCEL_REASON_CHOICES
+        is presentation_options.OPERATOR_HANDOFF_CANCEL_REASON_CHOICES
+    )
+
+
+async def test_extracted_handoff_cancel_preserves_validation_and_payload() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    notices: list[tuple[str, str]] = []
+    submitted: list[dict[str, object]] = []
+    approval_screen = SimpleNamespace(app=app)
+    handoffs = (
+        {
+            "handoff_id": "handoff-1",
+            "target_operator_agent_id": "operator-7",
+            "objective": "Replace the legacy request with a structured handoff.",
+        },
+        {
+            "handoff_id": "handoff-2",
+            "target_operator_agent_id": "operator-8",
+            "objective": "Withdraw the duplicate request.",
+        },
+    )
+
+    def notify(message: str, *, severity: str = "information", **_kwargs: object) -> None:
+        notices.append((message, severity))
+
+    async def cancel_operator_handoff_ids(
+        operator_agent_id: str,
+        handoff_ids: tuple[str, ...],
+        *,
+        reason: str,
+        detail: str,
+        superseded_by_handoff_ids: tuple[str, ...],
+        approval_screen: object,
+    ) -> None:
+        submitted.append(
+            {
+                "operator_agent_id": operator_agent_id,
+                "handoff_ids": handoff_ids,
+                "reason": reason,
+                "detail": detail,
+                "superseded_by_handoff_ids": superseded_by_handoff_ids,
+                "approval_screen": approval_screen,
+            }
+        )
+
+    app.notify = notify  # type: ignore[method-assign]
+    app.cancel_operator_handoff_ids = cancel_operator_handoff_ids  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        screen = screens.OperatorHandoffCancelConfirmScreen(
+            operator_agent_id="operator-0",
+            handoffs=handoffs,
+            approval_screen=approval_screen,  # type: ignore[arg-type]
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+
+        reason = screen.query_one("#operator-handoff-cancel-reason", Select)
+        confirm = screen.query_one("#operator-handoff-cancel-confirm", Button)
+        confirm_event = SimpleNamespace(button=confirm, stop=lambda: None)
+        reason.value = "other"
+        screen.on_button_pressed(confirm_event)  # type: ignore[arg-type]
+        await pilot.pause()
+
+        assert app.screen is screen
+        assert submitted == []
+        assert notices[-1] == (
+            "Cancellation detail is required when the reason is Other.",
+            "warning",
+        )
+
+        screen.query_one("#operator-handoff-cancel-detail", Input).value = (
+            "Operator requested withdrawal."
+        )
+        screen.query_one("#operator-handoff-cancel-replacements", Input).value = (
+            "replacement-2 replacement-1,replacement-2"
+        )
+        screen.on_button_pressed(confirm_event)  # type: ignore[arg-type]
+        await pilot.pause()
+
+        assert app.screen is not screen
+
+    assert submitted == [
+        {
+            "operator_agent_id": "operator-0",
+            "handoff_ids": ("handoff-1", "handoff-2"),
+            "reason": "other",
+            "detail": "Operator requested withdrawal.",
+            "superseded_by_handoff_ids": ("replacement-2", "replacement-1"),
+            "approval_screen": approval_screen,
+        }
+    ]
+
+
+async def test_extracted_handoff_completion_preserves_table_and_workers() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, object, object | None]] = []
+    delivery = {
+        "completion_delivery_id": "receipt-1",
+        "target_operator_agent_id": "operator-7",
+        "terminal_status": "complete",
+        "delivery_status": "sent",
+        "summary": "Checkpoint completed and validated.",
+        "created_at": 0.0,
+    }
+
+    async def focus(screen: object, selected: object) -> None:
+        calls.append(("focus", screen, selected))
+
+    async def acknowledge(screen: object, selected: object) -> None:
+        calls.append(("ack", screen, selected))
+
+    async def retry(screen: object, selected: object) -> None:
+        calls.append(("retry", screen, selected))
+
+    async def refresh(screen: object) -> None:
+        calls.append(("refresh", screen, None))
+
+    app.focus_operator_completion_receipt = focus  # type: ignore[method-assign]
+    app.acknowledge_operator_completion_receipt = acknowledge  # type: ignore[method-assign]
+    app.retry_operator_completion_receipt = retry  # type: ignore[method-assign]
+    app.refresh_operator_completion_screen = refresh  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        screen = screens.OperatorHandoffCompletionScreen(
+            recipient_agent_id="operator-0",
+            deliveries=[delivery],
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+
+        table = screen.query_one("#operator-completion-table", DataTable)
+        assert [column.label.plain for column in table.columns.values()] == [
+            "Created",
+            "From",
+            "Result",
+            "Delivery",
+            "Summary",
+            "ID",
+        ]
+        assert table.get_row("receipt-1") == [
+            "1970-01-01 00:00",
+            "operator-7",
+            "complete",
+            "sent",
+            "Checkpoint completed and validated.",
+            "receipt-1",
+        ]
+        assert screen.current_delivery() is delivery
+
+        for button_id in (
+            "operator-completion-focus",
+            "operator-completion-ack",
+            "operator-completion-retry",
+            "operator-completion-refresh",
+        ):
+            assert await pilot.click(f"#{button_id}")
+            await pilot.pause()
+
+        assert await pilot.click("#operator-completion-close")
+        await pilot.pause()
+        assert app.screen is not screen
+
+    assert calls == [
+        ("focus", screen, delivery),
+        ("ack", screen, delivery),
+        ("retry", screen, delivery),
+        ("refresh", screen, None),
+    ]
+
+
+async def test_extracted_handoff_approval_preserves_selection_and_nested_screens() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, object]] = []
+    handoffs = [
+        {
+            "handoff_id": "handoff-1",
+            "target_operator_agent_id": "operator-7",
+            "status": "proposed",
+            "objective": "Validate the release.",
+            "created_at": 0.0,
+            "execution_scope": {"action_class": "test_validation"},
+        },
+        {
+            "handoff_id": "handoff-2",
+            "target_operator_agent_id": "operator-8",
+            "status": "proposed",
+            "objective": "Review the implementation.",
+            "created_at": None,
+            "execution_scope": {},
+        },
+    ]
+
+    async def preflight(
+        operator_agent_id: str,
+        handoff_ids: tuple[str, ...],
+    ) -> None:
+        calls.append(("preflight", (operator_agent_id, handoff_ids)))
+
+    async def refresh(screen: object) -> None:
+        calls.append(("refresh", screen))
+
+    app.preflight_operator_handoff_ids = preflight  # type: ignore[method-assign]
+    app.refresh_operator_handoff_approval_screen = refresh  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        screen = screens.OperatorHandoffApprovalScreen(
+            operator_agent_id="operator-0",
+            handoffs=handoffs,
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+
+        table = screen.query_one("#operator-handoff-approval-table", DataTable)
+        assert [column.label.plain for column in table.columns.values()] == [
+            "Mark",
+            "Created",
+            "Target",
+            "Class",
+            "Status",
+            "Objective",
+            "ID",
+        ]
+        assert table.get_row("handoff-1") == [
+            "○",
+            "1970-01-01 00:00",
+            "operator-7",
+            "test_validation",
+            "proposed",
+            "Validate the release.",
+            "handoff-1",
+        ]
+        assert screen.format_timestamp("invalid") == "-"
+        assert screen.truncate("abcdef", 4) == "abc…"
+        assert screen.selected_handoff_ids() == ("handoff-1",)
+
+        screen.action_toggle_selected()
+        table.move_cursor(row=1, animate=False, scroll=False)
+        screen.action_toggle_selected()
+        assert screen.selected_handoff_ids() == ("handoff-1", "handoff-2")
+
+        assert await pilot.click("#operator-handoff-approve")
+        await pilot.pause()
+        confirm = app.screen
+        assert isinstance(confirm, screens.OperatorHandoffApprovalConfirmScreen)
+        assert confirm.handoff_ids == ("handoff-1", "handoff-2")
+        assert confirm.approval_screen is screen
+        assert await pilot.click("#operator-handoff-confirm-cancel")
+        await pilot.pause()
+        assert app.screen is screen
+
+        assert await pilot.click("#operator-handoff-cancel")
+        await pilot.pause()
+        cancel = app.screen
+        assert isinstance(cancel, screens.OperatorHandoffCancelConfirmScreen)
+        assert cancel.handoffs == tuple(handoffs)
+        assert cancel.approval_screen is screen
+        assert await pilot.click("#operator-handoff-cancel-back")
+        await pilot.pause()
+        assert app.screen is screen
+
+        assert await pilot.click("#operator-handoff-preflight")
+        await pilot.pause()
+        refresh_button = screen.query_one("#operator-handoff-refresh", Button)
+        screen.on_button_pressed(  # type: ignore[arg-type]
+            SimpleNamespace(button=refresh_button, stop=lambda: None)
+        )
+        await pilot.pause()
+
+    assert calls == [
+        ("preflight", ("operator-0", ("handoff-1", "handoff-2"))),
+        ("refresh", screen),
     ]
 
 
