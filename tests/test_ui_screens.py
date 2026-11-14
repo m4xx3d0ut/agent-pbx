@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from textual.widgets import Input, TextArea
 
 from agent_pbx import tui
@@ -15,6 +17,10 @@ def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
         "FileTrashScreen",
         "JoplinReferencePromptScreen",
         "IssueClearConfirmScreen",
+        "LinkedGitCommitConfirmScreen",
+        "LinkedGitCommitPathsScreen",
+        "LinkedGitRecoveryConfirmScreen",
+        "LinkedGitReviewArtifactScreen",
         "JoplinNoteTitleScreen",
         "JoplinDeleteConfirmScreen",
         "JoplinPasteConfirmScreen",
@@ -46,6 +52,111 @@ async def test_extracted_git_diff_cancel_dismisses_without_submit() -> None:
         assert app.screen is not screen
 
     assert submitted == []
+
+
+async def test_extracted_linked_git_paths_submit_and_cancel() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    reviewed: list[tuple[object, tuple[str, ...]]] = []
+    context = SimpleNamespace(
+        agent_id="operator-7-fork-linked",
+        work_root="/tmp/linked",
+        authority_sha256="7" * 64,
+    )
+
+    async def review(received_context: object, paths: tuple[str, ...]) -> None:
+        reviewed.append((received_context, paths))
+
+    app.review_linked_git_broker_commit = review  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        submit_screen = screens.LinkedGitCommitPathsScreen(
+            context=context,
+            suggested_paths=("src/app.py", "tests/test_app.py"),
+        )
+        app.push_screen(submit_screen)
+        await pilot.pause()
+
+        await pilot.click("#linked-git-broker-review")
+        await pilot.pause()
+
+        assert app.screen is not submit_screen
+        assert reviewed == [
+            (context, ("src/app.py", "tests/test_app.py")),
+        ]
+
+        cancel_screen = screens.LinkedGitCommitPathsScreen(context=context)
+        app.push_screen(cancel_screen)
+        await pilot.pause()
+
+        await pilot.click("#linked-git-broker-cancel")
+        await pilot.pause()
+
+        assert app.screen is not cancel_screen
+        assert len(reviewed) == 1
+
+
+async def test_extracted_linked_git_recovery_requires_exact_confirmation() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    recovered: list[tuple[object, object, str]] = []
+    context = SimpleNamespace(
+        agent_id="operator-7-fork-linked",
+        work_root="/tmp/linked",
+        authority_sha256="7" * 64,
+    )
+    identity = SimpleNamespace(
+        path="src/app.py",
+        state="file",
+        mode="100644",
+        raw_sha256="1" * 64,
+        raw_blob_oid="2" * 40,
+        index_mode="100644",
+        index_oid="3" * 40,
+    )
+    receipt = SimpleNamespace(
+        transaction_id="e" * 64,
+        branch="pbx/operator-7",
+        head="a" * 40,
+        head_tree="b" * 40,
+        index_tree="b" * 40,
+        upstream="origin/dev",
+        upstream_oid="c" * 40,
+        index_sha256="d" * 64,
+        branch_ref_sha256="5" * 64,
+        branch_reflog_sha256="6" * 64,
+        path_identities=(identity,),
+    )
+    pending = SimpleNamespace(phase="prepared", receipt=receipt)
+
+    async def recover(
+        received_context: object,
+        received_pending: object,
+        confirmation: str,
+    ) -> None:
+        recovered.append((received_context, received_pending, confirmation))
+
+    app.recover_linked_git_broker_commit = recover  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        screen = screens.LinkedGitRecoveryConfirmScreen(
+            context=context,
+            pending=pending,
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+        confirmation = screen.query_one("#linked-git-broker-confirmation", Input)
+
+        confirmation.value = "wrong"
+        screen.submit()
+        await pilot.pause()
+        assert app.screen is screen
+        assert recovered == []
+
+        confirmation.value = screen.expected_confirmation
+        screen.submit()
+        await pilot.pause()
+
+        assert app.screen is not screen
+        assert recovered == [
+            (context, pending, screen.expected_confirmation),
+        ]
 
 
 async def test_extracted_model_elevation_unmount_clears_modal_agent() -> None:

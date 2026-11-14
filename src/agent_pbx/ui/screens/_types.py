@@ -13,3 +13,9 @@ class CustomSlashCommandView(Protocol):
     arg_label: str
     arg_placeholder: str
     arg_required: bool
+
+
+class LinkedGitBrokerTuiContextView(Protocol):
+    agent_id: str
+    work_root: str
+    authority_sha256: str
