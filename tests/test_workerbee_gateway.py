@@ -634,6 +634,17 @@ def test_gateway_automatic_scoped_workbench_transition_keeps_lease(
         profile_label="Workbench",
         updated_by="test",
     )
+    path_policy = policy.resolve_path_domain(
+        agent_id="demo-agent",
+        source_root=binding.source_root,
+    )
+    binding = workspace.prepare(
+        runtime=runtime.selected(),
+        project=binding.project,
+        source_root=binding.source_root,
+        allowed_host_root=path_policy.allowed_host_root,
+        workspace_policy_digest=path_policy.policy_digest,
+    )
     gateway = WorkerBeeGatewayService(
         tmp_path / "gateway-policy",
         runtime,
@@ -780,6 +791,19 @@ def test_gateway_transition_revert_restores_prior_binding(tmp_path: Path) -> Non
         managed_scratch_root=None,
         profile_label="Workbench",
         updated_by="test",
+    )
+    path_policy = policy.resolve_path_domain(
+        agent_id="demo-agent",
+        source_root=binding.source_root,
+    )
+    selected = runtime.selected()
+    assert selected is not None
+    binding = workspace.prepare(
+        runtime=selected,
+        project=binding.project,
+        source_root=binding.source_root,
+        allowed_host_root=path_policy.allowed_host_root,
+        workspace_policy_digest=path_policy.policy_digest,
     )
     gateway = WorkerBeeGatewayService(
         tmp_path / "gateway-policy",
@@ -1595,6 +1619,7 @@ def test_gateway_api_manages_workspace_policy_and_controller_transition(
         )
         assert saved.status_code == 200
         assert saved.json()["effective"]["profile_label"] == "Test Workbench"
+        current_policy_digest = saved.json()["effective_digest"]
 
         preview = client.post(
             "/v2/agents/demo-agent/workerbee/workspace-transitions/preview",
@@ -1609,6 +1634,13 @@ def test_gateway_api_manages_workspace_policy_and_controller_transition(
         assert applied.status_code == 200
         assert applied.json()["changed"] is True
         assert applied.json()["lease"]["project"] == "second"
+        assert applied.json()["workspace_binding"]["binding_id"] != binding["binding_id"]
+        assert applied.json()["workspace_binding"]["path_domain"][
+            "workspace_policy_digest"
+        ] == current_policy_digest
+        assert applied.json()["workspace_binding"]["path_domain"][
+            "allowed_host_root"
+        ] == str((tmp_path / "git").resolve())
         transitions = client.get(
             "/v2/agents/demo-agent/workerbee/workspace-transitions"
         )
@@ -1619,8 +1651,10 @@ def test_gateway_api_manages_workspace_policy_and_controller_transition(
             "/v2/agents/demo-agent/workerbee/workspace-transitions/"
             f"{transitions.json()[0]['transition_id']}/revert"
         )
-        assert reverted.status_code == 200
-        assert reverted.json()["lease"]["workspace_binding_id"] == binding["binding_id"]
+        assert reverted.status_code == 409
+        assert reverted.json()["detail"]["code"] == (
+            "WORKERBEE_WORKSPACE_POLICY_DIGEST_DRIFT"
+        )
 
 
 def test_gateway_api_manages_backend_aware_snapshot_policy(tmp_path: Path) -> None:
@@ -2111,3 +2145,7 @@ def test_active_gateway_use_reconciles_same_lease_metadata_and_denies_foreign_le
         with pytest.raises(WorkerBeeGatewayError) as stale_policy:
             app.state.workerbee_gateway.current_binding(lease_id)
         assert stale_policy.value.code == "WORKERBEE_WORKSPACE_POLICY_DIGEST_DRIFT"
+        assert (
+            app.state.workerbee_gateway.load(lease_id).workspace_binding_id
+            == binding["binding_id"]
+        )

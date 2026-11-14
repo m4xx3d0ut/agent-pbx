@@ -421,6 +421,7 @@ class WorkerBeeGatewayService:
                 str(exc),
             ) from exc
         self._validate_binding_scope(lease, binding)
+        self._validate_current_path_policy(lease, binding)
         self._notify_binding_validated(lease, binding)
         return lease
 
@@ -607,7 +608,7 @@ class WorkerBeeGatewayService:
         """Move one lease to an allowed Git checkout without changing its identity."""
 
         current = self.load(lease.lease_id)
-        runtime, binding = self._refresh_context(current)
+        runtime, binding = self._refresh_context(current, allow_policy_drift=True)
         if self.workspace_policy is None:
             return self.refresh_workspace(current)
         supplied = dict(arguments or {})
@@ -813,6 +814,7 @@ class WorkerBeeGatewayService:
         previous = self.workspace_service.load(str(transition["from_binding_id"]))
         try:
             self.workspace_service.verify_runtime(previous, runtime)
+            self._validate_current_path_policy(current, previous)
             # Re-apply current policy and administrator ceilings before restoring.
             self.workspace_policy.resolve_target(
                 agent_id=current.agent_id,
@@ -984,6 +986,8 @@ class WorkerBeeGatewayService:
     def _refresh_context(
         self,
         lease: WorkerBeeGatewayLease,
+        *,
+        allow_policy_drift: bool = False,
     ) -> tuple[WorkerBeeRuntimeSelection, WorkerBeeWorkspaceBinding]:
         runtime = self.runtime_registry.selected()
         if runtime is None:
@@ -1013,8 +1017,34 @@ class WorkerBeeGatewayService:
                 "WorkerBee lease and workspace binding target different projects.",
             )
         self._validate_binding_scope(lease, binding)
+        if not allow_policy_drift:
+            self._validate_current_path_policy(lease, binding)
         self._notify_binding_validated(lease, binding)
         return runtime, binding
+
+    def _validate_current_path_policy(
+        self,
+        lease: WorkerBeeGatewayLease,
+        binding: WorkerBeeWorkspaceBinding,
+    ) -> None:
+        if self.workspace_policy is None:
+            return
+        try:
+            current = self.workspace_policy.resolve_path_domain(
+                agent_id=lease.agent_id,
+                source_root=binding.source_root,
+            )
+        except WorkerBeeWorkspacePolicyError as exc:
+            raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
+        if (
+            binding.path_domain.workspace_policy_digest != current.policy_digest
+            or binding.path_domain.allowed_host_root != current.allowed_host_root
+        ):
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_WORKSPACE_POLICY_DIGEST_DRIFT",
+                "WorkerBee workspace binding no longer matches effective root policy.",
+                "Prepare or transition to a fresh binding under the current policy.",
+            )
 
     @staticmethod
     def _validate_binding_scope(

@@ -19,6 +19,7 @@ from agent_pbx.workerbee_workspace import (
     WORKERBEE_WORKSPACE_INCLUDE_POLICY_ENV,
     WorkerBeeWorkspaceError,
     WorkerBeeWorkspaceIncludePolicyError,
+    WorkerBeePathDomainMappingReceipt,
     WorkerBeeWorkspaceService,
     configured_workerbee_workspace_include_paths,
 )
@@ -233,6 +234,32 @@ def test_workspace_path_domain_rejects_source_outside_allowed_root(
             allowed_host_root=allowed,
         )
     assert failure.value.code == "WORKERBEE_PATH_DOMAIN_ROOT_DENIED"
+
+
+def test_workspace_release_preserves_typed_path_domain_receipt(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "repo"
+    git_repo(source)
+    selected = runtime(tmp_path, "oss")
+    service = WorkerBeeWorkspaceService(tmp_path / "state")
+    binding = service.prepare(
+        runtime=selected,
+        project="demo",
+        source_root=source,
+    )
+    service.verify_runtime(binding, selected)
+
+    released = service.release(binding.binding_id)
+    reloaded = service.load(binding.binding_id)
+
+    assert isinstance(released.path_domain, WorkerBeePathDomainMappingReceipt)
+    assert isinstance(reloaded.path_domain, WorkerBeePathDomainMappingReceipt)
+    assert reloaded == released
+    assert reloaded.path_domain == binding.path_domain
+    with pytest.raises(WorkerBeeWorkspaceError) as not_ready:
+        service.verify_runtime(reloaded, selected)
+    assert not_ready.value.code == "WORKERBEE_WORKSPACE_BINDING_NOT_READY"
 
 
 def test_debug_binding_uses_exact_materializer_receipt(tmp_path: Path) -> None:

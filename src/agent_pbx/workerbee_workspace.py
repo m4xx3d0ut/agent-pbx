@@ -8,7 +8,7 @@ import secrets
 import stat
 import subprocess
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
 
@@ -602,12 +602,10 @@ class WorkerBeeWorkspaceService:
                     exc.message,
                     exc.remediation,
                 ) from exc
-        updated = WorkerBeeWorkspaceBinding(
-            **{
-                **asdict(binding),
-                "state": "released",
-                "released_at": self.clock(),
-            }
+        updated = replace(
+            binding,
+            state="released",
+            released_at=self.clock(),
         )
         _atomic_private_json(self._receipt_path(binding_id), updated.public_dict())
         return updated
