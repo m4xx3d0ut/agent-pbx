@@ -21098,8 +21098,28 @@ async def test_tui_fresh_edit_fork_launch_includes_linked_git_permission_profile
     app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     monkeypatch.setattr(tmux_support, "list_panes", lambda **_kwargs: [])
 
+    operator_metadata: dict[str, object] = {
+        "agent_type": "operator",
+        "operator_role": "root",
+        "access_mode": "edit",
+        "workerbee_access_profile_ceiling": "trusted-workbench",
+        "workerbee_workspace_policy_digest": "b" * 64,
+    }
+    operator_metadata.update(
+        app.workerbee_profile_metadata(
+            "operator-0",
+            operator_metadata,
+            profile="trusted-workbench",
+        )
+    )
     async with app.run_test():
         app.agents = {
+            "operator-0": {
+                "agent_id": "operator-0",
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "metadata": operator_metadata,
+            },
             "caller-1": {
                 "agent_id": "caller-1",
                 "agent_type": "caller",
@@ -21128,6 +21148,9 @@ async def test_tui_fresh_edit_fork_launch_includes_linked_git_permission_profile
         for item in values
     )
     assert records[0]["metadata"]["linked_git_admin"] == plan.public_dict()  # type: ignore[index]
+    assert records[0]["metadata"]["workerbee_mcp_profile"] == "trusted-workbench"  # type: ignore[index]
+    assert records[0]["metadata"]["workerbee_profile_intent"]["source_entity_id"] == "operator-0"  # type: ignore[index]
+    assert launches[0]["env"]["AGENT_PBX_WORKERBEE_MCP_PROFILE"] == "trusted-workbench"  # type: ignore[index]
 
 
 async def test_tui_resume_leaves_external_lease_dialog_unregistered(
@@ -27617,6 +27640,64 @@ def test_tui_workerbee_gateway_binding_replaces_direct_transport_and_sets_env() 
     assert env["AGENT_PBX_WORKERBEE_BACKEND"] == "platform_debug"
     assert env["AGENT_PBX_WORKERBEE_BACKEND_GENERATION"] == "8"
     assert env["AGENT_PBX_WORKERBEE_WORKSPACE_BINDING_ID"] == "wb-binding"
+
+
+def test_tui_trusted_workerbee_profile_is_independent_from_scoped_edit_authority() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    metadata: dict[str, object] = {
+        "agent_type": "operator",
+        "operator_role": "root",
+        "access_mode": "edit",
+        "operator_authority_profile": "scoped-edit",
+        "workerbee_access_profile_ceiling": "trusted-workbench",
+        "workerbee_workspace_policy_digest": "a" * 64,
+    }
+    metadata.update(
+        app.workerbee_profile_metadata(
+            "operator-6",
+            metadata,
+            profile="trusted-workbench",
+        )
+    )
+    agent = {
+        "agent_id": "operator-6",
+        "agent_type": "operator",
+        "metadata": metadata,
+    }
+    app.agents = {"operator-6": agent}
+
+    assert app.workerbee_profile_for_agent(agent) == "trusted-workbench"
+    env = app.operator_launch_env(
+        agent_id="operator-6",
+        cwd="/tmp/project",
+        mcp_url="http://127.0.0.1:8765/mcp",
+    )
+    assert env["AGENT_PBX_WORKERBEE_MCP_PROFILE"] == "trusted-workbench"
+    assert env["AGENT_PBX_WORKERBEE_GATEWAY_TOKEN"] == ""
+    assert env["AGENT_PBX_WORKERBEE_BACKEND"] == ""
+    assert env["AGENT_PBX_WORKERBEE_BACKEND_GENERATION"] == ""
+    assert env["AGENT_PBX_WORKERBEE_WORKSPACE_BINDING_ID"] == ""
+    assert metadata["operator_authority_profile"] == "scoped-edit"
+
+
+def test_tui_review_fork_cannot_resolve_trusted_workerbee_profile() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    agent = {
+        "agent_id": "operator-6-fork-review",
+        "agent_type": "operator",
+        "metadata": {
+            "agent_type": "operator",
+            "operator_role": "fork",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+            "workerbee_mcp_profile": "trusted-workbench",
+            "workerbee_access_profile_ceiling": "trusted-workbench",
+            "workerbee_workspace_policy_digest": "a" * 64,
+        },
+    }
+
+    with pytest.raises(ValueError, match="missing its durable|review-readonly"):
+        app.workerbee_profile_for_agent(agent)
 
 
 def test_tui_operator_gateway_binding_uses_exact_local_deploy_surface() -> None:

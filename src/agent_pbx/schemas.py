@@ -278,6 +278,7 @@ class ManagedAgentLaunchRequest(BaseModel):
         "dedicated", "outer_if_present", "outer_required"
     ] = "dedicated"
     source_codex_session_id: str | None = Field(default=None, max_length=200)
+    workerbee_profile: Literal["local-deploy"] = "local-deploy"
 
 
 class RuntimeMigrationPreviewRequest(BaseModel):

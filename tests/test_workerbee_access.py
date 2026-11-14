@@ -12,7 +12,12 @@ from agent_pbx.workerbee_access import (
 )
 
 
-def registered_store(tmp_path: Path, *, review: bool = False) -> Store:
+def registered_store(
+    tmp_path: Path,
+    *,
+    review: bool = False,
+    operator: bool = False,
+) -> Store:
     store = Store(tmp_path / "pbx.sqlite")
     store.init()
     store.register_agent(
@@ -20,8 +25,18 @@ def registered_store(tmp_path: Path, *, review: bool = False) -> Store:
             agent_id="agent-1",
             project="demo",
             name="agent-1",
+            agent_type="operator" if operator else "caller",
             metadata={
                 "cwd": str(tmp_path),
+                **(
+                    {
+                        "agent_type": "operator",
+                        "operator_authority_profile": "scoped-edit",
+                        "workerbee_workspace_policy_digest": "a" * 64,
+                    }
+                    if operator
+                    else {}
+                ),
                 **({"access_mode": "review_readonly"} if review else {}),
             },
         )
@@ -121,7 +136,7 @@ def test_trusted_workbench_requires_raised_ceiling_and_supports_local_label(
 
     raised_root = tmp_path / "raised"
     raised = WorkerBeeAccessPolicyService(
-        registered_store(raised_root),
+        registered_store(raised_root, operator=True),
         environ={
             "AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING": "trusted-workbench",
             "AGENT_PBX_WORKERBEE_TRUSTED_WORKBENCH_LABEL": "Rosie Workbench",

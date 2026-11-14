@@ -130,8 +130,15 @@ from .workerbee_gateway import (
     WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
 )
 from .workerbee_modes import (
+    WORKERBEE_ACCESS_PROFILES,
     WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
     reviewed_tools_for_access_profile,
+)
+from .workerbee_profile import (
+    WORKERBEE_PROFILE_INTENT_METADATA_KEY,
+    WorkerBeeProfileIntentError,
+    build_workerbee_profile_intent,
+    resolve_workerbee_profile_intent,
 )
 from .contracts import ActionDefinition
 from .terminal import (
@@ -23265,6 +23272,7 @@ class AgentPBXTUI(App[None]):
         if not isinstance(agent, dict):
             return None
         metadata = self.agent_metadata(agent)
+        workerbee_profile = self.workerbee_profile_for_agent(agent)
         updated_metadata = {
             **metadata,
             "cwd": cwd,
@@ -23273,6 +23281,11 @@ class AgentPBXTUI(App[None]):
             "last_tmux_restart_at": time.time(),
             "last_tmux_restart_mode": "in_place",
             **self.workerbee_gateway_metadata(workerbee_gateway_binding),
+            **self.workerbee_profile_metadata(
+                agent_id,
+                {**metadata, "agent_type": CALLER_AGENT_TYPE},
+                profile=workerbee_profile,
+            ),
         }
         if model_preset is not None:
             updated_metadata.update(model_preset.metadata())
@@ -26289,6 +26302,7 @@ class AgentPBXTUI(App[None]):
         source_cwd: str | None = None,
         work_root: str | None = None,
         review_launch_mode: str | None = None,
+        workerbee_profile: str | None = None,
         workerbee_gateway_binding: Mapping[str, object] | None = None,
     ) -> dict[str, str]:
         logical_id = logical_operator_id or agent_id
@@ -26325,6 +26339,10 @@ class AgentPBXTUI(App[None]):
             "AGENT_PBX_LOGICAL_OPERATOR_ID": logical_id,
             "AGENT_PBX_OPERATOR_CWD": cwd,
             "AGENT_PBX_CWD": cwd,
+            WORKERBEE_GATEWAY_TOKEN_ENV: "",
+            "AGENT_PBX_WORKERBEE_BACKEND": "",
+            "AGENT_PBX_WORKERBEE_BACKEND_GENERATION": "",
+            "AGENT_PBX_WORKERBEE_WORKSPACE_BINDING_ID": "",
         }
         if operator_role == OPERATOR_ROLE_FORK:
             env["AGENT_PBX_OPERATOR_FORK_TRACK_ID"] = resolved_track_id
@@ -26352,6 +26370,19 @@ class AgentPBXTUI(App[None]):
                 )
             if model_preset.verbosity:
                 env["AGENT_PBX_CODEX_VERBOSITY"] = model_preset.verbosity
+        selected_workerbee_profile = str(workerbee_profile or "").strip()
+        if not selected_workerbee_profile:
+            agent = self.agents.get(agent_id)
+            selected_workerbee_profile = (
+                self.workerbee_profile_for_agent(agent)
+                if isinstance(agent, dict)
+                else WORKERBEE_PROFILE_LOCAL_DEPLOY
+            )
+        if selected_workerbee_profile not in WORKERBEE_ACCESS_PROFILES:
+            raise WorkerBeeProfileIntentError(
+                f"unsupported WorkerBee launch profile: {selected_workerbee_profile!r}"
+            )
+        env["AGENT_PBX_WORKERBEE_MCP_PROFILE"] = selected_workerbee_profile
         self.apply_workerbee_gateway_env(env, workerbee_gateway_binding)
         if self.token:
             env[AGENT_PBX_TOKEN_ENV] = self.token
@@ -26615,6 +26646,10 @@ class AgentPBXTUI(App[None]):
             "AGENT_PBX_AGENT_PROJECT": project,
             "AGENT_PBX_PBX_MODE": PBX_REPORT_MODE,
             "AGENT_PBX_CWD": cwd,
+            WORKERBEE_GATEWAY_TOKEN_ENV: "",
+            "AGENT_PBX_WORKERBEE_BACKEND": "",
+            "AGENT_PBX_WORKERBEE_BACKEND_GENERATION": "",
+            "AGENT_PBX_WORKERBEE_WORKSPACE_BINDING_ID": "",
         }
         if model_preset is not None:
             env["AGENT_PBX_CODEX_MODEL_PRESET"] = model_preset.key
@@ -26628,9 +26663,14 @@ class AgentPBXTUI(App[None]):
                 )
             if model_preset.verbosity:
                 env["AGENT_PBX_CODEX_VERBOSITY"] = model_preset.verbosity
-        normalized_workerbee_profile = str(workerbee_profile or "").strip()
-        if normalized_workerbee_profile == CALLER_WORKERBEE_LOCAL_DEPLOY_PROFILE:
-            env["AGENT_PBX_WORKERBEE_MCP_PROFILE"] = normalized_workerbee_profile
+        normalized_workerbee_profile = str(
+            workerbee_profile or WORKERBEE_PROFILE_LOCAL_DEPLOY
+        ).strip()
+        if normalized_workerbee_profile not in WORKERBEE_ACCESS_PROFILES:
+            raise WorkerBeeProfileIntentError(
+                f"unsupported WorkerBee launch profile: {normalized_workerbee_profile!r}"
+            )
+        env["AGENT_PBX_WORKERBEE_MCP_PROFILE"] = normalized_workerbee_profile
         self.apply_workerbee_gateway_env(env, workerbee_gateway_binding)
         if self.token:
             env[AGENT_PBX_TOKEN_ENV] = self.token
@@ -26669,15 +26709,33 @@ class AgentPBXTUI(App[None]):
         self,
         agent: Mapping[str, Any],
     ) -> str:
-        metadata = self.agent_metadata(agent)
-        if str(metadata.get("access_mode") or "").strip() == REVIEW_OPERATOR_FORK_ACCESS_MODE:
-            return WORKERBEE_PROFILE_REVIEW
-        if (
-            str(metadata.get(CALLER_WORKERBEE_PROFILE_METADATA_KEY) or "").strip()
-            == CALLER_WORKERBEE_LOCAL_DEPLOY_PROFILE
-        ):
-            return WORKERBEE_PROFILE_LOCAL_DEPLOY
-        return WORKERBEE_PROFILE_OBSERVE
+        metadata = {
+            **self.agent_metadata(agent),
+            "agent_type": self.agent_type(agent),
+        }
+        return resolve_workerbee_profile_intent(
+            str(agent.get("agent_id") or agent.get("id") or "unknown"),
+            metadata,
+        ).profile
+
+    def workerbee_profile_metadata(
+        self,
+        agent_id: str,
+        metadata: Mapping[str, Any],
+        *,
+        profile: str,
+        source_entity_id: str | None = None,
+    ) -> dict[str, object]:
+        intent = build_workerbee_profile_intent(
+            agent_id,
+            metadata,
+            profile=profile,
+            source_entity_id=source_entity_id,
+        )
+        return {
+            CALLER_WORKERBEE_PROFILE_METADATA_KEY: intent.profile,
+            WORKERBEE_PROFILE_INTENT_METADATA_KEY: intent.public_dict(),
+        }
 
     async def prepare_workerbee_gateway_launch(
         self,
@@ -26805,7 +26863,7 @@ class AgentPBXTUI(App[None]):
             project=project,
             cwd=cwd,
             mcp_url=mcp_url,
-            workerbee_profile=WORKERBEE_PROFILE_OBSERVE,
+            workerbee_profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
             workerbee_gateway_binding=workerbee_gateway_binding,
         )
         env.update(
@@ -26856,6 +26914,13 @@ class AgentPBXTUI(App[None]):
             "spawn_mode": request.get("mode"),
             **self.workerbee_gateway_metadata(workerbee_gateway_binding),
         }
+        metadata.update(
+            self.workerbee_profile_metadata(
+                agent_id,
+                {**metadata, "agent_type": CALLER_AGENT_TYPE},
+                profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+            )
+        )
         response = await self.api_client().post(
             "/v1/agents/register",
             json={
@@ -26968,6 +27033,18 @@ class AgentPBXTUI(App[None]):
             default_source_codex_session_id=default_source_codex_session_id,
             restart_mode=restart_mode,
         )
+        profile_metadata = {
+            **existing_metadata,
+            **generated_metadata,
+            "agent_type": OPERATOR_AGENT_TYPE,
+        }
+        workerbee_profile = (
+            str(
+                (workerbee_gateway_binding or {}).get("lease", {}).get("profile")
+            ).strip()
+            if isinstance((workerbee_gateway_binding or {}).get("lease"), dict)
+            else ""
+        ) or resolve_workerbee_profile_intent(agent_id, profile_metadata).profile
         response = await self.api_client().post(
             "/v1/agents/register",
             json={
@@ -26980,6 +27057,11 @@ class AgentPBXTUI(App[None]):
                     **existing_metadata,
                     **generated_metadata,
                     **self.workerbee_gateway_metadata(workerbee_gateway_binding),
+                    **self.workerbee_profile_metadata(
+                        agent_id,
+                        profile_metadata,
+                        profile=workerbee_profile,
+                    ),
                 },
             },
             headers=auth_headers(self.token),
@@ -28190,14 +28272,11 @@ class AgentPBXTUI(App[None]):
                 "operator_workspace_set_id",
                 "operator_workspace_set_version",
                 "operator_workspace_set_digest",
+                "workerbee_access_profile_ceiling",
+                "workerbee_workspace_policy_digest",
             ):
                 if key in logical_metadata:
                     fork_metadata[key] = logical_metadata[key]
-            if (
-                fork_metadata.get("operator_authority_profile")
-                == "trusted-workbench"
-            ):
-                fork_metadata["workerbee_mcp_profile"] = WORKERBEE_PROFILE_LOCAL_DEPLOY
         review_mcp_approval_servers: tuple[str, ...] = ()
         if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE:
             review_mcp_approval_servers = review_operator_mcp_approval_server_names()
@@ -28244,9 +28323,18 @@ class AgentPBXTUI(App[None]):
         workerbee_profile = (
             WORKERBEE_PROFILE_REVIEW
             if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
-            else str(
-                fork_metadata.get("workerbee_mcp_profile")
-                or WORKERBEE_PROFILE_OBSERVE
+            else (
+                self.workerbee_profile_for_agent(logical_agent)
+                if isinstance(logical_agent, dict)
+                else WORKERBEE_PROFILE_LOCAL_DEPLOY
+            )
+        )
+        fork_metadata.update(
+            self.workerbee_profile_metadata(
+                fork_agent_id,
+                fork_metadata,
+                profile=workerbee_profile,
+                source_entity_id=logical_operator_id,
             )
         )
         workerbee_gateway_binding = await self.prepare_workerbee_gateway_launch(
@@ -28339,6 +28427,7 @@ class AgentPBXTUI(App[None]):
                 work_root=launch_cwd,
                 review_launch_mode=mode,
                 model_preset=launch_preset,
+                workerbee_profile=workerbee_profile,
                 workerbee_gateway_binding=workerbee_gateway_binding,
             )
 

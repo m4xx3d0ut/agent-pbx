@@ -6,7 +6,6 @@ from typing import Any, Mapping
 
 from .store import Store
 from .workerbee_modes import (
-    WORKERBEE_ACCESS_PROFILES,
     WORKERBEE_EXECUTION_CONTROLLED_RUN,
     WORKERBEE_EXECUTION_INTERACTIVE,
     WORKERBEE_PUBLIC_DEFAULT_ACCESS_PROFILE,
@@ -26,6 +25,12 @@ from .workerbee_modes import (
     optional_tools_for_access_profile,
     capability_families_for_profile,
     tools_for_access_profile,
+)
+from .workerbee_profile import (
+    WORKERBEE_PROFILE_CEILING_METADATA_KEY,
+    WORKERBEE_PROFILE_INTENT_METADATA_KEY,
+    WorkerBeeProfileIntentError,
+    build_workerbee_profile_intent,
 )
 
 
@@ -281,11 +286,35 @@ class WorkerBeeAccessPolicyService:
                 "WORKERBEE_ACCESS_PROFILE_CEILING",
                 f"{selected} exceeds the administrator access ceiling.",
             )
+        agent = self.store.get_agent(agent_id) or {}
+        metadata = (
+            dict(agent.get("metadata"))
+            if isinstance(agent.get("metadata"), dict)
+            else {}
+        )
+        metadata["agent_type"] = str(agent.get("agent_type") or "caller")
+        metadata["workerbee_mcp_profile"] = selected
+        metadata[WORKERBEE_PROFILE_CEILING_METADATA_KEY] = str(
+            posture["profile_ceiling"]
+        )
+        try:
+            intent = build_workerbee_profile_intent(
+                agent_id, metadata, profile=selected
+            )
+        except WorkerBeeProfileIntentError as exc:
+            raise WorkerBeeAccessPolicyError(
+                "WORKERBEE_ACCESS_PROFILE_AUTHORITY_MISMATCH",
+                str(exc),
+            ) from exc
         updated = self.store.merge_agent_metadata(
             agent_id,
             {
                 "workerbee_mcp_profile": selected,
                 "workerbee_mcp_profile_updated_by": str(updated_by or "local"),
+                WORKERBEE_PROFILE_CEILING_METADATA_KEY: str(
+                    posture["profile_ceiling"]
+                ),
+                WORKERBEE_PROFILE_INTENT_METADATA_KEY: intent.public_dict(),
             },
             event_type="workerbee_access_profile_updated",
             event_payload={
@@ -391,6 +420,39 @@ class WorkerBeeAccessPolicyService:
                 "At least one WorkerBee policy axis must be supplied.",
             )
         changes["workerbee_policy_updated_by"] = str(updated_by or "local")
+        agent = self.store.get_agent(agent_id) or {}
+        merged_metadata = (
+            dict(agent.get("metadata"))
+            if isinstance(agent.get("metadata"), dict)
+            else {}
+        )
+        merged_metadata["agent_type"] = str(
+            agent.get("agent_type") or "caller"
+        )
+        merged_metadata.update(changes)
+        merged_metadata[WORKERBEE_PROFILE_CEILING_METADATA_KEY] = str(
+            posture["profile_ceiling"]
+        )
+        selected_profile = str(
+            merged_metadata.get("workerbee_mcp_profile")
+            or WORKERBEE_PUBLIC_DEFAULT_ACCESS_PROFILE
+        )
+        try:
+            changes[WORKERBEE_PROFILE_INTENT_METADATA_KEY] = (
+                build_workerbee_profile_intent(
+                    agent_id,
+                    merged_metadata,
+                    profile=selected_profile,
+                ).public_dict()
+            )
+        except WorkerBeeProfileIntentError as exc:
+            raise WorkerBeeAccessPolicyError(
+                "WORKERBEE_ACCESS_PROFILE_AUTHORITY_MISMATCH",
+                str(exc),
+            ) from exc
+        changes[WORKERBEE_PROFILE_CEILING_METADATA_KEY] = str(
+            posture["profile_ceiling"]
+        )
         updated = self.store.merge_agent_metadata(
             agent_id,
             changes,
@@ -398,7 +460,16 @@ class WorkerBeeAccessPolicyService:
             event_payload={
                 "agent_id": agent_id,
                 "updated_by": str(updated_by or "local"),
-                "changed_axes": sorted(key for key in changes if key != "workerbee_policy_updated_by"),
+                "changed_axes": sorted(
+                    key
+                    for key in changes
+                    if key
+                    not in {
+                        "workerbee_policy_updated_by",
+                        WORKERBEE_PROFILE_INTENT_METADATA_KEY,
+                        WORKERBEE_PROFILE_CEILING_METADATA_KEY,
+                    }
+                ),
             },
         )
         if updated is None:
@@ -418,6 +489,11 @@ class WorkerBeeAccessPolicyService:
                 and value != current["execution_lane"]
             )
             for key, value in changes.items()
-            if key != "workerbee_policy_updated_by"
+            if key
+            not in {
+                "workerbee_policy_updated_by",
+                WORKERBEE_PROFILE_INTENT_METADATA_KEY,
+                WORKERBEE_PROFILE_CEILING_METADATA_KEY,
+            }
         )
         return result

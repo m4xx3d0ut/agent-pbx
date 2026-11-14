@@ -155,6 +155,10 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     assert any("AGENT_PBX_AGENT_PROJECT=demo" in item for item in commands[0])
     assert any(f"AGENT_PBX_CWD={repo}" in item for item in commands[0])
     assert any("AGENT_PBX_PBX_MODE=report" in item for item in commands[0])
+    assert any(
+        "AGENT_PBX_WORKERBEE_MCP_PROFILE=local-deploy" in item
+        for item in commands[0]
+    )
     assert any("AGENT_PBX_SOURCE_CODEX_SESSION_ID=source-session-1" in item for item in commands[0])
     assert any("AGENT_PBX_MANAGED_BOOTSTRAP_ID=" in item for item in commands[0])
     assert any("CODEX_NON_INTERACTIVE=1" in item for item in commands[0])
@@ -173,6 +177,8 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     metadata = store.get_agent("codex-demo")["metadata"]  # type: ignore[index]
     assert metadata["managed_bootstrap_state"] == "delivered"
     assert metadata["source_codex_session_id"] == "source-session-1"
+    assert metadata["workerbee_mcp_profile"] == "local-deploy"
+    assert metadata["workerbee_profile_intent"]["profile"] == "local-deploy"
 
     repeated = runtime.launch(
         project_path=str(repo),
@@ -403,7 +409,18 @@ def test_managed_runtime_api_discovers_projects_and_persists_migration(
     assert preview.status_code == 200
     assert preview.json()["agent_id"] == "codex-demo"
     assert preview.json()["source_codex_session_id"] == "source-session-api"
+    assert preview.json()["workerbee_profile"] == "local-deploy"
     assert "check_for_update_on_startup=false" in preview.json()["command"]
+
+    denied = client.post(
+        "/v2/agents/managed-launch/preview",
+        headers=headers,
+        json={
+            "project_path": str(repo),
+            "workerbee_profile": "trusted-workbench",
+        },
+    )
+    assert denied.status_code == 422
 
     register = client.post(
         "/v1/agents/register",

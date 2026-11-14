@@ -1789,6 +1789,7 @@ def create_app(
                 runtime_server_mode=payload.runtime_server_mode,
                 server_url=local_server,
                 source_codex_session_id=payload.source_codex_session_id,
+                workerbee_profile=payload.workerbee_profile,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1813,6 +1814,7 @@ def create_app(
                 server_url=local_server,
                 token=resolved_config.token,
                 source_codex_session_id=payload.source_codex_session_id,
+                workerbee_profile=payload.workerbee_profile,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

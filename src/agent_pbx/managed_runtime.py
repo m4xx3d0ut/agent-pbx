@@ -39,6 +39,14 @@ from .runtime_tmux import (
 from .schemas import AgentRegisterRequest
 from .store import Store
 from .tmux_binary import configured_tmux_binary, managed_tmux_launch_environment
+from .workerbee_modes import WORKERBEE_PROFILE_LOCAL_DEPLOY
+from .workerbee_profile import (
+    WORKERBEE_PROFILE_CEILING_METADATA_KEY,
+    WORKERBEE_PROFILE_INTENT_METADATA_KEY,
+    WORKERBEE_PROFILE_METADATA_KEY,
+    build_workerbee_profile_intent,
+    resolve_workerbee_profile_intent,
+)
 
 
 PROJECT_ROOTS_ENV = "AGENT_PBX_PROJECT_ROOTS"
@@ -154,6 +162,7 @@ class ManagedRuntimeService:
         runtime_server_mode: str = "dedicated",
         server_url: str = "http://127.0.0.1:8765",
         source_codex_session_id: str | None = None,
+        workerbee_profile: str = WORKERBEE_PROFILE_LOCAL_DEPLOY,
     ) -> dict[str, Any]:
         path = self._validated_project_path(project_path)
         project_name = path.name
@@ -172,6 +181,10 @@ class ManagedRuntimeService:
             raise ValueError("elevated profiles require an approved model lease")
         if profile.migration_only:
             raise ValueError("migration-only profiles cannot launch new agents")
+        if workerbee_profile != WORKERBEE_PROFILE_LOCAL_DEPLOY:
+            raise ValueError(
+                "managed caller launches are fixed to the local-deploy WorkerBee profile"
+            )
         catalog = self.catalog_loader(self.codex_bin)
         validation = validate_managed_profile(profile, catalog)
         if not validation.valid:
@@ -185,6 +198,7 @@ class ManagedRuntimeService:
             project=project_name,
             cwd=path,
             source_codex_session_id=source_codex_session_id,
+            workerbee_profile=workerbee_profile,
         )
         bootstrap_id = managed_caller_bootstrap_id(
             agent_id=resolved_agent_id,
@@ -192,6 +206,7 @@ class ManagedRuntimeService:
             profile_id=profile_id,
             runtime_server_mode=runtime_server_mode,
             source_codex_session_id=source_codex_session_id,
+            workerbee_profile=workerbee_profile,
         )
         return {
             "agent_id": resolved_agent_id,
@@ -217,6 +232,7 @@ class ManagedRuntimeService:
             ).hexdigest(),
             "source_codex_session_id": str(source_codex_session_id or "").strip()
             or None,
+            "workerbee_profile": workerbee_profile,
             "warnings": list(validation.warnings),
         }
 
@@ -230,6 +246,7 @@ class ManagedRuntimeService:
         server_url: str = "http://127.0.0.1:8765",
         token: str | None = None,
         source_codex_session_id: str | None = None,
+        workerbee_profile: str = WORKERBEE_PROFILE_LOCAL_DEPLOY,
     ) -> dict[str, Any]:
         existing = self._idempotent_launch_result(
             project_path=project_path,
@@ -237,6 +254,7 @@ class ManagedRuntimeService:
             profile_id=profile_id,
             runtime_server_mode=runtime_server_mode,
             source_codex_session_id=source_codex_session_id,
+            workerbee_profile=workerbee_profile,
         )
         if existing is not None:
             return existing
@@ -247,6 +265,7 @@ class ManagedRuntimeService:
             runtime_server_mode=runtime_server_mode,
             server_url=server_url,
             source_codex_session_id=source_codex_session_id,
+            workerbee_profile=workerbee_profile,
         )
         identity_data = preview["runtime_server"]
         identity = TmuxServerIdentity(
@@ -279,6 +298,7 @@ class ManagedRuntimeService:
             "AGENT_PBX_MODE": "report",
             "AGENT_PBX_MANAGED_BOOTSTRAP_ID": str(preview["bootstrap_id"]),
             "CODEX_NON_INTERACTIVE": "1",
+            "AGENT_PBX_WORKERBEE_MCP_PROFILE": str(preview["workerbee_profile"]),
         }
         if preview.get("source_codex_session_id"):
             env["AGENT_PBX_SOURCE_CODEX_SESSION_ID"] = str(
@@ -340,6 +360,18 @@ class ManagedRuntimeService:
             )
             if pane is None:
                 raise RuntimeError("launched pane was not visible on the runtime server")
+            profile_metadata = {
+                "agent_type": "caller",
+                WORKERBEE_PROFILE_METADATA_KEY: str(preview["workerbee_profile"]),
+                WORKERBEE_PROFILE_CEILING_METADATA_KEY: (
+                    WORKERBEE_PROFILE_LOCAL_DEPLOY
+                ),
+            }
+            profile_intent = build_workerbee_profile_intent(
+                str(preview["agent_id"]),
+                profile_metadata,
+                profile=str(preview["workerbee_profile"]),
+            )
             metadata = {
                 "cwd": str(preview["project_path"]),
                 "launched_by": "agent-pbx-managed-runtime",
@@ -372,6 +404,11 @@ class ManagedRuntimeService:
                 ],
                 "managed_bootstrap_state": "delivered",
                 "source_codex_session_id": preview.get("source_codex_session_id"),
+                WORKERBEE_PROFILE_METADATA_KEY: str(preview["workerbee_profile"]),
+                WORKERBEE_PROFILE_CEILING_METADATA_KEY: (
+                    WORKERBEE_PROFILE_LOCAL_DEPLOY
+                ),
+                WORKERBEE_PROFILE_INTENT_METADATA_KEY: profile_intent.public_dict(),
             }
             agent, mapping = self.store.create_managed_agent_runtime(
                 AgentRegisterRequest(
@@ -400,6 +437,15 @@ class ManagedRuntimeService:
                         "managed_bootstrap_version": preview["bootstrap_version"],
                         "source_codex_session_id": preview.get(
                             "source_codex_session_id"
+                        ),
+                        WORKERBEE_PROFILE_METADATA_KEY: str(
+                            preview["workerbee_profile"]
+                        ),
+                        WORKERBEE_PROFILE_CEILING_METADATA_KEY: (
+                            WORKERBEE_PROFILE_LOCAL_DEPLOY
+                        ),
+                        WORKERBEE_PROFILE_INTENT_METADATA_KEY: (
+                            profile_intent.public_dict()
                         ),
                     },
                 },
@@ -430,6 +476,7 @@ class ManagedRuntimeService:
         profile_id: str,
         runtime_server_mode: str,
         source_codex_session_id: str | None,
+        workerbee_profile: str,
     ) -> dict[str, Any] | None:
         path = self._validated_project_path(project_path)
         resolved_agent_id = normalize_managed_agent_id(agent_id, project_name=path.name)
@@ -442,12 +489,18 @@ class ManagedRuntimeService:
             profile_id=profile_id,
             runtime_server_mode=runtime_server_mode,
             source_codex_session_id=source_codex_session_id,
+            workerbee_profile=workerbee_profile,
         )
         metadata = (
             dict(existing.get("metadata") or {})
             if isinstance(existing.get("metadata"), dict)
             else {}
         )
+        intent = resolve_workerbee_profile_intent(resolved_agent_id, metadata)
+        if intent.profile != workerbee_profile:
+            raise ValueError(
+                "managed launch WorkerBee profile differs from the persisted intent"
+            )
         mapping = self.store.get_tmux_runtime_mapping(resolved_agent_id)
         if (
             metadata.get("managed_bootstrap_id") != bootstrap_id

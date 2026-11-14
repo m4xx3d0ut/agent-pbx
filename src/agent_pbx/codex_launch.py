@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Iterable, Mapping
+from typing import Iterable, Mapping
 
 
 MANAGED_CALLER_BOOTSTRAP_VERSION = "agent-pbx-managed-caller-v1"
@@ -70,6 +70,7 @@ def managed_caller_bootstrap_prompt(
     project: str,
     cwd: str | Path,
     source_codex_session_id: str | None = None,
+    workerbee_profile: str = "local-deploy",
 ) -> str:
     source_session = str(source_codex_session_id or "").strip()
     lines = [
@@ -82,6 +83,7 @@ def managed_caller_bootstrap_prompt(
         f"- metadata.cwd: {Path(cwd).expanduser().resolve(strict=False)}",
         '- metadata.pbx_mode: "report"',
         '- metadata.launched_by: "agent-pbx-managed-runtime"',
+        f'- metadata.workerbee_mcp_profile: "{workerbee_profile}"',
         f"- metadata.reporting_agent_id: {agent_id}",
         "- metadata.codex_session_id: the current Codex session id",
     ]
@@ -108,6 +110,7 @@ def managed_caller_bootstrap_id(
     profile_id: str,
     runtime_server_mode: str,
     source_codex_session_id: str | None = None,
+    workerbee_profile: str = "local-deploy",
 ) -> str:
     payload = {
         "version": MANAGED_CALLER_BOOTSTRAP_VERSION,
@@ -117,5 +120,8 @@ def managed_caller_bootstrap_id(
         "runtime_server_mode": runtime_server_mode,
         "source_codex_session_id": str(source_codex_session_id or "").strip(),
     }
+    selected_workerbee_profile = str(workerbee_profile or "").strip()
+    if selected_workerbee_profile and selected_workerbee_profile != "local-deploy":
+        payload["workerbee_profile"] = selected_workerbee_profile
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
