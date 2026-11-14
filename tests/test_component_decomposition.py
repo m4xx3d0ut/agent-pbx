@@ -109,6 +109,14 @@ def test_future_component_ownership_rules_reject_absolute_and_relative_bypasses(
         and "agent_pbx.persistence.repositories" in error
         for error in errors
     )
+
+    controller_cycle = tmp_path / "src/agent_pbx/ui/controllers/cycle.py"
+    controller_cycle.write_text("from ...tui import AgentPBXTUI\n", encoding="utf-8")
+    cycle_errors = checker.ownership_errors()
+    assert any(
+        "ui/controllers/cycle.py" in error and "agent_pbx.tui" in error
+        for error in cycle_errors
+    )
     assert any("api_routes/agents.py" in error and "agent_pbx.store" in error for error in errors)
     assert any(
         "persistence/repositories/agents.py" in error and "agent_pbx.api" in error

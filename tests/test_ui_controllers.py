@@ -1,10 +1,35 @@
+from types import SimpleNamespace
+
 import pytest
 
 from agent_pbx.contracts import ActionDefinition
 from agent_pbx.ui.actions import ActionRegistry
 from agent_pbx.ui.async_jobs import AsyncGenerationGate
+from agent_pbx.ui.controllers import TUIController, controller_method
 from agent_pbx.ui.focus import FocusGenerationGuard
 from agent_pbx.ui.panels.joplin import JoplinPanelState
+
+
+class _ExampleController(TUIController[SimpleNamespace]):
+    def increment(self, amount: int = 1) -> int:
+        self.value += amount
+        return self.value
+
+
+class _ExampleHost(SimpleNamespace):
+    increment = controller_method("controller", "increment")
+
+    def __init__(self) -> None:
+        super().__init__(value=1)
+        self.controller = _ExampleController(self)
+
+
+def test_controller_method_preserves_host_state_and_legacy_call_shape() -> None:
+    host = _ExampleHost()
+
+    assert host.increment(2) == 3
+    assert host.value == 3
+    assert host.controller.value == 3
 
 
 def test_action_registry_rejects_duplicate_ids() -> None:

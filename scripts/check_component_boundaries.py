@@ -83,6 +83,7 @@ OWNERSHIP_RULES = {
             "agent_pbx.api_services",
             "agent_pbx.persistence.repositories",
             "agent_pbx.store",
+            "agent_pbx.tui",
             "fastapi",
             "sqlite3",
         ],
