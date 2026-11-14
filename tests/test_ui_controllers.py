@@ -12,6 +12,7 @@ from agent_pbx.ui.controllers.github import GitHubController
 from agent_pbx.ui.controllers.joplin import JoplinController
 from agent_pbx.ui.controllers.operator_handoffs import OperatorHandoffController
 from agent_pbx.ui.controllers.references import PromptReferenceController
+from agent_pbx.ui.controllers.workerbee import WorkerBeeController
 from agent_pbx.ui.controllers.workerbee_projection import (
     WorkerBeeProjectionController,
 )
@@ -208,6 +209,13 @@ def test_operator_handoff_controller_preserves_legacy_tui_entry_points() -> None
             }
         ],
     )[0]["handoff_id"] == "handoff-1"
+
+
+def test_workerbee_controller_preserves_legacy_tui_entry_points() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert isinstance(app._workerbee_controller, WorkerBeeController)
+    assert app.load_workerbee_status.__self__ is app._workerbee_controller
 
 
 def test_action_registry_rejects_duplicate_ids() -> None:

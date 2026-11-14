@@ -43,6 +43,7 @@ from .github import GitHubController
 from .joplin import JoplinController
 from .operator_handoffs import OperatorHandoffController
 from .references import PromptReferenceController
+from .workerbee import WorkerBeeController
 from .workerbee_projection import WorkerBeeProjectionController
 
 
@@ -86,6 +87,7 @@ __all__ = [
     "JoplinController",
     "OperatorHandoffController",
     "TUIController",
+    "WorkerBeeController",
     "WorkerBeeProjectionController",
     "controller_method",
     "github_ref_number",
