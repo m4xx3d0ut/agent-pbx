@@ -26,6 +26,14 @@ class TUIController(Generic[HostT]):
     def host(self) -> HostT:
         return cast(HostT, object.__getattribute__(self, "_host"))
 
+    def __getattribute__(self, name: str) -> Any:
+        if not name.startswith("_") and name != "host":
+            host = object.__getattribute__(self, "_host")
+            host_values = getattr(host, "__dict__", {})
+            if name in host_values:
+                return host_values[name]
+        return object.__getattribute__(self, name)
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self.host, name)
 

@@ -9,6 +9,7 @@ from agent_pbx.ui.actions import ActionRegistry
 from agent_pbx.ui.async_jobs import AsyncGenerationGate
 from agent_pbx.ui.controllers import TUIController, controller_method
 from agent_pbx.ui.controllers.github import GitHubController
+from agent_pbx.ui.controllers.joplin import JoplinController
 from agent_pbx.ui.controllers.references import PromptReferenceController
 from agent_pbx.ui.controllers.workerbee_projection import (
     WorkerBeeProjectionController,
@@ -152,6 +153,44 @@ def test_prompt_reference_controller_preserves_public_aliases_and_formatting() -
     assert ui_references.joplin_note_ref_completion_tokens(
         [{"id": "note-1", "title": "Release Plan"}]
     ) == ("@joplin:Release-Plan",)
+
+
+def test_joplin_controller_preserves_legacy_status_formatters() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert isinstance(app._joplin_controller, JoplinController)
+    assert (
+        app.format_joplin_sync_summary(
+            {
+                "enabled": True,
+                "write_sync": {"running": 0, "pending": 1},
+            }
+        )
+        == "Writes: queued 1"
+    )
+    assert (
+        app.format_joplin_profile_summary(
+            {
+                "profile_validation": {
+                    "running": 0,
+                    "pending": 0,
+                    "current_status": "succeeded",
+                }
+            },
+            {"pending_total": 0},
+        )
+        == "Profile: ok"
+    )
+    assert app.format_joplin_time(0.0) == "1970-01-01"
+
+
+def test_controller_honors_instance_level_host_overrides() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    replacement = object()
+    app.ensure_joplin_available = replacement  # type: ignore[method-assign]
+
+    assert app._joplin_controller.ensure_joplin_available is replacement
 
 
 def test_action_registry_rejects_duplicate_ids() -> None:

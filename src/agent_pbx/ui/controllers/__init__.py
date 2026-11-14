@@ -40,6 +40,7 @@ from ..references import (
 )
 from ._base import ControllerHost, TUIController, controller_method
 from .github import GitHubController
+from .joplin import JoplinController
 from .references import PromptReferenceController
 from .workerbee_projection import WorkerBeeProjectionController
 
@@ -81,6 +82,7 @@ __all__ = [
     "pull_request_ref_completion_tokens",
     "ControllerHost",
     "GitHubController",
+    "JoplinController",
     "TUIController",
     "WorkerBeeProjectionController",
     "controller_method",
