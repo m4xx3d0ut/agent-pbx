@@ -131,13 +131,18 @@ from .workerbee_gateway import (
 )
 from .workerbee_modes import (
     WORKERBEE_ACCESS_PROFILES,
+    WORKERBEE_PROFILE_RANK,
     WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
     reviewed_tools_for_access_profile,
 )
 from .workerbee_profile import (
+    WORKERBEE_PROFILE_CEILING_METADATA_KEY,
     WORKERBEE_PROFILE_INTENT_METADATA_KEY,
+    WORKERBEE_WORKSPACE_POLICY_DIGEST_METADATA_KEY,
     WorkerBeeProfileIntentError,
     build_workerbee_profile_intent,
+    configured_operator_workerbee_profile,
+    has_explicit_workerbee_profile,
     resolve_workerbee_profile_intent,
 )
 from .contracts import ActionDefinition
@@ -26737,6 +26742,100 @@ class AgentPBXTUI(App[None]):
             WORKERBEE_PROFILE_INTENT_METADATA_KEY: intent.public_dict(),
         }
 
+    async def operator_workerbee_server_authority(
+        self,
+        *,
+        profile: str | None,
+        expected_ceiling: str = "",
+        expected_digest: str = "",
+    ) -> tuple[str, dict[str, str]]:
+        """Resolve profile authority from the daemon, never the TUI environment."""
+
+        try:
+            response = await self.api_client().get(
+                "/v2/workerbee/workspace-policy",
+                headers=auth_headers(self.token),
+                timeout=30,
+            )
+            response.raise_for_status()
+            view = response.json()
+        except Exception as exc:
+            raise WorkerBeeProfileIntentError(
+                "WorkerBee server policy evidence is unavailable"
+            ) from exc
+        if not isinstance(view, dict):
+            raise WorkerBeeProfileIntentError(
+                "WorkerBee server policy evidence is malformed"
+            )
+        access_posture = view.get("access_posture")
+        if not isinstance(access_posture, dict):
+            raise WorkerBeeProfileIntentError(
+                "WorkerBee server access posture is unavailable"
+            )
+        configured_default = str(
+            access_posture.get("operator_default_effective_profile") or ""
+        ).strip()
+        ceiling = str(access_posture.get("profile_ceiling") or "").strip()
+        if configured_default not in {
+            WORKERBEE_PROFILE_OBSERVE,
+            WORKERBEE_PROFILE_LOCAL_DEPLOY,
+            WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+        } or ceiling not in {
+            WORKERBEE_PROFILE_OBSERVE,
+            WORKERBEE_PROFILE_LOCAL_DEPLOY,
+            WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+        }:
+            raise WorkerBeeProfileIntentError(
+                "WorkerBee server access posture contains an invalid Operator profile"
+            )
+        selected = str(profile or configured_default).strip()
+        if selected not in {
+            WORKERBEE_PROFILE_OBSERVE,
+            WORKERBEE_PROFILE_LOCAL_DEPLOY,
+            WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+        } or WORKERBEE_PROFILE_RANK[selected] > WORKERBEE_PROFILE_RANK[ceiling]:
+            raise WorkerBeeProfileIntentError(
+                "WorkerBee Operator profile exceeds the daemon-resolved ceiling"
+            )
+        if expected_ceiling:
+            if expected_ceiling not in WORKERBEE_PROFILE_RANK:
+                raise WorkerBeeProfileIntentError(
+                    "WorkerBee durable access-profile ceiling is invalid"
+                )
+            if (
+                WORKERBEE_PROFILE_RANK[expected_ceiling]
+                > WORKERBEE_PROFILE_RANK[ceiling]
+            ):
+                raise WorkerBeeProfileIntentError(
+                    "WorkerBee access-profile ceiling is stale or mismatched"
+                )
+        metadata = {WORKERBEE_PROFILE_CEILING_METADATA_KEY: ceiling}
+        if selected != WORKERBEE_PROFILE_TRUSTED_WORKBENCH:
+            return selected, metadata
+        effective = view.get("effective")
+        digest = str(view.get("effective_digest") or "").strip()
+        if (
+            not isinstance(effective, dict)
+            or effective.get("policy") != "scoped-workbench"
+            or not isinstance(effective.get("allowed_roots"), list)
+            or not effective["allowed_roots"]
+            or any(
+                not isinstance(root, str) or not root.strip()
+                for root in effective["allowed_roots"]
+            )
+            or bool(view.get("constrained"))
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise WorkerBeeProfileIntentError(
+                "trusted-workbench requires unconstrained scoped-workbench root-set evidence"
+            )
+        if expected_digest and expected_digest != digest:
+            raise WorkerBeeProfileIntentError(
+                "trusted-workbench workspace-policy digest is stale or mismatched"
+            )
+        metadata[WORKERBEE_WORKSPACE_POLICY_DIGEST_METADATA_KEY] = digest
+        return selected, metadata
+
     async def prepare_workerbee_gateway_launch(
         self,
         *,
@@ -26838,6 +26937,11 @@ class AgentPBXTUI(App[None]):
             if isinstance(binding.get("workspace_binding"), dict)
             else {}
         )
+        path_domain = (
+            workspace.get("path_domain")
+            if isinstance(workspace.get("path_domain"), dict)
+            else {}
+        )
         values = {
             WORKERBEE_WORKSPACE_BINDING_METADATA_KEY: workspace.get("binding_id"),
             WORKERBEE_GATEWAY_LEASE_METADATA_KEY: lease.get("lease_id"),
@@ -26845,6 +26949,12 @@ class AgentPBXTUI(App[None]):
             "workerbee_backend_generation": lease.get("backend_generation"),
             "workerbee_binding_state": workspace.get("state"),
             CALLER_WORKERBEE_PROFILE_METADATA_KEY: lease.get("profile"),
+            WORKERBEE_WORKSPACE_POLICY_DIGEST_METADATA_KEY: path_domain.get(
+                "workspace_policy_digest"
+            ),
+            "workerbee_path_domain_receipt_sha256": path_domain.get(
+                "receipt_sha256"
+            ),
         }
         return {key: value for key, value in values.items() if value is not None}
 
@@ -27017,6 +27127,7 @@ class AgentPBXTUI(App[None]):
         restart_mode: str | None = None,
         workerbee_gateway_binding: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
+        existing_entity = isinstance(self.agents.get(agent_id), dict)
         existing_metadata = self.operator_metadata_for(agent_id)
         generated_metadata = self.operator_root_metadata(
             agent_id,
@@ -27038,13 +27149,53 @@ class AgentPBXTUI(App[None]):
             **generated_metadata,
             "agent_type": OPERATOR_AGENT_TYPE,
         }
-        workerbee_profile = (
+        lease_profile = (
             str(
                 (workerbee_gateway_binding or {}).get("lease", {}).get("profile")
             ).strip()
             if isinstance((workerbee_gateway_binding or {}).get("lease"), dict)
             else ""
-        ) or resolve_workerbee_profile_intent(agent_id, profile_metadata).profile
+        )
+        explicit_profile = has_explicit_workerbee_profile(profile_metadata)
+        entity_profile = configured_operator_workerbee_profile(
+            agent_id,
+            profile_metadata,
+            configured_default=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+            existing_entity=existing_entity,
+        )
+        if existing_entity and not explicit_profile and not lease_profile:
+            workerbee_profile = entity_profile
+        else:
+            if lease_profile and explicit_profile and lease_profile != entity_profile:
+                raise WorkerBeeProfileIntentError(
+                    "WorkerBee lease profile does not match durable entity intent"
+                )
+            server_profile, server_metadata = (
+                await self.operator_workerbee_server_authority(
+                    profile=lease_profile or (entity_profile if explicit_profile else None),
+                    expected_ceiling=str(
+                        profile_metadata.get(WORKERBEE_PROFILE_CEILING_METADATA_KEY)
+                        or ""
+                    ).strip(),
+                    expected_digest=str(
+                        profile_metadata.get(
+                            WORKERBEE_WORKSPACE_POLICY_DIGEST_METADATA_KEY
+                        )
+                        or ""
+                    ).strip(),
+                )
+            )
+            profile_metadata.update(server_metadata)
+            workerbee_profile = (
+                entity_profile
+                if explicit_profile
+                else configured_operator_workerbee_profile(
+                    agent_id,
+                    profile_metadata,
+                    configured_default=server_profile,
+                    existing_entity=False,
+                )
+            )
         response = await self.api_client().post(
             "/v1/agents/register",
             json={
@@ -27054,8 +27205,7 @@ class AgentPBXTUI(App[None]):
                 "agent_type": OPERATOR_AGENT_TYPE,
                 "pbx_active": True,
                 "metadata": {
-                    **existing_metadata,
-                    **generated_metadata,
+                    **profile_metadata,
                     **self.workerbee_gateway_metadata(workerbee_gateway_binding),
                     **self.workerbee_profile_metadata(
                         agent_id,
@@ -28329,6 +28479,23 @@ class AgentPBXTUI(App[None]):
                 else WORKERBEE_PROFILE_LOCAL_DEPLOY
             )
         )
+        if workerbee_profile == WORKERBEE_PROFILE_TRUSTED_WORKBENCH:
+            workerbee_profile, server_metadata = (
+                await self.operator_workerbee_server_authority(
+                    profile=workerbee_profile,
+                    expected_ceiling=str(
+                        fork_metadata.get(WORKERBEE_PROFILE_CEILING_METADATA_KEY)
+                        or ""
+                    ).strip(),
+                    expected_digest=str(
+                        fork_metadata.get(
+                            WORKERBEE_WORKSPACE_POLICY_DIGEST_METADATA_KEY
+                        )
+                        or ""
+                    ).strip(),
+                )
+            )
+            fork_metadata.update(server_metadata)
         fork_metadata.update(
             self.workerbee_profile_metadata(
                 fork_agent_id,

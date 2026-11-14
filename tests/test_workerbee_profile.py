@@ -8,6 +8,7 @@ from agent_pbx.workerbee_profile import (
     WORKERBEE_PROFILE_INTENT_METADATA_KEY,
     WorkerBeeProfileIntentError,
     build_workerbee_profile_intent,
+    configured_operator_workerbee_profile,
     resolve_workerbee_profile_intent,
 )
 
@@ -91,4 +92,78 @@ def test_profile_above_independent_ceiling_fails_closed() -> None:
     metadata["workerbee_access_profile_ceiling"] = "local-deploy"
 
     with pytest.raises(WorkerBeeProfileIntentError, match="independent"):
+        build_workerbee_profile_intent("operator-6", metadata)
+
+
+def test_configured_operator_default_applies_only_to_new_root() -> None:
+    metadata = {
+        "agent_type": "operator",
+        "operator_role": "root",
+        "access_mode": "edit",
+        "workerbee_access_profile_ceiling": "trusted-workbench",
+        "workerbee_workspace_policy_digest": "a" * 64,
+    }
+
+    assert configured_operator_workerbee_profile(
+        "operator-6",
+        metadata,
+        configured_default="trusted-workbench",
+        existing_entity=False,
+    ) == "trusted-workbench"
+    assert configured_operator_workerbee_profile(
+        "operator-6",
+        metadata,
+        configured_default="observe-local",
+        existing_entity=False,
+    ) == "observe-local"
+    assert configured_operator_workerbee_profile(
+        "operator-6",
+        metadata,
+        configured_default="trusted-workbench",
+        existing_entity=True,
+    ) == "local-deploy"
+
+
+def test_explicit_entity_profile_overrides_configured_operator_default() -> None:
+    metadata = trusted_operator_metadata()
+    metadata["workerbee_mcp_profile"] = "local-deploy"
+    intent = build_workerbee_profile_intent(
+        "operator-6",
+        metadata,
+        profile="local-deploy",
+    )
+    metadata[WORKERBEE_PROFILE_INTENT_METADATA_KEY] = intent.public_dict()
+
+    assert configured_operator_workerbee_profile(
+        "operator-6",
+        metadata,
+        configured_default="trusted-workbench",
+        existing_entity=False,
+    ) == "local-deploy"
+
+
+def test_configured_operator_default_never_broadens_callers_or_reviews() -> None:
+    assert configured_operator_workerbee_profile(
+        "caller-1",
+        {"agent_type": "caller"},
+        configured_default="trusted-workbench",
+        existing_entity=False,
+    ) == "local-deploy"
+    assert configured_operator_workerbee_profile(
+        "operator-6-review",
+        {
+            "agent_type": "operator",
+            "fork_purpose": "review",
+            "access_mode": "review_readonly",
+        },
+        configured_default="trusted-workbench",
+        existing_entity=False,
+    ) == "review-readonly"
+
+
+def test_trusted_profile_rejects_malformed_workspace_policy_digest() -> None:
+    metadata = trusted_operator_metadata()
+    metadata["workerbee_workspace_policy_digest"] = "not-a-digest"
+
+    with pytest.raises(WorkerBeeProfileIntentError, match="valid.*digest"):
         build_workerbee_profile_intent("operator-6", metadata)

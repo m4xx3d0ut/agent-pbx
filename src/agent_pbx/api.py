@@ -38,7 +38,7 @@ from .auth import (
     require_global_controller,
     require_token,
 )
-from .config import ServerConfig
+from .config import OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV, ServerConfig
 from .compat import compatibility_posture
 from .codex_sessions import enrich_codex_session_metadata
 from .codex_config import load_codex_config_view, patch_codex_config
@@ -851,7 +851,18 @@ def create_app(
     )
     workerbee_workspace_policy = WorkerBeeWorkspacePolicyService(store)
     workerbee_snapshot_policy = WorkerBeeSnapshotPolicyService(store)
-    workerbee_access_policy = WorkerBeeAccessPolicyService(store)
+    workerbee_access_environ = dict(os.environ)
+    if (
+        resolved_config.operator_workerbee_default_profile != "local-deploy"
+        or OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV in workerbee_access_environ
+    ):
+        workerbee_access_environ[OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV] = (
+            resolved_config.operator_workerbee_default_profile
+        )
+    workerbee_access_policy = WorkerBeeAccessPolicyService(
+        store,
+        environ=workerbee_access_environ,
+    )
     workerbee_controlled_runs = WorkerBeeControlledRunService(
         store,
         workerbee_runtime,
@@ -2636,9 +2647,13 @@ def create_app(
         request: Request,
         _controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        view = await asyncio.to_thread(
             request.app.state.workerbee_workspace_policy.get_policy
         )
+        view["access_posture"] = await asyncio.to_thread(
+            request.app.state.workerbee_access_policy.posture
+        )
+        return view
 
     @app.get(
         "/v2/agents/{agent_id}/workerbee/access-profile",

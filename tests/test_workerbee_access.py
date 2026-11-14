@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
+from agent_pbx.api import create_app
+from agent_pbx.config import ServerConfig
 from agent_pbx.store import Store
 from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.workerbee_access import (
@@ -51,6 +54,7 @@ def test_access_profile_defaults_to_public_local_deploy_and_persists_explicit_ob
 
     initial = service.get_profile("agent-1")
     assert initial["effective_profile"] == "local-deploy"
+    assert initial["operator_default_profile"] == "local-deploy"
     assert initial["source_mode"] == "snapshot-import"
     assert initial["execution_lane"] == "interactive-gateway"
     updated = service.set_profile(
@@ -62,11 +66,86 @@ def test_access_profile_defaults_to_public_local_deploy_and_persists_explicit_ob
     assert service.store.get_agent("agent-1")["metadata"]["workerbee_mcp_profile"] == "observe-local"
 
 
+def test_access_posture_reports_configured_operator_default_without_migrating_agent(
+    tmp_path: Path,
+) -> None:
+    store = registered_store(tmp_path, operator=True)
+    service = WorkerBeeAccessPolicyService(
+        store,
+        environ={
+            "AGENT_PBX_OPERATOR_WORKERBEE_DEFAULT_PROFILE": "trusted-workbench",
+            "AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING": "trusted-workbench",
+        },
+    )
+
+    profile = service.get_profile("agent-1")
+
+    assert profile["operator_default_profile"] == "trusted-workbench"
+    assert profile["effective_profile"] == "local-deploy"
+    assert "workerbee_mcp_profile" not in store.get_agent("agent-1")["metadata"]
+
+
+def test_global_workspace_policy_exposes_daemon_resolved_access_posture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING",
+        "trusted-workbench",
+    )
+    client = TestClient(
+        create_app(
+            ServerConfig(
+                db_path=tmp_path / "pbx.sqlite",
+                operator_workerbee_default_profile="trusted-workbench",
+            )
+        )
+    )
+
+    response = client.get("/v2/workerbee/workspace-policy")
+
+    assert response.status_code == 200
+    posture = response.json()["access_posture"]
+    assert posture["operator_default_profile"] == "trusted-workbench"
+    assert posture["operator_default_requested_profile"] == "trusted-workbench"
+    assert posture["operator_default_effective_profile"] == "trusted-workbench"
+    assert posture["operator_default_constrained"] is False
+    assert posture["profile_ceiling"] == "trusted-workbench"
+
+
+def test_global_workspace_policy_constrains_implicit_default_to_observe_ceiling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(
+        "AGENT_PBX_OPERATOR_WORKERBEE_DEFAULT_PROFILE",
+        raising=False,
+    )
+    monkeypatch.setenv(
+        "AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING",
+        "observe-local",
+    )
+    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
+
+    response = client.get("/v2/workerbee/workspace-policy")
+
+    assert response.status_code == 200
+    posture = response.json()["access_posture"]
+    assert posture["operator_default_requested_profile"] == "local-deploy"
+    assert posture["operator_default_effective_profile"] == "observe-local"
+    assert posture["operator_default_constrained"] is True
+    assert posture["profile_ceiling"] == "observe-local"
+
+
 def test_access_profile_ceiling_and_review_fork_fail_closed(tmp_path: Path) -> None:
     constrained = WorkerBeeAccessPolicyService(
         registered_store(tmp_path),
         environ={"AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING": "observe-local"},
     )
+    posture = constrained.posture()
+    assert posture["operator_default_requested_profile"] == "local-deploy"
+    assert posture["operator_default_effective_profile"] == "observe-local"
+    assert posture["operator_default_constrained"] is True
     with pytest.raises(WorkerBeeAccessPolicyError) as ceiling:
         constrained.set_profile("agent-1", profile="local-deploy", updated_by="test")
     assert ceiling.value.code == "WORKERBEE_ACCESS_PROFILE_CEILING"

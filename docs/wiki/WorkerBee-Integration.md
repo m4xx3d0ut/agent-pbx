@@ -350,6 +350,43 @@ export AGENT_PBX_WORKERBEE_ACCESS_CONTROL_MODE="read_only" # editable|read_only|
 export AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING="observe-local" # or local-deploy
 ```
 
+Root Operators have a separate, Operator-only launch default. Its committed
+value is `local-deploy`; a private host overlay may opt newly created root
+Operators into Trusted Workbench only when the independent WorkerBee ceiling
+and workspace policy permit it:
+
+```bash
+export AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING="trusted-workbench"
+export AGENT_PBX_OPERATOR_WORKERBEE_DEFAULT_PROFILE="trusted-workbench"
+```
+
+The daemon-resolved access posture is authoritative. A TUI reads that posture
+and the effective workspace-policy root-set digest before it writes a durable
+launch intent; a different TUI environment cannot elevate the selection.
+The posture reports requested default, effective default, and whether a
+narrower ceiling constrained it. Thus the implicit public `local-deploy`
+request becomes effective `observe-local` under an observe-only ceiling;
+an explicitly configured default above its ceiling is a configuration error.
+Precedence is: an explicit durable entity profile, then the daemon Operator
+default for a new root Operator. A new edit fork inherits its root Operator's
+effective profile. Caller Agents remain `local-deploy`, and review forks are
+always `review-readonly`. Trusted Workbench fails closed when the daemon
+ceiling, backend, generation, allowed-root-set digest, or binding evidence is
+missing, stale, constrained, or incompatible.
+
+This WorkerBee authority is independent from Codex filesystem authority and
+from Git staging, broker, approval, and commit receipts. Reusing the effective
+workspace-policy digest identifies only the WorkerBee project/root set; it
+does not grant Git authority.
+
+Changing the host default does not rewrite existing live records. Migrating an
+existing root/edit Operator requires a separate reviewed activation that
+updates only an exact ready, non-review mapping. Mappings in `stale`,
+`server_lost`, `missing`, `ambiguous`, or `transitioning` state are excluded.
+Rollback removes the private default (returning new Operators to
+`local-deploy`); existing explicit durable profiles remain unchanged until a
+separate reviewed metadata update.
+
 The new profile takes effect only after an Agent PBX restart/resume of that
 entity. Agent PBX does not rewrite a running Codex process or mint broader tools
 inside the current lease.

@@ -5,6 +5,15 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from .workerbee_modes import (
+    WORKERBEE_PROFILE_LOCAL_DEPLOY,
+    WORKERBEE_PROFILE_OBSERVE,
+    WORKERBEE_PROFILE_RANK,
+    WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+    WorkerBeeModeError,
+    canonical_workerbee_access_profile,
+)
+
 
 WORKERBEE_TRUSTED_DIRECT_HELPER_ENV = "AGENT_PBX_WORKERBEE_WORKSPACE_HELPER_BIN"
 WORKERBEE_TRUSTED_DIRECT_RECEIPT_ROOT_ENV = (
@@ -19,6 +28,72 @@ WORKERBEE_TRUSTED_DIRECT_APPROVED_ROOTS_ENV = (
 WORKERBEE_TRUSTED_DIRECT_ADMIN_CEILING_ENV = (
     "AGENT_PBX_WORKERBEE_TRUSTED_DIRECT_ADMINISTRATOR_CEILING"
 )
+WORKERBEE_ACCESS_PROFILE_CEILING_ENV = "AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING"
+OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV = (
+    "AGENT_PBX_OPERATOR_WORKERBEE_DEFAULT_PROFILE"
+)
+
+
+def env_workerbee_access_profile_ceiling(
+    environ: dict[str, str] | None = None,
+) -> str:
+    values = os.environ if environ is None else environ
+    raw = str(
+        values.get(WORKERBEE_ACCESS_PROFILE_CEILING_ENV)
+        or WORKERBEE_PROFILE_LOCAL_DEPLOY
+    ).strip()
+    try:
+        selected = canonical_workerbee_access_profile(raw)
+    except WorkerBeeModeError as exc:
+        raise ValueError(
+            f"{WORKERBEE_ACCESS_PROFILE_CEILING_ENV} must be observe-local, "
+            "local-deploy, or trusted-workbench"
+        ) from exc
+    if selected not in {
+        WORKERBEE_PROFILE_OBSERVE,
+        WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+    }:
+        raise ValueError(
+            f"{WORKERBEE_ACCESS_PROFILE_CEILING_ENV} must be observe-local, "
+            "local-deploy, or trusted-workbench"
+        )
+    return selected
+
+
+def env_operator_workerbee_default_profile(
+    environ: dict[str, str] | None = None,
+) -> str:
+    values = os.environ if environ is None else environ
+    raw = str(
+        values.get(OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV)
+        or WORKERBEE_PROFILE_LOCAL_DEPLOY
+    ).strip()
+    try:
+        selected = canonical_workerbee_access_profile(raw)
+    except WorkerBeeModeError as exc:
+        raise ValueError(
+            f"{OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV} must be local-deploy or "
+            "trusted-workbench"
+        ) from exc
+    if selected not in {
+        WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+    }:
+        raise ValueError(
+            f"{OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV} must be local-deploy or "
+            "trusted-workbench"
+        )
+    ceiling = env_workerbee_access_profile_ceiling(values)
+    if (
+        OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV in values
+        and WORKERBEE_PROFILE_RANK[selected] > WORKERBEE_PROFILE_RANK[ceiling]
+    ):
+        raise ValueError(
+            f"{OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV} exceeds "
+            f"{WORKERBEE_ACCESS_PROFILE_CEILING_ENV}"
+        )
+    return selected
 
 
 def env_optional_path(name: str) -> Path | None:
@@ -122,6 +197,9 @@ class ServerConfig:
     durable_helper_measurements_enabled: bool = False
     dynamic_resources_enabled: bool = False
     workerbee_development_resources_enabled: bool = False
+    operator_workerbee_default_profile: str = field(
+        default_factory=env_operator_workerbee_default_profile
+    )
     workerbee_bin: Path | None = None
     workerbee_timeout_seconds: float = 20.0
     workerbee_cache_seconds: float = 10.0

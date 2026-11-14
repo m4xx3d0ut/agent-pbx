@@ -4,6 +4,11 @@ import os
 import json
 from typing import Any, Mapping
 
+from .config import (
+    OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV,
+    WORKERBEE_ACCESS_PROFILE_CEILING_ENV,
+    env_operator_workerbee_default_profile,
+)
 from .store import Store
 from .workerbee_modes import (
     WORKERBEE_EXECUTION_CONTROLLED_RUN,
@@ -35,7 +40,6 @@ from .workerbee_profile import (
 
 
 WORKERBEE_ACCESS_CONTROL_MODE_ENV = "AGENT_PBX_WORKERBEE_ACCESS_CONTROL_MODE"
-WORKERBEE_ACCESS_PROFILE_CEILING_ENV = "AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING"
 WORKERBEE_SOURCE_MODE_CONTROL_ENV = "AGENT_PBX_WORKERBEE_SOURCE_MODE_CONTROL_MODE"
 WORKERBEE_SOURCE_MODE_CEILING_ENV = "AGENT_PBX_WORKERBEE_SOURCE_MODE_CEILING_JSON"
 WORKERBEE_EXECUTION_LANE_CONTROL_ENV = (
@@ -97,6 +101,22 @@ class WorkerBeeAccessPolicyService:
                 "WORKERBEE_ACCESS_CONFIG_INVALID",
                 f"Unsupported WorkerBee access profile ceiling: {ceiling!r}.",
             )
+        try:
+            operator_default_requested = env_operator_workerbee_default_profile(
+                dict(self.environ)
+            )
+        except ValueError as exc:
+            raise WorkerBeeAccessPolicyError(
+                "WORKERBEE_ACCESS_CONFIG_INVALID",
+                str(exc),
+            ) from exc
+        operator_default_constrained = (
+            WORKERBEE_PROFILE_RANK[operator_default_requested]
+            > WORKERBEE_PROFILE_RANK[ceiling]
+        )
+        operator_default_effective = (
+            ceiling if operator_default_constrained else operator_default_requested
+        )
         source_control = str(
             self.environ.get(WORKERBEE_SOURCE_MODE_CONTROL_ENV) or "editable"
         ).strip().lower()
@@ -158,6 +178,11 @@ class WorkerBeeAccessPolicyService:
         return {
             "control_mode": control,
             "profile_ceiling": ceiling,
+            "operator_default_profile": operator_default_effective,
+            "operator_default_requested_profile": operator_default_requested,
+            "operator_default_effective_profile": operator_default_effective,
+            "operator_default_constrained": operator_default_constrained,
+            "operator_default_profile_env": OPERATOR_WORKERBEE_DEFAULT_PROFILE_ENV,
             "source_mode_control": source_control,
             "source_mode_ceiling": list(source_ceiling),
             "execution_lane_control": lane_control,

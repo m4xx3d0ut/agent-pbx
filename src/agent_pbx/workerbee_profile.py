@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import re
 from typing import Any, Mapping
 
 from .workerbee_modes import (
     WORKERBEE_ACCESS_PROFILES,
     WORKERBEE_PROFILE_LOCAL_DEPLOY,
+    WORKERBEE_PROFILE_OBSERVE,
     WORKERBEE_PROFILE_REVIEW,
     WORKERBEE_PROFILE_RANK,
     WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
@@ -20,6 +22,7 @@ WORKERBEE_PROFILE_CEILING_METADATA_KEY = "workerbee_access_profile_ceiling"
 WORKERBEE_WORKSPACE_POLICY_DIGEST_METADATA_KEY = (
     "workerbee_workspace_policy_digest"
 )
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class WorkerBeeProfileIntentError(ValueError):
@@ -28,6 +31,54 @@ class WorkerBeeProfileIntentError(ValueError):
 
 def _text(metadata: Mapping[str, Any], key: str) -> str:
     return str(metadata.get(key) or "").strip()
+
+
+def has_explicit_workerbee_profile(metadata: Mapping[str, Any]) -> bool:
+    """Return whether durable entity metadata owns an explicit profile choice."""
+
+    return bool(
+        metadata.get(WORKERBEE_PROFILE_INTENT_METADATA_KEY) is not None
+        or _text(metadata, WORKERBEE_PROFILE_METADATA_KEY)
+    )
+
+
+def configured_operator_workerbee_profile(
+    entity_id: str,
+    metadata: Mapping[str, Any],
+    *,
+    configured_default: str,
+    existing_entity: bool,
+) -> str:
+    """Select a root Operator profile without migrating existing records.
+
+    Explicit durable metadata always wins.  The host default applies only to a
+    newly created root Operator; legacy/live entities without explicit metadata
+    retain the committed local-deploy posture until a separately reviewed
+    migration changes their durable record.
+    """
+
+    if _text(metadata, "agent_type") != "operator":
+        return WORKERBEE_PROFILE_LOCAL_DEPLOY
+    if (
+        _text(metadata, "access_mode") == "review_readonly"
+        or _text(metadata, "fork_purpose") == "review"
+    ):
+        return WORKERBEE_PROFILE_REVIEW
+    if has_explicit_workerbee_profile(metadata):
+        return resolve_workerbee_profile_intent(entity_id, metadata).profile
+    if existing_entity:
+        return WORKERBEE_PROFILE_LOCAL_DEPLOY
+    selected = canonical_workerbee_access_profile(configured_default)
+    if selected not in {
+        WORKERBEE_PROFILE_OBSERVE,
+        WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+    }:
+        raise WorkerBeeProfileIntentError(
+            "effective Operator WorkerBee default must be observe-local, "
+            "local-deploy, or trusted-workbench"
+        )
+    return selected
 
 
 @dataclass(frozen=True)
@@ -103,9 +154,9 @@ def build_workerbee_profile_intent(
             raise WorkerBeeProfileIntentError(
                 "review forks cannot receive trusted-workbench"
             )
-        if not workspace_policy_digest:
+        if not _SHA256.fullmatch(workspace_policy_digest):
             raise WorkerBeeProfileIntentError(
-                "trusted-workbench requires a WorkerBee workspace-policy digest"
+                "trusted-workbench requires a valid WorkerBee workspace-policy digest"
             )
 
     return WorkerBeeProfileIntent(
