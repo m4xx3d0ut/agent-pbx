@@ -34,6 +34,8 @@ def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
         "PullRequestMergeConfirmScreen",
         "RuntimeMigrationScreen",
         "SettingsScreen",
+        "WorkerBeeSwitchConfirmScreen",
+        "WorkerBeeWorkspaceScreen",
         "slugify",
     )
 
@@ -959,3 +961,232 @@ async def test_extracted_operator_authority_preserves_payloads_and_hooks() -> No
             str(screen.query_one("#operator-authority-summary", Static).renderable)
             == "Preview: Trusted Set · members=2 · digest=abcdef012345"
         )
+
+
+async def test_extracted_workerbee_switch_preserves_confirmation_and_worker_hook() -> (
+    None
+):
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    transaction = {
+        "transaction_id": "a" * 24,
+        "target": "platform_debug",
+        "before": {"backend": "oss"},
+    }
+    workers: list[tuple[object, str, bool]] = []
+
+    app.apply_workerbee_switch = (  # type: ignore[method-assign]
+        lambda received, *, confirmation: ("apply", received, confirmation)
+    )
+    async with app.run_test() as pilot:
+        screen = screens.WorkerBeeSwitchConfirmScreen(transaction=transaction)
+        app.push_screen(screen)
+        await pilot.pause()
+
+        confirmation = screen.query_one("#workerbee-switch-confirm", Input)
+        assert screen.BINDINGS == [("escape", "dismiss", "Close")]
+        assert screen.focused is confirmation
+        assert confirmation.placeholder == "switch platform_debug"
+        assert (
+            str(screen.query_one("#workerbee-switch-title", Static).renderable)
+            == "Switch WorkerBee Backend"
+        )
+        assert str(
+            screen.query_one("#workerbee-switch-summary", Static).renderable
+        ) == (
+            "Current: oss\n"
+            "Target: platform_debug\n"
+            "Existing Codex sessions remain pinned; this affects future sessions.\n"
+            'Type "switch platform_debug" to confirm.'
+        )
+        assert (
+            screen.query_one("#workerbee-switch-run", Button).label.plain
+            == "Apply Switch"
+        )
+
+        original_run_worker = app.run_worker
+        app.run_worker = (  # type: ignore[method-assign]
+            lambda work, *, name, exclusive: workers.append((work, name, exclusive))
+        )
+        confirmation.value = "switch platform_debug"
+        await pilot.press("enter")
+        await pilot.pause()
+        app.run_worker = original_run_worker  # type: ignore[method-assign]
+
+        assert app.screen is not screen
+        assert workers == [
+            (
+                ("apply", transaction, "switch platform_debug"),
+                "workerbee-switch-apply",
+                True,
+            )
+        ]
+
+        rollback_screen = screens.WorkerBeeSwitchConfirmScreen(
+            transaction=transaction,
+            action="rollback",
+        )
+        app.push_screen(rollback_screen)
+        await pilot.pause()
+        assert rollback_screen.expected_confirmation() == f"rollback {'a' * 24}"
+        assert (
+            str(
+                rollback_screen.query_one(
+                    "#workerbee-switch-title", Static
+                ).renderable
+            )
+            == "Rollback WorkerBee Backend"
+        )
+        assert (
+            rollback_screen.query_one("#workerbee-switch-run", Button).label.plain
+            == "Rollback"
+        )
+        await pilot.click("#workerbee-switch-cancel")
+        await pilot.pause()
+
+        assert app.screen is not rollback_screen
+        assert len(workers) == 1
+
+
+async def test_extracted_workerbee_workspace_preserves_payloads_and_app_hooks() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    policy = {
+        "effective": {
+            "policy": "scoped-workbench",
+            "request_mode": "automatic",
+            "allowed_roots": ["/repo/one", "/repo/two"],
+            "managed_scratch_root": "/scratch",
+            "profile_label": "Rosie Workbench",
+        },
+        "admin": {
+            "control_mode": "editable",
+            "policy_ceiling": "scoped-workbench",
+        },
+    }
+    transitions = [
+        {
+            "status": "applied",
+            "runtime_project": "demo",
+            "working_subpath": "service",
+        }
+    ]
+    workers: list[tuple[object, str, bool]] = []
+
+    app.save_workerbee_workspace_policy = (  # type: ignore[method-assign]
+        lambda received, global_policy=False: ("save", received, global_policy)
+    )
+    app.inherit_workerbee_workspace_policy = (  # type: ignore[method-assign]
+        lambda received: ("inherit", received)
+    )
+    app.preview_workerbee_workspace_target = (  # type: ignore[method-assign]
+        lambda received: ("preview", received)
+    )
+    app.apply_workerbee_workspace_target = (  # type: ignore[method-assign]
+        lambda received: ("bind", received)
+    )
+    app.approve_workerbee_workspace_transition = (  # type: ignore[method-assign]
+        lambda received: ("approve", received)
+    )
+    app.deny_workerbee_workspace_transition = (  # type: ignore[method-assign]
+        lambda received: ("deny", received)
+    )
+    app.revert_workerbee_workspace_transition = (  # type: ignore[method-assign]
+        lambda received: ("revert", received)
+    )
+
+    async with app.run_test() as pilot:
+        screen = screens.WorkerBeeWorkspaceScreen(
+            agent_id="agent-1",
+            policy_view=policy,
+            transitions=transitions,
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+
+        assert screen.BINDINGS == [("escape", "dismiss", "Close")]
+        assert screen.focused is screen.query_one("#workerbee-workspace-policy", Select)
+        assert screen.query_one("#workerbee-workspace-policy", Select).value == (
+            "scoped-workbench"
+        )
+        assert screen.query_one(
+            "#workerbee-workspace-request-mode", Select
+        ).value == "automatic"
+        assert screen.query_one("#workerbee-workspace-roots", Input).value == (
+            "/repo/one, /repo/two"
+        )
+        assert (
+            str(screen.query_one("#workerbee-workspace-summary", Static).renderable)
+            == "Latest: applied · demo · service"
+        )
+        assert screen.query_one("#workerbee-workspace-bind", Button).disabled is True
+
+        screen.query_one("#workerbee-workspace-roots", Input).value = (
+            " /repo/three, , /repo/four "
+        )
+        screen.query_one("#workerbee-workspace-scratch", Input).value = "  "
+        screen.query_one("#workerbee-workspace-label", Input).value = "New profile"
+        screen.query_one("#workerbee-workspace-target", Input).value = " /repo/three "
+        screen.query_one("#workerbee-workspace-scenario", Input).value = " demo-next "
+
+        assert screen.policy_payload() == {
+            "policy": "scoped-workbench",
+            "request_mode": "automatic",
+            "allowed_roots": ["/repo/three", "/repo/four"],
+            "managed_scratch_root": None,
+            "profile_label": "New profile",
+        }
+        assert screen.target_payload() == {
+            "cwd": "/repo/three",
+            "project": "demo-next",
+        }
+
+        preview = {
+            "target": {
+                "source_root": "/repo/three",
+                "working_subpath": "service",
+                "runtime_project": "demo-next",
+                "request_mode": "automatic",
+            }
+        }
+        screen.show_preview(preview)
+        assert screen.preview_payload == {
+            "request": {"cwd": "/repo/three", "project": "demo-next"},
+            "preview": preview,
+        }
+        assert (
+            str(screen.query_one("#workerbee-workspace-summary", Static).renderable)
+            == "Preview: /repo/three · service · demo-next · automatic"
+        )
+        assert screen.query_one("#workerbee-workspace-bind", Button).disabled is False
+
+        original_run_worker = app.run_worker
+        app.run_worker = (  # type: ignore[method-assign]
+            lambda work, *, name, exclusive: workers.append((work, name, exclusive))
+        )
+        for button_id in (
+            "workerbee-workspace-save",
+            "workerbee-workspace-save-global",
+            "workerbee-workspace-inherit",
+            "workerbee-workspace-preview",
+            "workerbee-workspace-bind",
+            "workerbee-workspace-approve",
+            "workerbee-workspace-deny",
+            "workerbee-workspace-revert",
+        ):
+            screen.query_one(f"#{button_id}", Button).press()
+            await pilot.pause()
+        app.run_worker = original_run_worker  # type: ignore[method-assign]
+
+        assert workers == [
+            (("save", screen, False), "workerbee-workspace-policy-save", True),
+            (("save", screen, True), "workerbee-workspace-global-policy-save", True),
+            (("inherit", screen), "workerbee-workspace-policy-inherit", True),
+            (("preview", screen), "workerbee-workspace-preview", True),
+            (("bind", screen), "workerbee-workspace-bind", True),
+            (("approve", screen), "workerbee-workspace-approve", True),
+            (("deny", screen), "workerbee-workspace-deny", True),
+            (("revert", screen), "workerbee-workspace-revert", True),
+        ]
+
+        screen.query_one("#workerbee-workspace-close", Button).press()
+        await pilot.pause()
+        assert app.screen is not screen
