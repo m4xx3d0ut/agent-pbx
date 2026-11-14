@@ -7,10 +7,12 @@ from agent_pbx.tui import AgentPBXTUI
 from agent_pbx.ui.actions import ActionRegistry
 from agent_pbx.ui.async_jobs import AsyncGenerationGate
 from agent_pbx.ui.controllers import TUIController, controller_method
+from agent_pbx.ui.controllers.github import GitHubController
 from agent_pbx.ui.controllers.workerbee_projection import (
     WorkerBeeProjectionController,
 )
 from agent_pbx.ui.focus import FocusGenerationGuard
+from agent_pbx.ui.github import github_ref_number
 from agent_pbx.ui.panels.joplin import JoplinPanelState
 from agent_pbx.workerbee_mcp import WorkerBeeMcpPreflight
 
@@ -101,6 +103,26 @@ def test_workerbee_projection_controller_keeps_legacy_tui_entry_points() -> None
     assert app.format_workerbee_workload(
         {"kind": "Service", "namespace": "demo", "name": "web"}
     ) == "Service demo/web"
+
+
+def test_github_controller_preserves_reference_numbers_and_tui_entry_points() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+
+    assert github_ref_number("12") == 12
+    assert github_ref_number(0) is None
+    assert github_ref_number("invalid") is None
+    assert isinstance(app._github_controller, GitHubController)
+    assert app.format_pull_request_checks(
+        {"total": 3, "success": 2, "pending": 1}
+    ) == "1 pending/3"
+    assert "State: open" in app.format_issue_detail(
+        {
+            "number": 7,
+            "title": "Controller extraction",
+            "state": "open",
+            "body": "Preserve behavior.",
+        }
+    )
 
 
 def test_action_registry_rejects_duplicate_ids() -> None:
