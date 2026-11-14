@@ -16,7 +16,6 @@ from .workerbee_runtime import (
     WORKERBEE_BACKEND_OSS,
     WORKERBEE_BACKEND_PLATFORM_DEBUG,
     WORKERBEE_BACKEND_USER_APPLIANCE,
-    WORKERBEE_WORKSPACE_DIRECT_HOST,
     WorkerBeeRuntimeSelection,
     canonical_workerbee_backend,
     workspace_strategy_for_backend,
