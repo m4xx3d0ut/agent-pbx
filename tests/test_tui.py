@@ -27638,6 +27638,101 @@ def test_tui_workerbee_bootstrap_policy_covers_all_operator_roles() -> None:
         assert "workerbee_v1_exec" not in workerbee_config, role
 
 
+def test_tui_launch_policy_matrix_preserves_bytes_order_and_global_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    config_path = codex_home / "config.toml"
+    original_config = b'[notice]\nmessage = "do not mutate"\n'
+    config_path.write_bytes(original_config)
+    work_root = tmp_path / "project root"
+    work_root.mkdir()
+    trusted = str(work_root.resolve())
+    monkeypatch.setenv(CODEX_MODEL_ENV, "gpt-6-sol")
+    monkeypatch.setenv(CODEX_REASONING_EFFORT_ENV, "high")
+    monkeypatch.setenv(CODEX_REASONING_SUMMARY_ENV, "detailed")
+    monkeypatch.setenv(CODEX_VERBOSITY_ENV, "low")
+    monkeypatch.setenv(CODEX_SERVICE_TIER_ENV, "priority")
+    common = {
+        "mcp_url": "http://127.0.0.1:8767/mcp",
+        "codex_home": codex_home,
+        "work_root": trusted,
+        "server_configs": {
+            "workerbee": {"url": "http://127.0.0.1:8765/mcp"},
+        },
+        "terminal_mode": CODEX_TERMINAL_MODE_SCROLLBACK,
+    }
+    launches = {
+        "caller": caller_agent_config_overrides(
+            workerbee_profile="local-deploy",
+            **common,
+        ),
+        "review": review_operator_config_overrides(
+            ("agent-pbx", "workerbee"),
+            **common,
+        ),
+        "root": operator_agent_config_overrides(
+            ("agent-pbx", "workerbee"),
+            include_campaign_lifecycle=True,
+            **common,
+        ),
+    }
+    terminal = [
+        'tui.keymap.composer.submit=["enter"]',
+        'tui.keymap.editor.insert_newline=["ctrl-j","shift-enter","alt-enter","ctrl-enter"]',
+        'tui.alternate_screen="never"',
+    ]
+    explicit_model = [
+        'model="gpt-6-sol"',
+        'model_reasoning_effort="high"',
+        'model_reasoning_summary="detailed"',
+        'model_verbosity="low"',
+        'service_tier="priority"',
+    ]
+
+    for role, overrides in launches.items():
+        assert overrides[0] == "check_for_update_on_startup=false", role
+        assert overrides[1].startswith("mcp_servers.agent-pbx="), role
+        assert overrides[2].startswith("mcp_servers.workerbee="), role
+        assert overrides[3] == (
+            f'projects={{"{trusted}" = {{trust_level = "trusted"}}}}'
+        ), role
+        assert overrides[8:13] == explicit_model, role
+        assert overrides[13:] == terminal, role
+        assert overrides[4] == 'model="gpt-5.6-sol"', role
+        assert overrides[5] == (
+            'model_reasoning_effort="high"'
+            if role == "caller"
+            else 'model_reasoning_effort="xhigh"'
+        ), role
+        assert overrides[6:8] == [
+            'model_reasoning_summary="detailed"',
+            'model_verbosity="high"',
+        ], role
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    argv = shlex.split(
+        app.codex_interactive_command(
+            "codex --search",
+            cd=trusted,
+            sandbox="workspace-write",
+            config_overrides=launches["root"],
+        )
+    )
+    assert argv[:6] == [
+        "codex",
+        "--search",
+        "--cd",
+        trusted,
+        "--sandbox",
+        "workspace-write",
+    ]
+    assert argv[6::2] == ["-c"] * len(launches["root"])
+    assert argv[7::2] == launches["root"]
+    assert config_path.read_bytes() == original_config
+
+
 def test_tui_direct_caller_launch_preserves_global_workerbee_config() -> None:
     overrides = caller_agent_config_overrides(
         mcp_url="http://127.0.0.1:8767/mcp",

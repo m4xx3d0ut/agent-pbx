@@ -64,7 +64,12 @@ from .codex_cli import (
     inspect_codex_model_catalog,
     inspect_codex_posture,
 )
-from .codex_launch import managed_codex_process_overrides
+from .codex_launch import (
+    CodexLaunchOverridePolicy,
+    codex_config_override,
+    managed_codex_process_overrides,
+    toml_key,
+)
 from .codex_sessions import (
     CodexSessionPathCache,
     CodexTranscriptTailCache,
@@ -1673,39 +1678,8 @@ def codex_mcp_remove_command(codex_command: str) -> list[str]:
     return [*codex_command_argv(codex_command), "mcp", "remove", "agent-pbx"]
 
 
-def toml_key(value: str) -> str:
-    if re.match(r"^[A-Za-z0-9_-]+$", value):
-        return value
-    return json.dumps(value)
-
-
 def codex_config_mcp_key(server_name: str, setting: str) -> str:
     return f"mcp_servers.{toml_key(server_name)}.{setting}"
-
-
-def toml_literal(value: object) -> str:
-    if isinstance(value, str):
-        return json.dumps(value)
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return json.dumps(value)
-    if isinstance(value, Mapping):
-        return (
-            "{"
-            + ", ".join(
-                f"{toml_key(str(key))} = {toml_literal(item)}"
-                for key, item in value.items()
-            )
-            + "}"
-        )
-    if isinstance(value, Iterable):
-        return "[" + ", ".join(toml_literal(item) for item in value) + "]"
-    return json.dumps(value)
-
-
-def codex_config_override(key: str, value: object) -> str:
-    return f"{key}={toml_literal(value)}"
 
 
 def codex_model_launch_config_overrides() -> list[str]:
@@ -2070,14 +2044,13 @@ def caller_agent_config_overrides(
     server_configs: Mapping[str, Mapping[str, object]] | None = None,
     workerbee_gateway_binding: Mapping[str, object] | None = None,
 ) -> list[str]:
-    overrides = [
-        *managed_codex_process_overrides(),
+    mcp_overrides = [
         agent_pbx_mcp_config_override(
             CALLER_AGENT_PBX_APPROVED_TOOLS,
             mcp_url=mcp_url,
         )
     ]
-    overrides.extend(
+    mcp_overrides.extend(
         caller_workerbee_mcp_config_overrides(
             workerbee_profile,
             codex_home=codex_home,
@@ -2085,17 +2058,18 @@ def caller_agent_config_overrides(
             gateway_binding=workerbee_gateway_binding,
         )
     )
-    trust_override = codex_project_trust_config_override(work_root)
-    if trust_override:
-        overrides.append(trust_override)
-    overrides.extend(
-        codex_model_preset_config_overrides(
-            CODEX_MODEL_PRESET_BY_KEY[DEFAULT_CALLER_MODEL_PRESET_KEY]
-        )
-    )
-    overrides.extend(codex_model_launch_config_overrides())
-    overrides.extend(codex_terminal_config_overrides(terminal_mode))
-    return overrides
+    return CodexLaunchOverridePolicy(
+        process=managed_codex_process_overrides(),
+        mcp=tuple(mcp_overrides),
+        trust=codex_project_trust_config_override(work_root),
+        profile=tuple(
+            codex_model_preset_config_overrides(
+                CODEX_MODEL_PRESET_BY_KEY[DEFAULT_CALLER_MODEL_PRESET_KEY]
+            )
+        ),
+        model=tuple(codex_model_launch_config_overrides()),
+        terminal=tuple(codex_terminal_config_overrides(terminal_mode)),
+    ).overrides()
 
 
 def review_operator_config_overrides(
@@ -2108,25 +2082,26 @@ def review_operator_config_overrides(
     terminal_mode: str = CODEX_TERMINAL_MODE_DEFAULT,
     workerbee_gateway_binding: Mapping[str, object] | None = None,
 ) -> list[str]:
-    overrides = review_operator_mcp_config_overrides(
-        server_names,
-        mcp_url=mcp_url,
-        codex_home=codex_home,
-        server_configs=server_configs,
-        workerbee_gateway_binding=workerbee_gateway_binding,
-    )
-    overrides[:0] = managed_codex_process_overrides()
-    trust_override = codex_project_trust_config_override(work_root)
-    if trust_override:
-        overrides.append(trust_override)
-    overrides.extend(
-        codex_model_preset_config_overrides(
-            CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
-        )
-    )
-    overrides.extend(codex_model_launch_config_overrides())
-    overrides.extend(codex_terminal_config_overrides(terminal_mode))
-    return overrides
+    return CodexLaunchOverridePolicy(
+        process=managed_codex_process_overrides(),
+        mcp=tuple(
+            review_operator_mcp_config_overrides(
+                server_names,
+                mcp_url=mcp_url,
+                codex_home=codex_home,
+                server_configs=server_configs,
+                workerbee_gateway_binding=workerbee_gateway_binding,
+            )
+        ),
+        trust=codex_project_trust_config_override(work_root),
+        profile=tuple(
+            codex_model_preset_config_overrides(
+                CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
+            )
+        ),
+        model=tuple(codex_model_launch_config_overrides()),
+        terminal=tuple(codex_terminal_config_overrides(terminal_mode)),
+    ).overrides()
 
 
 def operator_agent_config_overrides(
@@ -2147,40 +2122,41 @@ def operator_agent_config_overrides(
     Root operator panes receive the campaign lifecycle tools. Edit and review
     forks remain unable to create, follow up, or finish campaigns directly.
     """
-    overrides = review_operator_mcp_config_overrides(
-        server_names or operator_mcp_approval_server_names(),
-        mcp_url=mcp_url,
-        codex_home=codex_home,
-        server_configs=server_configs,
-        agent_pbx_approved_tools=(
-            OPERATOR_AGENT_PBX_APPROVED_TOOLS
-            if include_campaign_lifecycle
-            else None
+    return CodexLaunchOverridePolicy(
+        process=managed_codex_process_overrides(),
+        mcp=tuple(
+            review_operator_mcp_config_overrides(
+                server_names or operator_mcp_approval_server_names(),
+                mcp_url=mcp_url,
+                codex_home=codex_home,
+                server_configs=server_configs,
+                agent_pbx_approved_tools=(
+                    OPERATOR_AGENT_PBX_APPROVED_TOOLS
+                    if include_campaign_lifecycle
+                    else None
+                ),
+                workerbee_approved_tools=workerbee_gateway_launch_tools(
+                    workerbee_gateway_binding
+                ),
+                workerbee_gateway_binding=workerbee_gateway_binding,
+            )
         ),
-        workerbee_approved_tools=workerbee_gateway_launch_tools(
-            workerbee_gateway_binding
+        trust=codex_project_trust_config_override(work_root),
+        profile=tuple(
+            codex_model_preset_config_overrides(
+                CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
+            )
         ),
-        workerbee_gateway_binding=workerbee_gateway_binding,
-    )
-    overrides[:0] = managed_codex_process_overrides()
-    trust_override = codex_project_trust_config_override(work_root)
-    if trust_override:
-        overrides.append(trust_override)
-    overrides.extend(
-        codex_model_preset_config_overrides(
-            CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
-        )
-    )
-    overrides.extend(codex_model_launch_config_overrides())
-    overrides.extend(codex_terminal_config_overrides(terminal_mode))
-    overrides.extend(
-        codex_config_override(key, value)
-        for key, value in operator_authority_launch_overrides(
-            authority_metadata or {},
-            linked_git_admin_plan=linked_git_admin_plan,
-        )
-    )
-    return overrides
+        model=tuple(codex_model_launch_config_overrides()),
+        terminal=tuple(codex_terminal_config_overrides(terminal_mode)),
+        authority=tuple(
+            codex_config_override(key, value)
+            for key, value in operator_authority_launch_overrides(
+                authority_metadata or {},
+                linked_git_admin_plan=linked_git_admin_plan,
+            )
+        ),
+    ).overrides()
 
 
 def process_error_summary(result: subprocess.CompletedProcess[str]) -> str:

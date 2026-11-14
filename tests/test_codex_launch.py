@@ -1,12 +1,65 @@
 from pathlib import Path
 
 from agent_pbx.codex_launch import (
+    CodexLaunchOverridePolicy,
     MANAGED_CALLER_PBX_TOOLS,
+    codex_config_override,
     managed_caller_bootstrap_id,
     managed_caller_bootstrap_prompt,
     managed_caller_codex_overrides,
     managed_codex_process_overrides,
+    toml_key,
+    toml_literal,
 )
+
+
+def test_launch_toml_serialization_preserves_legacy_bytes() -> None:
+    value = {
+        "url": "http://127.0.0.1:8767/mcp",
+        "enabled": True,
+        "retries": 2,
+        "enabled_tools": ["pbx_report_turn", "pbx_operator_runbook"],
+        "tools": {
+            "pbx report": {"approval_mode": "approve"},
+        },
+    }
+
+    assert toml_key("agent-pbx") == "agent-pbx"
+    assert toml_key("agent pbx") == '"agent pbx"'
+    assert toml_literal(value) == (
+        '{url = "http://127.0.0.1:8767/mcp", enabled = true, retries = 2, '
+        'enabled_tools = ["pbx_report_turn", "pbx_operator_runbook"], '
+        'tools = {"pbx report" = {approval_mode = "approve"}}}'
+    )
+    assert codex_config_override("mcp_servers.agent-pbx", value) == (
+        'mcp_servers.agent-pbx={url = "http://127.0.0.1:8767/mcp", '
+        'enabled = true, retries = 2, enabled_tools = '
+        '["pbx_report_turn", "pbx_operator_runbook"], tools = '
+        '{"pbx report" = {approval_mode = "approve"}}}'
+    )
+
+
+def test_launch_override_policy_preserves_precedence_and_payload_bytes() -> None:
+    policy = CodexLaunchOverridePolicy(
+        process=("process=false",),
+        mcp=("mcp.agent={url = \"local\"}", "mcp.worker={url = \"worker\"}"),
+        trust='projects={"/tmp/project" = {trust_level = "trusted"}}',
+        profile=('model="profile"',),
+        model=('model="environment"',),
+        terminal=('tui.alternate_screen="never"',),
+        authority=('sandbox_mode="workspace-write"',),
+    )
+
+    assert policy.overrides() == [
+        "process=false",
+        'mcp.agent={url = "local"}',
+        'mcp.worker={url = "worker"}',
+        'projects={"/tmp/project" = {trust_level = "trusted"}}',
+        'model="profile"',
+        'model="environment"',
+        'tui.alternate_screen="never"',
+        'sandbox_mode="workspace-write"',
+    ]
 
 
 def test_managed_codex_process_policy_is_launch_scoped() -> None:

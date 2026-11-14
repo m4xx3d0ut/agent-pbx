@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -16,11 +17,15 @@ MANAGED_CALLER_PBX_TOOLS = (
 )
 
 
-def _toml_key(value: str) -> str:
+def toml_key(value: str) -> str:
+    """Serialize one TOML key using Codex CLI override syntax."""
+
     return value if re.match(r"^[A-Za-z0-9_-]+$", value) else json.dumps(value)
 
 
-def _toml_literal(value: object) -> str:
+def toml_literal(value: object) -> str:
+    """Serialize one launch-scoped Codex configuration value."""
+
     if isinstance(value, str):
         return json.dumps(value)
     if isinstance(value, bool):
@@ -29,16 +34,48 @@ def _toml_literal(value: object) -> str:
         return json.dumps(value)
     if isinstance(value, Mapping):
         return "{" + ", ".join(
-            f"{_toml_key(str(key))} = {_toml_literal(item)}"
+            f"{toml_key(str(key))} = {toml_literal(item)}"
             for key, item in value.items()
         ) + "}"
     if isinstance(value, Iterable):
-        return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
+        return "[" + ", ".join(toml_literal(item) for item in value) + "]"
     return json.dumps(value)
 
 
 def codex_config_override(key: str, value: object) -> str:
-    return f"{key}={_toml_literal(value)}"
+    """Return one byte-stable ``-c key=value`` payload for Codex."""
+
+    return f"{key}={toml_literal(value)}"
+
+
+@dataclass(frozen=True)
+class CodexLaunchOverridePolicy:
+    """Ordered, launch-scoped Codex policy assembled outside the TUI.
+
+    The field order is the precedence contract used by every Agent PBX launch:
+    process invariants, MCP surfaces, project trust, profile defaults, explicit
+    environment model overrides, terminal behavior, then authority-specific
+    overrides.  Keeping this order here prevents Textual call sites from
+    silently diverging while retaining the exact legacy argv payloads.
+    """
+
+    process: tuple[str, ...] = ()
+    mcp: tuple[str, ...] = ()
+    trust: str | None = None
+    profile: tuple[str, ...] = ()
+    model: tuple[str, ...] = ()
+    terminal: tuple[str, ...] = ()
+    authority: tuple[str, ...] = ()
+
+    def overrides(self) -> list[str]:
+        values = [*self.process, *self.mcp]
+        if self.trust:
+            values.append(self.trust)
+        values.extend(self.profile)
+        values.extend(self.model)
+        values.extend(self.terminal)
+        values.extend(self.authority)
+        return values
 
 
 def managed_codex_process_overrides() -> tuple[str, ...]:
