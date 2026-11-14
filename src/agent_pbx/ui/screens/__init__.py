@@ -29,7 +29,12 @@ from .operators import (
 )
 from .runtime import ManagedProjectPickerScreen, RuntimeMigrationScreen
 from .settings import SettingsScreen
-from .workerbee_policy import WorkerBeeSwitchConfirmScreen, WorkerBeeWorkspaceScreen
+from .workerbee_policy import (
+    WorkerBeeAccessScreen,
+    WorkerBeeSnapshotScreen,
+    WorkerBeeSwitchConfirmScreen,
+    WorkerBeeWorkspaceScreen,
+)
 
 
 __all__ = [
@@ -58,6 +63,8 @@ __all__ = [
     "PullRequestMergeConfirmScreen",
     "RuntimeMigrationScreen",
     "SettingsScreen",
+    "WorkerBeeAccessScreen",
+    "WorkerBeeSnapshotScreen",
     "WorkerBeeSwitchConfirmScreen",
     "WorkerBeeWorkspaceScreen",
     "slugify",

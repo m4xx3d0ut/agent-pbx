@@ -34,6 +34,8 @@ def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
         "PullRequestMergeConfirmScreen",
         "RuntimeMigrationScreen",
         "SettingsScreen",
+        "WorkerBeeAccessScreen",
+        "WorkerBeeSnapshotScreen",
         "WorkerBeeSwitchConfirmScreen",
         "WorkerBeeWorkspaceScreen",
         "slugify",
@@ -1029,11 +1031,7 @@ async def test_extracted_workerbee_switch_preserves_confirmation_and_worker_hook
         await pilot.pause()
         assert rollback_screen.expected_confirmation() == f"rollback {'a' * 24}"
         assert (
-            str(
-                rollback_screen.query_one(
-                    "#workerbee-switch-title", Static
-                ).renderable
-            )
+            str(rollback_screen.query_one("#workerbee-switch-title", Static).renderable)
             == "Rollback WorkerBee Backend"
         )
         assert (
@@ -1107,9 +1105,10 @@ async def test_extracted_workerbee_workspace_preserves_payloads_and_app_hooks() 
         assert screen.query_one("#workerbee-workspace-policy", Select).value == (
             "scoped-workbench"
         )
-        assert screen.query_one(
-            "#workerbee-workspace-request-mode", Select
-        ).value == "automatic"
+        assert (
+            screen.query_one("#workerbee-workspace-request-mode", Select).value
+            == "automatic"
+        )
         assert screen.query_one("#workerbee-workspace-roots", Input).value == (
             "/repo/one, /repo/two"
         )
@@ -1119,9 +1118,9 @@ async def test_extracted_workerbee_workspace_preserves_payloads_and_app_hooks() 
         )
         assert screen.query_one("#workerbee-workspace-bind", Button).disabled is True
 
-        screen.query_one("#workerbee-workspace-roots", Input).value = (
-            " /repo/three, , /repo/four "
-        )
+        screen.query_one(
+            "#workerbee-workspace-roots", Input
+        ).value = " /repo/three, , /repo/four "
         screen.query_one("#workerbee-workspace-scratch", Input).value = "  "
         screen.query_one("#workerbee-workspace-label", Input).value = "New profile"
         screen.query_one("#workerbee-workspace-target", Input).value = " /repo/three "
@@ -1188,5 +1187,251 @@ async def test_extracted_workerbee_workspace_preserves_payloads_and_app_hooks() 
         ]
 
         screen.query_one("#workerbee-workspace-close", Button).press()
+        await pilot.pause()
+        assert app.screen is not screen
+
+
+async def test_extracted_workerbee_snapshot_screen_preserves_payload_preview_and_hooks() -> (
+    None
+):
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    policy = {
+        "applicable": True,
+        "backend": "platform_debug",
+        "workflow_label": "Trusted Platform Workbench",
+        "effective": {
+            "source_root": "/repo/demo",
+            "policy": "safe-working-tree",
+            "include_paths": ["site-output", "reports"],
+            "max_bytes": 1024,
+            "max_files": 20,
+            "max_file_bytes": 512,
+            "profile_label": "Project output",
+        },
+        "admin": {
+            "control_mode": "editable",
+            "policy_ceiling": "safe-working-tree",
+        },
+    }
+    workers: list[tuple[object, str, bool]] = []
+
+    app.save_workerbee_snapshot_policy = (  # type: ignore[method-assign]
+        lambda received, global_policy=False: ("save", received, global_policy)
+    )
+    app.inherit_workerbee_snapshot_policy = (  # type: ignore[method-assign]
+        lambda received: ("inherit", received)
+    )
+    app.preview_workerbee_snapshot_policy = (  # type: ignore[method-assign]
+        lambda received: ("preview", received)
+    )
+
+    async with app.run_test() as pilot:
+        screen = screens.WorkerBeeSnapshotScreen(agent_id="agent-1", policy_view=policy)
+        app.push_screen(screen)
+        await pilot.pause()
+
+        policy_select = screen.query_one("#workerbee-snapshot-policy", Select)
+        assert screen.BINDINGS == [("escape", "dismiss", "Close")]
+        assert screen.focused is policy_select
+        assert policy_select.value == "safe-working-tree"
+        assert policy_select._options == [  # type: ignore[attr-defined]
+            ("", Select.BLANK),
+            ("Tracked content", "tracked"),
+            ("Tracked + approved generated paths", "approved-paths"),
+            ("Safe working tree", "safe-working-tree"),
+        ]
+        assert (
+            str(screen.query_one("#workerbee-snapshot-posture", Static).renderable)
+            == "Trusted Platform Workbench · backend=platform_debug · "
+            "control=editable · ceiling=safe-working-tree"
+        )
+        assert (
+            str(screen.query_one("#workerbee-snapshot-summary", Static).renderable)
+            == "Preview resolves generated roots without changing the active lease or workspace."
+        )
+        assert screen.query_one("#workerbee-snapshot-save", Button).label.plain == (
+            "Save Agent"
+        )
+        assert (
+            screen.query_one("#workerbee-snapshot-save-global", Button).label.plain
+            == "Save Root Default"
+        )
+
+        screen.query_one(
+            "#workerbee-snapshot-includes", Input
+        ).value = " site-output, , reports, coverage "
+        screen.query_one("#workerbee-snapshot-max-bytes", Input).value = " 2048 "
+        screen.query_one("#workerbee-snapshot-max-files", Input).value = ""
+        screen.query_one("#workerbee-snapshot-max-file-bytes", Input).value = "768"
+        screen.query_one("#workerbee-snapshot-label", Input).value = "  "
+        assert screen.policy_payload() == {
+            "source_root": "/repo/demo",
+            "policy": "safe-working-tree",
+            "include_paths": ["site-output", "reports", "coverage"],
+            "max_bytes": 2048,
+            "max_files": None,
+            "max_file_bytes": 768,
+            "profile_label": None,
+        }
+
+        screen.show_preview(
+            {
+                "selection": {
+                    "policy": "safe-working-tree",
+                    "file_count": 4,
+                    "total_bytes": 120,
+                    "include_paths": ["site-output", "reports"],
+                    "excluded_paths": [".env (sensitive-name)"],
+                }
+            }
+        )
+        assert (
+            str(screen.query_one("#workerbee-snapshot-summary", Static).renderable)
+            == "Preview: safe-working-tree · 4 files · 120 bytes · "
+            "2 generated roots · 1 excluded"
+        )
+
+        original_run_worker = app.run_worker
+        app.run_worker = (  # type: ignore[method-assign]
+            lambda work, *, name, exclusive: workers.append((work, name, exclusive))
+        )
+        for button_id in (
+            "workerbee-snapshot-save",
+            "workerbee-snapshot-save-global",
+            "workerbee-snapshot-inherit",
+            "workerbee-snapshot-preview",
+        ):
+            screen.query_one(f"#{button_id}", Button).press()
+            await pilot.pause()
+        app.run_worker = original_run_worker  # type: ignore[method-assign]
+
+        assert workers == [
+            (("save", screen, False), "workerbee-snapshot-save", True),
+            (("save", screen, True), "workerbee-snapshot-save-global", True),
+            (("inherit", screen), "workerbee-snapshot-inherit", True),
+            (("preview", screen), "workerbee-snapshot-preview", True),
+        ]
+
+        screen.query_one("#workerbee-snapshot-close", Button).press()
+        await pilot.pause()
+        assert app.screen is not screen
+
+        direct_screen = screens.WorkerBeeSnapshotScreen(
+            agent_id="agent-1",
+            policy_view={
+                **policy,
+                "applicable": False,
+                "backend": "oss",
+            },
+        )
+        app.push_screen(direct_screen)
+        await pilot.pause()
+        assert (
+            str(
+                direct_screen.query_one(
+                    "#workerbee-snapshot-direct-host", Static
+                ).renderable
+            )
+            == "The selected OSS backend uses the host checkout directly; no appliance snapshot is created."
+        )
+        assert (
+            direct_screen.query_one("#workerbee-snapshot-policy", Select).disabled
+            is True
+        )
+        assert (
+            direct_screen.query_one("#workerbee-snapshot-preview", Button).disabled
+            is True
+        )
+        direct_screen.query_one("#workerbee-snapshot-close", Button).press()
+        await pilot.pause()
+
+
+async def test_extracted_workerbee_access_preserves_choices_payload_and_hooks() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    view = {
+        "selected_backend": "platform_debug",
+        "effective_profile": "local-deploy",
+        "control_mode": "editable",
+        "profile_ceiling": "trusted-workbench",
+        "trusted_workbench_label": "Rosie Workbench",
+        "source_mode": "snapshot-import",
+        "source_mode_control": "editable",
+        "source_mode_ceiling": [
+            "native-direct",
+            "snapshot-import",
+            "managed-clone",
+        ],
+        "execution_lane": "interactive-gateway",
+        "execution_lane_control": "read_only",
+        "review_readonly": False,
+        "tool_surface_contract": {
+            "required_tools": ["workerbee_v1_session_start", "workerbee_v1_status"],
+            "reviewed_optional_tools": ["workerbee_v1_logs"],
+        },
+    }
+    workers: list[tuple[object, str, bool]] = []
+
+    app.save_workerbee_access_profile = (  # type: ignore[method-assign]
+        lambda received: ("save", received)
+    )
+    async with app.run_test() as pilot:
+        screen = screens.WorkerBeeAccessScreen(agent_id="agent-1", access_view=view)
+        app.push_screen(screen)
+        await pilot.pause()
+
+        access = screen.query_one("#workerbee-access-profile", Select)
+        source = screen.query_one("#workerbee-source-mode", Select)
+        lane = screen.query_one("#workerbee-execution-lane", Select)
+        assert screen.BINDINGS == [("escape", "dismiss", "Close")]
+        assert screen.focused is access
+        assert access.value == "local-deploy"
+        assert access._options == [  # type: ignore[attr-defined]
+            ("", Select.BLANK),
+            ("Inspect runtime state", "observe-local"),
+            ("Build and deploy in this workspace", "local-deploy"),
+            ("Rosie Workbench", "trusted-workbench"),
+        ]
+        assert source._options == [  # type: ignore[attr-defined]
+            ("", Select.BLANK),
+            ("Native direct checkout", "native-direct"),
+            ("Content-addressed snapshot import", "snapshot-import"),
+            ("Managed appliance clone", "managed-clone"),
+        ]
+        assert lane.disabled is True
+        assert lane._options == [  # type: ignore[attr-defined]
+            ("", Select.BLANK),
+            ("Ordinary generation-bound gateway", "interactive-gateway"),
+            ("Controlled run (root-owned approval)", "controlled-run"),
+        ]
+        assert (
+            str(screen.query_one("#workerbee-tool-surface-summary", Static).renderable)
+            == "requested=2 · backend optional=1 · unknown=quarantined/denied · "
+            "effective catalog: run doctor"
+        )
+        assert (
+            str(screen.query_one("#workerbee-access-summary", Static).renderable)
+            == "Access and source changes apply after a safe Agent/Operator restart or resume. "
+            "Controlled runs require separate root approval."
+        )
+
+        access.value = "trusted-workbench"
+        source.value = "managed-clone"
+        await pilot.pause()
+        assert screen.selected_profile() == "trusted-workbench"
+        assert screen.policy_payload() == {
+            "access_profile": "trusted-workbench",
+            "source_mode": "managed-clone",
+        }
+
+        original_run_worker = app.run_worker
+        app.run_worker = (  # type: ignore[method-assign]
+            lambda work, *, name, exclusive: workers.append((work, name, exclusive))
+        )
+        screen.query_one("#workerbee-access-save", Button).press()
+        await pilot.pause()
+        app.run_worker = original_run_worker  # type: ignore[method-assign]
+        assert workers == [(("save", screen), "workerbee-access-save", True)]
+
+        screen.query_one("#workerbee-access-close", Button).press()
         await pilot.pause()
         assert app.screen is not screen
