@@ -21,6 +21,12 @@ from .joplin import (
     JoplinPasteConfirmScreen,
     JoplinReferencePromptScreen,
 )
+from .operators import (
+    OperatorAuthorityScreen,
+    OperatorHistoryScreen,
+    OperatorKillConfirmScreen,
+    OperatorProjectSpawnCancelScreen,
+)
 from .runtime import ManagedProjectPickerScreen, RuntimeMigrationScreen
 from .settings import SettingsScreen
 
@@ -44,6 +50,10 @@ __all__ = [
     "JoplinReferencePromptScreen",
     "IssueClearConfirmScreen",
     "ModelElevationScreen",
+    "OperatorAuthorityScreen",
+    "OperatorHistoryScreen",
+    "OperatorKillConfirmScreen",
+    "OperatorProjectSpawnCancelScreen",
     "PullRequestMergeConfirmScreen",
     "RuntimeMigrationScreen",
     "SettingsScreen",

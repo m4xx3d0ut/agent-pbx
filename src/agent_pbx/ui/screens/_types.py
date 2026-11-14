@@ -19,3 +19,11 @@ class LinkedGitBrokerTuiContextView(Protocol):
     agent_id: str
     work_root: str
     authority_sha256: str
+
+
+class OperatorSessionCandidateView(Protocol):
+    session_id: str
+    timestamp: float
+    source: str
+    path: str
+    summary: str

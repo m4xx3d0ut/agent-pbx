@@ -27,6 +27,10 @@ def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
         "JoplinDeleteConfirmScreen",
         "JoplinPasteConfirmScreen",
         "ModelElevationScreen",
+        "OperatorAuthorityScreen",
+        "OperatorHistoryScreen",
+        "OperatorKillConfirmScreen",
+        "OperatorProjectSpawnCancelScreen",
         "PullRequestMergeConfirmScreen",
         "RuntimeMigrationScreen",
         "SettingsScreen",
@@ -692,3 +696,266 @@ async def test_extracted_issue_clear_submit_and_cancel() -> None:
 
         assert app.screen is not cancel_screen
         assert len(cleared) == 1
+
+
+async def test_extracted_operator_kill_confirm_and_cancel() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    dismissed: list[dict[str, object]] = []
+
+    async def dismiss_selected_agent(**request: object) -> None:
+        dismissed.append(request)
+
+    app.dismiss_selected_agent = dismiss_selected_agent  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        confirm_screen = screens.OperatorKillConfirmScreen(
+            agent_id="operator-6",
+            action="purge",
+            delete_thread=True,
+        )
+        app.push_screen(confirm_screen)
+        await pilot.pause()
+
+        assert (
+            str(confirm_screen.query_one("#operator-kill-message", Static).renderable)
+            == "Purge operator-6 and kill its tmux pane?"
+        )
+        await pilot.click("#operator-kill-confirm")
+        await pilot.pause()
+
+        assert app.screen is not confirm_screen
+        assert dismissed == [
+            {
+                "agent_id": "operator-6",
+                "delete_thread": True,
+                "confirmed_operator_kill": True,
+            }
+        ]
+
+        cancel_screen = screens.OperatorKillConfirmScreen(
+            agent_id="operator-6",
+            action="hide",
+            delete_thread=False,
+        )
+        app.push_screen(cancel_screen)
+        await pilot.pause()
+        await pilot.click("#operator-kill-cancel")
+        await pilot.pause()
+
+        assert app.screen is not cancel_screen
+        assert len(dismissed) == 1
+
+
+async def test_extracted_project_spawn_cancel_confirm_and_keep_pending() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    canceled: list[str] = []
+
+    async def cancel_project_spawn_request(spawn_request_id: str) -> None:
+        canceled.append(spawn_request_id)
+
+    app.cancel_project_spawn_request = cancel_project_spawn_request  # type: ignore[method-assign]
+    request = {
+        "spawn_request_id": "spawn-7",
+        "project_name": "workerbee",
+        "target_path": "/tmp/workerbee",
+    }
+    async with app.run_test() as pilot:
+        confirm_screen = screens.OperatorProjectSpawnCancelScreen(request)
+        app.push_screen(confirm_screen)
+        await pilot.pause()
+
+        summary = str(
+            confirm_screen.query_one("#operator-kill-message", Static).renderable
+        )
+        assert "Request: spawn-7" in summary
+        assert "Project: workerbee" in summary
+        assert "Target: /tmp/workerbee" in summary
+        await pilot.click("#project-spawn-cancel-confirm")
+        await pilot.pause()
+
+        assert app.screen is not confirm_screen
+        assert canceled == ["spawn-7"]
+
+        keep_screen = screens.OperatorProjectSpawnCancelScreen(request)
+        app.push_screen(keep_screen)
+        await pilot.pause()
+        await pilot.click("#project-spawn-cancel-close")
+        await pilot.pause()
+
+        assert app.screen is not keep_screen
+        assert canceled == ["spawn-7"]
+
+
+async def test_extracted_operator_history_preserves_rows_refresh_and_resume() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    candidates = [
+        tui.OperatorSessionCandidate(
+            session_id="new-session",
+            timestamp=3600.0,
+            source="codex.sessions",
+            summary="new prompt",
+        ),
+        tui.OperatorSessionCandidate(
+            session_id="old-session",
+            timestamp=0.0,
+            source="metadata.operator_session_history",
+            summary="old prompt",
+        ),
+    ]
+    refreshed: list[object] = []
+    resumed: list[tuple[str, str]] = []
+
+    async def refresh_operator_history_screen(screen: object) -> None:
+        refreshed.append(screen)
+
+    async def resume_selected_operator(
+        *,
+        agent_id: str,
+        resume_candidate: tui.OperatorSessionCandidate,
+    ) -> None:
+        resumed.append((agent_id, resume_candidate.session_id))
+
+    app.refresh_operator_history_screen = refresh_operator_history_screen  # type: ignore[method-assign]
+    app.resume_selected_operator = resume_selected_operator  # type: ignore[method-assign]
+    async with app.run_test() as pilot:
+        screen = screens.OperatorHistoryScreen(
+            agent_id="operator-7",
+            candidates=candidates,
+            resume_target=candidates[1],
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+
+        table = screen.query_one("#operator-history-table", DataTable)
+        assert table.columns[list(table.columns)[0]].label.plain == "Pick"
+        assert table.get_row("new-session") == [
+            "1",
+            "1970-01-01 01:00",
+            "codex.sessions",
+            "new-session",
+            "new prompt",
+        ]
+        assert table.get_row("old-session") == [
+            "*",
+            "-",
+            "metadata.operator_session_history",
+            "old-session",
+            "old prompt",
+        ]
+        assert table.cursor_row == 1
+
+        await pilot.click("#operator-history-refresh")
+        await pilot.pause()
+        assert refreshed == [screen]
+
+        table.move_cursor(row=0, animate=False, scroll=False)
+        await pilot.click("#operator-history-resume")
+        await pilot.pause()
+
+        assert app.screen is not screen
+        assert resumed == [("operator-7", "new-session")]
+
+
+async def test_extracted_operator_authority_preserves_payloads_and_hooks() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, object]] = []
+
+    async def preview(screen: object) -> None:
+        calls.append(("preview", screen))
+
+    async def save(screen: object) -> None:
+        calls.append(("save", screen))
+
+    async def apply(screen: object) -> None:
+        calls.append(("apply", screen))
+
+    app.preview_operator_workspace_set = preview  # type: ignore[method-assign]
+    app.save_operator_workspace_set = save  # type: ignore[method-assign]
+    app.apply_operator_authority = apply  # type: ignore[method-assign]
+    authority_view = {
+        "admin": {
+            "control_mode": "editable",
+            "profile_ceiling": "full-access",
+        },
+        "requested_profile": "scoped-edit",
+        "effective_profile": "scoped-edit",
+        "profile_label": "Rosie Workbench",
+        "pending_activation": True,
+        "workspace_set": {
+            "set_id": "rosie-stackops",
+            "label": "Rosie StackOps",
+            "member_count": 1,
+            "members": [{"path": "/home/test/git/agent-pbx"}],
+            "collections": ["/home/test/git/k1s-wt"],
+        },
+    }
+    workspace_sets = [
+        {"set_id": "rosie-stackops", "label": "Rosie StackOps", "version": 3}
+    ]
+
+    async with app.run_test() as pilot:
+        screen = screens.OperatorAuthorityScreen(
+            agent_id="operator-0",
+            authority_view=authority_view,
+            workspace_sets=workspace_sets,
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+
+        assert screen.query_one("#operator-authority-profile", Select).value == (
+            "scoped-edit"
+        )
+        assert screen.query_one("#operator-authority-set", Select).value == (
+            "rosie-stackops"
+        )
+        assert "pending safe restart/resume" in str(
+            screen.query_one("#operator-authority-summary", Static).renderable
+        )
+
+        screen.query_one(
+            "#operator-authority-profile", Select
+        ).value = "trusted-workbench"
+        screen.query_one("#operator-authority-label", Input).value = "Trusted Rosie"
+        screen.query_one("#operator-workspace-set-id", Input).value = "trusted-set"
+        screen.query_one("#operator-workspace-set-label", Input).value = "Trusted Set"
+        screen.query_one(
+            "#operator-workspace-set-members", Input
+        ).value = "/repo/one, /repo/two"
+        screen.query_one(
+            "#operator-workspace-set-collections", Input
+        ).value = "/collection/a, /collection/b"
+
+        assert screen.assignment_payload() == {
+            "profile": "trusted-workbench",
+            "workspace_set_id": "rosie-stackops",
+            "profile_label": "Trusted Rosie",
+        }
+        assert screen.workspace_set_payload() == (
+            "trusted-set",
+            {
+                "label": "Trusted Set",
+                "members": ["/repo/one", "/repo/two"],
+                "collections": ["/collection/a", "/collection/b"],
+                "collection_depth": 1,
+            },
+        )
+
+        screen.query_one("#operator-authority-preview", Button).press()
+        await pilot.pause()
+        screen.query_one("#operator-authority-save-set", Button).press()
+        await pilot.pause()
+        screen.query_one("#operator-authority-apply", Button).press()
+        await pilot.pause()
+
+        assert calls == [("preview", screen), ("save", screen), ("apply", screen)]
+
+        screen.show_preview(
+            {
+                "label": "Trusted Set",
+                "member_count": 2,
+                "member_digest": "abcdef0123456789",
+            }
+        )
+        assert (
+            str(screen.query_one("#operator-authority-summary", Static).renderable)
+            == "Preview: Trusted Set · members=2 · digest=abcdef012345"
+        )
