@@ -1347,7 +1347,8 @@ def build_mcp_server(
             OperatorAssignmentCreate(**assignment)
             for assignment in (assignments or [])
         ]
-        return operator_service.start_campaign(
+        return operator_delivery_call(
+            operator_service.start_campaign,
             operator_agent_id=operator_agent_id,
             title=title,
             objective=objective,
@@ -1371,15 +1372,15 @@ def build_mcp_server(
         """Send a tracked campaign follow-up to a caller agent."""
         return operator_delivery_call(
             operator_service.send_followup,
-                operator_agent_id=operator_agent_id,
-                campaign_id=campaign_id,
-                target_agent_id=target_agent_id,
-                message=message,
-                assignment_id=assignment_id,
-                operator_fork_id=operator_fork_id,
-                fork_track_id=fork_track_id,
-                delivery=delivery,
-                delivery_request_id=delivery_request_id,
+            operator_agent_id=operator_agent_id,
+            campaign_id=campaign_id,
+            target_agent_id=target_agent_id,
+            message=message,
+            assignment_id=assignment_id,
+            operator_fork_id=operator_fork_id,
+            fork_track_id=fork_track_id,
+            delivery=delivery,
+            delivery_request_id=delivery_request_id,
         )
 
     @mcp.tool()

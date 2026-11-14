@@ -41,6 +41,12 @@ def codex_config_override(key: str, value: object) -> str:
     return f"{key}={_toml_literal(value)}"
 
 
+def managed_codex_process_overrides() -> tuple[str, ...]:
+    """Return launch-scoped policy shared by every PBX-managed Codex process."""
+
+    return (codex_config_override("check_for_update_on_startup", False),)
+
+
 def managed_caller_codex_overrides(server_url: str) -> tuple[str, ...]:
     """Return the narrow, noninteractive Codex launch policy for PBX bootstrap."""
 
@@ -50,7 +56,7 @@ def managed_caller_codex_overrides(server_url: str) -> tuple[str, ...]:
         for tool in MANAGED_CALLER_PBX_TOOLS
     }
     return (
-        codex_config_override("check_for_update_on_startup", False),
+        *managed_codex_process_overrides(),
         codex_config_override(
             "mcp_servers.agent-pbx",
             {

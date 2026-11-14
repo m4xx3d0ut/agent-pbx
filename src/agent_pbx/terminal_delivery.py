@@ -56,6 +56,11 @@ UPDATE_OVERLAY_MARKERS = (
     "upgrade codex",
 )
 
+THINKING_OVERLAY_MARKERS = (
+    "response taking extra thought",
+    "retry with a faster model",
+)
+
 
 class IdleTargetDeliveryOutcome(str, Enum):
     DELIVERED = "delivered"
@@ -197,6 +202,7 @@ def classify_codex_terminal_capture(captured: str) -> TerminalReadiness:
         ("startup", STARTUP_OVERLAY_MARKERS),
         ("model", MODEL_OVERLAY_MARKERS),
         ("update", UPDATE_OVERLAY_MARKERS),
+        ("thinking", THINKING_OVERLAY_MARKERS),
     ):
         if any(marker in normalized for marker in markers):
             return TerminalReadiness(
@@ -211,10 +217,7 @@ def classify_codex_terminal_capture(captured: str) -> TerminalReadiness:
         if prompt is None:
             continue
         prompt_body = prompt.group("body").strip().casefold()
-        known_body = not prompt_body or any(
-            prompt_body.startswith(placeholder)
-            for placeholder in CODEX_INPUT_PLACEHOLDERS
-        )
+        known_body = not prompt_body or prompt_body in CODEX_INPUT_PLACEHOLDERS
         if not known_body:
             continue
         footer = bottom_band[index + 1 :]

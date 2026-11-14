@@ -3517,3 +3517,11 @@ def test_operator_campaign_tmux_delivery_rejects_drifted_fork_metadata(
     assert dispatch_failures[0]["detail"]["error"].startswith(
         "stale_mapping: exact managed runtime mapping is unavailable"
     )
+    assert dispatch_failures[0]["detail"]["delivery_error"]["outcome"] == (
+        "stale_mapping"
+    )
+    assert dispatch_failures[0]["detail"]["delivery_error"]["reason_code"] == (
+        "runtime_mapping_missing"
+    )
+    assert dispatch_failures[0]["detail"]["delivery_error"]["request_id"]
+    assert "message" not in dispatch_failures[0]["detail"]["delivery_error"]

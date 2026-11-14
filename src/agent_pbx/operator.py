@@ -4089,6 +4089,26 @@ class OperatorService:
                     operator_fork_id=assignment.get("operator_fork_id"),
                     fork_track_id=assignment.get("fork_track_id"),
                 )
+            except IdleTargetDeliveryError as exc:
+                self.store.update_operator_assignment(
+                    assignment["assignment_id"],
+                    state="blocked",
+                    complete=True,
+                )
+                self.store.add_operator_campaign_event(
+                    campaign_id=campaign["campaign_id"],
+                    assignment_id=assignment["assignment_id"],
+                    operator_agent_id=operator_agent_id,
+                    target_agent_id=assignment["target_agent_id"],
+                    event_type="dispatch_failed",
+                    summary=f"Dispatch failed for {assignment['target_agent_id']}",
+                    detail={
+                        "error": str(exc),
+                        "delivery": delivery,
+                        "delivery_error": exc.result.public_dict(),
+                    },
+                )
+                continue
             except Exception as exc:  # noqa: BLE001 - delivery failure becomes state.
                 self.store.update_operator_assignment(
                     assignment["assignment_id"],

@@ -5,7 +5,14 @@ from agent_pbx.codex_launch import (
     managed_caller_bootstrap_id,
     managed_caller_bootstrap_prompt,
     managed_caller_codex_overrides,
+    managed_codex_process_overrides,
 )
+
+
+def test_managed_codex_process_policy_is_launch_scoped() -> None:
+    assert managed_codex_process_overrides() == (
+        "check_for_update_on_startup=false",
+    )
 
 
 def test_managed_caller_overrides_are_narrow_and_noninteractive() -> None:

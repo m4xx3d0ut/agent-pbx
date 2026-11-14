@@ -64,6 +64,7 @@ from .codex_cli import (
     inspect_codex_model_catalog,
     inspect_codex_posture,
 )
+from .codex_launch import managed_codex_process_overrides
 from .codex_sessions import (
     CodexSessionPathCache,
     CodexTranscriptTailCache,
@@ -2070,6 +2071,7 @@ def caller_agent_config_overrides(
     workerbee_gateway_binding: Mapping[str, object] | None = None,
 ) -> list[str]:
     overrides = [
+        *managed_codex_process_overrides(),
         agent_pbx_mcp_config_override(
             CALLER_AGENT_PBX_APPROVED_TOOLS,
             mcp_url=mcp_url,
@@ -2113,6 +2115,7 @@ def review_operator_config_overrides(
         server_configs=server_configs,
         workerbee_gateway_binding=workerbee_gateway_binding,
     )
+    overrides[:0] = managed_codex_process_overrides()
     trust_override = codex_project_trust_config_override(work_root)
     if trust_override:
         overrides.append(trust_override)
@@ -2159,6 +2162,7 @@ def operator_agent_config_overrides(
         ),
         workerbee_gateway_binding=workerbee_gateway_binding,
     )
+    overrides[:0] = managed_codex_process_overrides()
     trust_override = codex_project_trust_config_override(work_root)
     if trust_override:
         overrides.append(trust_override)

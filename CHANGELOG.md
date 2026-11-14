@@ -7,6 +7,13 @@
 - Add a manual, exact-tag recovery workflow that verifies already-published
   PyPI files and restores prebuilt GitHub Release assets without receiving
   OIDC publication authority.
+- Add receipt-bearing, idempotent Operator terminal delivery with typed
+  readiness outcomes and exact managed-runtime identity evidence.
+
+### Changed
+
+- Disable Codex startup update checks explicitly for managed caller, root
+  Operator, edit-fork, review-fork, restart, and resume launch policies.
 
 ### Fixed
 
@@ -17,6 +24,11 @@
   section.
 - Separate Git modal-routing tests from pane-refresh scheduling so background
   terminal refreshes cannot create nondeterministic release-gate failures.
+- Refuse report-mode delivery unless the exact Codex session, managed tmux
+  target, process start identity, workspace set, runtime readiness, idle input
+  prompt, and writer lease all remain valid through injection. Explicit nohup
+  targets retain queue fallback; startup, model, update, and thinking overlays
+  return typed non-success outcomes.
 
 ## v2.4.0 - 2026-11-13
 

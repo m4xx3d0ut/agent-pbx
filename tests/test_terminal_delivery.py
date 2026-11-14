@@ -343,10 +343,73 @@ async def test_operator_api_surfaces_exact_typed_delivery_outcome() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("service_method", "tool_name", "arguments"),
+    [
+        (
+            "start_campaign",
+            "pbx_operator_start_campaign",
+            {
+                "operator_agent_id": "operator-6",
+                "title": "Typed rejection",
+                "objective": "Retain delivery details.",
+                "assignments": [],
+            },
+        ),
+        (
+            "send_followup",
+            "pbx_operator_send_followup",
+            {
+                "operator_agent_id": "operator-6",
+                "campaign_id": "campaign-1",
+                "target_agent_id": "caller-1",
+                "message": "Continue.",
+            },
+        ),
+        (
+            "route_review_escalation",
+            "pbx_operator_route_review_escalation",
+            {
+                "operator_agent_id": "operator-6",
+                "review_fork_id": "fork-review-1",
+                "message": "Apply the review correction.",
+            },
+        ),
+        (
+            "approve_handoff",
+            "pbx_operator_approve_handoff",
+            {
+                "operator_agent_id": "operator-6",
+                "handoff_id": "handoff-1",
+            },
+        ),
+        (
+            "update_handoff",
+            "pbx_operator_update_handoff",
+            {
+                "operator_agent_id": "operator-6",
+                "handoff_id": "handoff-1",
+                "status": "complete",
+                "summary": "Done.",
+            },
+        ),
+        (
+            "retry_handoff_completion_delivery",
+            "pbx_operator_retry_handoff_completion",
+            {
+                "operator_agent_id": "operator-6",
+                "completion_delivery_id": "completion-1",
+            },
+        ),
+    ],
+)
 @pytest.mark.asyncio
 async def test_operator_mcp_surfaces_exact_typed_delivery_outcome(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    service_method: str,
+    tool_name: str,
+    arguments: dict[str, Any],
 ) -> None:
     store = Store(tmp_path / "pbx.sqlite")
     store.init()
@@ -366,17 +429,9 @@ async def test_operator_mcp_surfaces_exact_typed_delivery_outcome(
     def reject(_self: OperatorService, **_kwargs: object) -> dict[str, Any]:
         raise IdleTargetDeliveryError(typed)
 
-    monkeypatch.setattr(OperatorService, "send_followup", reject)
+    monkeypatch.setattr(OperatorService, service_method, reject)
     mcp = build_mcp_server(store)
-    raw = await mcp.call_tool(
-        "pbx_operator_send_followup",
-        {
-            "operator_agent_id": "operator-6",
-            "campaign_id": "campaign-1",
-            "target_agent_id": "caller-1",
-            "message": "Continue.",
-        },
-    )
+    raw = await mcp.call_tool(tool_name, arguments)
     content, structured = raw if isinstance(raw, tuple) else (raw, None)
     payload = structured
     if isinstance(payload, dict) and set(payload) == {"result"}:
@@ -596,10 +651,9 @@ def test_terminal_capture_classifier_requires_current_prompt() -> None:
 @pytest.mark.parametrize(
     "capture",
     [
-        "response taking extra thought\n› Retry with a faster model\n  Keep waiting",
         "Earlier transcript\n› old submitted prompt\nassistant still streaming",
         "Earlier transcript\n› typed draft",
-        "\x1b[1m› Retry with a faster model\x1b[0m",
+        "› Ask Codex to do anything about this typed draft",
     ],
 )
 def test_terminal_capture_classifier_rejects_menu_transcript_and_draft(
@@ -608,6 +662,16 @@ def test_terminal_capture_classifier_rejects_menu_transcript_and_draft(
     readiness = classify_codex_terminal_capture(capture)
     assert readiness.ready is False
     assert readiness.outcome == IdleTargetDeliveryOutcome.TARGET_NOT_READY
+
+
+def test_terminal_capture_classifier_marks_extra_thought_menu_as_overlay() -> None:
+    readiness = classify_codex_terminal_capture(
+        "response taking extra thought\n"
+        "\x1b[1m› Retry with a faster model\x1b[0m\n  Keep waiting"
+    )
+    assert readiness.ready is False
+    assert readiness.outcome == IdleTargetDeliveryOutcome.OVERLAY_ACTIVE
+    assert readiness.reason_code == "thinking_overlay_active"
 
 
 def test_terminal_capture_classifier_accepts_bottom_composer_band_and_ansi() -> None:

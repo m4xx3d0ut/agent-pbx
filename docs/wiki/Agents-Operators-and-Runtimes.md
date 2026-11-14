@@ -71,6 +71,18 @@ must be deliberately registered with nohup enabled; queued commands, pings, and
 plan choices never imply it. Compatibility polling can be disabled only after
 the local native/event-stream path is qualified.
 
+Report-mode Operator delivery is fail closed. Agent PBX binds the durable
+entity and Codex session to the exact managed server, socket, tmux
+session/window/pane, process PID/start identity, workspace set, authority
+profile, and writer lease. It captures only a bounded terminal tail to prove a
+current empty input composer, revalidates after acquiring the lease, and then
+injects once. Startup, model-selection, update, and extra-thinking interstitials
+return `overlay_active`; stale mappings, ambiguous evidence, active security
+prompts, and non-idle targets never claim delivery. A caller-stable
+`delivery_request_id` suppresses duplicate injection across replay without
+placing prompt bodies in delivery audit events. Queue fallback remains limited
+to explicitly registered nohup targets.
+
 ## Restart, resume, and model transition
 
 Model and reasoning settings are treated as session-static. A requested profile
@@ -79,6 +91,13 @@ restarts/resumes in the managed pane, verifies the effective profile, and keeps
 rollback evidence. If no healthy v2 mapping exists, an explicit restart may
 create a fresh managed pane and resume the known session. It fails closed when
 the association cannot be proved.
+
+All managed caller and Operator launch, restart, fork, and resume policies set
+`check_for_update_on_startup=false`. Update selection is never automated by
+delivery logic; if an update or another Codex interstitial is visible, delivery
+reports the overlay and waits for separately authorized operator handling.
+Model announcements are likewise classified, not suppressed, unless a future
+supported Codex capability is explicitly reviewed and enabled.
 
 Lifecycle repair and native adoption are preview-first actions. They must never
 retarget a reused pane ID or retire a healthy source before the replacement is

@@ -17,12 +17,12 @@
       "lines": 14652
     },
     "src/agent_pbx/tui.py": {
-      "ast_nodes": 239692,
-      "bytes": 1773245,
+      "ast_nodes": 239721,
+      "bytes": 1773484,
       "classes": 71,
       "functions": 1674,
-      "imports": 68,
-      "lines": 44240
+      "imports": 69,
+      "lines": 44244
     }
   },
   "baseline_commit": "9d62240f7c4370763d442d65549f7e950111028b",

@@ -18750,8 +18750,17 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
 
     class Client:
         async def get(self, path: str, **_: object) -> Response:
-            assert path == "/v1/auth/check"
-            return Response({"ok": True})
+            if path == "/v1/auth/check":
+                return Response({"ok": True})
+            assert path == "/v2/workerbee/workspace-policy"
+            return Response(
+                {
+                    "access_posture": {
+                        "operator_default_effective_profile": "observe-local",
+                        "profile_ceiling": "local-deploy",
+                    }
+                }
+            )
 
         async def post(self, path: str, **kwargs: object) -> Response:
             posts.append({"path": path, **kwargs})
@@ -18827,6 +18836,8 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
     assert posts[1]["json"]["metadata"]["tmux_pane_id"] == "%42"  # type: ignore[index]
     expected_tmux = resolve_tmux_binary()
     assert expected_tmux is not None
+    launch_argv = shlex.split(str(launches[0]["command"]))
+    assert "check_for_update_on_startup=false" in launch_argv
     assert launches[0]["env"] == {
             "AGENT_PBX_SERVER_URL": "http://127.0.0.1:8765",
             "AGENT_PBX_MCP_URL": "http://127.0.0.1:8765/mcp",
@@ -18885,8 +18896,17 @@ async def test_tui_start_operator_does_not_bind_stale_caller_when_operator_selec
 
     class Client:
         async def get(self, path: str, **_: object) -> Response:
-            assert path == "/v1/auth/check"
-            return Response({"ok": True})
+            if path == "/v1/auth/check":
+                return Response({"ok": True})
+            assert path == "/v2/workerbee/workspace-policy"
+            return Response(
+                {
+                    "access_posture": {
+                        "operator_default_effective_profile": "observe-local",
+                        "profile_ceiling": "local-deploy",
+                    }
+                }
+            )
 
         async def post(self, path: str, **kwargs: object) -> Response:
             assert path == "/v1/agents/register"
@@ -19610,6 +19630,7 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
     assert 'model_reasoning_effort="high"' in config_values
     assert 'model_reasoning_summary="detailed"' in config_values
     assert 'model_verbosity="high"' in config_values
+    assert "check_for_update_on_startup=false" in config_values
     workerbee_config = next(
         item for item in config_values if item.startswith("mcp_servers.workerbee=")
     )
@@ -20344,8 +20365,17 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
 
     class Client:
         async def get(self, path: str, **_: object) -> Response:
-            assert path == "/v1/auth/check"
-            return Response({"ok": True})
+            if path == "/v1/auth/check":
+                return Response({"ok": True})
+            assert path == "/v2/workerbee/workspace-policy"
+            return Response(
+                {
+                    "access_posture": {
+                        "operator_default_effective_profile": "local-deploy",
+                        "profile_ceiling": "local-deploy",
+                    }
+                }
+            )
 
         async def post(self, path: str, **kwargs: object) -> Response:
             posts.append({"path": path, **kwargs})
@@ -20496,6 +20526,7 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     assert 'model_reasoning_effort="max"' in launch_argv
     assert 'model_reasoning_summary="detailed"' in launch_argv
     assert 'model_verbosity="high"' in launch_argv
+    assert "check_for_update_on_startup=false" in launch_argv
     assert respawns[0]["env"]["AGENT_PBX_RESUME_CODEX_SESSION_ID"] == "current-session"
     assert respawns[0]["env"]["AGENT_PBX_REPORTING_AGENT_ID"] == "operator-0"
     assert respawns[0]["env"]["AGENT_PBX_CODEX_MODEL"] == "gpt-5.6-terra"
@@ -21434,6 +21465,7 @@ async def test_tui_restart_review_fork_resumes_with_approval_overrides(
         for index, item in enumerate(argv)
         if item == "-c"
     ]
+    assert "check_for_update_on_startup=false" in config_overrides
     assert f'default_permissions="{LINKED_EDIT_PERMISSION_PROFILE}"' not in config_overrides
     assert not any(
         item.startswith(f"permissions.{LINKED_EDIT_PERMISSION_PROFILE}=")
@@ -28665,6 +28697,17 @@ def test_tui_role_launches_use_distinct_sol_reasoning_defaults(
     assert 'model_reasoning_effort="xhigh"' in operator
     assert 'model_reasoning_summary="detailed"' in operator
     assert 'model_verbosity="high"' in operator
+
+
+def test_tui_all_managed_launch_profiles_disable_startup_update_checks() -> None:
+    profiles = {
+        "caller": caller_agent_config_overrides(),
+        "operator": operator_agent_config_overrides(),
+        "review": review_operator_config_overrides(),
+    }
+
+    for role, overrides in profiles.items():
+        assert overrides.count("check_for_update_on_startup=false") == 1, role
 
 
 def test_tui_restart_model_defaults_follow_entity_role() -> None:
