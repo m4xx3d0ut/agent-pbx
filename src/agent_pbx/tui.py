@@ -180,7 +180,12 @@ from .runtime_tmux import (
     tmux_client_attach_command,
     tmux_socket_from_environment,
 )
-from .ui import actions as ui_actions, screens as ui_screens, widgets as ui_widgets
+from .ui import (
+    actions as ui_actions,
+    preferences as ui_preferences,
+    screens as ui_screens,
+    widgets as ui_widgets,
+)
 from .ui.async_jobs import AsyncGenerationGate
 from .ui.focus import FocusGenerationGuard
 from .ui.navigation import NavigationDestination, NavigationHistory
@@ -228,6 +233,7 @@ LinkedGitRecoveryConfirmScreen = ui_screens.LinkedGitRecoveryConfirmScreen
 LinkedGitReviewArtifactScreen = ui_screens.LinkedGitReviewArtifactScreen
 ModelElevationScreen = ui_screens.ModelElevationScreen
 PullRequestMergeConfirmScreen = ui_screens.PullRequestMergeConfirmScreen
+SettingsScreen = ui_screens.SettingsScreen
 SLASH_COMPLETION_BACKWARD_KEYS = ui_widgets.SLASH_COMPLETION_BACKWARD_KEYS
 SLASH_COMPLETION_FORWARD_KEYS = ui_widgets.SLASH_COMPLETION_FORWARD_KEYS
 FollowUpTextArea = ui_widgets.FollowUpTextArea
@@ -240,6 +246,35 @@ is_follow_up_newline_key = ui_widgets.is_follow_up_newline_key
 normalized_key_names = ui_widgets.normalized_key_names
 slash_completion_direction = ui_widgets.slash_completion_direction
 slugify = ui_screens.slugify
+
+ACCESSIBLE_TUI_THEME = ui_preferences.ACCESSIBLE_TUI_THEME
+ADAPTIVE_TUI_LAYOUT = ui_preferences.ADAPTIVE_TUI_LAYOUT
+COMPACT_TUI_LAYOUT = ui_preferences.COMPACT_TUI_LAYOUT
+DEFAULT_CUSTOM_THEME_NAME = ui_preferences.DEFAULT_CUSTOM_THEME_NAME
+DEFAULT_JOPLIN_COPY_MODE = ui_preferences.DEFAULT_JOPLIN_COPY_MODE
+DEFAULT_SPLIT_PERCENT = ui_preferences.DEFAULT_SPLIT_PERCENT
+DEFAULT_TUI_LAYOUT = ui_preferences.DEFAULT_TUI_LAYOUT
+DEFAULT_TUI_THEME = ui_preferences.DEFAULT_TUI_THEME
+EMBEDDED_TERMINAL_SCROLL_MODE_CHOICES = (
+    ui_preferences.EMBEDDED_TERMINAL_SCROLL_MODE_CHOICES
+)
+JOPLIN_COPY_MODE_CHOICES = ui_preferences.JOPLIN_COPY_MODE_CHOICES
+JOPLIN_COPY_MODE_COPY_FIRST = ui_preferences.JOPLIN_COPY_MODE_COPY_FIRST
+JOPLIN_COPY_MODE_TMUX_CAPTURE = ui_preferences.JOPLIN_COPY_MODE_TMUX_CAPTURE
+JOPLIN_COPY_MODE_TRANSCRIPT_FIRST = (
+    ui_preferences.JOPLIN_COPY_MODE_TRANSCRIPT_FIRST
+)
+LAYOUT_CHOICES = ui_preferences.LAYOUT_CHOICES
+MAX_SPLIT_PERCENT = ui_preferences.MAX_SPLIT_PERCENT
+MINIMAL_TUI_THEME = ui_preferences.MINIMAL_TUI_THEME
+MIN_SPLIT_PERCENT = ui_preferences.MIN_SPLIT_PERCENT
+SPLIT_PERCENT_STEP = ui_preferences.SPLIT_PERCENT_STEP
+SPLIT_TUI_LAYOUT = ui_preferences.SPLIT_TUI_LAYOUT
+THEME_1337_NAME = ui_preferences.THEME_1337_NAME
+TINY_TUI_LAYOUT = ui_preferences.TINY_TUI_LAYOUT
+TMUX_POPOUT_MODE_CHOICES = ui_preferences.TMUX_POPOUT_MODE_CHOICES
+TMUX_RUNTIME_SERVER_MODE_CHOICES = ui_preferences.TMUX_RUNTIME_SERVER_MODE_CHOICES
+normalize_joplin_copy_mode = ui_preferences.normalize_joplin_copy_mode
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on", "y", "enabled"}
@@ -288,30 +323,10 @@ WORKFLOW_PROJECTION_EVENT_PREFIXES = (
     "workerbee_controlled_run_",
 )
 STARRED_AGENT_COLUMN = "*"
-DEFAULT_TUI_THEME = "cyberpunk"
-ACCESSIBLE_TUI_THEME = "cyberpunk-accessible"
-MINIMAL_TUI_THEME = "minimal"
-DEFAULT_CUSTOM_THEME_NAME = "1337"
-THEME_1337_NAME = DEFAULT_CUSTOM_THEME_NAME
-ADAPTIVE_TUI_LAYOUT = "adaptive"
-DEFAULT_TUI_LAYOUT = ADAPTIVE_TUI_LAYOUT
-SPLIT_TUI_LAYOUT = "split"
-COMPACT_TUI_LAYOUT = "compact"
-TINY_TUI_LAYOUT = "tiny"
-LAYOUT_CHOICES = (
-    (ADAPTIVE_TUI_LAYOUT.title(), ADAPTIVE_TUI_LAYOUT),
-    (SPLIT_TUI_LAYOUT.title(), SPLIT_TUI_LAYOUT),
-    (COMPACT_TUI_LAYOUT.title(), COMPACT_TUI_LAYOUT),
-    (TINY_TUI_LAYOUT.title(), TINY_TUI_LAYOUT),
-)
 SPLIT_MIN_WIDTH = 100
 SPLIT_MIN_HEIGHT = 24
 COMPACT_MIN_WIDTH = 70
 COMPACT_MIN_HEIGHT = 22
-DEFAULT_SPLIT_PERCENT = 42
-MIN_SPLIT_PERCENT = 25
-MAX_SPLIT_PERCENT = 75
-SPLIT_PERCENT_STEP = 5
 PBX_REPORT_MODE = "report"
 PBX_NOHUP_MODE = "nohup"
 LATEST_REPORT_DONE_STATUSES = {"complete", "completed", "done"}
@@ -515,24 +530,10 @@ DEFAULT_DETACHED_TMUX_HEIGHT = 48
 DEFAULT_TMUX_REFRESH_SECONDS = 1.5
 DEFAULT_TMUX_RUNTIME_SERVER_MODE = RuntimeServerMode.DEDICATED.value
 DEFAULT_TMUX_POPOUT_MODE = "auto"
-TMUX_POPOUT_MODE_CHOICES = (
-    ("Automatic for runtime server", "auto"),
-    ("Switch recorded outer client", "switch_client"),
-    ("Suspend TUI and attach", "suspend_attach"),
-)
 TMUX_WRITER_LEASE_SECONDS = 30.0
 TMUX_WRITER_RENEW_SECONDS = 12.0
 OPERATOR_BROKER_REFRESH_SECONDS = 2.0
 TMUX_RUNTIME_MAPPING_CACHE_SECONDS = 3.0
-TMUX_RUNTIME_SERVER_MODE_CHOICES = (
-    ("Dedicated PBX server", RuntimeServerMode.DEDICATED.value),
-    ("Outer server when present", RuntimeServerMode.OUTER_IF_PRESENT.value),
-    ("Require outer server", RuntimeServerMode.OUTER_REQUIRED.value),
-)
-EMBEDDED_TERMINAL_SCROLL_MODE_CHOICES = (
-    ("Tmux history (wheel/swipe)", EMBEDDED_SCROLL_MODE_TMUX),
-    ("Child application mouse input", EMBEDDED_SCROLL_MODE_CHILD),
-)
 EMBEDDED_TERMINAL_SCROLL_COALESCE_SECONDS = 0.03
 EMBEDDED_TERMINAL_SCROLL_LINES_PER_TICK = 5
 EMBEDDED_TERMINAL_SCROLL_MAX_LINES = 200
@@ -554,17 +555,8 @@ CLIPBOARD_COPY_POLL_SECONDS = 0.2
 # A clipboard change can race ahead of Codex drawing its native /copy picker.
 # Give that picker a short chance to appear before accepting the clipboard value.
 CODEX_COPY_SELECTOR_SETTLE_SECONDS = 1.0
-JOPLIN_COPY_MODE_COPY_FIRST = "copy_first"
-JOPLIN_COPY_MODE_TRANSCRIPT_FIRST = "transcript_first"
-JOPLIN_COPY_MODE_TMUX_CAPTURE = "tmux_capture"
-DEFAULT_JOPLIN_COPY_MODE = JOPLIN_COPY_MODE_COPY_FIRST
 DEFAULT_JOPLIN_PASTE_CONFIRM_CHARS = 1000
 DEFAULT_JOPLIN_PASTE_CONFIRM_LINES = 2
-JOPLIN_COPY_MODE_CHOICES = (
-    ("Fast: /copy → transcript → tmux", JOPLIN_COPY_MODE_COPY_FIRST),
-    ("Clean: transcript first", JOPLIN_COPY_MODE_TRANSCRIPT_FIRST),
-    ("Visible tmux capture only", JOPLIN_COPY_MODE_TMUX_CAPTURE),
-)
 OPERATOR_HANDOFF_CANCEL_REASON_CHOICES = (
     ("Superseded by structured handoff", "superseded"),
     ("No longer needed", "no_longer_needed"),
@@ -2316,35 +2308,6 @@ def load_tui_settings(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
-
-
-def normalize_joplin_copy_mode(value: object) -> str:
-    mode = str(value or "").strip().casefold().replace("-", "_")
-    if mode in {
-        JOPLIN_COPY_MODE_COPY_FIRST,
-        "copy",
-        "clipboard",
-        "clipboard_first",
-        "legacy",
-        "legacy_clipboard",
-        "fast",
-    }:
-        return JOPLIN_COPY_MODE_COPY_FIRST
-    if mode in {
-        JOPLIN_COPY_MODE_TRANSCRIPT_FIRST,
-        "transcript",
-        "export",
-        "clean",
-    }:
-        return JOPLIN_COPY_MODE_TRANSCRIPT_FIRST
-    if mode in {
-        JOPLIN_COPY_MODE_TMUX_CAPTURE,
-        "tmux",
-        "capture",
-        "visible",
-    }:
-        return JOPLIN_COPY_MODE_TMUX_CAPTURE
-    return DEFAULT_JOPLIN_COPY_MODE
 
 
 def normalize_codex_terminal_mode(value: object) -> str:
@@ -4381,190 +4344,6 @@ def parse_git_push_slash_command(message: str) -> str | None:
     if not separator or command.lower() != "/gitpush":
         return None
     return branch.strip()
-
-
-class SettingsScreen(ModalScreen[None]):
-    BINDINGS = [("escape", "dismiss", "Close")]
-
-    def __init__(
-        self,
-        *,
-        visual_flash_enabled: bool,
-        terminal_bell_enabled: bool,
-        agent_blink_enabled: bool,
-        low_power_enabled: bool,
-        layout_mode: str,
-        split_percent: int,
-        joplin_copy_mode: str,
-        tmux_direct_enabled: bool,
-        tmux_features_available: bool,
-        tmux_runtime_server_mode: str,
-        embedded_terminal_enabled: bool,
-        embedded_terminal_scroll_mode: str,
-        tmux_popout_mode: str,
-        custom_theme_name: str,
-        theme_name: str,
-    ) -> None:
-        super().__init__()
-        self.visual_flash_enabled = visual_flash_enabled
-        self.terminal_bell_enabled = terminal_bell_enabled
-        self.agent_blink_enabled = agent_blink_enabled
-        self.low_power_enabled = low_power_enabled
-        self.layout_mode = layout_mode
-        self.split_percent = split_percent
-        self.joplin_copy_mode = normalize_joplin_copy_mode(joplin_copy_mode)
-        self.tmux_direct_enabled = tmux_direct_enabled
-        self.tmux_features_available = tmux_features_available
-        self.tmux_runtime_server_mode = normalize_runtime_server_mode(
-            tmux_runtime_server_mode
-        ).value
-        self.embedded_terminal_enabled = embedded_terminal_enabled
-        self.embedded_terminal_scroll_mode = normalize_embedded_scroll_mode(
-            embedded_terminal_scroll_mode
-        )
-        self.tmux_popout_mode = tmux_popout_mode
-        self.custom_theme_name = custom_theme_name
-        self.theme_name = theme_name
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="settings-panel"):
-            yield Static("Settings", id="settings-title")
-            with Vertical(id="settings-options"):
-                yield Checkbox(
-                    "Visual flash",
-                    value=self.visual_flash_enabled,
-                    id="visual-flash",
-                )
-                yield Checkbox(
-                    "Terminal bell",
-                    value=self.terminal_bell_enabled,
-                    id="terminal-bell",
-                )
-                yield Checkbox(
-                    "Unseen blink",
-                    value=self.agent_blink_enabled,
-                    id="agent-blink",
-                )
-                yield Checkbox(
-                    "Low-power watch mode",
-                    value=self.low_power_enabled,
-                    id="low-power",
-                )
-                yield Static("Layout", id="layout-mode-label")
-                yield Select(
-                    LAYOUT_CHOICES,
-                    value=self.layout_mode,
-                    allow_blank=False,
-                    id="layout-mode",
-                )
-                yield Static(
-                    f"Agents width: {self.split_percent}%",
-                    id="split-percent-label",
-                )
-                with Horizontal(id="split-percent-actions"):
-                    yield Button("Narrow", id="split-narrow")
-                    yield Button("Reset", id="split-reset")
-                    yield Button("Widen", id="split-widen")
-                yield Static("Joplin response copy", id="joplin-copy-mode-label")
-                yield Select(
-                    JOPLIN_COPY_MODE_CHOICES,
-                    value=self.joplin_copy_mode,
-                    allow_blank=False,
-                    id="joplin-copy-mode",
-                )
-                tmux_direct = Checkbox(
-                    "Tmux direct default",
-                    value=self.tmux_direct_enabled,
-                    id="tmux-direct",
-                )
-                tmux_direct.disabled = not self.tmux_features_available
-                yield tmux_direct
-                yield Static("Runtime tmux server", id="tmux-runtime-mode-label")
-                yield Select(
-                    TMUX_RUNTIME_SERVER_MODE_CHOICES,
-                    value=self.tmux_runtime_server_mode,
-                    allow_blank=False,
-                    id="tmux-runtime-mode",
-                )
-                embedded_terminal = Checkbox(
-                    "Embedded native tmux terminal (v2)",
-                    value=self.embedded_terminal_enabled,
-                    id="embedded-terminal-v2",
-                )
-                embedded_terminal.disabled = not self.tmux_features_available
-                yield embedded_terminal
-                yield Static(
-                    "Embedded wheel/swipe behavior",
-                    id="embedded-terminal-scroll-mode-label",
-                )
-                embedded_scroll_mode = Select(
-                    EMBEDDED_TERMINAL_SCROLL_MODE_CHOICES,
-                    value=self.embedded_terminal_scroll_mode,
-                    allow_blank=False,
-                    id="embedded-terminal-scroll-mode",
-                )
-                embedded_scroll_mode.disabled = not self.tmux_features_available
-                yield embedded_scroll_mode
-                yield Static("Tmux pop-out behavior", id="tmux-popout-mode-label")
-                yield Select(
-                    TMUX_POPOUT_MODE_CHOICES,
-                    value=self.tmux_popout_mode,
-                    allow_blank=False,
-                    id="tmux-popout-mode",
-                )
-                yield Static("Theme", id="theme-label")
-                yield Select(
-                    [
-                        ("Cyberpunk", DEFAULT_TUI_THEME),
-                        ("Cyberpunk Accessible", ACCESSIBLE_TUI_THEME),
-                        ("Minimal", MINIMAL_TUI_THEME),
-                        (self.custom_theme_name, self.custom_theme_name),
-                    ],
-                    value=self.theme_name,
-                    allow_blank=False,
-                    id="theme-mode",
-                )
-            with Horizontal(id="settings-actions"):
-                yield Button("Close", id="settings-close", variant="primary")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "settings-close":
-            event.stop()
-            self.dismiss()
-            return
-        if event.button.id in {"split-narrow", "split-reset", "split-widen"}:
-            event.stop()
-            app = self.app
-            if event.button.id == "split-narrow":
-                app.adjust_split_percent(-SPLIT_PERCENT_STEP)  # type: ignore[attr-defined]
-            elif event.button.id == "split-widen":
-                app.adjust_split_percent(SPLIT_PERCENT_STEP)  # type: ignore[attr-defined]
-            else:
-                app.reset_split_percent()  # type: ignore[attr-defined]
-            self.split_percent = app.split_percent  # type: ignore[attr-defined]
-            self.query_one("#split-percent-label", Static).update(
-                f"Agents width: {self.split_percent}%"
-            )
-
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "layout-mode":
-            event.stop()
-            self.app.set_layout_mode(str(event.value))  # type: ignore[attr-defined]
-        elif event.select.id == "theme-mode":
-            event.stop()
-            self.app.set_ui_theme(str(event.value))  # type: ignore[attr-defined]
-        elif event.select.id == "joplin-copy-mode":
-            event.stop()
-            self.app.set_joplin_copy_mode(str(event.value))  # type: ignore[attr-defined]
-        elif event.select.id == "tmux-runtime-mode":
-            event.stop()
-            self.app.set_tmux_runtime_server_mode(str(event.value))  # type: ignore[attr-defined]
-        elif event.select.id == "embedded-terminal-scroll-mode":
-            event.stop()
-            self.app.set_embedded_terminal_scroll_mode(str(event.value))  # type: ignore[attr-defined]
-        elif event.select.id == "tmux-popout-mode":
-            event.stop()
-            self.app.set_tmux_popout_mode(str(event.value))  # type: ignore[attr-defined]
 
 
 class ManagedProjectPickerScreen(ModalScreen[None]):

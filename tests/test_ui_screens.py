@@ -1,8 +1,9 @@
 from types import SimpleNamespace
 
-from textual.widgets import Input, TextArea
+from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
 
 from agent_pbx import tui
+from agent_pbx.ui import preferences
 from agent_pbx.ui import screens
 
 
@@ -26,11 +27,129 @@ def test_command_joplin_codex_screen_aliases_are_object_identical() -> None:
         "JoplinPasteConfirmScreen",
         "ModelElevationScreen",
         "PullRequestMergeConfirmScreen",
+        "SettingsScreen",
         "slugify",
     )
 
     for name in names:
         assert getattr(tui, name) is getattr(screens, name)
+
+    assert tui.normalize_joplin_copy_mode is preferences.normalize_joplin_copy_mode
+
+
+def test_extracted_settings_normalizes_constructor_values() -> None:
+    screen = screens.SettingsScreen(
+        visual_flash_enabled=True,
+        terminal_bell_enabled=False,
+        agent_blink_enabled=True,
+        low_power_enabled=False,
+        layout_mode="adaptive",
+        split_percent=42,
+        joplin_copy_mode="legacy-clipboard",
+        tmux_direct_enabled=True,
+        tmux_features_available=False,
+        tmux_runtime_server_mode="outer-if-present",
+        embedded_terminal_enabled=True,
+        embedded_terminal_scroll_mode="invalid",
+        tmux_popout_mode="auto",
+        custom_theme_name="1337",
+        theme_name="cyberpunk",
+    )
+
+    assert screen.joplin_copy_mode == "copy_first"
+    assert screen.tmux_runtime_server_mode == "outer_if_present"
+    assert screen.embedded_terminal_scroll_mode == "tmux"
+
+
+async def test_extracted_settings_preserves_controls_and_app_hooks() -> None:
+    app = tui.AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[tuple[str, object]] = []
+
+    def adjust_split_percent(delta: int) -> None:
+        calls.append(("split", delta))
+        app.split_percent += delta
+
+    def reset_split_percent() -> None:
+        calls.append(("split_reset", None))
+        app.split_percent = 42
+
+    app.adjust_split_percent = adjust_split_percent  # type: ignore[method-assign]
+    app.reset_split_percent = reset_split_percent  # type: ignore[method-assign]
+    app.set_layout_mode = lambda value: calls.append(("layout", value))  # type: ignore[method-assign]
+    app.set_ui_theme = lambda value: calls.append(("theme", value))  # type: ignore[method-assign]
+    app.set_joplin_copy_mode = lambda value: calls.append(("joplin", value))  # type: ignore[method-assign]
+    app.set_tmux_runtime_server_mode = lambda value: calls.append(("runtime", value))  # type: ignore[method-assign]
+    app.set_embedded_terminal_scroll_mode = lambda value: calls.append(
+        ("scroll", value)
+    )  # type: ignore[method-assign]
+    app.set_tmux_popout_mode = lambda value: calls.append(("popout", value))  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        screen = screens.SettingsScreen(
+            visual_flash_enabled=True,
+            terminal_bell_enabled=False,
+            agent_blink_enabled=True,
+            low_power_enabled=False,
+            layout_mode="adaptive",
+            split_percent=42,
+            joplin_copy_mode="copy_first",
+            tmux_direct_enabled=False,
+            tmux_features_available=False,
+            tmux_runtime_server_mode="dedicated",
+            embedded_terminal_enabled=False,
+            embedded_terminal_scroll_mode="tmux",
+            tmux_popout_mode="auto",
+            custom_theme_name="1337",
+            theme_name="cyberpunk",
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+
+        assert screen.query_one("#visual-flash", Checkbox).value is True
+        assert screen.query_one("#terminal-bell", Checkbox).value is False
+        assert screen.query_one("#tmux-direct", Checkbox).disabled is True
+        assert screen.query_one("#embedded-terminal-v2", Checkbox).disabled is True
+        assert (
+            screen.query_one("#embedded-terminal-scroll-mode", Select).disabled is True
+        )
+        assert screen.query_one("#layout-mode", Select).value == "adaptive"
+        assert screen.query_one("#joplin-copy-mode", Select).value == "copy_first"
+        assert screen.query_one("#tmux-runtime-mode", Select).value == "dedicated"
+        assert screen.query_one("#theme-mode", Select).value == "cyberpunk"
+        assert screen.query_one("#settings-close", Button).label.plain == "Close"
+
+        await pilot.click("#split-widen")
+        await pilot.pause()
+        assert calls[-1] == ("split", 5)
+        assert str(screen.query_one("#split-percent-label", Static).renderable) == (
+            "Agents width: 47%"
+        )
+
+        await pilot.click("#split-reset")
+        await pilot.pause()
+        assert calls[-1] == ("split_reset", None)
+        assert str(screen.query_one("#split-percent-label", Static).renderable) == (
+            "Agents width: 42%"
+        )
+
+        screen.query_one("#layout-mode", Select).value = "compact"
+        screen.query_one("#theme-mode", Select).value = "minimal"
+        screen.query_one("#joplin-copy-mode", Select).value = "transcript_first"
+        screen.query_one("#tmux-runtime-mode", Select).value = "outer_if_present"
+        screen.query_one("#embedded-terminal-scroll-mode", Select).value = "child"
+        screen.query_one("#tmux-popout-mode", Select).value = "suspend_attach"
+        await pilot.pause()
+
+        assert ("layout", "compact") in calls
+        assert ("theme", "minimal") in calls
+        assert ("joplin", "transcript_first") in calls
+        assert ("runtime", "outer_if_present") in calls
+        assert ("scroll", "child") in calls
+        assert ("popout", "suspend_attach") in calls
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is not screen
 
 
 async def test_extracted_git_diff_cancel_dismisses_without_submit() -> None:

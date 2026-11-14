@@ -21,6 +21,7 @@ from .joplin import (
     JoplinPasteConfirmScreen,
     JoplinReferencePromptScreen,
 )
+from .settings import SettingsScreen
 
 
 __all__ = [
@@ -42,5 +43,6 @@ __all__ = [
     "IssueClearConfirmScreen",
     "ModelElevationScreen",
     "PullRequestMergeConfirmScreen",
+    "SettingsScreen",
     "slugify",
 ]
