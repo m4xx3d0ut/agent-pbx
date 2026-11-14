@@ -2,18 +2,21 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_pbx import tui as tui_module
 from agent_pbx.contracts import ActionDefinition
 from agent_pbx.tui import AgentPBXTUI
 from agent_pbx.ui.actions import ActionRegistry
 from agent_pbx.ui.async_jobs import AsyncGenerationGate
 from agent_pbx.ui.controllers import TUIController, controller_method
 from agent_pbx.ui.controllers.github import GitHubController
+from agent_pbx.ui.controllers.references import PromptReferenceController
 from agent_pbx.ui.controllers.workerbee_projection import (
     WorkerBeeProjectionController,
 )
 from agent_pbx.ui.focus import FocusGenerationGuard
 from agent_pbx.ui.github import github_ref_number
 from agent_pbx.ui.panels.joplin import JoplinPanelState
+from agent_pbx.ui import references as ui_references
 from agent_pbx.workerbee_mcp import WorkerBeeMcpPreflight
 
 
@@ -123,6 +126,32 @@ def test_github_controller_preserves_reference_numbers_and_tui_entry_points() ->
             "body": "Preserve behavior.",
         }
     )
+
+
+def test_prompt_reference_controller_preserves_public_aliases_and_formatting() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    reference = ui_references.CallerAgentReference(
+        token="@caller:builder",
+        agent_id="builder-1",
+        name="Builder",
+        project="demo",
+        status="working",
+        pbx_mode="report",
+        pbx_active=True,
+        active_campaign_count=1,
+    )
+
+    assert isinstance(app._prompt_reference_controller, PromptReferenceController)
+    assert tui_module.CallerAgentReference is ui_references.CallerAgentReference
+    assert tui_module.JoplinNoteReference is ui_references.JoplinNoteReference
+    assert tui_module.CALLER_AGENT_REF_PATTERN is ui_references.CALLER_AGENT_REF_PATTERN
+    assert tui_module.format_caller_agent_references_for_prompt(
+        "Inspect the caller.",
+        [reference],
+    ).startswith("Inspect the caller.\n\n---\n\n## Caller Agent References")
+    assert ui_references.joplin_note_ref_completion_tokens(
+        [{"id": "note-1", "title": "Release Plan"}]
+    ) == ("@joplin:Release-Plan",)
 
 
 def test_action_registry_rejects_duplicate_ids() -> None:
