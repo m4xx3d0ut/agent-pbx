@@ -4,11 +4,13 @@ import subprocess
 
 import pytest
 
+from agent_pbx import terminal_delivery
 from agent_pbx import tmux as tmux_support
 from agent_pbx.mcp_tools import build_mcp_server
 from agent_pbx.operator import OperatorService, operator_runbook_payload
 from agent_pbx.schemas import AgentRegisterRequest, ReportCreateRequest
 from agent_pbx.store import Store
+from agent_pbx.terminal_delivery import IdleTargetDeliveryError
 
 
 def tool_json(result: object) -> object:
@@ -45,6 +47,124 @@ def register_operator_and_caller(store: Store, tmp_path: Path) -> None:
             },
         )
     )
+
+
+def prepare_exact_idle_delivery_target(
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    service: OperatorService,
+    agent_id: str,
+    workspace: Path,
+    pane_id: str = "%22",
+    session_name: str | None = None,
+    window_id: str = "@22",
+    pane_pid: int = 4242,
+    observed_pid: int | None = None,
+    process_start_ticks: int = 99,
+    codex_session_id: str = "session-fork-1",
+    tmux_bin: str = "/home/test/.local/bin/tmux-3.7c",
+    socket_path: str = "/run/user/1000/agent-pbx/runtime-tmux-3.7c-v2.sock",
+    extra_panes: list[tmux_support.TmuxPane] | None = None,
+    capture: str = "Recent output\n› ",
+) -> tuple[list[tuple[str, str | None]], list[tuple[str, str, str, str | None]]]:
+    agent = store.get_agent(agent_id)
+    assert agent is not None
+    metadata = dict(agent.get("metadata") or {})
+    metadata.update(
+        {
+            "pbx_mode": "report",
+            "fork_codex_session_id": codex_session_id,
+            "work_root": str(workspace),
+            "cwd": str(workspace),
+            "operator_workspace_set_digest": "a" * 64,
+            "operator_authority_profile": "scoped-edit",
+        }
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id=agent_id,
+            project=str(agent.get("project") or "agent-pbx-operator"),
+            agent_type=str(agent.get("agent_type") or "operator"),
+            metadata=metadata,
+        )
+    )
+    resolved_session = session_name or f"agent-pbx-runtime-{agent_id}"
+    store.upsert_tmux_runtime_mapping(
+        entity_id=agent_id,
+        server_mode="dedicated",
+        server_id="runtime-37",
+        socket_path=socket_path,
+        session_name=resolved_session,
+        window_id=window_id,
+        window_name=agent_id,
+        pane_id=pane_id,
+        pane_pid=pane_pid,
+        process_start_ticks=process_start_ticks,
+        codex_session_id=codex_session_id,
+        cwd=str(workspace),
+        state="ready",
+        metadata={"tmux_bin": tmux_bin},
+    )
+    service.idle_target_delivery.runtime_snapshot = lambda _agent_id: {
+        "session_id": codex_session_id,
+        "state": "ready",
+    }
+    pane = tmux_support.TmuxPane(
+        session_name=resolved_session,
+        window_index="0",
+        pane_index="0",
+        pane_id=pane_id,
+        active=True,
+        current_command="codex",
+        title=agent_id,
+        cwd=str(workspace),
+        width=100,
+        height=30,
+        history_size=10,
+        window_name=agent_id,
+        window_id=window_id,
+    )
+    list_calls: list[tuple[str, str | None]] = []
+    send_calls: list[tuple[str, str, str, str | None]] = []
+
+    def fake_list_panes(
+        requested_tmux_bin: str = "tmux",
+        *,
+        socket_path: str | None = None,
+    ) -> list[tmux_support.TmuxPane]:
+        list_calls.append((requested_tmux_bin, socket_path))
+        return [*(extra_panes or []), pane]
+
+    def fake_send_text(
+        target: str,
+        text: str,
+        *,
+        tmux_bin: str = "tmux",
+        socket_path: str | None = None,
+        **_: object,
+    ) -> bool:
+        send_calls.append((target, text, tmux_bin, socket_path))
+        return True
+
+    monkeypatch.setattr(terminal_delivery.tmux_support, "list_panes", fake_list_panes)
+    monkeypatch.setattr(
+        terminal_delivery.tmux_support,
+        "pane_root_pid",
+        lambda *_args, **_kwargs: observed_pid if observed_pid is not None else pane_pid,
+    )
+    monkeypatch.setattr(
+        terminal_delivery,
+        "process_start_ticks",
+        lambda _pid: process_start_ticks,
+    )
+    monkeypatch.setattr(
+        terminal_delivery.tmux_support,
+        "capture_pane",
+        lambda *_args, **_kwargs: capture,
+    )
+    monkeypatch.setattr(terminal_delivery.tmux_support, "send_text", fake_send_text)
+    return list_calls, send_calls
 
 
 def test_operator_runbook_requires_visible_pbx_forks() -> None:
@@ -144,7 +264,7 @@ def test_terminal_fork_report_projects_assignment_and_campaign(tmp_path: Path) -
         source_caller_agent_id="caller-1",
         fork_agent_id="operator-0-fork-caller-1",
         status="running",
-        metadata={"pbx_mode": "report"},
+        metadata={"pbx_mode": "nohup"},
     )
     campaign = service.start_campaign(
         operator_agent_id="operator-0",
@@ -193,7 +313,7 @@ def test_terminal_report_projection_rejects_reporter_and_preserves_terminal_stat
         source_caller_agent_id="caller-1",
         fork_agent_id="operator-0-fork-caller-1",
         status="running",
-        metadata={"pbx_mode": "report"},
+        metadata={"pbx_mode": "nohup"},
     )
     store.register_agent(
         AgentRegisterRequest(
@@ -272,7 +392,7 @@ def test_campaign_status_replays_historical_terminal_report_once(
         source_caller_agent_id="caller-1",
         fork_agent_id="operator-0-fork-caller-1",
         status="running",
-        metadata={"pbx_mode": "report"},
+        metadata={"pbx_mode": "nohup"},
     )
     campaign = service.start_campaign(
         operator_agent_id="operator-0",
@@ -1024,29 +1144,6 @@ def test_operator_campaign_tmux_delivery_records_sent_command(
             },
         )
     )
-    sent: list[tuple[str, str]] = []
-    pane = tmux_support.TmuxPane(
-        session_name="agent-pbx-operators",
-        window_index="0",
-        pane_index="1",
-        pane_id="%1",
-        active=True,
-        current_command="codex",
-        title="caller-1",
-        cwd=str(caller_cwd),
-        width=100,
-        height=30,
-        history_size=10,
-        window_name="operator-0-fork-caller-1",
-    )
-    monkeypatch.setattr(
-        "agent_pbx.operator.tmux_support.list_panes",
-        lambda tmux_bin="tmux": [pane],
-    )
-    monkeypatch.setattr(
-        "agent_pbx.operator.tmux_support.send_text",
-        lambda target, text, **kwargs: sent.append((target, text)),
-    )
     service = OperatorService(store)
     fork = service.ensure_fork(
         operator_agent_id="operator-0",
@@ -1055,6 +1152,14 @@ def test_operator_campaign_tmux_delivery_records_sent_command(
         tmux_pane_id="%1",
         status="running",
         metadata={"tmux_pane_id": "%1"},
+    )
+    _, send_calls = prepare_exact_idle_delivery_target(
+        store,
+        monkeypatch,
+        service=service,
+        agent_id="operator-0-fork-caller-1",
+        workspace=caller_cwd,
+        pane_id="%1",
     )
 
     campaign = service.start_campaign(
@@ -1074,11 +1179,11 @@ def test_operator_campaign_tmux_delivery_records_sent_command(
     assignment = campaign["assignments"][0]
     command = store.get_command(assignment["last_command_id"])
 
-    assert sent and sent[0][0] == "%1"
+    assert send_calls and send_calls[0][0] == "%1"
     assert command is not None
     assert command["agent_id"] == "operator-0-fork-caller-1"
     assert command["status"] == "sent"
-    assert command["payload"]["tmux_pane_id"] == "%1"
+    assert command["result"]["target_identity"]["pane_id"] == "%1"
     assert command["payload"]["operator_fork_id"] == fork["operator_fork_id"]
     assert assignment["state"] == "sent"
 
@@ -1159,6 +1264,17 @@ def test_operator_followup_uses_managed_runtime_tmux_binary_and_socket(
         "agent_pbx.operator.tmux_support.send_text",
         fake_send_text,
     )
+    list_calls, send_calls = prepare_exact_idle_delivery_target(
+        store,
+        monkeypatch,
+        service=service,
+        agent_id="operator-0-fork-caller-1",
+        workspace=tmp_path / "caller-1",
+        pane_id="%22",
+        session_name=managed_session,
+        tmux_bin=managed_tmux,
+        socket_path=managed_socket,
+    )
     campaign = service.start_campaign(
         operator_agent_id="operator-0",
         title="Mapped follow-up",
@@ -1179,7 +1295,10 @@ def test_operator_followup_uses_managed_runtime_tmux_binary_and_socket(
         delivery="auto",
     )
 
-    assert list_calls == [(managed_tmux, managed_socket)]
+    assert list_calls == [
+        (managed_tmux, managed_socket),
+        (managed_tmux, managed_socket),
+    ]
     assert send_calls == [
         (
             "%22",
@@ -1189,7 +1308,7 @@ def test_operator_followup_uses_managed_runtime_tmux_binary_and_socket(
         )
     ]
     assert command["status"] == "sent"
-    assert command["payload"]["tmux_pane_id"] == "%22"
+    assert command["result"]["target_identity"]["pane_id"] == "%22"
 
 
 def test_operator_followup_accepts_codex_beneath_managed_shell_wrapper(
@@ -1273,6 +1392,17 @@ def test_operator_followup_accepts_codex_beneath_managed_shell_wrapper(
         "agent_pbx.operator.tmux_support.send_text",
         fake_send_text,
     )
+    _, sent = prepare_exact_idle_delivery_target(
+        store,
+        monkeypatch,
+        service=service,
+        agent_id="operator-0-fork-caller-1",
+        workspace=tmp_path / "caller-1",
+        pane_id="%22",
+        session_name=managed_session,
+        tmux_bin=managed_tmux,
+        socket_path=managed_socket,
+    )
     campaign = service.start_campaign(
         operator_agent_id="operator-0",
         title="Mapped wrapper follow-up",
@@ -1302,10 +1432,8 @@ def test_operator_followup_accepts_codex_beneath_managed_shell_wrapper(
         )
     ]
     assert command["status"] == "sent"
-    assert command["payload"]["tmux_target_command"] == "sh"
-    assert command["payload"]["tmux_target_codex_like"] is True
-    assert command["payload"]["tmux_target_codex_detection"] == "pane_process_tree"
-    assert command["payload"]["tmux_target_mode_cleared"] is True
+    assert command["result"]["outcome"] == "delivered"
+    assert command["result"]["target_identity"]["process_start_ticks"] == 99
 
 
 def test_operator_followup_rejects_reused_managed_wrapper_process(
@@ -1362,6 +1490,17 @@ def test_operator_followup_rejects_reused_managed_wrapper_process(
         "agent_pbx.operator.tmux_support.pane_root_pid",
         lambda *_args, **_kwargs: 5000,
     )
+    prepare_exact_idle_delivery_target(
+        store,
+        monkeypatch,
+        service=service,
+        agent_id="operator-0-fork-caller-1",
+        workspace=tmp_path / "caller-1",
+        pane_id="%22",
+        session_name=managed_session,
+        socket_path="/tmp/runtime.sock",
+        observed_pid=5000,
+    )
     campaign = service.start_campaign(
         operator_agent_id="operator-0",
         title="Mapped wrapper follow-up",
@@ -1372,7 +1511,10 @@ def test_operator_followup_rejects_reused_managed_wrapper_process(
     )
     assignment = campaign["assignments"][0]
 
-    with pytest.raises(ValueError, match="process identity changed"):
+    with pytest.raises(
+        IdleTargetDeliveryError,
+        match="stale_mapping: managed tmux pane process identity changed",
+    ):
         service.send_followup(
             operator_agent_id="operator-0",
             campaign_id=campaign["campaign_id"],
@@ -1460,6 +1602,21 @@ async def test_mcp_operator_campaign_tools_queue_delivery(tmp_path: Path) -> Non
                 "assignment_id": assignment["assignment_id"],
                 "message": "Please include the test result in your next report.",
                 "delivery": "queue",
+                "delivery_request_id": "mcp-followup-1",
+            },
+        )
+    )
+    followup_replay = tool_json(
+        await mcp.call_tool(
+            "pbx_operator_send_followup",
+            {
+                "operator_agent_id": "operator-0",
+                "campaign_id": campaign["campaign_id"],
+                "target_agent_id": "caller-1",
+                "assignment_id": assignment["assignment_id"],
+                "message": "Please include the test result in your next report.",
+                "delivery": "queue",
+                "delivery_request_id": "mcp-followup-1",
             },
         )
     )
@@ -1503,6 +1660,7 @@ async def test_mcp_operator_campaign_tools_queue_delivery(tmp_path: Path) -> Non
     assert assignment["operator_fork_id"] == fork["operator_fork_id"]
     assert followup["payload"]["campaign_id"] == campaign["campaign_id"]
     assert followup["payload"]["assignment_id"] == assignment["assignment_id"]
+    assert followup_replay["command_id"] == followup["command_id"]
     assert reported["state"] == "complete"
     assert finished["status"] == "complete"
     assert successor["created"] is True
@@ -2769,6 +2927,15 @@ def test_operator_campaign_tmux_delivery_prefers_repaired_fork_pane(
         "agent_pbx.operator.tmux_support.send_text",
         lambda target, text, **kwargs: sent.append((target, text)),
     )
+    _, send_calls = prepare_exact_idle_delivery_target(
+        store,
+        monkeypatch,
+        service=service,
+        agent_id="operator-0-fork-caller-1",
+        workspace=caller_cwd,
+        pane_id="%2",
+        extra_panes=[stale_pane],
+    )
 
     campaign = service.start_campaign(
         operator_agent_id="operator-0",
@@ -2781,12 +2948,12 @@ def test_operator_campaign_tmux_delivery_prefers_repaired_fork_pane(
     assignment = campaign["assignments"][0]
     command = store.get_command(assignment["last_command_id"])
 
-    assert sent and sent[0][0] == "%2"
+    assert send_calls and send_calls[0][0] == "%2"
     assert command is not None
     assert command["agent_id"] == "operator-0-fork-caller-1"
     assert command["payload"]["target_agent_id"] == "caller-1"
     assert command["payload"]["fork_agent_id"] == "operator-0-fork-caller-1"
-    assert command["payload"]["tmux_pane_id"] == "%2"
+    assert command["result"]["target_identity"]["pane_id"] == "%2"
 
 
 def test_operator_campaign_tmux_delivery_prefers_fork_window_over_caller_pane(
@@ -2864,6 +3031,15 @@ def test_operator_campaign_tmux_delivery_prefers_fork_window_over_caller_pane(
         "agent_pbx.operator.tmux_support.send_text",
         lambda target, text, **kwargs: sent.append((target, text)),
     )
+    _, send_calls = prepare_exact_idle_delivery_target(
+        store,
+        monkeypatch,
+        service=service,
+        agent_id="operator-0-fork-caller-1",
+        workspace=caller_cwd,
+        pane_id="%2",
+        extra_panes=[caller_pane, fork_pane],
+    )
 
     campaign = service.start_campaign(
         operator_agent_id="operator-0",
@@ -2876,10 +3052,10 @@ def test_operator_campaign_tmux_delivery_prefers_fork_window_over_caller_pane(
     assignment = campaign["assignments"][0]
     command = store.get_command(assignment["last_command_id"])
 
-    assert sent and sent[0][0] == "%2"
+    assert send_calls and send_calls[0][0] == "%2"
     assert command is not None
     assert command["agent_id"] == "operator-0-fork-caller-1"
-    assert command["payload"]["tmux_pane_id"] == "%2"
+    assert command["result"]["target_identity"]["pane_id"] == "%2"
 
 
 def test_operator_allows_default_and_review_forks_for_same_source_session(
@@ -3223,7 +3399,7 @@ def test_operator_project_spawn_requires_review_readonly_fork(
         )
 
 
-def test_operator_campaign_tmux_delivery_survives_drifted_fork_metadata(
+def test_operator_campaign_tmux_delivery_rejects_drifted_fork_metadata(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3324,15 +3500,20 @@ def test_operator_campaign_tmux_delivery_survives_drifted_fork_metadata(
     campaign = service.start_campaign(
         operator_agent_id="operator-0",
         title="Drifted fork route",
-        objective="Route to the fork window despite stale agent metadata.",
+        objective="Reject stale fork metadata without an exact managed mapping.",
         criteria=[],
         assignments=[{"target_agent_id": "caller-1", "prompt": "Continue."}],
         delivery="tmux",
     )
-    assignment = campaign["assignments"][0]
-    command = store.get_command(assignment["last_command_id"])
 
-    assert sent and sent[0][0] == "%2"
-    assert command is not None
-    assert command["agent_id"] == "operator-0-fork-caller-1"
-    assert command["payload"]["tmux_pane_id"] == "%2"
+    assert sent == []
+    assert campaign["assignments"][0]["state"] == "blocked"
+    dispatch_failures = [
+        event
+        for event in campaign["events"]
+        if event["event_type"] == "dispatch_failed"
+    ]
+    assert len(dispatch_failures) == 1
+    assert dispatch_failures[0]["detail"]["error"].startswith(
+        "stale_mapping: exact managed runtime mapping is unavailable"
+    )

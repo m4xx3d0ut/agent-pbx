@@ -590,6 +590,7 @@ class OperatorFollowupRequest(BaseModel):
     fork_track_id: str | None = Field(default=None, max_length=80)
     assignment_id: str | None = Field(default=None, max_length=120)
     delivery: CampaignDelivery = "auto"
+    delivery_request_id: str | None = Field(default=None, min_length=1, max_length=240)
 
 
 class OperatorAssignmentReportRequest(BaseModel):

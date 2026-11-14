@@ -130,7 +130,11 @@ from .issues import (
 from .mcp_tools import create_mcp_asgi_app
 from .managed_runtime import ManagedRuntimeService
 from .agent_adoption import AgentPaneAdoptionService
-from .operator import OperatorService, operator_runbook_payload
+from .operator import (
+    IdleTargetDeliveryError,
+    OperatorService,
+    operator_runbook_payload,
+)
 from .operator_broker import OperatorBrokerService
 from .operator_authority import OperatorAuthorityError, OperatorAuthorityService
 from .protected_provider import ProtectedProviderDiagnosticService
@@ -1097,6 +1101,7 @@ def create_app(
         store,
         durable_helpers=app.state.durable_helpers,
         dynamic_resources=app.state.dynamic_resources,
+        codex_runtime=app.state.codex_runtime,
     )
     app.state.operator_broker_service = OperatorBrokerService(store)
     app.state.protected_provider_diagnostics = ProtectedProviderDiagnosticService(
@@ -6622,6 +6627,7 @@ def create_app(
             operator_fork_id=payload.operator_fork_id,
             fork_track_id=payload.fork_track_id,
             delivery=payload.delivery,
+            delivery_request_id=payload.delivery_request_id,
         )
 
     @app.post(
@@ -7544,6 +7550,21 @@ async def run_operator_call(
 ) -> Any:
     try:
         return await asyncio.to_thread(func, *args, **kwargs)
+    except IdleTargetDeliveryError as exc:
+        result = exc.result
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "IDLE_TARGET_DELIVERY_REJECTED",
+                "message": str(exc),
+                "outcome": result.outcome.value,
+                "reason_code": result.reason_code,
+                "request_id": result.request_id,
+                "command_id": result.command_id,
+                "retryable": result.outcome.value
+                in {"target_not_ready", "overlay_active"},
+            },
+        ) from exc
     except ValueError as exc:
         message = str(exc)
         response_status = (

@@ -20,6 +20,7 @@ from .host_process_evidence import (
 from .joplin import JoplinService
 from .issues import IssueService
 from .operator import OperatorService, operator_runbook_payload
+from .terminal_delivery import IdleTargetDeliveryError
 from .operator_broker import OperatorBrokerService
 from .polling import poll_commands as poll_commands_until
 from .pull_requests import PullRequestService
@@ -218,6 +219,18 @@ def build_mcp_server(
     operator_service = OperatorService(store)
     operator_broker_service = OperatorBrokerService(store)
     process_attestor = host_process_attestor or HostProcessAttestor()
+
+    def operator_delivery_call(func: Any, /, **kwargs: Any) -> dict[str, Any]:
+        try:
+            return func(**kwargs)
+        except IdleTargetDeliveryError as exc:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "IDLE_TARGET_DELIVERY_REJECTED",
+                    **exc.result.public_dict(),
+                },
+            }
 
     @mcp.tool()
     def pbx_agent_runbook() -> dict[str, Any]:
@@ -1007,7 +1020,8 @@ def build_mcp_server(
         completion_delivery_id: str,
     ) -> dict[str, Any]:
         """Retry delivery of one pending or failed completion receipt."""
-        return operator_service.retry_handoff_completion_delivery(
+        return operator_delivery_call(
+            operator_service.retry_handoff_completion_delivery,
             operator_agent_id=operator_agent_id,
             completion_delivery_id=completion_delivery_id,
         )
@@ -1096,7 +1110,8 @@ def build_mcp_server(
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Approve and deliver an operator handoff, or mark it pending launch."""
-        return operator_service.approve_handoff(
+        return operator_delivery_call(
+            operator_service.approve_handoff,
             operator_agent_id=operator_agent_id,
             handoff_id=handoff_id,
             delivery=delivery,
@@ -1135,7 +1150,8 @@ def build_mcp_server(
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Update an operator handoff to running, blocked, failed, or complete."""
-        return operator_service.update_handoff(
+        return operator_delivery_call(
+            operator_service.update_handoff,
             operator_agent_id=operator_agent_id,
             handoff_id=handoff_id,
             status=status,
@@ -1350,17 +1366,20 @@ def build_mcp_server(
         operator_fork_id: str | None = None,
         fork_track_id: str | None = None,
         delivery: str = "auto",
+        delivery_request_id: str | None = None,
     ) -> dict[str, Any]:
         """Send a tracked campaign follow-up to a caller agent."""
-        return operator_service.send_followup(
-            operator_agent_id=operator_agent_id,
-            campaign_id=campaign_id,
-            target_agent_id=target_agent_id,
-            message=message,
-            assignment_id=assignment_id,
-            operator_fork_id=operator_fork_id,
-            fork_track_id=fork_track_id,
-            delivery=delivery,
+        return operator_delivery_call(
+            operator_service.send_followup,
+                operator_agent_id=operator_agent_id,
+                campaign_id=campaign_id,
+                target_agent_id=target_agent_id,
+                message=message,
+                assignment_id=assignment_id,
+                operator_fork_id=operator_fork_id,
+                fork_track_id=fork_track_id,
+                delivery=delivery,
+                delivery_request_id=delivery_request_id,
         )
 
     @mcp.tool()
@@ -1374,7 +1393,8 @@ def build_mcp_server(
         delivery: str = "auto",
     ) -> dict[str, Any]:
         """Route a review-fork edit escalation through the root operator or edit fork."""
-        return operator_service.route_review_escalation(
+        return operator_delivery_call(
+            operator_service.route_review_escalation,
             operator_agent_id=operator_agent_id,
             review_fork_id=review_fork_id,
             message=message,

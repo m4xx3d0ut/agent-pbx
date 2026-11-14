@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -45,6 +46,12 @@ from .operator_kb_sync import (
 )
 from .durable_helpers import DurableHelperRegistry
 from .dynamic_resources import DynamicResourceBroker
+from .terminal_delivery import (
+    IdleTargetDeliveryError,
+    IdleTargetDeliveryOutcome,
+    IdleTargetDeliveryRequest,
+    IdleTargetDeliveryService,
+)
 from .tmux_binary import configured_tmux_binary
 
 
@@ -299,11 +306,18 @@ class OperatorService:
         tmux_bin: str = "tmux",
         durable_helpers: DurableHelperRegistry | None = None,
         dynamic_resources: DynamicResourceBroker | None = None,
+        codex_runtime: Any | None = None,
     ) -> None:
         self.store = store
         self.tmux_bin = configured_tmux_binary(tmux_bin)
         self.durable_helpers = durable_helpers
         self.dynamic_resources = dynamic_resources
+        snapshot = getattr(codex_runtime, "snapshot", None)
+        self.idle_target_delivery = IdleTargetDeliveryService(
+            store,
+            runtime_snapshot=snapshot if callable(snapshot) else None,
+            tmux_bin=self.tmux_bin,
+        )
 
     def list_agents(self, *, agent_type: str = "caller") -> list[dict[str, Any]]:
         requested = str(agent_type or "caller").strip().lower()
@@ -4149,6 +4163,7 @@ class OperatorService:
         operator_fork_id: str | None = None,
         fork_track_id: str | None = None,
         delivery: str = "auto",
+        delivery_request_id: str | None = None,
     ) -> dict[str, Any]:
         operator = self._require_operator(operator_agent_id)
         campaign = self._require_campaign_for_operator(campaign_id, operator)
@@ -4167,6 +4182,7 @@ class OperatorService:
             source="operator_campaign_followup",
             operator_fork_id=operator_fork_id or assignment.get("operator_fork_id"),
             fork_track_id=fork_track_id or assignment.get("fork_track_id"),
+            delivery_request_id=delivery_request_id,
         )
         state = "sent" if command["status"] == "sent" else "waiting"
         self._append_command_delivery_event(
@@ -4752,6 +4768,7 @@ class OperatorService:
         source: str,
         operator_fork_id: str | None = None,
         fork_track_id: str | None = None,
+        delivery_request_id: str | None = None,
     ) -> dict[str, Any]:
         fork = self._resolve_delivery_fork(
             operator_agent_id=operator_agent_id,
@@ -4771,7 +4788,6 @@ class OperatorService:
         if resolved == "auto":
             resolved = "queue" if mode == NOHUP_MODE else "tmux"
         payload = {
-            "message": message,
             "source": source,
             "requested_delivery": delivery,
             "resolved_delivery": resolved,
@@ -4788,34 +4804,22 @@ class OperatorService:
             "source_cwd": fork.get("source_cwd"),
             "work_root": fork.get("work_root"),
         }
-        if resolved == "queue":
-            return self.store.create_command(
-                CommandCreateRequest(
-                    agent_id=str(fork["fork_agent_id"]),
-                    type="send_input",
-                    payload=payload,
-                )
+        request_id = str(delivery_request_id or "").strip() or (
+            self._idle_delivery_request_id(
+                source=source,
+                target_agent_id=str(fork["fork_agent_id"]),
+                message=message,
+                stable_parts=(campaign_id, assignment_id, fork.get("operator_fork_id")),
+                deduplicate=source == "operator_campaign_start",
             )
-        if resolved != "tmux":
-            raise ValueError("delivery must be auto, queue, or tmux")
-        delivery_target = self._send_tmux_text(target, message)
-        pane = delivery_target.pane
-        payload["tmux_pane_id"] = pane.pane_id
-        payload["tmux_target"] = pane.target_label
-        payload["tmux_target_command"] = pane.current_command
-        payload["tmux_target_title"] = pane.title
-        payload["tmux_target_cwd"] = pane.cwd
-        payload["tmux_target_window"] = pane.window_name
-        payload["tmux_target_codex_like"] = delivery_target.codex_like_target
-        payload["tmux_target_codex_detection"] = delivery_target.codex_detection
-        payload["tmux_target_mode_cleared"] = delivery_target.pane_mode_cleared
-        return self.store.create_command(
-            CommandCreateRequest(
-                agent_id=str(fork["fork_agent_id"]),
-                type="send_input",
-                payload=payload,
-            ),
-            status="sent",
+        )
+        return self._deliver_idle_target_command(
+            target=target,
+            message=message,
+            requested_delivery=resolved,
+            request_id=request_id,
+            source=source,
+            payload=payload,
         )
 
     def _deliver_root_operator_message(
@@ -4835,48 +4839,85 @@ class OperatorService:
         if resolved == "auto":
             resolved = "queue" if mode == NOHUP_MODE else "tmux"
         command_payload = {
-            "message": message,
             **payload,
             "logical_operator_id": logical_operator_id,
             "requested_delivery": delivery,
             "resolved_delivery": resolved,
             "delivery_mode": resolved,
         }
-        if resolved == "queue":
-            return self.store.create_command(
-                CommandCreateRequest(
-                    agent_id=logical_operator_id,
-                    type="send_input",
-                    payload=command_payload,
-                )
+        stable_parts = (
+            command_payload.get("handoff_id"),
+            command_payload.get("campaign_id"),
+            command_payload.get("assignment_id"),
+            command_payload.get("completion_delivery_id"),
+            command_payload.get("review_fork_id"),
+        )
+        request_id = self._idle_delivery_request_id(
+            source=str(command_payload.get("source") or "operator_root_message"),
+            target_agent_id=logical_operator_id,
+            message=message,
+            stable_parts=stable_parts,
+            deduplicate=any(str(value or "").strip() for value in stable_parts),
+        )
+        return self._deliver_idle_target_command(
+            target=target,
+            message=message,
+            requested_delivery=resolved,
+            request_id=request_id,
+            source=str(command_payload.get("source") or "operator_root_message"),
+            payload=command_payload,
+        )
+
+    def _deliver_idle_target_command(
+        self,
+        *,
+        target: Mapping[str, Any],
+        message: str,
+        requested_delivery: str,
+        request_id: str,
+        source: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        entity_id = str(target.get("agent_id") or "").strip()
+        result = self.idle_target_delivery.deliver(
+            IdleTargetDeliveryRequest(
+                request_id=request_id,
+                entity_id=entity_id,
+                message=message,
+                requested_delivery=requested_delivery,
+                source=source,
+                payload=payload,
             )
-        if resolved != "tmux":
-            raise ValueError("delivery must be auto, queue, or tmux")
-        delivery_target = self._send_tmux_text(target, message)
-        pane = delivery_target.pane
-        command_payload["tmux_pane_id"] = pane.pane_id
-        command_payload["tmux_target"] = pane.target_label
-        command_payload["tmux_target_command"] = pane.current_command
-        command_payload["tmux_target_title"] = pane.title
-        command_payload["tmux_target_cwd"] = pane.cwd
-        command_payload["tmux_target_window"] = pane.window_name
-        command_payload["tmux_target_codex_like"] = (
-            delivery_target.codex_like_target
         )
-        command_payload["tmux_target_codex_detection"] = (
-            delivery_target.codex_detection
-        )
-        command_payload["tmux_target_mode_cleared"] = (
-            delivery_target.pane_mode_cleared
-        )
-        return self.store.create_command(
-            CommandCreateRequest(
-                agent_id=logical_operator_id,
-                type="send_input",
-                payload=command_payload,
-            ),
-            status="sent",
-        )
+        if result.outcome not in {
+            IdleTargetDeliveryOutcome.DELIVERED,
+            IdleTargetDeliveryOutcome.QUEUED,
+        }:
+            raise IdleTargetDeliveryError(result)
+        return self.idle_target_delivery.command_for_result(result)
+
+    @staticmethod
+    def _idle_delivery_request_id(
+        *,
+        source: str,
+        target_agent_id: str,
+        message: str,
+        stable_parts: tuple[object, ...],
+        deduplicate: bool,
+    ) -> str:
+        if not deduplicate:
+            return "idle-delivery-" + uuid.uuid4().hex
+        material = json.dumps(
+            {
+                "source": str(source),
+                "target_agent_id": str(target_agent_id),
+                "stable_parts": [str(value or "") for value in stable_parts],
+                "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "idle-delivery-" + hashlib.sha256(material).hexdigest()
 
     def _deliver_operator_seed_run(
         self,
@@ -5444,9 +5485,18 @@ class OperatorService:
     @staticmethod
     def _handoff_delivery_evidence(command: dict[str, Any]) -> dict[str, Any]:
         payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
-        tmux_pane_id = payload.get("tmux_pane_id")
-        delivered_to_pane = bool(tmux_pane_id)
-        codex_like_target = bool(payload.get("tmux_target_codex_like"))
+        result = command.get("result") if isinstance(command.get("result"), dict) else {}
+        target_identity = (
+            result.get("target_identity")
+            if isinstance(result.get("target_identity"), dict)
+            else {}
+        )
+        tmux_pane_id = payload.get("tmux_pane_id") or target_identity.get("pane_id")
+        delivered_to_pane = (
+            str(result.get("outcome") or "") == "delivered"
+            or bool(payload.get("tmux_pane_id"))
+        )
+        codex_like_target = delivered_to_pane and bool(tmux_pane_id)
         return {
             "command_id": command.get("command_id"),
             "command_status": command.get("status"),
@@ -5464,13 +5514,20 @@ class OperatorService:
             "submitted_to_codex": delivered_to_pane and codex_like_target,
             "target_command": payload.get("tmux_target_command"),
             "target_title": payload.get("tmux_target_title"),
-            "target_cwd": payload.get("tmux_target_cwd"),
-            "target_window": payload.get("tmux_target_window"),
+            "target_cwd": payload.get("tmux_target_cwd")
+            or target_identity.get("workspace_path"),
+            "target_window": payload.get("tmux_target_window")
+            or target_identity.get("window_id"),
             "codex_like_target": codex_like_target,
             "agent_acknowledged": False,
             "agent_started": False,
             "tmux_pane_id": tmux_pane_id,
-            "tmux_target": payload.get("tmux_target"),
+            "tmux_target": payload.get("tmux_target")
+            or target_identity.get("pane_id"),
+            "idle_delivery_outcome": result.get("outcome"),
+            "idle_delivery_request_id": result.get("request_id")
+            or payload.get("delivery_request_id"),
+            "target_identity_sha256": result.get("target_identity_sha256"),
         }
 
     @staticmethod
