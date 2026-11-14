@@ -26748,6 +26748,7 @@ class AgentPBXTUI(App[None]):
         profile: str | None,
         expected_ceiling: str = "",
         expected_digest: str = "",
+        durable_profile: bool = False,
     ) -> tuple[str, dict[str, str]]:
         """Resolve profile authority from the daemon, never the TUI environment."""
 
@@ -26794,6 +26795,11 @@ class AgentPBXTUI(App[None]):
             WORKERBEE_PROFILE_LOCAL_DEPLOY,
             WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
         } or WORKERBEE_PROFILE_RANK[selected] > WORKERBEE_PROFILE_RANK[ceiling]:
+            if durable_profile:
+                raise WorkerBeeProfileIntentError(
+                    "existing WorkerBee profile exceeds the daemon-resolved ceiling; "
+                    "a separately reviewed ready-mapping migration is required"
+                )
             raise WorkerBeeProfileIntentError(
                 "WorkerBee Operator profile exceeds the daemon-resolved ceiling"
             )
@@ -26924,6 +26930,55 @@ class AgentPBXTUI(App[None]):
             raise RuntimeError("WorkerBee runtime binding response is incomplete")
         binding["workspace_binding"] = workspace
         return binding
+
+    async def prepare_operator_fork_workerbee_launch(
+        self,
+        *,
+        fork_agent_id: str,
+        logical_operator_id: str,
+        source_session_id: str,
+        source_root: str,
+        fork_metadata: dict[str, Any],
+        profile: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Revalidate inherited daemon authority before preparing a fork lease."""
+
+        selected = profile
+        if str(fork_metadata.get("fork_purpose") or "") != REVIEW_OPERATOR_FORK_PURPOSE:
+            selected, server_metadata = (
+                await self.operator_workerbee_server_authority(
+                    profile=selected,
+                    expected_ceiling=str(
+                        fork_metadata.get(WORKERBEE_PROFILE_CEILING_METADATA_KEY)
+                        or ""
+                    ).strip(),
+                    expected_digest=str(
+                        fork_metadata.get(
+                            WORKERBEE_WORKSPACE_POLICY_DIGEST_METADATA_KEY
+                        )
+                        or ""
+                    ).strip(),
+                    durable_profile=True,
+                )
+            )
+            fork_metadata.update(server_metadata)
+        fork_metadata.update(
+            self.workerbee_profile_metadata(
+                fork_agent_id,
+                fork_metadata,
+                profile=selected,
+                source_entity_id=logical_operator_id,
+            )
+        )
+        binding = await self.prepare_workerbee_gateway_launch(
+            agent_id=fork_agent_id,
+            project="agent-pbx-operator",
+            codex_session_id=source_session_id,
+            profile=selected,
+            source_root=source_root,
+        )
+        fork_metadata.update(self.workerbee_gateway_metadata(binding))
+        return selected, binding
 
     @staticmethod
     def workerbee_gateway_metadata(
@@ -27157,19 +27212,35 @@ class AgentPBXTUI(App[None]):
             else ""
         )
         explicit_profile = has_explicit_workerbee_profile(profile_metadata)
+        legacy_existing_profile = existing_entity and not explicit_profile
         entity_profile = configured_operator_workerbee_profile(
             agent_id,
             profile_metadata,
             configured_default=WORKERBEE_PROFILE_LOCAL_DEPLOY,
             existing_entity=existing_entity,
         )
-        if existing_entity and not explicit_profile and not lease_profile:
-            workerbee_profile = entity_profile
-        else:
-            if lease_profile and explicit_profile and lease_profile != entity_profile:
-                raise WorkerBeeProfileIntentError(
-                    "WorkerBee lease profile does not match durable entity intent"
+        if lease_profile and existing_entity and lease_profile != entity_profile:
+            raise WorkerBeeProfileIntentError(
+                "WorkerBee lease profile does not match durable entity intent"
+            )
+        if legacy_existing_profile:
+            workerbee_profile, _server_metadata = (
+                await self.operator_workerbee_server_authority(
+                    profile=lease_profile or entity_profile,
+                    expected_ceiling=str(
+                        profile_metadata.get(WORKERBEE_PROFILE_CEILING_METADATA_KEY)
+                        or ""
+                    ).strip(),
+                    expected_digest=str(
+                        profile_metadata.get(
+                            WORKERBEE_WORKSPACE_POLICY_DIGEST_METADATA_KEY
+                        )
+                        or ""
+                    ).strip(),
+                    durable_profile=True,
                 )
+            )
+        else:
             server_profile, server_metadata = (
                 await self.operator_workerbee_server_authority(
                     profile=lease_profile or (entity_profile if explicit_profile else None),
@@ -27183,9 +27254,11 @@ class AgentPBXTUI(App[None]):
                         )
                         or ""
                     ).strip(),
+                    durable_profile=explicit_profile,
                 )
             )
-            profile_metadata.update(server_metadata)
+            if not explicit_profile:
+                profile_metadata.update(server_metadata)
             workerbee_profile = (
                 entity_profile
                 if explicit_profile
@@ -27196,6 +27269,18 @@ class AgentPBXTUI(App[None]):
                     existing_entity=False,
                 )
             )
+        gateway_metadata = self.workerbee_gateway_metadata(workerbee_gateway_binding)
+        if legacy_existing_profile:
+            gateway_metadata.pop(CALLER_WORKERBEE_PROFILE_METADATA_KEY, None)
+        profile_projection = (
+            {}
+            if legacy_existing_profile
+            else self.workerbee_profile_metadata(
+                agent_id,
+                profile_metadata,
+                profile=workerbee_profile,
+            )
+        )
         response = await self.api_client().post(
             "/v1/agents/register",
             json={
@@ -27206,12 +27291,8 @@ class AgentPBXTUI(App[None]):
                 "pbx_active": True,
                 "metadata": {
                     **profile_metadata,
-                    **self.workerbee_gateway_metadata(workerbee_gateway_binding),
-                    **self.workerbee_profile_metadata(
-                        agent_id,
-                        profile_metadata,
-                        profile=workerbee_profile,
-                    ),
+                    **gateway_metadata,
+                    **profile_projection,
                 },
             },
             headers=auth_headers(self.token),
@@ -28479,40 +28560,15 @@ class AgentPBXTUI(App[None]):
                 else WORKERBEE_PROFILE_LOCAL_DEPLOY
             )
         )
-        if workerbee_profile == WORKERBEE_PROFILE_TRUSTED_WORKBENCH:
-            workerbee_profile, server_metadata = (
-                await self.operator_workerbee_server_authority(
-                    profile=workerbee_profile,
-                    expected_ceiling=str(
-                        fork_metadata.get(WORKERBEE_PROFILE_CEILING_METADATA_KEY)
-                        or ""
-                    ).strip(),
-                    expected_digest=str(
-                        fork_metadata.get(
-                            WORKERBEE_WORKSPACE_POLICY_DIGEST_METADATA_KEY
-                        )
-                        or ""
-                    ).strip(),
-                )
-            )
-            fork_metadata.update(server_metadata)
-        fork_metadata.update(
-            self.workerbee_profile_metadata(
-                fork_agent_id,
-                fork_metadata,
+        workerbee_profile, workerbee_gateway_binding = (
+            await self.prepare_operator_fork_workerbee_launch(
+                fork_agent_id=fork_agent_id,
+                logical_operator_id=logical_operator_id,
+                source_session_id=source_session_id,
+                source_root=launch_cwd,
+                fork_metadata=fork_metadata,
                 profile=workerbee_profile,
-                source_entity_id=logical_operator_id,
             )
-        )
-        workerbee_gateway_binding = await self.prepare_workerbee_gateway_launch(
-            agent_id=fork_agent_id,
-            project="agent-pbx-operator",
-            codex_session_id=source_session_id,
-            profile=workerbee_profile,
-            source_root=launch_cwd,
-        )
-        fork_metadata.update(
-            self.workerbee_gateway_metadata(workerbee_gateway_binding)
         )
         launch_config_overrides = (
             review_operator_config_overrides(

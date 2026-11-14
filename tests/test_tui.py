@@ -27768,6 +27768,32 @@ async def test_tui_new_root_uses_configured_workerbee_default_with_policy_eviden
     assert metadata["workerbee_workspace_policy_digest"] == "d" * 64  # type: ignore[index]
     assert metadata["workerbee_profile_intent"]["source_entity_id"] == "operator-6"  # type: ignore[index]
     assert len(posts) == 1
+    leased = await app.register_operator_root(
+        "operator-7",
+        cwd="/srv/work/agent-pbx",
+        codex_command="codex",
+        mcp_url="http://127.0.0.1:8765/mcp",
+        session_name="agent-pbx-operators",
+        workerbee_gateway_binding={
+            "lease": {
+                "lease_id": "lease-7",
+                "profile": "trusted-workbench",
+                "backend": "platform_debug",
+                "backend_generation": 7,
+            },
+            "workspace_binding": {
+                "binding_id": "binding-7",
+                "state": "ready",
+                "path_domain": {
+                    "workspace_policy_digest": "d" * 64,
+                    "receipt_sha256": "f" * 64,
+                },
+            },
+        },
+    )
+    assert leased["metadata"]["workerbee_mcp_profile"] == "trusted-workbench"  # type: ignore[index]
+    assert leased["metadata"]["workerbee_gateway_lease_id"] == "lease-7"  # type: ignore[index]
+    assert len(posts) == 2
     with pytest.raises(ValueError, match="digest is stale or mismatched"):
         await app.operator_workerbee_server_authority(
             profile="trusted-workbench",
@@ -27807,7 +27833,23 @@ async def test_tui_existing_root_without_profile_is_not_auto_migrated(
 
     class Client:
         async def get(self, path: str, **_kwargs: object) -> Response:
-            raise AssertionError(f"unexpected policy read: {path}")
+            assert path == "/v2/workerbee/workspace-policy"
+            return Response(
+                {
+                    "access_posture": {
+                        "operator_default_requested_profile": "trusted-workbench",
+                        "operator_default_effective_profile": "trusted-workbench",
+                        "operator_default_constrained": False,
+                        "profile_ceiling": "trusted-workbench",
+                    },
+                    "effective": {
+                        "policy": "scoped-workbench",
+                        "allowed_roots": ["/srv/work"],
+                    },
+                    "effective_digest": "e" * 64,
+                    "constrained": False,
+                }
+            )
 
         async def post(
             self,
@@ -27835,7 +27877,52 @@ async def test_tui_existing_root_without_profile_is_not_auto_migrated(
         session_name="agent-pbx-operators",
     )
 
-    assert agent["metadata"]["workerbee_mcp_profile"] == "local-deploy"  # type: ignore[index]
+    assert "workerbee_mcp_profile" not in agent["metadata"]  # type: ignore[operator]
+    assert "workerbee_profile_intent" not in agent["metadata"]  # type: ignore[operator]
+
+
+async def test_tui_existing_legacy_root_above_current_ceiling_fails_before_post() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "operator-6": {
+            "agent_id": "operator-6",
+            "agent_type": "operator",
+            "metadata": {"agent_type": "operator", "operator_role": "root"},
+        }
+    }
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "access_posture": {
+                    "operator_default_requested_profile": "local-deploy",
+                    "operator_default_effective_profile": "observe-local",
+                    "operator_default_constrained": True,
+                    "profile_ceiling": "observe-local",
+                }
+            }
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            assert path == "/v2/workerbee/workspace-policy"
+            return Response()
+
+        async def post(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("legacy root must fail before registration POST")
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    with pytest.raises(ValueError, match="reviewed ready-mapping migration"):
+        await app.register_operator_root(
+            "operator-6",
+            cwd="/srv/work/agent-pbx",
+            codex_command="codex",
+            mcp_url="http://127.0.0.1:8765/mcp",
+            session_name="agent-pbx-operators",
+        )
 
 
 async def test_tui_trusted_default_fails_closed_without_policy_evidence(
@@ -27972,6 +28059,119 @@ async def test_tui_explicit_local_profile_wins_over_broader_server_default() -> 
 
     assert selected == "local-deploy"
     assert metadata == {"workerbee_access_profile_ceiling": "trusted-workbench"}
+
+
+async def test_tui_local_edit_fork_above_current_ceiling_fails_before_gateway() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    gateway_calls: list[str] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "access_posture": {
+                    "operator_default_requested_profile": "local-deploy",
+                    "operator_default_effective_profile": "observe-local",
+                    "operator_default_constrained": True,
+                    "profile_ceiling": "observe-local",
+                }
+            }
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            assert path == "/v2/workerbee/workspace-policy"
+            return Response()
+
+    async def prepare(**kwargs: object) -> None:
+        gateway_calls.append(str(kwargs["agent_id"]))
+        return None
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.prepare_workerbee_gateway_launch = prepare  # type: ignore[method-assign]
+    metadata: dict[str, object] = {
+        "agent_type": "operator",
+        "operator_role": "fork",
+        "fork_purpose": "edit",
+        "access_mode": "edit",
+        "workerbee_access_profile_ceiling": "local-deploy",
+    }
+
+    with pytest.raises(ValueError, match="reviewed ready-mapping migration"):
+        await app.prepare_operator_fork_workerbee_launch(
+            fork_agent_id="operator-6-fork-caller-1",
+            logical_operator_id="operator-6",
+            source_session_id="session-1",
+            source_root="/srv/work/project",
+            fork_metadata=metadata,
+            profile="local-deploy",
+        )
+
+    assert gateway_calls == []
+
+
+@pytest.mark.parametrize(
+    ("profile", "ceiling"),
+    [
+        ("observe-local", "observe-local"),
+        ("observe-local", "local-deploy"),
+        ("local-deploy", "local-deploy"),
+    ],
+)
+async def test_tui_edit_fork_profiles_at_or_below_current_ceiling_remain_green(
+    profile: str,
+    ceiling: str,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    gateway_profiles: list[str] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "access_posture": {
+                    "operator_default_requested_profile": "local-deploy",
+                    "operator_default_effective_profile": ceiling,
+                    "operator_default_constrained": ceiling == "observe-local",
+                    "profile_ceiling": ceiling,
+                }
+            }
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            assert path == "/v2/workerbee/workspace-policy"
+            return Response()
+
+    async def prepare(**kwargs: object) -> None:
+        gateway_profiles.append(str(kwargs["profile"]))
+        return None
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+    app.prepare_workerbee_gateway_launch = prepare  # type: ignore[method-assign]
+    metadata: dict[str, object] = {
+        "agent_type": "operator",
+        "operator_role": "fork",
+        "fork_purpose": "edit",
+        "access_mode": "edit",
+        "workerbee_access_profile_ceiling": ceiling,
+    }
+
+    selected, binding = await app.prepare_operator_fork_workerbee_launch(
+        fork_agent_id="operator-6-fork-caller-1",
+        logical_operator_id="operator-6",
+        source_session_id="session-1",
+        source_root="/srv/work/project",
+        fork_metadata=metadata,
+        profile=profile,
+    )
+
+    assert selected == profile
+    assert binding is None
+    assert gateway_profiles == [profile]
+    assert metadata["workerbee_mcp_profile"] == profile
 
 
 def test_tui_review_fork_cannot_resolve_trusted_workerbee_profile() -> None:
