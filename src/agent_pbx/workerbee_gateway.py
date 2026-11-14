@@ -62,7 +62,8 @@ from .workerbee_modes import (
     tools_for_access_profile,
 )
 
-WORKERBEE_GATEWAY_API_VERSION = "agent-pbx.workerbee-gateway/v2"
+WORKERBEE_GATEWAY_API_VERSION = "agent-pbx.workerbee-gateway/v3"
+WORKERBEE_GATEWAY_V2_API_VERSION = "agent-pbx.workerbee-gateway/v2"
 WORKERBEE_GATEWAY_LEGACY_API_VERSION = "agent-pbx.workerbee-gateway/v1"
 WORKERBEE_GATEWAY_TOKEN_ENV = "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN"
 WORKERBEE_OBSERVE_TOOLS = tools_for_access_profile(WORKERBEE_PROFILE_OBSERVE)
@@ -152,6 +153,7 @@ class WorkerBeeGatewayLease:
     backend_generation: int
     backend_fingerprint: str
     workspace_binding_id: str
+    path_domain_receipt_sha256: str
     project: str
     status: str
     created_at: float
@@ -208,6 +210,11 @@ class WorkerBeeGatewayService:
             None,
         ]
         | None = None,
+        binding_validated: Callable[
+            [WorkerBeeGatewayLease, WorkerBeeWorkspaceBinding],
+            None,
+        ]
+        | None = None,
         workspace_policy: WorkerBeeWorkspacePolicyService | None = None,
         snapshot_policy: WorkerBeeSnapshotPolicyService | None = None,
     ) -> None:
@@ -216,6 +223,7 @@ class WorkerBeeGatewayService:
         self.workspace_service = workspace_service
         self.clock = clock
         self.binding_refreshed = binding_refreshed
+        self.binding_validated = binding_validated
         self.workspace_policy = workspace_policy
         self.snapshot_policy = snapshot_policy
         self._mutation_lock = threading.Lock()
@@ -281,6 +289,7 @@ class WorkerBeeGatewayService:
             backend_generation=runtime.generation,
             backend_fingerprint=runtime.fingerprint,
             workspace_binding_id=binding.binding_id,
+            path_domain_receipt_sha256=binding.path_domain.receipt_sha256,
             project=binding.project,
             status="active",
             created_at=now,
@@ -323,9 +332,22 @@ class WorkerBeeGatewayService:
                     str(payload.get("workspace_binding_id") or "")
                 )
                 payload["source_mode"] = legacy_binding.source_mode
+                payload["path_domain_receipt_sha256"] = (
+                    legacy_binding.path_domain.receipt_sha256
+                )
             except WorkerBeeWorkspaceError as exc:
                 raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
             payload["execution_lane"] = WORKERBEE_EXECUTION_INTERACTIVE
+        elif api_version == WORKERBEE_GATEWAY_V2_API_VERSION:
+            try:
+                legacy_binding = self.workspace_service.load(
+                    str(payload.get("workspace_binding_id") or "")
+                )
+                payload["path_domain_receipt_sha256"] = (
+                    legacy_binding.path_domain.receipt_sha256
+                )
+            except WorkerBeeWorkspaceError as exc:
+                raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
         elif api_version != WORKERBEE_GATEWAY_API_VERSION:
             raise WorkerBeeGatewayError(
                 "WORKERBEE_GATEWAY_LEASE_VERSION_UNSUPPORTED",
@@ -398,7 +420,29 @@ class WorkerBeeGatewayService:
                 str(getattr(exc, "code", "WORKERBEE_WORKSPACE_BINDING_INVALID")),
                 str(exc),
             ) from exc
+        self._validate_binding_scope(lease, binding)
+        self._notify_binding_validated(lease, binding)
         return lease
+
+    def current_binding(
+        self,
+        lease_id: str,
+    ) -> tuple[WorkerBeeGatewayLease, WorkerBeeWorkspaceBinding]:
+        """Return one active internal lease/binding pair after full revalidation."""
+
+        lease = self.load(lease_id)
+        if lease.status != "active" or lease.revoked_at is not None:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_GATEWAY_LEASE_REVOKED",
+                "WorkerBee gateway lease is no longer active.",
+            )
+        if lease.expires_at is not None and self.clock() >= lease.expires_at:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_GATEWAY_LEASE_EXPIRED",
+                "WorkerBee gateway lease expired.",
+            )
+        _runtime, binding = self._refresh_context(lease)
+        return lease, binding
 
     def revoke(self, lease_id: str) -> WorkerBeeGatewayLease:
         lease = self.load(lease_id)
@@ -640,11 +684,17 @@ class WorkerBeeGatewayService:
 
         try:
             include_paths = self._target_include_paths(current, target)
+            path_policy = self.workspace_policy.resolve_path_domain(
+                agent_id=current.agent_id,
+                source_root=target.source_root,
+            )
             next_binding = self.workspace_service.prepare(
                 runtime=runtime,
                 project=target.runtime_project,
                 source_root=target.source_root,
                 include_paths=include_paths,
+                allowed_host_root=path_policy.allowed_host_root,
+                workspace_policy_digest=path_policy.policy_digest,
             )
             self.workspace_service.verify_runtime(next_binding, runtime)
         except (WorkerBeeWorkspaceError, WorkerBeeGatewayError) as exc:
@@ -660,6 +710,9 @@ class WorkerBeeGatewayService:
             **{
                 **asdict(current),
                 "workspace_binding_id": next_binding.binding_id,
+                "path_domain_receipt_sha256": (
+                    next_binding.path_domain.receipt_sha256
+                ),
                 "project": target.runtime_project,
                 "source_project": target.base_project,
                 "working_subpath": target.working_subpath,
@@ -780,6 +833,9 @@ class WorkerBeeGatewayService:
             **{
                 **asdict(current),
                 "workspace_binding_id": previous.binding_id,
+                "path_domain_receipt_sha256": (
+                    previous.path_domain.receipt_sha256
+                ),
                 "project": str(metadata.get("from_project") or previous.project),
                 "source_project": str(
                     metadata.get("from_source_project") or previous.project
@@ -836,12 +892,15 @@ class WorkerBeeGatewayService:
         if expected_binding_id == binding.binding_id:
             return current, binding, False
         try:
+            path_policy = self._path_policy(current, binding.source_root)
             refreshed_binding = self.workspace_service.prepare(
                 runtime=runtime,
                 project=binding.project,
                 source_root=binding.source_root,
                 include_paths=include_paths,
                 source_mode=binding.source_mode,
+                allowed_host_root=path_policy[0],
+                workspace_policy_digest=path_policy[1],
             )
             self.workspace_service.verify_runtime(refreshed_binding, runtime)
             verified_binding_id = self.workspace_service.expected_binding_id(
@@ -869,6 +928,9 @@ class WorkerBeeGatewayService:
             **{
                 **asdict(current),
                 "workspace_binding_id": refreshed_binding.binding_id,
+                "path_domain_receipt_sha256": (
+                    refreshed_binding.path_domain.receipt_sha256
+                ),
             }
         )
         lease_path = self._lease_path(current.lease_id)
@@ -950,7 +1012,47 @@ class WorkerBeeGatewayService:
                 "WORKERBEE_PROJECT_SCOPE_MISMATCH",
                 "WorkerBee lease and workspace binding target different projects.",
             )
+        self._validate_binding_scope(lease, binding)
+        self._notify_binding_validated(lease, binding)
         return runtime, binding
+
+    @staticmethod
+    def _validate_binding_scope(
+        lease: WorkerBeeGatewayLease,
+        binding: WorkerBeeWorkspaceBinding,
+    ) -> None:
+        if binding.source_mode != lease.source_mode:
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_SOURCE_MODE_DRIFT",
+                "Gateway lease and workspace binding source modes differ.",
+            )
+        if (
+            lease.path_domain_receipt_sha256
+            != binding.path_domain.receipt_sha256
+        ):
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_PATH_DOMAIN_RECEIPT_DRIFT",
+                "Gateway lease and workspace path-domain receipts differ.",
+                "Issue a fresh reviewed lease for the current workspace binding.",
+            )
+
+    def _notify_binding_validated(
+        self,
+        lease: WorkerBeeGatewayLease,
+        binding: WorkerBeeWorkspaceBinding,
+    ) -> None:
+        if self.binding_validated is None:
+            return
+        try:
+            self.binding_validated(lease, binding)
+        except WorkerBeeGatewayError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - fail closed at controller boundary
+            raise WorkerBeeGatewayError(
+                "WORKERBEE_BINDING_RECONCILE_FAILED",
+                "The active WorkerBee lease could not reconcile durable Agent metadata.",
+                "Review lease and entity generation evidence before retrying.",
+            ) from exc
 
     def _workspace_include_paths(
         self,
@@ -979,6 +1081,27 @@ class WorkerBeeGatewayService:
                 f"WorkerBee workspace include policy {exc}.",
                 "Correct the host-owned include policy before refreshing this session.",
             ) from exc
+
+    def _path_policy(
+        self,
+        lease: WorkerBeeGatewayLease,
+        source_root: str,
+    ) -> tuple[str, str]:
+        if self.workspace_policy is None:
+            return source_root, self.workspace_service._canonical_sha256(
+                {
+                    "api_version": "agent-pbx.workerbee-workspace-root-policy/v1",
+                    "allowed_host_root": source_root,
+                }
+            )
+        try:
+            policy = self.workspace_policy.resolve_path_domain(
+                agent_id=lease.agent_id,
+                source_root=source_root,
+            )
+        except WorkerBeeWorkspacePolicyError as exc:
+            raise WorkerBeeGatewayError(exc.code, exc.message, exc.remediation) from exc
+        return policy.allowed_host_root, policy.policy_digest
 
     def _target_include_paths(
         self,

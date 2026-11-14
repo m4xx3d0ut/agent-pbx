@@ -40,7 +40,8 @@ from .workerbee_direct_bind import (
     WorkerBeeTrustedDirectBindVerifier,
 )
 
-WORKERBEE_WORKSPACE_BINDING_API_VERSION = "agent-pbx.workerbee-workspace-binding/v4"
+WORKERBEE_WORKSPACE_BINDING_API_VERSION = "agent-pbx.workerbee-workspace-binding/v5"
+WORKERBEE_WORKSPACE_BINDING_V4_API_VERSION = "agent-pbx.workerbee-workspace-binding/v4"
 WORKERBEE_WORKSPACE_BINDING_V3_API_VERSION = "agent-pbx.workerbee-workspace-binding/v3"
 WORKERBEE_WORKSPACE_BINDING_LEGACY_API_VERSION = (
     "agent-pbx.workerbee-workspace-binding/v2"
@@ -50,6 +51,10 @@ WORKERBEE_WORKSPACE_INCLUDE_POLICY_ENV = (
     "AGENT_PBX_WORKERBEE_WORKSPACE_INCLUDES_JSON"
 )
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
+WORKERBEE_PATH_DOMAIN_RECEIPT_API_VERSION = (
+    "agent-pbx.workerbee-path-domain-mapping/v1"
+)
 
 
 class WorkerBeeWorkspaceError(RuntimeError):
@@ -168,6 +173,32 @@ def normalize_workerbee_workspace_include_paths(
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerBeePathDomainMappingReceipt:
+    binding_id: str
+    backend: str
+    backend_instance_id: str
+    backend_generation: int
+    backend_fingerprint: str
+    source_mode: str
+    host_source_root: str
+    allowed_host_root: str
+    container_target_root: str
+    runtime_workspace_path: str
+    workspace_policy_digest: str
+    created_at: float
+    receipt_sha256: str
+    api_version: str = WORKERBEE_PATH_DOMAIN_RECEIPT_API_VERSION
+
+    def unsigned_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result.pop("receipt_sha256", None)
+        return result
+
+    def public_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerBeeWorkspaceBinding:
     binding_id: str
     project: str
@@ -184,6 +215,7 @@ class WorkerBeeWorkspaceBinding:
     source_mode_version: int
     workspace_strategy: str
     runtime_workspace_path: str
+    path_domain: WorkerBeePathDomainMappingReceipt
     materializer_receipt: str
     helper_receipt_id: str
     helper_receipt_sha256: str
@@ -296,6 +328,8 @@ class WorkerBeeWorkspaceService:
         source_mode: str | None = None,
         trusted_direct_bind_receipt_id: str = "",
         trusted_direct_bind_receipt_sha256: str = "",
+        allowed_host_root: str | Path | None = None,
+        workspace_policy_digest: str = "",
     ) -> WorkerBeeWorkspaceBinding:
         selected_project = self._safe_project(project)
         lexical_source = Path(source_root).expanduser()
@@ -352,6 +386,8 @@ class WorkerBeeWorkspaceService:
                 source=source,
                 identity=identity,
                 source_mode=selected_source_mode,
+                allowed_host_root=allowed_host_root,
+                workspace_policy_digest=workspace_policy_digest,
             )
         elif selected_source_mode in {
             WORKERBEE_SOURCE_SNAPSHOT_IMPORT,
@@ -364,6 +400,8 @@ class WorkerBeeWorkspaceService:
                 identity=identity,
                 include_paths=normalized_include_paths,
                 source_mode=selected_source_mode,
+                allowed_host_root=allowed_host_root,
+                workspace_policy_digest=workspace_policy_digest,
             )
         elif selected_source_mode == WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND:
             binding = self._trusted_direct_binding(
@@ -372,6 +410,8 @@ class WorkerBeeWorkspaceService:
                 source=source,
                 identity=identity,
                 evidence=direct_evidence,
+                allowed_host_root=allowed_host_root,
+                workspace_policy_digest=workspace_policy_digest,
             )
         else:  # pragma: no cover - runtime selection validates this first
             raise WorkerBeeWorkspaceError(
@@ -487,12 +527,22 @@ class WorkerBeeWorkspaceService:
             payload.setdefault("helper_mount_id", "")
             payload.setdefault("helper_binary_sha256", "")
             payload.setdefault("helper_receipt_expires_at", 0.0)
+        elif api_version == WORKERBEE_WORKSPACE_BINDING_V4_API_VERSION:
+            pass
         elif api_version != WORKERBEE_WORKSPACE_BINDING_API_VERSION:
             raise WorkerBeeWorkspaceError(
                 "WORKERBEE_WORKSPACE_BINDING_VERSION_UNSUPPORTED",
                 "WorkerBee workspace binding receipt has an unsupported version.",
             )
+        if api_version != WORKERBEE_WORKSPACE_BINDING_API_VERSION:
+            payload["path_domain"] = self._legacy_path_domain_receipt(
+                payload
+            ).public_dict()
         try:
+            path_domain = payload.get("path_domain")
+            if not isinstance(path_domain, dict):
+                raise TypeError("path_domain must be an object")
+            payload["path_domain"] = WorkerBeePathDomainMappingReceipt(**path_domain)
             return WorkerBeeWorkspaceBinding(**payload)
         except (TypeError, ValueError) as exc:
             raise WorkerBeeWorkspaceError(
@@ -528,6 +578,7 @@ class WorkerBeeWorkspaceService:
                 "WORKERBEE_WORKSPACE_BINDING_NOT_READY",
                 f"Workspace binding is {binding.state!r}, not ready.",
             )
+        self._validate_path_domain(binding, runtime)
 
     def release(self, binding_id: str) -> WorkerBeeWorkspaceBinding:
         binding = self.load(binding_id)
@@ -569,15 +620,29 @@ class WorkerBeeWorkspaceService:
         source: Path,
         identity: Mapping[str, Any],
         source_mode: str,
+        allowed_host_root: str | Path | None,
+        workspace_policy_digest: str,
     ) -> WorkerBeeWorkspaceBinding:
         now = self.clock()
+        binding_id = self._binding_id(
+            runtime,
+            project,
+            identity,
+            source_mode=source_mode,
+        )
+        path_domain = self._path_domain_receipt(
+            binding_id=binding_id,
+            runtime=runtime,
+            source_mode=source_mode,
+            host_source_root=source,
+            allowed_host_root=allowed_host_root,
+            container_target_root=str(source),
+            runtime_workspace_path=str(source),
+            workspace_policy_digest=workspace_policy_digest,
+            created_at=now,
+        )
         return WorkerBeeWorkspaceBinding(
-            binding_id=self._binding_id(
-                runtime,
-                project,
-                identity,
-                source_mode=source_mode,
-            ),
+            binding_id=binding_id,
             project=project,
             source_root=str(source),
             source_commit=str(identity["source_commit"]),
@@ -592,6 +657,7 @@ class WorkerBeeWorkspaceService:
             source_mode_version=WORKERBEE_SOURCE_MODE_VERSION,
             workspace_strategy=legacy_strategy_for_source_mode(source_mode),
             runtime_workspace_path=str(source),
+            path_domain=path_domain,
             materializer_receipt="",
             helper_receipt_id="",
             helper_receipt_sha256="",
@@ -614,6 +680,8 @@ class WorkerBeeWorkspaceService:
         identity: Mapping[str, Any],
         include_paths: tuple[str, ...],
         source_mode: str,
+        allowed_host_root: str | Path | None,
+        workspace_policy_digest: str,
     ) -> WorkerBeeWorkspaceBinding:
         if runtime.backend == WORKERBEE_BACKEND_USER_APPLIANCE:
             raise WorkerBeeWorkspaceError(
@@ -703,6 +771,17 @@ class WorkerBeeWorkspaceService:
                 "WorkerBee materializer receipt dirty state does not match the checkout.",
             )
         now = self.clock()
+        path_domain = self._path_domain_receipt(
+            binding_id=binding_id,
+            runtime=runtime,
+            source_mode=source_mode,
+            host_source_root=source,
+            allowed_host_root=allowed_host_root,
+            container_target_root=runtime_path,
+            runtime_workspace_path=runtime_path,
+            workspace_policy_digest=workspace_policy_digest,
+            created_at=now,
+        )
         return WorkerBeeWorkspaceBinding(
             binding_id=binding_id,
             project=project,
@@ -719,6 +798,7 @@ class WorkerBeeWorkspaceService:
             source_mode_version=WORKERBEE_SOURCE_MODE_VERSION,
             workspace_strategy=legacy_strategy_for_source_mode(source_mode),
             runtime_workspace_path=runtime_path,
+            path_domain=path_domain,
             materializer_receipt=str(payload.get("receipt_path") or "").strip(),
             helper_receipt_id="",
             helper_receipt_sha256="",
@@ -740,6 +820,8 @@ class WorkerBeeWorkspaceService:
         source: Path,
         identity: Mapping[str, Any],
         evidence: WorkerBeeTrustedDirectBindEvidence | None,
+        allowed_host_root: str | Path | None,
+        workspace_policy_digest: str,
     ) -> WorkerBeeWorkspaceBinding:
         if runtime.backend != WORKERBEE_BACKEND_PLATFORM_DEBUG:
             raise WorkerBeeWorkspaceError(
@@ -769,6 +851,17 @@ class WorkerBeeWorkspaceService:
                 "The host-owned helper receipt does not match the admitted Git source identity.",
             )
         now = self.clock()
+        path_domain = self._path_domain_receipt(
+            binding_id=binding_id,
+            runtime=runtime,
+            source_mode=WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND,
+            host_source_root=source,
+            allowed_host_root=allowed_host_root,
+            container_target_root=evidence.runtime_workspace_path,
+            runtime_workspace_path=evidence.runtime_workspace_path,
+            workspace_policy_digest=workspace_policy_digest,
+            created_at=now,
+        )
         return WorkerBeeWorkspaceBinding(
             binding_id=binding_id,
             project=project,
@@ -787,6 +880,7 @@ class WorkerBeeWorkspaceService:
                 WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND
             ),
             runtime_workspace_path=evidence.runtime_workspace_path,
+            path_domain=path_domain,
             materializer_receipt="",
             helper_receipt_id=evidence.receipt_id,
             helper_receipt_sha256=evidence.receipt_sha256,
@@ -858,6 +952,215 @@ class WorkerBeeWorkspaceService:
                 "Operation-time trusted-direct-bind evidence drifted from the binding.",
             )
         return evidence
+
+    def _path_domain_receipt(
+        self,
+        *,
+        binding_id: str,
+        runtime: WorkerBeeRuntimeSelection,
+        source_mode: str,
+        host_source_root: str | Path,
+        allowed_host_root: str | Path | None,
+        container_target_root: str,
+        runtime_workspace_path: str,
+        workspace_policy_digest: str,
+        created_at: float,
+    ) -> WorkerBeePathDomainMappingReceipt:
+        source = Path(host_source_root).expanduser().resolve(strict=True)
+        allowed = Path(allowed_host_root or source).expanduser().resolve(strict=True)
+        if not source.is_dir() or not allowed.is_dir():
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_INVALID",
+                "WorkerBee path-domain roots must be existing directories.",
+            )
+        try:
+            source.relative_to(allowed)
+        except ValueError as exc:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_ROOT_DENIED",
+                "WorkerBee host source root is outside its policy-approved host root.",
+            ) from exc
+        container = self._absolute_posix_path(
+            container_target_root, field="container target root"
+        )
+        runtime_path = self._absolute_posix_path(
+            runtime_workspace_path, field="runtime workspace path"
+        )
+        try:
+            runtime_path.relative_to(container)
+        except ValueError as exc:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_RUNTIME_DENIED",
+                "WorkerBee runtime workspace path is outside its container target root.",
+            ) from exc
+        policy_digest = str(workspace_policy_digest or "").strip().lower()
+        if not policy_digest:
+            policy_digest = self._canonical_sha256(
+                {
+                    "api_version": "agent-pbx.workerbee-workspace-root-policy/v1",
+                    "allowed_host_root": str(allowed),
+                }
+            )
+        if not _SHA256.fullmatch(policy_digest):
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_POLICY_DIGEST_INVALID",
+                "WorkerBee workspace-policy digest must be a canonical SHA-256 value.",
+            )
+        unsigned = {
+            "api_version": WORKERBEE_PATH_DOMAIN_RECEIPT_API_VERSION,
+            "binding_id": binding_id,
+            "backend": runtime.backend,
+            "backend_instance_id": runtime.instance_id,
+            "backend_generation": runtime.generation,
+            "backend_fingerprint": runtime.fingerprint,
+            "source_mode": source_mode,
+            "host_source_root": str(source),
+            "allowed_host_root": str(allowed),
+            "container_target_root": container.as_posix(),
+            "runtime_workspace_path": runtime_path.as_posix(),
+            "workspace_policy_digest": policy_digest,
+            "created_at": created_at,
+        }
+        return WorkerBeePathDomainMappingReceipt(
+            **unsigned,
+            receipt_sha256=self._canonical_sha256(unsigned),
+        )
+
+    def _legacy_path_domain_receipt(
+        self,
+        payload: Mapping[str, Any],
+    ) -> WorkerBeePathDomainMappingReceipt:
+        source_root = str(payload.get("source_root") or "").strip()
+        runtime_path = str(payload.get("runtime_workspace_path") or "").strip()
+        policy_digest = self._canonical_sha256(
+            {
+                "api_version": "agent-pbx.workerbee-workspace-root-policy/v1",
+                "allowed_host_root": source_root,
+            }
+        )
+        unsigned = {
+            "api_version": WORKERBEE_PATH_DOMAIN_RECEIPT_API_VERSION,
+            "binding_id": str(payload.get("binding_id") or ""),
+            "backend": str(payload.get("backend") or ""),
+            "backend_instance_id": str(payload.get("backend_instance_id") or ""),
+            "backend_generation": payload.get("backend_generation"),
+            "backend_fingerprint": str(payload.get("backend_fingerprint") or ""),
+            "source_mode": str(payload.get("source_mode") or ""),
+            "host_source_root": source_root,
+            "allowed_host_root": source_root,
+            "container_target_root": runtime_path,
+            "runtime_workspace_path": runtime_path,
+            "workspace_policy_digest": policy_digest,
+            "created_at": payload.get("created_at"),
+        }
+        return WorkerBeePathDomainMappingReceipt(
+            **unsigned,
+            receipt_sha256=self._canonical_sha256(unsigned),
+        )
+
+    def _validate_path_domain(
+        self,
+        binding: WorkerBeeWorkspaceBinding,
+        runtime: WorkerBeeRuntimeSelection,
+    ) -> None:
+        receipt = binding.path_domain
+        if receipt.api_version != WORKERBEE_PATH_DOMAIN_RECEIPT_API_VERSION:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_VERSION_UNSUPPORTED",
+                "WorkerBee path-domain mapping receipt version is unsupported.",
+            )
+        if (
+            type(receipt.backend_generation) is not int
+            or type(receipt.created_at) not in {int, float}
+        ):
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_INVALID",
+                "WorkerBee path-domain mapping receipt has invalid typed fields.",
+            )
+        if (
+            receipt.binding_id != binding.binding_id
+            or receipt.backend != binding.backend
+            or receipt.backend_instance_id != binding.backend_instance_id
+            or receipt.backend_generation != binding.backend_generation
+            or receipt.backend_fingerprint != binding.backend_fingerprint
+            or receipt.source_mode != binding.source_mode
+            or receipt.host_source_root != binding.source_root
+            or receipt.runtime_workspace_path != binding.runtime_workspace_path
+            or receipt.backend != runtime.backend
+            or receipt.backend_instance_id != runtime.instance_id
+            or receipt.backend_generation != runtime.generation
+            or receipt.backend_fingerprint != runtime.fingerprint
+        ):
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_DRIFT",
+                "WorkerBee path-domain mapping no longer matches its binding or runtime.",
+            )
+        if not _SHA256.fullmatch(receipt.workspace_policy_digest):
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_POLICY_DIGEST_INVALID",
+                "WorkerBee path-domain mapping has an invalid workspace-policy digest.",
+            )
+        expected = self._canonical_sha256(receipt.unsigned_dict())
+        if receipt.receipt_sha256 != expected:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_RECEIPT_DRIFT",
+                "WorkerBee path-domain mapping receipt digest does not match its evidence.",
+            )
+        source = Path(receipt.host_source_root)
+        allowed = Path(receipt.allowed_host_root)
+        if (
+            not source.is_absolute()
+            or not allowed.is_absolute()
+            or ".." in source.parts
+            or ".." in allowed.parts
+            or str(source) != receipt.host_source_root
+            or str(allowed) != receipt.allowed_host_root
+        ):
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_INVALID",
+                "WorkerBee host path-domain roots must be absolute.",
+            )
+        try:
+            source.relative_to(allowed)
+            runtime_path = self._absolute_posix_path(
+                receipt.runtime_workspace_path, field="runtime workspace path"
+            )
+            runtime_path.relative_to(
+                self._absolute_posix_path(
+                    receipt.container_target_root, field="container target root"
+                )
+            )
+        except ValueError as exc:
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_ROOT_DENIED",
+                "WorkerBee path-domain mapping crosses its approved boundary.",
+            ) from exc
+
+    @staticmethod
+    def _absolute_posix_path(value: str, *, field: str) -> PurePosixPath:
+        raw = str(value or "").strip()
+        path = PurePosixPath(raw)
+        raw_parts = raw.split("/")
+        if (
+            not raw
+            or not path.is_absolute()
+            or "\\" in raw
+            or "\x00" in raw
+            or raw_parts[0] != ""
+            or any(part in {"", ".", ".."} for part in raw_parts[1:])
+        ):
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_PATH_DOMAIN_INVALID",
+                f"WorkerBee {field} is not a canonical absolute path.",
+            )
+        return path
+
+    @staticmethod
+    def _canonical_sha256(payload: Mapping[str, Any]) -> str:
+        canonical = json.dumps(
+            dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
     def _require_direct_verifier(self) -> WorkerBeeTrustedDirectBindVerifier:
         if self.trusted_direct_verifier is None:

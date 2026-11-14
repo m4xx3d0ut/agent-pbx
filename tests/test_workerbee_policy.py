@@ -78,6 +78,72 @@ def test_workspace_policy_uses_reviewed_workflow_defaults_when_no_db_override(
     assert view["effective"]["request_mode"] == "automatic"
     assert view["effective"]["allowed_roots"] == [str(root)]
     assert view["effective"]["profile_label"] == "Trusted Platform Workbench"
+    assert len(view["effective_digest"]) == 64
+
+
+def test_workspace_policy_path_domain_uses_most_specific_allowed_root(
+    tmp_path: Path,
+) -> None:
+    outer = tmp_path / "git"
+    inner = outer / "team"
+    source = inner / "repo"
+    source.mkdir(parents=True)
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    service = WorkerBeeWorkspacePolicyService(
+        store,
+        environ={
+            "AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_POLICY": "scoped-workbench",
+            "AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_ROOTS_JSON": (
+                f'["{outer}","{inner}"]'
+            ),
+        },
+    )
+
+    path_policy = service.resolve_path_domain(
+        agent_id="agent-1",
+        source_root=source,
+    )
+
+    assert path_policy.host_source_root == str(source.resolve())
+    assert path_policy.allowed_host_root == str(inner.resolve())
+    assert path_policy.policy_digest == service.get_policy("agent-1")[
+        "effective_digest"
+    ]
+
+
+def test_workspace_policy_path_domain_rejects_outside_and_digest_drift(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    service = WorkerBeeWorkspacePolicyService(
+        store,
+        environ={
+            "AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_POLICY": "scoped-workbench",
+            "AGENT_PBX_WORKERBEE_WORKSPACE_DEFAULT_ROOTS_JSON": f'["{allowed}"]',
+        },
+    )
+    original = service.get_policy("agent-1")["effective_digest"]
+
+    with pytest.raises(WorkerBeeWorkspacePolicyError) as denied:
+        service.resolve_path_domain(agent_id="agent-1", source_root=outside)
+    assert denied.value.code == "WORKERBEE_WORKSPACE_SCOPE_DENIED"
+
+    service.set_policy(
+        agent_id="agent-1",
+        policy="pinned",
+        request_mode="approval",
+        allowed_roots=[],
+        managed_scratch_root=None,
+        profile_label="Changed",
+        updated_by="test",
+    )
+    assert service.get_policy("agent-1")["effective_digest"] != original
 
 
 def test_scoped_workbench_resolves_git_root_and_subpath(tmp_path: Path) -> None:

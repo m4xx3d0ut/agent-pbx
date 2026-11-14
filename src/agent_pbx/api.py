@@ -69,6 +69,7 @@ from .workerbee_access import (
 from .workerbee_modes import (
     WORKERBEE_PROFILE_OBSERVE,
     WORKERBEE_PROFILE_REVIEW,
+    WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
     WORKERBEE_SOURCE_TRUSTED_DIRECT_BIND,
 )
 from .workerbee_runtime import WorkerBeeRuntimeRegistry
@@ -441,6 +442,94 @@ def refresh_workerbee_runtime_selection(app: FastAPI) -> dict[str, Any]:
     return posture
 
 
+def durable_workerbee_profile(metadata: Mapping[str, Any]) -> str:
+    intent = (
+        metadata.get("workerbee_profile_intent")
+        if isinstance(metadata.get("workerbee_profile_intent"), dict)
+        else {}
+    )
+    return str(
+        intent.get("profile") or metadata.get("workerbee_mcp_profile") or ""
+    ).strip()
+
+
+def reconcile_workerbee_agent_binding(
+    store: Store,
+    lease: WorkerBeeGatewayLease,
+    binding: WorkerBeeWorkspaceBinding,
+    *,
+    event_type: str,
+    extra_metadata: Mapping[str, Any] | None = None,
+    extra_event_payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Atomically project one fully validated active lease into entity metadata."""
+
+    agent = store.get_agent(lease.agent_id)
+    if agent is None:
+        raise WorkerBeeGatewayError(
+            "WORKERBEE_BINDING_AGENT_MISSING",
+            "The active WorkerBee lease Agent is no longer registered.",
+        )
+    metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+    recorded_lease_id = str(metadata.get("workerbee_gateway_lease_id") or "").strip()
+    if recorded_lease_id != lease.lease_id:
+        raise WorkerBeeGatewayError(
+            "WORKERBEE_BINDING_LEASE_DRIFT",
+            "Durable Agent metadata names a different WorkerBee gateway lease.",
+            "Reconcile the current launch intent and lease before using WorkerBee.",
+        )
+    receipt = binding.path_domain
+    recorded_policy_digest = str(
+        metadata.get("workerbee_workspace_policy_digest") or ""
+    ).strip()
+    durable_profile = durable_workerbee_profile(metadata)
+    if (
+        durable_profile == WORKERBEE_PROFILE_TRUSTED_WORKBENCH
+        and recorded_policy_digest
+        and recorded_policy_digest != receipt.workspace_policy_digest
+    ):
+        raise WorkerBeeGatewayError(
+            "WORKERBEE_WORKSPACE_POLICY_DIGEST_DRIFT",
+            "Durable WorkerBee workspace-policy authority differs from the active binding.",
+            "Issue a fresh binding and lease under the current workspace policy.",
+        )
+    projected = {
+        "workerbee_workspace_binding_id": binding.binding_id,
+        "workerbee_backend": lease.backend,
+        "workerbee_backend_generation": lease.backend_generation,
+        "workerbee_path_domain_receipt_sha256": receipt.receipt_sha256,
+        "workerbee_workspace_policy_digest": receipt.workspace_policy_digest,
+        "workerbee_host_source_root": receipt.host_source_root,
+        "workerbee_allowed_host_root": receipt.allowed_host_root,
+        "workerbee_container_target_root": receipt.container_target_root,
+        "workerbee_runtime_workspace_path": receipt.runtime_workspace_path,
+    }
+    projected.update(dict(extra_metadata or {}))
+    if all(metadata.get(key) == value for key, value in projected.items()):
+        return agent
+    reconciled = store.merge_agent_metadata(
+        lease.agent_id,
+        projected,
+        event_type=event_type,
+        event_payload={
+            "agent_id": lease.agent_id,
+            "lease_id": lease.lease_id,
+            "workspace_binding_id": binding.binding_id,
+            "backend": lease.backend,
+            "backend_generation": lease.backend_generation,
+            "path_domain_receipt_sha256": receipt.receipt_sha256,
+            "workspace_policy_digest": receipt.workspace_policy_digest,
+            **dict(extra_event_payload or {}),
+        },
+    )
+    if reconciled is None:
+        raise WorkerBeeGatewayError(
+            "WORKERBEE_BINDING_AGENT_MISSING",
+            "The active WorkerBee lease Agent disappeared during reconciliation.",
+        )
+    return reconciled
+
+
 async def selected_workerbee_status_for_agent(
     app: FastAPI,
     agent: dict[str, Any],
@@ -463,18 +552,27 @@ async def selected_workerbee_status_for_agent(
     metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
     binding_id = str(metadata.get("workerbee_workspace_binding_id") or "").strip()
     lease_id = str(metadata.get("workerbee_gateway_lease_id") or "").strip()
+    selected_binding: WorkerBeeWorkspaceBinding | None = None
+    lease_error: WorkerBeeGatewayError | None = None
     if lease_id:
         try:
-            lease = await asyncio.to_thread(app.state.workerbee_gateway.load, lease_id)
-        except WorkerBeeGatewayError:
+            lease, selected_binding = await asyncio.to_thread(
+                app.state.workerbee_gateway.current_binding,
+                lease_id,
+            )
+        except WorkerBeeGatewayError as exc:
             lease = None
+            lease_error = exc
         if (
             lease is not None
             and lease.agent_id == agent_id
-            and lease.status == "active"
-            and lease.revoked_at is None
         ):
             binding_id = lease.workspace_binding_id
+        elif lease is not None:
+            lease_error = WorkerBeeGatewayError(
+                "WORKERBEE_BINDING_AGENT_MISMATCH",
+                "WorkerBee gateway lease belongs to a different Agent.",
+            )
     base: dict[str, Any] = {
         "configured": True,
         "available": False,
@@ -502,6 +600,9 @@ async def selected_workerbee_status_for_agent(
         "workspace_binding": None,
         "workspace_policy": workerbee_policy_status(app, agent_id),
     }
+    if lease_error is not None:
+        base["error"] = lease_error.public_dict()
+        return base
     if not binding_id:
         base["error"] = {
             "code": "WORKERBEE_WORKSPACE_BINDING_REQUIRED",
@@ -510,7 +611,9 @@ async def selected_workerbee_status_for_agent(
         }
         return base
     try:
-        binding = await asyncio.to_thread(app.state.workerbee_workspaces.load, binding_id)
+        binding = selected_binding or await asyncio.to_thread(
+            app.state.workerbee_workspaces.load, binding_id
+        )
         runtime = app.state.workerbee_runtime.selected()
         if runtime is None:
             raise WorkerBeeWorkspaceError(
@@ -771,12 +874,7 @@ def create_app(
     ) -> None:
         refreshed_at = time.time()
         event_payload = {
-            "agent_id": refreshed_lease.agent_id,
-            "lease_id": refreshed_lease.lease_id,
             "previous_binding_id": previous_lease.workspace_binding_id,
-            "workspace_binding_id": binding.binding_id,
-            "backend": refreshed_lease.backend,
-            "backend_generation": refreshed_lease.backend_generation,
             "project": binding.project,
             "source_project": refreshed_lease.source_project,
             "working_subpath": refreshed_lease.working_subpath,
@@ -785,32 +883,41 @@ def create_app(
             "source_dirty": binding.source_dirty,
             "refreshed_at": refreshed_at,
         }
-        agent = store.merge_agent_metadata(
-            refreshed_lease.agent_id,
-            {
-                "workerbee_workspace_binding_id": binding.binding_id,
+        reconcile_workerbee_agent_binding(
+            store,
+            refreshed_lease,
+            binding,
+            event_type="workerbee_workspace_refreshed",
+            extra_metadata={
                 "workerbee_workspace_previous_binding_id": (
                     previous_lease.workspace_binding_id
                 ),
                 "workerbee_workspace_refreshed_at": refreshed_at,
-                "workerbee_backend": refreshed_lease.backend,
-                "workerbee_backend_generation": refreshed_lease.backend_generation,
                 "workerbee_workspace_source_root": binding.source_root,
                 "workerbee_workspace_working_subpath": refreshed_lease.working_subpath,
                 "workerbee_workspace_project": refreshed_lease.project,
                 "workerbee_workspace_scenario": refreshed_lease.scenario_label,
             },
-            event_type="workerbee_workspace_refreshed",
-            event_payload=event_payload,
+            extra_event_payload=event_payload,
         )
-        if agent is None:
-            raise RuntimeError("WorkerBee lease Agent is no longer registered")
+
+    def record_workerbee_binding_validation(
+        lease: WorkerBeeGatewayLease,
+        binding: WorkerBeeWorkspaceBinding,
+    ) -> None:
+        reconcile_workerbee_agent_binding(
+            store,
+            lease,
+            binding,
+            event_type="workerbee_binding_reconciled",
+        )
 
     workerbee_gateway = WorkerBeeGatewayService(
         workerbee_state_root / "gateway",
         workerbee_runtime,
         workerbee_workspaces,
         binding_refreshed=record_workerbee_workspace_refresh,
+        binding_validated=record_workerbee_binding_validation,
         workspace_policy=workerbee_workspace_policy,
         snapshot_policy=workerbee_snapshot_policy,
     )
@@ -3409,6 +3516,32 @@ def create_app(
                     "Requested appliance include paths exceed the effective host policy.",
                     "Approve the paths through WorkerBee appliance-content policy first.",
                 )
+            path_policy = await asyncio.to_thread(
+                request.app.state.workerbee_workspace_policy.resolve_path_domain,
+                agent_id=agent_id,
+                source_root=cwd,
+            )
+            if agent is not None:
+                agent_metadata = (
+                    agent.get("metadata")
+                    if isinstance(agent.get("metadata"), dict)
+                    else {}
+                )
+                persisted_policy_digest = str(
+                    agent_metadata.get("workerbee_workspace_policy_digest") or ""
+                ).strip()
+                if (
+                    durable_workerbee_profile(agent_metadata)
+                    == WORKERBEE_PROFILE_TRUSTED_WORKBENCH
+                    and persisted_policy_digest
+                    and persisted_policy_digest != path_policy.policy_digest
+                ):
+                    raise WorkerBeeAccessPolicyError(
+                        "WORKERBEE_WORKSPACE_POLICY_DIGEST_DRIFT",
+                        "Durable WorkerBee profile authority no longer matches workspace policy.",
+                        "Review and persist the current WorkerBee policy before "
+                        "preparing a workspace.",
+                    )
             binding = await asyncio.to_thread(
                 request.app.state.workerbee_workspaces.prepare,
                 runtime=runtime,
@@ -3422,10 +3555,13 @@ def create_app(
                 trusted_direct_bind_receipt_sha256=(
                     payload.trusted_direct_bind_receipt_sha256
                 ),
+                allowed_host_root=path_policy.allowed_host_root,
+                workspace_policy_digest=path_policy.policy_digest,
             )
         except (
             WorkerBeeAccessPolicyError,
             WorkerBeeWorkspaceError,
+            WorkerBeeWorkspacePolicyError,
             WorkerBeeSnapshotPolicyError,
         ) as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
@@ -3473,6 +3609,45 @@ def create_app(
                         "Requested lease profile does not match the Agent's effective access policy.",
                         f"Request {effective_profile!r} or update the policy within its administrator ceiling.",
                     )
+                requested_binding = await asyncio.to_thread(
+                    request.app.state.workerbee_workspaces.load,
+                    payload.workspace_binding_id,
+                )
+                path_policy = await asyncio.to_thread(
+                    request.app.state.workerbee_workspace_policy.resolve_path_domain,
+                    agent_id=agent_id,
+                    source_root=requested_binding.source_root,
+                )
+                if (
+                    requested_binding.path_domain.workspace_policy_digest
+                    != path_policy.policy_digest
+                    or requested_binding.path_domain.allowed_host_root
+                    != path_policy.allowed_host_root
+                ):
+                    raise WorkerBeeAccessPolicyError(
+                        "WORKERBEE_WORKSPACE_POLICY_DIGEST_DRIFT",
+                        "Workspace binding was created under a different effective root policy.",
+                        "Prepare a fresh workspace binding under the current policy.",
+                    )
+                agent_metadata = (
+                    agent.get("metadata")
+                    if isinstance(agent.get("metadata"), dict)
+                    else {}
+                )
+                persisted_policy_digest = str(
+                    agent_metadata.get("workerbee_workspace_policy_digest") or ""
+                ).strip()
+                if (
+                    durable_workerbee_profile(agent_metadata)
+                    == WORKERBEE_PROFILE_TRUSTED_WORKBENCH
+                    and persisted_policy_digest
+                    and persisted_policy_digest != path_policy.policy_digest
+                ):
+                    raise WorkerBeeAccessPolicyError(
+                        "WORKERBEE_WORKSPACE_POLICY_DIGEST_DRIFT",
+                        "Durable WorkerBee profile authority no longer matches workspace policy.",
+                        "Review and persist the current WorkerBee policy before issuing a lease.",
+                    )
             lease, token = await asyncio.to_thread(
                 request.app.state.workerbee_gateway.issue,
                 agent_id=agent_id,
@@ -3481,9 +3656,18 @@ def create_app(
                 workspace_binding_id=payload.workspace_binding_id,
                 ttl_seconds=payload.ttl_seconds,
             )
-        except (WorkerBeeAccessPolicyError, WorkerBeeGatewayError) as exc:
+        except (
+            WorkerBeeAccessPolicyError,
+            WorkerBeeGatewayError,
+            WorkerBeeWorkspaceError,
+            WorkerBeeWorkspacePolicyError,
+        ) as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
         if agent is not None:
+            binding = await asyncio.to_thread(
+                request.app.state.workerbee_workspaces.load,
+                lease.workspace_binding_id,
+            )
             await asyncio.to_thread(
                 store.merge_agent_metadata,
                 agent_id,
@@ -3492,6 +3676,26 @@ def create_app(
                     "workerbee_workspace_binding_id": lease.workspace_binding_id,
                     "workerbee_workspace_project": lease.project,
                     "workerbee_workspace_working_subpath": lease.working_subpath,
+                    "workerbee_backend": lease.backend,
+                    "workerbee_backend_generation": lease.backend_generation,
+                    "workerbee_path_domain_receipt_sha256": (
+                        binding.path_domain.receipt_sha256
+                    ),
+                    "workerbee_workspace_policy_digest": (
+                        binding.path_domain.workspace_policy_digest
+                    ),
+                    "workerbee_host_source_root": (
+                        binding.path_domain.host_source_root
+                    ),
+                    "workerbee_allowed_host_root": (
+                        binding.path_domain.allowed_host_root
+                    ),
+                    "workerbee_container_target_root": (
+                        binding.path_domain.container_target_root
+                    ),
+                    "workerbee_runtime_workspace_path": (
+                        binding.path_domain.runtime_workspace_path
+                    ),
                 },
                 event_type="workerbee_gateway_lease_issued",
                 event_payload={
@@ -3501,6 +3705,12 @@ def create_app(
                     "backend": lease.backend,
                     "backend_generation": lease.backend_generation,
                     "profile": lease.profile,
+                    "path_domain_receipt_sha256": (
+                        binding.path_domain.receipt_sha256
+                    ),
+                    "workspace_policy_digest": (
+                        binding.path_domain.workspace_policy_digest
+                    ),
                 },
             )
         gateway_url = (

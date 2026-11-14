@@ -121,6 +121,16 @@ class WorkerBeeWorkspaceTarget:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerBeeWorkspacePathPolicy:
+    host_source_root: str
+    allowed_host_root: str
+    policy_digest: str
+
+    def public_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+
 class WorkerBeeWorkspacePolicyService:
     """Resolve daemon-owned WorkerBee workspace policy and journal transitions."""
 
@@ -208,7 +218,7 @@ class WorkerBeeWorkspacePolicyService:
             created_at=requested.created_at,
             updated_at=requested.updated_at,
         )
-        return {
+        result = {
             "api_version": "agent-pbx.workerbee-workspace-policy/v1",
             "global": global_policy.public_dict(),
             "entity": entity_policy.public_dict() if entity_policy else None,
@@ -216,6 +226,83 @@ class WorkerBeeWorkspacePolicyService:
             "admin": posture.public_dict(),
             "constrained": constrained,
         }
+        result["effective_digest"] = self._effective_policy_digest(result)
+        return result
+
+    def resolve_path_domain(
+        self,
+        *,
+        agent_id: str,
+        source_root: str | Path,
+    ) -> WorkerBeeWorkspacePathPolicy:
+        """Bind one canonical host source to the effective allowed-root policy."""
+
+        try:
+            source = Path(source_root).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise WorkerBeeWorkspacePolicyError(
+                "WORKERBEE_WORKSPACE_SOURCE_UNAVAILABLE",
+                "WorkerBee host source root is unavailable for policy binding.",
+            ) from exc
+        if not source.is_dir():
+            raise WorkerBeeWorkspacePolicyError(
+                "WORKERBEE_WORKSPACE_SOURCE_UNAVAILABLE",
+                "WorkerBee host source root is not a directory.",
+            )
+        view = self.get_policy(agent_id)
+        effective = view["effective"]
+        configured = tuple(
+            str(item) for item in effective.get("allowed_roots") or ()
+        )
+        candidates: list[Path] = []
+        for raw in configured:
+            try:
+                root = Path(raw).expanduser().resolve(strict=True)
+                source.relative_to(root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if root.is_dir():
+                candidates.append(root)
+        if configured and not candidates:
+            raise WorkerBeeWorkspacePolicyError(
+                "WORKERBEE_WORKSPACE_SCOPE_DENIED",
+                "WorkerBee host source root is outside the effective allowed-root set.",
+                "Select a source inside the reviewed workspace policy before preparing a binding.",
+            )
+        allowed = (
+            max(candidates, key=lambda item: len(item.parts))
+            if candidates
+            else source
+        )
+        return WorkerBeeWorkspacePathPolicy(
+            host_source_root=str(source),
+            allowed_host_root=str(allowed),
+            policy_digest=str(view["effective_digest"]),
+        )
+
+    @staticmethod
+    def _effective_policy_digest(view: Mapping[str, Any]) -> str:
+        effective = (
+            view.get("effective")
+            if isinstance(view.get("effective"), dict)
+            else {}
+        )
+        admin = view.get("admin") if isinstance(view.get("admin"), dict) else {}
+        payload = {
+            "api_version": "agent-pbx.workerbee-workspace-policy-digest/v1",
+            "policy": str(effective.get("policy") or ""),
+            "request_mode": str(effective.get("request_mode") or ""),
+            "allowed_roots": list(effective.get("allowed_roots") or ()),
+            "managed_scratch_root": effective.get("managed_scratch_root"),
+            "policy_ceiling": str(admin.get("policy_ceiling") or ""),
+            "root_ceiling": list(admin.get("root_ceiling") or ()),
+            "request_mode_override": admin.get("request_mode_override"),
+            "constrained": bool(view.get("constrained")),
+        }
+        canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
     def set_policy(
         self,

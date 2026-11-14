@@ -5,6 +5,7 @@ import hashlib
 import os
 import stat
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ import pytest
 import agent_pbx.workerbee_direct_bind as direct_bind
 from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
 from agent_pbx.workerbee_workspace import (
+    WORKERBEE_WORKSPACE_BINDING_V4_API_VERSION,
     WORKERBEE_WORKSPACE_BINDING_LEGACY_API_VERSION,
     WORKERBEE_WORKSPACE_INCLUDE_POLICY_ENV,
     WorkerBeeWorkspaceError,
@@ -172,7 +174,65 @@ def test_oss_binding_uses_direct_host_checkout(tmp_path: Path) -> None:
     assert binding.source_commit == commit
     assert binding.session_start_args(goal="test")["cwd"] == str(source.resolve())
     assert "workspace_sha256" not in binding.session_start_args(goal="test")
+    assert binding.path_domain.host_source_root == str(source.resolve())
+    assert binding.path_domain.allowed_host_root == str(source.resolve())
+    assert binding.path_domain.container_target_root == str(source.resolve())
+    assert binding.path_domain.runtime_workspace_path == str(source.resolve())
+    assert len(binding.path_domain.workspace_policy_digest) == 64
+    assert len(binding.path_domain.receipt_sha256) == 64
     assert service.load(binding.binding_id) == binding
+
+
+def test_workspace_path_domain_binds_approved_host_root_and_rejects_drift(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "git"
+    source = allowed / "repo"
+    allowed.mkdir()
+    git_repo(source)
+    selected = runtime(tmp_path, "oss")
+    service = WorkerBeeWorkspaceService(tmp_path / "state")
+    policy_digest = "a" * 64
+
+    binding = service.prepare(
+        runtime=selected,
+        project="demo",
+        source_root=source,
+        allowed_host_root=allowed,
+        workspace_policy_digest=policy_digest,
+    )
+
+    assert binding.path_domain.allowed_host_root == str(allowed.resolve())
+    assert binding.path_domain.workspace_policy_digest == policy_digest
+    drifted = replace(
+        binding,
+        path_domain=replace(
+            binding.path_domain,
+            runtime_workspace_path="/tmp/other",
+        ),
+    )
+    with pytest.raises(WorkerBeeWorkspaceError) as failure:
+        service.verify_runtime(drifted, selected)
+    assert failure.value.code == "WORKERBEE_PATH_DOMAIN_DRIFT"
+
+
+def test_workspace_path_domain_rejects_source_outside_allowed_root(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "repo"
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    git_repo(source)
+    service = WorkerBeeWorkspaceService(tmp_path / "state")
+
+    with pytest.raises(WorkerBeeWorkspaceError) as failure:
+        service.prepare(
+            runtime=runtime(tmp_path, "oss"),
+            project="demo",
+            source_root=source,
+            allowed_host_root=allowed,
+        )
+    assert failure.value.code == "WORKERBEE_PATH_DOMAIN_ROOT_DENIED"
 
 
 def test_debug_binding_uses_exact_materializer_receipt(tmp_path: Path) -> None:
@@ -206,6 +266,9 @@ def test_debug_binding_uses_exact_materializer_receipt(tmp_path: Path) -> None:
     assert binding.workspace_strategy == "content_addressed_import"
     assert binding.source_mode == "snapshot-import"
     assert binding.runtime_workspace_path == "/workspace/imports/demo-123"
+    assert binding.path_domain.host_source_root == str(source.resolve())
+    assert binding.path_domain.container_target_root == binding.runtime_workspace_path
+    assert binding.path_domain.runtime_workspace_path == binding.runtime_workspace_path
     assert binding.content_sha256 == "a" * 64
     assert binding.session_start_args(goal="deploy")["workspace_path"] == binding.runtime_workspace_path
     service.verify_runtime(binding, selected)
@@ -217,8 +280,9 @@ def test_workspace_service_loads_v2_receipt_as_explicit_legacy_source_mode(
     source = tmp_path / "repo"
     git_repo(source)
     service = WorkerBeeWorkspaceService(tmp_path / "state")
+    selected = runtime(tmp_path, "oss")
     binding = service.prepare(
-        runtime=runtime(tmp_path, "oss"), project="demo", source_root=source
+        runtime=selected, project="demo", source_root=source
     )
     payload = binding.public_dict()
     payload["api_version"] = WORKERBEE_WORKSPACE_BINDING_LEGACY_API_VERSION
@@ -232,6 +296,7 @@ def test_workspace_service_loads_v2_receipt_as_explicit_legacy_source_mode(
         "helper_mount_id",
         "helper_binary_sha256",
         "helper_receipt_expires_at",
+        "path_domain",
     ):
         payload.pop(key)
     receipt_path = service.state_root / "bindings" / f"{binding.binding_id}.json"
@@ -242,6 +307,31 @@ def test_workspace_service_loads_v2_receipt_as_explicit_legacy_source_mode(
     assert migrated.source_mode == "native-direct"
     assert migrated.source_mode_version == 0
     assert migrated.workspace_strategy == "direct_host"
+    assert migrated.path_domain.binding_id == binding.binding_id
+    assert migrated.path_domain.host_source_root == binding.source_root
+
+
+def test_workspace_service_loads_v4_receipt_with_narrow_path_domain(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "repo"
+    git_repo(source)
+    service = WorkerBeeWorkspaceService(tmp_path / "state")
+    selected = runtime(tmp_path, "oss")
+    binding = service.prepare(
+        runtime=selected, project="demo", source_root=source
+    )
+    payload = binding.public_dict()
+    payload["api_version"] = WORKERBEE_WORKSPACE_BINDING_V4_API_VERSION
+    payload.pop("path_domain")
+    receipt_path = service.state_root / "bindings" / f"{binding.binding_id}.json"
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = service.load(binding.binding_id)
+
+    assert migrated.path_domain.binding_id == binding.binding_id
+    assert migrated.path_domain.allowed_host_root == binding.source_root
+    service.verify_runtime(migrated, selected)
 
 
 def trusted_direct_fixture(
@@ -460,6 +550,8 @@ def test_trusted_direct_bind_revalidation_rejects_response_field_drift(
         source_mode="trusted-direct-bind",
         trusted_direct_bind_receipt_id=receipt_id,
         trusted_direct_bind_receipt_sha256=receipt_sha256,
+        allowed_host_root=source.parent,
+        workspace_policy_digest="a" * 64,
     )
     receipt_path = tmp_path / "direct-receipts" / f"{receipt_id}.json"
     response = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -506,6 +598,8 @@ def test_trusted_direct_bind_requires_ceiling_safe_root_and_verified_helper(
         source_mode="trusted-direct-bind",
         trusted_direct_bind_receipt_id=receipt_id,
         trusted_direct_bind_receipt_sha256=receipt_sha256,
+        allowed_host_root=source.parent,
+        workspace_policy_digest="a" * 64,
     )
 
     assert binding.source_mode == "trusted-direct-bind"
@@ -514,6 +608,9 @@ def test_trusted_direct_bind_requires_ceiling_safe_root_and_verified_helper(
     assert binding.helper_receipt_id == receipt_id
     assert binding.helper_receipt_sha256 == receipt_sha256
     assert len(binding.capability_evidence_sha256) == 64
+    assert binding.path_domain.allowed_host_root == str(source.parent.resolve())
+    assert binding.path_domain.container_target_root == binding.runtime_workspace_path
+    assert binding.path_domain.workspace_policy_digest == "a" * 64
 
 
 def test_trusted_direct_bind_rejects_missing_ceiling_and_receipt_drift(

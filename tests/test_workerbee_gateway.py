@@ -20,6 +20,7 @@ from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
 from agent_pbx import workerbee_direct_bind as direct_bind
 from agent_pbx.workerbee_gateway import (
+    WORKERBEE_GATEWAY_V2_API_VERSION,
     WORKERBEE_MUTATING_TOOLS,
     WORKERBEE_PROFILE_LOCAL_DEPLOY,
     WORKERBEE_PROFILE_OBSERVE,
@@ -282,11 +283,69 @@ def test_gateway_lease_is_private_and_scoped_to_binding(tmp_path: Path) -> None:
 
     assert token.startswith("apbx_")
     assert "token_hash" not in lease.public_dict()
+    assert (
+        lease.path_domain_receipt_sha256
+        == binding.path_domain.receipt_sha256
+    )
     assert gateway.validate(lease.lease_id, token) == lease
     assert (tmp_path / "gateway" / "leases" / f"{lease.lease_id}.json").stat().st_mode & 0o777 == 0o600
     with pytest.raises(WorkerBeeGatewayError) as wrong_token:
         gateway.validate(lease.lease_id, "wrong")
     assert wrong_token.value.code == "WORKERBEE_GATEWAY_AUTH_FAILED"
+
+
+def test_gateway_rejects_path_domain_receipt_drift_and_migrates_v2(
+    tmp_path: Path,
+) -> None:
+    _runtime, _workspace, binding, gateway = services(tmp_path)
+    lease, token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    lease_path = gateway.state_root / "leases" / f"{lease.lease_id}.json"
+    legacy = lease.private_dict()
+    legacy["api_version"] = WORKERBEE_GATEWAY_V2_API_VERSION
+    legacy.pop("path_domain_receipt_sha256")
+    lease_path.write_text(json.dumps(legacy), encoding="utf-8")
+    assert (
+        gateway.load(lease.lease_id).path_domain_receipt_sha256
+        == binding.path_domain.receipt_sha256
+    )
+
+    drifted = lease.private_dict()
+    drifted["path_domain_receipt_sha256"] = "f" * 64
+    lease_path.write_text(json.dumps(drifted), encoding="utf-8")
+    with pytest.raises(WorkerBeeGatewayError) as failure:
+        gateway.validate(lease.lease_id, token)
+    assert failure.value.code == "WORKERBEE_PATH_DOMAIN_RECEIPT_DRIFT"
+
+
+def test_gateway_revalidates_binding_callback_on_restart_use(tmp_path: Path) -> None:
+    runtime_registry, workspace, binding, _gateway = services(tmp_path)
+    validated: list[tuple[str, str]] = []
+    gateway = WorkerBeeGatewayService(
+        tmp_path / "gateway-restart",
+        runtime_registry,
+        workspace,
+        binding_validated=lambda lease, current: validated.append(
+            (lease.lease_id, current.binding_id)
+        ),
+    )
+    lease, token = gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+
+    assert gateway.validate(lease.lease_id, token) == lease
+    assert gateway.current_binding(lease.lease_id) == (lease, binding)
+    assert validated == [
+        (lease.lease_id, binding.binding_id),
+        (lease.lease_id, binding.binding_id),
+    ]
 
 
 def test_gateway_session_start_refreshes_platform_snapshot_on_same_lease(
@@ -1912,6 +1971,9 @@ def test_selected_appliance_status_uses_bound_selected_mcp(
 
             return Lease()
 
+        def current_binding(self, lease_id):  # type: ignore[no-untyped-def]
+            return self.load(lease_id), Binding()
+
     class HostCliMustNotRun:
         def status_for_agent(self, _agent):  # type: ignore[no-untyped-def]
             raise AssertionError("host OSS CLI status must not be merged into appliance status")
@@ -1963,3 +2025,89 @@ def test_selected_appliance_status_uses_bound_selected_mcp(
                 {"project": "demo"},
             )
         ]
+
+
+def test_active_gateway_use_reconciles_same_lease_metadata_and_denies_foreign_lease(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+
+    class Selector:
+        def status(self):  # type: ignore[no-untyped-def]
+            return {
+                "active": {
+                    "ready": True,
+                    "backend": "oss",
+                    "endpoint": "http://127.0.0.1:8765/mcp",
+                    "server_name": "K1S WorkerBee",
+                    "server_version": "1.30.0",
+                }
+            }
+
+    app.state.workerbee_switcher = Selector()
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "demo-agent",
+                "project": "demo",
+                "metadata": {
+                    "cwd": str(repo),
+                    "workerbee_mcp_profile": "local-deploy",
+                    "workerbee_source_mode": "native-direct",
+                },
+            },
+        ).status_code == 200
+        prepared = client.post(
+            "/v2/agents/demo-agent/workerbee/workspaces", json={}
+        )
+        assert prepared.status_code == 200
+        binding = prepared.json()
+        issued = client.post(
+            "/v2/agents/demo-agent/workerbee/leases",
+            json={
+                "codex_session_id": "thread-1",
+                "profile": "local-deploy",
+                "workspace_binding_id": binding["binding_id"],
+            },
+        )
+        assert issued.status_code == 200
+        lease_id = issued.json()["lease"]["lease_id"]
+        app.state.store.merge_agent_metadata(
+            "demo-agent",
+            {
+                "workerbee_workspace_binding_id": "wb-stale-binding",
+                "workerbee_path_domain_receipt_sha256": "f" * 64,
+            },
+        )
+
+        lease, current = app.state.workerbee_gateway.current_binding(lease_id)
+        metadata = app.state.store.get_agent("demo-agent")["metadata"]
+        assert lease.workspace_binding_id == current.binding_id == binding["binding_id"]
+        assert metadata["workerbee_workspace_binding_id"] == binding["binding_id"]
+        assert metadata["workerbee_path_domain_receipt_sha256"] == (
+            current.path_domain.receipt_sha256
+        )
+        assert metadata["workerbee_allowed_host_root"] == str(repo.resolve())
+
+        app.state.store.merge_agent_metadata(
+            "demo-agent",
+            {"workerbee_gateway_lease_id": "foreign-lease"},
+        )
+        with pytest.raises(WorkerBeeGatewayError) as failure:
+            app.state.workerbee_gateway.current_binding(lease_id)
+        assert failure.value.code == "WORKERBEE_BINDING_LEASE_DRIFT"
+
+        app.state.store.merge_agent_metadata(
+            "demo-agent",
+            {
+                "workerbee_gateway_lease_id": lease_id,
+                "workerbee_mcp_profile": "trusted-workbench",
+                "workerbee_workspace_policy_digest": "e" * 64,
+            },
+        )
+        with pytest.raises(WorkerBeeGatewayError) as stale_policy:
+            app.state.workerbee_gateway.current_binding(lease_id)
+        assert stale_policy.value.code == "WORKERBEE_WORKSPACE_POLICY_DIGEST_DRIFT"
