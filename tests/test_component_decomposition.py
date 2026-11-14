@@ -14,6 +14,7 @@ from agent_pbx.config import ServerConfig
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "check_component_boundaries.py"
 CONTRACT = ROOT / "tests" / "fixtures" / "component_decomposition_v1.json"
+TUI_COMPAT = ROOT / "tests" / "fixtures" / "tui_compat_v1.json"
 
 ROUTE_OWNERSHIP = {
     "evidence_audit": {
@@ -79,17 +80,76 @@ def test_dependency_direction_has_no_forbidden_edges() -> None:
     assert _checker().dependency_errors() == []
 
 
+def test_future_component_ownership_rules_reject_absolute_and_relative_bypasses(
+    tmp_path: Path,
+) -> None:
+    checker = _checker()
+    examples = {
+        "src/agent_pbx/ui/screens/modal.py": "from ...store import Store\n",
+        "src/agent_pbx/ui/controllers/runtime.py": (
+            "from ...persistence.repositories.runtime import RuntimeRepository\n"
+        ),
+        "src/agent_pbx/api_routes/agents.py": "from ..store import Store\n",
+        "src/agent_pbx/persistence/repositories/agents.py": (
+            "from ...api import create_app\n"
+        ),
+    }
+    for relative, source in examples.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    checker.ROOT = tmp_path
+
+    errors = checker.ownership_errors()
+
+    assert len(errors) == 4
+    assert any("ui/screens/modal.py" in error and "agent_pbx.store" in error for error in errors)
+    assert any(
+        "ui/controllers/runtime.py" in error
+        and "agent_pbx.persistence.repositories" in error
+        for error in errors
+    )
+    assert any("api_routes/agents.py" in error and "agent_pbx.store" in error for error in errors)
+    assert any(
+        "persistence/repositories/agents.py" in error and "agent_pbx.api" in error
+        for error in errors
+    )
+
+
 def test_store_schema_and_transaction_inventory_are_versioned() -> None:
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
 
     assert contract["schema"] == "agent-pbx.component-decomposition-contract/v1"
     assert (
         contract["baseline_commit"]
-        == "9d62240f7c4370763d442d65549f7e950111028b"
+        == "56f46179863fed13f339ab3e55481a895b994921"
     )
+    assert contract["review_targets"] == _checker().REVIEW_TARGETS
+    assert contract["ownership_rules"] == _checker().OWNERSHIP_RULES
     assert contract["store_contract"] == _checker().collect_store_contract()
     assert contract["store_contract"]["schema_version"] == 45
     assert contract["store_contract"]["begin_immediate_methods"]
+
+
+def test_tui_widget_action_tab_and_keymap_ownership_is_versioned() -> None:
+    expected = json.loads(TUI_COMPAT.read_text(encoding="utf-8"))
+    actual = _checker().collect_tui_compatibility()
+
+    assert expected == actual
+    assert expected["schema"] == "agent-pbx.tui-compatibility-contract/v1"
+    assert expected["widget_owner"] == "AgentPBXTUI.compose"
+    assert len(expected["widgets"]) == 242
+    assert len(expected["tabs"]) == 11
+    assert expected["action_owner"] == "AgentPBXTUI"
+    assert len(expected["bound_actions"]) == 32
+    assert expected["keymap_owner"] == "AgentPBXTUI.BINDINGS"
+    assert len(expected["bindings"]) == 35
+    assert expected["terminal_focus_ownership"] == {
+        "policy_owner": "AgentPBXTUI.pbx_owns_key_under_terminal_focus",
+        "policy_sha256": "c97587d8268fe77a42ccf09d37881002df868451b766576ca49717654a1609fe",
+        "priority_gate_owner": "AgentPBXTUI._check_bindings",
+        "priority_gate_sha256": "0a5c63c989c44e150a67405cbb663a82afb6862ef17f6c5e729a674a366ff17e",
+    }
 
 
 def test_owned_route_families_remain_complete(tmp_path: Path) -> None:

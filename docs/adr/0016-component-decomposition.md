@@ -2,7 +2,8 @@
 
 - Status: Accepted for implementation
 - Date: 2026-11-13
-- Baseline: Agent PBX v2.4.0 (`acbc24b6a95cff33b3381d6d178702b9ebcb20f0`)
+- Baseline: locally accepted post-v2.4 candidate
+  (`56f46179863fed13f339ab3e55481a895b994921`)
 
 ## Context
 
@@ -39,17 +40,34 @@ but controllers continue to delegate to the same service methods. Route modules
 must not import `Store` or the TUI, instantiate executors, perform migrations,
 or acquire new mutation authority.
 
+Boundary D0 extends that one-way rule to the planned package owners:
+
+- `ui.screens` owns typed modal presentation without I/O or authorization;
+- `ui.controllers` owns TUI orchestration without API composition or direct
+  persistence;
+- `api_routes` owns HTTP translation without direct persistence or UI access;
+  and
+- `persistence.repositories` owns SQLite operations behind the public `Store`
+  facade without transport or presentation dependencies.
+
+The accepted `AgentPBXTUI` widget, tab, binding, action, and terminal-focus key
+ownership is captured through deterministic static inspection before those
+owners are extracted.
+
 ## Compatibility contract
 
 The owned route matrix and transaction rules are documented in
 [`docs/component-decomposition.md`](../component-decomposition.md). The
 checked fixtures are:
 
-- `agent-pbx.component-decomposition-contract/v1`, containing AST ceilings and
-  the schema/transaction fingerprint; and
+- `agent-pbx.component-decomposition-contract/v1`, containing AST ceilings,
+  review targets, package ownership rules, and the schema/transaction
+  fingerprint;
+- `agent-pbx.tui-compatibility-contract/v1`, containing deterministic widget,
+  tab, binding, action, and terminal-focus ownership; and
 - the complete canonical OpenAPI document in `openapi_compat_v1.json`.
 
-Changing either fixture is an explicit compatibility review, never a mechanical
+Changing any fixture is an explicit compatibility review, never a mechanical
 side effect of moving code. The checker runs with a private temporary database
 and does not start the daemon, TUI, MCP session managers, or any runtime.
 

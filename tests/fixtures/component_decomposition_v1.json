@@ -1,12 +1,12 @@
 {
   "ast_maxima": {
     "src/agent_pbx/api.py": {
-      "ast_nodes": 37378,
-      "bytes": 300498,
+      "ast_nodes": 36706,
+      "bytes": 297062,
       "classes": 1,
-      "functions": 316,
+      "functions": 290,
       "imports": 66,
-      "lines": 7987
+      "lines": 7897
     },
     "src/agent_pbx/store.py": {
       "ast_nodes": 61083,
@@ -17,15 +17,79 @@
       "lines": 14652
     },
     "src/agent_pbx/tui.py": {
-      "ast_nodes": 239721,
-      "bytes": 1773484,
+      "ast_nodes": 239719,
+      "bytes": 1773455,
       "classes": 71,
       "functions": 1674,
       "imports": 69,
       "lines": 44244
     }
   },
-  "baseline_commit": "9d62240f7c4370763d442d65549f7e950111028b",
+  "baseline_commit": "56f46179863fed13f339ab3e55481a895b994921",
+  "ownership_rules": {
+    "src/agent_pbx/api_routes": {
+      "forbidden_imports": [
+        "agent_pbx.persistence.repositories",
+        "agent_pbx.store",
+        "agent_pbx.tui",
+        "agent_pbx.ui"
+      ],
+      "owner": "HTTP translation over typed application services"
+    },
+    "src/agent_pbx/persistence/repositories": {
+      "forbidden_imports": [
+        "agent_pbx.api",
+        "agent_pbx.api_routes",
+        "agent_pbx.api_services",
+        "agent_pbx.tui",
+        "agent_pbx.ui",
+        "fastapi",
+        "httpx",
+        "textual"
+      ],
+      "owner": "SQLite domain persistence behind the Store facade"
+    },
+    "src/agent_pbx/ui/controllers": {
+      "forbidden_imports": [
+        "agent_pbx.api",
+        "agent_pbx.api_routes",
+        "agent_pbx.api_services",
+        "agent_pbx.persistence.repositories",
+        "agent_pbx.store",
+        "fastapi",
+        "sqlite3"
+      ],
+      "owner": "TUI orchestration and view-model coordination"
+    },
+    "src/agent_pbx/ui/screens": {
+      "forbidden_imports": [
+        "agent_pbx.api",
+        "agent_pbx.api_routes",
+        "agent_pbx.api_services",
+        "agent_pbx.persistence",
+        "agent_pbx.store",
+        "fastapi",
+        "httpx",
+        "sqlite3",
+        "subprocess"
+      ],
+      "owner": "typed Textual modal presentation"
+    }
+  },
+  "review_targets": {
+    "src/agent_pbx/api.py": {
+      "lines": 6400,
+      "owner": "FastAPI composition root"
+    },
+    "src/agent_pbx/store.py": {
+      "lines": 12000,
+      "owner": "persistence compatibility facade"
+    },
+    "src/agent_pbx/tui.py": {
+      "lines": 34000,
+      "owner": "Textual composition root and event router"
+    }
+  },
   "schema": "agent-pbx.component-decomposition-contract/v1",
   "store_contract": {
     "begin_immediate_methods": [
