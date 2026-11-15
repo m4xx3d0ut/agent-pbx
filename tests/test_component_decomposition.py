@@ -269,3 +269,22 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
     }
     assert github_routes
     assert set(github_routes.values()) == {"agent_pbx.api_routes.github"}
+    joplin_routes = {
+        route.path: route.endpoint.__module__
+        for route in app.routes
+        if "/joplin" in route.path
+        and not route.path.startswith("/v1/evidence/")
+    }
+    assert joplin_routes
+    assert set(joplin_routes.values()) == {"agent_pbx.api_routes.joplin"}
+    file_editor_routes = {
+        route.path: route.endpoint.__module__
+        for route in app.routes
+        if "/files" in route.path
+        or "/terminal-editor" in route.path
+        or "/runtime-bundle" in route.path
+    }
+    assert file_editor_routes
+    assert set(file_editor_routes.values()) == {
+        "agent_pbx.api_routes.file_editor"
+    }
