@@ -16,6 +16,7 @@ from .file_editor import register_file_editor_routes
 from .github import register_github_routes
 from .joplin import register_joplin_routes
 from .operator_kb_v2 import register_operator_kb_v2_routes
+from .operator import register_operator_routes, run_operator_call
 from .protected_provider import register_protected_provider_routes
 from .runtime import register_runtime_routes
 from .workerbee import register_workerbee_routes
@@ -34,9 +35,11 @@ __all__ = (
     "register_github_routes",
     "register_joplin_routes",
     "register_operator_kb_v2_routes",
+    "register_operator_routes",
     "register_protected_provider_routes",
     "register_runtime_routes",
     "register_workerbee_routes",
     "run_issue_call",
+    "run_operator_call",
     "run_pull_request_call",
 )
