@@ -316,3 +316,24 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
         == "agent_pbx.api_routes.operator"
     ]
     assert len(operator_routes) == 80
+    operator_authority_routes = [
+        route
+        for route in app.routes
+        if getattr(getattr(route, "endpoint", None), "__module__", "")
+        == "agent_pbx.api_routes.operator_authority"
+    ]
+    assert len(operator_authority_routes) == 3
+    command_routes = [
+        route
+        for route in app.routes
+        if getattr(getattr(route, "endpoint", None), "__module__", "")
+        == "agent_pbx.api_routes.commands"
+    ]
+    assert len(command_routes) == 4
+    remote_event_routes = [
+        route
+        for route in app.routes
+        if getattr(getattr(route, "endpoint", None), "__module__", "")
+        == "agent_pbx.api_routes.remote_events"
+    ]
+    assert len(remote_event_routes) == 13
