@@ -97,9 +97,12 @@ from .events import EventClientRegistry, EventStreamService
 from .api_routes import (
     ApiServices,
     EvidenceExportService,
+    append_joplin_command_log,
+    require_agent,
     register_durable_helper_routes,
     register_dynamic_resource_routes,
     register_evidence_routes,
+    register_github_routes,
     register_operator_kb_v2_routes,
     register_protected_provider_routes,
 )
@@ -124,7 +127,6 @@ from .joplin import (
 from .lifecycle import LifecycleService
 from .issues import (
     IssueConfig,
-    IssueError,
     IssueService,
 )
 from .mcp_tools import create_mcp_asgi_app
@@ -142,7 +144,6 @@ from .pairing import PairRequest, PairResponse, issue_pairing_token
 from .polling import poll_commands as poll_commands_until
 from .pull_requests import (
     PullRequestConfig,
-    PullRequestError,
     PullRequestService,
 )
 from .runtime_tmux import (
@@ -344,20 +345,6 @@ from .schemas import (
     OperatorReviewEscalationRequest,
     OperatorAlertAcknowledgementResponse,
     OperatorAssignmentReportRequest,
-    IssueActionRequest,
-    IssueActionResponse,
-    IssueClearRequest,
-    IssueClearResponse,
-    IssueDetailResponse,
-    IssueListResponse,
-    IssueStatusResponse,
-    PullRequestActionRequest,
-    PullRequestActionResponse,
-    PullRequestDetailResponse,
-    PullRequestListResponse,
-    PullRequestMergeRequest,
-    PullRequestMergeResponse,
-    PullRequestStatusResponse,
     ReportCreateRequest,
     ReportResponse,
     RuntimeMigrationPreviewRequest,
@@ -3828,413 +3815,7 @@ def create_app(
         except (OSError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.get(
-        "/v1/agents/{agent_id}/pull-requests/status",
-        response_model=PullRequestStatusResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def get_agent_pull_request_status(
-        agent_id: str,
-        request: Request,
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        pull_requests = request.app.state.pull_requests
-        return await asyncio.to_thread(pull_requests.status_for_agent, agent)
-
-    @app.get(
-        "/v1/agents/{agent_id}/pull-requests",
-        response_model=PullRequestListResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def list_agent_pull_requests(
-        agent_id: str,
-        request: Request,
-        limit: int = 30,
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        pull_requests = request.app.state.pull_requests
-        return await asyncio.to_thread(pull_requests.list_for_agent, agent, limit=limit)
-
-    @app.get(
-        "/v1/agents/{agent_id}/pull-requests/{number}",
-        response_model=PullRequestDetailResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def get_agent_pull_request_detail(
-        agent_id: str,
-        number: int,
-        request: Request,
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        pull_requests = request.app.state.pull_requests
-        return await run_pull_request_call(
-            pull_requests.detail_for_agent,
-            agent,
-            number,
-        )
-
-    @app.post(
-        "/v1/agents/{agent_id}/pull-requests/{number}/review-request",
-        response_model=PullRequestActionResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def request_pull_request_review(
-        agent_id: str,
-        number: int,
-        request: Request,
-        payload: PullRequestActionRequest = Body(
-            default_factory=PullRequestActionRequest
-        ),
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        pull_requests = request.app.state.pull_requests
-        detail = await run_pull_request_call(
-            pull_requests.detail_for_agent,
-            agent,
-            number,
-        )
-        prompt = pull_requests.review_prompt(detail)
-        if payload.message:
-            prompt = f"{prompt}\n\nOperator note: {payload.message.strip()}"
-        if not payload.queue:
-            return {
-                "ok": True,
-                "action": "review-request",
-                "agent_id": agent_id,
-                "number": number,
-                "repo": detail.get("repo"),
-                "command": None,
-                "message": "Review prompt generated.",
-                "prompt": prompt,
-            }
-        command = store.create_command(
-            CommandCreateRequest(
-                agent_id=agent_id,
-                type="send_input",
-                payload={
-                    "message": prompt,
-                    "source": "pull_request_review",
-                    "pr_number": number,
-                    "repo": detail.get("repo"),
-                },
-            )
-        )
-        store.append_event(
-            "pr_review_requested",
-            {
-                "agent_id": agent_id,
-                "command_id": command["command_id"],
-                "number": number,
-                "repo": detail.get("repo"),
-                "url": detail.get("url"),
-            },
-            command["command_id"],
-        )
-        await append_joplin_command_log(request, store, command)
-        return {
-            "ok": True,
-            "action": "review-request",
-            "agent_id": agent_id,
-            "number": number,
-            "repo": detail.get("repo"),
-            "command": command,
-            "message": "Review request queued for agent.",
-            "prompt": prompt,
-        }
-
-    @app.post(
-        "/v1/agents/{agent_id}/pull-requests/{number}/workerbee-validation-request",
-        response_model=PullRequestActionResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def request_pull_request_workerbee_validation(
-        agent_id: str,
-        number: int,
-        request: Request,
-        payload: PullRequestActionRequest = Body(
-            default_factory=PullRequestActionRequest
-        ),
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        pull_requests = request.app.state.pull_requests
-        detail = await run_pull_request_call(
-            pull_requests.detail_for_agent,
-            agent,
-            number,
-        )
-        prompt = pull_requests.workerbee_validation_prompt(detail)
-        if payload.message:
-            prompt = f"{prompt}\n\nOperator note: {payload.message.strip()}"
-        if not payload.queue:
-            return {
-                "ok": True,
-                "action": "workerbee-validation-request",
-                "agent_id": agent_id,
-                "number": number,
-                "repo": detail.get("repo"),
-                "command": None,
-                "message": "WorkerBee validation prompt generated.",
-                "prompt": prompt,
-            }
-        command = store.create_command(
-            CommandCreateRequest(
-                agent_id=agent_id,
-                type="send_input",
-                payload={
-                    "message": prompt,
-                    "source": "pull_request_workerbee_validation",
-                    "pr_number": number,
-                    "repo": detail.get("repo"),
-                },
-            )
-        )
-        store.append_event(
-            "pr_workerbee_validation_requested",
-            {
-                "agent_id": agent_id,
-                "command_id": command["command_id"],
-                "number": number,
-                "repo": detail.get("repo"),
-                "url": detail.get("url"),
-            },
-            command["command_id"],
-        )
-        await append_joplin_command_log(request, store, command)
-        return {
-            "ok": True,
-            "action": "workerbee-validation-request",
-            "agent_id": agent_id,
-            "number": number,
-            "repo": detail.get("repo"),
-            "command": command,
-            "message": "WorkerBee validation request queued for agent.",
-            "prompt": prompt,
-        }
-
-    @app.post(
-        "/v1/agents/{agent_id}/pull-requests/{number}/merge",
-        response_model=PullRequestMergeResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def merge_pull_request(
-        agent_id: str,
-        number: int,
-        payload: PullRequestMergeRequest,
-        request: Request,
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        pull_requests = request.app.state.pull_requests
-        store.append_event(
-            "pr_merge_requested",
-            {
-                "agent_id": agent_id,
-                "number": number,
-                "method": payload.method,
-            },
-            agent_id,
-        )
-        try:
-            merged = await run_pull_request_call(
-                pull_requests.merge_for_agent,
-                agent,
-                number,
-                method=payload.method,
-                confirm=payload.confirm,
-            )
-        except HTTPException as exc:
-            store.append_event(
-                "pr_merge_failed",
-                {
-                    "agent_id": agent_id,
-                    "number": number,
-                    "method": payload.method,
-                    "detail": exc.detail,
-                },
-                agent_id,
-            )
-            raise
-        store.append_event(
-            "pr_merged",
-            {
-                "agent_id": agent_id,
-                "number": number,
-                "method": payload.method,
-                "repo": merged.get("repo"),
-                "url": merged.get("url"),
-            },
-            agent_id,
-        )
-        return merged
-
-    @app.get(
-        "/v1/agents/{agent_id}/issues/status",
-        response_model=IssueStatusResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def get_agent_issue_status(
-        agent_id: str,
-        request: Request,
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        issues = request.app.state.issues
-        return await asyncio.to_thread(issues.status_for_agent, agent)
-
-    @app.get(
-        "/v1/agents/{agent_id}/issues",
-        response_model=IssueListResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def list_agent_issues(
-        agent_id: str,
-        request: Request,
-        state: str = "open",
-        limit: int = 30,
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        issues = request.app.state.issues
-        return await asyncio.to_thread(
-            issues.list_for_agent,
-            agent,
-            state=state,
-            limit=limit,
-        )
-
-    @app.get(
-        "/v1/agents/{agent_id}/issues/{number}",
-        response_model=IssueDetailResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def get_agent_issue_detail(
-        agent_id: str,
-        number: int,
-        request: Request,
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        issues = request.app.state.issues
-        return await run_issue_call(issues.detail_for_agent, agent, number)
-
-    @app.post(
-        "/v1/agents/{agent_id}/issues/{number}/mitigation-request",
-        response_model=IssueActionResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def request_issue_mitigation(
-        agent_id: str,
-        number: int,
-        request: Request,
-        payload: IssueActionRequest = Body(default_factory=IssueActionRequest),
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        issues = request.app.state.issues
-        detail = await run_issue_call(issues.detail_for_agent, agent, number)
-        prompt = issues.mitigation_prompt(detail)
-        if payload.message:
-            prompt = f"{prompt}\n\nOperator note: {payload.message.strip()}"
-        if not payload.queue:
-            return {
-                "ok": True,
-                "action": "mitigation-request",
-                "agent_id": agent_id,
-                "number": number,
-                "repo": detail.get("repo"),
-                "command": None,
-                "message": "Issue mitigation prompt generated.",
-                "prompt": prompt,
-            }
-        command = store.create_command(
-            CommandCreateRequest(
-                agent_id=agent_id,
-                type="send_input",
-                payload={
-                    "message": prompt,
-                    "source": "issue_mitigation",
-                    "issue_number": number,
-                    "repo": detail.get("repo"),
-                },
-            )
-        )
-        store.append_event(
-            "issue_mitigation_requested",
-            {
-                "agent_id": agent_id,
-                "command_id": command["command_id"],
-                "number": number,
-                "repo": detail.get("repo"),
-                "url": detail.get("url"),
-            },
-            command["command_id"],
-        )
-        await append_joplin_command_log(request, store, command)
-        return {
-            "ok": True,
-            "action": "mitigation-request",
-            "agent_id": agent_id,
-            "number": number,
-            "repo": detail.get("repo"),
-            "command": command,
-            "message": "Issue mitigation request queued for agent.",
-            "prompt": prompt,
-        }
-
-    @app.post(
-        "/v1/agents/{agent_id}/issues/{number}/clear",
-        response_model=IssueClearResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def clear_issue(
-        agent_id: str,
-        number: int,
-        payload: IssueClearRequest,
-        request: Request,
-        store: Store = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = require_agent(store, agent_id)
-        issues = request.app.state.issues
-        store.append_event(
-            "issue_clear_requested",
-            {"agent_id": agent_id, "number": number},
-            agent_id,
-        )
-        try:
-            cleared = await run_issue_call(
-                issues.clear_for_agent,
-                agent,
-                number,
-                comment=payload.comment,
-                confirm=payload.confirm,
-            )
-        except HTTPException as exc:
-            store.append_event(
-                "issue_clear_failed",
-                {
-                    "agent_id": agent_id,
-                    "number": number,
-                    "detail": exc.detail,
-                },
-                agent_id,
-            )
-            raise
-        store.append_event(
-            "issue_cleared",
-            {
-                "agent_id": agent_id,
-                "number": number,
-                "repo": cleared.get("repo"),
-                "url": cleared.get("url"),
-            },
-            agent_id,
-        )
-        return cleared
+    register_github_routes(app)
 
     @app.get(
         "/v1/joplin/status",
@@ -7424,13 +7005,6 @@ def create_app(
     return app
 
 
-def require_agent(store: Store, agent_id: str) -> dict[str, object]:
-    agent = store.get_agent(agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="agent not registered")
-    return agent
-
-
 def require_joplin(request: Request) -> JoplinGateway:
     joplin = request.app.state.joplin
     status_payload = joplin.status()
@@ -7497,49 +7071,6 @@ async def run_joplin_call(
                 "message": str(exc),
                 "retryable": False,
             },
-        ) from exc
-
-
-async def run_pull_request_call(
-    func: Callable[..., Any],
-    *args: Any,
-    **kwargs: Any,
-) -> Any:
-    try:
-        return await asyncio.to_thread(func, *args, **kwargs)
-    except PullRequestError as exc:
-        response_status = (
-            status.HTTP_403_FORBIDDEN
-            if exc.code in {"PR_MERGE_DISABLED", "PR_REPO_NOT_ALLOWED"}
-            else status.HTTP_409_CONFLICT
-            if exc.code in {"PR_MERGE_CONFIRMATION_REQUIRED", "PR_MERGE_METHOD_INVALID"}
-            else status.HTTP_503_SERVICE_UNAVAILABLE
-        )
-        raise HTTPException(
-            status_code=response_status,
-            detail=exc.as_error(),
-        ) from exc
-
-
-async def run_issue_call(
-    func: Callable[..., Any],
-    *args: Any,
-    **kwargs: Any,
-) -> Any:
-    try:
-        return await asyncio.to_thread(func, *args, **kwargs)
-    except IssueError as exc:
-        response_status = (
-            status.HTTP_403_FORBIDDEN
-            if exc.code in {"ISSUE_CLOSE_DISABLED", "ISSUE_REPO_NOT_ALLOWED"}
-            else status.HTTP_409_CONFLICT
-            if exc.code
-            in {"ISSUE_CLEAR_CONFIRMATION_REQUIRED", "ISSUE_CLEAR_COMMENT_REQUIRED"}
-            else status.HTTP_503_SERVICE_UNAVAILABLE
-        )
-        raise HTTPException(
-            status_code=response_status,
-            detail=exc.as_error(),
         ) from exc
 
 
@@ -7697,28 +7228,6 @@ def _managed_skill_service(
         return ManagedSkillPackService(root, pack_names=defaults)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-async def append_joplin_command_log(
-    request: Request,
-    store: Store,
-    command: dict[str, object],
-) -> None:
-    joplin: JoplinGateway = request.app.state.joplin
-    if not joplin.config.configured:
-        return
-    try:
-        await asyncio.to_thread(joplin.append_command_log, store, command)
-    except Exception as exc:  # noqa: BLE001 - logging must not break PBX commands
-        store.append_event(
-            "joplin_log_failed",
-            {
-                "agent_id": command.get("agent_id"),
-                "command_id": command.get("command_id"),
-                "message": str(exc),
-            },
-            str(command.get("command_id") or ""),
-        )
 
 
 async def append_joplin_report_log(

@@ -53,6 +53,22 @@ ROUTE_OWNERSHIP = {
     "protected_provider_diagnostics": {
         ("POST", "/v2/operator/protected-provider/diagnose"),
     },
+    "github": {
+        ("GET", "/v1/agents/{agent_id}/pull-requests/status"),
+        ("GET", "/v1/agents/{agent_id}/pull-requests"),
+        ("GET", "/v1/agents/{agent_id}/pull-requests/{number}"),
+        ("POST", "/v1/agents/{agent_id}/pull-requests/{number}/review-request"),
+        (
+            "POST",
+            "/v1/agents/{agent_id}/pull-requests/{number}/workerbee-validation-request",
+        ),
+        ("POST", "/v1/agents/{agent_id}/pull-requests/{number}/merge"),
+        ("GET", "/v1/agents/{agent_id}/issues/status"),
+        ("GET", "/v1/agents/{agent_id}/issues"),
+        ("GET", "/v1/agents/{agent_id}/issues/{number}"),
+        ("POST", "/v1/agents/{agent_id}/issues/{number}/mitigation-request"),
+        ("POST", "/v1/agents/{agent_id}/issues/{number}/clear"),
+    },
 }
 
 
@@ -245,3 +261,11 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
     assert set(protected_provider_routes.values()) == {
         "agent_pbx.api_routes.protected_provider"
     }
+    github_routes = {
+        route.path: route.endpoint.__module__
+        for route in app.routes
+        if route.path.startswith("/v1/agents/")
+        and ("/pull-requests" in route.path or "/issues" in route.path)
+    }
+    assert github_routes
+    assert set(github_routes.values()) == {"agent_pbx.api_routes.github"}
