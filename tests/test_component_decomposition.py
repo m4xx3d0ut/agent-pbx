@@ -302,3 +302,10 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
         == "agent_pbx.api_routes.agent_lifecycle"
     ]
     assert len(agent_lifecycle_routes) == 32
+    workerbee_routes = [
+        route
+        for route in app.routes
+        if getattr(getattr(route, "endpoint", None), "__module__", "")
+        == "agent_pbx.api_routes.workerbee"
+    ]
+    assert len(workerbee_routes) == 38
