@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 CONTRACT_PATH = ROOT / "tests" / "fixtures" / "component_decomposition_v1.json"
 OPENAPI_PATH = ROOT / "tests" / "fixtures" / "openapi_compat_v1.json"
+API_ROUTE_INVENTORY_PATH = ROOT / "tests" / "fixtures" / "api_route_inventory_v1.json"
 TUI_COMPAT_PATH = ROOT / "tests" / "fixtures" / "tui_compat_v1.json"
 ACCEPTED_BASELINE_COMMIT = "56f46179863fed13f339ab3e55481a895b994921"
 AST_TARGETS = (
@@ -120,6 +121,30 @@ def canonical_json(value: Any) -> bytes:
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
+
+
+def collect_api_route_inventory() -> list[dict[str, str]]:
+    """Return the public path/method/operation-ID contract in stable order."""
+
+    openapi = collect_openapi()
+    inventory: list[dict[str, str]] = []
+    for path, path_item in openapi.get("paths", {}).items():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if not isinstance(operation, dict) or "operationId" not in operation:
+                continue
+            inventory.append(
+                {
+                    "method": str(method).upper(),
+                    "operation_id": str(operation["operationId"]),
+                    "path": str(path),
+                }
+            )
+    return sorted(
+        inventory,
+        key=lambda item: (item["path"], item["method"], item["operation_id"]),
+    )
 
 
 def _tree(path: Path) -> ast.Module:
@@ -510,6 +535,12 @@ def check() -> list[str]:
     current_openapi = collect_openapi()
     if canonical_json(current_openapi) != canonical_json(expected_openapi):
         errors.append("public OpenAPI contract drifted")
+    expected_routes = json.loads(
+        API_ROUTE_INVENTORY_PATH.read_text(encoding="utf-8")
+    )
+    current_routes = collect_api_route_inventory()
+    if canonical_json(current_routes) != canonical_json(expected_routes):
+        errors.append("public API route inventory drifted")
     expected_tui = json.loads(TUI_COMPAT_PATH.read_text(encoding="utf-8"))
     current_tui = collect_tui_compatibility()
     if canonical_json(current_tui) != canonical_json(expected_tui):

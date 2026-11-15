@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "check_component_boundaries.py"
 CONTRACT = ROOT / "tests" / "fixtures" / "component_decomposition_v1.json"
 TUI_COMPAT = ROOT / "tests" / "fixtures" / "tui_compat_v1.json"
+API_ROUTE_INVENTORY = ROOT / "tests" / "fixtures" / "api_route_inventory_v1.json"
 
 ROUTE_OWNERSHIP = {
     "evidence_audit": {
@@ -137,6 +138,19 @@ def test_store_schema_and_transaction_inventory_are_versioned() -> None:
     assert contract["store_contract"] == _checker().collect_store_contract()
     assert contract["store_contract"]["schema_version"] == 45
     assert contract["store_contract"]["begin_immediate_methods"]
+
+
+def test_api_route_method_and_operation_id_inventory_is_versioned() -> None:
+    expected = json.loads(API_ROUTE_INVENTORY.read_text(encoding="utf-8"))
+
+    assert expected == _checker().collect_api_route_inventory()
+    assert len(expected) == 280
+    assert len(
+        {
+            (item["method"], item["path"], item["operation_id"])
+            for item in expected
+        }
+    ) == len(expected)
 
 
 def test_tui_widget_action_tab_and_keymap_ownership_is_versioned() -> None:

@@ -1,0 +1,1402 @@
+[
+  {
+    "method": "GET",
+    "operation_id": "healthz_healthz_get",
+    "path": "/healthz"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_agents_v1_agents_get",
+    "path": "/v1/agents"
+  },
+  {
+    "method": "POST",
+    "operation_id": "apply_agent_prune_v1_agents_prune_apply_post",
+    "path": "/v1/agents/prune/apply"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_agent_prune_batches_v1_agents_prune_batches_get",
+    "path": "/v1/agents/prune/batches"
+  },
+  {
+    "method": "POST",
+    "operation_id": "undo_agent_prune_batch_v1_agents_prune_batches__batch_id__undo_post",
+    "path": "/v1/agents/prune/batches/{batch_id}/undo"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_agent_prune_v1_agents_prune_preview_post",
+    "path": "/v1/agents/prune/preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "register_agent_v1_agents_register_post",
+    "path": "/v1/agents/register"
+  },
+  {
+    "method": "DELETE",
+    "operation_id": "dismiss_agent_v1_agents__agent_id__delete",
+    "path": "/v1/agents/{agent_id}"
+  },
+  {
+    "method": "GET",
+    "operation_id": "poll_commands_v1_agents__agent_id__commands_get",
+    "path": "/v1/agents/{agent_id}/commands"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_agent_files_v1_agents__agent_id__files_get",
+    "path": "/v1/agents/{agent_id}/files"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_agent_file_path_v1_agents__agent_id__files_create_post",
+    "path": "/v1/agents/{agent_id}/files/create"
+  },
+  {
+    "method": "POST",
+    "operation_id": "delete_agent_file_path_v1_agents__agent_id__files_delete_post",
+    "path": "/v1/agents/{agent_id}/files/delete"
+  },
+  {
+    "method": "GET",
+    "operation_id": "preview_agent_file_delete_v1_agents__agent_id__files_delete_preview_get",
+    "path": "/v1/agents/{agent_id}/files/delete-preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "check_agent_file_diagnostics_v1_agents__agent_id__files_diagnostics_post",
+    "path": "/v1/agents/{agent_id}/files/diagnostics"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_file_document_v1_agents__agent_id__files_document_get",
+    "path": "/v1/agents/{agent_id}/files/document"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "put_agent_file_document_v1_agents__agent_id__files_document_put",
+    "path": "/v1/agents/{agent_id}/files/document"
+  },
+  {
+    "method": "POST",
+    "operation_id": "move_agent_file_path_v1_agents__agent_id__files_move_post",
+    "path": "/v1/agents/{agent_id}/files/move"
+  },
+  {
+    "method": "GET",
+    "operation_id": "preview_agent_file_v1_agents__agent_id__files_preview_get",
+    "path": "/v1/agents/{agent_id}/files/preview"
+  },
+  {
+    "method": "GET",
+    "operation_id": "search_agent_files_v1_agents__agent_id__files_search_get",
+    "path": "/v1/agents/{agent_id}/files/search"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_agent_file_trash_v1_agents__agent_id__files_trash_get",
+    "path": "/v1/agents/{agent_id}/files/trash"
+  },
+  {
+    "method": "POST",
+    "operation_id": "apply_agent_file_trash_prune_v1_agents__agent_id__files_trash_prune_post",
+    "path": "/v1/agents/{agent_id}/files/trash/prune"
+  },
+  {
+    "method": "GET",
+    "operation_id": "preview_agent_file_trash_prune_v1_agents__agent_id__files_trash_prune_preview_get",
+    "path": "/v1/agents/{agent_id}/files/trash/prune-preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "undo_agent_file_trash_prune_v1_agents__agent_id__files_trash_prune_undo_post",
+    "path": "/v1/agents/{agent_id}/files/trash/prune-undo"
+  },
+  {
+    "method": "POST",
+    "operation_id": "restore_agent_file_trash_v1_agents__agent_id__files_trash_restore_post",
+    "path": "/v1/agents/{agent_id}/files/trash/restore"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_agent_issues_v1_agents__agent_id__issues_get",
+    "path": "/v1/agents/{agent_id}/issues"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_issue_status_v1_agents__agent_id__issues_status_get",
+    "path": "/v1/agents/{agent_id}/issues/status"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_issue_detail_v1_agents__agent_id__issues__number__get",
+    "path": "/v1/agents/{agent_id}/issues/{number}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "clear_issue_v1_agents__agent_id__issues__number__clear_post",
+    "path": "/v1/agents/{agent_id}/issues/{number}/clear"
+  },
+  {
+    "method": "POST",
+    "operation_id": "request_issue_mitigation_v1_agents__agent_id__issues__number__mitigation_request_post",
+    "path": "/v1/agents/{agent_id}/issues/{number}/mitigation-request"
+  },
+  {
+    "method": "POST",
+    "operation_id": "resolve_agent_joplin_conflict_v1_agents__agent_id__joplin_conflicts__conflict_id__resolve_post",
+    "path": "/v1/agents/{agent_id}/joplin/conflicts/{conflict_id}/resolve"
+  },
+  {
+    "method": "POST",
+    "operation_id": "copy_agent_joplin_note_v1_agents__agent_id__joplin_copy_post",
+    "path": "/v1/agents/{agent_id}/joplin/copy"
+  },
+  {
+    "method": "POST",
+    "operation_id": "append_agent_joplin_log_v1_agents__agent_id__joplin_log_append_post",
+    "path": "/v1/agents/{agent_id}/joplin/log/append"
+  },
+  {
+    "method": "POST",
+    "operation_id": "start_agent_joplin_log_v1_agents__agent_id__joplin_log_start_post",
+    "path": "/v1/agents/{agent_id}/joplin/log/start"
+  },
+  {
+    "method": "POST",
+    "operation_id": "stop_agent_joplin_log_v1_agents__agent_id__joplin_log_stop_post",
+    "path": "/v1/agents/{agent_id}/joplin/log/stop"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_agent_joplin_notes_v1_agents__agent_id__joplin_notes_get",
+    "path": "/v1/agents/{agent_id}/joplin/notes"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_agent_joplin_note_v1_agents__agent_id__joplin_notes_post",
+    "path": "/v1/agents/{agent_id}/joplin/notes"
+  },
+  {
+    "method": "DELETE",
+    "operation_id": "delete_agent_joplin_note_v1_agents__agent_id__joplin_notes__note_id__delete",
+    "path": "/v1/agents/{agent_id}/joplin/notes/{note_id}"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_joplin_note_v1_agents__agent_id__joplin_notes__note_id__get",
+    "path": "/v1/agents/{agent_id}/joplin/notes/{note_id}"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "update_agent_joplin_note_v1_agents__agent_id__joplin_notes__note_id__put",
+    "path": "/v1/agents/{agent_id}/joplin/notes/{note_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "begin_agent_joplin_edit_v1_agents__agent_id__joplin_notes__note_id__edit_post",
+    "path": "/v1/agents/{agent_id}/joplin/notes/{note_id}/edit"
+  },
+  {
+    "method": "POST",
+    "operation_id": "promote_agent_joplin_native_conflict_v1_agents__agent_id__joplin_notes__note_id__promote_conflict_post",
+    "path": "/v1/agents/{agent_id}/joplin/notes/{note_id}/promote-conflict"
+  },
+  {
+    "method": "POST",
+    "operation_id": "retry_agent_joplin_write_sync_v1_agents__agent_id__joplin_sync_retry_post",
+    "path": "/v1/agents/{agent_id}/joplin/sync/retry"
+  },
+  {
+    "method": "POST",
+    "operation_id": "mark_agent_latest_seen_v1_agents__agent_id__latest_seen_post",
+    "path": "/v1/agents/{agent_id}/latest/seen"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "set_agent_pbx_active_v1_agents__agent_id__pbx_active_put",
+    "path": "/v1/agents/{agent_id}/pbx-active"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_agent_pull_requests_v1_agents__agent_id__pull_requests_get",
+    "path": "/v1/agents/{agent_id}/pull-requests"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_pull_request_status_v1_agents__agent_id__pull_requests_status_get",
+    "path": "/v1/agents/{agent_id}/pull-requests/status"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_pull_request_detail_v1_agents__agent_id__pull_requests__number__get",
+    "path": "/v1/agents/{agent_id}/pull-requests/{number}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "merge_pull_request_v1_agents__agent_id__pull_requests__number__merge_post",
+    "path": "/v1/agents/{agent_id}/pull-requests/{number}/merge"
+  },
+  {
+    "method": "POST",
+    "operation_id": "request_pull_request_review_v1_agents__agent_id__pull_requests__number__review_request_post",
+    "path": "/v1/agents/{agent_id}/pull-requests/{number}/review-request"
+  },
+  {
+    "method": "POST",
+    "operation_id": "request_pull_request_workerbee_validation_v1_agents__agent_id__pull_requests__number__workerbee_validation_request_post",
+    "path": "/v1/agents/{agent_id}/pull-requests/{number}/workerbee-validation-request"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_agent_reports_v1_agents__agent_id__reports_get",
+    "path": "/v1/agents/{agent_id}/reports"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_report_v1_agents__agent_id__reports_post",
+    "path": "/v1/agents/{agent_id}/reports"
+  },
+  {
+    "method": "GET",
+    "operation_id": "agent_runtime_bundle_v1_agents__agent_id__runtime_bundle_get",
+    "path": "/v1/agents/{agent_id}/runtime-bundle"
+  },
+  {
+    "method": "DELETE",
+    "operation_id": "unstar_agent_v1_agents__agent_id__star_delete",
+    "path": "/v1/agents/{agent_id}/star"
+  },
+  {
+    "method": "POST",
+    "operation_id": "star_agent_v1_agents__agent_id__star_post",
+    "path": "/v1/agents/{agent_id}/star"
+  },
+  {
+    "method": "DELETE",
+    "operation_id": "stop_terminal_editor_v1_agents__agent_id__terminal_editor_delete",
+    "path": "/v1/agents/{agent_id}/terminal-editor"
+  },
+  {
+    "method": "GET",
+    "operation_id": "terminal_editor_status_v1_agents__agent_id__terminal_editor_get",
+    "path": "/v1/agents/{agent_id}/terminal-editor"
+  },
+  {
+    "method": "POST",
+    "operation_id": "start_terminal_editor_v1_agents__agent_id__terminal_editor_post",
+    "path": "/v1/agents/{agent_id}/terminal-editor"
+  },
+  {
+    "method": "POST",
+    "operation_id": "forget_terminal_editor_v1_agents__agent_id__terminal_editor_forget_post",
+    "path": "/v1/agents/{agent_id}/terminal-editor/forget"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_terminal_editor_v1_agents__agent_id__terminal_editor_preview_post",
+    "path": "/v1/agents/{agent_id}/terminal-editor/preview"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_agent_thread_v1_agents__agent_id__thread_get",
+    "path": "/v1/agents/{agent_id}/thread"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "unhide_agent_v1_agents__agent_id__unhide_put",
+    "path": "/v1/agents/{agent_id}/unhide"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_workerbee_status_v1_agents__agent_id__workerbee_get",
+    "path": "/v1/agents/{agent_id}/workerbee"
+  },
+  {
+    "method": "GET",
+    "operation_id": "auth_check_v1_auth_check_get",
+    "path": "/v1/auth/check"
+  },
+  {
+    "method": "POST",
+    "operation_id": "update_codex_cli_v1_codex_cli_update_post",
+    "path": "/v1/codex/cli/update"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_codex_config_v1_codex_config_get",
+    "path": "/v1/codex/config"
+  },
+  {
+    "method": "PATCH",
+    "operation_id": "patch_global_codex_config_v1_codex_config_patch",
+    "path": "/v1/codex/config"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_command_v1_commands_post",
+    "path": "/v1/commands"
+  },
+  {
+    "method": "DELETE",
+    "operation_id": "delete_queued_command_v1_commands__command_id__delete",
+    "path": "/v1/commands/{command_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "ack_command_v1_commands__command_id__ack_post",
+    "path": "/v1/commands/{command_id}/ack"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_events_v1_events_get",
+    "path": "/v1/events"
+  },
+  {
+    "method": "GET",
+    "operation_id": "event_stream_v1_events_stream_get",
+    "path": "/v1/events/stream"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_evidence_export_v1_evidence_exports_post",
+    "path": "/v1/evidence/exports"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_evidence_export_v1_evidence_preview_post",
+    "path": "/v1/evidence/preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_evidence_retention_v1_evidence_retention_preview_post",
+    "path": "/v1/evidence/retention/preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "verify_evidence_export_v1_evidence_verify_post",
+    "path": "/v1/evidence/verify"
+  },
+  {
+    "method": "POST",
+    "operation_id": "render_evidence_for_joplin_v1_evidence__export_id__joplin_render_post",
+    "path": "/v1/evidence/{export_id}/joplin-render"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_joplin_document_v1_joplin_documents_post",
+    "path": "/v1/joplin/documents"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "update_joplin_edit_draft_v1_joplin_edits__edit_id__draft_put",
+    "path": "/v1/joplin/edits/{edit_id}/draft"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_joplin_status_v1_joplin_status_get",
+    "path": "/v1/joplin/status"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_joplin_sync_status_v1_joplin_sync_get",
+    "path": "/v1/joplin/sync"
+  },
+  {
+    "method": "POST",
+    "operation_id": "enqueue_joplin_sync_v1_joplin_sync_post",
+    "path": "/v1/joplin/sync"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_broker_checkpoints_v1_operator_broker_checkpoints_get",
+    "path": "/v1/operator/broker-checkpoints"
+  },
+  {
+    "method": "POST",
+    "operation_id": "request_operator_broker_checkpoint_v1_operator_broker_checkpoints_post",
+    "path": "/v1/operator/broker-checkpoints"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preflight_operator_broker_checkpoint_v1_operator_broker_checkpoints_preflight_post",
+    "path": "/v1/operator/broker-checkpoints/preflight"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_operator_broker_checkpoint_v1_operator_broker_checkpoints__request_id__get",
+    "path": "/v1/operator/broker-checkpoints/{request_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "cancel_operator_broker_checkpoint_v1_operator_broker_checkpoints__request_id__cancel_post",
+    "path": "/v1/operator/broker-checkpoints/{request_id}/cancel"
+  },
+  {
+    "method": "POST",
+    "operation_id": "claim_operator_broker_checkpoint_v1_operator_broker_checkpoints__request_id__claim_post",
+    "path": "/v1/operator/broker-checkpoints/{request_id}/claim"
+  },
+  {
+    "method": "POST",
+    "operation_id": "transition_operator_broker_checkpoint_v1_operator_broker_checkpoints__request_id__transition_post",
+    "path": "/v1/operator/broker-checkpoints/{request_id}/transition"
+  },
+  {
+    "method": "POST",
+    "operation_id": "validate_operator_broker_checkpoint_v1_operator_broker_checkpoints__request_id__validate_post",
+    "path": "/v1/operator/broker-checkpoints/{request_id}/validate"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_campaigns_v1_operator_campaigns_get",
+    "path": "/v1/operator/campaigns"
+  },
+  {
+    "method": "POST",
+    "operation_id": "start_operator_campaign_v1_operator_campaigns_post",
+    "path": "/v1/operator/campaigns"
+  },
+  {
+    "method": "POST",
+    "operation_id": "report_operator_campaign_assignment_v1_operator_campaigns__campaign_id__assignments__assignment_id__report_post",
+    "path": "/v1/operator/campaigns/{campaign_id}/assignments/{assignment_id}/report"
+  },
+  {
+    "method": "POST",
+    "operation_id": "finish_operator_campaign_v1_operator_campaigns__campaign_id__finish_post",
+    "path": "/v1/operator/campaigns/{campaign_id}/finish"
+  },
+  {
+    "method": "POST",
+    "operation_id": "send_operator_campaign_followup_v1_operator_campaigns__campaign_id__followups_post",
+    "path": "/v1/operator/campaigns/{campaign_id}/followups"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_operator_campaign_successor_v1_operator_campaigns__campaign_id__successor_post",
+    "path": "/v1/operator/campaigns/{campaign_id}/successor"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_delegation_leases_v1_operator_delegation_leases_get",
+    "path": "/v1/operator/delegation-leases"
+  },
+  {
+    "method": "POST",
+    "operation_id": "request_operator_delegation_lease_v1_operator_delegation_leases_post",
+    "path": "/v1/operator/delegation-leases"
+  },
+  {
+    "method": "POST",
+    "operation_id": "apply_operator_delegation_lease_v1_operator_delegation_leases__lease_id__apply__handoff_id__post",
+    "path": "/v1/operator/delegation-leases/{lease_id}/apply/{handoff_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "decide_operator_delegation_lease_v1_operator_delegation_leases__lease_id__decision_post",
+    "path": "/v1/operator/delegation-leases/{lease_id}/decision"
+  },
+  {
+    "method": "POST",
+    "operation_id": "revoke_operator_delegation_lease_v1_operator_delegation_leases__lease_id__revoke_post",
+    "path": "/v1/operator/delegation-leases/{lease_id}/revoke"
+  },
+  {
+    "method": "POST",
+    "operation_id": "link_operator_forks_v1_operator_fork_edges_post",
+    "path": "/v1/operator/fork-edges"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_forks_v1_operator_forks_get",
+    "path": "/v1/operator/forks"
+  },
+  {
+    "method": "POST",
+    "operation_id": "ensure_operator_fork_v1_operator_forks_ensure_post",
+    "path": "/v1/operator/forks/ensure"
+  },
+  {
+    "method": "POST",
+    "operation_id": "rebind_operator_fork_source_session_v1_operator_forks_rebind_source_session_post",
+    "path": "/v1/operator/forks/rebind-source-session"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_handoff_actions_v1_operator_handoff_actions_get",
+    "path": "/v1/operator/handoff-actions"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_handoff_completions_v1_operator_handoff_completions_get",
+    "path": "/v1/operator/handoff-completions"
+  },
+  {
+    "method": "POST",
+    "operation_id": "acknowledge_operator_handoff_completion_v1_operator_handoff_completions__completion_delivery_id__ack_post",
+    "path": "/v1/operator/handoff-completions/{completion_delivery_id}/ack"
+  },
+  {
+    "method": "POST",
+    "operation_id": "retry_operator_handoff_completion_v1_operator_handoff_completions__completion_delivery_id__retry_post",
+    "path": "/v1/operator/handoff-completions/{completion_delivery_id}/retry"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_handoffs_v1_operator_handoffs_get",
+    "path": "/v1/operator/handoffs"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_operator_handoff_v1_operator_handoffs_post",
+    "path": "/v1/operator/handoffs"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_operator_handoff_v1_operator_handoffs__handoff_id__get",
+    "path": "/v1/operator/handoffs/{handoff_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "ack_operator_handoff_v1_operator_handoffs__handoff_id__ack_post",
+    "path": "/v1/operator/handoffs/{handoff_id}/ack"
+  },
+  {
+    "method": "POST",
+    "operation_id": "record_operator_handoff_action_receipt_v1_operator_handoffs__handoff_id__action_receipts_post",
+    "path": "/v1/operator/handoffs/{handoff_id}/action-receipts"
+  },
+  {
+    "method": "POST",
+    "operation_id": "approve_operator_handoff_v1_operator_handoffs__handoff_id__approve_post",
+    "path": "/v1/operator/handoffs/{handoff_id}/approve"
+  },
+  {
+    "method": "POST",
+    "operation_id": "cancel_operator_handoff_v1_operator_handoffs__handoff_id__cancel_post",
+    "path": "/v1/operator/handoffs/{handoff_id}/cancel"
+  },
+  {
+    "method": "GET",
+    "operation_id": "preflight_operator_handoff_execution_v1_operator_handoffs__handoff_id__execution_preflight_get",
+    "path": "/v1/operator/handoffs/{handoff_id}/execution-preflight"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preflight_operator_handoff_v1_operator_handoffs__handoff_id__preflight_post",
+    "path": "/v1/operator/handoffs/{handoff_id}/preflight"
+  },
+  {
+    "method": "POST",
+    "operation_id": "update_operator_handoff_v1_operator_handoffs__handoff_id__status_post",
+    "path": "/v1/operator/handoffs/{handoff_id}/status"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_durable_helpers_v1_operator_helpers_get",
+    "path": "/v1/operator/helpers"
+  },
+  {
+    "method": "POST",
+    "operation_id": "import_durable_helper_v1_operator_helpers_import_post",
+    "path": "/v1/operator/helpers/import"
+  },
+  {
+    "method": "GET",
+    "operation_id": "durable_helper_measurements_v1_operator_helpers_measurements_get",
+    "path": "/v1/operator/helpers/measurements"
+  },
+  {
+    "method": "POST",
+    "operation_id": "propose_durable_helper_v1_operator_helpers_propose_post",
+    "path": "/v1/operator/helpers/propose"
+  },
+  {
+    "method": "POST",
+    "operation_id": "export_durable_helper_v1_operator_helpers__helper_id__export_post",
+    "path": "/v1/operator/helpers/{helper_id}/export"
+  },
+  {
+    "method": "POST",
+    "operation_id": "prepare_durable_helper_invocation_v1_operator_helpers__helper_id__invocation_post",
+    "path": "/v1/operator/helpers/{helper_id}/invocation"
+  },
+  {
+    "method": "POST",
+    "operation_id": "transition_durable_helper_v1_operator_helpers__helper_id__transition_post",
+    "path": "/v1/operator/helpers/{helper_id}/transition"
+  },
+  {
+    "method": "POST",
+    "operation_id": "validate_durable_helper_v1_operator_helpers__helper_id__validate_post",
+    "path": "/v1/operator/helpers/{helper_id}/validate"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_kb_entries_v1_operator_kb_get",
+    "path": "/v1/operator/kb"
+  },
+  {
+    "method": "POST",
+    "operation_id": "propose_operator_kb_entry_v1_operator_kb_post",
+    "path": "/v1/operator/kb"
+  },
+  {
+    "method": "POST",
+    "operation_id": "export_operator_kb_bundle_v2_v1_operator_kb_bundle_v2_export_post",
+    "path": "/v1/operator/kb/bundle-v2/export"
+  },
+  {
+    "method": "POST",
+    "operation_id": "prepare_operator_kb_bundle_v2_git_tree_v1_operator_kb_bundle_v2_git_tree_post",
+    "path": "/v1/operator/kb/bundle-v2/git-tree"
+  },
+  {
+    "method": "POST",
+    "operation_id": "import_operator_kb_bundle_v2_v1_operator_kb_bundle_v2_import_post",
+    "path": "/v1/operator/kb/bundle-v2/import"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_operator_kb_bundle_v2_v1_operator_kb_bundle_v2_preview_post",
+    "path": "/v1/operator/kb/bundle-v2/preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "compile_operator_kb_report_v1_operator_kb_compile_report_post",
+    "path": "/v1/operator/kb/compile-report"
+  },
+  {
+    "method": "POST",
+    "operation_id": "operator_kb_context_v1_operator_kb_context_post",
+    "path": "/v1/operator/kb/context"
+  },
+  {
+    "method": "GET",
+    "operation_id": "export_operator_kb_entries_v1_operator_kb_export_get",
+    "path": "/v1/operator/kb/export"
+  },
+  {
+    "method": "POST",
+    "operation_id": "propose_operator_kb_from_link_v1_operator_kb_from_link_post",
+    "path": "/v1/operator/kb/from-link"
+  },
+  {
+    "method": "POST",
+    "operation_id": "import_operator_kb_entries_v1_operator_kb_import_post",
+    "path": "/v1/operator/kb/import"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_kb_index_jobs_v1_operator_kb_index_jobs_get",
+    "path": "/v1/operator/kb/index-jobs"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_operator_kb_index_job_v1_operator_kb_index_jobs_post",
+    "path": "/v1/operator/kb/index-jobs"
+  },
+  {
+    "method": "POST",
+    "operation_id": "run_operator_kb_index_jobs_v1_operator_kb_index_jobs_run_post",
+    "path": "/v1/operator/kb/index-jobs/run"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_kb_queries_v1_operator_kb_queries_get",
+    "path": "/v1/operator/kb/queries"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_operator_kb_query_v1_operator_kb_queries__query_id__get",
+    "path": "/v1/operator/kb/queries/{query_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_operator_kb_query_feedback_v1_operator_kb_queries__query_id__feedback_post",
+    "path": "/v1/operator/kb/queries/{query_id}/feedback"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_kb_seed_runs_v1_operator_kb_seed_runs_get",
+    "path": "/v1/operator/kb/seed-runs"
+  },
+  {
+    "method": "POST",
+    "operation_id": "start_operator_kb_seed_run_v1_operator_kb_seed_runs_post",
+    "path": "/v1/operator/kb/seed-runs"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_operator_kb_seed_run_v1_operator_kb_seed_runs__seed_run_id__get",
+    "path": "/v1/operator/kb/seed-runs/{seed_run_id}"
+  },
+  {
+    "method": "PATCH",
+    "operation_id": "update_operator_kb_seed_run_v1_operator_kb_seed_runs__seed_run_id__patch",
+    "path": "/v1/operator/kb/seed-runs/{seed_run_id}"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_operator_kb_entry_v1_operator_kb__kb_id__get",
+    "path": "/v1/operator/kb/{kb_id}"
+  },
+  {
+    "method": "PATCH",
+    "operation_id": "update_operator_kb_entry_v1_operator_kb__kb_id__patch",
+    "path": "/v1/operator/kb/{kb_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "promote_operator_kb_entry_v1_operator_kb__kb_id__promote_post",
+    "path": "/v1/operator/kb/{kb_id}/promote"
+  },
+  {
+    "method": "POST",
+    "operation_id": "reject_operator_kb_entry_v1_operator_kb__kb_id__reject_post",
+    "path": "/v1/operator/kb/{kb_id}/reject"
+  },
+  {
+    "method": "POST",
+    "operation_id": "retire_operator_kb_entry_v1_operator_kb__kb_id__retire_post",
+    "path": "/v1/operator/kb/{kb_id}/retire"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_knowledge_links_v1_operator_knowledge_links_get",
+    "path": "/v1/operator/knowledge-links"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_operator_knowledge_link_v1_operator_knowledge_links_post",
+    "path": "/v1/operator/knowledge-links"
+  },
+  {
+    "method": "POST",
+    "operation_id": "propose_operator_knowledge_handoff_v1_operator_knowledge_links_proposals_post",
+    "path": "/v1/operator/knowledge-links/proposals"
+  },
+  {
+    "method": "POST",
+    "operation_id": "close_operator_knowledge_link_v1_operator_knowledge_links__link_id__close_post",
+    "path": "/v1/operator/knowledge-links/{link_id}/close"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_operator_knowledge_context_v1_operator_knowledge_links__link_id__context_get",
+    "path": "/v1/operator/knowledge-links/{link_id}/context"
+  },
+  {
+    "method": "POST",
+    "operation_id": "send_operator_knowledge_turn_v1_operator_knowledge_links__link_id__turns_post",
+    "path": "/v1/operator/knowledge-links/{link_id}/turns"
+  },
+  {
+    "method": "POST",
+    "operation_id": "approve_operator_knowledge_turn_v1_operator_knowledge_links__link_id__turns__turn_id__approve_post",
+    "path": "/v1/operator/knowledge-links/{link_id}/turns/{turn_id}/approve"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_project_spawns_v1_operator_project_spawns_get",
+    "path": "/v1/operator/project-spawns"
+  },
+  {
+    "method": "POST",
+    "operation_id": "request_operator_project_spawn_v1_operator_project_spawns_post",
+    "path": "/v1/operator/project-spawns"
+  },
+  {
+    "method": "GET",
+    "operation_id": "inspect_operator_project_spawn_v1_operator_project_spawns__spawn_request_id__get",
+    "path": "/v1/operator/project-spawns/{spawn_request_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "cancel_operator_project_spawn_v1_operator_project_spawns__spawn_request_id__cancel_post",
+    "path": "/v1/operator/project-spawns/{spawn_request_id}/cancel"
+  },
+  {
+    "method": "POST",
+    "operation_id": "update_operator_project_spawn_v1_operator_project_spawns__spawn_request_id__status_post",
+    "path": "/v1/operator/project-spawns/{spawn_request_id}/status"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_dynamic_resources_v1_operator_resources_get",
+    "path": "/v1/operator/resources"
+  },
+  {
+    "method": "POST",
+    "operation_id": "request_dynamic_resource_v1_operator_resources_request_post",
+    "path": "/v1/operator/resources/request"
+  },
+  {
+    "method": "POST",
+    "operation_id": "acquire_dynamic_resource_v1_operator_resources__request_id__acquire_post",
+    "path": "/v1/operator/resources/{request_id}/acquire"
+  },
+  {
+    "method": "POST",
+    "operation_id": "approve_dynamic_resource_v1_operator_resources__request_id__approve_post",
+    "path": "/v1/operator/resources/{request_id}/approve"
+  },
+  {
+    "method": "POST",
+    "operation_id": "recover_dynamic_resource_v1_operator_resources__request_id__recover_post",
+    "path": "/v1/operator/resources/{request_id}/recover"
+  },
+  {
+    "method": "POST",
+    "operation_id": "release_dynamic_resource_v1_operator_resources__request_id__release_post",
+    "path": "/v1/operator/resources/{request_id}/release"
+  },
+  {
+    "method": "POST",
+    "operation_id": "use_dynamic_resource_v1_operator_resources__request_id__use_post",
+    "path": "/v1/operator/resources/{request_id}/use"
+  },
+  {
+    "method": "POST",
+    "operation_id": "route_operator_review_escalation_v1_operator_review_escalations_post",
+    "path": "/v1/operator/review/escalations"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_operator_runbook_v1_operator_runbook_get",
+    "path": "/v1/operator/runbook"
+  },
+  {
+    "method": "POST",
+    "operation_id": "resolve_project_joplin_conflict_v1_projects__project__joplin_conflicts__conflict_id__resolve_post",
+    "path": "/v1/projects/{project}/joplin/conflicts/{conflict_id}/resolve"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_project_joplin_notes_v1_projects__project__joplin_notes_get",
+    "path": "/v1/projects/{project}/joplin/notes"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_project_joplin_note_v1_projects__project__joplin_notes_post",
+    "path": "/v1/projects/{project}/joplin/notes"
+  },
+  {
+    "method": "DELETE",
+    "operation_id": "delete_project_joplin_note_v1_projects__project__joplin_notes__note_id__delete",
+    "path": "/v1/projects/{project}/joplin/notes/{note_id}"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_project_joplin_note_v1_projects__project__joplin_notes__note_id__get",
+    "path": "/v1/projects/{project}/joplin/notes/{note_id}"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "update_project_joplin_note_v1_projects__project__joplin_notes__note_id__put",
+    "path": "/v1/projects/{project}/joplin/notes/{note_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "begin_project_joplin_edit_v1_projects__project__joplin_notes__note_id__edit_post",
+    "path": "/v1/projects/{project}/joplin/notes/{note_id}/edit"
+  },
+  {
+    "method": "POST",
+    "operation_id": "promote_project_joplin_native_conflict_v1_projects__project__joplin_notes__note_id__promote_conflict_post",
+    "path": "/v1/projects/{project}/joplin/notes/{note_id}/promote-conflict"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_report_v1_reports__report_id__get",
+    "path": "/v1/reports/{report_id}"
+  },
+  {
+    "method": "GET",
+    "operation_id": "terminal_editor_profile_view_v1_terminal_editor_profiles_get",
+    "path": "/v1/terminal-editor/profiles"
+  },
+  {
+    "method": "GET",
+    "operation_id": "workerbee_switch_status_v1_workerbee_switch_get",
+    "path": "/v1/workerbee/switch"
+  },
+  {
+    "method": "POST",
+    "operation_id": "apply_workerbee_switch_v1_workerbee_switch_apply_post",
+    "path": "/v1/workerbee/switch/apply"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_workerbee_switch_v1_workerbee_switch_preview_post",
+    "path": "/v1/workerbee/switch/preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "rollback_workerbee_switch_v1_workerbee_switch_rollback_post",
+    "path": "/v1/workerbee/switch/rollback"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_agent_pane_adoption_v2_agent_pane_adoptions_preview_post",
+    "path": "/v2/agent-pane-adoptions/preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "apply_agent_pane_adoption_v2_agent_pane_adoptions__batch_id__apply_post",
+    "path": "/v2/agent-pane-adoptions/{batch_id}/apply"
+  },
+  {
+    "method": "POST",
+    "operation_id": "rollback_agent_pane_adoption_v2_agent_pane_adoptions__batch_id__rollback_post",
+    "path": "/v2/agent-pane-adoptions/{batch_id}/rollback"
+  },
+  {
+    "method": "POST",
+    "operation_id": "launch_managed_agent_v2_agents_managed_launch_post",
+    "path": "/v2/agents/managed-launch"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_managed_agent_launch_v2_agents_managed_launch_preview_post",
+    "path": "/v2/agents/managed-launch/preview"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_codex_runtime_v2_agents__agent_id__codex_runtime_get",
+    "path": "/v2/agents/{agent_id}/codex-runtime"
+  },
+  {
+    "method": "POST",
+    "operation_id": "observe_agent_codex_runtime_v2_agents__agent_id__codex_runtime_events_post",
+    "path": "/v2/agents/{agent_id}/codex-runtime/events"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_operator_authority_v2_agents__agent_id__operator_authority_get",
+    "path": "/v2/agents/{agent_id}/operator-authority"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "put_agent_operator_authority_v2_agents__agent_id__operator_authority_put",
+    "path": "/v2/agents/{agent_id}/operator-authority"
+  },
+  {
+    "method": "POST",
+    "operation_id": "activate_agent_operator_authority_v2_agents__agent_id__operator_authority_activated_post",
+    "path": "/v2/agents/{agent_id}/operator-authority/activated"
+  },
+  {
+    "method": "POST",
+    "operation_id": "apply_managed_skills_v2_agents__agent_id__skills_apply_post",
+    "path": "/v2/agents/{agent_id}/skills/apply"
+  },
+  {
+    "method": "GET",
+    "operation_id": "preview_managed_skills_v2_agents__agent_id__skills_preview_get",
+    "path": "/v2/agents/{agent_id}/skills/preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "rollback_managed_skills_v2_agents__agent_id__skills_rollback_post",
+    "path": "/v2/agents/{agent_id}/skills/rollback"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_workerbee_access_profile_v2_agents__agent_id__workerbee_access_profile_get",
+    "path": "/v2/agents/{agent_id}/workerbee/access-profile"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "put_agent_workerbee_access_profile_v2_agents__agent_id__workerbee_access_profile_put",
+    "path": "/v2/agents/{agent_id}/workerbee/access-profile"
+  },
+  {
+    "method": "POST",
+    "operation_id": "issue_workerbee_gateway_lease_v2_agents__agent_id__workerbee_leases_post",
+    "path": "/v2/agents/{agent_id}/workerbee/leases"
+  },
+  {
+    "method": "DELETE",
+    "operation_id": "revoke_workerbee_gateway_lease_v2_agents__agent_id__workerbee_leases__lease_id__delete",
+    "path": "/v2/agents/{agent_id}/workerbee/leases/{lease_id}"
+  },
+  {
+    "method": "DELETE",
+    "operation_id": "delete_agent_workerbee_snapshot_policy_v2_agents__agent_id__workerbee_snapshot_policy_delete",
+    "path": "/v2/agents/{agent_id}/workerbee/snapshot-policy"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_workerbee_snapshot_policy_v2_agents__agent_id__workerbee_snapshot_policy_get",
+    "path": "/v2/agents/{agent_id}/workerbee/snapshot-policy"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "put_agent_workerbee_snapshot_policy_v2_agents__agent_id__workerbee_snapshot_policy_put",
+    "path": "/v2/agents/{agent_id}/workerbee/snapshot-policy"
+  },
+  {
+    "method": "GET",
+    "operation_id": "preview_agent_workerbee_snapshot_policy_v2_agents__agent_id__workerbee_snapshot_policy_preview_get",
+    "path": "/v2/agents/{agent_id}/workerbee/snapshot-policy/preview"
+  },
+  {
+    "method": "DELETE",
+    "operation_id": "delete_agent_workerbee_workspace_policy_v2_agents__agent_id__workerbee_workspace_policy_delete",
+    "path": "/v2/agents/{agent_id}/workerbee/workspace-policy"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_agent_workerbee_workspace_policy_v2_agents__agent_id__workerbee_workspace_policy_get",
+    "path": "/v2/agents/{agent_id}/workerbee/workspace-policy"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "put_agent_workerbee_workspace_policy_v2_agents__agent_id__workerbee_workspace_policy_put",
+    "path": "/v2/agents/{agent_id}/workerbee/workspace-policy"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_workerbee_workspace_transitions_v2_agents__agent_id__workerbee_workspace_transitions_get",
+    "path": "/v2/agents/{agent_id}/workerbee/workspace-transitions"
+  },
+  {
+    "method": "POST",
+    "operation_id": "apply_workerbee_workspace_transition_v2_agents__agent_id__workerbee_workspace_transitions_post",
+    "path": "/v2/agents/{agent_id}/workerbee/workspace-transitions"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_workerbee_workspace_transition_v2_agents__agent_id__workerbee_workspace_transitions_preview_post",
+    "path": "/v2/agents/{agent_id}/workerbee/workspace-transitions/preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "decide_workerbee_workspace_transition_v2_agents__agent_id__workerbee_workspace_transitions__transition_id__decision_post",
+    "path": "/v2/agents/{agent_id}/workerbee/workspace-transitions/{transition_id}/decision"
+  },
+  {
+    "method": "POST",
+    "operation_id": "revert_workerbee_workspace_transition_v2_agents__agent_id__workerbee_workspace_transitions__transition_id__revert_post",
+    "path": "/v2/agents/{agent_id}/workerbee/workspace-transitions/{transition_id}/revert"
+  },
+  {
+    "method": "POST",
+    "operation_id": "prepare_workerbee_workspace_v2_agents__agent_id__workerbee_workspaces_post",
+    "path": "/v2/agents/{agent_id}/workerbee/workspaces"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_codex_capabilities_v2_codex_capabilities_get",
+    "path": "/v2/codex/capabilities"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_model_elevations_v2_codex_elevations_get",
+    "path": "/v2/codex/elevations"
+  },
+  {
+    "method": "POST",
+    "operation_id": "request_model_elevation_v2_codex_elevations_post",
+    "path": "/v2/codex/elevations"
+  },
+  {
+    "method": "POST",
+    "operation_id": "activate_model_elevation_v2_codex_elevations__lease_id__activate_post",
+    "path": "/v2/codex/elevations/{lease_id}/activate"
+  },
+  {
+    "method": "POST",
+    "operation_id": "decide_model_elevation_v2_codex_elevations__lease_id__decision_post",
+    "path": "/v2/codex/elevations/{lease_id}/decision"
+  },
+  {
+    "method": "POST",
+    "operation_id": "finish_model_elevation_v2_codex_elevations__lease_id__finish_post",
+    "path": "/v2/codex/elevations/{lease_id}/finish"
+  },
+  {
+    "method": "POST",
+    "operation_id": "request_model_elevation_revert_v2_codex_elevations__lease_id__revert_post",
+    "path": "/v2/codex/elevations/{lease_id}/revert"
+  },
+  {
+    "method": "POST",
+    "operation_id": "update_model_elevation_transition_v2_codex_elevations__lease_id__transition_post",
+    "path": "/v2/codex/elevations/{lease_id}/transition"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_codex_event_bridge_v2_codex_event_bridge_get",
+    "path": "/v2/codex/event-bridge"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_codex_profiles_v2_codex_profiles_get",
+    "path": "/v2/codex/profiles"
+  },
+  {
+    "method": "GET",
+    "operation_id": "event_snapshot_v2_v2_events_snapshot_get",
+    "path": "/v2/events/snapshot"
+  },
+  {
+    "method": "GET",
+    "operation_id": "inspect_lifecycle_entity_v2_lifecycle__entity_id__get",
+    "path": "/v2/lifecycle/{entity_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "apply_lifecycle_action_v2_lifecycle__entity_id__actions__action__apply_post",
+    "path": "/v2/lifecycle/{entity_id}/actions/{action}/apply"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_lifecycle_action_v2_lifecycle__entity_id__actions__action__preview_post",
+    "path": "/v2/lifecycle/{entity_id}/actions/{action}/preview"
+  },
+  {
+    "method": "POST",
+    "operation_id": "finalize_managed_runtime_stop_v2_lifecycle__entity_id__managed_stop_finalize_post",
+    "path": "/v2/lifecycle/{entity_id}/managed-stop/finalize"
+  },
+  {
+    "method": "POST",
+    "operation_id": "prepare_managed_runtime_stop_v2_lifecycle__entity_id__managed_stop_prepare_post",
+    "path": "/v2/lifecycle/{entity_id}/managed-stop/prepare"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_operator_authority_posture_v2_operator_authority_posture_get",
+    "path": "/v2/operator/authority/posture"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_campaigns_paginated_v2_operator_campaigns_get",
+    "path": "/v2/operator/campaigns"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_operator_campaign_detail_v2_operator_campaigns__campaign_id__get",
+    "path": "/v2/operator/campaigns/{campaign_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "diagnose_protected_provider_merge_v2_operator_protected_provider_diagnose_post",
+    "path": "/v2/operator/protected-provider/diagnose"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_operator_workspace_sets_v2_operator_workspace_sets_get",
+    "path": "/v2/operator/workspace-sets"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_operator_workspace_set_v2_operator_workspace_sets_preview_post",
+    "path": "/v2/operator/workspace-sets/preview"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "put_operator_workspace_set_v2_operator_workspace_sets__set_id__put",
+    "path": "/v2/operator/workspace-sets/{set_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "acknowledge_operator_alert_family_v2_operators__root_operator_id__alerts_acknowledge_post",
+    "path": "/v2/operators/{root_operator_id}/alerts/acknowledge"
+  },
+  {
+    "method": "GET",
+    "operation_id": "discover_managed_projects_v2_projects_discover_get",
+    "path": "/v2/projects/discover"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_remote_audit_v2_remote_audit_get",
+    "path": "/v2/remote/audit"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_remote_client_view_state_v2_remote_clients__client_id__view_state_get",
+    "path": "/v2/remote/clients/{client_id}/view-state"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "update_remote_client_view_state_v2_remote_clients__client_id__view_state_put",
+    "path": "/v2/remote/clients/{client_id}/view-state"
+  },
+  {
+    "method": "POST",
+    "operation_id": "remote_lifecycle_control_v2_remote_control__entity_id___action__post",
+    "path": "/v2/remote/control/{entity_id}/{action}"
+  },
+  {
+    "method": "GET",
+    "operation_id": "remote_client_identity_v2_remote_me_get",
+    "path": "/v2/remote/me"
+  },
+  {
+    "method": "GET",
+    "operation_id": "remote_terminal_snapshot_v2_remote_terminal__entity_id__snapshot_get",
+    "path": "/v2/remote/terminal/{entity_id}/snapshot"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_remote_tokens_v2_remote_tokens_get",
+    "path": "/v2/remote/tokens"
+  },
+  {
+    "method": "POST",
+    "operation_id": "issue_remote_token_v2_remote_tokens_post",
+    "path": "/v2/remote/tokens"
+  },
+  {
+    "method": "POST",
+    "operation_id": "revoke_remote_token_v2_remote_tokens__token_id__revoke_post",
+    "path": "/v2/remote/tokens/{token_id}/revoke"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_runtime_migrations_v2_runtime_migrations_get",
+    "path": "/v2/runtime-migrations"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_runtime_migration_v2_runtime_migrations_preview_post",
+    "path": "/v2/runtime-migrations/preview"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_runtime_migration_v2_runtime_migrations__batch_id__get",
+    "path": "/v2/runtime-migrations/{batch_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "record_runtime_migration_results_v2_runtime_migrations__batch_id__results_post",
+    "path": "/v2/runtime-migrations/{batch_id}/results"
+  },
+  {
+    "method": "POST",
+    "operation_id": "rollback_runtime_migration_v2_runtime_migrations__batch_id__rollback_post",
+    "path": "/v2/runtime-migrations/{batch_id}/rollback"
+  },
+  {
+    "method": "POST",
+    "operation_id": "reconcile_tmux_runtimes_v2_tmux_reconcile_post",
+    "path": "/v2/tmux/reconcile"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_tmux_runtimes_v2_tmux_runtimes_get",
+    "path": "/v2/tmux/runtimes"
+  },
+  {
+    "method": "DELETE",
+    "operation_id": "delete_tmux_runtime_v2_tmux_runtimes__entity_id__delete",
+    "path": "/v2/tmux/runtimes/{entity_id}"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_tmux_runtime_v2_tmux_runtimes__entity_id__get",
+    "path": "/v2/tmux/runtimes/{entity_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "register_tmux_runtime_v2_tmux_runtimes__entity_id__post",
+    "path": "/v2/tmux/runtimes/{entity_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "acquire_tmux_runtime_writer_v2_tmux_runtimes__entity_id__writer_acquire_post",
+    "path": "/v2/tmux/runtimes/{entity_id}/writer/acquire"
+  },
+  {
+    "method": "POST",
+    "operation_id": "release_tmux_runtime_writer_v2_tmux_runtimes__entity_id__writer_release_post",
+    "path": "/v2/tmux/runtimes/{entity_id}/writer/release"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_workerbee_controlled_run_leases_v2_workerbee_controlled_run_leases_get",
+    "path": "/v2/workerbee/controlled-run-leases"
+  },
+  {
+    "method": "POST",
+    "operation_id": "decide_workerbee_controlled_run_lease_v2_workerbee_controlled_run_leases__lease_id__decision_post",
+    "path": "/v2/workerbee/controlled-run-leases/{lease_id}/decision"
+  },
+  {
+    "method": "POST",
+    "operation_id": "revoke_workerbee_controlled_run_lease_v2_workerbee_controlled_run_leases__lease_id__revoke_post",
+    "path": "/v2/workerbee/controlled-run-leases/{lease_id}/revoke"
+  },
+  {
+    "method": "GET",
+    "operation_id": "list_workerbee_controlled_runs_v2_workerbee_controlled_runs_get",
+    "path": "/v2/workerbee/controlled-runs"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_workerbee_controlled_run_v2_workerbee_controlled_runs_post",
+    "path": "/v2/workerbee/controlled-runs"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_workerbee_controlled_run_posture_v2_workerbee_controlled_runs_posture_get",
+    "path": "/v2/workerbee/controlled-runs/posture"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preflight_workerbee_controlled_run_v2_workerbee_controlled_runs_preflight_post",
+    "path": "/v2/workerbee/controlled-runs/preflight"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_workerbee_controlled_run_v2_workerbee_controlled_runs__request_id__get",
+    "path": "/v2/workerbee/controlled-runs/{request_id}"
+  },
+  {
+    "method": "POST",
+    "operation_id": "cancel_workerbee_controlled_run_v2_workerbee_controlled_runs__request_id__cancel_post",
+    "path": "/v2/workerbee/controlled-runs/{request_id}/cancel"
+  },
+  {
+    "method": "POST",
+    "operation_id": "decide_workerbee_controlled_run_v2_workerbee_controlled_runs__request_id__decision_post",
+    "path": "/v2/workerbee/controlled-runs/{request_id}/decision"
+  },
+  {
+    "method": "POST",
+    "operation_id": "create_workerbee_controlled_run_lease_v2_workerbee_controlled_runs__request_id__leases_post",
+    "path": "/v2/workerbee/controlled-runs/{request_id}/leases"
+  },
+  {
+    "method": "GET",
+    "operation_id": "workerbee_runtime_status_v2_workerbee_runtime_get",
+    "path": "/v2/workerbee/runtime"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_workerbee_snapshot_policy_v2_workerbee_snapshot_policy_get",
+    "path": "/v2/workerbee/snapshot-policy"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "put_workerbee_snapshot_policy_v2_workerbee_snapshot_policy_put",
+    "path": "/v2/workerbee/snapshot-policy"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_workerbee_workspace_policy_v2_workerbee_workspace_policy_get",
+    "path": "/v2/workerbee/workspace-policy"
+  },
+  {
+    "method": "PUT",
+    "operation_id": "put_workerbee_workspace_policy_v2_workerbee_workspace_policy_put",
+    "path": "/v2/workerbee/workspace-policy"
+  }
+]
