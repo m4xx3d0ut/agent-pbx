@@ -35,7 +35,7 @@ AST_TARGETS = (
 AST_METRICS = ("lines", "bytes", "ast_nodes", "functions", "classes", "imports")
 REVIEW_TARGETS = {
     "src/agent_pbx/api.py": {
-        "lines": 6400,
+        "lines": 1100,
         "owner": "FastAPI composition root",
     },
     "src/agent_pbx/store.py": {
@@ -43,7 +43,7 @@ REVIEW_TARGETS = {
         "owner": "persistence compatibility facade",
     },
     "src/agent_pbx/tui.py": {
-        "lines": 34000,
+        "lines": 33000,
         "owner": "Textual composition root and event router",
     },
 }

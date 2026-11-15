@@ -1,12 +1,12 @@
 {
   "ast_maxima": {
     "src/agent_pbx/api.py": {
-      "ast_nodes": 36706,
-      "bytes": 297062,
+      "ast_nodes": 5282,
+      "bytes": 44058,
       "classes": 1,
-      "functions": 290,
-      "imports": 66,
-      "lines": 7897
+      "functions": 22,
+      "imports": 59,
+      "lines": 1171
     },
     "src/agent_pbx/store.py": {
       "ast_nodes": 61083,
@@ -17,12 +17,12 @@
       "lines": 14652
     },
     "src/agent_pbx/tui.py": {
-      "ast_nodes": 239719,
-      "bytes": 1773455,
-      "classes": 71,
-      "functions": 1674,
+      "ast_nodes": 177107,
+      "bytes": 1353047,
+      "classes": 20,
+      "functions": 1191,
       "imports": 69,
-      "lines": 44244
+      "lines": 33745
     }
   },
   "baseline_commit": "56f46179863fed13f339ab3e55481a895b994921",
@@ -79,7 +79,7 @@
   },
   "review_targets": {
     "src/agent_pbx/api.py": {
-      "lines": 6400,
+      "lines": 1100,
       "owner": "FastAPI composition root"
     },
     "src/agent_pbx/store.py": {
@@ -87,7 +87,7 @@
       "owner": "persistence compatibility facade"
     },
     "src/agent_pbx/tui.py": {
-      "lines": 34000,
+      "lines": 33000,
       "owner": "Textual composition root and event router"
     }
   },
