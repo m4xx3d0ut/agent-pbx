@@ -97,10 +97,33 @@ async def append_joplin_command_log(
         )
 
 
+async def append_joplin_report_log(
+    request: Request,
+    store: CommandLogStore,
+    report: dict[str, object],
+) -> None:
+    joplin = request.app.state.joplin
+    if not joplin.config.configured:
+        return
+    try:
+        await asyncio.to_thread(joplin.append_report_log, store, report)
+    except Exception as exc:  # noqa: BLE001 - logging must not break PBX reports
+        store.append_event(
+            "joplin_log_failed",
+            {
+                "agent_id": report.get("agent_id"),
+                "report_id": report.get("report_id"),
+                "message": str(exc),
+            },
+            str(report.get("report_id") or ""),
+        )
+
+
 __all__ = (
     "AgentLookup",
     "CommandLogStore",
     "append_joplin_command_log",
+    "append_joplin_report_log",
     "require_agent",
     "run_issue_call",
     "run_pull_request_call",
