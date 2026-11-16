@@ -3,5 +3,11 @@
 from .agents import AgentRepository
 from .events import EventRepository
 from .model_elevations import ModelElevationRepository
+from .runtime import RuntimeRepository
 
-__all__ = ["AgentRepository", "EventRepository", "ModelElevationRepository"]
+__all__ = [
+    "AgentRepository",
+    "EventRepository",
+    "ModelElevationRepository",
+    "RuntimeRepository",
+]

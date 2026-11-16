@@ -39,6 +39,7 @@ ATOMIC_STORE_OPERATIONS: Final[frozenset[str]] = frozenset(
 # domain-local method name. Keeping this mapping explicit makes delegation part
 # of the reviewed atomicity contract rather than an AST naming heuristic.
 ATOMIC_STORE_DELEGATES: Final[dict[str, str]] = {
+    "acquire_tmux_writer_lease": "acquire_writer_lease",
     "append_event_if_changed": "append_if_changed",
     "mark_model_elevation_revert_pending": "mark_revert_pending",
     "request_or_reuse_model_elevation": "request_or_reuse",

@@ -21,6 +21,7 @@ from .persistence import (
     AgentRepository,
     EventRepository,
     ModelElevationRepository,
+    RuntimeRepository,
     SQLiteConnectionFactory,
     begin_immediate,
 )
@@ -362,6 +363,7 @@ class Store:
         self._agents = AgentRepository(self._connections)
         self._events = EventRepository(self._connections)
         self._model_elevations = ModelElevationRepository(self._connections)
+        self._runtime = RuntimeRepository(self._connections)
 
     def connect(self) -> sqlite3.Connection:
         return self._connections.connect()
@@ -2791,88 +2793,30 @@ class Store:
     ) -> dict[str, Any]:
         if self.get_agent(entity_id) is None:
             raise ValueError(f"agent {entity_id!r} is not registered")
-        current = now_ts()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO tmux_runtime_mappings(
-                    entity_id, server_mode, server_id, socket_path,
-                    session_name, window_id, window_name, pane_id, pane_pid,
-                    process_start_ticks, codex_session_id, cwd,
-                    origin_client_tty, origin_session_name, state,
-                    metadata_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(entity_id) DO UPDATE SET
-                    server_mode = excluded.server_mode,
-                    server_id = excluded.server_id,
-                    socket_path = excluded.socket_path,
-                    session_name = excluded.session_name,
-                    window_id = excluded.window_id,
-                    window_name = excluded.window_name,
-                    pane_id = excluded.pane_id,
-                    pane_pid = excluded.pane_pid,
-                    process_start_ticks = excluded.process_start_ticks,
-                    codex_session_id = excluded.codex_session_id,
-                    cwd = excluded.cwd,
-                    origin_client_tty = COALESCE(
-                        NULLIF(excluded.origin_client_tty, ''),
-                        tmux_runtime_mappings.origin_client_tty
-                    ),
-                    origin_session_name = COALESCE(
-                        NULLIF(excluded.origin_session_name, ''),
-                        tmux_runtime_mappings.origin_session_name
-                    ),
-                    state = excluded.state,
-                    writer_client_id = CASE
-                        WHEN tmux_runtime_mappings.server_id != excluded.server_id
-                          OR tmux_runtime_mappings.pane_id != excluded.pane_id
-                        THEN NULL ELSE tmux_runtime_mappings.writer_client_id END,
-                    writer_lease_expires_at = CASE
-                        WHEN tmux_runtime_mappings.server_id != excluded.server_id
-                          OR tmux_runtime_mappings.pane_id != excluded.pane_id
-                        THEN NULL ELSE tmux_runtime_mappings.writer_lease_expires_at END,
-                    metadata_json = excluded.metadata_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    entity_id,
-                    server_mode,
-                    server_id,
-                    socket_path,
-                    session_name,
-                    window_id,
-                    window_name,
-                    pane_id,
-                    pane_pid,
-                    process_start_ticks,
-                    codex_session_id,
-                    cwd,
-                    origin_client_tty,
-                    origin_session_name,
-                    state,
-                    json.dumps(metadata or {}),
-                    current,
-                    current,
-                ),
-            )
-        mapping = self.get_tmux_runtime_mapping(entity_id)
-        assert mapping is not None
-        return mapping
+        return self._runtime.upsert_mapping(
+            entity_id=entity_id,
+            server_mode=server_mode,
+            server_id=server_id,
+            socket_path=socket_path,
+            session_name=session_name,
+            pane_id=pane_id,
+            window_id=window_id,
+            window_name=window_name,
+            pane_pid=pane_pid,
+            process_start_ticks=process_start_ticks,
+            codex_session_id=codex_session_id,
+            cwd=cwd,
+            origin_client_tty=origin_client_tty,
+            origin_session_name=origin_session_name,
+            state=state,
+            metadata=metadata,
+        )
 
     def get_tmux_runtime_mapping(self, entity_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM tmux_runtime_mappings WHERE entity_id = ?",
-                (entity_id,),
-            ).fetchone()
-        return self._tmux_runtime_mapping_from_row(row) if row is not None else None
+        return self._runtime.get_mapping(entity_id)
 
     def list_tmux_runtime_mappings(self) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM tmux_runtime_mappings ORDER BY updated_at DESC, entity_id"
-            ).fetchall()
-        return [self._tmux_runtime_mapping_from_row(row) for row in rows]
+        return self._runtime.list_mappings()
 
     def set_tmux_runtime_state(
         self,
@@ -2882,34 +2826,12 @@ class Store:
         metadata: dict[str, Any] | None = None,
         clear_writer_lease: bool = False,
     ) -> dict[str, Any]:
-        mapping = self.get_tmux_runtime_mapping(entity_id)
-        if mapping is None:
-            raise ValueError("tmux runtime mapping not found")
-        merged = dict(mapping.get("metadata") or {})
-        merged.update(metadata or {})
-        with self.connect() as conn:
-            if clear_writer_lease:
-                conn.execute(
-                    """
-                    UPDATE tmux_runtime_mappings
-                    SET state = ?, metadata_json = ?, writer_client_id = NULL,
-                        writer_lease_expires_at = NULL, updated_at = ?
-                    WHERE entity_id = ?
-                    """,
-                    (state, json.dumps(merged), now_ts(), entity_id),
-                )
-            else:
-                conn.execute(
-                    """
-                    UPDATE tmux_runtime_mappings
-                    SET state = ?, metadata_json = ?, updated_at = ?
-                    WHERE entity_id = ?
-                    """,
-                    (state, json.dumps(merged), now_ts(), entity_id),
-                )
-        updated = self.get_tmux_runtime_mapping(entity_id)
-        assert updated is not None
-        return updated
+        return self._runtime.set_mapping_state(
+            entity_id,
+            state=state,
+            metadata=metadata,
+            clear_writer_lease=clear_writer_lease,
+        )
 
     def acquire_tmux_writer_lease(
         self,
@@ -2918,72 +2840,20 @@ class Store:
         client_id: str,
         ttl_seconds: float,
     ) -> dict[str, Any]:
-        current = now_ts()
-        expires_at = current + max(5.0, min(300.0, float(ttl_seconds)))
-        with self.connect() as conn:
-            begin_immediate(conn)
-            row = conn.execute(
-                """
-                SELECT state, writer_client_id, writer_lease_expires_at
-                FROM tmux_runtime_mappings WHERE entity_id = ?
-                """,
-                (entity_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("tmux runtime mapping not found")
-            if str(row["state"] or "") == "stopping":
-                raise ValueError("tmux runtime is stopping; writer acquisition is disabled")
-            owner = str(row["writer_client_id"] or "")
-            owner_expiry = row["writer_lease_expires_at"]
-            if (
-                owner
-                and owner != client_id
-                and owner_expiry is not None
-                and float(owner_expiry) > current
-            ):
-                raise ValueError(f"tmux runtime writer is leased to {owner!r}")
-            conn.execute(
-                """
-                UPDATE tmux_runtime_mappings
-                SET writer_client_id = ?, writer_lease_expires_at = ?, updated_at = ?
-                WHERE entity_id = ?
-                """,
-                (client_id, expires_at, current, entity_id),
-            )
-        mapping = self.get_tmux_runtime_mapping(entity_id)
-        assert mapping is not None
-        return mapping
+        return self._runtime.acquire_writer_lease(
+            entity_id,
+            client_id=client_id,
+            ttl_seconds=ttl_seconds,
+        )
 
     def release_tmux_writer_lease(self, entity_id: str, *, client_id: str) -> dict[str, Any]:
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT writer_client_id FROM tmux_runtime_mappings WHERE entity_id = ?",
-                (entity_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("tmux runtime mapping not found")
-            owner = str(row["writer_client_id"] or "")
-            if owner and owner != client_id:
-                raise ValueError(f"tmux runtime writer is leased to {owner!r}")
-            conn.execute(
-                """
-                UPDATE tmux_runtime_mappings
-                SET writer_client_id = NULL, writer_lease_expires_at = NULL,
-                    updated_at = ? WHERE entity_id = ?
-                """,
-                (now_ts(), entity_id),
-            )
-        mapping = self.get_tmux_runtime_mapping(entity_id)
-        assert mapping is not None
-        return mapping
+        return self._runtime.release_writer_lease(
+            entity_id,
+            client_id=client_id,
+        )
 
     def delete_tmux_runtime_mapping(self, entity_id: str) -> bool:
-        with self.connect() as conn:
-            cursor = conn.execute(
-                "DELETE FROM tmux_runtime_mappings WHERE entity_id = ?",
-                (entity_id,),
-            )
-        return bool(cursor.rowcount)
+        return self._runtime.delete_mapping(entity_id)
 
     @staticmethod
     def _managed_runtime_stop_identity(mapping: Mapping[str, Any]) -> dict[str, Any]:
@@ -3303,46 +3173,17 @@ class Store:
         retention_until: float,
         snapshot: dict[str, Any],
     ) -> dict[str, Any]:
-        batch_id = f"runtime-migration-{uuid.uuid4().hex}"
-        created_at = now_ts()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO runtime_migration_batches
-                    (batch_id, status, target_cli_version, retention_until,
-                     snapshot_json, results_json, created_at)
-                VALUES (?, 'previewed', ?, ?, ?, '[]', ?)
-                """,
-                (
-                    batch_id,
-                    target_cli_version or None,
-                    float(retention_until),
-                    json.dumps(snapshot),
-                    created_at,
-                ),
-            )
-        batch = self.get_runtime_migration_batch(batch_id)
-        assert batch is not None
-        return batch
+        return self._runtime.create_migration_batch(
+            target_cli_version=target_cli_version,
+            retention_until=retention_until,
+            snapshot=snapshot,
+        )
 
     def get_runtime_migration_batch(self, batch_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM runtime_migration_batches WHERE batch_id = ?",
-                (batch_id,),
-            ).fetchone()
-        return self._runtime_migration_batch_from_row(row) if row else None
+        return self._runtime.get_migration_batch(batch_id)
 
     def list_runtime_migration_batches(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM runtime_migration_batches
-                ORDER BY created_at DESC LIMIT ?
-                """,
-                (max(1, min(1000, int(limit))),),
-            ).fetchall()
-        return [self._runtime_migration_batch_from_row(row) for row in rows]
+        return self._runtime.list_migration_batches(limit=limit)
 
     def update_runtime_migration_batch(
         self,
@@ -3353,31 +3194,13 @@ class Store:
         applied: bool = False,
         rolled_back: bool = False,
     ) -> dict[str, Any]:
-        if self.get_runtime_migration_batch(batch_id) is None:
-            raise ValueError("runtime migration batch not found")
-        current = now_ts()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE runtime_migration_batches
-                SET status = ?, results_json = ?,
-                    applied_at = CASE WHEN ? THEN COALESCE(applied_at, ?) ELSE applied_at END,
-                    rolled_back_at = CASE WHEN ? THEN COALESCE(rolled_back_at, ?) ELSE rolled_back_at END
-                WHERE batch_id = ?
-                """,
-                (
-                    status,
-                    json.dumps(results),
-                    int(applied),
-                    current,
-                    int(rolled_back),
-                    current,
-                    batch_id,
-                ),
-            )
-        updated = self.get_runtime_migration_batch(batch_id)
-        assert updated is not None
-        return updated
+        return self._runtime.update_migration_batch(
+            batch_id,
+            status=status,
+            results=results,
+            applied=applied,
+            rolled_back=rolled_back,
+        )
 
     def restore_runtime_migration_batch(self, batch_id: str) -> dict[str, Any]:
         batch = self.get_runtime_migration_batch(batch_id)
@@ -3451,12 +3274,7 @@ class Store:
 
     def prune_expired_runtime_migration_batches(self, *, now: float | None = None) -> int:
         current = now_ts() if now is None else float(now)
-        with self.connect() as conn:
-            cursor = conn.execute(
-                "DELETE FROM runtime_migration_batches WHERE retention_until < ?",
-                (current,),
-            )
-        return int(cursor.rowcount)
+        return self._runtime.prune_expired_migration_batches(current=current)
 
     def create_managed_agent_runtime(
         self,
@@ -14133,20 +13951,7 @@ class Store:
 
     @staticmethod
     def _tmux_runtime_mapping_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        data = dict(row)
-        raw_metadata = data.pop("metadata_json", "{}")
-        try:
-            metadata = json.loads(raw_metadata)
-        except json.JSONDecodeError:
-            metadata = {}
-        data["metadata"] = metadata if isinstance(metadata, dict) else {}
-        expires_at = data.get("writer_lease_expires_at")
-        data["writer_lease_active"] = bool(
-            data.get("writer_client_id")
-            and expires_at is not None
-            and float(expires_at) > now_ts()
-        )
-        return data
+        return RuntimeRepository.mapping_from_row(row)
 
     @staticmethod
     def _terminal_editor_runtime_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -14162,19 +13967,7 @@ class Store:
 
     @staticmethod
     def _runtime_migration_batch_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        data = dict(row)
-        for source, target, expected, default in (
-            ("snapshot_json", "snapshot", dict, {}),
-            ("results_json", "results", list, []),
-        ):
-            raw = data.pop(source, json.dumps(default))
-            try:
-                decoded = json.loads(raw)
-            except json.JSONDecodeError:
-                decoded = default
-            data[target] = decoded if isinstance(decoded, expected) else default
-        data["retained"] = float(data.get("retention_until") or 0) >= now_ts()
-        return data
+        return RuntimeRepository.migration_batch_from_row(row)
 
     @staticmethod
     def _thread_report(report: dict[str, Any]) -> dict[str, Any]:

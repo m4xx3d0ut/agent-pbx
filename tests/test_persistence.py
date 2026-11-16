@@ -63,6 +63,7 @@ def test_begin_immediate_uses_reviewed_atomic_operation_manifest(
     assert "append_event_if_changed" in ATOMIC_STORE_OPERATIONS
     assert "merge_agent_metadata" in ATOMIC_STORE_OPERATIONS
     assert ATOMIC_STORE_DELEGATES == {
+        "acquire_tmux_writer_lease": "acquire_writer_lease",
         "append_event_if_changed": "append_if_changed",
         "mark_model_elevation_revert_pending": "mark_revert_pending",
         "request_or_reuse_model_elevation": "request_or_reuse",
