@@ -91,7 +91,7 @@ architecture review goals, not permission to expand another component:
 | Composition module | Accepted ceiling | D7 line target | Intended end state |
 |---|---:|---:|---|
 | `src/agent_pbx/api.py` | 1,171 | 1,100 | application composition and router registration |
-| `src/agent_pbx/store.py` | 13,384 | 12,000 | stable persistence facade over cohesive repositories |
+| `src/agent_pbx/store.py` | 13,135 | 12,000 | stable persistence facade over cohesive repositories |
 | `src/agent_pbx/tui.py` | 33,745 | 33,000 | Textual composition root and event routing |
 
 The checker requires every target to remain below its accepted ceiling. D7 may
@@ -201,3 +201,27 @@ D5-4 ratchets the Store ceiling to 13,384 lines, 536,375 bytes, and 56,049 AST
 nodes. Schema version 45, all 150 SQLite objects, the schema fingerprint, and
 public API/MCP/TUI compatibility remain unchanged. Resource, KB, WorkerBee, and
 Operator campaign persistence remain separately reviewed future boundaries.
+
+### D5-5 bounded artifact persistence checkpoint
+
+Recoverable file-trash entries/prune batches and durable-helper bundle/event
+records now belong to two cohesive persistence repositories. `Store` retains
+all public signatures as compatibility delegates. File mutation, trash-policy
+decisions, helper object storage, approved-root checks, helper validation and
+invocation, Operator authorization, feature gates, and KB policy remain in
+their existing service layers.
+
+The file-trash prune/apply and undo writes continue to use one managed SQLite
+transaction. Durable-helper bundle/event creation and lifecycle update/event
+append also remain single managed transactions. Failure-injection
+characterization proves that a failed second write rolls back the first. These
+operations retain their existing implicit SQLite transaction behavior and do
+not alter the 32-operation explicit immediate-transaction inventory or its 11
+repository delegates.
+
+D5-5 ratchets the Store ceiling to 13,135 lines, 526,401 bytes, and 54,752 AST
+nodes. All 363 Store declarations, schema version 45, the 150-object schema
+fingerprint, OpenAPI inventory, and TUI compatibility remain unchanged.
+Dynamic-resource leases, remote audit, WorkerBee controlled runs, Operator
+campaigns/handoffs/broker workflows, and Operator KB indexing remain separate
+future review boundaries.
