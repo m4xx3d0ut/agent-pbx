@@ -422,8 +422,9 @@ def _store_transaction_methods() -> list[str]:
                 if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
                 if any(
-                    isinstance(item, ast.Constant)
-                    and item.value == "BEGIN IMMEDIATE"
+                    isinstance(item, ast.Call)
+                    and isinstance(item.func, ast.Name)
+                    and item.func.id == "begin_immediate"
                     for item in ast.walk(child)
                 ):
                     methods.append(child.name)
@@ -482,7 +483,17 @@ def _store_connection_contract(store: Any) -> dict[str, Any]:
 
 def collect_store_contract() -> dict[str, Any]:
     sys.path.insert(0, str(SRC))
+    from agent_pbx.persistence.transactions import ATOMIC_STORE_OPERATIONS
     from agent_pbx.store import SCHEMA_VERSION, Store
+
+    observed_atomic_operations = _store_transaction_methods()
+    atomic_operation_manifest = sorted(ATOMIC_STORE_OPERATIONS)
+    if observed_atomic_operations != atomic_operation_manifest:
+        raise RuntimeError(
+            "Store atomic transaction calls do not match the reviewed manifest: "
+            f"observed={observed_atomic_operations!r} "
+            f"manifest={atomic_operation_manifest!r}"
+        )
 
     with tempfile.TemporaryDirectory(prefix="agent-pbx-component-schema-") as raw:
         path = Path(raw) / "pbx.sqlite"
@@ -512,7 +523,7 @@ def collect_store_contract() -> dict[str, Any]:
         "object_count": len(objects),
         "object_names": [f"{item['type']}:{item['name']}" for item in objects],
         "schema_sha256": hashlib.sha256(canonical_json(objects)).hexdigest(),
-        "begin_immediate_methods": _store_transaction_methods(),
+        "begin_immediate_methods": atomic_operation_manifest,
         "connection": connection,
         "method_declarations": _store_method_contract(),
     }

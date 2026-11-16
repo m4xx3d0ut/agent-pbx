@@ -17,6 +17,7 @@ from .schemas import (
     plan_options_to_jsonable,
 )
 from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_slug
+from .persistence import SQLiteConnectionFactory, begin_immediate
 from .security import hash_secret, now_ts
 
 
@@ -357,14 +358,10 @@ class TokenRecord:
 class Store:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
+        self._connections = SQLiteConnectionFactory(self.path)
 
     def connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return self._connections.connect()
 
     def schema_version(self) -> int:
         with self.connect() as conn:
@@ -2504,7 +2501,7 @@ class Store:
         created_at = now_ts()
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 """
                 SELECT payload_json
@@ -2663,7 +2660,7 @@ class Store:
         lease_id = str(uuid.uuid4())
         requested_at = now_ts()
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             existing = conn.execute(
                 """
                 SELECT * FROM model_elevation_leases
@@ -2821,7 +2818,7 @@ class Store:
         transition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 "SELECT * FROM model_elevation_leases WHERE lease_id = ?",
                 (lease_id,),
@@ -2856,7 +2853,7 @@ class Store:
         transition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 "SELECT * FROM model_elevation_leases WHERE lease_id = ?",
                 (lease_id,),
@@ -3261,7 +3258,7 @@ class Store:
         current = now_ts()
         expires_at = current + max(5.0, min(300.0, float(ttl_seconds)))
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 """
                 SELECT state, writer_client_id, writer_lease_expires_at
@@ -3351,7 +3348,7 @@ class Store:
 
         current = now_ts()
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 "SELECT * FROM tmux_runtime_mappings WHERE entity_id = ?",
                 (entity_id,),
@@ -3445,7 +3442,7 @@ class Store:
         current = now_ts()
         report_id = str(uuid.uuid4())
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             mapping_row = conn.execute(
                 "SELECT * FROM tmux_runtime_mappings WHERE entity_id = ?",
                 (entity_id,),
@@ -4348,7 +4345,7 @@ class Store:
         """Merge controller metadata and optionally journal it in one transaction."""
 
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 "SELECT metadata_json FROM agents WHERE agent_id = ?",
                 (agent_id,),
@@ -4392,7 +4389,7 @@ class Store:
         """
 
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 """
                 SELECT operator_fork_id, metadata_json
@@ -4909,7 +4906,7 @@ class Store:
         event: dict[str, Any] | None = None
         result: dict[str, Any]
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             assignment = conn.execute(
                 """
                 SELECT a.assignment_id, a.campaign_id, a.target_agent_id,
@@ -6451,7 +6448,7 @@ class Store:
         )
         current = now_ts()
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             predecessor = conn.execute(
                 "SELECT * FROM operator_campaigns WHERE campaign_id = ?",
                 (predecessor_campaign_id,),
@@ -9329,7 +9326,7 @@ class Store:
             "recovery_required",
         )
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 """
                 SELECT * FROM dynamic_resource_requests
@@ -9525,7 +9522,7 @@ class Store:
     ) -> dict[str, Any]:
         current = now_ts()
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 "SELECT * FROM dynamic_resource_requests WHERE request_id = ?",
                 (request_id,),
@@ -10154,7 +10151,7 @@ class Store:
     ) -> dict[str, Any]:
         current = now_ts()
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 "SELECT * FROM operator_delegation_leases WHERE lease_id = ?",
                 (lease_id,),
@@ -10760,7 +10757,7 @@ class Store:
 
         current = now_ts()
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 """
                 SELECT status, metadata_json
@@ -10875,7 +10872,7 @@ class Store:
         open_statuses = tuple(sorted(OPERATOR_BROKER_REQUEST_OPEN_STATUSES))
         placeholders = ",".join("?" for _ in open_statuses)
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             self._expire_operator_broker_requests(conn, current=current)
             existing = conn.execute(
                 "SELECT * FROM operator_broker_requests WHERE request_id = ?",
@@ -10960,7 +10957,7 @@ class Store:
             )
         )
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 """
                 SELECT r.*, a.state AS assignment_state,
@@ -11148,7 +11145,7 @@ class Store:
         current = now_ts()
         claim_expires_at = current + min(max(int(lease_seconds), 10), 300)
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             self._expire_operator_broker_requests(conn, current=current)
             row = conn.execute(
                 "SELECT * FROM operator_broker_requests WHERE request_id = ?",
@@ -11214,7 +11211,7 @@ class Store:
         current = now_ts()
         terminal = normalized_status in OPERATOR_BROKER_REQUEST_TERMINAL_STATUSES
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 "SELECT * FROM operator_broker_requests WHERE request_id = ?",
                 (request_id,),
@@ -11279,7 +11276,7 @@ class Store:
     ) -> dict[str, Any]:
         current = now_ts()
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 "SELECT * FROM operator_broker_requests WHERE request_id = ?",
                 (request_id,),
@@ -11320,7 +11317,7 @@ class Store:
 
         current = now_ts()
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 "SELECT * FROM operator_broker_requests WHERE request_id = ?",
                 (request_id,),
@@ -11592,7 +11589,7 @@ class Store:
             separators=(",", ":"),
         )
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             self._expire_workerbee_controlled_runs(conn, current=current)
             existing = conn.execute(
                 f"""
@@ -11750,7 +11747,7 @@ class Store:
     ) -> dict[str, Any]:
         current = now_ts()
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             self._expire_workerbee_controlled_runs(conn, current=current)
             row = conn.execute(
                 "SELECT * FROM workerbee_controlled_run_requests WHERE request_id = ?",
@@ -11825,7 +11822,7 @@ class Store:
         current = now_ts()
         claim_expires_at = current + min(max(int(lease_seconds), 10), 300)
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             self._expire_workerbee_controlled_runs(conn, current=current)
             row = conn.execute(
                 "SELECT * FROM workerbee_controlled_run_requests WHERE request_id = ?",
@@ -11895,7 +11892,7 @@ class Store:
         current = now_ts()
         terminal = normalized in {"succeeded", "failed", "canceled"}
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             self._expire_workerbee_controlled_runs(conn, current=current)
             row = conn.execute(
                 "SELECT * FROM workerbee_controlled_run_requests WHERE request_id = ?",
@@ -12369,7 +12366,7 @@ class Store:
             raise ValueError("operator action scope digest is required")
         current = now_ts()
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            begin_immediate(conn)
             row = conn.execute(
                 """
                 SELECT transaction_id, handoff_id, action_class, target_agent_id,
