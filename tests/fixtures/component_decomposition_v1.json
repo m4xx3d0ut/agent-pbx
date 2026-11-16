@@ -9,12 +9,12 @@
       "lines": 1171
     },
     "src/agent_pbx/store.py": {
-      "ast_nodes": 61083,
-      "bytes": 589963,
+      "ast_nodes": 60556,
+      "bytes": 583493,
       "classes": 2,
       "functions": 375,
       "imports": 17,
-      "lines": 14652
+      "lines": 14488
     },
     "src/agent_pbx/tui.py": {
       "ast_nodes": 177107,

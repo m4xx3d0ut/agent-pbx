@@ -90,9 +90,9 @@ architecture review goals, not permission to expand another component:
 
 | Composition module | Accepted ceiling | D7 line target | Intended end state |
 |---|---:|---:|---|
-| `src/agent_pbx/api.py` | 7,897 | 6,400 | application composition and router registration |
-| `src/agent_pbx/store.py` | 14,652 | 12,000 | stable persistence facade over cohesive repositories |
-| `src/agent_pbx/tui.py` | 44,244 | 34,000 | Textual composition root and event routing |
+| `src/agent_pbx/api.py` | 1,171 | 1,100 | application composition and router registration |
+| `src/agent_pbx/store.py` | 14,488 | 12,000 | stable persistence facade over cohesive repositories |
+| `src/agent_pbx/tui.py` | 33,745 | 33,000 | Textual composition root and event routing |
 
 The checker requires every target to remain below its accepted ceiling. D7 may
 accept a smaller reduction when cohesion and compatibility evidence justify it;
@@ -106,9 +106,11 @@ it must not meet a number by creating circular or weakly owned modules.
   introduced by route extraction.
 - A route invokes the same application-service method before and after the
   move. It does not split one service transaction across controller code.
-- Existing `BEGIN IMMEDIATE` methods remain the complete explicit
-  write-serialization inventory. Removing or adding one requires a separate
-  persistence review and fixture version.
+- The 26 logical atomic Store operations remain the complete explicit
+  write-serialization inventory. They invoke the single reviewed
+  `begin_immediate` primitive directly or through an explicit repository
+  delegation recorded in the compatibility fixture. Removing, adding, or
+  redirecting one requires a separate persistence review and fixture version.
 - Feature checks run before their service mutation, and authorization
   dependencies stay on the same operation.
 - The full canonical OpenAPI document must remain byte-equivalent after sorted
@@ -132,6 +134,23 @@ ceiling by two while retaining its 44,244-line ceiling. `store.py` remains at
 its prior exact ceiling. No ceiling increased.
 
 The OpenAPI fixture, schema-45 fingerprint, SQLite object inventory, and
-explicit `BEGIN IMMEDIATE` method inventory remain unchanged. Provenance
-alignment and the new ownership fixtures do not authorize a product, policy,
-route, schema, migration, version, runtime, or configuration change.
+explicit atomic-operation inventory remain unchanged. Provenance alignment and
+the new ownership fixtures do not authorize a product, policy, route, schema,
+migration, version, runtime, or configuration change.
+
+### D5-R0 persistence checkpoint
+
+The first persistence checkpoint introduces a single configured connection
+factory, an explicitly managed repository connection lifecycle, and the one
+reviewed immediate-transaction primitive. `Store.connect()` remains the raw
+connection compatibility API. Event persistence and base Agent rows now belong
+to `persistence.repositories`; `Store` continues to own Agent identity policy,
+Operator/fork hydration, cross-domain projections, and cross-table
+transactions.
+
+The Store contract additionally freezes all 363 method declarations and their
+signatures/decorators, connection PRAGMAs and row factory, the schema-45 object
+hash, and explicit repository delegation for logical atomic operations. D5-R0
+ratchets the Store ceiling to 14,488 lines and 60,556 AST nodes. Higher-risk
+runtime, Joplin, resource/KB/WorkerBee, and Operator campaign persistence is not
+authorized by this checkpoint.

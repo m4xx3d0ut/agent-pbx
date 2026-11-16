@@ -21,7 +21,7 @@ OpenAPI snapshot pins every public method, path, request and response schema,
 status declaration, and operation identifier. An AST inventory sets no-growth
 ceilings for `api.py`, `store.py`, and `tui.py`; extraction may reduce those
 modules but may not make them larger. A schema-45 SQLite fingerprint and the
-inventory of `Store` methods using `BEGIN IMMEDIATE` pin migration and explicit
+inventory of logical atomic `Store` operations pin migration and explicit
 write-serialization posture.
 
 Dependency direction is one way:
@@ -53,6 +53,13 @@ Boundary D0 extends that one-way rule to the planned package owners:
 The accepted `AgentPBXTUI` widget, tab, binding, action, and terminal-focus key
 ownership is captured through deterministic static inspection before those
 owners are extracted.
+
+At D5-R0, `Store.connect()` remains a raw-connection compatibility API while a
+shared factory supplies identical PRAGMAs and managed connection ownership to
+repositories. All atomic operations use one `BEGIN IMMEDIATE` primitive. A
+versioned manifest ties each logical Store operation either to that direct call
+or to a named repository delegation, preventing source movement from silently
+weakening writer serialization.
 
 ## Compatibility contract
 
