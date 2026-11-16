@@ -91,7 +91,7 @@ architecture review goals, not permission to expand another component:
 | Composition module | Accepted ceiling | D7 line target | Intended end state |
 |---|---:|---:|---|
 | `src/agent_pbx/api.py` | 1,171 | 1,100 | application composition and router registration |
-| `src/agent_pbx/store.py` | 14,026 | 12,000 | stable persistence facade over cohesive repositories |
+| `src/agent_pbx/store.py` | 13,384 | 12,000 | stable persistence facade over cohesive repositories |
 | `src/agent_pbx/tui.py` | 33,745 | 33,000 | Textual composition root and event routing |
 
 The checker requires every target to remain below its accepted ceiling. D7 may
@@ -106,7 +106,7 @@ it must not meet a number by creating circular or weakly owned modules.
   introduced by route extraction.
 - A route invokes the same application-service method before and after the
   move. It does not split one service transaction across controller code.
-- The 26 logical atomic Store operations remain the complete explicit
+- The 32 logical atomic Store operations remain the complete explicit
   write-serialization inventory. They invoke the single reviewed
   `begin_immediate` primitive directly or through an explicit repository
   delegation recorded in the compatibility fixture. Removing, adding, or
@@ -174,3 +174,30 @@ nodes while preserving all 363 Store declarations, schema version 45, the
 150-object schema fingerprint, and public API/TUI compatibility. Higher-risk
 Joplin, resource/KB/WorkerBee, and Operator campaign persistence remains out of
 scope.
+
+### D5-4 Joplin and editor persistence checkpoint
+
+Terminal-editor runtime identity/state, Joplin response logs, local edit and
+conflict state, and durable Joplin sync scheduling now belong to three cohesive
+repositories. `Store` preserves Agent-existence validation and all 363 public
+declarations. Joplin HTTP, E2EE, profile ownership, merge policy, terminal
+process management, authorization, and TUI behavior remain outside persistence.
+
+The atomic inventory grows from 26 to 32 reviewed operations. Active-log
+replacement, active-log stop, edit begin/reuse, conflict recording, sync
+enqueue/coalescing, and FIFO sync claim use the shared immediate-transaction
+primitive through 6 new repository delegates. Together with the 5 D5-3
+delegates, 11 operations delegate and 21 continue invoking the primitive in the
+facade. Concurrent equivalent edit starts now reuse one edit, equivalent sync
+enqueues coalesce into one job, and concurrent claims select distinct queued
+jobs.
+
+Cross-domain `dismiss_agent(delete_thread=True)` cleanup remains in `Store`
+because it deletes reports, commands, poll events, Joplin logs, and Joplin sync
+jobs in one Agent-lifecycle transaction. Moving only its Joplin statements
+would split ownership and weaken rollback behavior.
+
+D5-4 ratchets the Store ceiling to 13,384 lines, 536,375 bytes, and 56,049 AST
+nodes. Schema version 45, all 150 SQLite objects, the schema fingerprint, and
+public API/MCP/TUI compatibility remain unchanged. Resource, KB, WorkerBee, and
+Operator campaign persistence remain separately reviewed future boundaries.

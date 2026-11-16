@@ -59,14 +59,20 @@ def test_begin_immediate_uses_reviewed_atomic_operation_manifest(
         begin_immediate(connection)
         assert connection.in_transaction is True
 
-    assert len(ATOMIC_STORE_OPERATIONS) == 26
+    assert len(ATOMIC_STORE_OPERATIONS) == 32
     assert "append_event_if_changed" in ATOMIC_STORE_OPERATIONS
     assert "merge_agent_metadata" in ATOMIC_STORE_OPERATIONS
     assert ATOMIC_STORE_DELEGATES == {
         "acquire_tmux_writer_lease": "acquire_writer_lease",
         "append_event_if_changed": "append_if_changed",
+        "begin_joplin_edit": "begin_edit",
+        "claim_next_joplin_sync_job": "claim_next",
+        "enqueue_joplin_sync": "enqueue",
         "mark_model_elevation_revert_pending": "mark_revert_pending",
         "request_or_reuse_model_elevation": "request_or_reuse",
+        "record_joplin_conflict": "record_conflict",
+        "start_joplin_log": "start_log",
+        "stop_active_joplin_log": "stop_active_log",
         "update_model_elevation_transition": "update_transition",
     }
 

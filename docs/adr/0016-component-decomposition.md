@@ -67,6 +67,15 @@ runtime stop, migration restore, managed Agent creation, and terminal-editor
 state remain facade-owned until separately reviewed. This favors explicit
 transaction cohesion over reducing `store.py` by moving partially owned SQL.
 
+D5-4 moves terminal-editor records, Joplin response/edit/conflict state, and
+durable Joplin sync jobs behind three repositories. Six Joplin operations join
+the reviewed atomic inventory because they combine selection with replacement,
+creation, coalescing, or claim. The repositories use the shared immediate-write
+primitive, while the facade retains public signatures and cross-domain Agent
+cleanup. Joplin transport, encryption, profile coordination, merge policy, and
+terminal process lifecycle are not persistence responsibilities and remain in
+their existing services.
+
 ## Compatibility contract
 
 The owned route matrix and transaction rules are documented in
