@@ -257,3 +257,35 @@ fingerprint, OpenAPI inventory, TUI compatibility, provider contracts, and
 runtime behavior remain unchanged. Remote audit, WorkerBee controlled runs,
 Operator campaigns/handoffs/broker workflows, and Operator KB indexing remain
 separate future review boundaries.
+
+### D5-C persistence boundary closure
+
+D5 closes at commit `e856d3b6bb9f0817f72cb65e497274b3325e7c79`. From the
+D5-R0 ceiling through D5-6, the persistence facade fell from 14,488 to 12,961
+lines, a reduction of 1,527 lines (10.54 percent), while retaining all 363
+public Store declarations. Ten cohesive repositories now own Agent rows,
+events, model elevations, tmux runtimes and migrations, terminal editors,
+Joplin sessions, Joplin sync jobs, recoverable file trash, durable helpers, and
+dynamic resources.
+
+The final D5-6 candidate passed the complete suite with 1,968 tests passing and
+3 skipped. The component boundary checker, schema-45/150-object fingerprint,
+32-operation immediate-transaction inventory, canonical OpenAPI document, TUI
+compatibility inventory, and Git whitespace check also passed. One unrelated
+Git-broker timing test failed once during qualification, then passed in
+isolation, in 20 consecutive repetitions, and in the final complete suite.
+
+The accepted Store ceiling remains 12,961 lines and the D7 review target
+remains 12,000. The 961-line difference is accepted for D5 closure rather than
+moving authorization-, audit-, lifecycle-, campaign-, WorkerBee-control-, KB-,
+or destructive-prune transactions without their own state and transaction
+review. In particular, a small remote-client/audit extraction would not
+materially close the difference and would move security-sensitive ownership
+for numerical rather than architectural benefit.
+
+D5-C changes no source, schema, migration, fixture, route, feature gate,
+runtime, configuration, or durable value. Rollback remains an ordinary commit
+revert for any individual extraction. D7 begins with a review of all three
+composition roots and may accept the retained difference or authorize a new,
+separately scoped domain boundary; it must not reopen D5 merely to satisfy a
+line target.

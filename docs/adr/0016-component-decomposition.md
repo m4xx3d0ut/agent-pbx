@@ -76,6 +76,15 @@ cleanup. Joplin transport, encryption, profile coordination, merge policy, and
 terminal process lifecycle are not persistence responsibilities and remain in
 their existing services.
 
+D5 closes after the bounded-artifact and dynamic-resource repositories at a
+12,961-line Store facade. This is 961 lines above the D7 review target but below
+the hard accepted ceiling. The retained code is concentrated in Operator KB,
+broker, fork, handoff, campaign, WorkerBee-control, delegation, remote-audit,
+and destructive lifecycle transactions. Moving one of those domains requires a
+separate authorization and transaction review; D5 does not create a weak owner
+to meet a numerical goal. The D7 architecture review decides whether to accept
+the retained composition or authorize a new boundary.
+
 ## Compatibility contract
 
 The owned route matrix and transaction rules are documented in
