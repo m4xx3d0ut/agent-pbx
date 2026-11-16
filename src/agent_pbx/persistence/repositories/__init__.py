@@ -2,5 +2,6 @@
 
 from .agents import AgentRepository
 from .events import EventRepository
+from .model_elevations import ModelElevationRepository
 
-__all__ = ["AgentRepository", "EventRepository"]
+__all__ = ["AgentRepository", "EventRepository", "ModelElevationRepository"]

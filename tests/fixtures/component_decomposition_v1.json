@@ -94,7 +94,10 @@
   "schema": "agent-pbx.component-decomposition-contract/v1",
   "store_contract": {
     "atomic_operation_delegates": {
-      "append_event_if_changed": "append_if_changed"
+      "append_event_if_changed": "append_if_changed",
+      "mark_model_elevation_revert_pending": "mark_revert_pending",
+      "request_or_reuse_model_elevation": "request_or_reuse",
+      "update_model_elevation_transition": "update_transition"
     },
     "begin_immediate_methods": [
       "acquire_tmux_writer_lease",

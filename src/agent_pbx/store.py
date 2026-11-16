@@ -20,6 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .persistence import (
     AgentRepository,
     EventRepository,
+    ModelElevationRepository,
     SQLiteConnectionFactory,
     begin_immediate,
 )
@@ -34,12 +35,6 @@ USAGE_WARN_TOKENS_PER_HOUR = 10_000
 POLL_WARN_PER_HOUR = 24
 STALE_WORKING_SECONDS = 600
 STALE_WORKING_STATUSES = {"running", "working"}
-MODEL_ELEVATION_OPEN_STATUSES = {
-    "pending",
-    "approved",
-    "active",
-    "revert_pending",
-}
 OPERATOR_AGENT_TYPE = "operator"
 OPERATOR_DELEGATION_LEASE_STATUSES = {
     "pending",
@@ -366,6 +361,7 @@ class Store:
         self._connections = SQLiteConnectionFactory(self.path)
         self._agents = AgentRepository(self._connections)
         self._events = EventRepository(self._connections)
+        self._model_elevations = ModelElevationRepository(self._connections)
 
     def connect(self) -> sqlite3.Connection:
         return self._connections.connect()
@@ -2552,62 +2548,15 @@ class Store:
         scope: str,
         prior_profile: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
-        """Create one elevation lease or return the existing open lease.
-
-        ``BEGIN IMMEDIATE`` serializes the read-and-insert decision across API
-        workers. This is deliberately enforced in the store as well as the TUI:
-        repeated button presses, palette dispatches, and concurrent clients must
-        not create independent approvals for the same runtime.
-        """
-
         if self.get_agent(agent_id) is None:
             raise ValueError(f"agent {agent_id!r} is not registered")
-        self.expire_model_elevations()
-        lease_id = str(uuid.uuid4())
-        requested_at = now_ts()
-        with self.connect() as conn:
-            begin_immediate(conn)
-            existing = conn.execute(
-                """
-                SELECT * FROM model_elevation_leases
-                WHERE agent_id = ?
-                  AND status IN ('pending', 'approved', 'active', 'revert_pending')
-                ORDER BY requested_at DESC
-                LIMIT 1
-                """,
-                (agent_id,),
-            ).fetchone()
-            if existing is not None:
-                lease = self._model_elevation_from_row(existing)
-                if str(lease.get("requested_profile") or "") != requested_profile:
-                    raise ValueError(
-                        f"agent {agent_id!r} already has an open model elevation "
-                        f"for {lease.get('requested_profile')!r}"
-                    )
-                return lease, False
-            conn.execute(
-                """
-                INSERT INTO model_elevation_leases(
-                    lease_id, agent_id, requested_profile, prior_profile,
-                    justification, scope, status, requested_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-                """,
-                (
-                    lease_id,
-                    agent_id,
-                    requested_profile,
-                    prior_profile,
-                    justification,
-                    scope,
-                    requested_at,
-                ),
-            )
-            created = conn.execute(
-                "SELECT * FROM model_elevation_leases WHERE lease_id = ?",
-                (lease_id,),
-            ).fetchone()
-            assert created is not None
-            return self._model_elevation_from_row(created), True
+        return self._model_elevations.request_or_reuse(
+            agent_id=agent_id,
+            requested_profile=requested_profile,
+            justification=justification,
+            scope=scope,
+            prior_profile=prior_profile,
+        )
 
     def decide_model_elevation(
         self,
@@ -2617,42 +2566,12 @@ class Store:
         approved_by: str,
         duration_seconds: float,
     ) -> dict[str, Any]:
-        lease = self.get_model_elevation(lease_id)
-        if lease is None:
-            raise ValueError("model elevation lease not found")
-        if (
-            approved
-            and lease["status"] in {"approved", "active", "revert_pending"}
-            and str(lease.get("approved_by") or "") == approved_by
-        ):
-            return lease
-        if not approved and lease["status"] == "rejected":
-            return lease
-        if lease["status"] != "pending":
-            raise ValueError("model elevation lease is no longer pending")
-        decided_at = now_ts()
-        status_value = "approved" if approved else "rejected"
-        expires_at = decided_at + max(1.0, duration_seconds) if approved else None
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE model_elevation_leases
-                SET status = ?, approved_at = ?, approved_by = ?,
-                    expires_at = ?, finished_at = ?
-                WHERE lease_id = ? AND status = 'pending'
-                """,
-                (
-                    status_value,
-                    decided_at,
-                    approved_by,
-                    expires_at,
-                    None if approved else decided_at,
-                    lease_id,
-                ),
-            )
-        decided = self.get_model_elevation(lease_id)
-        assert decided is not None
-        return decided
+        return self._model_elevations.decide(
+            lease_id,
+            approved=approved,
+            approved_by=approved_by,
+            duration_seconds=duration_seconds,
+        )
 
     def activate_model_elevation(
         self,
@@ -2660,35 +2579,7 @@ class Store:
         *,
         transition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        lease = self.get_model_elevation(lease_id)
-        if lease is None:
-            raise ValueError("model elevation lease not found")
-        current = now_ts()
-        if lease["status"] == "active":
-            if lease.get("expires_at") is not None and float(lease["expires_at"]) <= current:
-                self.expire_model_elevations(current_time=current)
-                raise ValueError("model elevation lease has expired and awaits reversion")
-            return self.update_model_elevation_transition(
-                lease_id,
-                transition=transition,
-            )
-        if lease["status"] != "approved":
-            raise ValueError("model elevation lease is not approved")
-        if lease.get("expires_at") is not None and float(lease["expires_at"]) <= current:
-            self.finish_model_elevation(lease_id, status="expired")
-            raise ValueError("model elevation lease has expired")
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE model_elevation_leases
-                SET status = 'active', activated_at = ?, transition_json = ?
-                WHERE lease_id = ? AND status = 'approved'
-                """,
-                (current, json.dumps(transition or {}), lease_id),
-            )
-        activated = self.get_model_elevation(lease_id)
-        assert activated is not None
-        return activated
+        return self._model_elevations.activate(lease_id, transition=transition)
 
     def finish_model_elevation(
         self,
@@ -2697,25 +2588,11 @@ class Store:
         status: str,
         transition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if status not in {"expired", "failed", "reverted"}:
-            raise ValueError(f"invalid terminal elevation status {status!r}")
-        lease = self.get_model_elevation(lease_id)
-        if lease is None:
-            raise ValueError("model elevation lease not found")
-        merged = dict(lease.get("transition") or {})
-        merged.update(transition or {})
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE model_elevation_leases
-                SET status = ?, finished_at = ?, transition_json = ?
-                WHERE lease_id = ?
-                """,
-                (status, now_ts(), json.dumps(merged), lease_id),
-            )
-        finished = self.get_model_elevation(lease_id)
-        assert finished is not None
-        return finished
+        return self._model_elevations.finish(
+            lease_id,
+            status=status,
+            transition=transition,
+        )
 
     def update_model_elevation_transition(
         self,
@@ -2723,33 +2600,10 @@ class Store:
         *,
         transition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        with self.connect() as conn:
-            begin_immediate(conn)
-            row = conn.execute(
-                "SELECT * FROM model_elevation_leases WHERE lease_id = ?",
-                (lease_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("model elevation lease not found")
-            lease = self._model_elevation_from_row(row)
-            if str(lease.get("status") or "") not in MODEL_ELEVATION_OPEN_STATUSES:
-                raise ValueError("model elevation lease is already terminal")
-            merged = dict(lease.get("transition") or {})
-            merged.update(transition or {})
-            conn.execute(
-                """
-                UPDATE model_elevation_leases
-                SET transition_json = ?
-                WHERE lease_id = ?
-                """,
-                (json.dumps(merged), lease_id),
-            )
-            updated = conn.execute(
-                "SELECT * FROM model_elevation_leases WHERE lease_id = ?",
-                (lease_id,),
-            ).fetchone()
-            assert updated is not None
-            return self._model_elevation_from_row(updated)
+        return self._model_elevations.update_transition(
+            lease_id,
+            transition=transition,
+        )
 
     def mark_model_elevation_revert_pending(
         self,
@@ -2758,97 +2612,17 @@ class Store:
         reason: str,
         transition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        with self.connect() as conn:
-            begin_immediate(conn)
-            row = conn.execute(
-                "SELECT * FROM model_elevation_leases WHERE lease_id = ?",
-                (lease_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("model elevation lease not found")
-            lease = self._model_elevation_from_row(row)
-            status = str(lease.get("status") or "")
-            if status not in {"active", "revert_pending"}:
-                raise ValueError("only an active model elevation can request reversion")
-            merged = dict(lease.get("transition") or {})
-            merged.update(transition or {})
-            if status == "active":
-                merged.update(
-                    {
-                        "revert_reason": reason,
-                        "revert_requested_at": now_ts(),
-                    }
-                )
-            cursor = conn.execute(
-                """
-                UPDATE model_elevation_leases
-                SET status = 'revert_pending', transition_json = ?
-                WHERE lease_id = ? AND status IN ('active', 'revert_pending')
-                """,
-                (json.dumps(merged), lease_id),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("model elevation changed before reversion was recorded")
-            updated = conn.execute(
-                "SELECT * FROM model_elevation_leases WHERE lease_id = ?",
-                (lease_id,),
-            ).fetchone()
-            assert updated is not None
-            return self._model_elevation_from_row(updated)
+        return self._model_elevations.mark_revert_pending(
+            lease_id,
+            reason=reason,
+            transition=transition,
+        )
 
     def expire_model_elevations(self, *, current_time: float | None = None) -> int:
-        current = now_ts() if current_time is None else float(current_time)
-        with self.connect() as conn:
-            approved = conn.execute(
-                """
-                UPDATE model_elevation_leases
-                SET status = 'expired', finished_at = ?
-                WHERE status = 'approved'
-                  AND expires_at IS NOT NULL AND expires_at <= ?
-                """,
-                (current, current),
-            )
-            active_rows = conn.execute(
-                """
-                SELECT lease_id, transition_json
-                FROM model_elevation_leases
-                WHERE status = 'active'
-                  AND expires_at IS NOT NULL AND expires_at <= ?
-                """,
-                (current,),
-            ).fetchall()
-            active_count = 0
-            for row in active_rows:
-                try:
-                    transition = json.loads(row["transition_json"] or "{}")
-                except json.JSONDecodeError:
-                    transition = {}
-                if not isinstance(transition, dict):
-                    transition = {}
-                transition.update(
-                    {
-                        "revert_reason": "lease_expired",
-                        "revert_requested_at": current,
-                    }
-                )
-                cursor = conn.execute(
-                    """
-                    UPDATE model_elevation_leases
-                    SET status = 'revert_pending', transition_json = ?
-                    WHERE lease_id = ? AND status = 'active'
-                    """,
-                    (json.dumps(transition), str(row["lease_id"])),
-                )
-                active_count += int(cursor.rowcount)
-        return int(approved.rowcount) + active_count
+        return self._model_elevations.expire(current_time=current_time)
 
     def get_model_elevation(self, lease_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM model_elevation_leases WHERE lease_id = ?",
-                (lease_id,),
-            ).fetchone()
-        return self._model_elevation_from_row(row) if row is not None else None
+        return self._model_elevations.get(lease_id)
 
     def list_model_elevations(
         self,
@@ -2856,24 +2630,7 @@ class Store:
         agent_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            if agent_id:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM model_elevation_leases
-                    WHERE agent_id = ? ORDER BY requested_at DESC LIMIT ?
-                    """,
-                    (agent_id, max(1, min(500, limit))),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM model_elevation_leases
-                    ORDER BY requested_at DESC LIMIT ?
-                    """,
-                    (max(1, min(500, limit)),),
-                ).fetchall()
-        return [self._model_elevation_from_row(row) for row in rows]
+        return self._model_elevations.list(agent_id=agent_id, limit=limit)
 
     def upsert_terminal_editor_runtime(
         self,
@@ -14372,19 +14129,7 @@ class Store:
 
     @staticmethod
     def _model_elevation_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        data = dict(row)
-        raw_transition = data.pop("transition_json", "{}")
-        try:
-            transition = json.loads(raw_transition)
-        except json.JSONDecodeError:
-            transition = {}
-        data["transition"] = transition if isinstance(transition, dict) else {}
-        expires_at = data.get("expires_at")
-        data["expired"] = bool(
-            data.get("status") == "expired"
-            or (expires_at is not None and float(expires_at) <= now_ts())
-        )
-        return data
+        return ModelElevationRepository.from_row(row)
 
     @staticmethod
     def _tmux_runtime_mapping_from_row(row: sqlite3.Row) -> dict[str, Any]:
