@@ -7874,80 +7874,31 @@ class Store:
         restart_required: bool,
         expires_at: float,
     ) -> tuple[dict[str, Any], bool]:
-        current = now_ts()
-        open_states = (
-            "pending_approval",
-            "approved",
-            "leased",
-            "recovery_required",
+        request, created = self._dynamic_resources.request_or_reuse(
+            request_id=request_id,
+            request_sha256=request_sha256,
+            resource_class=resource_class,
+            requester_agent_id=requester_agent_id,
+            operator_agent_id=operator_agent_id,
+            campaign_id=campaign_id,
+            handoff_id=handoff_id,
+            workspace_set_digest=workspace_set_digest,
+            workerbee_binding_id=workerbee_binding_id,
+            workerbee_backend_generation=workerbee_backend_generation,
+            provider_capability_sha256=provider_capability_sha256,
+            spec=spec,
+            provider=provider,
+            ttl_seconds=ttl_seconds,
+            quota=quota,
+            max_uses=max_uses,
+            status=status,
+            approval_mode=approval_mode,
+            delegation_lease_id=delegation_lease_id,
+            restart_required=restart_required,
+            expires_at=expires_at,
         )
-        with self.connect() as conn:
-            begin_immediate(conn)
-            row = conn.execute(
-                """
-                SELECT * FROM dynamic_resource_requests
-                WHERE request_sha256 = ?
-                  AND status IN (?, ?, ?, ?)
-                ORDER BY created_at ASC
-                LIMIT 1
-                """,
-                (request_sha256, *open_states),
-            ).fetchone()
-            if row is not None:
-                return self._dynamic_resource_from_row(row), False
-            conn.execute(
-                """
-                INSERT INTO dynamic_resource_requests(
-                    request_id, request_sha256, resource_class,
-                    requester_agent_id, operator_agent_id, campaign_id,
-                    handoff_id, workspace_set_digest, workerbee_binding_id,
-                    workerbee_backend_generation, provider_capability_sha256,
-                    spec_json, provider,
-                    ttl_seconds, quota, max_uses, use_count, status,
-                    approval_mode, approval_json, delegation_lease_id,
-                    provider_receipt_json, cleanup_receipt_json,
-                    restart_required, expires_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
-                          ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?)
-                """,
-                (
-                    request_id,
-                    request_sha256,
-                    resource_class,
-                    requester_agent_id,
-                    operator_agent_id,
-                    campaign_id,
-                    handoff_id,
-                    workspace_set_digest,
-                    workerbee_binding_id,
-                    workerbee_backend_generation,
-                    provider_capability_sha256,
-                    json.dumps(spec, sort_keys=True),
-                    provider,
-                    int(ttl_seconds),
-                    int(quota),
-                    int(max_uses),
-                    status,
-                    approval_mode,
-                    delegation_lease_id,
-                    1 if restart_required else 0,
-                    float(expires_at),
-                    current,
-                    current,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO dynamic_resource_events(
-                    request_id, event_type, operator_agent_id,
-                    metadata_json, created_at
-                ) VALUES (?, 'requested', ?, '{}', ?)
-                """,
-                (request_id, operator_agent_id, current),
-            )
-        request = self.get_dynamic_resource_request(request_id)
-        if request is None:
-            raise RuntimeError("dynamic resource request insert failed")
+        if not created:
+            return request, False
         self.append_event(
             "dynamic_resource_requested",
             {
@@ -7961,7 +7912,7 @@ class Store:
             },
             operator_agent_id,
         )
-        return request, True
+        return request, created
 
     def get_dynamic_resource_request(self, request_id: str) -> dict[str, Any] | None:
         return self._dynamic_resources.get(request_id)
@@ -8021,44 +7972,10 @@ class Store:
         *,
         requester_agent_id: str,
     ) -> dict[str, Any]:
-        current = now_ts()
-        with self.connect() as conn:
-            begin_immediate(conn)
-            row = conn.execute(
-                "SELECT * FROM dynamic_resource_requests WHERE request_id = ?",
-                (request_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("dynamic resource request not found")
-            request = self._dynamic_resource_from_row(row)
-            if request["status"] != "leased" or request["expires_at"] <= current:
-                raise ValueError("dynamic resource lease is not active")
-            if request["requester_agent_id"] != requester_agent_id:
-                raise ValueError("dynamic resource requester identity mismatch")
-            next_count = int(request["use_count"]) + 1
-            if next_count > int(request["max_uses"]):
-                raise ValueError("dynamic resource use quota is exhausted")
-            cursor = conn.execute(
-                """
-                UPDATE dynamic_resource_requests
-                SET use_count = ?, updated_at = ?
-                WHERE request_id = ? AND status = 'leased' AND use_count = ?
-                """,
-                (next_count, current, request_id, request["use_count"]),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("dynamic resource use raced")
-            conn.execute(
-                """
-                INSERT INTO dynamic_resource_events(
-                    request_id, event_type, operator_agent_id,
-                    metadata_json, created_at
-                ) VALUES (?, 'used', NULL, ?, ?)
-                """,
-                (request_id, json.dumps({"use_count": next_count}), current),
-            )
-        updated = self.get_dynamic_resource_request(request_id)
-        assert updated is not None
+        updated, next_count = self._dynamic_resources.consume(
+            request_id,
+            requester_agent_id=requester_agent_id,
+        )
         self.append_event(
             "dynamic_resource_used",
             {

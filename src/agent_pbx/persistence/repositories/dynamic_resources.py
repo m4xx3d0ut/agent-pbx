@@ -6,6 +6,7 @@ from typing import Any
 
 from ...security import now_ts
 from ..connection import SQLiteConnectionFactory
+from ..transactions import begin_immediate
 
 
 class DynamicResourceRepository:
@@ -13,6 +14,107 @@ class DynamicResourceRepository:
 
     def __init__(self, connections: SQLiteConnectionFactory) -> None:
         self._connections = connections
+
+    def request_or_reuse(
+        self,
+        *,
+        request_id: str,
+        request_sha256: str,
+        resource_class: str,
+        requester_agent_id: str,
+        operator_agent_id: str,
+        campaign_id: str | None,
+        handoff_id: str | None,
+        workspace_set_digest: str,
+        workerbee_binding_id: str | None,
+        workerbee_backend_generation: str | None,
+        provider_capability_sha256: str | None,
+        spec: dict[str, Any],
+        provider: str,
+        ttl_seconds: int,
+        quota: int,
+        max_uses: int,
+        status: str,
+        approval_mode: str,
+        delegation_lease_id: str | None,
+        restart_required: bool,
+        expires_at: float,
+    ) -> tuple[dict[str, Any], bool]:
+        current = now_ts()
+        open_states = (
+            "pending_approval",
+            "approved",
+            "leased",
+            "recovery_required",
+        )
+        with self._connections.managed() as connection:
+            begin_immediate(connection)
+            row = connection.execute(
+                """
+                SELECT * FROM dynamic_resource_requests
+                WHERE request_sha256 = ?
+                  AND status IN (?, ?, ?, ?)
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (request_sha256, *open_states),
+            ).fetchone()
+            if row is not None:
+                return self.from_row(row), False
+            connection.execute(
+                """
+                INSERT INTO dynamic_resource_requests(
+                    request_id, request_sha256, resource_class,
+                    requester_agent_id, operator_agent_id, campaign_id,
+                    handoff_id, workspace_set_digest, workerbee_binding_id,
+                    workerbee_backend_generation, provider_capability_sha256,
+                    spec_json, provider,
+                    ttl_seconds, quota, max_uses, use_count, status,
+                    approval_mode, approval_json, delegation_lease_id,
+                    provider_receipt_json, cleanup_receipt_json,
+                    restart_required, expires_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                          ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    request_sha256,
+                    resource_class,
+                    requester_agent_id,
+                    operator_agent_id,
+                    campaign_id,
+                    handoff_id,
+                    workspace_set_digest,
+                    workerbee_binding_id,
+                    workerbee_backend_generation,
+                    provider_capability_sha256,
+                    json.dumps(spec, sort_keys=True),
+                    provider,
+                    int(ttl_seconds),
+                    int(quota),
+                    int(max_uses),
+                    status,
+                    approval_mode,
+                    delegation_lease_id,
+                    1 if restart_required else 0,
+                    float(expires_at),
+                    current,
+                    current,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO dynamic_resource_events(
+                    request_id, event_type, operator_agent_id,
+                    metadata_json, created_at
+                ) VALUES (?, 'requested', ?, '{}', ?)
+                """,
+                (request_id, operator_agent_id, current),
+            )
+        request = self.get(request_id)
+        if request is None:
+            raise RuntimeError("dynamic resource request insert failed")
+        return request, True
 
     def get(self, request_id: str) -> dict[str, Any] | None:
         with self._connections.managed() as connection:
@@ -110,6 +212,52 @@ class DynamicResourceRepository:
         if request is None:
             raise RuntimeError("dynamic resource request disappeared")
         return request
+
+    def consume(
+        self,
+        request_id: str,
+        *,
+        requester_agent_id: str,
+    ) -> tuple[dict[str, Any], int]:
+        current = now_ts()
+        with self._connections.managed() as connection:
+            begin_immediate(connection)
+            row = connection.execute(
+                "SELECT * FROM dynamic_resource_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("dynamic resource request not found")
+            request = self.from_row(row)
+            if request["status"] != "leased" or request["expires_at"] <= current:
+                raise ValueError("dynamic resource lease is not active")
+            if request["requester_agent_id"] != requester_agent_id:
+                raise ValueError("dynamic resource requester identity mismatch")
+            next_count = int(request["use_count"]) + 1
+            if next_count > int(request["max_uses"]):
+                raise ValueError("dynamic resource use quota is exhausted")
+            cursor = connection.execute(
+                """
+                UPDATE dynamic_resource_requests
+                SET use_count = ?, updated_at = ?
+                WHERE request_id = ? AND status = 'leased' AND use_count = ?
+                """,
+                (next_count, current, request_id, request["use_count"]),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("dynamic resource use raced")
+            connection.execute(
+                """
+                INSERT INTO dynamic_resource_events(
+                    request_id, event_type, operator_agent_id,
+                    metadata_json, created_at
+                ) VALUES (?, 'used', NULL, ?, ?)
+                """,
+                (request_id, json.dumps({"use_count": next_count}), current),
+            )
+        updated = self.get(request_id)
+        assert updated is not None
+        return updated, next_count
 
     def list_events(
         self,
