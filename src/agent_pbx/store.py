@@ -23,6 +23,7 @@ from .persistence import (
     ModelElevationRepository,
     RuntimeRepository,
     SQLiteConnectionFactory,
+    TerminalEditorRepository,
     begin_immediate,
 )
 from .security import hash_secret, now_ts
@@ -364,6 +365,7 @@ class Store:
         self._events = EventRepository(self._connections)
         self._model_elevations = ModelElevationRepository(self._connections)
         self._runtime = RuntimeRepository(self._connections)
+        self._terminal_editors = TerminalEditorRepository(self._connections)
 
     def connect(self) -> sqlite3.Connection:
         return self._connections.connect()
@@ -2645,90 +2647,18 @@ class Store:
         agent_id = str(runtime.get("agent_id") or "").strip()
         if not agent_id or self.get_agent(agent_id) is None:
             raise ValueError(f"agent {agent_id!r} is not registered")
-        runtime_id = str(runtime.get("runtime_id") or "").strip()
-        if not runtime_id:
-            raise ValueError("terminal editor runtime_id is required")
-        current = now_ts()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO terminal_editor_runtimes(
-                    runtime_id, agent_id, project, access_mode, profile_id,
-                    path, root, socket_path, rpc_socket_path, rpc_enabled,
-                    server_id, session_name, window_id, pane_id, pane_pid,
-                    process_start_ticks, tmux_bin, state, last_error,
-                    metadata_json, created_at, updated_at, last_verified_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(agent_id) DO UPDATE SET
-                    runtime_id = excluded.runtime_id,
-                    project = excluded.project,
-                    access_mode = excluded.access_mode,
-                    profile_id = excluded.profile_id,
-                    path = excluded.path,
-                    root = excluded.root,
-                    socket_path = excluded.socket_path,
-                    rpc_socket_path = excluded.rpc_socket_path,
-                    rpc_enabled = excluded.rpc_enabled,
-                    server_id = excluded.server_id,
-                    session_name = excluded.session_name,
-                    window_id = excluded.window_id,
-                    pane_id = excluded.pane_id,
-                    pane_pid = excluded.pane_pid,
-                    process_start_ticks = excluded.process_start_ticks,
-                    tmux_bin = excluded.tmux_bin,
-                    state = excluded.state,
-                    last_error = excluded.last_error,
-                    metadata_json = excluded.metadata_json,
-                    updated_at = excluded.updated_at,
-                    last_verified_at = COALESCE(
-                        excluded.last_verified_at,
-                        terminal_editor_runtimes.last_verified_at
-                    )
-                """,
-                (
-                    runtime_id,
-                    agent_id,
-                    str(runtime.get("project") or ""),
-                    str(runtime.get("access_mode") or "edit"),
-                    str(runtime.get("profile_id") or ""),
-                    str(runtime.get("path") or ""),
-                    str(runtime.get("root") or ""),
-                    str(runtime.get("socket_path") or ""),
-                    str(runtime.get("rpc_socket_path") or "") or None,
-                    int(bool(runtime.get("rpc_enabled"))),
-                    str(runtime.get("server_id") or ""),
-                    str(runtime.get("session_name") or ""),
-                    str(runtime.get("window_id") or "") or None,
-                    str(runtime.get("pane_id") or ""),
-                    runtime.get("pane_pid"),
-                    runtime.get("process_start_ticks"),
-                    str(runtime.get("tmux_bin") or ""),
-                    str(runtime.get("state") or "ready"),
-                    last_error,
-                    json.dumps(metadata or {}),
-                    current,
-                    current,
-                    current if verified else None,
-                ),
-            )
-        stored = self.get_terminal_editor_runtime(agent_id)
-        assert stored is not None
-        return stored
+        return self._terminal_editors.upsert(
+            runtime,
+            last_error=last_error,
+            metadata=metadata,
+            verified=verified,
+        )
 
     def get_terminal_editor_runtime(self, agent_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM terminal_editor_runtimes WHERE agent_id = ?",
-                (agent_id,),
-            ).fetchone()
-        return self._terminal_editor_runtime_from_row(row) if row is not None else None
+        return self._terminal_editors.get(agent_id)
 
     def list_terminal_editor_runtimes(self) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM terminal_editor_runtimes ORDER BY updated_at DESC"
-            ).fetchall()
-        return [self._terminal_editor_runtime_from_row(row) for row in rows]
+        return self._terminal_editors.list()
 
     def update_terminal_editor_runtime_state(
         self,
@@ -2739,37 +2669,16 @@ class Store:
         verified: bool = False,
         path: str | None = None,
     ) -> dict[str, Any] | None:
-        current = now_ts()
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE terminal_editor_runtimes
-                SET state = ?, last_error = ?, updated_at = ?,
-                    last_verified_at = CASE WHEN ? THEN ? ELSE last_verified_at END,
-                    path = COALESCE(?, path)
-                WHERE agent_id = ?
-                """,
-                (
-                    str(state),
-                    last_error,
-                    current,
-                    int(verified),
-                    current,
-                    path,
-                    agent_id,
-                ),
-            )
-        if cursor.rowcount == 0:
-            return None
-        return self.get_terminal_editor_runtime(agent_id)
+        return self._terminal_editors.update_state(
+            agent_id,
+            state=state,
+            last_error=last_error,
+            verified=verified,
+            path=path,
+        )
 
     def delete_terminal_editor_runtime(self, agent_id: str) -> bool:
-        with self.connect() as conn:
-            cursor = conn.execute(
-                "DELETE FROM terminal_editor_runtimes WHERE agent_id = ?",
-                (agent_id,),
-            )
-        return cursor.rowcount > 0
+        return self._terminal_editors.delete(agent_id)
 
     def upsert_tmux_runtime_mapping(
         self,
@@ -13955,15 +13864,7 @@ class Store:
 
     @staticmethod
     def _terminal_editor_runtime_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        data = dict(row)
-        raw_metadata = data.pop("metadata_json", "{}")
-        try:
-            metadata = json.loads(raw_metadata)
-        except json.JSONDecodeError:
-            metadata = {}
-        data["metadata"] = metadata if isinstance(metadata, dict) else {}
-        data["rpc_enabled"] = bool(data.get("rpc_enabled"))
-        return data
+        return TerminalEditorRepository.from_row(row)
 
     @staticmethod
     def _runtime_migration_batch_from_row(row: sqlite3.Row) -> dict[str, Any]:

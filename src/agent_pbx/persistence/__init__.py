@@ -6,6 +6,7 @@ from .repositories import (
     EventRepository,
     ModelElevationRepository,
     RuntimeRepository,
+    TerminalEditorRepository,
 )
 from .transactions import begin_immediate
 
@@ -14,6 +15,7 @@ __all__ = [
     "EventRepository",
     "ModelElevationRepository",
     "RuntimeRepository",
+    "TerminalEditorRepository",
     "SQLiteConnectionFactory",
     "begin_immediate",
 ]
