@@ -290,12 +290,19 @@ lookups remain late-bound through `app.state`, preserving the existing test and
 integration replacement seam. `api.py` is ratcheted from 1,171 to 792 lines,
 and the new application service has its own exact no-growth ceiling.
 
-### D8-S — Schema bootstrap and migration owner
+### D8-S — Schema bootstrap and migration owner — implemented
 
 - characterize empty and legacy initialization;
 - extract schema mechanics behind `Store.init()`;
 - retain all compatibility imports and migration behavior;
 - ratchet `store.py` and the new schema module.
+
+Schema DDL and upgrade orchestration now live in
+`persistence/schema.py` behind the unchanged `Store.init()` compatibility
+method. All 363 reviewed Store declarations remain present. Empty bootstrap,
+idempotent re-initialization, and legacy markers 6, 19, 20, 28, 30, 39, 43,
+44, and 45 are characterized. `store.py` is ratcheted from 12,961 to 11,331
+lines, and the schema owner has an exact no-growth ceiling.
 
 ### D8-T — TUI command catalog and button router
 

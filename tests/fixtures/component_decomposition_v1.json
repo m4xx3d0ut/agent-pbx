@@ -9,12 +9,12 @@
       "lines": 792
     },
     "src/agent_pbx/store.py": {
-      "ast_nodes": 53867,
-      "bytes": 519055,
+      "ast_nodes": 53271,
+      "bytes": 440796,
       "classes": 2,
       "functions": 373,
-      "imports": 17,
-      "lines": 12961
+      "imports": 18,
+      "lines": 11331
     },
     "src/agent_pbx/tui.py": {
       "ast_nodes": 177107,
@@ -42,6 +42,14 @@
       "functions": 40,
       "imports": 17,
       "lines": 1339
+    },
+    "src/agent_pbx/persistence/schema.py": {
+      "ast_nodes": 722,
+      "bytes": 73231,
+      "classes": 1,
+      "functions": 8,
+      "imports": 3,
+      "lines": 1671
     },
     "src/agent_pbx/workerbee_application.py": {
       "ast_nodes": 2378,
@@ -141,7 +149,7 @@
       "owner": "FastAPI composition root"
     },
     "src/agent_pbx/store.py": {
-      "lines": 12000,
+      "lines": 10500,
       "owner": "persistence compatibility facade"
     },
     "src/agent_pbx/tui.py": {

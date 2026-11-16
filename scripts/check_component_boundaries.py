@@ -35,6 +35,7 @@ AST_TARGETS = (
 EXTRACTED_MODULE_CEILING_TARGETS = (
     "src/agent_pbx/api_routes/operator.py",
     "src/agent_pbx/api_routes/workerbee.py",
+    "src/agent_pbx/persistence/schema.py",
     "src/agent_pbx/workerbee_application.py",
     "src/agent_pbx/ui/controllers/github.py",
     "src/agent_pbx/ui/controllers/joplin.py",
@@ -48,7 +49,7 @@ REVIEW_TARGETS = {
         "owner": "FastAPI composition root",
     },
     "src/agent_pbx/store.py": {
-        "lines": 12000,
+        "lines": 10500,
         "owner": "persistence compatibility facade",
     },
     "src/agent_pbx/tui.py": {

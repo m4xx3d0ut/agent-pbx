@@ -343,3 +343,18 @@ after application construction. Public routes, response bodies, error codes,
 gateway reconciliation, and policy-digest enforcement remain characterized by
 the existing WorkerBee API tests. Structural ceilings now pin `api.py` at its
 smaller post-extraction size and cover the new application owner explicitly.
+
+### D8-S schema bootstrap owner
+
+D8-S moves the DDL and ordered schema-upgrade orchestration into
+`persistence/schema.py`. `Store.init()` remains the public compatibility entry
+point and delegates through a typed `SchemaStore` protocol; the pre-existing
+Store helpers for version reads, column additions, report/agent backfills, FTS
+rebuilds, and semantic-chunk rebuilds retain their names and signatures.
+
+Characterization covers clean bootstrap, repeat initialization, and reviewed
+legacy schema markers 6, 19, 20, 28, 30, 39, 43, 44, and 45. Each path reaches
+schema version 45 without schema-object or seeded-Agent drift. The canonical
+schema hash, 150-object inventory, 363-method Store surface, and 32 atomic
+transaction owners remain frozen. Structural ceilings now pin the smaller
+`store.py` facade and the extracted schema owner.
