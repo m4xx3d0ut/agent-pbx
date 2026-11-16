@@ -12,6 +12,7 @@ ATOMIC_STORE_OPERATIONS: Final[frozenset[str]] = frozenset(
         "cancel_operator_broker_request",
         "cancel_operator_handoff",
         "claim_operator_broker_request",
+        "begin_joplin_edit",
         "claim_workerbee_controlled_run_request",
         "consume_dynamic_resource_request",
         "consume_operator_delegation_lease",
@@ -28,6 +29,9 @@ ATOMIC_STORE_OPERATIONS: Final[frozenset[str]] = frozenset(
         "reconcile_operator_terminal_report",
         "request_or_reuse_dynamic_resource",
         "request_or_reuse_model_elevation",
+        "record_joplin_conflict",
+        "start_joplin_log",
+        "stop_active_joplin_log",
         "transition_operator_broker_request",
         "transition_workerbee_controlled_run_request",
         "update_model_elevation_transition",
@@ -41,8 +45,12 @@ ATOMIC_STORE_OPERATIONS: Final[frozenset[str]] = frozenset(
 ATOMIC_STORE_DELEGATES: Final[dict[str, str]] = {
     "acquire_tmux_writer_lease": "acquire_writer_lease",
     "append_event_if_changed": "append_if_changed",
+    "begin_joplin_edit": "begin_edit",
     "mark_model_elevation_revert_pending": "mark_revert_pending",
     "request_or_reuse_model_elevation": "request_or_reuse",
+    "record_joplin_conflict": "record_conflict",
+    "start_joplin_log": "start_log",
+    "stop_active_joplin_log": "stop_active_log",
     "update_model_elevation_transition": "update_transition",
 }
 

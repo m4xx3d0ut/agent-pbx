@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -131,6 +133,35 @@ def test_joplin_log_replaces_active_log_and_survives_restart(tmp_path: Path) -> 
     assert reopened.get_joplin_log(str(second["log_id"])) == stopped
 
 
+def test_concurrent_joplin_log_start_leaves_one_active_log(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    database = store.path
+    barrier = threading.Barrier(2)
+
+    def start_log(worker: int) -> str:
+        concurrent = Store(database)
+        barrier.wait()
+        log = concurrent.start_joplin_log(
+            agent_id="agent-1",
+            project="demo",
+            session_id=f"session-{worker}",
+            note_id=f"note-{worker}",
+            title=f"Title {worker}",
+        )
+        return str(log["log_id"])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        log_ids = list(pool.map(start_log, (1, 2)))
+
+    assert len(set(log_ids)) == 2
+    with store.connect() as connection:
+        active_count = connection.execute(
+            "SELECT COUNT(*) FROM joplin_logs WHERE agent_id = ? AND active = 1",
+            ("agent-1",),
+        ).fetchone()[0]
+    assert active_count == 1
+
+
 def test_joplin_edit_reuse_conflict_and_rebase_contract(tmp_path: Path) -> None:
     store = _store(tmp_path)
     first = store.begin_joplin_edit(
@@ -191,6 +222,29 @@ def test_joplin_edit_reuse_conflict_and_rebase_contract(tmp_path: Path) -> None:
     assert rebased["status"] == "editing"
     assert rebased["base_revision"] == "rev-2"
     assert rebased["draft_body"] == "Merged body"
+
+
+def test_concurrent_joplin_edit_begin_reuses_single_edit(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    database = store.path
+    barrier = threading.Barrier(2)
+
+    def begin_edit(_: int) -> str:
+        concurrent = Store(database)
+        barrier.wait()
+        edit = concurrent.begin_joplin_edit(
+            client_id="client-a",
+            scope_key="project:demo",
+            note=_note(),
+            agent_id="agent-1",
+            project="demo",
+        )
+        return str(edit["edit_id"])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        edit_ids = list(pool.map(begin_edit, (1, 2)))
+
+    assert len(set(edit_ids)) == 1
 
 
 def test_joplin_sync_coalescing_and_lane_status_survive_restart(

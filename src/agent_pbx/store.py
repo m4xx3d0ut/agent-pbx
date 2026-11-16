@@ -20,6 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .persistence import (
     AgentRepository,
     EventRepository,
+    JoplinSessionRepository,
     ModelElevationRepository,
     RuntimeRepository,
     SQLiteConnectionFactory,
@@ -363,6 +364,7 @@ class Store:
         self._connections = SQLiteConnectionFactory(self.path)
         self._agents = AgentRepository(self._connections)
         self._events = EventRepository(self._connections)
+        self._joplin_sessions = JoplinSessionRepository(self._connections)
         self._model_elevations = ModelElevationRepository(self._connections)
         self._runtime = RuntimeRepository(self._connections)
         self._terminal_editors = TerminalEditorRepository(self._connections)
@@ -4726,91 +4728,25 @@ class Store:
         note_id: str,
         title: str,
     ) -> dict[str, Any]:
-        log_id = str(uuid.uuid4())
-        current = now_ts()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE joplin_logs
-                SET active = 0, stopped_at = COALESCE(stopped_at, ?), updated_at = ?
-                WHERE agent_id = ? AND active = 1
-                """,
-                (current, current, agent_id),
-            )
-            conn.execute(
-                """
-                INSERT INTO joplin_logs
-                    (log_id, agent_id, project, session_id, note_id, title,
-                     active, started_at, stopped_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, ?)
-                """,
-                (
-                    log_id,
-                    agent_id,
-                    project,
-                    session_id,
-                    note_id,
-                    title,
-                    current,
-                    current,
-                ),
-            )
-        log = self.get_joplin_log(log_id)
-        if log is None:
-            raise RuntimeError("joplin log insert failed")
-        return log
+        return self._joplin_sessions.start_log(
+            agent_id=agent_id,
+            project=project,
+            session_id=session_id,
+            note_id=note_id,
+            title=title,
+        )
 
     def get_joplin_log(self, log_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT log_id, agent_id, project, session_id, note_id, title,
-                       active, started_at, stopped_at, updated_at
-                FROM joplin_logs
-                WHERE log_id = ?
-                """,
-                (log_id,),
-            ).fetchone()
-        return self._joplin_log_from_row(row) if row else None
+        return self._joplin_sessions.get_log(log_id)
 
     def get_active_joplin_log(self, agent_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT log_id, agent_id, project, session_id, note_id, title,
-                       active, started_at, stopped_at, updated_at
-                FROM joplin_logs
-                WHERE agent_id = ? AND active = 1
-                ORDER BY started_at DESC
-                LIMIT 1
-                """,
-                (agent_id,),
-            ).fetchone()
-        return self._joplin_log_from_row(row) if row else None
+        return self._joplin_sessions.get_active_log(agent_id)
 
     def stop_active_joplin_log(self, agent_id: str) -> dict[str, Any] | None:
-        active = self.get_active_joplin_log(agent_id)
-        if active is None:
-            return None
-        current = now_ts()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE joplin_logs
-                SET active = 0, stopped_at = ?, updated_at = ?
-                WHERE log_id = ?
-                """,
-                (current, current, active["log_id"]),
-            )
-        return self.get_joplin_log(active["log_id"])
+        return self._joplin_sessions.stop_active_log(agent_id)
 
     def touch_joplin_log(self, log_id: str) -> None:
-        current = now_ts()
-        with self.connect() as conn:
-            conn.execute(
-                "UPDATE joplin_logs SET updated_at = ? WHERE log_id = ?",
-                (current, log_id),
-            )
+        self._joplin_sessions.touch_log(log_id)
 
     def begin_joplin_edit(
         self,
@@ -4821,68 +4757,16 @@ class Store:
         agent_id: str | None = None,
         project: str | None = None,
     ) -> dict[str, Any]:
-        note_id = str(note.get("id") or "")
-        if not note_id:
-            raise ValueError("Joplin edit requires a note id")
-        current = now_ts()
-        with self.connect() as conn:
-            active = conn.execute(
-                """
-                SELECT * FROM joplin_edit_sessions
-                WHERE client_id = ? AND scope_key = ? AND note_id = ?
-                  AND status IN ('editing', 'conflict')
-                LIMIT 1
-                """,
-                (client_id, scope_key, note_id),
-            ).fetchone()
-            if active is not None:
-                return self._joplin_edit_from_row(active)
-            edit_id = str(uuid.uuid4())
-            title = str(note.get("title") or "")
-            body = str(note.get("body") or "")
-            conn.execute(
-                """
-                INSERT INTO joplin_edit_sessions
-                    (edit_id, client_id, scope_key, agent_id, project, note_id,
-                     base_revision, base_updated_time, base_user_updated_time,
-                     base_title_hash, base_body_hash, base_title, base_body,
-                     draft_title, draft_body, dirty, status, sync_generation,
-                     created_at, updated_at, resolved_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
-                        'editing', 0, ?, ?, NULL)
-                """,
-                (
-                    edit_id,
-                    client_id,
-                    scope_key,
-                    agent_id,
-                    project,
-                    note_id,
-                    str(note.get("revision") or ""),
-                    note.get("updated_time"),
-                    note.get("user_updated_time"),
-                    str(note.get("title_hash") or ""),
-                    str(note.get("body_hash") or ""),
-                    title,
-                    body,
-                    title,
-                    body,
-                    current,
-                    current,
-                ),
-            )
-        edit = self.get_joplin_edit(edit_id)
-        if edit is None:
-            raise RuntimeError("Joplin edit session insert failed")
-        return edit
+        return self._joplin_sessions.begin_edit(
+            client_id=client_id,
+            scope_key=scope_key,
+            note=note,
+            agent_id=agent_id,
+            project=project,
+        )
 
     def get_joplin_edit(self, edit_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM joplin_edit_sessions WHERE edit_id = ?",
-                (edit_id,),
-            ).fetchone()
-        return self._joplin_edit_from_row(row) if row else None
+        return self._joplin_sessions.get_edit(edit_id)
 
     def update_joplin_edit_draft(
         self,
@@ -4891,17 +4775,11 @@ class Store:
         title: str,
         body: str,
     ) -> dict[str, Any] | None:
-        current = now_ts()
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE joplin_edit_sessions
-                SET draft_title = ?, draft_body = ?, dirty = 1, updated_at = ?
-                WHERE edit_id = ? AND status IN ('editing', 'conflict')
-                """,
-                (title, body, current, edit_id),
-            )
-        return self.get_joplin_edit(edit_id) if cursor.rowcount else None
+        return self._joplin_sessions.update_edit_draft(
+            edit_id,
+            title=title,
+            body=body,
+        )
 
     def complete_joplin_edit(
         self,
@@ -4910,18 +4788,11 @@ class Store:
         status: str = "saved",
         sync_generation: int = 0,
     ) -> dict[str, Any] | None:
-        current = now_ts()
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE joplin_edit_sessions
-                SET dirty = 0, status = ?, sync_generation = ?,
-                    updated_at = ?, resolved_at = ?
-                WHERE edit_id = ?
-                """,
-                (status, sync_generation, current, current, edit_id),
-            )
-        return self.get_joplin_edit(edit_id) if cursor.rowcount else None
+        return self._joplin_sessions.complete_edit(
+            edit_id,
+            status=status,
+            sync_generation=sync_generation,
+        )
 
     def rebase_joplin_edit(
         self,
@@ -4931,33 +4802,12 @@ class Store:
         draft_title: str,
         draft_body: str,
     ) -> dict[str, Any] | None:
-        current = now_ts()
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE joplin_edit_sessions
-                SET base_revision = ?, base_updated_time = ?,
-                    base_user_updated_time = ?, base_title_hash = ?,
-                    base_body_hash = ?, base_title = ?, base_body = ?,
-                    draft_title = ?, draft_body = ?, dirty = 1,
-                    status = 'editing', updated_at = ?, resolved_at = NULL
-                WHERE edit_id = ?
-                """,
-                (
-                    str(current_note.get("revision") or ""),
-                    current_note.get("updated_time"),
-                    current_note.get("user_updated_time"),
-                    str(current_note.get("title_hash") or ""),
-                    str(current_note.get("body_hash") or ""),
-                    str(current_note.get("title") or ""),
-                    str(current_note.get("body") or ""),
-                    draft_title,
-                    draft_body,
-                    current,
-                    edit_id,
-                ),
-            )
-        return self.get_joplin_edit(edit_id) if cursor.rowcount else None
+        return self._joplin_sessions.rebase_edit(
+            edit_id,
+            current_note=current_note,
+            draft_title=draft_title,
+            draft_body=draft_body,
+        )
 
     def record_joplin_conflict(
         self,
@@ -4969,76 +4819,23 @@ class Store:
         merged_title: str,
         merged_body: str,
     ) -> dict[str, Any]:
-        edit = self.get_joplin_edit(edit_id)
-        if edit is None:
-            raise ValueError("Joplin edit session does not exist")
-        conflict_id = str(uuid.uuid4())
-        current = now_ts()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE joplin_edit_sessions
-                SET status = 'conflict', draft_title = ?, draft_body = ?,
-                    dirty = 1, updated_at = ?
-                WHERE edit_id = ?
-                """,
-                (local_title, local_body, current, edit_id),
-            )
-            conn.execute(
-                """
-                INSERT INTO joplin_note_conflicts
-                    (conflict_id, edit_id, note_id, base_revision,
-                     current_revision, base_title, base_body, local_title,
-                     local_body, current_title, current_body, merged_title,
-                     merged_body, status, resolution, created_at, resolved_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open',
-                        NULL, ?, NULL)
-                """,
-                (
-                    conflict_id,
-                    edit_id,
-                    edit["note_id"],
-                    edit["base_revision"],
-                    str(current_note.get("revision") or ""),
-                    edit["base_title"],
-                    edit["base_body"],
-                    local_title,
-                    local_body,
-                    str(current_note.get("title") or ""),
-                    str(current_note.get("body") or ""),
-                    merged_title,
-                    merged_body,
-                    current,
-                ),
-            )
-        conflict = self.get_joplin_conflict(conflict_id)
-        if conflict is None:
-            raise RuntimeError("Joplin conflict insert failed")
-        return conflict
+        return self._joplin_sessions.record_conflict(
+            edit_id=edit_id,
+            current_note=current_note,
+            local_title=local_title,
+            local_body=local_body,
+            merged_title=merged_title,
+            merged_body=merged_body,
+        )
 
     def get_joplin_conflict(self, conflict_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM joplin_note_conflicts WHERE conflict_id = ?",
-                (conflict_id,),
-            ).fetchone()
-        return dict(row) if row else None
+        return self._joplin_sessions.get_conflict(conflict_id)
 
     def get_open_joplin_conflict_for_edit(
         self,
         edit_id: str,
     ) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM joplin_note_conflicts
-                WHERE edit_id = ? AND status = 'open'
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (edit_id,),
-            ).fetchone()
-        return dict(row) if row else None
+        return self._joplin_sessions.get_open_conflict_for_edit(edit_id)
 
     def resolve_joplin_conflict(
         self,
@@ -5046,17 +4843,10 @@ class Store:
         *,
         resolution: str,
     ) -> dict[str, Any] | None:
-        current = now_ts()
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE joplin_note_conflicts
-                SET status = 'resolved', resolution = ?, resolved_at = ?
-                WHERE conflict_id = ? AND status = 'open'
-                """,
-                (resolution, current, conflict_id),
-            )
-        return self.get_joplin_conflict(conflict_id) if cursor.rowcount else None
+        return self._joplin_sessions.resolve_conflict(
+            conflict_id,
+            resolution=resolution,
+        )
 
     def record_file_trash_entry(
         self,
@@ -13633,9 +13423,7 @@ class Store:
 
     @staticmethod
     def _joplin_log_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        data = dict(row)
-        data["active"] = bool(data["active"])
-        return data
+        return JoplinSessionRepository.log_from_row(row)
 
     @staticmethod
     def _joplin_sync_job_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -13652,9 +13440,7 @@ class Store:
 
     @staticmethod
     def _joplin_edit_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        data = dict(row)
-        data["dirty"] = bool(data.get("dirty"))
-        return data
+        return JoplinSessionRepository.edit_from_row(row)
 
     @staticmethod
     def _file_trash_entry_from_row(row: sqlite3.Row) -> dict[str, Any]:
