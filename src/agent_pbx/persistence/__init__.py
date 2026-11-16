@@ -4,6 +4,7 @@ from .connection import SQLiteConnectionFactory
 from .repositories import (
     AgentRepository,
     EventRepository,
+    FileTrashRepository,
     JoplinSessionRepository,
     JoplinSyncRepository,
     ModelElevationRepository,
@@ -15,6 +16,7 @@ from .transactions import begin_immediate
 __all__ = [
     "AgentRepository",
     "EventRepository",
+    "FileTrashRepository",
     "JoplinSessionRepository",
     "JoplinSyncRepository",
     "ModelElevationRepository",
