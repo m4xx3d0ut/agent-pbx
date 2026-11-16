@@ -295,6 +295,53 @@ def test_joplin_sync_coalescing_and_lane_status_survive_restart(
     assert reopened.joplin_sync_status() == status
 
 
+def test_concurrent_joplin_sync_enqueue_coalesces_one_job(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    database = store.path
+    barrier = threading.Barrier(2)
+
+    def enqueue(worker: int) -> str:
+        concurrent = Store(database)
+        barrier.wait()
+        job = concurrent.enqueue_joplin_sync(
+            reason="note_update",
+            agent_id="agent-1",
+            note_id=f"note-{worker}",
+            profile_key="profile-a",
+        )
+        return str(job["sync_id"])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sync_ids = list(pool.map(enqueue, (1, 2)))
+
+    assert len(set(sync_ids)) == 1
+    jobs = store.list_joplin_sync_jobs()
+    assert len(jobs) == 1
+    assert set(jobs[0]["note_ids"]) == {"note-1", "note-2"}
+    assert jobs[0]["generation"] == 2
+
+
+def test_concurrent_joplin_sync_claims_are_distinct(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    database = store.path
+    first = store.enqueue_joplin_sync(reason="first", profile_key="profile-a")
+    second = store.enqueue_joplin_sync(reason="second", profile_key="profile-a")
+    barrier = threading.Barrier(2)
+
+    def claim(_: int) -> str:
+        concurrent = Store(database)
+        barrier.wait()
+        job = concurrent.claim_next_joplin_sync_job()
+        assert job is not None
+        return str(job["sync_id"])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claimed_ids = list(pool.map(claim, (1, 2)))
+
+    assert set(claimed_ids) == {str(first["sync_id"]), str(second["sync_id"])}
+    assert all(job["status"] == "running" for job in store.list_joplin_sync_jobs())
+
+
 def test_joplin_sync_hydration_tolerates_legacy_json(tmp_path: Path) -> None:
     store = _store(tmp_path)
     job = store.enqueue_joplin_sync(reason="manual", profile_key="profile-a")

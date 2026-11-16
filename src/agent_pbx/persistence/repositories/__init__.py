@@ -3,6 +3,7 @@
 from .agents import AgentRepository
 from .events import EventRepository
 from .joplin_sessions import JoplinSessionRepository
+from .joplin_sync import JoplinSyncRepository
 from .model_elevations import ModelElevationRepository
 from .runtime import RuntimeRepository
 from .terminal_editors import TerminalEditorRepository
@@ -11,6 +12,7 @@ __all__ = [
     "AgentRepository",
     "EventRepository",
     "JoplinSessionRepository",
+    "JoplinSyncRepository",
     "ModelElevationRepository",
     "RuntimeRepository",
     "TerminalEditorRepository",
