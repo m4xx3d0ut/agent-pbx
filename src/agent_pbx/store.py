@@ -19,6 +19,7 @@ from .schemas import (
 from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_slug
 from .persistence import (
     AgentRepository,
+    DurableHelperRepository,
     EventRepository,
     FileTrashRepository,
     JoplinSessionRepository,
@@ -365,6 +366,7 @@ class Store:
         self.path = Path(path)
         self._connections = SQLiteConnectionFactory(self.path)
         self._agents = AgentRepository(self._connections)
+        self._durable_helpers = DurableHelperRepository(self._connections)
         self._events = EventRepository(self._connections)
         self._file_trash = FileTrashRepository(self._connections)
         self._joplin_sessions = JoplinSessionRepository(self._connections)
@@ -7777,52 +7779,22 @@ class Store:
         status: str,
         created_by_operator_agent_id: str,
     ) -> dict[str, Any]:
-        current = now_ts()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO durable_helper_bundles
-                    (helper_id, name, object_sha256, object_bytes, source_path,
-                     manifest_json, provenance_json, scopes_json, kb_refs_json,
-                     status, created_by_operator_agent_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    helper_id,
-                    name,
-                    object_sha256,
-                    int(object_bytes),
-                    source_path,
-                    json.dumps(manifest, sort_keys=True),
-                    json.dumps(provenance, sort_keys=True),
-                    json.dumps(scopes, sort_keys=True),
-                    json.dumps(kb_refs, sort_keys=True),
-                    status,
-                    created_by_operator_agent_id,
-                    current,
-                    current,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO durable_helper_events
-                    (helper_id, event_type, operator_agent_id, metadata_json, created_at)
-                VALUES (?, 'proposed', ?, '{}', ?)
-                """,
-                (helper_id, created_by_operator_agent_id, current),
-            )
-        bundle = self.get_durable_helper_bundle(helper_id)
-        if bundle is None:
-            raise RuntimeError("durable helper insert failed")
-        return bundle
+        return self._durable_helpers.create(
+            helper_id=helper_id,
+            name=name,
+            object_sha256=object_sha256,
+            object_bytes=object_bytes,
+            source_path=source_path,
+            manifest=manifest,
+            provenance=provenance,
+            scopes=scopes,
+            kb_refs=kb_refs,
+            status=status,
+            created_by_operator_agent_id=created_by_operator_agent_id,
+        )
 
     def get_durable_helper_bundle(self, helper_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM durable_helper_bundles WHERE helper_id = ?",
-                (helper_id,),
-            ).fetchone()
-        return self._durable_helper_from_row(row) if row else None
+        return self._durable_helpers.get(helper_id)
 
     def find_durable_helper_bundle(
         self,
@@ -7830,15 +7802,7 @@ class Store:
         name: str,
         object_sha256: str,
     ) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM durable_helper_bundles
-                WHERE name = ? AND object_sha256 = ?
-                """,
-                (name, object_sha256),
-            ).fetchone()
-        return self._durable_helper_from_row(row) if row else None
+        return self._durable_helpers.find(name=name, object_sha256=object_sha256)
 
     def list_durable_helper_bundles(
         self,
@@ -7846,23 +7810,7 @@ class Store:
         status: str | None = None,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        params: list[Any] = []
-        where = ""
-        if status is not None:
-            where = "WHERE status = ?"
-            params.append(status)
-        params.append(min(max(int(limit), 1), 1000))
-        with self.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM durable_helper_bundles
-                {where}
-                ORDER BY updated_at DESC, helper_id ASC
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
-        return [self._durable_helper_from_row(row) for row in rows]
+        return self._durable_helpers.list(status=status, limit=limit)
 
     def update_durable_helper_bundle(
         self,
@@ -7876,45 +7824,16 @@ class Store:
         operator_agent_id: str,
         event_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        current = now_ts()
-        assignments: list[str] = ["updated_at = ?"]
-        values: list[Any] = [current]
-        if status is not None:
-            assignments.append("status = ?")
-            values.append(status)
-        if validation_receipt is not None:
-            assignments.append("validation_receipt_json = ?")
-            values.append(json.dumps(validation_receipt, sort_keys=True))
-        if reviewed_by_operator_agent_id is not None:
-            assignments.append("reviewed_by_operator_agent_id = ?")
-            values.append(reviewed_by_operator_agent_id)
-        if activated_by_operator_agent_id is not None:
-            assignments.append("activated_by_operator_agent_id = ?")
-            values.append(activated_by_operator_agent_id)
-        values.append(helper_id)
-        with self.connect() as conn:
-            cursor = conn.execute(
-                f"UPDATE durable_helper_bundles SET {', '.join(assignments)} "
-                "WHERE helper_id = ?",
-                values,
-            )
-            if cursor.rowcount == 0:
-                return None
-            conn.execute(
-                """
-                INSERT INTO durable_helper_events
-                    (helper_id, event_type, operator_agent_id, metadata_json, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    helper_id,
-                    event_type,
-                    operator_agent_id,
-                    json.dumps(event_metadata or {}, sort_keys=True),
-                    current,
-                ),
-            )
-        return self.get_durable_helper_bundle(helper_id)
+        return self._durable_helpers.update(
+            helper_id,
+            status=status,
+            validation_receipt=validation_receipt,
+            reviewed_by_operator_agent_id=reviewed_by_operator_agent_id,
+            activated_by_operator_agent_id=activated_by_operator_agent_id,
+            event_type=event_type,
+            operator_agent_id=operator_agent_id,
+            event_metadata=event_metadata,
+        )
 
     def list_durable_helper_events(
         self,
@@ -7922,51 +7841,11 @@ class Store:
         helper_id: str | None = None,
         limit: int = 500,
     ) -> list[dict[str, Any]]:
-        params: list[Any] = []
-        where = ""
-        if helper_id is not None:
-            where = "WHERE helper_id = ?"
-            params.append(helper_id)
-        params.append(min(max(int(limit), 1), 2000))
-        with self.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM durable_helper_events
-                {where}
-                ORDER BY event_id ASC
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
-        events: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            try:
-                metadata = json.loads(item.pop("metadata_json") or "{}")
-            except json.JSONDecodeError:
-                metadata = {}
-            item["metadata"] = metadata if isinstance(metadata, dict) else {}
-            events.append(item)
-        return events
+        return self._durable_helpers.list_events(helper_id=helper_id, limit=limit)
 
     @staticmethod
     def _durable_helper_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        item = dict(row)
-        for column, target, fallback in (
-            ("manifest_json", "manifest", {}),
-            ("provenance_json", "provenance", {}),
-            ("validation_receipt_json", "validation_receipt", None),
-            ("scopes_json", "scopes", []),
-            ("kb_refs_json", "kb_refs", []),
-        ):
-            raw = item.pop(column)
-            try:
-                value = json.loads(raw) if raw is not None else fallback
-            except json.JSONDecodeError:
-                value = fallback
-            item[target] = value
-        item["object_bytes"] = int(item.get("object_bytes") or 0)
-        return item
+        return DurableHelperRepository.from_row(row)
 
     def request_or_reuse_dynamic_resource(
         self,
