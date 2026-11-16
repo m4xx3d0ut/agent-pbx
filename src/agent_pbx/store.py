@@ -20,6 +20,7 @@ from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_sl
 from .persistence import (
     AgentRepository,
     DurableHelperRepository,
+    DynamicResourceRepository,
     EventRepository,
     FileTrashRepository,
     JoplinSessionRepository,
@@ -367,6 +368,7 @@ class Store:
         self._connections = SQLiteConnectionFactory(self.path)
         self._agents = AgentRepository(self._connections)
         self._durable_helpers = DurableHelperRepository(self._connections)
+        self._dynamic_resources = DynamicResourceRepository(self._connections)
         self._events = EventRepository(self._connections)
         self._file_trash = FileTrashRepository(self._connections)
         self._joplin_sessions = JoplinSessionRepository(self._connections)
@@ -7962,12 +7964,7 @@ class Store:
         return request, True
 
     def get_dynamic_resource_request(self, request_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM dynamic_resource_requests WHERE request_id = ?",
-                (request_id,),
-            ).fetchone()
-        return self._dynamic_resource_from_row(row) if row else None
+        return self._dynamic_resources.get(request_id)
 
     def list_dynamic_resource_requests(
         self,
@@ -7976,27 +7973,11 @@ class Store:
         campaign_id: str | None = None,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        where: list[str] = []
-        params: list[Any] = []
-        if status:
-            where.append("status = ?")
-            params.append(status)
-        if campaign_id:
-            where.append("campaign_id = ?")
-            params.append(campaign_id)
-        clause = f"WHERE {' AND '.join(where)}" if where else ""
-        params.append(min(max(int(limit), 1), 1000))
-        with self.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM dynamic_resource_requests
-                {clause}
-                ORDER BY created_at DESC, request_id ASC
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
-        return [self._dynamic_resource_from_row(row) for row in rows]
+        return self._dynamic_resources.list(
+            status=status,
+            campaign_id=campaign_id,
+            limit=limit,
+        )
 
     def update_dynamic_resource_request(
         self,
@@ -8011,51 +7992,17 @@ class Store:
         cleanup_receipt: dict[str, Any] | None = None,
         event_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if not expected_statuses:
-            raise ValueError("dynamic resource update requires expected states")
-        current = now_ts()
-        assignments = ["status = ?", "updated_at = ?"]
-        values: list[Any] = [status, current]
-        if approval is not None:
-            assignments.append("approval_json = ?")
-            values.append(json.dumps(approval, sort_keys=True))
-        if provider_receipt is not None:
-            assignments.append("provider_receipt_json = ?")
-            values.append(json.dumps(provider_receipt, sort_keys=True))
-        if cleanup_receipt is not None:
-            assignments.append("cleanup_receipt_json = ?")
-            values.append(json.dumps(cleanup_receipt, sort_keys=True))
-        placeholders = ", ".join("?" for _ in expected_statuses)
-        values.extend((request_id, *expected_statuses))
-        with self.connect() as conn:
-            cursor = conn.execute(
-                f"""
-                UPDATE dynamic_resource_requests
-                SET {', '.join(assignments)}
-                WHERE request_id = ? AND status IN ({placeholders})
-                """,
-                values,
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("dynamic resource state changed")
-            conn.execute(
-                """
-                INSERT INTO dynamic_resource_events(
-                    request_id, event_type, operator_agent_id,
-                    metadata_json, created_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    request_id,
-                    event_type,
-                    operator_agent_id,
-                    json.dumps(event_metadata or {}, sort_keys=True),
-                    current,
-                ),
-            )
-        request = self.get_dynamic_resource_request(request_id)
-        if request is None:
-            raise RuntimeError("dynamic resource request disappeared")
+        request = self._dynamic_resources.transition(
+            request_id,
+            expected_statuses=expected_statuses,
+            status=status,
+            operator_agent_id=operator_agent_id,
+            event_type=event_type,
+            approval=approval,
+            provider_receipt=provider_receipt,
+            cleanup_receipt=cleanup_receipt,
+            event_metadata=event_metadata,
+        )
         self.append_event(
             f"dynamic_resource_{event_type}",
             {
@@ -8130,52 +8077,14 @@ class Store:
         request_id: str | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
-        params: list[Any] = []
-        where = ""
-        if request_id:
-            where = "WHERE request_id = ?"
-            params.append(request_id)
-        params.append(min(max(int(limit), 1), 2000))
-        with self.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM dynamic_resource_events
-                {where}
-                ORDER BY event_id ASC
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
-        events: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            try:
-                metadata = json.loads(item.pop("metadata_json") or "{}")
-            except json.JSONDecodeError:
-                metadata = {}
-            item["metadata"] = metadata if isinstance(metadata, dict) else {}
-            events.append(item)
-        return events
+        return self._dynamic_resources.list_events(
+            request_id=request_id,
+            limit=limit,
+        )
 
     @staticmethod
     def _dynamic_resource_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        item = dict(row)
-        for column, target in (
-            ("spec_json", "spec"),
-            ("approval_json", "approval"),
-            ("provider_receipt_json", "provider_receipt"),
-            ("cleanup_receipt_json", "cleanup_receipt"),
-        ):
-            raw = item.pop(column)
-            try:
-                value = json.loads(raw) if raw is not None else None
-            except json.JSONDecodeError:
-                value = None
-            item[target] = value
-        for key in ("ttl_seconds", "quota", "max_uses", "use_count"):
-            item[key] = int(item.get(key) or 0)
-        item["restart_required"] = bool(item.get("restart_required"))
-        return item
+        return DynamicResourceRepository.from_row(row)
 
     def create_operator_kb_seed_run(
         self,
