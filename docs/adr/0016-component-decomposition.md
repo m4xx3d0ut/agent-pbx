@@ -61,6 +61,12 @@ versioned manifest ties each logical Store operation either to that direct call
 or to a named repository delegation, preventing source movement from silently
 weakening writer serialization.
 
+D5-3 applies that rule to model-elevation leases and tmux runtime writer leases.
+Repository extraction stops at cross-domain transaction boundaries: managed
+runtime stop, migration restore, managed Agent creation, and terminal-editor
+state remain facade-owned until separately reviewed. This favors explicit
+transaction cohesion over reducing `store.py` by moving partially owned SQL.
+
 ## Compatibility contract
 
 The owned route matrix and transaction rules are documented in

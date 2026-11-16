@@ -91,7 +91,7 @@ architecture review goals, not permission to expand another component:
 | Composition module | Accepted ceiling | D7 line target | Intended end state |
 |---|---:|---:|---|
 | `src/agent_pbx/api.py` | 1,171 | 1,100 | application composition and router registration |
-| `src/agent_pbx/store.py` | 14,488 | 12,000 | stable persistence facade over cohesive repositories |
+| `src/agent_pbx/store.py` | 14,026 | 12,000 | stable persistence facade over cohesive repositories |
 | `src/agent_pbx/tui.py` | 33,745 | 33,000 | Textual composition root and event routing |
 
 The checker requires every target to remain below its accepted ceiling. D7 may
@@ -151,6 +151,26 @@ transactions.
 The Store contract additionally freezes all 363 method declarations and their
 signatures/decorators, connection PRAGMAs and row factory, the schema-45 object
 hash, and explicit repository delegation for logical atomic operations. D5-R0
-ratchets the Store ceiling to 14,488 lines and 60,556 AST nodes. Higher-risk
-runtime, Joplin, resource/KB/WorkerBee, and Operator campaign persistence is not
-authorized by this checkpoint.
+ratchets the Store ceiling to 14,488 lines and 60,556 AST nodes.
+
+### D5-3 runtime persistence checkpoint
+
+Model-elevation lease state, tmux runtime mapping CRUD, writer leases, and
+runtime-migration batch CRUD/pruning now belong to cohesive persistence
+repositories behind the unchanged `Store` signatures. Five of the 26 logical
+atomic Store operations have explicit repository delegates; the other 21 still
+invoke the shared primitive directly. The checker requires both sets to equal
+the same reviewed manifest.
+
+Cross-domain lifecycle work deliberately remains in `Store`. Managed runtime
+stop preparation/finalization spans mappings, Agents, Operator forks, reports,
+and events. Runtime-migration restore spans Agent records and mappings. Managed
+Agent creation atomically creates both an Agent and its mapping. Terminal editor
+state is a separate persistence domain. Those boundaries require their own
+review rather than being moved because they are adjacent in the source file.
+
+D5-3 ratchets the Store ceiling to 14,026 lines, 563,451 bytes, and 58,472 AST
+nodes while preserving all 363 Store declarations, schema version 45, the
+150-object schema fingerprint, and public API/TUI compatibility. Higher-risk
+Joplin, resource/KB/WorkerBee, and Operator campaign persistence remains out of
+scope.
