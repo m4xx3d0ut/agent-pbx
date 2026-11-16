@@ -32,6 +32,14 @@ AST_TARGETS = (
     "src/agent_pbx/store.py",
     "src/agent_pbx/tui.py",
 )
+EXTRACTED_MODULE_CEILING_TARGETS = (
+    "src/agent_pbx/api_routes/operator.py",
+    "src/agent_pbx/api_routes/workerbee.py",
+    "src/agent_pbx/ui/controllers/github.py",
+    "src/agent_pbx/ui/controllers/joplin.py",
+    "src/agent_pbx/ui/controllers/operator_handoffs.py",
+    "src/agent_pbx/ui/controllers/workerbee.py",
+)
 AST_METRICS = ("lines", "bytes", "ast_nodes", "functions", "classes", "imports")
 REVIEW_TARGETS = {
     "src/agent_pbx/api.py": {
@@ -151,26 +159,37 @@ def _tree(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
+def _ast_inventory(relative: str) -> dict[str, int]:
+    source = (ROOT / relative).read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=relative)
+    return {
+        "lines": len(source.splitlines()),
+        "bytes": len(source.encode("utf-8")),
+        "ast_nodes": sum(1 for _ in ast.walk(tree)),
+        "functions": sum(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for node in ast.walk(tree)
+        ),
+        "classes": sum(isinstance(node, ast.ClassDef) for node in ast.walk(tree)),
+        "imports": sum(
+            isinstance(node, (ast.Import, ast.ImportFrom))
+            for node in ast.walk(tree)
+        ),
+    }
+
+
 def collect_ast_inventory() -> dict[str, dict[str, int]]:
     inventory: dict[str, dict[str, int]] = {}
     for relative in AST_TARGETS:
-        source = (ROOT / relative).read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=relative)
-        inventory[relative] = {
-            "lines": len(source.splitlines()),
-            "bytes": len(source.encode("utf-8")),
-            "ast_nodes": sum(1 for _ in ast.walk(tree)),
-            "functions": sum(
-                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                for node in ast.walk(tree)
-            ),
-            "classes": sum(isinstance(node, ast.ClassDef) for node in ast.walk(tree)),
-            "imports": sum(
-                isinstance(node, (ast.Import, ast.ImportFrom))
-                for node in ast.walk(tree)
-            ),
-        }
+        inventory[relative] = _ast_inventory(relative)
     return inventory
+
+
+def collect_extracted_module_inventory() -> dict[str, dict[str, int]]:
+    return {
+        relative: _ast_inventory(relative)
+        for relative in EXTRACTED_MODULE_CEILING_TARGETS
+    }
 
 
 def _absolute_imports(relative: str) -> set[str]:
@@ -217,6 +236,109 @@ def _python_sources(relative_root: str) -> list[Path]:
     return []
 
 
+def _internal_module_name(path: Path) -> str:
+    relative = path.relative_to(ROOT / "src").with_suffix("")
+    parts = list(relative.parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _nearest_known_module(candidate: str, known: set[str]) -> str | None:
+    current = candidate
+    while current:
+        if current in known:
+            return current
+        current = current.rpartition(".")[0]
+    return None
+
+
+def collect_internal_import_graph() -> dict[str, list[str]]:
+    """Return the resolved internal Python import graph in stable order."""
+
+    source_root = ROOT / "src" / "agent_pbx"
+    sources = sorted(source_root.rglob("*.py")) if source_root.exists() else []
+    modules = {_internal_module_name(path): path for path in sources}
+    known = set(modules)
+    graph: dict[str, list[str]] = {}
+    for module, path in sorted(modules.items()):
+        package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+        imports: set[str] = set()
+        for node in ast.walk(_tree(path)):
+            candidates: list[str] = []
+            if isinstance(node, ast.Import):
+                candidates.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    base_parts = package.split(".") if package else []
+                    retained = max(0, len(base_parts) - node.level + 1)
+                    base = ".".join(
+                        [*base_parts[:retained], *(node.module or "").split(".")]
+                    ).rstrip(".")
+                else:
+                    base = node.module or ""
+                if base:
+                    candidates.append(base)
+                for alias in node.names:
+                    if alias.name != "*":
+                        candidates.append(
+                            ".".join(part for part in (base, alias.name) if part)
+                        )
+            for candidate in candidates:
+                if not _matches_prefix(candidate, "agent_pbx"):
+                    continue
+                resolved = _nearest_known_module(candidate, known)
+                if resolved is not None and resolved != module:
+                    imports.add(resolved)
+        graph[module] = sorted(imports)
+    return graph
+
+
+def internal_import_cycle_errors() -> list[str]:
+    graph = collect_internal_import_graph()
+    index = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[list[str]] = []
+
+    def visit(module: str) -> None:
+        nonlocal index
+        indices[module] = index
+        lowlinks[module] = index
+        index += 1
+        stack.append(module)
+        on_stack.add(module)
+        for imported in graph.get(module, []):
+            if imported not in indices:
+                visit(imported)
+                lowlinks[module] = min(lowlinks[module], lowlinks[imported])
+            elif imported in on_stack:
+                lowlinks[module] = min(lowlinks[module], indices[imported])
+        if lowlinks[module] != indices[module]:
+            return
+        component: list[str] = []
+        while stack:
+            imported = stack.pop()
+            on_stack.remove(imported)
+            component.append(imported)
+            if imported == module:
+                break
+        if len(component) > 1 or (
+            len(component) == 1 and component[0] in graph.get(component[0], [])
+        ):
+            components.append(sorted(component))
+
+    for module in sorted(graph):
+        if module not in indices:
+            visit(module)
+    return [
+        "internal Agent PBX import cycle: " + " -> ".join([*component, component[0]])
+        for component in sorted(components)
+    ]
+
+
 def dependency_errors() -> list[str]:
     errors: list[str] = []
     for relative, forbidden in FORBIDDEN_DEPENDENCIES.items():
@@ -241,6 +363,7 @@ def dependency_errors() -> list[str]:
                         f"{relative} bypasses the typed service boundary via {candidate}"
                     )
     errors.extend(ownership_errors())
+    errors.extend(internal_import_cycle_errors())
     return errors
 
 
@@ -562,6 +685,7 @@ def write_fixtures() -> None:
         "schema": "agent-pbx.component-decomposition-contract/v1",
         "baseline_commit": ACCEPTED_BASELINE_COMMIT,
         "ast_maxima": collect_ast_inventory(),
+        "extracted_module_maxima": collect_extracted_module_inventory(),
         "review_targets": REVIEW_TARGETS,
         "ownership_rules": OWNERSHIP_RULES,
         "store_contract": collect_store_contract(),
@@ -601,6 +725,25 @@ def check() -> list[str]:
                 errors.append(
                     f"{relative} {metric} grew from ceiling {maximum} to {current}"
                 )
+    expected_extracted = set(EXTRACTED_MODULE_CEILING_TARGETS)
+    recorded_extracted = set(contract.get("extracted_module_maxima") or {})
+    if recorded_extracted != expected_extracted:
+        errors.append(
+            "extracted module ceiling inventory changed: "
+            f"recorded={sorted(recorded_extracted)!r} "
+            f"expected={sorted(expected_extracted)!r}"
+        )
+    else:
+        current_extracted = collect_extracted_module_inventory()
+        for relative, maxima in contract["extracted_module_maxima"].items():
+            for metric in AST_METRICS:
+                current = int(current_extracted[relative][metric])
+                maximum = int(maxima[metric])
+                if current > maximum:
+                    errors.append(
+                        f"{relative} {metric} grew from extracted-module ceiling "
+                        f"{maximum} to {current}"
+                    )
     for relative, target in REVIEW_TARGETS.items():
         maximum = int(contract["ast_maxima"][relative]["lines"])
         if int(target["lines"]) >= maximum:

@@ -97,6 +97,32 @@ def test_dependency_direction_has_no_forbidden_edges() -> None:
     assert _checker().dependency_errors() == []
 
 
+def test_internal_agent_pbx_import_graph_is_acyclic() -> None:
+    assert _checker().internal_import_cycle_errors() == []
+
+
+def test_internal_import_cycle_guard_fails_closed(tmp_path: Path) -> None:
+    checker = _checker()
+    package = tmp_path / "src" / "agent_pbx"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "left.py").write_text(
+        "from .right import value\nvalue = 'left'\n",
+        encoding="utf-8",
+    )
+    (package / "right.py").write_text(
+        "from .left import value\nvalue = 'right'\n",
+        encoding="utf-8",
+    )
+    checker.ROOT = tmp_path
+
+    errors = checker.internal_import_cycle_errors()
+
+    assert len(errors) == 1
+    assert "agent_pbx.left" in errors[0]
+    assert "agent_pbx.right" in errors[0]
+
+
 def test_future_component_ownership_rules_reject_absolute_and_relative_bypasses(
     tmp_path: Path,
 ) -> None:
@@ -151,6 +177,13 @@ def test_store_schema_and_transaction_inventory_are_versioned() -> None:
     )
     assert contract["review_targets"] == _checker().REVIEW_TARGETS
     assert contract["ownership_rules"] == _checker().OWNERSHIP_RULES
+    assert set(contract["extracted_module_maxima"]) == set(
+        _checker().EXTRACTED_MODULE_CEILING_TARGETS
+    )
+    assert (
+        contract["extracted_module_maxima"]
+        == _checker().collect_extracted_module_inventory()
+    )
     assert contract["store_contract"] == _checker().collect_store_contract()
     assert contract["store_contract"]["schema_version"] == 45
     assert len(contract["store_contract"]["begin_immediate_methods"]) == 32

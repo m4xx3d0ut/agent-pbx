@@ -306,3 +306,25 @@ schema bootstrap and backfill currently account for approximately 1,747 method
 lines and can move without splitting a business transaction. These boundaries
 require separate approval and characterization; D7 itself changes no runtime
 behavior or compatibility fixture.
+
+### D7-G extended structural guardrails
+
+D7-G makes the architecture review executable. The boundary checker now builds
+the internal Agent PBX Python import graph and fails on every strongly connected
+component rather than checking only a fixed list of forbidden edges. Synthetic
+cycle coverage proves relative imports cannot bypass that check.
+
+The six largest extracted route/controller owners also receive exact no-growth
+ceilings for lines, bytes, AST nodes, functions, classes, and imports:
+
+- `api_routes/operator.py`;
+- `api_routes/workerbee.py`;
+- `ui/controllers/github.py`;
+- `ui/controllers/joplin.py`;
+- `ui/controllers/operator_handoffs.py`; and
+- `ui/controllers/workerbee.py`.
+
+Those ceilings prevent decomposition from merely moving growth out of the
+three original composition roots. Splitting an owner into a new cohesive module
+remains possible through an explicit fixture review. D7-G changes no route,
+schema, Store signature, TUI ownership surface, runtime, or feature gate.

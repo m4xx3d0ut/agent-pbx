@@ -26,6 +26,56 @@
     }
   },
   "baseline_commit": "56f46179863fed13f339ab3e55481a895b994921",
+  "extracted_module_maxima": {
+    "src/agent_pbx/api_routes/operator.py": {
+      "ast_nodes": 7574,
+      "bytes": 66722,
+      "classes": 0,
+      "functions": 83,
+      "imports": 9,
+      "lines": 1843
+    },
+    "src/agent_pbx/api_routes/workerbee.py": {
+      "ast_nodes": 6364,
+      "bytes": 55924,
+      "classes": 0,
+      "functions": 40,
+      "imports": 16,
+      "lines": 1346
+    },
+    "src/agent_pbx/ui/controllers/github.py": {
+      "ast_nodes": 6966,
+      "bytes": 42066,
+      "classes": 1,
+      "functions": 35,
+      "imports": 8,
+      "lines": 1027
+    },
+    "src/agent_pbx/ui/controllers/joplin.py": {
+      "ast_nodes": 8141,
+      "bytes": 54081,
+      "classes": 1,
+      "functions": 50,
+      "imports": 14,
+      "lines": 1305
+    },
+    "src/agent_pbx/ui/controllers/operator_handoffs.py": {
+      "ast_nodes": 9251,
+      "bytes": 68694,
+      "classes": 1,
+      "functions": 50,
+      "imports": 12,
+      "lines": 1731
+    },
+    "src/agent_pbx/ui/controllers/workerbee.py": {
+      "ast_nodes": 5495,
+      "bytes": 42882,
+      "classes": 1,
+      "functions": 32,
+      "imports": 10,
+      "lines": 1091
+    }
+  },
   "ownership_rules": {
     "src/agent_pbx/api_routes": {
       "forbidden_imports": [
@@ -101,9 +151,9 @@
       "consume_dynamic_resource_request": "consume",
       "enqueue_joplin_sync": "enqueue",
       "mark_model_elevation_revert_pending": "mark_revert_pending",
+      "record_joplin_conflict": "record_conflict",
       "request_or_reuse_dynamic_resource": "request_or_reuse",
       "request_or_reuse_model_elevation": "request_or_reuse",
-      "record_joplin_conflict": "record_conflict",
       "start_joplin_log": "start_log",
       "stop_active_joplin_log": "stop_active_log",
       "update_model_elevation_transition": "update_transition"

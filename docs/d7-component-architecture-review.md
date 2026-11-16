@@ -265,12 +265,15 @@ undermine the purpose of the decomposition.
 The following sequence is recommended for later approval. It is not authorized
 by D7 itself.
 
-### D7-G — Extended structural guardrails
+### D7-G — Extended structural guardrails — implemented
 
 - add an internal-import cycle check;
 - add reviewed per-file ceilings for extracted route/controller owners;
 - retain the canonical OpenAPI, Store, schema, and TUI fixtures;
 - no product behavior change.
+
+The implemented guard covers all internal Python modules and pins the six
+largest extracted route/controller owners identified above.
 
 ### D8-A — WorkerBee API application facade
 
