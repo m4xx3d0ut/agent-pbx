@@ -35,6 +35,13 @@ ATOMIC_STORE_OPERATIONS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Store retains the stable operation name while a repository may use a shorter
+# domain-local method name. Keeping this mapping explicit makes delegation part
+# of the reviewed atomicity contract rather than an AST naming heuristic.
+ATOMIC_STORE_DELEGATES: Final[dict[str, str]] = {
+    "append_event_if_changed": "append_if_changed",
+}
+
 
 def begin_immediate(connection: sqlite3.Connection) -> None:
     """Begin the reviewed SQLite writer transaction used by atomic operations."""

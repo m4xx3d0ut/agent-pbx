@@ -413,7 +413,10 @@ def collect_tui_compatibility() -> dict[str, Any]:
     }
 
 
-def _store_transaction_methods() -> list[str]:
+def _store_transaction_methods(
+    atomic_names: set[str] | frozenset[str],
+    delegates: dict[str, str],
+) -> list[str]:
     tree = _tree(ROOT / "src" / "agent_pbx" / "store.py")
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name == "Store":
@@ -421,12 +424,20 @@ def _store_transaction_methods() -> list[str]:
             for child in node.body:
                 if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
-                if any(
+                uses_primitive = any(
                     isinstance(item, ast.Call)
                     and isinstance(item.func, ast.Name)
                     and item.func.id == "begin_immediate"
                     for item in ast.walk(child)
-                ):
+                )
+                delegate_name = delegates.get(child.name, child.name)
+                delegates_matching_operation = child.name in atomic_names and any(
+                    isinstance(item, ast.Call)
+                    and isinstance(item.func, ast.Attribute)
+                    and item.func.attr == delegate_name
+                    for item in ast.walk(child)
+                )
+                if uses_primitive or delegates_matching_operation:
                     methods.append(child.name)
             return sorted(methods)
     raise RuntimeError("Store class not found")
@@ -483,10 +494,16 @@ def _store_connection_contract(store: Any) -> dict[str, Any]:
 
 def collect_store_contract() -> dict[str, Any]:
     sys.path.insert(0, str(SRC))
-    from agent_pbx.persistence.transactions import ATOMIC_STORE_OPERATIONS
+    from agent_pbx.persistence.transactions import (
+        ATOMIC_STORE_DELEGATES,
+        ATOMIC_STORE_OPERATIONS,
+    )
     from agent_pbx.store import SCHEMA_VERSION, Store
 
-    observed_atomic_operations = _store_transaction_methods()
+    observed_atomic_operations = _store_transaction_methods(
+        ATOMIC_STORE_OPERATIONS,
+        ATOMIC_STORE_DELEGATES,
+    )
     atomic_operation_manifest = sorted(ATOMIC_STORE_OPERATIONS)
     if observed_atomic_operations != atomic_operation_manifest:
         raise RuntimeError(
@@ -524,6 +541,7 @@ def collect_store_contract() -> dict[str, Any]:
         "object_names": [f"{item['type']}:{item['name']}" for item in objects],
         "schema_sha256": hashlib.sha256(canonical_json(objects)).hexdigest(),
         "begin_immediate_methods": atomic_operation_manifest,
+        "atomic_operation_delegates": dict(sorted(ATOMIC_STORE_DELEGATES.items())),
         "connection": connection,
         "method_declarations": _store_method_contract(),
     }

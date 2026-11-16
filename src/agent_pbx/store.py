@@ -17,7 +17,12 @@ from .schemas import (
     plan_options_to_jsonable,
 )
 from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_slug
-from .persistence import SQLiteConnectionFactory, begin_immediate
+from .persistence import (
+    AgentRepository,
+    EventRepository,
+    SQLiteConnectionFactory,
+    begin_immediate,
+)
 from .security import hash_secret, now_ts
 
 
@@ -359,6 +364,8 @@ class Store:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
         self._connections = SQLiteConnectionFactory(self.path)
+        self._agents = AgentRepository(self._connections)
+        self._events = EventRepository(self._connections)
 
     def connect(self) -> sqlite3.Connection:
         return self._connections.connect()
@@ -2467,23 +2474,12 @@ class Store:
     def append_event(
         self, event_type: str, payload: dict[str, Any], subject_id: str | None = None
     ) -> dict[str, Any]:
-        created_at = now_ts()
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO events(type, subject_id, payload_json, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (event_type, subject_id, json.dumps(payload), created_at),
-            )
-            event_id = int(cursor.lastrowid)
-        return {
-            "event_id": event_id,
-            "type": event_type,
-            "subject_id": subject_id,
-            "payload": payload,
-            "created_at": created_at,
-        }
+        return self._events.append(
+            event_type,
+            payload,
+            subject_id,
+            created_at=now_ts(),
+        )
 
     def append_event_if_changed(
         self,
@@ -2498,60 +2494,15 @@ class Store:
         faults from flooding the durable event stream or the TUI alert banner.
         """
 
-        created_at = now_ts()
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        with self.connect() as conn:
-            begin_immediate(conn)
-            row = conn.execute(
-                """
-                SELECT payload_json
-                FROM events
-                WHERE type = ? AND subject_id IS ?
-                ORDER BY event_id DESC
-                LIMIT 1
-                """,
-                (event_type, subject_id),
-            ).fetchone()
-            if row is not None:
-                try:
-                    previous = json.dumps(
-                        json.loads(str(row["payload_json"])),
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    previous = str(row["payload_json"])
-                if previous == encoded:
-                    return None
-            cursor = conn.execute(
-                """
-                INSERT INTO events(type, subject_id, payload_json, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (event_type, subject_id, encoded, created_at),
-            )
-            event_id = int(cursor.lastrowid)
-        return {
-            "event_id": event_id,
-            "type": event_type,
-            "subject_id": subject_id,
-            "payload": payload,
-            "created_at": created_at,
-        }
+        return self._events.append_if_changed(
+            event_type,
+            payload,
+            subject_id,
+            created_at=now_ts(),
+        )
 
     def list_events(self, *, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT event_id, type, subject_id, payload_json, created_at
-                FROM events
-                WHERE event_id > ?
-                ORDER BY event_id ASC
-                LIMIT ?
-                """,
-                (after_id, limit),
-            ).fetchall()
-        return [self._event_from_row(row) for row in rows]
+        return self._events.list_events(after_id=after_id, limit=limit)
 
     def list_subject_events(
         self,
@@ -2562,62 +2513,17 @@ class Store:
     ) -> list[dict[str, Any]]:
         """Return the newest events for one subject in chronological order."""
 
-        bounded_limit = max(1, min(int(limit), 1000))
-        clauses = ["subject_id = ?"]
-        values: list[object] = [subject_id]
-        if event_type:
-            clauses.append("type = ?")
-            values.append(event_type)
-        values.append(bounded_limit)
-        with self.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT event_id, type, subject_id, payload_json, created_at
-                FROM events
-                WHERE {' AND '.join(clauses)}
-                ORDER BY event_id DESC
-                LIMIT ?
-                """,
-                values,
-            ).fetchall()
-        return [self._event_from_row(row) for row in reversed(rows)]
+        return self._events.list_subject_events(
+            subject_id,
+            event_type=event_type,
+            limit=limit,
+        )
 
     def list_recent_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT event_id, type, subject_id, payload_json, created_at
-                FROM (
-                    SELECT event_id, type, subject_id, payload_json, created_at
-                    FROM events
-                    ORDER BY event_id DESC
-                    LIMIT ?
-                )
-                ORDER BY event_id ASC
-                """,
-                (limit,),
-            ).fetchall()
-        return [self._event_from_row(row) for row in rows]
+        return self._events.list_recent_events(limit=limit)
 
     def event_bounds(self) -> dict[str, int | None]:
-        with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT MIN(event_id) AS oldest_event_id,
-                       MAX(event_id) AS latest_event_id,
-                       COUNT(*) AS event_count
-                FROM events
-                """
-            ).fetchone()
-        return {
-            "oldest_event_id": int(row["oldest_event_id"])
-            if row and row["oldest_event_id"] is not None
-            else None,
-            "latest_event_id": int(row["latest_event_id"])
-            if row and row["latest_event_id"] is not None
-            else None,
-            "event_count": int(row["event_count"]) if row else 0,
-        }
+        return self._events.bounds()
 
     def request_model_elevation(
         self,
@@ -3869,14 +3775,7 @@ class Store:
     def register_agent(self, request: AgentRegisterRequest) -> dict[str, Any]:
         current = now_ts()
         with self.connect() as conn:
-            existing = conn.execute(
-                """
-                SELECT name, agent_type, project, metadata_json
-                FROM agents
-                WHERE agent_id = ?
-                """,
-                (request.agent_id,),
-            ).fetchone()
+            existing = self._agents.registration_row(conn, request.agent_id)
             existing_fork = self._operator_fork_row_for_agent(conn, request.agent_id)
             existing_fork_identity = (
                 self._operator_fork_agent_identity(existing_fork)
@@ -4029,32 +3928,15 @@ class Store:
                     requested_project=project,
                     existing_project=(str(existing["project"]) if existing else None),
                 )
-            conn.execute(
-                """
-                INSERT INTO agents
-                    (agent_id, agent_type, project, name, status, pbx_active, metadata_json,
-                     created_at, last_seen_at, dismissed_at)
-                VALUES (?, ?, ?, ?, 'online', ?, ?, ?, ?, NULL)
-                ON CONFLICT(agent_id) DO UPDATE SET
-                    agent_type = excluded.agent_type,
-                    project = excluded.project,
-                    name = excluded.name,
-                    status = 'online',
-                    pbx_active = excluded.pbx_active,
-                    metadata_json = excluded.metadata_json,
-                    last_seen_at = excluded.last_seen_at,
-                    dismissed_at = NULL
-                """,
-                (
-                    request.agent_id,
-                    agent_type,
-                    project,
-                    name,
-                    int(request.pbx_active),
-                    metadata_json,
-                    current,
-                    current,
-                ),
+            self._agents.upsert_registration(
+                conn,
+                agent_id=request.agent_id,
+                agent_type=agent_type,
+                project=project,
+                name=name,
+                pbx_active=request.pbx_active,
+                metadata_json=metadata_json,
+                current=current,
             )
         return self.get_agent(request.agent_id) or {}
 
@@ -4316,16 +4198,7 @@ class Store:
 
     def get_agent(self, agent_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT agent_id, agent_type, project, name, status, pbx_active, metadata_json,
-                       created_at, last_seen_at, last_poll_at,
-                       latest_report_seen_at, starred_at, dismissed_at
-                FROM agents
-                WHERE agent_id = ?
-                """,
-                (agent_id,),
-            ).fetchone()
+            row = self._agents.get_row(conn, agent_id)
             fork_row = self._operator_fork_row_for_agent(conn, agent_id) if row else None
         if not row:
             return None
@@ -4416,18 +4289,8 @@ class Store:
         return self.get_operator_fork(str(row["operator_fork_id"]))
 
     def list_agents(self, *, include_hidden: bool = False) -> list[dict[str, Any]]:
-        where_clause = "" if include_hidden else "WHERE dismissed_at IS NULL"
         with self.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT agent_id, agent_type, project, name, status, pbx_active, metadata_json,
-                       created_at, last_seen_at, last_poll_at,
-                       latest_report_seen_at, starred_at, dismissed_at
-                FROM agents
-                {where_clause}
-                ORDER BY last_seen_at DESC, agent_id ASC
-                """
-            ).fetchall()
+            rows = self._agents.list_rows(conn, include_hidden=include_hidden)
             agents = [self._agent_from_row(row) for row in rows]
             fork_rows = self._operator_fork_rows_for_agents(
                 conn,
@@ -4449,16 +4312,7 @@ class Store:
         return agents
 
     def unhide_agent(self, agent_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE agents
-                SET dismissed_at = NULL
-                WHERE agent_id = ?
-                """,
-                (agent_id,),
-            )
-        return self.get_agent(agent_id) if cursor.rowcount else None
+        return self.get_agent(agent_id) if self._agents.unhide(agent_id) else None
 
     def dismiss_agent(
         self, agent_id: str, *, delete_thread: bool = False
@@ -4794,17 +4648,12 @@ class Store:
         return self.get_agent_prune_batch(batch_id)
 
     def set_agent_pbx_active(self, agent_id: str, active: bool) -> dict[str, Any] | None:
-        current = now_ts()
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE agents
-                SET pbx_active = ?, last_seen_at = ?, dismissed_at = NULL
-                WHERE agent_id = ?
-                """,
-                (int(active), current, agent_id),
-            )
-        return self.get_agent(agent_id) if cursor.rowcount else None
+        changed = self._agents.set_pbx_active(
+            agent_id,
+            active=active,
+            current=now_ts(),
+        )
+        return self.get_agent(agent_id) if changed else None
 
     def create_report(
         self, agent_id: str, request: ReportCreateRequest
@@ -5381,16 +5230,8 @@ class Store:
         self, agent_id: str, *, starred: bool
     ) -> dict[str, Any] | None:
         starred_at = now_ts() if starred else None
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE agents
-                SET starred_at = ?
-                WHERE agent_id = ?
-                """,
-                (starred_at, agent_id),
-            )
-        return self.get_agent(agent_id) if cursor.rowcount else None
+        changed = self._agents.set_starred(agent_id, starred_at=starred_at)
+        return self.get_agent(agent_id) if changed else None
 
     def start_joplin_log(
         self,
@@ -14304,9 +14145,7 @@ class Store:
 
     @staticmethod
     def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        data = dict(row)
-        data["payload"] = json.loads(data.pop("payload_json"))
-        return data
+        return EventRepository.event_from_row(row)
 
     @staticmethod
     def _joplin_log_from_row(row: sqlite3.Row) -> dict[str, Any]:

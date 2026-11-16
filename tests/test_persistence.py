@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 from agent_pbx.persistence.connection import SQLiteConnectionFactory
+from agent_pbx.persistence.repositories import AgentRepository, EventRepository
 from agent_pbx.persistence.transactions import (
+    ATOMIC_STORE_DELEGATES,
     ATOMIC_STORE_OPERATIONS,
     begin_immediate,
 )
+from agent_pbx.store import Store
 
 
 def test_connection_factory_preserves_store_connection_contract(
@@ -58,3 +62,84 @@ def test_begin_immediate_uses_reviewed_atomic_operation_manifest(
     assert len(ATOMIC_STORE_OPERATIONS) == 26
     assert "append_event_if_changed" in ATOMIC_STORE_OPERATIONS
     assert "merge_agent_metadata" in ATOMIC_STORE_OPERATIONS
+    assert ATOMIC_STORE_DELEGATES == {
+        "append_event_if_changed": "append_if_changed"
+    }
+
+
+def test_event_repository_preserves_order_bounds_and_deduplication(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "pbx.sqlite"
+    Store(path).init()
+    repository = EventRepository(SQLiteConnectionFactory(path))
+
+    first = repository.append(
+        "state",
+        {"value": 1},
+        "agent-1",
+        created_at=1.0,
+    )
+    assert repository.append_if_changed(
+        "state",
+        {"value": 1},
+        "agent-1",
+        created_at=2.0,
+    ) is None
+    second = repository.append_if_changed(
+        "state",
+        {"value": 2},
+        "agent-1",
+        created_at=3.0,
+    )
+
+    assert second is not None
+    assert [item["event_id"] for item in repository.list_events()] == [
+        first["event_id"],
+        second["event_id"],
+    ]
+    assert [
+        item["payload"]["value"]
+        for item in repository.list_subject_events("agent-1", limit=1)
+    ] == [2]
+    assert repository.list_recent_events(limit=1) == [second]
+    assert repository.bounds() == {
+        "oldest_event_id": first["event_id"],
+        "latest_event_id": second["event_id"],
+        "event_count": 2,
+    }
+
+
+def test_agent_repository_preserves_base_row_and_simple_write_semantics(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "pbx.sqlite"
+    Store(path).init()
+    connections = SQLiteConnectionFactory(path)
+    repository = AgentRepository(connections)
+    with connections.managed() as connection:
+        repository.upsert_registration(
+            connection,
+            agent_id="agent-1",
+            agent_type="caller",
+            project="demo",
+            name="Agent One",
+            pbx_active=True,
+            metadata_json=json.dumps({"cwd": str(tmp_path)}),
+            current=10.0,
+        )
+
+    raw = repository.raw_agent("agent-1")
+    assert raw is not None
+    assert raw["project"] == "demo"
+    assert raw["pbx_active"] == 1
+    assert raw["metadata_json"] == json.dumps({"cwd": str(tmp_path)})
+
+    assert repository.set_starred("agent-1", starred_at=11.0) is True
+    assert repository.set_pbx_active("agent-1", active=False, current=12.0) is True
+    with connections.managed() as connection:
+        rows = repository.list_rows(connection, include_hidden=False)
+    assert len(rows) == 1
+    assert rows[0]["starred_at"] == 11.0
+    assert rows[0]["pbx_active"] == 0
+    assert rows[0]["last_seen_at"] == 12.0
