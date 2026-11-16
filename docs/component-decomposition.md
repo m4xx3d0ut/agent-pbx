@@ -289,3 +289,20 @@ revert for any individual extraction. D7 begins with a review of all three
 composition roots and may accept the retained difference or authorize a new,
 separately scoped domain boundary; it must not reopen D5 merely to satisfy a
 line target.
+
+### D7 architecture review
+
+The D7 review is recorded in
+[`d7-component-architecture-review.md`](d7-component-architecture-review.md).
+It accepts the current exact ceilings for integration while retaining the lower
+values as architecture goals. The internal Agent PBX Python import graph has no
+cycles and all checked ownership edges remain one way.
+
+D7 identifies three future boundaries rather than reopening completed work:
+a typed WorkerBee application-runtime facade outside `api.py`, a schema
+bootstrap/migration owner behind `Store.init()`, and typed TUI command-catalog
+and button-routing owners. The schema owner is the strongest Store follow-up:
+schema bootstrap and backfill currently account for approximately 1,747 method
+lines and can move without splitting a business transaction. These boundaries
+require separate approval and characterization; D7 itself changes no runtime
+behavior or compatibility fixture.

@@ -85,6 +85,13 @@ separate authorization and transaction review; D5 does not create a weak owner
 to meet a numerical goal. The D7 architecture review decides whether to accept
 the retained composition or authorize a new boundary.
 
+D7 accepts the exact current composition-root ceilings for integration and
+retains the lower values as architecture goals. It identifies schema bootstrap
+behind `Store.init()` as a cohesive future persistence owner, rather than
+splitting an authorization-sensitive domain transaction. WorkerBee runtime
+application orchestration and TUI command/button dispatch are likewise future
+typed boundaries. None is authorized by the review itself.
+
 ## Compatibility contract
 
 The owned route matrix and transaction rules are documented in
