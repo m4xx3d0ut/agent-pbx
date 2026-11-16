@@ -431,6 +431,55 @@ def _store_transaction_methods() -> list[str]:
     raise RuntimeError("Store class not found")
 
 
+def _store_method_contract() -> list[dict[str, Any]]:
+    """Return the declared Store surface without importing implementation details.
+
+    The compatibility facade intentionally retains private helpers while the
+    persistence implementation is decomposed.  Freezing every declaration
+    catches accidental signature, decorator, or async-boundary drift during
+    that extraction, including helpers that are consumed by tests or adjacent
+    services even though they are not a documented public API.
+    """
+
+    tree = _tree(ROOT / "src" / "agent_pbx" / "store.py")
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "Store":
+            methods: list[dict[str, Any]] = []
+            for child in node.body:
+                if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                methods.append(
+                    {
+                        "name": child.name,
+                        "signature": ast.unparse(child.args),
+                        "decorators": [
+                            ast.unparse(decorator)
+                            for decorator in child.decorator_list
+                        ],
+                        "async": isinstance(child, ast.AsyncFunctionDef),
+                    }
+                )
+            return methods
+    raise RuntimeError("Store class not found")
+
+
+def _store_connection_contract(store: Any) -> dict[str, Any]:
+    with store.connect() as conn:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        return {
+            "row_factory": (
+                f"{conn.row_factory.__module__}.{conn.row_factory.__qualname__}"
+                if conn.row_factory is not None
+                else None
+            ),
+            "journal_mode": str(journal_mode).lower(),
+            "foreign_keys": int(foreign_keys),
+            "isolation_level": conn.isolation_level,
+            "in_transaction_on_open": conn.in_transaction,
+        }
+
+
 def collect_store_contract() -> dict[str, Any]:
     sys.path.insert(0, str(SRC))
     from agent_pbx.store import SCHEMA_VERSION, Store
@@ -439,6 +488,7 @@ def collect_store_contract() -> dict[str, Any]:
         path = Path(raw) / "pbx.sqlite"
         store = Store(path)
         store.init()
+        connection = _store_connection_contract(store)
         with sqlite3.connect(path) as conn:
             rows = conn.execute(
                 """
@@ -463,6 +513,8 @@ def collect_store_contract() -> dict[str, Any]:
         "object_names": [f"{item['type']}:{item['name']}" for item in objects],
         "schema_sha256": hashlib.sha256(canonical_json(objects)).hexdigest(),
         "begin_immediate_methods": _store_transaction_methods(),
+        "connection": connection,
+        "method_declarations": _store_method_contract(),
     }
 
 

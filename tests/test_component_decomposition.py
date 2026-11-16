@@ -153,7 +153,15 @@ def test_store_schema_and_transaction_inventory_are_versioned() -> None:
     assert contract["ownership_rules"] == _checker().OWNERSHIP_RULES
     assert contract["store_contract"] == _checker().collect_store_contract()
     assert contract["store_contract"]["schema_version"] == 45
-    assert contract["store_contract"]["begin_immediate_methods"]
+    assert len(contract["store_contract"]["begin_immediate_methods"]) == 26
+    assert len(contract["store_contract"]["method_declarations"]) == 363
+    assert contract["store_contract"]["connection"] == {
+        "foreign_keys": 1,
+        "in_transaction_on_open": False,
+        "isolation_level": "",
+        "journal_mode": "wal",
+        "row_factory": "sqlite3.Row",
+    }
 
 
 def test_api_route_method_and_operation_id_inventory_is_versioned() -> None:

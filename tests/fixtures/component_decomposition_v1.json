@@ -121,6 +121,2459 @@
       "update_model_elevation_transition",
       "validate_operator_broker_request"
     ],
+    "connection": {
+      "foreign_keys": 1,
+      "in_transaction_on_open": false,
+      "isolation_level": "",
+      "journal_mode": "wal",
+      "row_factory": "sqlite3.Row"
+    },
+    "method_declarations": [
+      {
+        "async": false,
+        "decorators": [],
+        "name": "__init__",
+        "signature": "self, path: Path | str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "connect",
+        "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "schema_version",
+        "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "init",
+        "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_schema_version",
+        "signature": "conn: sqlite3.Connection"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_backfill_latest_report_seen",
+        "signature": "conn: sqlite3.Connection"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_backfill_agent_type",
+        "signature": "conn: sqlite3.Connection"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_ensure_column",
+        "signature": "conn: sqlite3.Connection, table: str, column: str, definition: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "has_tokens",
+        "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "add_token",
+        "signature": "self, raw_token: str, *, kind: str, label: str | None=None, ttl_seconds: int | None=None, role: str | None=None, audience: str | None=None, client_id: str | None=None, scopes: list[str] | tuple[str, ...] | None=None, allowed_agent_ids: list[str] | tuple[str, ...] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "verify_token",
+        "signature": "self, raw_token: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_tokens",
+        "signature": "self, *, include_revoked: bool=False"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "revoke_token",
+        "signature": "self, token_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "touch_token",
+        "signature": "self, token_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_token_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_token_public",
+        "signature": "record: TokenRecord"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "upsert_remote_client_session",
+        "signature": "self, *, client_id: str, token_id: str | None, role: str, audience: str | None, allowed_agent_ids: tuple[str, ...] | list[str], cursor: int=0, connected: bool=True"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_remote_client_session",
+        "signature": "self, client_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_remote_client_view_state",
+        "signature": "self, client_id: str, *, token_id: str | None, view_state: dict[str, Any], cursor: int | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "disconnect_remote_client_session",
+        "signature": "self, client_id: str, *, cursor: int"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "append_remote_audit",
+        "signature": "self, *, client_id: str | None, token_id: str | None, role: str, action: str, outcome: str, target_agent_id: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_remote_audit",
+        "signature": "self, *, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_remote_client_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_pairing_code",
+        "signature": "self, code: str, *, ttl_seconds: int"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "consume_pairing_code",
+        "signature": "self, code: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "append_event",
+        "signature": "self, event_type: str, payload: dict[str, Any], subject_id: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "append_event_if_changed",
+        "signature": "self, event_type: str, payload: dict[str, Any], subject_id: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_events",
+        "signature": "self, *, after_id: int=0, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_subject_events",
+        "signature": "self, subject_id: str, *, event_type: str | None=None, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_recent_events",
+        "signature": "self, *, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "event_bounds",
+        "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "request_model_elevation",
+        "signature": "self, *, agent_id: str, requested_profile: str, justification: str, scope: str, prior_profile: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "request_or_reuse_model_elevation",
+        "signature": "self, *, agent_id: str, requested_profile: str, justification: str, scope: str, prior_profile: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "decide_model_elevation",
+        "signature": "self, lease_id: str, *, approved: bool, approved_by: str, duration_seconds: float"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "activate_model_elevation",
+        "signature": "self, lease_id: str, *, transition: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "finish_model_elevation",
+        "signature": "self, lease_id: str, *, status: str, transition: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_model_elevation_transition",
+        "signature": "self, lease_id: str, *, transition: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "mark_model_elevation_revert_pending",
+        "signature": "self, lease_id: str, *, reason: str, transition: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "expire_model_elevations",
+        "signature": "self, *, current_time: float | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_model_elevation",
+        "signature": "self, lease_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_model_elevations",
+        "signature": "self, *, agent_id: str | None=None, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "upsert_terminal_editor_runtime",
+        "signature": "self, runtime: dict[str, Any], *, last_error: str | None=None, metadata: dict[str, Any] | None=None, verified: bool=False"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_terminal_editor_runtime",
+        "signature": "self, agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_terminal_editor_runtimes",
+        "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_terminal_editor_runtime_state",
+        "signature": "self, agent_id: str, *, state: str, last_error: str | None=None, verified: bool=False, path: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "delete_terminal_editor_runtime",
+        "signature": "self, agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "upsert_tmux_runtime_mapping",
+        "signature": "self, *, entity_id: str, server_mode: str, server_id: str, socket_path: str, session_name: str, pane_id: str, window_id: str | None=None, window_name: str | None=None, pane_pid: int | None=None, process_start_ticks: int | None=None, codex_session_id: str | None=None, cwd: str | None=None, origin_client_tty: str | None=None, origin_session_name: str | None=None, state: str='registered', metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_tmux_runtime_mapping",
+        "signature": "self, entity_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_tmux_runtime_mappings",
+        "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "set_tmux_runtime_state",
+        "signature": "self, entity_id: str, *, state: str, metadata: dict[str, Any] | None=None, clear_writer_lease: bool=False"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "acquire_tmux_writer_lease",
+        "signature": "self, entity_id: str, *, client_id: str, ttl_seconds: float"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "release_tmux_writer_lease",
+        "signature": "self, entity_id: str, *, client_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "delete_tmux_runtime_mapping",
+        "signature": "self, entity_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_managed_runtime_stop_identity",
+        "signature": "mapping: Mapping[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "prepare_managed_runtime_stop",
+        "signature": "self, entity_id: str, *, expected_identity: Mapping[str, Any], client_id: str, phase: str, metadata: Mapping[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "finalize_managed_runtime_stop",
+        "signature": "self, entity_id: str, *, transaction_id: str, metadata: Mapping[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_finalized_managed_runtime_stop",
+        "signature": "self, entity_id: str, *, transaction_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_runtime_migration_batch",
+        "signature": "self, *, target_cli_version: str, retention_until: float, snapshot: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_runtime_migration_batch",
+        "signature": "self, batch_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_runtime_migration_batches",
+        "signature": "self, *, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_runtime_migration_batch",
+        "signature": "self, batch_id: str, *, status: str, results: list[dict[str, Any]], applied: bool=False, rolled_back: bool=False"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "restore_runtime_migration_batch",
+        "signature": "self, batch_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "prune_expired_runtime_migration_batches",
+        "signature": "self, *, now: float | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_managed_agent_runtime",
+        "signature": "self, request: AgentRegisterRequest, *, runtime_mapping: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "register_agent",
+        "signature": "self, request: AgentRegisterRequest"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_project_value_is_path",
+        "signature": "value: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_canonical_caller_registration_project",
+        "signature": "cls, *, requested_project: str, existing_project: str | None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "agent_registration_identity_violation_payload",
+        "signature": "self, request: AgentRegisterRequest"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalized_agent_type",
+        "signature": "value: Any"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_merged_agent_metadata",
+        "signature": "existing_json: str | None, metadata: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_json_object",
+        "signature": "value: str | None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_backfill_agent_cwd",
+        "signature": "metadata: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_registration_allows_source_caller_rebind",
+        "signature": "metadata: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_registration_session_ids",
+        "signature": "metadata: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalized_identity_path",
+        "signature": "value: Any"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "_source_link_refs_for_caller",
+        "signature": "self, conn: sqlite3.Connection, agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "_operator_session_collision",
+        "signature": "self, conn: sqlite3.Connection, session_ids: set[str]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_agent",
+        "signature": "self, agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "merge_agent_metadata",
+        "signature": "self, agent_id: str, metadata: Mapping[str, Any], *, event_type: str | None=None, event_payload: Mapping[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "merge_operator_fork_metadata",
+        "signature": "self, fork_agent_id: str, metadata: Mapping[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_agents",
+        "signature": "self, *, include_hidden: bool=False"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "unhide_agent",
+        "signature": "self, agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "dismiss_agent",
+        "signature": "self, agent_id: str, *, delete_thread: bool=False"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "preview_agent_prune",
+        "signature": "self, *, preset: str='terminal-callers', min_age_days: float=30.0, include_projects: list[str] | None=None, exclude_projects: list[str] | None=None, agent_ids: list[str] | None=None, include_hidden: bool=False, include_starred: bool=False, require_no_tmux_pane: bool=True, limit: int=500, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "apply_agent_prune",
+        "signature": "self, *, preview: dict[str, Any], criteria: dict[str, Any], metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_agent_prune_batch",
+        "signature": "self, batch_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_agent_prune_batches",
+        "signature": "self, *, limit: int=20"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "undo_agent_prune_batch",
+        "signature": "self, batch_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "set_agent_pbx_active",
+        "signature": "self, agent_id: str, active: bool"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_report",
+        "signature": "self, agent_id: str, request: ReportCreateRequest"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "reconcile_operator_terminal_report",
+        "signature": "self, report_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "reconcile_operator_campaign_reports",
+        "signature": "self, campaign_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "report_request_with_identity_metadata",
+        "signature": "request: ReportCreateRequest"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "report_request_with_canonical_project",
+        "signature": "agent: dict[str, Any], request: ReportCreateRequest"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "declared_reporting_agent_id",
+        "signature": "cls, request: ReportCreateRequest"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "report_identity_violation_payload",
+        "signature": "self, agent_id: str, request: ReportCreateRequest"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "mark_latest_report_seen",
+        "signature": "self, agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "acknowledge_operator_alert_family",
+        "signature": "self, root_operator_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "set_agent_starred",
+        "signature": "self, agent_id: str, *, starred: bool"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "start_joplin_log",
+        "signature": "self, *, agent_id: str, project: str, session_id: str, note_id: str, title: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_joplin_log",
+        "signature": "self, log_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_active_joplin_log",
+        "signature": "self, agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "stop_active_joplin_log",
+        "signature": "self, agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "touch_joplin_log",
+        "signature": "self, log_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "begin_joplin_edit",
+        "signature": "self, *, client_id: str, scope_key: str, note: dict[str, Any], agent_id: str | None=None, project: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_joplin_edit",
+        "signature": "self, edit_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_joplin_edit_draft",
+        "signature": "self, edit_id: str, *, title: str, body: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "complete_joplin_edit",
+        "signature": "self, edit_id: str, *, status: str='saved', sync_generation: int=0"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "rebase_joplin_edit",
+        "signature": "self, edit_id: str, *, current_note: dict[str, Any], draft_title: str, draft_body: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "record_joplin_conflict",
+        "signature": "self, *, edit_id: str, current_note: dict[str, Any], local_title: str, local_body: str, merged_title: str, merged_body: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_joplin_conflict",
+        "signature": "self, conflict_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_open_joplin_conflict_for_edit",
+        "signature": "self, edit_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "resolve_joplin_conflict",
+        "signature": "self, conflict_id: str, *, resolution: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "record_file_trash_entry",
+        "signature": "self, *, agent_id: str, project: str, root_path: str, result: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_file_trash_entry",
+        "signature": "self, trash_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_file_trash_entries",
+        "signature": "self, agent_id: str, *, status: str | None=None, limit: int=200"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "mark_file_trash_restored",
+        "signature": "self, trash_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "record_file_trash_prune_batch",
+        "signature": "self, *, agent_id: str, preview_token: str, result: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_file_trash_prune_batch",
+        "signature": "self, batch_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "mark_file_trash_prune_undone",
+        "signature": "self, batch_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "enqueue_joplin_sync",
+        "signature": "self, *, reason: str, agent_id: str | None=None, note_id: str | None=None, profile_key: str='default'"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "claim_next_joplin_sync_job",
+        "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "complete_joplin_sync_job",
+        "signature": "self, sync_id: str, *, success: bool, error: str | None=None, error_code: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_joplin_sync_job",
+        "signature": "self, sync_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_joplin_sync_jobs",
+        "signature": "self, *, limit: int=20"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "latest_failed_joplin_write",
+        "signature": "self, agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "active_joplin_write_for_targets",
+        "signature": "self, *, agent_id: str, reason: str, note_ids: list[str]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "joplin_sync_status",
+        "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_report",
+        "signature": "self, report_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_reports",
+        "signature": "self, agent_id: str | None=None, *, limit: int=20"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_thread",
+        "signature": "self, agent_id: str, *, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_campaign",
+        "signature": "self, *, operator_agent_id: str, title: str, objective: str, criteria: list[str], assignments: list[dict[str, Any]]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_campaign_successor",
+        "signature": "self, *, operator_agent_id: str, predecessor_campaign_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_campaign",
+        "signature": "self, campaign_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_campaigns",
+        "signature": "self, *, operator_agent_id: str | None=None, operator_agent_ids: list[str] | None=None, campaign_id: str | None=None, status: str | None=None, limit: int=50, include_events: bool=True, offset: int=0"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_campaign_assignments",
+        "signature": "self, *, campaign_id: str | None=None, target_agent_id: str | None=None, limit: int=200"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_campaign_assignment",
+        "signature": "self, assignment_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_assignment",
+        "signature": "self, assignment_id: str, *, state: str | None=None, last_report_id: str | None=None, last_command_id: str | None=None, operator_fork_id: str | None=None, fork_track_id: str | None=None, complete: bool | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_campaign",
+        "signature": "self, campaign_id: str, *, status: str | None=None, summary: str | None=None, complete: bool | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "add_operator_campaign_event",
+        "signature": "self, *, campaign_id: str, operator_agent_id: str, event_type: str, summary: str, assignment_id: str | None=None, target_agent_id: str | None=None, detail: dict[str, Any] | None=None, report_id: str | None=None, command_id: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_campaign_event",
+        "signature": "self, event_id: int"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_campaign_events",
+        "signature": "self, *, campaign_id: str | None=None, assignment_id: str | None=None, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_fork",
+        "signature": "self, *, logical_operator_agent_id: str, fork_agent_id: str, source_caller_agent_id: str, source_codex_session_id: str, cwd: str, fork_track_id: str='default', fork_purpose: str='edit', access_mode: str='edit', source_cwd: str | None=None, work_root: str | None=None, fork_codex_session_id: str | None=None, campaign_id: str | None=None, codex_home: str | None=None, codex_host_id: str | None=None, tmux_pane_id: str | None=None, status: str='starting', summary: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_fork",
+        "signature": "self, operator_fork_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_fork_for_source",
+        "signature": "self, *, logical_operator_agent_id: str, source_caller_agent_id: str, source_codex_session_id: str, fork_track_id: str='default'"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_fork_for_agent",
+        "signature": "self, fork_agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_forks",
+        "signature": "self, *, logical_operator_agent_id: str | None=None, source_caller_agent_id: str | None=None, fork_track_id: str | None=None, campaign_id: str | None=None, status: str | None=None, limit: int=100, include_edges: bool=True"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_fork",
+        "signature": "self, operator_fork_id: str, *, fork_agent_id: str | None=None, fork_codex_session_id: str | None=None, clear_fork_codex_session_id: bool=False, campaign_id: str | None=None, cwd: str | None=None, fork_purpose: str | None=None, access_mode: str | None=None, source_cwd: str | None=None, work_root: str | None=None, codex_home: str | None=None, codex_host_id: str | None=None, tmux_pane_id: str | None=None, status: str | None=None, summary: str | None=None, metadata: dict[str, Any] | None=None, touch: bool=False, complete: bool | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_fork_source_session",
+        "signature": "self, operator_fork_id: str, *, old_source_codex_session_id: str, new_source_codex_session_id: str, source_cwd: str | None=None, codex_host_id: str | None=None, metadata: dict[str, Any] | None=None, touch: bool=True"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_project_spawn_request",
+        "signature": "self, *, logical_operator_agent_id: str, operator_agent_id: str, review_fork_id: str, review_fork_agent_id: str, source_caller_agent_id: str, source_cwd: str, target_parent: str, target_slug: str, target_path: str, project_name: str, mode: str, instructions: str, campaign_id: str | None=None, assignment_id: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_project_spawn_request",
+        "signature": "self, spawn_request_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_project_spawn_requests",
+        "signature": "self, *, logical_operator_agent_id: str | None=None, review_fork_id: str | None=None, status: str | None=None, limit: int=50"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_project_spawn_request",
+        "signature": "self, spawn_request_id: str, *, status: str, launched_agent_id: str | None=None, tmux_pane_id: str | None=None, error: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_fork_edge",
+        "signature": "self, *, from_fork_id: str, to_fork_id: str, edge_type: str, summary: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_fork_edge_path_exists",
+        "signature": "conn: sqlite3.Connection, start_fork_id: str, target_fork_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_fork_edge",
+        "signature": "self, edge_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_fork_edges",
+        "signature": "self, *, operator_fork_id: str | None=None, limit: int=200"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_knowledge_link",
+        "signature": "self, *, logical_operator_agent_id: str, operator_agent_id: str, source_agent_id: str, target_agent_id: str, link_type: str, status: str='active', source_operator_fork_id: str | None=None, summary: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_knowledge_link",
+        "signature": "self, link_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_knowledge_links",
+        "signature": "self, *, logical_operator_agent_id: str | None=None, source_agent_id: str | None=None, target_agent_id: str | None=None, status: str | None=None, limit: int=50"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_knowledge_link",
+        "signature": "self, link_id: str, *, status: str | None=None, summary: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_knowledge_turn",
+        "signature": "self, *, link_id: str, sender_agent_id: str, recipient_agent_id: str, turn_type: str, message: str, delivery_status: str='recorded', command_id: str | None=None, tmux_pane_id: str | None=None, error: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_knowledge_turn",
+        "signature": "self, turn_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_knowledge_turns",
+        "signature": "self, *, link_id: str, delivery_status: str | None=None, limit: int=200"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_knowledge_turn_delivery",
+        "signature": "self, turn_id: str, *, delivery_status: str, command_id: str | None=None, tmux_pane_id: str | None=None, error: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_kb_entry",
+        "signature": "self, *, kb_id: str | None=None, scope: str, title: str, summary: str, body: str, created_by_operator_agent_id: str, created_by_agent_id: str, project: str | None=None, repo_root: str | None=None, git_remote: str | None=None, branch: str | None=None, tags: list[str] | None=None, status: str='proposed', redaction_status: str='unreviewed', source_knowledge_link_id: str | None=None, source_handoff_id: str | None=None, source_turn_ids: list[str] | None=None, stale_after: float | None=None, expires_at: float | None=None, imported_at: float | None=None, metadata: dict[str, Any] | None=None, sources: list[dict[str, Any]] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_kb_entry",
+        "signature": "self, kb_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "search_operator_kb_entries",
+        "signature": "self, *, query: str | None=None, scope: str | None=None, project: str | None=None, repo_root: str | None=None, status: str | None='active', tags: list[str] | None=None, include_expired: bool=False, semantic: bool=False, limit: int=50"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "_search_operator_kb_entries_fts",
+        "signature": "self, conn: sqlite3.Connection, *, match_query: str, scope: str | None, project: str | None, repo_root: str | None, status: str | None, tags: list[str], include_expired: bool, limit: int"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "_search_operator_kb_entries_like",
+        "signature": "self, conn: sqlite3.Connection, *, terms: list[str], scope: str | None, project: str | None, repo_root: str | None, status: str | None, tags: list[str], include_expired: bool, limit: int"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "_merge_operator_kb_semantic_search_results",
+        "signature": "self, conn: sqlite3.Connection, *, keyword_entries: list[dict[str, Any]], query: str, scope: str | None, project: str | None, repo_root: str | None, status: str | None, tags: list[str], include_expired: bool, limit: int"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "_search_operator_kb_semantic_chunks",
+        "signature": "self, conn: sqlite3.Connection, *, query_signature: dict[str, float], scope: str | None, project: str | None, repo_root: str | None, status: str | None, tags: list[str], include_expired: bool, limit: int"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_status_sort_rank",
+        "signature": "entry: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_kb_query",
+        "signature": "self, *, logical_operator_agent_id: str, operator_agent_id: str, query: str, matches: list[dict[str, Any]], target_operator_agent_id: str | None=None, scope: str | None=None, project: str | None=None, repo_root: str | None=None, tags: list[str] | None=None, include_expired: bool=False, include_proposed: bool=False, semantic: bool=False, retrieval_mode: str='keyword', source: str='search', limit: int=50, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_kb_query",
+        "signature": "self, query_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_kb_queries",
+        "signature": "self, *, logical_operator_agent_id: str, misses: bool=False, limit: int=50"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_kb_feedback",
+        "signature": "self, *, logical_operator_agent_id: str, operator_agent_id: str, feedback: str, query_id: str | None=None, match_id: str | None=None, kb_id: str | None=None, summary: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "_operator_kb_search_filters",
+        "signature": "self, *, scope: str | None, project: str | None, repo_root: str | None, status: str | None, tags: list[str], include_expired: bool, table_alias: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_kb_entry",
+        "signature": "self, kb_id: str, *, updates: dict[str, Any] | None=None, status: str | None=None, redaction_status: str | None=None, summary: str | None=None, metadata: dict[str, Any] | None=None, event_type: str='operator_kb_updated', operator_agent_id: str | None=None, event_summary: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "export_operator_kb_entries",
+        "signature": "self, *, query: str | None=None, scope: str | None=None, project: str | None=None, repo_root: str | None=None, status: str | None='active', tags: list[str] | None=None, include_expired: bool=False, limit: int=500"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "import_operator_kb_entries",
+        "signature": "self, *, bundle: dict[str, Any], operator_agent_id: str, import_status: str='proposed', metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_kb_sync_record",
+        "signature": "self, *, logical_project_id: str, stable_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_kb_sync_records",
+        "signature": "self, *, logical_project_id: str, limit: int=1000"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "upsert_operator_kb_sync_record",
+        "signature": "self, *, logical_project_id: str, stable_id: str, local_kb_id: str | None, revision: int, parent_content_hash: str | None, content_hash: str, tombstone: bool, trusted_reviewer: bool, reviewer_evidence: dict[str, Any], source_bundle_sha256: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_sync_record_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_durable_helper_bundle",
+        "signature": "self, *, helper_id: str, name: str, object_sha256: str, object_bytes: int, source_path: str, manifest: dict[str, Any], provenance: dict[str, Any], scopes: list[str], kb_refs: list[str], status: str, created_by_operator_agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_durable_helper_bundle",
+        "signature": "self, helper_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "find_durable_helper_bundle",
+        "signature": "self, *, name: str, object_sha256: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_durable_helper_bundles",
+        "signature": "self, *, status: str | None=None, limit: int=200"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_durable_helper_bundle",
+        "signature": "self, helper_id: str, *, status: str | None=None, validation_receipt: dict[str, Any] | None=None, reviewed_by_operator_agent_id: str | None=None, activated_by_operator_agent_id: str | None=None, event_type: str, operator_agent_id: str, event_metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_durable_helper_events",
+        "signature": "self, *, helper_id: str | None=None, limit: int=500"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_durable_helper_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "request_or_reuse_dynamic_resource",
+        "signature": "self, *, request_id: str, request_sha256: str, resource_class: str, requester_agent_id: str, operator_agent_id: str, campaign_id: str | None, handoff_id: str | None, workspace_set_digest: str, workerbee_binding_id: str | None, workerbee_backend_generation: str | None, provider_capability_sha256: str | None, spec: dict[str, Any], provider: str, ttl_seconds: int, quota: int, max_uses: int, status: str, approval_mode: str, delegation_lease_id: str | None, restart_required: bool, expires_at: float"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_dynamic_resource_request",
+        "signature": "self, request_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_dynamic_resource_requests",
+        "signature": "self, *, status: str | None=None, campaign_id: str | None=None, limit: int=200"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_dynamic_resource_request",
+        "signature": "self, request_id: str, *, expected_statuses: tuple[str, ...], status: str, operator_agent_id: str, event_type: str, approval: dict[str, Any] | None=None, provider_receipt: dict[str, Any] | None=None, cleanup_receipt: dict[str, Any] | None=None, event_metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "consume_dynamic_resource_request",
+        "signature": "self, request_id: str, *, requester_agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_dynamic_resource_events",
+        "signature": "self, *, request_id: str | None=None, limit: int=1000"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_dynamic_resource_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_kb_seed_run",
+        "signature": "self, *, seed_run_id: str | None=None, logical_operator_agent_id: str, source_operator_agent_id: str, seed_type: str, scope: str, prompt: str, project: str | None=None, repo_root: str | None=None, git_remote: str | None=None, branch: str | None=None, status: str='requested', metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_kb_seed_run",
+        "signature": "self, seed_run_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_kb_seed_runs",
+        "signature": "self, *, logical_operator_agent_id: str | None=None, source_operator_agent_id: str | None=None, status: str | None=None, limit: int=50"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_kb_seed_run",
+        "signature": "self, seed_run_id: str, *, status: str | None=None, command_id: str | None=None, tmux_pane_id: str | None=None, delivery_status: str | None=None, error: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_kb_index_job",
+        "signature": "self, *, operation: str, kb_id: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_kb_index_job",
+        "signature": "self, job_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_kb_index_jobs",
+        "signature": "self, *, status: str | None=None, limit: int=50"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "process_operator_kb_index_jobs",
+        "signature": "self, *, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "find_operator_kb_entry_by_content_hash",
+        "signature": "self, *, logical_operator_agent_id: str, content_hash: str, statuses: list[str] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_delegation_lease",
+        "signature": "self, *, source_operator_agent_id: str, target_operator_agent_ids: list[str], campaign_ids: list[str], workspace_set_digest: str, allowed_action_classes: list[str], allowed_roots: list[str], exact_paths: list[str], denied_actions: list[str], max_uses: int, expires_at: float, requested_by: str, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_delegation_lease",
+        "signature": "self, lease_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_delegation_leases",
+        "signature": "self, *, source_operator_agent_id: str | None=None, status: str | None=None, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "decide_operator_delegation_lease",
+        "signature": "self, lease_id: str, *, approve: bool, approved_by: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "revoke_operator_delegation_lease",
+        "signature": "self, lease_id: str, *, revoked_by: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "consume_operator_delegation_lease",
+        "signature": "self, lease_id: str, *, handoff_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_handoff",
+        "signature": "self, *, logical_operator_agent_id: str, source_operator_agent_id: str, target_operator_agent_id: str, source_agent_id: str, objective: str, message: str, source_operator_fork_id: str | None=None, target_caller_agent_id: str | None=None, target_operator_fork_id: str | None=None, knowledge_link_id: str | None=None, knowledge_turn_id: str | None=None, allowed_mutation_scope: str | None=None, execution_scope: dict[str, Any] | None=None, required_artifacts: list[Any] | None=None, artifact_bundle: list[Any] | None=None, status: str='proposed', needs_ack: bool=True, expires_at: float | None=None, command_id: str | None=None, tmux_pane_id: str | None=None, delivery_status: str | None=None, delivery_evidence: dict[str, Any] | None=None, error: str | None=None, summary: str | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_handoff",
+        "signature": "self, handoff_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_handoffs",
+        "signature": "self, *, logical_operator_agent_id: str | None=None, source_agent_id: str | None=None, target_operator_agent_id: str | None=None, target_caller_agent_id: str | None=None, status: str | None=None, limit: int=50"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_handoff_completion_delivery",
+        "signature": "self, completion_delivery_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_handoff_completion_deliveries",
+        "signature": "self, *, recipient_agent_id: str | None=None, source_operator_agent_id: str | None=None, delivery_status: str | None=None, unacknowledged_only: bool=False, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_handoff_completion_delivery",
+        "signature": "self, completion_delivery_id: str, *, delivery_mode: str | None=None, delivery_status: str | None=None, command_id: str | None=None, last_error: str | None=None, attempted: bool=False, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "acknowledge_operator_handoff_completion_delivery",
+        "signature": "self, completion_delivery_id: str, *, acknowledged_by: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_handoff_artifact_kinds",
+        "signature": "artifacts: list[Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_handoff_completion_version",
+        "signature": "handoff_id: str, terminal_status: str, completed_at: float"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "update_operator_handoff",
+        "signature": "self, handoff_id: str, *, status: str | None=None, target_operator_fork_id: str | None=None, command_id: str | None=None, tmux_pane_id: str | None=None, delivery_status: str | None=None, delivery_evidence: dict[str, Any] | None=None, artifact_bundle: list[Any] | None=None, required_artifacts: list[Any] | None=None, error: str | None=None, summary: str | None=None, metadata: dict[str, Any] | None=None, acknowledge: bool=False, start: bool=False, complete: bool=False"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "cancel_operator_handoff",
+        "signature": "self, handoff_id: str, *, logical_operator_agent_id: str, expected_status: str, summary: str, cancellation: dict[str, Any], metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_operator_broker_request",
+        "signature": "self, *, root_operator_agent_id: str, target_fork_agent_id: str, handoff_id: str, campaign_id: str, assignment_id: str, workspace_set_digest: str, scope_sha256: str, expected_git_parent: str, commit_subject: str, exact_paths: list[str] | tuple[str, ...], ttl_seconds: int, max_in_flight_per_root: int, expected_git_parents: Iterable[str] | None=None, expected_git_tree: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "project_operator_broker_approval",
+        "signature": "self, request_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_broker_request",
+        "signature": "self, request_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_broker_requests",
+        "signature": "self, *, root_operator_agent_id: str | None=None, target_fork_agent_id: str | None=None, statuses: tuple[str, ...] | list[str] | None=None, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "claim_operator_broker_request",
+        "signature": "self, *, request_id: str, executor_id: str, lease_seconds: int=60"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "transition_operator_broker_request",
+        "signature": "self, *, request_id: str, executor_id: str, status: str, expected_statuses: tuple[str, ...] | list[str], action_transaction_id: str | None=None, result: Mapping[str, Any] | None=None, error_code: str | None=None, error: str | None=None, lease_seconds: int=60"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "cancel_operator_broker_request",
+        "signature": "self, *, request_id: str, root_operator_agent_id: str, reason: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "validate_operator_broker_request",
+        "signature": "self, *, request_id: str, root_operator_agent_id: str, action_transaction_id: str, validation_sha256: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "operator_campaign_completion_blockers",
+        "signature": "self, campaign_id: str, *, assignment_id: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_campaign_completion_blockers",
+        "signature": "conn: sqlite3.Connection, campaign_id: str, *, assignment_id: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_expire_operator_broker_requests",
+        "signature": "conn: sqlite3.Connection, *, current: float"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_broker_request_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_workerbee_controlled_run_request",
+        "signature": "self, *, identity: Mapping[str, Any], requested_by: str, reason: str, ttl_seconds: int, max_in_flight_per_root: int"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_workerbee_controlled_run_request",
+        "signature": "self, request_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_workerbee_controlled_run_requests",
+        "signature": "self, *, root_operator_agent_id: str | None=None, target_fork_agent_id: str | None=None, statuses: tuple[str, ...] | list[str] | None=None, limit: int=100, expire: bool=True"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "decide_workerbee_controlled_run_request",
+        "signature": "self, request_id: str, *, approve: bool, decided_by: str, lease_id: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "claim_workerbee_controlled_run_request",
+        "signature": "self, request_id: str, *, executor_id: str, lease_seconds: int=60"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "transition_workerbee_controlled_run_request",
+        "signature": "self, request_id: str, *, executor_id: str, status: str, expected_statuses: tuple[str, ...] | list[str], workerbee_run_id: str | None=None, workerbee_workspace_id: str | None=None, result: Mapping[str, Any] | None=None, error_code: str | None=None, error: str | None=None, lease_seconds: int=60"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "cancel_workerbee_controlled_run_request",
+        "signature": "self, request_id: str, *, canceled_by: str, reason: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "record_workerbee_controlled_run_receipt",
+        "signature": "self, request_id: str, *, outcome: str, backend_run_id: str | None, workspace_id: str | None, evidence: Mapping[str, Any], cleanup: Mapping[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_workerbee_controlled_run_lease",
+        "signature": "self, *, request: Mapping[str, Any], requested_by: str, max_uses: int, ttl_seconds: int"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_workerbee_controlled_run_lease",
+        "signature": "self, lease_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_workerbee_controlled_run_leases",
+        "signature": "self, *, root_operator_agent_id: str | None=None, status: str | None=None, limit: int=100, expire: bool=True"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "decide_workerbee_controlled_run_lease",
+        "signature": "self, lease_id: str, *, approve: bool, decided_by: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "revoke_workerbee_controlled_run_lease",
+        "signature": "self, lease_id: str, *, revoked_by: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_controlled_run_lease_matches_request",
+        "signature": "lease: sqlite3.Row, request: sqlite3.Row, current: float"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_expire_workerbee_controlled_runs",
+        "signature": "conn: sqlite3.Connection, *, current: float"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_workerbee_controlled_run_request_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_workerbee_controlled_run_lease_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_workerbee_controlled_run_receipt_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_operator_action_transaction",
+        "signature": "self, *, transaction_id: str | None=None, handoff_id: str | None=None, include_receipts: bool=True"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "list_operator_action_transactions",
+        "signature": "self, *, state: str | None=None, target_agent_id: str | None=None, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "append_operator_action_receipt",
+        "signature": "self, *, handoff_id: str, action_class: str, target_agent_id: str, scope_sha256: str, initial_state: str, step: str, outcome: str, actor: str, evidence: dict[str, Any] | None=None, metadata: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_action_transaction_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_action_receipt_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "create_command",
+        "signature": "self, request: CommandCreateRequest, *, status: str='queued'"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_command",
+        "signature": "self, command_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "delete_queued_command",
+        "signature": "self, command_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "claim_commands",
+        "signature": "self, agent_id: str, *, limit: int=10"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "record_poll",
+        "signature": "self, agent_id: str, *, delivered_count: int"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "ack_command",
+        "signature": "self, command_id: str, agent_id: str, result: dict[str, Any] | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_fork_select_sql",
+        "signature": ""
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_project_spawn_select_sql",
+        "signature": ""
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_knowledge_link_select_sql",
+        "signature": ""
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_handoff_select_sql",
+        "signature": ""
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_handoff_completion_select_sql",
+        "signature": ""
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_entry_select_sql",
+        "signature": "alias: str | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_seed_run_select_sql",
+        "signature": ""
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_operator_fork_row_for_agent",
+        "signature": "cls, conn: sqlite3.Connection, agent_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_operator_fork_rows_for_agents",
+        "signature": "cls, conn: sqlite3.Connection, agent_ids: list[str]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_fork_metadata_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_operator_fork_agent_identity",
+        "signature": "cls, row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_none_if_blank",
+        "signature": "value: Any"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalize_id_list",
+        "signature": "values: list[Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalize_tags",
+        "signature": "values: list[Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalize_operator_kb_scope",
+        "signature": "scope: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalize_operator_kb_status",
+        "signature": "status: str | None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalize_operator_kb_redaction_status",
+        "signature": "status: str | None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalize_operator_kb_seed_run_status",
+        "signature": "status: str | None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalize_operator_kb_index_operation",
+        "signature": "operation: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalize_operator_kb_index_status",
+        "signature": "status: str | None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_normalize_operator_kb_feedback",
+        "signature": "feedback: str | None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_fts_match_query",
+        "signature": "query: str | None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_queue_operator_kb_index_job",
+        "signature": "conn: sqlite3.Connection, *, operation: str, kb_id: str | None=None, metadata: dict[str, Any] | None=None, job_id: str | None=None, created_at: float | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_fts_entry_payload",
+        "signature": "entry: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_delete_operator_kb_fts_entry",
+        "signature": "conn: sqlite3.Connection, kb_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_upsert_operator_kb_fts_entry",
+        "signature": "cls, conn: sqlite3.Connection, kb_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_rebuild_operator_kb_fts",
+        "signature": "cls, conn: sqlite3.Connection"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_delete_operator_kb_semantic_chunks",
+        "signature": "cls, conn: sqlite3.Connection, kb_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_upsert_operator_kb_semantic_chunks",
+        "signature": "cls, conn: sqlite3.Connection, kb_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_rebuild_operator_kb_semantic_chunks",
+        "signature": "cls, conn: sqlite3.Connection"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_operator_kb_semantic_chunks_for_entry",
+        "signature": "cls, entry: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_semantic_document_text",
+        "signature": "entry: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_chunk_text",
+        "signature": "text: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_operator_kb_semantic_signature",
+        "signature": "cls, text: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_operator_kb_semantic_weighted_terms",
+        "signature": "cls, text: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_operator_kb_semantic_tokens",
+        "signature": "cls, text: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_semantic_normalize_token",
+        "signature": "token: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_semantic_signature_from_json",
+        "signature": "raw: str | None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_semantic_similarity",
+        "signature": "left: dict[str, float], right: dict[str, float]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_sources_payload",
+        "signature": "*, kb_id: str, source_knowledge_link_id: str | None, source_handoff_id: str | None, source_turn_ids: list[Any], sources: list[dict[str, Any]]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_source_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_entry_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_query_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_query_match_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_feedback_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_seed_run_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_index_job_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_sources_for_entry",
+        "signature": "conn: sqlite3.Connection, kb_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_query_matches_for_query",
+        "signature": "conn: sqlite3.Connection, query_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_feedback_for_query",
+        "signature": "conn: sqlite3.Connection, query_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_feedback_summary_for_query",
+        "signature": "conn: sqlite3.Connection, query_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_kb_entry_retrieval",
+        "signature": "entry: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_float_or_none",
+        "signature": "value: Any"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_int_or_none",
+        "signature": "value: Any"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_agent_prune_candidate_from_agent",
+        "signature": "agent: dict[str, Any], *, reason: str, guard_reasons: list[str], now: float"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_agent_has_recorded_tmux_pane",
+        "signature": "agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_agent_is_operator_fork",
+        "signature": "agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_agent_prune_match_reason",
+        "signature": "agent: dict[str, Any], *, preset: str, min_age_days: float, now: float"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_agent_prune_batch_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "agent_prune_protection_reasons",
+        "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "classmethod"
+        ],
+        "name": "_hydrate_operator_fork_agent",
+        "signature": "cls, agent: dict[str, Any], fork_row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_agent_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_add_effective_status",
+        "signature": "agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_add_latest_report_summary",
+        "signature": "conn: sqlite3.Connection, agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_add_queue_summary",
+        "signature": "conn: sqlite3.Connection, agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_add_campaign_summary",
+        "signature": "conn: sqlite3.Connection, agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_add_handoff_approval_summary",
+        "signature": "conn: sqlite3.Connection, agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_add_handoff_action_summary",
+        "signature": "conn: sqlite3.Connection, agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_add_handoff_completion_summary",
+        "signature": "conn: sqlite3.Connection, agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_add_operator_workflow_summary",
+        "signature": "conn: sqlite3.Connection, agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_add_workerbee_controlled_run_summary",
+        "signature": "conn: sqlite3.Connection, agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_add_usage_summary",
+        "signature": "conn: sqlite3.Connection, agent: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_report_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_command_from_row",
+        "signature": "row: sqlite3.Row | None"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_event_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_joplin_log_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_joplin_sync_job_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_joplin_edit_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_file_trash_entry_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_json_list",
+        "signature": "value: Any"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_campaign_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_assignment_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_campaign_event_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_fork_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_project_spawn_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_knowledge_link_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_knowledge_turn_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_handoff_completion_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_handoff_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_delegation_lease_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_operator_fork_edge_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_model_elevation_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_tmux_runtime_mapping_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_terminal_editor_runtime_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_runtime_migration_batch_from_row",
+        "signature": "row: sqlite3.Row"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_thread_report",
+        "signature": "report: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_thread_command",
+        "signature": "command: dict[str, Any]"
+      }
+    ],
     "object_count": 150,
     "object_names": [
       "index:idx_agent_prune_batches_created",
