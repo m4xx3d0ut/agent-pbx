@@ -9,6 +9,7 @@ from types import ModuleType
 
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
+from agent_pbx.workerbee_application import WorkerBeeApplicationService
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -255,6 +256,10 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
     assert app.state.api_services.operator_service is app.state.operator_service
     assert app.state.api_services.durable_helpers is app.state.durable_helpers
     assert app.state.api_services.dynamic_resources is app.state.dynamic_resources
+    assert isinstance(
+        app.state.workerbee_application,
+        WorkerBeeApplicationService,
+    )
     assert (
         app.state.api_services.protected_provider_diagnostics
         is app.state.protected_provider_diagnostics

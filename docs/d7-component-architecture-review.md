@@ -275,12 +275,20 @@ by D7 itself.
 The implemented guard covers all internal Python modules and pins the six
 largest extracted route/controller owners identified above.
 
-### D8-A — WorkerBee API application facade
+### D8-A — WorkerBee API application facade — implemented
 
 - characterize selected-runtime and binding outcomes;
 - extract the typed facade;
 - preserve route and error contracts;
 - ratchet `api.py` below its D7 goal when naturally achieved.
+
+The WorkerBee selected-runtime, binding projection, access readback, policy
+summary, and selected status orchestration now live in
+`workerbee_application.py`. The FastAPI composition root constructs that typed
+service and WorkerBee routes translate HTTP requests through it. Provider
+lookups remain late-bound through `app.state`, preserving the existing test and
+integration replacement seam. `api.py` is ratcheted from 1,171 to 792 lines,
+and the new application service has its own exact no-growth ceiling.
 
 ### D8-S — Schema bootstrap and migration owner
 

@@ -328,3 +328,18 @@ Those ceilings prevent decomposition from merely moving growth out of the
 three original composition roots. Splitting an owner into a new cohesive module
 remains possible through an explicit fixture review. D7-G changes no route,
 schema, Store signature, TUI ownership surface, runtime, or feature gate.
+
+### D8-A WorkerBee application facade
+
+D8-A moves selected-runtime refresh, durable binding projection, selected
+backend status, policy summaries, access-profile readback, and trusted-direct
+configuration readback into `WorkerBeeApplicationService` and
+`WorkerBeeBindingProjectionService`. `api.py` remains the composition root;
+`api_routes/workerbee.py` remains the HTTP translation owner.
+
+The service resolves replaceable runtime dependencies through provider
+functions so existing isolated harnesses can substitute `app.state` services
+after application construction. Public routes, response bodies, error codes,
+gateway reconciliation, and policy-digest enforcement remain characterized by
+the existing WorkerBee API tests. Structural ceilings now pin `api.py` at its
+smaller post-extraction size and cover the new application owner explicitly.

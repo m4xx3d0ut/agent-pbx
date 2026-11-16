@@ -1,12 +1,12 @@
 {
   "ast_maxima": {
     "src/agent_pbx/api.py": {
-      "ast_nodes": 5282,
-      "bytes": 44058,
+      "ast_nodes": 3266,
+      "bytes": 28808,
       "classes": 1,
-      "functions": 22,
+      "functions": 13,
       "imports": 59,
-      "lines": 1171
+      "lines": 792
     },
     "src/agent_pbx/store.py": {
       "ast_nodes": 53867,
@@ -36,12 +36,20 @@
       "lines": 1843
     },
     "src/agent_pbx/api_routes/workerbee.py": {
-      "ast_nodes": 6364,
-      "bytes": 55924,
+      "ast_nodes": 6337,
+      "bytes": 55825,
       "classes": 0,
       "functions": 40,
+      "imports": 17,
+      "lines": 1339
+    },
+    "src/agent_pbx/workerbee_application.py": {
+      "ast_nodes": 2378,
+      "bytes": 19336,
+      "classes": 2,
+      "functions": 12,
       "imports": 16,
-      "lines": 1346
+      "lines": 482
     },
     "src/agent_pbx/ui/controllers/github.py": {
       "ast_nodes": 6966,
@@ -129,7 +137,7 @@
   },
   "review_targets": {
     "src/agent_pbx/api.py": {
-      "lines": 1100,
+      "lines": 700,
       "owner": "FastAPI composition root"
     },
     "src/agent_pbx/store.py": {

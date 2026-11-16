@@ -34,6 +34,7 @@ from ..schemas import (
     WorkerBeeWorkspaceTransitionRequest,
 )
 from ..workerbee import agent_cwd
+from ..workerbee_application import WorkerBeeApplicationService
 from ..workerbee_access import WorkerBeeAccessPolicyError
 from ..workerbee_controlled_run import WorkerBeeControlledRunError
 from ..workerbee_gateway import WorkerBeeGatewayError
@@ -52,17 +53,14 @@ from ._shared import require_agent
 def register_workerbee_routes(
     app: FastAPI,
     *,
-    refresh_workerbee_runtime_selection: Any,
-    selected_workerbee_status_for_agent: Any,
-    workerbee_access_readback: Any,
-    durable_workerbee_profile: Any,
+    workerbee_application: WorkerBeeApplicationService,
     call_workerbee_mcp_tool: Any,
 ) -> None:
     async def workerbee_controlled_run_preflight(
         payload: WorkerBeeControlledRunPreflightRequest,
         request: Request,
     ) -> dict[str, Any]:
-        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
         try:
             result = await asyncio.to_thread(
                 request.app.state.workerbee_controlled_runs.preflight,
@@ -155,7 +153,7 @@ def register_workerbee_routes(
         agent = store.get_agent(agent_id)
         if agent is None:
             raise HTTPException(status_code=404, detail="agent not registered")
-        return await selected_workerbee_status_for_agent(request.app, agent)
+        return await workerbee_application.selected_status_for_agent(agent)
 
     @app.get(
         "/v2/workerbee/runtime",
@@ -163,7 +161,7 @@ def register_workerbee_routes(
         dependencies=[Depends(require_token)],
     )
     async def workerbee_runtime_status(request: Request) -> dict[str, Any]:
-        return await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        return await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
 
     @app.get(
         "/v2/workerbee/workspace-policy",
@@ -198,8 +196,7 @@ def register_workerbee_routes(
             )
         try:
             return await asyncio.to_thread(
-                workerbee_access_readback,
-                request.app,
+                workerbee_application.access_readback,
                 agent_id,
             )
         except WorkerBeeAccessPolicyError as exc:
@@ -240,8 +237,7 @@ def register_workerbee_routes(
                 updated_by=controller.token_id or controller.client_id or "local",
             )
             readback = await asyncio.to_thread(
-                workerbee_access_readback,
-                request.app,
+                workerbee_application.access_readback,
                 agent_id,
             )
             readback["changed"] = bool(result.get("changed"))
@@ -263,10 +259,7 @@ def register_workerbee_routes(
             )
         except WorkerBeeControlledRunError as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
-        posture["runtime"] = await asyncio.to_thread(
-            refresh_workerbee_runtime_selection,
-            request.app,
-        )
+        posture["runtime"] = await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
         return posture
 
     @app.post(
@@ -650,7 +643,7 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
-        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
         runtime = request.app.state.workerbee_runtime.selected()
         return await asyncio.to_thread(
             request.app.state.workerbee_snapshot_policy.get_policy,
@@ -731,7 +724,7 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
-        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
         runtime = request.app.state.workerbee_runtime.selected()
         if runtime is None:
             raise HTTPException(
@@ -793,7 +786,7 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=409, detail="Agent has no active WorkerBee gateway lease"
             )
-        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
         try:
             lease = await asyncio.to_thread(
                 request.app.state.workerbee_gateway.load, lease_id
@@ -845,7 +838,7 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=409, detail="Agent has no active WorkerBee gateway lease"
             )
-        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
         try:
             lease, binding, changed = await asyncio.to_thread(
                 request.app.state.workerbee_gateway.transition_workspace,
@@ -973,7 +966,7 @@ def register_workerbee_routes(
                 status_code=409,
                 detail="agent has no scoped cwd and no launch source root was supplied",
             )
-        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
         runtime = request.app.state.workerbee_runtime.selected()
         if runtime is None:
             raise HTTPException(
@@ -1066,7 +1059,7 @@ def register_workerbee_routes(
                     agent_metadata.get("workerbee_workspace_policy_digest") or ""
                 ).strip()
                 if (
-                    durable_workerbee_profile(agent_metadata)
+                    workerbee_application.durable_profile(agent_metadata)
                     == WORKERBEE_PROFILE_TRUSTED_WORKBENCH
                     and persisted_policy_digest
                     and persisted_policy_digest != path_policy.policy_digest
@@ -1112,7 +1105,7 @@ def register_workerbee_routes(
         store: Any = Depends(get_store),
     ) -> dict[str, Any]:
         agent = store.get_agent(agent_id)
-        await asyncio.to_thread(refresh_workerbee_runtime_selection, request.app)
+        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
         try:
             runtime = request.app.state.workerbee_runtime.selected()
             if runtime is None:
@@ -1171,7 +1164,7 @@ def register_workerbee_routes(
                     agent_metadata.get("workerbee_workspace_policy_digest") or ""
                 ).strip()
                 if (
-                    durable_workerbee_profile(agent_metadata)
+                    workerbee_application.durable_profile(agent_metadata)
                     == WORKERBEE_PROFILE_TRUSTED_WORKBENCH
                     and persisted_policy_digest
                     and persisted_policy_digest != path_policy.policy_digest

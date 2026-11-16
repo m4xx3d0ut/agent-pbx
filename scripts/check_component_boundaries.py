@@ -35,6 +35,7 @@ AST_TARGETS = (
 EXTRACTED_MODULE_CEILING_TARGETS = (
     "src/agent_pbx/api_routes/operator.py",
     "src/agent_pbx/api_routes/workerbee.py",
+    "src/agent_pbx/workerbee_application.py",
     "src/agent_pbx/ui/controllers/github.py",
     "src/agent_pbx/ui/controllers/joplin.py",
     "src/agent_pbx/ui/controllers/operator_handoffs.py",
@@ -43,7 +44,7 @@ EXTRACTED_MODULE_CEILING_TARGETS = (
 AST_METRICS = ("lines", "bytes", "ast_nodes", "functions", "classes", "imports")
 REVIEW_TARGETS = {
     "src/agent_pbx/api.py": {
-        "lines": 1100,
+        "lines": 700,
         "owner": "FastAPI composition root",
     },
     "src/agent_pbx/store.py": {
