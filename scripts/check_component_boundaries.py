@@ -41,6 +41,8 @@ EXTRACTED_MODULE_CEILING_TARGETS = (
     "src/agent_pbx/ui/controllers/joplin.py",
     "src/agent_pbx/ui/controllers/operator_handoffs.py",
     "src/agent_pbx/ui/controllers/workerbee.py",
+    "src/agent_pbx/ui/button_router.py",
+    "src/agent_pbx/ui/command_catalog.py",
 )
 AST_METRICS = ("lines", "bytes", "ast_nodes", "functions", "classes", "imports")
 REVIEW_TARGETS = {
@@ -53,7 +55,7 @@ REVIEW_TARGETS = {
         "owner": "persistence compatibility facade",
     },
     "src/agent_pbx/tui.py": {
-        "lines": 33000,
+        "lines": 32000,
         "owner": "Textual composition root and event router",
     },
 }

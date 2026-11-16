@@ -304,12 +304,21 @@ idempotent re-initialization, and legacy markers 6, 19, 20, 28, 30, 39, 43,
 44, and 45 are characterized. `store.py` is ratcheted from 12,961 to 11,331
 lines, and the schema owner has an exact no-growth ceiling.
 
-### D8-T — TUI command catalog and button router
+### D8-T — TUI command catalog and button router — implemented
 
 - freeze command metadata and button dispatch;
 - introduce typed descriptors and duplicate/unknown-ID checks;
 - preserve focus, key ownership, confirmation, and authorization behavior;
 - ratchet `tui.py` below its D7 goal when naturally achieved.
+
+The 215 reviewed static palette commands now live in a typed command catalog,
+with runtime duplicate detection extended to dynamic plan and custom slash
+commands. The 123 reviewed button IDs now live behind a typed, fail-closed
+button router with duplicate and blank-ID validation. `AgentPBXTUI` retains its
+Textual compatibility methods as delegates, and its widget, tab, action,
+keymap, focus, and terminal-input ownership fixture is unchanged. `tui.py` is
+ratcheted from 33,745 to 32,951 lines; both new owners have exact no-growth
+ceilings.
 
 ### Later domain reviews
 

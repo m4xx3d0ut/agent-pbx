@@ -358,3 +358,20 @@ schema version 45 without schema-object or seeded-Agent drift. The canonical
 schema hash, 150-object inventory, 363-method Store surface, and 32 atomic
 transaction owners remain frozen. Structural ceilings now pin the smaller
 `store.py` facade and the extracted schema owner.
+
+### D8-T command catalog and button router
+
+D8-T moves palette command construction to `ui/command_catalog.py` and button
+event dispatch to `ui/button_router.py`. The TUI retains
+`get_system_commands()` and `on_button_pressed()` as Textual-facing delegates,
+so framework integration and public ownership remain stable.
+
+The command catalog freezes 215 static command titles, rejects blank or
+duplicate titles, and applies the same runtime guard to native plan, dynamic
+plan, and project-authored slash commands. The button router freezes 123 IDs,
+rejects blank or duplicate descriptors, and returns without dispatch for an
+unknown ID. Focus, confirmation, authorization, F-key ownership, and terminal
+input continue to be implemented by their existing TUI/application owners.
+The canonical 242-widget, 11-tab, 32-action, and 35-binding TUI fixture remains
+unchanged. Structural ceilings now pin the smaller `tui.py` composition root
+and both extracted routing owners.

@@ -17,12 +17,12 @@
       "lines": 11331
     },
     "src/agent_pbx/tui.py": {
-      "ast_nodes": 177107,
-      "bytes": 1353047,
+      "ast_nodes": 172190,
+      "bytes": 1305693,
       "classes": 20,
       "functions": 1191,
-      "imports": 69,
-      "lines": 33745
+      "imports": 71,
+      "lines": 32951
     }
   },
   "baseline_commit": "56f46179863fed13f339ab3e55481a895b994921",
@@ -90,6 +90,22 @@
       "functions": 32,
       "imports": 10,
       "lines": 1091
+    },
+    "src/agent_pbx/ui/button_router.py": {
+      "ast_nodes": 2857,
+      "bytes": 23003,
+      "classes": 1,
+      "functions": 2,
+      "imports": 3,
+      "lines": 559
+    },
+    "src/agent_pbx/ui/command_catalog.py": {
+      "ast_nodes": 3686,
+      "bytes": 37961,
+      "classes": 3,
+      "functions": 6,
+      "imports": 7,
+      "lines": 728
     }
   },
   "ownership_rules": {
@@ -153,7 +169,7 @@
       "owner": "persistence compatibility facade"
     },
     "src/agent_pbx/tui.py": {
-      "lines": 33000,
+      "lines": 32000,
       "owner": "Textual composition root and event router"
     }
   },
