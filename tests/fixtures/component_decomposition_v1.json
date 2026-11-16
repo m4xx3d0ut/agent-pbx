@@ -9,12 +9,12 @@
       "lines": 1171
     },
     "src/agent_pbx/store.py": {
-      "ast_nodes": 54752,
-      "bytes": 526401,
+      "ast_nodes": 53867,
+      "bytes": 519055,
       "classes": 2,
       "functions": 373,
       "imports": 17,
-      "lines": 13135
+      "lines": 12961
     },
     "src/agent_pbx/tui.py": {
       "ast_nodes": 177107,
@@ -98,8 +98,10 @@
       "append_event_if_changed": "append_if_changed",
       "begin_joplin_edit": "begin_edit",
       "claim_next_joplin_sync_job": "claim_next",
+      "consume_dynamic_resource_request": "consume",
       "enqueue_joplin_sync": "enqueue",
       "mark_model_elevation_revert_pending": "mark_revert_pending",
+      "request_or_reuse_dynamic_resource": "request_or_reuse",
       "request_or_reuse_model_elevation": "request_or_reuse",
       "record_joplin_conflict": "record_conflict",
       "start_joplin_log": "start_log",

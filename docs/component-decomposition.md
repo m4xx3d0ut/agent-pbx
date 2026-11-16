@@ -91,7 +91,7 @@ architecture review goals, not permission to expand another component:
 | Composition module | Accepted ceiling | D7 line target | Intended end state |
 |---|---:|---:|---|
 | `src/agent_pbx/api.py` | 1,171 | 1,100 | application composition and router registration |
-| `src/agent_pbx/store.py` | 13,135 | 12,000 | stable persistence facade over cohesive repositories |
+| `src/agent_pbx/store.py` | 12,961 | 12,000 | stable persistence facade over cohesive repositories |
 | `src/agent_pbx/tui.py` | 33,745 | 33,000 | Textual composition root and event routing |
 
 The checker requires every target to remain below its accepted ceiling. D7 may
@@ -225,3 +225,35 @@ fingerprint, OpenAPI inventory, and TUI compatibility remain unchanged.
 Dynamic-resource leases, remote audit, WorkerBee controlled runs, Operator
 campaigns/handoffs/broker workflows, and Operator KB indexing remain separate
 future review boundaries.
+
+### D5-6 dynamic-resource persistence checkpoint
+
+Typed dynamic-resource request rows and resource-local lifecycle events now
+belong to a cohesive persistence repository. The repository owns digest-bound
+single-flight creation, expected-state compare-and-swap transitions,
+requester/expiry/quota checks within use-count transactions, event listing,
+and receipt/spec row conversion. `Store` retains all public signatures and the
+post-commit projection into the broader PBX event journal.
+
+Dynamic-resource feature gates, class/spec validation, Operator/campaign and
+handoff authority, F8 approval, delegation leases, Trusted Rosie policy,
+WorkerBee binding/backend generation and capability evidence, provider calls,
+receipt validation, cleanup, and recovery remain in `DynamicResourceBroker`
+and its injected providers. Persistence has no dependency on WorkerBee or a
+provider implementation.
+
+Failure-injection and concurrency characterization prove request/event,
+transition/event, and consumption/event rollback; one-winner state
+transitions; digest single-flight creation; and non-oversubscribed use quotas.
+The two immediate operations now delegate through the repository, increasing
+the reviewed delegate count from 11 to 13 while retaining all 32 operations.
+Resource-local state/event transactions still commit before the separate PBX
+audit projection; making that projection crash-atomic remains a separately
+reviewed outbox/event architecture concern.
+
+D5-6 ratchets the Store ceiling to 12,961 lines, 519,055 bytes, and 53,867 AST
+nodes. All 363 Store declarations, schema version 45, the 150-object schema
+fingerprint, OpenAPI inventory, TUI compatibility, provider contracts, and
+runtime behavior remain unchanged. Remote audit, WorkerBee controlled runs,
+Operator campaigns/handoffs/broker workflows, and Operator KB indexing remain
+separate future review boundaries.
