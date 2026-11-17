@@ -292,6 +292,7 @@ def harness_environment(plan: HarnessPlan) -> dict[str, str]:
         "AGENT_PBX_SERVER_URL": plan.server_url,
         "AGENT_PBX_TOKEN": plan.token,
         "AGENT_PBX_RUNTIME_SERVER_MODE": "dedicated",
+        "AGENT_PBX_TMUX_BIN": plan.tmux_bin,
         "AGENT_PBX_TMUX_SOCKET": str(plan.paths.tmux_socket),
         "AGENT_PBX_HARNESS": "1",
         "AGENT_PBX_HARNESS_RUN_ID": plan.run_id,

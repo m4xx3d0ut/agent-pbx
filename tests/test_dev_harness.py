@@ -112,6 +112,7 @@ def test_harness_environment_does_not_inherit_production_integration_paths(
     assert env["AGENT_PBX_SERVER_URL"] == plan.server_url
     assert "AGENT_PBX_JOPLIN_PROFILE" not in env
     assert env["AGENT_PBX_RUNTIME_SERVER_MODE"] == "dedicated"
+    assert env["AGENT_PBX_TMUX_BIN"] == plan.tmux_bin
 
 
 def test_run_in_harness_records_exact_argv_and_isolated_environment(
