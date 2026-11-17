@@ -2791,7 +2791,29 @@ def _read_approved_leaf(root: Path, relative: str) -> tuple[os.stat_result, byte
                 raise LinkedGitBrokerError(
                     f"approved file size changed during read: {relative}"
                 )
-            return after_metadata, raw
+            # A same-size rewrite can complete inside a filesystem timestamp
+            # quantum, leaving the metadata identity unchanged even though the
+            # descriptor returned bytes from two content generations.  Read the
+            # still-open descriptor a second time and require an identical
+            # snapshot before the broker hashes or stages these bytes.
+            os.lseek(leaf, 0, os.SEEK_SET)
+            verified_chunks: list[bytes] = []
+            while True:
+                chunk = os.read(leaf, 1024 * 1024)
+                if not chunk:
+                    break
+                verified_chunks.append(chunk)
+            verified_metadata = os.fstat(leaf)
+            verified_raw = b"".join(verified_chunks)
+            if (
+                _leaf_content_identity(verified_metadata) != before
+                or len(verified_raw) != verified_metadata.st_size
+                or verified_raw != raw
+            ):
+                raise LinkedGitBrokerError(
+                    f"approved file changed during read: {relative}"
+                )
+            return verified_metadata, verified_raw
         if stat.S_ISLNK(metadata.st_mode):
             target = os.readlink(parts[-1], dir_fd=current)
             after_metadata = os.stat(
