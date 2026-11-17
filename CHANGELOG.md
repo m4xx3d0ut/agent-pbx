@@ -17,6 +17,15 @@
 - Add isolated Operator-0 and Operator-6 regression fixtures for late reports,
   restart replay, duplicate suppression, and terminal-history preservation
   without using live managed panes or sockets.
+- Bind an interactive TUI writer lease to the exact host terminal and parent
+  process that launched it. If either identity disappears or changes, only the
+  orphan embedded client is detached, its writer lease is released, and that
+  TUI exits without stopping, signaling, restarting, or remapping the managed
+  runtime. Noninteractive pilot and test launches remain unaffected.
+- Clear stale transient live-validation metadata when a successful in-place
+  restart registers fresh PID/start evidence, while preserving the durable
+  reconciliation and registration event history. Writer-lease conflicts now
+  identify the read-only fallback without implying a runtime restart.
 
 ### Security
 
@@ -27,6 +36,9 @@
 - Keep prompt bodies and terminal captures out of delivery receipts and audit
   records; readiness evidence contains only bounded state, source, timestamp,
   reason, and target-identity metadata.
+- Prevent a detached or replaced host terminal from renewing or reacquiring a
+  writer lease. The liveness correction never signals or inspects a live
+  managed Codex PID and does not change multi-client read-only semantics.
 
 ## v2.5.0rc1 - 2026-11-17
 
