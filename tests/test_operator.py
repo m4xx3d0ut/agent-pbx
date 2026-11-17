@@ -3525,3 +3525,155 @@ def test_operator_campaign_tmux_delivery_rejects_drifted_fork_metadata(
     )
     assert dispatch_failures[0]["detail"]["delivery_error"]["request_id"]
     assert "message" not in dispatch_failures[0]["detail"]["delivery_error"]
+
+
+def test_root_operator_direct_caller_delivery_queues_without_creating_fork(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+
+    result = service.deliver_direct_caller_message(
+        operator_agent_id="operator-0",
+        target_caller_agent_id="caller-1",
+        message="Review the immutable evidence and report the result.",
+        purpose="bounded review",
+        delivery="auto",
+    )
+
+    assert result["delivery"]["target_caller_agent_id"] == "caller-1"
+    assert result["delivery"]["resolved_delivery"] == "queue"
+    assert result["command"]["status"] == "queued"
+    assert result["command"]["payload"]["source"] == "operator_direct_caller"
+    assert "Review the immutable evidence" in result["command"]["payload"]["message"]
+    assert store.list_operator_forks(limit=100) == []
+    events = store.list_events(limit=20)
+    assert any(
+        event["type"] == "operator_direct_caller_delivered"
+        for event in events
+    )
+
+
+def test_direct_caller_delivery_rejects_operator_fork_and_non_nohup_queue(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0-fork-caller-1",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={
+                "operator_role": "fork",
+                "logical_operator_id": "operator-0",
+                "pbx_mode": "report",
+            },
+        )
+    )
+    service = OperatorService(store)
+
+    with pytest.raises(ValueError, match="root operator"):
+        service.deliver_direct_caller_message(
+            operator_agent_id="operator-0-fork-caller-1",
+            target_caller_agent_id="caller-1",
+            message="Attempt delivery.",
+            purpose="review",
+        )
+
+    caller = store.get_agent("caller-1")
+    assert caller is not None
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={**caller["metadata"], "pbx_mode": "report"},
+        )
+    )
+    with pytest.raises(ValueError, match="explicit nohup"):
+        service.deliver_direct_caller_message(
+            operator_agent_id="operator-0",
+            target_caller_agent_id="caller-1",
+            message="Attempt queue delivery.",
+            purpose="review",
+            delivery="queue",
+        )
+
+
+def test_root_operator_reconciles_delivered_handoff_and_transaction(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-7",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"pbx_mode": "report", "cwd": str(tmp_path)},
+        )
+    )
+    service = OperatorService(store)
+    handoff = service.create_handoff(
+        operator_agent_id="operator-0",
+        source_agent_id="operator-0",
+        target_operator_agent_id="operator-7",
+        message="Perform the exact checkpoint.",
+        execution_scope={
+            "action_class": "exact_git_commit_broker",
+            "campaign_id": "campaign-1",
+            "workspace_set_digest": "a" * 64,
+            "mutation_mode": "exact_paths",
+            "allowed_roots": [str(tmp_path)],
+            "exact_paths": ["README.md"],
+            "expected_git_parent": "b" * 40,
+            "commit_subject": "docs: exact checkpoint",
+        },
+    )
+    running = store.update_operator_handoff(
+        handoff["handoff_id"],
+        status="running",
+        start=True,
+    )
+    assert running is not None
+    transaction = store.append_operator_action_receipt(
+        handoff_id=handoff["handoff_id"],
+        action_class="exact_git_commit_broker",
+        target_agent_id="operator-7",
+        scope_sha256="c" * 64,
+        initial_state="ready_stop",
+        step="stop",
+        outcome="failed",
+        actor="test",
+        evidence={"reason": "superseded checkpoint"},
+    )
+    assert transaction["state"] == "blocked_reapproval_required"
+
+    result = service.reconcile_handoff(
+        operator_agent_id="operator-0",
+        handoff_id=handoff["handoff_id"],
+        reason="A verified successor checkpoint replaced this attempt.",
+    )
+
+    assert result["previous_status"] == "running"
+    assert result["handoff"]["status"] == "failed"
+    assert result["handoff"]["metadata"]["reconciliation"]["disposition"] == (
+        "superseded"
+    )
+    assert result["action_transaction"]["state"] == "superseded"
+    assert service.list_handoff_actions(include_complete=False) == []
+    history = service.list_handoff_actions(include_complete=True)
+    assert len(history) == 1
+    assert history[0]["disposition"] == "terminal_review"
+    assert history[0]["actionable"] is False
+
+    repeated = service.reconcile_handoff(
+        operator_agent_id="operator-0",
+        handoff_id=handoff["handoff_id"],
+        reason="A verified successor checkpoint replaced this attempt.",
+    )
+    assert repeated["idempotent"] is True

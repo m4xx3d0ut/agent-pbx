@@ -6740,6 +6740,74 @@
         "title": "OperatorDelegationLeaseRevokeRequest",
         "type": "object"
       },
+      "OperatorDirectCallerDeliveryRequest": {
+        "properties": {
+          "delivery": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "queue",
+              "tmux"
+            ],
+            "title": "Delivery",
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "operator_agent_id": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Operator Agent Id",
+            "type": "string"
+          },
+          "purpose": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Purpose",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operator_agent_id",
+          "message",
+          "purpose"
+        ],
+        "title": "OperatorDirectCallerDeliveryRequest",
+        "type": "object"
+      },
+      "OperatorDirectCallerDeliveryResponse": {
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/CommandResponse"
+          },
+          "delivery": {
+            "additionalProperties": true,
+            "title": "Delivery",
+            "type": "object"
+          },
+          "preflight": {
+            "additionalProperties": true,
+            "title": "Preflight",
+            "type": "object"
+          }
+        },
+        "required": [
+          "delivery",
+          "command",
+          "preflight"
+        ],
+        "title": "OperatorDirectCallerDeliveryResponse",
+        "type": "object"
+      },
       "OperatorFollowupRequest": {
         "properties": {
           "assignment_id": {
@@ -7501,8 +7569,18 @@
             "title": "Action Class",
             "type": "string"
           },
+          "actionable": {
+            "default": true,
+            "title": "Actionable",
+            "type": "boolean"
+          },
           "campaign_id": {
             "title": "Campaign Id",
+            "type": "string"
+          },
+          "disposition": {
+            "default": "actionable",
+            "title": "Disposition",
             "type": "string"
           },
           "execution_scope": {
@@ -7512,6 +7590,11 @@
           },
           "handoff_id": {
             "title": "Handoff Id",
+            "type": "string"
+          },
+          "handoff_status": {
+            "default": "",
+            "title": "Handoff Status",
             "type": "string"
           },
           "logical_operator_agent_id": {
@@ -7570,6 +7653,17 @@
               }
             ],
             "title": "Transaction Id"
+          },
+          "transaction_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transaction State"
           },
           "updated_at": {
             "anyOf": [
@@ -8333,6 +8427,74 @@
           "status"
         ],
         "title": "OperatorHandoffPreflightResponse",
+        "type": "object"
+      },
+      "OperatorHandoffReconcileRequest": {
+        "properties": {
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "operator_agent_id": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Operator Agent Id",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "replacement_handoff_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Replacement Handoff Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "operator_agent_id",
+          "reason"
+        ],
+        "title": "OperatorHandoffReconcileRequest",
+        "type": "object"
+      },
+      "OperatorHandoffReconcileResponse": {
+        "properties": {
+          "action_transaction": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Transaction"
+          },
+          "handoff": {
+            "$ref": "#/components/schemas/OperatorHandoffResponse"
+          },
+          "idempotent": {
+            "default": false,
+            "title": "Idempotent",
+            "type": "boolean"
+          },
+          "previous_status": {
+            "title": "Previous Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "handoff",
+          "previous_status"
+        ],
+        "title": "OperatorHandoffReconcileResponse",
         "type": "object"
       },
       "OperatorHandoffResponse": {
@@ -19114,6 +19276,60 @@
         "summary": "Validate Operator Broker Checkpoint"
       }
     },
+    "/v1/operator/callers/{target_caller_agent_id}/deliver": {
+      "post": {
+        "operationId": "deliver_operator_message_to_caller_v1_operator_callers__target_caller_agent_id__deliver_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "target_caller_agent_id",
+            "required": true,
+            "schema": {
+              "title": "Target Caller Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorDirectCallerDeliveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorDirectCallerDeliveryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Deliver Operator Message To Caller"
+      }
+    },
     "/v1/operator/campaigns": {
       "get": {
         "operationId": "list_operator_campaigns_v1_operator_campaigns_get",
@@ -20859,6 +21075,60 @@
           }
         ],
         "summary": "Preflight Operator Handoff"
+      }
+    },
+    "/v1/operator/handoffs/{handoff_id}/reconcile": {
+      "post": {
+        "operationId": "reconcile_operator_handoff_v1_operator_handoffs__handoff_id__reconcile_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "handoff_id",
+            "required": true,
+            "schema": {
+              "title": "Handoff Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorHandoffReconcileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorHandoffReconcileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reconcile Operator Handoff"
       }
     },
     "/v1/operator/handoffs/{handoff_id}/status": {

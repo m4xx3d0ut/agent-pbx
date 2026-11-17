@@ -59,7 +59,7 @@ def test_begin_immediate_uses_reviewed_atomic_operation_manifest(
         begin_immediate(connection)
         assert connection.in_transaction is True
 
-    assert len(ATOMIC_STORE_OPERATIONS) == 32
+    assert len(ATOMIC_STORE_OPERATIONS) == 33
     assert "append_event_if_changed" in ATOMIC_STORE_OPERATIONS
     assert "merge_agent_metadata" in ATOMIC_STORE_OPERATIONS
     assert ATOMIC_STORE_DELEGATES == {

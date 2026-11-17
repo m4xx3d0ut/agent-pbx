@@ -187,8 +187,8 @@ def test_store_schema_and_transaction_inventory_are_versioned() -> None:
     )
     assert contract["store_contract"] == _checker().collect_store_contract()
     assert contract["store_contract"]["schema_version"] == 45
-    assert len(contract["store_contract"]["begin_immediate_methods"]) == 32
-    assert len(contract["store_contract"]["method_declarations"]) == 363
+    assert len(contract["store_contract"]["begin_immediate_methods"]) == 33
+    assert len(contract["store_contract"]["method_declarations"]) == 364
     assert contract["store_contract"]["connection"] == {
         "foreign_keys": 1,
         "in_transaction_on_open": False,
@@ -202,7 +202,7 @@ def test_api_route_method_and_operation_id_inventory_is_versioned() -> None:
     expected = json.loads(API_ROUTE_INVENTORY.read_text(encoding="utf-8"))
 
     assert expected == _checker().collect_api_route_inventory()
-    assert len(expected) == 280
+    assert len(expected) == 282
     assert len(
         {
             (item["method"], item["path"], item["operation_id"])
@@ -361,7 +361,7 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
         if getattr(getattr(route, "endpoint", None), "__module__", "")
         == "agent_pbx.api_routes.operator"
     ]
-    assert len(operator_routes) == 80
+    assert len(operator_routes) == 82
     operator_authority_routes = [
         route
         for route in app.routes

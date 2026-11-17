@@ -450,6 +450,11 @@
     "path": "/v1/operator/broker-checkpoints/{request_id}/validate"
   },
   {
+    "method": "POST",
+    "operation_id": "deliver_operator_message_to_caller_v1_operator_callers__target_caller_agent_id__deliver_post",
+    "path": "/v1/operator/callers/{target_caller_agent_id}/deliver"
+  },
+  {
     "method": "GET",
     "operation_id": "list_operator_campaigns_v1_operator_campaigns_get",
     "path": "/v1/operator/campaigns"
@@ -588,6 +593,11 @@
     "method": "POST",
     "operation_id": "preflight_operator_handoff_v1_operator_handoffs__handoff_id__preflight_post",
     "path": "/v1/operator/handoffs/{handoff_id}/preflight"
+  },
+  {
+    "method": "POST",
+    "operation_id": "reconcile_operator_handoff_v1_operator_handoffs__handoff_id__reconcile_post",
+    "path": "/v1/operator/handoffs/{handoff_id}/reconcile"
   },
   {
     "method": "POST",

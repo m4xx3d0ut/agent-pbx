@@ -332,6 +332,10 @@ class OperatorHandoffController(TUIController[Any]):
         await self.refresh_events()
 
     async def open_operator_ready_action(self, logical_operator_id: str) -> None:
+        active_screen = self.active_ready_action_screen()
+        if active_screen is not None:
+            self.notify("An Operator ready-action review is already open.")
+            return
         if self.handoff_action_opening_operator_id is not None:
             self.notify("Operator ready actions are already opening.")
             return
@@ -358,7 +362,14 @@ class OperatorHandoffController(TUIController[Any]):
             if not matching:
                 self.notify(f"No ready actions for {logical_operator_id}.")
                 return
-            self.push_screen(OperatorReadyActionScreen(matching[0]))
+            current = max(
+                matching,
+                key=lambda action: (
+                    float_value(action.get("updated_at")) or 0.0,
+                    str(action.get("handoff_id") or ""),
+                ),
+            )
+            self.push_screen(OperatorReadyActionScreen(current))
         except Exception as exc:
             self.notify(
                 f"Unable to open Operator ready actions: {exc}", severity="error"

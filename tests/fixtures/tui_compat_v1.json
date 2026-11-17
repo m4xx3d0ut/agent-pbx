@@ -2,41 +2,286 @@
   "action_owner": "AgentPBXTUI",
   "app_class": "AgentPBXTUI",
   "bindings": [
-    {"action": "refresh", "description": "Refresh", "key": "r", "key_display": null, "priority": false, "show": true},
-    {"action": "settings", "description": "Settings", "key": "s", "key_display": null, "priority": false, "show": true},
-    {"action": "focus_agents", "description": "Agents", "key": "f1", "key_display": "F1", "priority": true, "show": true},
-    {"action": "focus_events", "description": "Events", "key": "f2", "key_display": "F2", "priority": true, "show": true},
-    {"action": "focus_right_pane", "description": "Tabs", "key": "f3", "key_display": "F3", "priority": true, "show": true},
-    {"action": "focus_latest_input", "description": "Input", "key": "f4", "key_display": "F4", "priority": true, "show": true},
-    {"action": "focus_operators", "description": "Operators", "key": "f5", "key_display": "F5", "priority": true, "show": true},
-    {"action": "prev_operator_fork", "description": "Prev Fork", "key": "f6", "key_display": "F6", "priority": true, "show": true},
-    {"action": "next_operator_fork", "description": "Next Fork", "key": "f7", "key_display": "F7", "priority": true, "show": true},
-    {"action": "toggle_right_pane_fullscreen", "description": "Right Full", "key": "f9", "key_display": "F9", "priority": false, "show": true},
-    {"action": "launch_workspace", "description": "Launch Workspace", "key": "f10", "key_display": "F10", "priority": true, "show": true},
-    {"action": "navigation_back", "description": "Navigation Back", "key": "f11", "key_display": "F11", "priority": true, "show": true},
-    {"action": "navigation_forward", "description": "Navigation Forward", "key": "f12", "key_display": "F12", "priority": true, "show": true},
-    {"action": "start_operator", "description": "Start Operator", "key": "shift+o", "key_display": "O", "priority": false, "show": true},
-    {"action": "operator_history", "description": "Operator History", "key": "y", "key_display": null, "priority": true, "show": true},
-    {"action": "resume_operator", "description": "Resume Operator", "key": "u", "key_display": null, "priority": true, "show": true},
-    {"action": "restart_operator", "description": "Restart Operator", "key": "shift+u", "key_display": "U", "priority": false, "show": true},
-    {"action": "stop_operator", "description": "Stop Operator", "key": "x", "key_display": null, "priority": true, "show": true},
-    {"action": "start_review_operator_fork", "description": "Review Fork", "key": "shift+w", "key_display": "W", "priority": true, "show": true},
-    {"action": "start_review_operator_fork", "description": "Review Fork", "key": "upper_w", "key_display": null, "priority": true, "show": false},
-    {"action": "start_review_operator_fork", "description": "Review Fork", "key": "W", "key_display": null, "priority": true, "show": false},
-    {"action": "launch_project_spawn", "description": "Launch Spawn", "key": "shift+p", "key_display": "P", "priority": true, "show": true},
-    {"action": "toggle_tmux_direct", "description": "Tmux", "key": "ctrl+t", "key_display": null, "priority": false, "show": true},
-    {"action": "focus_next_alert", "description": "Next Alert", "key": "f8", "key_display": "F8", "priority": true, "show": true},
-    {"action": "toggle_tmux_direct", "description": "Tmux", "key": "alt+t", "key_display": "Alt+T", "priority": false, "show": false},
-    {"action": "toggle_star_agent", "description": "Star Agent", "key": "p", "key_display": null, "priority": true, "show": true},
-    {"action": "toggle_hidden_agents", "description": "Hidden", "key": "h", "key_display": null, "priority": true, "show": true},
-    {"action": "unhide_agent", "description": "Unhide Agent", "key": "shift+h", "key_display": "H", "priority": true, "show": true},
-    {"action": "hide_agent", "description": "Hide Agent", "key": "d", "key_display": null, "priority": true, "show": true},
-    {"action": "monitor_campaign", "description": "Campaign Monitor", "key": "shift+m", "key_display": "M", "priority": true, "show": true},
-    {"action": "view_campaign_report", "description": "Campaign Report", "key": "shift+r", "key_display": "R", "priority": true, "show": true},
-    {"action": "copy_campaign_to_joplin", "description": "Campaign Note", "key": "shift+c", "key_display": "C", "priority": true, "show": true},
-    {"action": "purge_agent", "description": "Purge Agent", "key": "shift+d", "key_display": "D", "priority": true, "show": true},
-    {"action": "back", "description": "Back", "key": "b", "key_display": null, "priority": false, "show": true},
-    {"action": "quit", "description": "Quit", "key": "q", "key_display": null, "priority": false, "show": true}
+    {
+      "action": "refresh",
+      "description": "Refresh",
+      "key": "r",
+      "key_display": null,
+      "priority": false,
+      "show": true
+    },
+    {
+      "action": "settings",
+      "description": "Settings",
+      "key": "s",
+      "key_display": null,
+      "priority": false,
+      "show": true
+    },
+    {
+      "action": "focus_agents",
+      "description": "Agents",
+      "key": "f1",
+      "key_display": "F1",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "focus_events",
+      "description": "Events",
+      "key": "f2",
+      "key_display": "F2",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "focus_right_pane",
+      "description": "Tabs",
+      "key": "f3",
+      "key_display": "F3",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "focus_latest_input",
+      "description": "Input",
+      "key": "f4",
+      "key_display": "F4",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "focus_operators",
+      "description": "Operators",
+      "key": "f5",
+      "key_display": "F5",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "prev_operator_fork",
+      "description": "Prev Fork",
+      "key": "f6",
+      "key_display": "F6",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "next_operator_fork",
+      "description": "Next Fork",
+      "key": "f7",
+      "key_display": "F7",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "toggle_right_pane_fullscreen",
+      "description": "Right Full",
+      "key": "f9",
+      "key_display": "F9",
+      "priority": false,
+      "show": true
+    },
+    {
+      "action": "launch_workspace",
+      "description": "Launch Workspace",
+      "key": "f10",
+      "key_display": "F10",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "navigation_back",
+      "description": "Navigation Back",
+      "key": "f11",
+      "key_display": "F11",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "navigation_forward",
+      "description": "Navigation Forward",
+      "key": "f12",
+      "key_display": "F12",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "start_operator",
+      "description": "Start Operator",
+      "key": "shift+o",
+      "key_display": "O",
+      "priority": false,
+      "show": true
+    },
+    {
+      "action": "operator_history",
+      "description": "Operator History",
+      "key": "y",
+      "key_display": null,
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "resume_operator",
+      "description": "Resume Operator",
+      "key": "u",
+      "key_display": null,
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "restart_operator",
+      "description": "Restart Operator",
+      "key": "shift+u",
+      "key_display": "U",
+      "priority": false,
+      "show": true
+    },
+    {
+      "action": "stop_operator",
+      "description": "Stop Operator",
+      "key": "x",
+      "key_display": null,
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "start_review_operator_fork",
+      "description": "Review Fork",
+      "key": "shift+w",
+      "key_display": "W",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "start_review_operator_fork",
+      "description": "Review Fork",
+      "key": "upper_w",
+      "key_display": null,
+      "priority": true,
+      "show": false
+    },
+    {
+      "action": "start_review_operator_fork",
+      "description": "Review Fork",
+      "key": "W",
+      "key_display": null,
+      "priority": true,
+      "show": false
+    },
+    {
+      "action": "launch_project_spawn",
+      "description": "Launch Spawn",
+      "key": "shift+p",
+      "key_display": "P",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "toggle_tmux_direct",
+      "description": "Tmux",
+      "key": "ctrl+t",
+      "key_display": null,
+      "priority": false,
+      "show": true
+    },
+    {
+      "action": "focus_next_alert",
+      "description": "Next Alert",
+      "key": "f8",
+      "key_display": "F8",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "toggle_tmux_direct",
+      "description": "Tmux",
+      "key": "alt+t",
+      "key_display": "Alt+T",
+      "priority": false,
+      "show": false
+    },
+    {
+      "action": "toggle_star_agent",
+      "description": "Star Agent",
+      "key": "p",
+      "key_display": null,
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "toggle_hidden_agents",
+      "description": "Hidden",
+      "key": "h",
+      "key_display": null,
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "unhide_agent",
+      "description": "Unhide Agent",
+      "key": "shift+h",
+      "key_display": "H",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "hide_agent",
+      "description": "Hide Agent",
+      "key": "d",
+      "key_display": null,
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "monitor_campaign",
+      "description": "Campaign Monitor",
+      "key": "shift+m",
+      "key_display": "M",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "view_campaign_report",
+      "description": "Campaign Report",
+      "key": "shift+r",
+      "key_display": "R",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "copy_campaign_to_joplin",
+      "description": "Campaign Note",
+      "key": "shift+c",
+      "key_display": "C",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "purge_agent",
+      "description": "Purge Agent",
+      "key": "shift+d",
+      "key_display": "D",
+      "priority": true,
+      "show": true
+    },
+    {
+      "action": "back",
+      "description": "Back",
+      "key": "b",
+      "key_display": null,
+      "priority": false,
+      "show": true
+    },
+    {
+      "action": "quit",
+      "description": "Quit",
+      "key": "q",
+      "key_display": null,
+      "priority": false,
+      "show": true
+    }
   ],
   "bound_actions": [
     "back",
@@ -77,17 +322,50 @@
   "source": "src/agent_pbx/tui.py",
   "tab_owner": "AgentPBXTUI.compose",
   "tabs": [
-    {"id": "latest-tab", "label": "Latest"},
-    {"id": "codex-tab", "label": "Codex"},
-    {"id": "thread-tab", "label": "Thread"},
-    {"id": "files-tab", "label": "Files"},
-    {"id": "editor-tab", "label": "Editor"},
-    {"id": "workerbee-tab", "label": "WorkerBee"},
-    {"id": "pull-requests-tab", "label": "PRs"},
-    {"id": "issues-tab", "label": "Issues"},
-    {"id": "campaigns-tab", "label": "Campaigns"},
-    {"id": "operator-kb-tab", "label": "KB"},
-    {"id": "joplin-tab", "label": "Joplin"}
+    {
+      "id": "latest-tab",
+      "label": "Latest"
+    },
+    {
+      "id": "codex-tab",
+      "label": "Codex"
+    },
+    {
+      "id": "thread-tab",
+      "label": "Thread"
+    },
+    {
+      "id": "files-tab",
+      "label": "Files"
+    },
+    {
+      "id": "editor-tab",
+      "label": "Editor"
+    },
+    {
+      "id": "workerbee-tab",
+      "label": "WorkerBee"
+    },
+    {
+      "id": "pull-requests-tab",
+      "label": "PRs"
+    },
+    {
+      "id": "issues-tab",
+      "label": "Issues"
+    },
+    {
+      "id": "campaigns-tab",
+      "label": "Campaigns"
+    },
+    {
+      "id": "operator-kb-tab",
+      "label": "KB"
+    },
+    {
+      "id": "joplin-tab",
+      "label": "Joplin"
+    }
   ],
   "terminal_focus_ownership": {
     "policy_owner": "AgentPBXTUI.pbx_owns_key_under_terminal_focus",

@@ -437,7 +437,12 @@ def test_blocked_handoff_retains_existing_action_transaction_for_reconciliation(
 
     assert action is not None
     assert action["state"] == "stopped_ready_broker"
-    assert action["next_action"] == "broker_review"
+    assert action["transaction_state"] == "stopped_ready_broker"
+    assert action["handoff_status"] == "blocked"
+    assert action["disposition"] == "terminal_review"
+    assert action["actionable"] is False
+    assert action["next_action"] is None
+    assert action["reason"] == "handoff is terminal (blocked)"
     assert action["transaction_id"] == "tx-1"
 
 

@@ -271,6 +271,8 @@ def operator_runbook_payload() -> dict[str, Any]:
             "When review work needs to transfer domain context to another operator, propose a knowledge handoff; the TUI/root operator approves delivery, either directly or through a bounded campaign lease it explicitly granted.",
             "Campaign delegation leases are available only when source and target Operators have the same activated Trusted Workbench workspace identity. They never cover credentials, provider/cloud work, deploy, publication, push/tag/release, workspace expansion, authority elevation, destructive work, or ambiguous prose-only scopes.",
             "Operator handoffs track required target fork launch, delivery evidence, receiver acknowledgement, running state, TTL expiry, artifact summaries, and terminal state.",
+            "A root Operator may use pbx_operator_reconcile_handoff to supersede an already-delivered source-owned handoff that is durably obsolete; this terminally reconciles any retained broker transaction without deleting receipts. Pre-delivery withdrawal still uses ordinary cancellation.",
+            "A root Operator may use pbx_operator_deliver_caller for bounded audited coordination with an exact existing caller when no campaign ownership transfer or Operator fork is required. Fork sessions cannot invoke this root-only delivery path.",
             "Every terminal handoff update creates one idempotent completion receipt addressed to the exact source root or source fork; sources review and acknowledge receipts independently of the terminal result.",
             "Report-mode completion injection requires an exact managed tmux mapping or recorded pane. Without exact evidence the durable receipt stays pending for TUI review instead of targeting a guessed pane.",
             "For new handoffs, provide execution_scope with an action_class, mutation_mode, campaign and workspace-set identity where applicable; exact Git commit brokers also require exact_paths, expected_git_parent, and commit_subject.",
@@ -3014,8 +3016,7 @@ class OperatorService:
         return {
             "ok": bool(
                 action
-                and action.get("state") != "blocked_reapproval_required"
-                and bool(action.get("next_action"))
+                and bool(action.get("actionable"))
             ),
             "handoff": handoff,
             "action": action,
@@ -3048,7 +3049,7 @@ class OperatorService:
                 continue
             if target_agent_id and action.get("target_agent_id") != target_agent_id:
                 continue
-            if not include_complete and action.get("state") == "complete":
+            if not include_complete and not bool(action.get("actionable")):
                 continue
             actions.append(action)
         return sorted(
@@ -3057,7 +3058,265 @@ class OperatorService:
                 float(item.get("updated_at") or 0.0),
                 str(item.get("handoff_id") or ""),
             ),
+            reverse=True,
         )[: min(max(limit, 1), 500)]
+
+    def reconcile_handoff(
+        self,
+        *,
+        operator_agent_id: str,
+        handoff_id: str,
+        reason: str,
+        replacement_handoff_ids: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Supersede one delivered source-owned handoff while preserving its audit trail."""
+
+        self._require_root_operator(operator_agent_id)
+        handoff = self._require_handoff_for_source_operator(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+        )
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            raise ValueError("handoff reconciliation reason is required")
+        replacements = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in replacement_handoff_ids or []
+                if str(value or "").strip()
+            )
+        )
+        if len(replacements) > 20:
+            raise ValueError("handoff reconciliation accepts at most 20 replacements")
+        if handoff_id in replacements:
+            raise ValueError("handoff cannot supersede itself")
+        logical_operator_id = str(handoff.get("logical_operator_agent_id") or "")
+        for replacement_id in replacements:
+            replacement = self._require_handoff(replacement_id)
+            if (
+                str(replacement.get("logical_operator_agent_id") or "")
+                != logical_operator_id
+            ):
+                raise ValueError(
+                    f"replacement handoff {replacement_id} belongs to a different operator"
+                )
+
+        current_status = str(handoff.get("status") or "").strip().lower()
+        if current_status in HANDOFF_PRESTART_STATUSES:
+            raise ValueError(
+                "pre-delivery handoffs must use the ordinary cancellation workflow"
+            )
+        existing_metadata = (
+            handoff.get("metadata")
+            if isinstance(handoff.get("metadata"), dict)
+            else {}
+        )
+        existing_reconciliation = existing_metadata.get("reconciliation")
+        if isinstance(existing_reconciliation, dict) and (
+            existing_reconciliation.get("disposition") == "superseded"
+        ):
+            transaction = self.store.get_operator_action_transaction(
+                handoff_id=handoff_id
+            )
+            return {
+                "handoff": handoff,
+                "previous_status": str(
+                    existing_reconciliation.get("previous_status") or current_status
+                ),
+                "action_transaction": transaction,
+                "idempotent": True,
+            }
+
+        reconciliation = {
+            "disposition": "superseded",
+            "reason": normalized_reason,
+            "reconciled_by": operator_agent_id,
+            "previous_status": current_status,
+            "replacement_handoff_ids": replacements,
+            "reconciled_at": now_ts(),
+        }
+        summary = f"Superseded by root Operator reconciliation: {normalized_reason}"
+        updated = self.store.update_operator_handoff(
+            handoff_id,
+            status="failed",
+            summary=summary,
+            metadata={
+                **(metadata or {}),
+                "reconciliation": reconciliation,
+            },
+            complete=True,
+        )
+        if updated is None:
+            raise RuntimeError("handoff reconciliation update failed")
+        transaction = self.store.supersede_operator_action_transaction(
+            handoff_id=handoff_id,
+            reason=normalized_reason,
+            actor=operator_agent_id,
+            replacement_handoff_ids=replacements,
+        )
+        self._record_handoff_event(
+            "operator_handoff_superseded",
+            updated,
+            summary=summary,
+            extra={
+                "previous_status": current_status,
+                "reconciled_by": operator_agent_id,
+                "replacement_handoff_ids": replacements,
+                "action_transaction_id": (
+                    transaction.get("transaction_id") if transaction else None
+                ),
+            },
+        )
+        updated = self._deliver_terminal_completion_if_needed(updated)
+        return {
+            "handoff": updated,
+            "previous_status": current_status,
+            "action_transaction": transaction,
+            "idempotent": False,
+        }
+
+    def preflight_direct_caller_delivery(
+        self,
+        *,
+        operator_agent_id: str,
+        target_caller_agent_id: str,
+        delivery: str = "auto",
+    ) -> dict[str, Any]:
+        """Validate one root-to-caller delivery without creating an Operator fork."""
+
+        self._require_root_operator(operator_agent_id)
+        target = self._require_caller(target_caller_agent_id)
+        requested = str(delivery or "auto").strip().lower() or "auto"
+        mode = str((target.get("metadata") or {}).get("pbx_mode") or "report").lower()
+        resolved = "queue" if requested == "auto" and mode == NOHUP_MODE else requested
+        if requested == "auto" and mode != NOHUP_MODE:
+            resolved = "tmux"
+        base = {
+            "operator_agent_id": operator_agent_id,
+            "target_caller_agent_id": target_caller_agent_id,
+            "requested_delivery": requested,
+            "resolved_delivery": resolved,
+            "checked_at": now_ts(),
+            "target": self._delivery_target_payload(target),
+            "ok": False,
+            "status": "failed",
+            "reason": None,
+            "pane": None,
+        }
+        if resolved == "queue":
+            if mode != NOHUP_MODE:
+                return {
+                    **base,
+                    "reason": "queue delivery requires an explicit nohup caller",
+                }
+            return {**base, "ok": True, "status": "ready"}
+        if resolved != "tmux":
+            return {
+                **base,
+                "reason": "delivery must be auto, queue, or tmux",
+            }
+        pane_result = self._preflight_tmux_target(target)
+        return {
+            **base,
+            "ok": bool(pane_result.get("ok")),
+            "status": "ready" if pane_result.get("ok") else "failed",
+            "reason": pane_result.get("reason"),
+            "pane": pane_result.get("pane"),
+            "warnings": pane_result.get("warnings") or [],
+        }
+
+    def deliver_direct_caller_message(
+        self,
+        *,
+        operator_agent_id: str,
+        target_caller_agent_id: str,
+        message: str,
+        purpose: str,
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Deliver a bounded, audited root-Operator message to an exact caller."""
+
+        self._require_root_operator(operator_agent_id)
+        target = self._require_caller(target_caller_agent_id)
+        normalized_message = str(message or "").strip()
+        normalized_purpose = str(purpose or "").strip()
+        if not normalized_message:
+            raise ValueError("direct caller delivery message is required")
+        if not normalized_purpose:
+            raise ValueError("direct caller delivery purpose is required")
+        preflight = self.preflight_direct_caller_delivery(
+            operator_agent_id=operator_agent_id,
+            target_caller_agent_id=target_caller_agent_id,
+            delivery=delivery,
+        )
+        if not bool(preflight.get("ok")):
+            raise ValueError(
+                str(preflight.get("reason") or "direct caller delivery preflight failed")
+            )
+        delivery_id = str(uuid.uuid4())
+        prompt = "\n".join(
+            [
+                "Agent PBX direct caller request",
+                "",
+                f"Delivery: {delivery_id}",
+                f"Source root Operator: {operator_agent_id}",
+                f"Purpose: {normalized_purpose}",
+                "",
+                normalized_message,
+                "",
+                "Report the result through your normal Agent PBX caller identity.",
+            ]
+        )
+        payload = {
+            "source": "operator_direct_caller",
+            "delivery_id": delivery_id,
+            "operator_agent_id": operator_agent_id,
+            "target_caller_agent_id": target_caller_agent_id,
+            "purpose": normalized_purpose,
+            "message_sha256": hashlib.sha256(
+                normalized_message.encode("utf-8")
+            ).hexdigest(),
+            "preflight": preflight,
+            "metadata": dict(metadata or {}),
+        }
+        request_id = self._idle_delivery_request_id(
+            source="operator_direct_caller",
+            target_agent_id=target_caller_agent_id,
+            message=prompt,
+            stable_parts=(delivery_id, operator_agent_id, normalized_purpose),
+            deduplicate=True,
+        )
+        command = self._deliver_idle_target_command(
+            target=target,
+            message=prompt,
+            requested_delivery=str(preflight["resolved_delivery"]),
+            request_id=request_id,
+            source="operator_direct_caller",
+            payload=payload,
+        )
+        command_payload = (
+            command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        )
+        audit = {
+            "delivery_id": delivery_id,
+            "operator_agent_id": operator_agent_id,
+            "target_caller_agent_id": target_caller_agent_id,
+            "purpose": normalized_purpose,
+            "message_sha256": payload["message_sha256"],
+            "resolved_delivery": preflight["resolved_delivery"],
+            "command_id": command.get("command_id"),
+            "command_status": command.get("status"),
+            "tmux_pane_id": command_payload.get("tmux_pane_id"),
+            "created_at": now_ts(),
+        }
+        self.store.append_event(
+            "operator_direct_caller_delivered",
+            audit,
+            delivery_id,
+        )
+        return {"delivery": audit, "command": command, "preflight": preflight}
 
     def record_handoff_action_receipt(
         self,
@@ -3084,8 +3343,13 @@ class OperatorService:
         )
         if projection is None:
             raise ValueError("handoff does not expose a managed local action")
-        if projection.get("state") == "blocked_reapproval_required":
-            raise ValueError(str(projection.get("reason") or "handoff requires reapproval"))
+        if not bool(projection.get("actionable")):
+            raise ValueError(
+                str(
+                    projection.get("reason")
+                    or "handoff does not expose an actionable local step"
+                )
+            )
         if target_agent is None:
             raise ValueError("handoff target edit fork is unavailable")
         self._validate_handoff_action_receipt(

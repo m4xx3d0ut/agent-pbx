@@ -959,6 +959,43 @@ def build_mcp_server(
         )
 
     @mcp.tool()
+    def pbx_operator_reconcile_handoff(
+        operator_agent_id: str,
+        handoff_id: str,
+        reason: str,
+        replacement_handoff_ids: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Supersede one delivered source-owned handoff as the exact root Operator."""
+        return operator_service.reconcile_handoff(
+            operator_agent_id=operator_agent_id,
+            handoff_id=handoff_id,
+            reason=reason,
+            replacement_handoff_ids=replacement_handoff_ids or [],
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
+    def pbx_operator_deliver_caller(
+        operator_agent_id: str,
+        target_caller_agent_id: str,
+        message: str,
+        purpose: str,
+        delivery: str = "auto",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Send one bounded audited root-Operator request to an exact caller."""
+        return operator_delivery_call(
+            operator_service.deliver_direct_caller_message,
+            operator_agent_id=operator_agent_id,
+            target_caller_agent_id=target_caller_agent_id,
+            message=message,
+            purpose=purpose,
+            delivery=delivery,
+            metadata=metadata or {},
+        )
+
+    @mcp.tool()
     def pbx_operator_list_handoffs(
         operator_agent_id: str | None = None,
         source_agent_id: str | None = None,

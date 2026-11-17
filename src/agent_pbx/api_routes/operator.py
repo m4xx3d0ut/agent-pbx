@@ -36,6 +36,8 @@ from ..schemas import (
     OperatorDelegationLeaseListResponse,
     OperatorDelegationLeaseResponse,
     OperatorDelegationLeaseRevokeRequest,
+    OperatorDirectCallerDeliveryRequest,
+    OperatorDirectCallerDeliveryResponse,
     OperatorFollowupRequest,
     OperatorForkEdgeCreateRequest,
     OperatorForkEdgeResponse,
@@ -59,6 +61,8 @@ from ..schemas import (
     OperatorHandoffListResponse,
     OperatorHandoffPreflightRequest,
     OperatorHandoffPreflightResponse,
+    OperatorHandoffReconcileRequest,
+    OperatorHandoffReconcileResponse,
     OperatorHandoffResponse,
     OperatorHandoffUpdateRequest,
     OperatorKbCompileReportRequest,
@@ -1491,6 +1495,45 @@ def register_operator_routes(app: FastAPI) -> None:
             reason=payload.reason,
             detail=payload.detail,
             superseded_by_handoff_ids=payload.superseded_by_handoff_ids,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/handoffs/{handoff_id}/reconcile",
+        response_model=OperatorHandoffReconcileResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def reconcile_operator_handoff(
+        handoff_id: str,
+        payload: OperatorHandoffReconcileRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.reconcile_handoff,
+            operator_agent_id=payload.operator_agent_id,
+            handoff_id=handoff_id,
+            reason=payload.reason,
+            replacement_handoff_ids=payload.replacement_handoff_ids,
+            metadata=payload.metadata,
+        )
+
+    @app.post(
+        "/v1/operator/callers/{target_caller_agent_id}/deliver",
+        response_model=OperatorDirectCallerDeliveryResponse,
+        dependencies=[Depends(require_token)],
+    )
+    async def deliver_operator_message_to_caller(
+        target_caller_agent_id: str,
+        payload: OperatorDirectCallerDeliveryRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        return await run_operator_call(
+            request.app.state.operator_service.deliver_direct_caller_message,
+            operator_agent_id=payload.operator_agent_id,
+            target_caller_agent_id=target_caller_agent_id,
+            message=payload.message,
+            purpose=payload.purpose,
+            delivery=payload.delivery,
             metadata=payload.metadata,
         )
 

@@ -15,11 +15,17 @@ ACTION_STATES = frozenset(
         "resumed_ready_validation",
         "complete",
         "blocked_reapproval_required",
+        "superseded",
     }
 )
 ACTION_STEPS = frozenset({"stop", "broker_review", "broker_commit", "resume", "validate"})
 ACTION_OUTCOMES = frozenset({"started", "succeeded", "failed", "restored"})
-TERMINAL_ACTION_STATES = frozenset({"complete", "blocked_reapproval_required"})
+TERMINAL_ACTION_STATES = frozenset(
+    {"complete", "blocked_reapproval_required", "superseded"}
+)
+TERMINAL_HANDOFF_STATUSES = frozenset(
+    {"blocked", "failed", "expired", "canceled", "cancelled"}
+)
 
 
 def project_handoff_action(
@@ -38,13 +44,7 @@ def project_handoff_action(
         "complete",
         "completed",
     }
-    terminal_handoff_statuses = {
-        "blocked",
-        "failed",
-        "expired",
-        "canceled",
-        "cancelled",
-    }
+    terminal_handoff_statuses = TERMINAL_HANDOFF_STATUSES
     if handoff_status not in active_handoff_statuses and not (
         transaction and handoff_status in terminal_handoff_statuses
     ):
@@ -98,6 +98,15 @@ def project_handoff_action(
             and not bool(target_agent.get("pbx_active", True))
         )
         projected_state = "stopped_ready_broker" if stopped else "ready_stop"
+    next_action = next_action_for_state(projected_state)
+    actionable = bool(
+        next_action
+        and projected_state not in TERMINAL_ACTION_STATES
+        and handoff_status not in TERMINAL_HANDOFF_STATUSES
+    )
+    terminal_reason = None
+    if handoff_status in TERMINAL_HANDOFF_STATUSES:
+        terminal_reason = f"handoff is terminal ({handoff_status})"
     return {
         "handoff_id": str(handoff.get("handoff_id") or ""),
         "logical_operator_agent_id": str(
@@ -113,11 +122,15 @@ def project_handoff_action(
         "campaign_id": str(scope.get("campaign_id") or ""),
         "action_class": str(scope.get("action_class") or ""),
         "state": projected_state,
-        "next_action": next_action_for_state(projected_state),
+        "transaction_state": state or None,
+        "handoff_status": handoff_status,
+        "disposition": "actionable" if actionable else "terminal_review",
+        "actionable": actionable,
+        "next_action": next_action if actionable else None,
         "scope_sha256": digest,
         "execution_scope": scope,
         "transaction_id": str((transaction or {}).get("transaction_id") or "") or None,
-        "reason": str((transaction or {}).get("reason") or "") or None,
+        "reason": str((transaction or {}).get("reason") or "") or terminal_reason,
         "updated_at": (transaction or {}).get("updated_at") or handoff.get("updated_at"),
     }
 
@@ -183,6 +196,10 @@ def _blocked_projection(
         "campaign_id": str((scope or {}).get("campaign_id") or ""),
         "action_class": str((scope or {}).get("action_class") or ""),
         "state": "blocked_reapproval_required",
+        "transaction_state": str((transaction or {}).get("state") or "") or None,
+        "handoff_status": str(handoff.get("status") or "").lower(),
+        "disposition": "terminal_review",
+        "actionable": False,
         "next_action": None,
         "scope_sha256": digest,
         "execution_scope": dict(scope or {}),

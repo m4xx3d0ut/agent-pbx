@@ -34,6 +34,7 @@ ATOMIC_STORE_OPERATIONS: Final[frozenset[str]] = frozenset(
         "record_joplin_conflict",
         "start_joplin_log",
         "stop_active_joplin_log",
+        "supersede_operator_action_transaction",
         "transition_operator_broker_request",
         "transition_workerbee_controlled_run_request",
         "update_model_elevation_transition",

@@ -1257,6 +1257,21 @@ class OperatorHandoffCancelRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class OperatorHandoffReconcileRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    reason: str = Field(min_length=1, max_length=4000)
+    replacement_handoff_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorDirectCallerDeliveryRequest(BaseModel):
+    operator_agent_id: str = Field(min_length=1, max_length=120)
+    message: str = Field(min_length=1, max_length=20000)
+    purpose: str = Field(min_length=1, max_length=240)
+    delivery: CampaignDelivery = "auto"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class OperatorHandoffAckRequest(BaseModel):
     operator_agent_id: str = Field(min_length=1, max_length=120)
     status: OperatorHandoffStatus = "acknowledged"
@@ -1354,6 +1369,19 @@ class OperatorHandoffCancelResponse(BaseModel):
     idempotent: bool = False
 
 
+class OperatorHandoffReconcileResponse(BaseModel):
+    handoff: OperatorHandoffResponse
+    previous_status: str
+    action_transaction: dict[str, Any] | None = None
+    idempotent: bool = False
+
+
+class OperatorDirectCallerDeliveryResponse(BaseModel):
+    delivery: dict[str, Any]
+    command: CommandResponse
+    preflight: dict[str, Any]
+
+
 class OperatorHandoffListResponse(BaseModel):
     handoffs: list[OperatorHandoffResponse] = Field(default_factory=list)
 
@@ -1372,6 +1400,10 @@ class OperatorHandoffActionResponse(BaseModel):
     campaign_id: str
     action_class: str
     state: str
+    transaction_state: str | None = None
+    handoff_status: str = ""
+    disposition: str = "actionable"
+    actionable: bool = True
     next_action: str | None = None
     scope_sha256: str
     execution_scope: dict[str, Any] = Field(default_factory=dict)

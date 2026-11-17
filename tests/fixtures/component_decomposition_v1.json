@@ -9,31 +9,31 @@
       "lines": 792
     },
     "src/agent_pbx/store.py": {
-      "ast_nodes": 53271,
-      "bytes": 440796,
+      "ast_nodes": 53577,
+      "bytes": 443639,
       "classes": 2,
-      "functions": 373,
+      "functions": 374,
       "imports": 18,
-      "lines": 11331
+      "lines": 11404
     },
     "src/agent_pbx/tui.py": {
-      "ast_nodes": 172190,
-      "bytes": 1305693,
+      "ast_nodes": 172192,
+      "bytes": 1305766,
       "classes": 20,
       "functions": 1191,
       "imports": 71,
-      "lines": 32951
+      "lines": 32953
     }
   },
   "baseline_commit": "56f46179863fed13f339ab3e55481a895b994921",
   "extracted_module_maxima": {
     "src/agent_pbx/api_routes/operator.py": {
-      "ast_nodes": 7574,
-      "bytes": 66722,
+      "ast_nodes": 7735,
+      "bytes": 68370,
       "classes": 0,
-      "functions": 83,
+      "functions": 85,
       "imports": 9,
-      "lines": 1843
+      "lines": 1886
     },
     "src/agent_pbx/api_routes/workerbee.py": {
       "ast_nodes": 6337,
@@ -51,13 +51,21 @@
       "imports": 3,
       "lines": 1671
     },
-    "src/agent_pbx/workerbee_application.py": {
-      "ast_nodes": 2378,
-      "bytes": 19336,
-      "classes": 2,
-      "functions": 12,
-      "imports": 16,
-      "lines": 482
+    "src/agent_pbx/ui/button_router.py": {
+      "ast_nodes": 2857,
+      "bytes": 23003,
+      "classes": 1,
+      "functions": 2,
+      "imports": 3,
+      "lines": 559
+    },
+    "src/agent_pbx/ui/command_catalog.py": {
+      "ast_nodes": 3686,
+      "bytes": 37961,
+      "classes": 3,
+      "functions": 6,
+      "imports": 7,
+      "lines": 728
     },
     "src/agent_pbx/ui/controllers/github.py": {
       "ast_nodes": 6966,
@@ -76,12 +84,12 @@
       "lines": 1305
     },
     "src/agent_pbx/ui/controllers/operator_handoffs.py": {
-      "ast_nodes": 9251,
-      "bytes": 68694,
+      "ast_nodes": 9308,
+      "bytes": 69127,
       "classes": 1,
       "functions": 50,
       "imports": 12,
-      "lines": 1731
+      "lines": 1742
     },
     "src/agent_pbx/ui/controllers/workerbee.py": {
       "ast_nodes": 5495,
@@ -91,21 +99,13 @@
       "imports": 10,
       "lines": 1091
     },
-    "src/agent_pbx/ui/button_router.py": {
-      "ast_nodes": 2857,
-      "bytes": 23003,
-      "classes": 1,
-      "functions": 2,
-      "imports": 3,
-      "lines": 559
-    },
-    "src/agent_pbx/ui/command_catalog.py": {
-      "ast_nodes": 3686,
-      "bytes": 37961,
-      "classes": 3,
-      "functions": 6,
-      "imports": 7,
-      "lines": 728
+    "src/agent_pbx/workerbee_application.py": {
+      "ast_nodes": 2378,
+      "bytes": 19336,
+      "classes": 2,
+      "functions": 12,
+      "imports": 16,
+      "lines": 482
     }
   },
   "ownership_rules": {
@@ -219,6 +219,7 @@
       "request_or_reuse_model_elevation",
       "start_joplin_log",
       "stop_active_joplin_log",
+      "supersede_operator_action_transaction",
       "transition_operator_broker_request",
       "transition_workerbee_controlled_run_request",
       "update_model_elevation_transition",
@@ -1843,6 +1844,12 @@
         "decorators": [],
         "name": "list_operator_action_transactions",
         "signature": "self, *, state: str | None=None, target_agent_id: str | None=None, limit: int=100"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "supersede_operator_action_transaction",
+        "signature": "self, *, handoff_id: str, reason: str, actor: str, replacement_handoff_ids: list[str] | None=None"
       },
       {
         "async": false,

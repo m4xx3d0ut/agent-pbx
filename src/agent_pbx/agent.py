@@ -216,6 +216,13 @@ The source root or exact source fork lists receipts with
 and acknowledges reviewed receipts with
 `pbx_operator_ack_handoff_completion`. Delivery failure does not reopen or
 rewrite the terminal handoff result.
+Root Operators may use `pbx_operator_reconcile_handoff` to supersede an
+already-delivered source-owned handoff that is durably obsolete; ordinary
+pre-delivery withdrawal continues to use the TUI/API cancellation workflow.
+For bounded coordination with an existing caller that does not require a new
+Operator fork or campaign assignment, a root Operator may use
+`pbx_operator_deliver_caller`. The target must be an exact live caller identity;
+the delivery is audited and does not transfer ownership or create a fork.
 When a knowledge link or handoff produces reusable operating guidance, operators
 and review forks may propose PBX-managed KB entries with
 `pbx_operator_kb_propose` or `pbx_operator_kb_propose_from_link`, and may query

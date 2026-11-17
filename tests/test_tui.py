@@ -29125,6 +29125,8 @@ def test_tui_root_operator_config_includes_campaign_lifecycle_tools(
         if item.startswith("mcp_servers.agent-pbx=")
     )
     assert "pbx_operator_create_handoff" in agent_pbx_config
+    assert "pbx_operator_reconcile_handoff" in agent_pbx_config
+    assert "pbx_operator_deliver_caller" in agent_pbx_config
     assert "pbx_attest_host_process_identity" in agent_pbx_config
     assert "pbx_operator_start_campaign" in agent_pbx_config
     assert "pbx_operator_send_followup" in agent_pbx_config
@@ -30643,6 +30645,41 @@ async def test_tui_f8_routes_ready_action_after_approval_before_report() -> None
 
     assert opened == ["operator-0"]
     assert app.unseen_latest_agent_ids == {"caller-1"}
+
+
+@pytest.mark.asyncio
+async def test_tui_ready_action_opens_newest_and_does_not_stack() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token=None)
+    actions = [
+        {
+            "handoff_id": "older",
+            "target_operator_agent_id": "operator-8",
+            "updated_at": 10.0,
+        },
+        {
+            "handoff_id": "newer",
+            "target_operator_agent_id": "operator-8",
+            "updated_at": 20.0,
+        },
+    ]
+    screens: list[OperatorReadyActionScreen] = []
+
+    async def fake_fetch(**_kwargs) -> list[dict[str, object]]:
+        return list(actions)
+
+    app.fetch_operator_handoff_actions = fake_fetch  # type: ignore[method-assign]
+    app.active_ready_action_screen = lambda: None  # type: ignore[method-assign]
+    app.push_screen = lambda screen: screens.append(screen)  # type: ignore[method-assign]
+
+    await app.open_operator_ready_action("operator-8")
+
+    assert len(screens) == 1
+    assert screens[0].action["handoff_id"] == "newer"
+
+    app.active_ready_action_screen = lambda: screens[0]  # type: ignore[method-assign]
+    await app.open_operator_ready_action("operator-8")
+
+    assert len(screens) == 1
 
 
 @pytest.mark.asyncio

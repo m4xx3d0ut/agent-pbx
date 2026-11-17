@@ -9092,6 +9092,76 @@ class Store:
             ).fetchall()
         return [self._operator_action_transaction_from_row(row) for row in rows]
 
+    def supersede_operator_action_transaction(
+        self,
+        *,
+        handoff_id: str,
+        reason: str,
+        actor: str,
+        replacement_handoff_ids: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Terminally reconcile one retained broker transaction without deleting evidence."""
+
+        normalized_reason = str(reason or "").strip()
+        normalized_actor = str(actor or "").strip()
+        if not normalized_reason:
+            raise ValueError("operator action supersede reason is required")
+        if not normalized_actor:
+            raise ValueError("operator action supersede actor is required")
+        replacements = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in replacement_handoff_ids or []
+                if str(value or "").strip()
+            )
+        )
+        current = now_ts()
+        with self.connect() as conn:
+            begin_immediate(conn)
+            row = conn.execute(
+                """
+                SELECT transaction_id, state, reason, metadata_json, completed_at
+                FROM operator_action_transactions
+                WHERE handoff_id = ?
+                """,
+                (handoff_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            transaction_id = str(row["transaction_id"])
+            state = str(row["state"] or "")
+            if state != "complete":
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                except json.JSONDecodeError:
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                reconciliation = {
+                    "disposition": "superseded",
+                    "reason": normalized_reason,
+                    "actor": normalized_actor,
+                    "replacement_handoff_ids": replacements,
+                    "reconciled_at": current,
+                }
+                metadata["reconciliation"] = reconciliation
+                conn.execute(
+                    """
+                    UPDATE operator_action_transactions
+                    SET state = 'superseded', reason = ?, metadata_json = ?,
+                        updated_at = ?, completed_at = COALESCE(completed_at, ?)
+                    WHERE transaction_id = ?
+                    """,
+                    (
+                        normalized_reason,
+                        json.dumps(metadata),
+                        current,
+                        current,
+                        transaction_id,
+                    ),
+                )
+        return self.get_operator_action_transaction(transaction_id=transaction_id)
+
     def append_operator_action_receipt(
         self,
         *,
@@ -10738,7 +10808,10 @@ class Store:
                 and transaction is None
             ):
                 continue
-            if transaction is not None and str(transaction["state"]) == "complete":
+            if transaction is not None and str(transaction["state"]) in {
+                "complete",
+                "blocked_reapproval_required",
+            }:
                 continue
             actionable.append(float(handoff.get("updated_at") or 0.0))
         agent["ready_handoff_action_count"] = len(actionable)
