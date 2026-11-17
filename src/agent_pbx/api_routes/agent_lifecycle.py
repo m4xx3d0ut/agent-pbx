@@ -22,6 +22,7 @@ from ..schemas import (
     AgentResponse,
     LifecycleActionRequest,
     ManagedAgentLaunchRequest,
+    ManagedCallerRehydrateRequest,
     ManagedRuntimeStopFinalizeRequest,
     ManagedRuntimeStopPrepareRequest,
     ReportCreateRequest,
@@ -222,6 +223,58 @@ def register_agent_lifecycle_routes(
                 service.launch,
                 project_path=payload.project_path,
                 agent_id=payload.agent_id,
+                profile_id=payload.profile_id,
+                runtime_server_mode=payload.runtime_server_mode,
+                server_url=local_server,
+                token=resolved_config.token,
+                source_codex_session_id=payload.source_codex_session_id,
+                workerbee_profile=payload.workerbee_profile,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/agents/rehydrate/preview",
+        dependencies=[Depends(require_token)],
+    )
+    async def preview_managed_caller_rehydration(
+        payload: ManagedCallerRehydrateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        service: ManagedRuntimeService = request.app.state.managed_runtime
+        local_server = f"http://127.0.0.1:{resolved_config.port}"
+        try:
+            return await asyncio.to_thread(
+                service.preview_rehydrate,
+                agent_id=payload.agent_id,
+                mode=payload.mode,
+                profile_id=payload.profile_id,
+                runtime_server_mode=payload.runtime_server_mode,
+                server_url=local_server,
+                source_codex_session_id=payload.source_codex_session_id,
+                workerbee_profile=payload.workerbee_profile,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/v2/agents/rehydrate",
+        dependencies=[Depends(require_token)],
+    )
+    async def apply_managed_caller_rehydration(
+        payload: ManagedCallerRehydrateRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        if not payload.preview_token:
+            raise HTTPException(status_code=409, detail="preview_token is required")
+        service: ManagedRuntimeService = request.app.state.managed_runtime
+        local_server = f"http://127.0.0.1:{resolved_config.port}"
+        try:
+            return await asyncio.to_thread(
+                service.rehydrate,
+                agent_id=payload.agent_id,
+                preview_token=payload.preview_token,
+                mode=payload.mode,
                 profile_id=payload.profile_id,
                 runtime_server_mode=payload.runtime_server_mode,
                 server_url=local_server,

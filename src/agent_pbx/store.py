@@ -1636,6 +1636,91 @@ class Store:
         assert agent is not None and mapping is not None
         return agent, mapping
 
+    def rehydrate_managed_caller_runtime(
+        self,
+        entity_id: str,
+        *,
+        metadata: dict[str, Any],
+        clear_metadata_keys: tuple[str, ...] = (),
+        runtime_mapping: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Atomically attach a new managed runtime to one existing caller.
+
+        The process/pane is created before this transaction.  Rechecking the
+        caller and mapping here closes the preview/apply race; callers kill the
+        newly created tmux session when this method refuses the transition.
+        """
+
+        current = now_ts()
+        with self.connect() as conn:
+            begin_immediate(conn)
+            row = conn.execute(
+                "SELECT agent_type, metadata_json FROM agents WHERE agent_id = ?",
+                (entity_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"agent {entity_id!r} does not exist")
+            if self._normalized_agent_type(row["agent_type"]) != "caller":
+                raise ValueError("managed rehydration supports caller agents only")
+            if conn.execute(
+                "SELECT 1 FROM tmux_runtime_mappings WHERE entity_id = ?",
+                (entity_id,),
+            ).fetchone():
+                raise ValueError("caller acquired a runtime mapping after preview")
+            try:
+                existing_metadata = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                existing_metadata = {}
+            if not isinstance(existing_metadata, dict):
+                existing_metadata = {}
+            for key in clear_metadata_keys:
+                existing_metadata.pop(key, None)
+            existing_metadata.update(metadata)
+            conn.execute(
+                """
+                UPDATE agents
+                SET status = 'online', pbx_active = 1,
+                    metadata_json = ?, last_seen_at = ?
+                WHERE agent_id = ?
+                """,
+                (json.dumps(existing_metadata), current, entity_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO tmux_runtime_mappings(
+                    entity_id, server_mode, server_id, socket_path,
+                    session_name, window_id, window_name, pane_id, pane_pid,
+                    process_start_ticks, codex_session_id, cwd,
+                    origin_client_tty, origin_session_name, state,
+                    metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entity_id,
+                    str(runtime_mapping["server_mode"]),
+                    str(runtime_mapping["server_id"]),
+                    str(runtime_mapping["socket_path"]),
+                    str(runtime_mapping["session_name"]),
+                    runtime_mapping.get("window_id"),
+                    runtime_mapping.get("window_name"),
+                    str(runtime_mapping["pane_id"]),
+                    runtime_mapping.get("pane_pid"),
+                    runtime_mapping.get("process_start_ticks"),
+                    runtime_mapping.get("codex_session_id"),
+                    runtime_mapping.get("cwd"),
+                    runtime_mapping.get("origin_client_tty"),
+                    runtime_mapping.get("origin_session_name"),
+                    str(runtime_mapping.get("state") or "ready"),
+                    json.dumps(runtime_mapping.get("metadata") or {}),
+                    current,
+                    current,
+                ),
+            )
+        agent = self.get_agent(entity_id)
+        mapping = self.get_tmux_runtime_mapping(entity_id)
+        assert agent is not None and mapping is not None
+        return agent, mapping
+
     def register_agent(self, request: AgentRegisterRequest) -> dict[str, Any]:
         current = now_ts()
         with self.connect() as conn:

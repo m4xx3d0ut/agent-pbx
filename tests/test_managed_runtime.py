@@ -132,7 +132,10 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
         lambda _identity: None,
     )
     monkeypatch.setattr("agent_pbx.managed_runtime.validate_tmux_socket", lambda _path: (True, ""))
-    monkeypatch.setattr("agent_pbx.managed_runtime.list_runtime_panes", lambda _identity: (pane,))
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.list_runtime_panes",
+        lambda _identity: (pane,) if commands else (),
+    )
     monkeypatch.setattr("agent_pbx.managed_runtime.process_start_ticks", lambda _pid: 99)
     monkeypatch.setattr(runtime, "_runtime_session_name", lambda _agent_id: pane.session_name)
     monkeypatch.setattr(
@@ -229,6 +232,163 @@ def test_managed_launch_failure_kills_session_without_orphan_agent(
 
     assert store.get_agent("codex-demo") is None
     assert any("kill-session" in call for call in calls)
+
+
+def test_existing_caller_rehydration_preview_preserves_identity_and_refuses_fork_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "git"
+    repo = init_repo(root / "private")
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="legacy-private",
+            project="private",
+            metadata={
+                "cwd": str(repo),
+                "codex_session_id": "shared-session",
+                "durable_reference": "preserve-me",
+            },
+        )
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="operator",
+            agent_type="operator",
+            metadata={"cwd": str(repo), "codex_session_id": "shared-session"},
+        )
+    )
+    runtime = service(store, root)
+    monkeypatch.setattr("agent_pbx.managed_runtime.list_runtime_panes", lambda _identity: ())
+
+    preview = runtime.preview_rehydrate(agent_id="legacy-private", mode="fresh")
+
+    assert preview["eligible"] is True
+    assert preview["source_codex_session_id"] is None
+    assert preview["historical_codex_session_id"] == "shared-session"
+    assert preview["historical_session_owner_ids"] == [
+        "legacy-private",
+        "operator-0",
+    ]
+    assert preview["co_owners"] == ["operator-0"]
+    assert len(preview["preview_token"]) == 64
+
+    fork_preview = runtime.preview_rehydrate(
+        agent_id="legacy-private",
+        mode="fork_source",
+    )
+    assert fork_preview["eligible"] is False
+    assert any("fork capability" in item for item in fork_preview["blockers"])
+
+
+def test_existing_caller_rehydration_applies_atomically_with_fresh_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "git"
+    repo = init_repo(root / "private")
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="legacy-private",
+            project="private",
+            metadata={
+                "cwd": str(repo),
+                "codex_session_id": "historical-session",
+                "durable_reference": "preserve-me",
+            },
+        )
+    )
+    runtime = service(store, root)
+    commands: list[list[str]] = []
+    real_run = subprocess.run
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        if argv[0] == "tmux-test":
+            commands.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "%19\n", "")
+        return real_run(argv, **kwargs)
+
+    pane = RuntimeTmuxPane(
+        session_name=runtime._runtime_session_name("legacy-private"),
+        window_id="@19",
+        window_name="codex",
+        pane_id="%19",
+        pane_pid=919,
+        cwd=str(repo),
+        current_command="codex",
+        title="private",
+    )
+    monkeypatch.setattr("agent_pbx.managed_runtime.subprocess.run", fake_run)
+    monkeypatch.setattr("agent_pbx.managed_runtime.list_runtime_panes", lambda _identity: ())
+    preview = runtime.preview_rehydrate(agent_id="legacy-private", mode="fresh")
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.ensure_dedicated_runtime_server",
+        lambda _identity: True,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.restore_dedicated_runtime_exit_policy",
+        lambda _identity: None,
+    )
+    monkeypatch.setattr("agent_pbx.managed_runtime.validate_tmux_socket", lambda _path: (True, ""))
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.list_runtime_panes",
+        lambda _identity: (pane,) if commands else (),
+    )
+    monkeypatch.setattr("agent_pbx.managed_runtime.process_start_ticks", lambda _pid: 77)
+    monkeypatch.setattr(
+        "agent_pbx.managed_runtime.managed_tmux_launch_environment",
+        lambda env, *_args, **_kwargs: dict(env),
+    )
+
+    result = runtime.rehydrate(
+        agent_id="legacy-private",
+        preview_token=preview["preview_token"],
+        mode="fresh",
+        token="secret",
+    )
+
+    assert result["rehydrated"] is True
+    agent = store.get_agent("legacy-private")
+    assert agent is not None
+    assert agent["metadata"]["durable_reference"] == "preserve-me"
+    assert "codex_session_id" not in agent["metadata"]
+    assert agent["metadata"]["rehydration_previous_codex_session_id"] == (
+        "historical-session"
+    )
+    mapping = store.get_tmux_runtime_mapping("legacy-private")
+    assert mapping is not None
+    assert mapping["pane_id"] == "%19"
+    assert mapping["metadata"]["managed_rehydration"] is True
+    assert not any(" resume " in command[-1] for command in commands)
+
+
+def test_existing_caller_rehydration_rejects_stale_preview_before_launch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "git"
+    repo = init_repo(root / "private")
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="legacy-private",
+            project="private",
+            metadata={"cwd": str(repo)},
+        )
+    )
+    runtime = service(store, root)
+    monkeypatch.setattr("agent_pbx.managed_runtime.list_runtime_panes", lambda _identity: ())
+    with pytest.raises(ValueError, match="preview token"):
+        runtime.rehydrate(
+            agent_id="legacy-private",
+            preview_token="0" * 64,
+        )
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux unavailable")

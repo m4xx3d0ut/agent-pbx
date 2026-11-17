@@ -281,6 +281,18 @@ class ManagedAgentLaunchRequest(BaseModel):
     workerbee_profile: Literal["local-deploy"] = "local-deploy"
 
 
+class ManagedCallerRehydrateRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=120)
+    mode: Literal["fresh", "fork_source"] = "fresh"
+    profile_id: str = Field(default="sol-high", min_length=1, max_length=120)
+    runtime_server_mode: Literal[
+        "dedicated", "outer_if_present", "outer_required"
+    ] = "dedicated"
+    source_codex_session_id: str | None = Field(default=None, max_length=200)
+    workerbee_profile: Literal["local-deploy"] = "local-deploy"
+    preview_token: str | None = Field(default=None, min_length=64, max_length=64)
+
+
 class RuntimeMigrationPreviewRequest(BaseModel):
     agent_ids: list[str] = Field(default_factory=list, max_length=500)
     include_starred: bool = True

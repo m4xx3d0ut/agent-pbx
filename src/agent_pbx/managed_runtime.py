@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -236,6 +237,202 @@ class ManagedRuntimeService:
             "warnings": list(validation.warnings),
         }
 
+    def preview_rehydrate(
+        self,
+        *,
+        agent_id: str,
+        mode: str = "fresh",
+        profile_id: str = DEFAULT_CALLER_PROFILE_ID,
+        runtime_server_mode: str = "dedicated",
+        server_url: str = "http://127.0.0.1:8765",
+        source_codex_session_id: str | None = None,
+        workerbee_profile: str = WORKERBEE_PROFILE_LOCAL_DEPLOY,
+    ) -> dict[str, Any]:
+        """Preview a new independent managed runtime for an existing caller."""
+
+        normalized_mode = str(mode or "fresh").strip().lower()
+        if normalized_mode not in {"fresh", "fork_source"}:
+            raise ValueError("rehydration mode must be fresh or fork_source")
+        agent = self.store.get_agent(agent_id)
+        if agent is None:
+            raise ValueError(f"agent {agent_id!r} does not exist")
+        if str(agent.get("agent_type") or "caller") != "caller":
+            raise ValueError("managed rehydration supports caller agents only")
+        metadata = (
+            dict(agent.get("metadata") or {})
+            if isinstance(agent.get("metadata"), dict)
+            else {}
+        )
+        project_path = str(
+            metadata.get("work_root")
+            or metadata.get("cwd")
+            or metadata.get("source_cwd")
+            or ""
+        ).strip()
+        if not project_path:
+            raise ValueError("caller has no persisted project working directory")
+        path = self._validated_project_path(project_path)
+        profile = MANAGED_CODEX_PROFILES.get(profile_id)
+        if profile is None:
+            raise ValueError(f"unknown managed Codex profile: {profile_id}")
+        if profile.elevated:
+            raise ValueError("elevated profiles require an approved model lease")
+        if profile.migration_only:
+            raise ValueError("migration-only profiles cannot rehydrate callers")
+        if workerbee_profile != WORKERBEE_PROFILE_LOCAL_DEPLOY:
+            raise ValueError(
+                "managed caller rehydration is fixed to the local-deploy WorkerBee profile"
+            )
+        validation = validate_managed_profile(profile, self.catalog_loader(self.codex_bin))
+        if not validation.valid:
+            raise ValueError("; ".join(validation.errors))
+        identity = resolve_runtime_tmux_server(runtime_server_mode)
+        if not identity.ready:
+            raise ValueError(identity.message or "runtime tmux server is unavailable")
+
+        blockers: list[str] = []
+        existing_mapping = self.store.get_tmux_runtime_mapping(agent_id)
+        if existing_mapping is not None:
+            blockers.append("caller already has a runtime mapping")
+        session_name = self._runtime_session_name(agent_id)
+        try:
+            if any(
+                pane.session_name == session_name
+                for pane in list_runtime_panes(identity)
+            ):
+                blockers.append(
+                    f"managed tmux session {session_name!r} already exists"
+                )
+        except Exception as exc:  # noqa: BLE001 - preview records a safe blocker.
+            blockers.append(f"unable to inspect runtime tmux server: {exc}")
+
+        historical_session_id = str(
+            source_codex_session_id
+            or metadata.get("last_resume_codex_session_id")
+            or metadata.get("codex_session_id")
+            or metadata.get("codex_thread_id")
+            or ""
+        ).strip()
+        session_owner_ids = self._codex_session_owner_ids(historical_session_id)
+        if normalized_mode == "fork_source":
+            if not historical_session_id:
+                blockers.append("fork_source requires a source Codex session id")
+            blockers.append(
+                "fork_source is not enabled until the installed Codex fork capability is observed"
+            )
+
+        owners = tuple(
+            owner
+            for owner in self._cwd_ownership().get(path, ())
+            if owner != agent_id
+        )
+        bootstrap_source = historical_session_id if normalized_mode == "fork_source" else None
+        bootstrap_prompt = managed_caller_bootstrap_prompt(
+            agent_id=agent_id,
+            project=str(agent.get("project") or path.name),
+            cwd=path,
+            source_codex_session_id=bootstrap_source,
+            workerbee_profile=workerbee_profile,
+        )
+        bootstrap_id = managed_caller_bootstrap_id(
+            agent_id=agent_id,
+            project_path=path,
+            profile_id=profile_id,
+            runtime_server_mode=runtime_server_mode,
+            source_codex_session_id=bootstrap_source,
+            workerbee_profile=workerbee_profile,
+        )
+        token_payload = {
+            "agent_id": agent_id,
+            "agent_type": agent.get("agent_type"),
+            "project": agent.get("project"),
+            "project_path": str(path),
+            "metadata_sha256": hashlib.sha256(
+                json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "mode": normalized_mode,
+            "profile_id": profile_id,
+            "runtime_server_mode": runtime_server_mode,
+            "runtime_server_id": identity.server_id,
+            "source_codex_session_id": historical_session_id or None,
+            "workerbee_profile": workerbee_profile,
+            "existing_mapping": existing_mapping,
+        }
+        preview_token = hashlib.sha256(
+            json.dumps(token_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        warnings = list(validation.warnings)
+        if owners:
+            warnings.append(
+                "workspace is also referenced by active entities: " + ", ".join(owners)
+            )
+        if historical_session_id and session_owner_ids:
+            warnings.append(
+                "historical Codex session is associated with: "
+                + ", ".join(session_owner_ids)
+                + "; fresh mode will not resume it"
+            )
+        return {
+            "agent_id": agent_id,
+            "project": str(agent.get("project") or path.name),
+            "project_path": str(path),
+            "mode": normalized_mode,
+            "eligible": not blockers,
+            "blockers": blockers,
+            "warnings": warnings,
+            "co_owners": list(owners),
+            "historical_codex_session_id": historical_session_id or None,
+            "historical_session_owner_ids": list(session_owner_ids),
+            "profile_id": profile.profile_id,
+            "model": profile.model,
+            "reasoning_effort": profile.reasoning_effort,
+            "verbosity": profile.verbosity,
+            "reasoning_summary": profile.reasoning_summary,
+            "runtime_server": identity.public_dict(),
+            "session_name": session_name,
+            "command": [
+                self.codex_bin,
+                *self._profile_argv(profile.overrides()),
+                *self._profile_argv(managed_caller_codex_overrides(server_url)),
+                bootstrap_prompt,
+            ],
+            "bootstrap_id": bootstrap_id,
+            "bootstrap_version": MANAGED_CALLER_BOOTSTRAP_VERSION,
+            "bootstrap_prompt_sha256": hashlib.sha256(
+                bootstrap_prompt.encode("utf-8")
+            ).hexdigest(),
+            "source_codex_session_id": bootstrap_source,
+            "workerbee_profile": workerbee_profile,
+            "preview_token": preview_token,
+        }
+
+    def rehydrate(
+        self,
+        *,
+        agent_id: str,
+        preview_token: str,
+        mode: str = "fresh",
+        profile_id: str = DEFAULT_CALLER_PROFILE_ID,
+        runtime_server_mode: str = "dedicated",
+        server_url: str = "http://127.0.0.1:8765",
+        token: str | None = None,
+        source_codex_session_id: str | None = None,
+        workerbee_profile: str = WORKERBEE_PROFILE_LOCAL_DEPLOY,
+    ) -> dict[str, Any]:
+        return self.launch(
+            project_path="",
+            agent_id=agent_id,
+            profile_id=profile_id,
+            runtime_server_mode=runtime_server_mode,
+            server_url=server_url,
+            token=token,
+            source_codex_session_id=source_codex_session_id,
+            workerbee_profile=workerbee_profile,
+            _rehydrate_existing=True,
+            _rehydration_mode=mode,
+            _preview_token=preview_token,
+        )
+
     def launch(
         self,
         *,
@@ -247,26 +444,44 @@ class ManagedRuntimeService:
         token: str | None = None,
         source_codex_session_id: str | None = None,
         workerbee_profile: str = WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        _rehydrate_existing: bool = False,
+        _rehydration_mode: str = "fresh",
+        _preview_token: str | None = None,
     ) -> dict[str, Any]:
-        existing = self._idempotent_launch_result(
-            project_path=project_path,
-            agent_id=agent_id,
-            profile_id=profile_id,
-            runtime_server_mode=runtime_server_mode,
-            source_codex_session_id=source_codex_session_id,
-            workerbee_profile=workerbee_profile,
-        )
-        if existing is not None:
-            return existing
-        preview = self.preview_launch(
-            project_path=project_path,
-            agent_id=agent_id,
-            profile_id=profile_id,
-            runtime_server_mode=runtime_server_mode,
-            server_url=server_url,
-            source_codex_session_id=source_codex_session_id,
-            workerbee_profile=workerbee_profile,
-        )
+        if _rehydrate_existing:
+            preview = self.preview_rehydrate(
+                agent_id=agent_id,
+                mode=_rehydration_mode,
+                profile_id=profile_id,
+                runtime_server_mode=runtime_server_mode,
+                server_url=server_url,
+                source_codex_session_id=source_codex_session_id,
+                workerbee_profile=workerbee_profile,
+            )
+            if not _preview_token or _preview_token != preview["preview_token"]:
+                raise ValueError("rehydration preview token is stale or invalid")
+            if not preview["eligible"]:
+                raise ValueError("; ".join(preview["blockers"]))
+        else:
+            existing = self._idempotent_launch_result(
+                project_path=project_path,
+                agent_id=agent_id,
+                profile_id=profile_id,
+                runtime_server_mode=runtime_server_mode,
+                source_codex_session_id=source_codex_session_id,
+                workerbee_profile=workerbee_profile,
+            )
+            if existing is not None:
+                return existing
+            preview = self.preview_launch(
+                project_path=project_path,
+                agent_id=agent_id,
+                profile_id=profile_id,
+                runtime_server_mode=runtime_server_mode,
+                server_url=server_url,
+                source_codex_session_id=source_codex_session_id,
+                workerbee_profile=workerbee_profile,
+            )
         identity_data = preview["runtime_server"]
         identity = TmuxServerIdentity(
             RuntimeServerMode(identity_data["requested_mode"]),
@@ -410,14 +625,7 @@ class ManagedRuntimeService:
                 ),
                 WORKERBEE_PROFILE_INTENT_METADATA_KEY: profile_intent.public_dict(),
             }
-            agent, mapping = self.store.create_managed_agent_runtime(
-                AgentRegisterRequest(
-                    agent_id=str(preview["agent_id"]),
-                    project=str(preview["project"]),
-                    name=str(preview["project"]),
-                    metadata=metadata,
-                ),
-                runtime_mapping={
+            runtime_mapping = {
                     "server_mode": identity.effective_mode.value,
                     "server_id": identity.server_id,
                     "socket_path": identity.socket_path,
@@ -448,13 +656,55 @@ class ManagedRuntimeService:
                             profile_intent.public_dict()
                         ),
                     },
-                },
-            )
+                }
+            if _rehydrate_existing:
+                metadata.update(
+                    {
+                        "rehydration_mode": str(preview["mode"]),
+                        "rehydration_preview_token": str(preview["preview_token"]),
+                        "rehydration_previous_codex_session_id": preview.get(
+                            "historical_codex_session_id"
+                        ),
+                        "rehydrated_at": time.time(),
+                    }
+                )
+                runtime_mapping["metadata"].update(
+                    {
+                        "managed_rehydration": True,
+                        "rehydration_mode": str(preview["mode"]),
+                        "rehydration_preview_token": str(preview["preview_token"]),
+                    }
+                )
+                agent, mapping = self.store.rehydrate_managed_caller_runtime(
+                    str(preview["agent_id"]),
+                    metadata=metadata,
+                    clear_metadata_keys=(
+                        "codex_session_id",
+                        "codex_thread_id",
+                        "last_resume_codex_session_id",
+                        "fork_codex_session_id",
+                    ),
+                    runtime_mapping=runtime_mapping,
+                )
+            else:
+                agent, mapping = self.store.create_managed_agent_runtime(
+                    AgentRegisterRequest(
+                        agent_id=str(preview["agent_id"]),
+                        project=str(preview["project"]),
+                        name=str(preview["project"]),
+                        metadata=metadata,
+                    ),
+                    runtime_mapping=runtime_mapping,
+                )
         except Exception:
             self._kill_session(identity, str(preview["session_name"]))
             raise
         self.store.append_event(
-            "managed_agent_launched",
+            (
+                "managed_caller_rehydrated"
+                if _rehydrate_existing
+                else "managed_agent_launched"
+            ),
             {
                 "agent_id": preview["agent_id"],
                 "project": preview["project"],
@@ -463,10 +713,17 @@ class ManagedRuntimeService:
                 "server_id": identity.server_id,
                 "bootstrap_id": preview["bootstrap_id"],
                 "source_codex_session_id": preview.get("source_codex_session_id"),
+                "rehydration_mode": preview.get("mode"),
             },
             str(preview["agent_id"]),
         )
-        return {**preview, "agent": agent, "runtime_mapping": mapping, "launched": True}
+        return {
+            **preview,
+            "agent": agent,
+            "runtime_mapping": mapping,
+            "launched": True,
+            "rehydrated": _rehydrate_existing,
+        }
 
     def _idempotent_launch_result(
         self,
@@ -761,6 +1018,30 @@ class ManagedRuntimeService:
                 str(agent["agent_id"])
             )
         return {path: tuple(sorted(agent_ids)) for path, agent_ids in owners.items()}
+
+    def _codex_session_owner_ids(self, session_id: str) -> tuple[str, ...]:
+        normalized = str(session_id or "").strip()
+        if not normalized:
+            return ()
+        owners: set[str] = set()
+        session_keys = (
+            "fork_codex_session_id",
+            "last_resume_codex_session_id",
+            "codex_session_id",
+            "codex_thread_id",
+        )
+        for agent in self.store.list_agents(include_hidden=True):
+            metadata = (
+                agent.get("metadata")
+                if isinstance(agent.get("metadata"), dict)
+                else {}
+            )
+            if any(str(metadata.get(key) or "").strip() == normalized for key in session_keys):
+                owners.add(str(agent["agent_id"]))
+        for mapping in self.store.list_tmux_runtime_mappings():
+            if str(mapping.get("codex_session_id") or "").strip() == normalized:
+                owners.add(str(mapping["entity_id"]))
+        return tuple(sorted(owners))
 
     @staticmethod
     def _profile_argv(overrides: Iterable[str]) -> list[str]:
