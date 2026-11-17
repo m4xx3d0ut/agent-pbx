@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v2.5.0rc1 - 2026-11-17
+
+### Highlights
+
+- Complete the first behavior-preserving component-decomposition boundary for
+  the API, TUI, and persistence layers while retaining the public route,
+  OpenAPI, Store, schema, transaction, authorization, and migration contracts.
+- Add independently governed WorkerBee Operator profiles and exact path-domain
+  lease evidence without coupling WorkerBee access to Codex, filesystem, Git,
+  broker, provider, deployment, publication, or credential authority.
+- Add typed, restart-safe terminal delivery that proves exact managed-runtime,
+  process, workspace, idle-input, and writer-lease evidence before injection.
+
 ### Added
 
 - Add a manual, exact-tag recovery workflow that verifies already-published
@@ -16,6 +29,9 @@
 
 ### Changed
 
+- Split FastAPI route families, Textual screens/controllers, and SQLite
+  repositories behind typed composition boundaries with executable no-growth,
+  import-direction, OpenAPI, TUI, Store, schema, and transaction guards.
 - Disable Codex startup update checks explicitly for managed caller, root
   Operator, edit-fork, review-fork, restart, and resume launch policies.
 - Resolve new root Operators through a daemon-owned WorkerBee profile default
@@ -45,6 +61,19 @@
 - Cover selected native root-Operator restart, explicit embedded-client
   detach, Agents-pane refocus, and disposable tmux-client replacement without
   changing or terminating the managed Codex runtime identity.
+
+### Security
+
+- Keep public WorkerBee access at `local-deploy`, force review forks to
+  `review-readonly`, and require daemon-resolved ceiling plus exact
+  workspace-policy evidence before a root Operator or edit fork can use
+  `trusted-workbench`.
+- Keep report-mode terminal delivery fail closed across stale session, pane,
+  process, workspace, authority, readiness, overlay, and writer-lease evidence;
+  queue fallback remains limited to explicit nohup targets.
+- Preserve exact Git broker approval and receipt authority independently from
+  WorkerBee access, terminal delivery, component ownership, and release
+  workflows.
 
 ## v2.4.0 - 2026-11-13
 
