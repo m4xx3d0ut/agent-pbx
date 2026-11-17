@@ -48,6 +48,23 @@ def test_harness_plan_is_private_scoped_and_redacts_token(monkeypatch, tmp_path)
     assert Path(payload["plan"]["harness_root"]) == tmp_path / "harness"
 
 
+def test_fixture_switcher_advertises_supported_oss_runtime(monkeypatch, tmp_path) -> None:
+    plan = make_plan(monkeypatch, tmp_path)
+    dev_harness.materialize_harness(plan)
+
+    result = subprocess.run(
+        [str(plan.paths.bin_dir / "wb-mcp-status")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["config"]["path"] == "fixture"
+    assert payload["status"]["backend"] == "oss"
+    assert payload["status"]["mcp_endpoint"] == "fixture://workerbee"
+
+
 def test_harness_rejects_production_state_collision(monkeypatch, tmp_path) -> None:
     source = make_source(tmp_path)
     production = tmp_path / "production"

@@ -327,7 +327,7 @@ def _write_fixture_commands(plan: HarnessPlan) -> None:
             "#!/bin/sh\n"
             "printf '%s\\n' '{\"config\":{\"api_version\":\"workerbee.mcp_switch_config/v1\","
             "\"path\":\"fixture\"},\"status\":{\"api_version\":"
-            "\"workerbee.mcp_switch_status/v1\",\"backend\":\"fixture\","
+            "\"workerbee.mcp_switch_status/v1\",\"backend\":\"oss\","
             "\"mcp_endpoint\":\"fixture://workerbee\",\"mcp\":{\"status\":"
             "\"ready\",\"server_info\":{\"name\":\"WorkerBee fixture\","
             "\"version\":\"0.1.7\"}}}}'\n"
